@@ -5,6 +5,8 @@
 use crate::prelude::*;
 use serde_json::json;
 
+type PendingEntryId = (String, u64, String);
+
 pub(super) struct Schedule {
     pub min: Duration,
     pub max: Duration,
@@ -178,7 +180,7 @@ async fn receive(
     let pool = account.relay_quic_pool()?;
     let cursor = account.client.gateway_receive_cursor(engine.target_delivery_id())?;
     let mut entries = engine.resume_after(cursor, 64).await?;
-    append_pending_entries(account, &mut entries, now)?;
+    let retry_keys = append_pending_entries(account, &mut entries, now)?;
     entries.sort_by_key(|entry| entry.inbox_seq);
     let mut backpressure = super::contact_backpressure::Backpressure::load(&account.client, now)?;
     let (mut applied, mut replies) = receive_page(
@@ -187,7 +189,7 @@ async fn receive(
         &pool,
         entries,
         &mut backpressure,
-        PageContext { replay: false, now },
+        PageContext { replay: false, now, retry_keys: &retry_keys },
     )
     .await?;
     let walk = account.client.gateway_receive_cursor(engine.target_delivery_id())?;
@@ -196,13 +198,14 @@ async fn receive(
         let count = page.len();
         page.retain(|entry| entry.inbox_seq <= until);
         let last = page.iter().map(|entry| entry.inbox_seq).max();
+        let retry_keys = BTreeMap::new();
         let (more, reply) = receive_page(
             account,
             engine,
             &pool,
             page,
             &mut backpressure,
-            PageContext { replay: true, now },
+            PageContext { replay: true, now, retry_keys: &retry_keys },
         )
         .await?;
         applied += more;
@@ -218,9 +221,32 @@ fn advance_cursor(client: &RamfluxClient, target: &str, sequence: u64) -> Result
         client.gateway_receive_cursor(target)?.max(sequence),
     )
 }
-struct PageContext {
+struct PageContext<'a> {
     replay: bool,
     now: i64,
+    retry_keys: &'a BTreeMap<PendingEntryId, String>,
+}
+fn retry_context(
+    client: &RamfluxClient,
+    entry: &GatewayInboxEntry,
+    retry_keys: &BTreeMap<PendingEntryId, String>,
+) -> Result<(String, Result<bool, SdkError>), SdkError> {
+    let retry_key = retry_keys.get(&pending_entry_id(entry));
+    let key = retry_key.cloned().map_or_else(|| client.inbox_admission_key(entry), Ok)?;
+    let committed = if entry.envelope.encrypted_payload.is_empty()
+        && let Some(stored_key) = retry_key
+    {
+        client.retained_committed_receipt_key(entry).and_then(|receipt_key| match receipt_key {
+            Some(receipt_key) if receipt_key == *stored_key => Ok(true),
+            Some(_) => Err(SdkError::InboundRejected(
+                "retained receipt key does not match retry admission".to_owned(),
+            )),
+            None => Ok(false),
+        })
+    } else {
+        Ok(false)
+    };
+    Ok((key, committed))
 }
 async fn receive_page(
     account: &mut LocalBusAccountState,
@@ -228,13 +254,13 @@ async fn receive_page(
     pool: &ramflux_transport::RelayQuicPool,
     entries: Vec<GatewayInboxEntry>,
     backpressure: &mut super::contact_backpressure::Backpressure,
-    context: PageContext,
+    context: PageContext<'_>,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
-    let PageContext { replay, now } = context;
+    let PageContext { replay, now, retry_keys } = context;
     let mut applied = 0;
     let mut replies = Vec::new();
     for entry in entries {
-        let key = account.client.inbox_admission_key(&entry)?;
+        let (key, committed_retry) = retry_context(&account.client, &entry, retry_keys)?;
         if !account.client.account_db()?.inbox_retry_ready(&key, now)? {
             advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
             continue;
@@ -243,14 +269,20 @@ async fn receive_page(
             continue;
         }
         let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
-        let outcome = if backpressure.duplicate(&entry) {
-            Err(SdkError::InboundRejected(
-                "another contact envelope for this root is already deferred".into(),
-            ))
-        } else if now >= expires && account.client.account_db()?.has_inbox_retry(&key)? {
-            Err(SdkError::InboundRejected("gateway TTL expired".to_owned()))
-        } else {
-            Box::pin(process(account, engine, pool, &entry)).await
+        let outcome = match committed_retry {
+            Err(error) => Err(error),
+            Ok(true) => Ok(Processed::control()),
+            Ok(false) => {
+                if backpressure.duplicate(&entry) {
+                    Err(SdkError::InboundRejected(
+                        "another contact envelope for this root is already deferred".into(),
+                    ))
+                } else if now >= expires && account.client.account_db()?.has_inbox_retry(&key)? {
+                    Err(SdkError::InboundRejected("gateway TTL expired".to_owned()))
+                } else {
+                    Box::pin(process(account, engine, pool, &entry)).await
+                }
+            }
         };
         let mut project_message = false;
         let mut strip_call_ciphertext = false;
@@ -461,26 +493,32 @@ fn redrive_if_state_changed(client: &RamfluxClient) -> Result<(), SdkError> {
     Ok(())
 }
 
+fn pending_entry_id(entry: &GatewayInboxEntry) -> PendingEntryId {
+    (entry.target_delivery_id.clone(), entry.inbox_seq, entry.envelope.envelope_id.clone())
+}
+
 fn append_pending_entries(
     account: &LocalBusAccountState,
     entries: &mut Vec<GatewayInboxEntry>,
     now: i64,
-) -> Result<(), SdkError> {
+) -> Result<BTreeMap<PendingEntryId, String>, SdkError> {
     let mut seen = entries
         .iter()
         .map(|entry| account.client.inbox_admission_key(entry))
         .collect::<Result<BTreeSet<_>, _>>()?;
-    for bytes in account
-        .client
-        .account_db()?
-        .unrouted_entries()?
-        .into_iter()
-        .chain(account.client.account_db()?.due_inbox_retries(now)?)
-    {
+    for bytes in account.client.account_db()?.unrouted_entries()? {
         let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
         if seen.insert(account.client.inbox_admission_key(&entry)?) {
             entries.push(entry);
         }
     }
-    Ok(())
+    let mut retry_keys = BTreeMap::new();
+    for (key, bytes) in account.client.account_db()?.due_inbox_retry_rows(now)? {
+        let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
+        retry_keys.insert(pending_entry_id(&entry), key.clone());
+        if seen.insert(key) {
+            entries.push(entry);
+        }
+    }
+    Ok(retry_keys)
 }

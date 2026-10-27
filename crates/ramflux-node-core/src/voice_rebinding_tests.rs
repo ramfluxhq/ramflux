@@ -59,6 +59,37 @@ fn rebinding_challenges_require_a_sixty_byte_datagram() -> TestResult {
     Ok(())
 }
 #[test]
+fn authenticated_rebind_response_survives_exhausted_unpinned_media_budget() -> TestResult {
+    let mut state = VoiceRelayState::default();
+    let lease = pair(&mut state, "node", &scope(1), "relay:9000", 100)?;
+    let old = "1.1.1.1:2000".parse()?;
+    let moved = "9.9.9.9:3000".parse()?;
+    let peer = "8.8.8.8:1000".parse()?;
+    let media = encode_voice_datagram(&lease.callee_token, &[0; 104])?;
+    assert_eq!(media.len(), 140);
+    state.route(&media, old, 100, false)?;
+    let VoiceRoute::Challenge { packet: challenge, .. } =
+        state.route_with_rebinding(&media, moved, 101, false)?
+    else {
+        return Err("missing challenge".into());
+    };
+    let mut refused = 0;
+    for _ in 0..49 {
+        if state.route_with_rebinding(&media, moved, 101, false).is_err() {
+            refused += 1;
+        }
+    }
+    assert!(refused > 0, "approximately 7 KiB/s must exhaust the unpinned media window");
+
+    let proof =
+        ramflux_crypto::voice_rebind_response(&lease.callee_key, &lease.lease_id, 1, &challenge)?;
+    let response = encode_voice_datagram(&lease.callee_token, &proof)?;
+    assert_eq!(state.route_with_rebinding(&response, moved, 101, false)?, VoiceRoute::Drop);
+    let peer_media = encode_voice_datagram(&lease.caller_token, b"opaque")?;
+    assert_eq!(state.route(&peer_media, peer, 101, false)?, Some((moved, &b"opaque"[..])));
+    Ok(())
+}
+#[test]
 fn nat_rebinding_requires_an_unexpired_cookie_echo_from_the_challenged_address() -> TestResult {
     let mut state = VoiceRelayState::default();
     let lease = pair(&mut state, "node", &scope(1), "relay:9000", 100)?;

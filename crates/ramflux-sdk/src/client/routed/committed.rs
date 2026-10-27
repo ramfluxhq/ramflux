@@ -108,6 +108,26 @@ impl RamfluxClient {
             .load_actor_state::<Committed>(&self.authenticated_committed_key(entry)?)?
             .map(|receipt| receipt.routing))
     }
+
+    pub(crate) fn retained_committed_receipt_key(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Option<String>, SdkError> {
+        let encoded = self.inbound_device_reference(entry)?;
+        let (root, device) = ramflux_protocol::parse_qualified_device_id(&encoded)?
+            .ok_or_else(|| SdkError::InboundRejected("retained sender root missing".to_owned()))?;
+        let source = self.device_identity_for_root(&root, &device)?;
+        let key = committed_key(&source, &entry.envelope.envelope_id)?;
+        let Some(receipt) = self.account_db()?.load_actor_state::<Committed>(&key)? else {
+            return Ok(None);
+        };
+        if receipt.entry.envelope.payload_hash != entry.envelope.payload_hash {
+            return Err(SdkError::InboundRejected(
+                "envelope id reused with a different authenticated payload".to_owned(),
+            ));
+        }
+        Ok(Some(key))
+    }
 }
 
 /// Read-model metadata only; this index is never consulted as a replay receipt.

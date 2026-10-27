@@ -102,6 +102,18 @@ impl AccountDb {
         let mut q=self.connection.prepare("SELECT entry_json FROM runtime_inbox_retry WHERE next_at<=?1 ORDER BY created_at,envelope_key LIMIT 64")?;
         Ok(q.query_map(params![at], |r| r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    /// Reads due retry rows together with their pre-retention admission keys.
+    /// # Errors
+    /// Returns SQLite errors.
+    pub fn due_inbox_retry_rows(&self, at: i64) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let mut query = self.connection.prepare(
+            "SELECT envelope_key,entry_json FROM runtime_inbox_retry \
+             WHERE next_at<=?1 ORDER BY created_at,envelope_key LIMIT 64",
+        )?;
+        Ok(query
+            .query_map(params![at], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
     /// Clears successful retry work and its admission state.
     /// # Errors
     /// Returns SQLite errors.

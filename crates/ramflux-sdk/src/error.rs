@@ -53,6 +53,8 @@ pub enum SdkError {
     InboundPending(String),
     #[error("contact admission waits for capacity: {0}")]
     ContactRequestCapacity(String),
+    #[error("voice call control receipt capacity exhausted at {limit} receipts")]
+    CallControlReceiptCapacity { limit: u64 },
     #[error("crypto error: {0}")]
     Crypto(#[from] CryptoError),
     #[error("storage error: {0}")]

@@ -254,7 +254,9 @@ impl RamfluxClient {
         let receipt_prefix = format!("voice/control/{}/", c.call_id);
         if self.account_db()?.actor_state_usage(&receipt_prefix)?.0 >= MAX_CONTROL_RECEIPTS_PER_CALL
         {
-            return Err(invalid("control receipt capacity exhausted"));
+            return Err(SdkError::CallControlReceiptCapacity {
+                limit: MAX_CONTROL_RECEIPTS_PER_CALL,
+            });
         }
         let next = self.plan_call(&c, crate::time::now_unix_timestamp())?;
         let db = self.account_db()?;

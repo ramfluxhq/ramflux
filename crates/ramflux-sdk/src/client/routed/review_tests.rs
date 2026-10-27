@@ -291,6 +291,14 @@ impl Inbox {
         config: GatewaySessionConfig,
         entries: Vec<GatewayInboxEntry>,
     ) -> Result<(GatewaySessionEngine, Writes), SdkError> {
+        let acknowledgements = entries.len();
+        Self::engine_with_acknowledgements(config, entries, acknowledgements)
+    }
+    pub(super) fn engine_with_acknowledgements(
+        config: GatewaySessionConfig,
+        entries: Vec<GatewayInboxEntry>,
+        acknowledgements: usize,
+    ) -> Result<(GatewaySessionEngine, Writes), SdkError> {
         let cursor = GatewayCursor {
             target_delivery_id: config.target_delivery_id.clone(),
             inbox_seq: entries.last().map_or(0, |entry| entry.inbox_seq),
@@ -298,10 +306,9 @@ impl Inbox {
             acked_envelope_ids: Vec::new(),
             nacked_envelope_ids: BTreeMap::new(),
         };
-        let count = entries.len();
         let mut responses =
             VecDeque::from([serde_json::to_vec(&GatewayServerFrame::Resume { entries })?]);
-        for _ in 0..count {
+        for _ in 0..acknowledgements {
             responses.push_back(serde_json::to_vec(&GatewayServerFrame::Ack {
                 cursor: cursor.clone(),
             })?);

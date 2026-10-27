@@ -20,24 +20,11 @@ pub(super) struct Admission<'lease, 'packet> {
     pub now: u64,
     pub challenge_allowed: bool,
 }
-pub(super) fn admit<'packet>(
-    side: &mut Side,
-    admission: Admission<'_, 'packet>,
-) -> Result<Option<VoiceRoute<'packet>>, NodeCoreError> {
-    let Admission { lease_id, index, source, payload, now, challenge_allowed } = admission;
-    if side.source.is_none() {
-        if payload.starts_with(RESPONSE) {
-            return Ok(Some(VoiceRoute::Drop));
-        }
-        side.source = Some(source);
-    }
-    if side.source == Some(source) {
-        return Ok(payload.starts_with(RESPONSE).then_some(VoiceRoute::Drop));
-    }
-    if let Some(challenge) = &side.challenge
-        && now < challenge.expires_at
-    {
-        if source == challenge.address
+pub(super) fn authenticates_pending(side: &Side, admission: Admission<'_, '_>) -> bool {
+    let Admission { lease_id, index, source, payload, now, .. } = admission;
+    side.challenge.as_ref().is_some_and(|challenge| {
+        now < challenge.expires_at
+            && source == challenge.address
             && payload.len() == 52
             && payload.starts_with(RESPONSE)
             && payload[4..36] == challenge.cookie
@@ -50,7 +37,26 @@ pub(super) fn admit<'packet>(
                 &payload[36..],
             )
             .is_ok()
-        {
+    })
+}
+pub(super) fn admit<'packet>(
+    side: &mut Side,
+    admission: Admission<'_, 'packet>,
+) -> Result<Option<VoiceRoute<'packet>>, NodeCoreError> {
+    let Admission { lease_id: _, index: _, source, payload, now, challenge_allowed } = admission;
+    if side.source.is_none() {
+        if payload.starts_with(RESPONSE) {
+            return Ok(Some(VoiceRoute::Drop));
+        }
+        side.source = Some(source);
+    }
+    if side.source == Some(source) {
+        return Ok(payload.starts_with(RESPONSE).then_some(VoiceRoute::Drop));
+    }
+    if let Some(challenge) = &side.challenge
+        && now < challenge.expires_at
+    {
+        if authenticates_pending(side, admission) {
             side.source = Some(source);
             side.challenge = None;
         }

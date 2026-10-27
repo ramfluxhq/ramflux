@@ -243,6 +243,15 @@ impl VoiceRelayState {
         let lease = self.leases.get_mut(&key).ok_or_else(|| refused("voice lease unavailable"))?;
         let side = &mut lease.sides[i];
         let pinned = side.source == Some(source);
+        let admission = rebinding::Admission {
+            lease_id: &lease.id,
+            index: u8::try_from(i).unwrap_or(0),
+            source,
+            payload,
+            now,
+            challenge_allowed: packet.len() >= MIN_REBIND_CHALLENGE_DATAGRAM_BYTES,
+        };
+        let authenticated_rebind = rebinding::authenticates_pending(side, admission);
         if pinned {
             charge_window(
                 &mut side.second,
@@ -252,7 +261,7 @@ impl VoiceRelayState {
                 BYTES_PER_SECOND,
                 "voice bandwidth exhausted",
             )?;
-        } else {
+        } else if !authenticated_rebind {
             charge_window(
                 &mut side.unpinned_second,
                 &mut side.unpinned_bytes,
@@ -262,17 +271,7 @@ impl VoiceRelayState {
                 "voice unpinned bandwidth exhausted",
             )?;
         }
-        if let Some(result) = rebinding::admit(
-            side,
-            rebinding::Admission {
-                lease_id: &lease.id,
-                index: u8::try_from(i).unwrap_or(0),
-                source,
-                payload,
-                now,
-                challenge_allowed: packet.len() >= MIN_REBIND_CHALLENGE_DATAGRAM_BYTES,
-            },
-        )? {
+        if let Some(result) = rebinding::admit(side, admission)? {
             return Ok(result);
         }
         if payload.is_empty() {

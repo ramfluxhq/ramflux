@@ -356,11 +356,8 @@ async fn a_call_refuses_control_receipts_beyond_its_bounded_capacity() -> Result
     let Err(error) = apply(&mut bob, &packet).await else {
         return Err(invalid("receipt cap accepted control"));
     };
-    assert!(matches!(
-        error,
-        SdkError::InboundRejected(ref message)
-            if message == "voice call: control receipt capacity exhausted"
-    ));
+    assert!(matches!(error, SdkError::CallControlReceiptCapacity { limit: 128 }));
+    assert_eq!(crate::bus::io::local_bus_error_code(&error), "CallControlReceiptCapacity");
     assert_eq!(bob.client.account_db()?.actor_state_usage(&prefix)?.0, 128);
     assert!(!bob.client.voice_calls.contains_key(&invite.call_id));
     Ok(())
@@ -412,5 +409,65 @@ async fn new_call_failure_rows_drop_ciphertext_while_existing_rows_still_decode(
         .find(|row| row.envelope.encrypted_payload.is_empty())
         .ok_or_else(|| invalid("new retry row missing"))?;
     assert_eq!(stored.envelope.encrypted_payload, "");
+    Ok(())
+}
+
+#[tokio::test]
+async fn stripped_call_ack_retry_uses_committed_receipt_before_payload_decode()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 21)?;
+    let mut bob = Fixture::new("bob", 31)?;
+    contacts(&alice, &bob)?;
+    let first = control(&alice, &bob, 1, "direct-thread")?;
+    let invite = signed(&alice, first.pending[0].clone())?;
+    let packet = entry(&alice, &bob, &invite, "call-ack-retry", "direct-thread")?;
+    apply(&mut bob, &packet).await?;
+
+    let key = bob.client.inbox_admission_key(&packet)?;
+    let retained = crate::bus::sync_driver::retained_inbox_entry(&packet, true);
+    assert_eq!(
+        bob.client.retained_committed_receipt_key(&retained)?.as_deref(),
+        Some(key.as_str())
+    );
+    let mut mismatched = retained.clone();
+    mismatched.envelope.payload_hash.push('x');
+    assert!(matches!(
+        bob.client.retained_committed_receipt_key(&mismatched),
+        Err(SdkError::InboundRejected(_))
+    ));
+    let now = now_unix_timestamp();
+    assert_ne!(
+        bob.client.account_db()?.defer_inbox_entry(
+            &key,
+            &serde_json::to_vec(&retained)?,
+            now.saturating_sub(2),
+        )?,
+        0
+    );
+    let (engine, writes) =
+        review::Inbox::engine_with_acknowledgements(bob.config()?, Vec::new(), 1)?;
+    let mut account = crate::bus::state::LocalBusAccountState::new(
+        std::mem::take(&mut bob.client),
+        engine,
+        "bob".to_owned(),
+    );
+    crate::bus::sync_driver::run(&mut account).await?;
+
+    assert!(
+        writes
+            .lock()
+            .map_err(|_| invalid("mutex"))?
+            .iter()
+            .any(|v| v["frame_type"] == "ack" && v["ack"]["envelope_id"] == "call-ack-retry")
+    );
+    assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
+    let events = account.client.account_db()?.journal_after(0, 128)?;
+    assert!(
+        !events.iter().any(|event| {
+            event.topic == "message.undeliverable" && event.body["envelope_id"] == "call-ack-retry"
+        }),
+        "{}",
+        serde_json::to_string(&events)?
+    );
     Ok(())
 }

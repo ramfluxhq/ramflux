@@ -857,7 +857,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::RemoteAppApprovalRequired
         | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
         SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
-        | SdkError::ContactRequestCapacity(_) => RamfluxErrorCode::RateLimited,
+        | SdkError::ContactRequestCapacity(_)
+        | SdkError::CallControlReceiptCapacity { .. } => RamfluxErrorCode::RateLimited,
         SdkError::CustodySetupInvalid
         | SdkError::SurfaceRefused { .. }
         | SdkError::TaskRefused { .. }

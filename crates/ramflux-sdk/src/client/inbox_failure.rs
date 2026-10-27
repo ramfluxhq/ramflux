@@ -39,7 +39,9 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
             | ramflux_crypto::CryptoError::CommitmentMismatch,
         ) => Some("authentication_failed"),
         SdkError::Json(_) | SdkError::Protocol(_) => Some("schema_invalid"),
-        SdkError::InboundRejected(_) => Some("routing_rejected"),
+        SdkError::InboundRejected(_) | SdkError::CallControlReceiptCapacity { .. } => {
+            Some("routing_rejected")
+        }
         _ => None,
     }
 }
