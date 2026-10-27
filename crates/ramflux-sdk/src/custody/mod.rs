@@ -13,7 +13,7 @@ mod store;
 mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
 pub use store::{BornAccount, CreationState, load_account};
-pub(crate) use store::{account_exists, list_accounts};
+pub(crate) use store::{accept_publication, account_exists, list_accounts, load_data_account};
 pub use vault::{BranchCredentials, NativePrimaryVault, PrimaryVault};
 
 use crate::SdkError;

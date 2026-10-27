@@ -38,7 +38,7 @@ impl RamfluxClient {
         now: u64,
     ) -> Result<(), SdkError> {
         let verified = verify_native_authority(manifest, expected, now)?;
-        self.observe_custodian_manifest(manifest, now)?;
+        self.prepare_local_custody_floor(manifest, expected, &verified, now)?;
         let db = self.account_db()?;
         let state_key = key(expected)?;
         // Persist a detected fence even though the caller receives a refusal.
@@ -131,6 +131,36 @@ impl RamfluxClient {
             }
             Ok(())
         })
+    }
+
+    fn prepare_local_custody_floor(
+        &self,
+        manifest: &CustodyManifest,
+        expected: &str,
+        verified: &VerifiedRecord,
+        now: u64,
+    ) -> Result<(), SdkError> {
+        self.invalidate_changed_custody_head(
+            expected,
+            &ramflux_protocol::custody::object_hash(verified.envelope())?,
+        );
+        self.observe_custodian_manifest(manifest, now)?;
+        if let Some(own) = &self.born_v3_account
+            && own.record().body.account_anchor == expected
+        {
+            // The public authority file advances before cache metadata. A crash can leave a
+            // cache behind the local floor; it cannot revive an older registration proof.
+            crate::custody::accept_publication(
+                self.account_index()?.root(),
+                own.local_account_id(),
+                &ramflux_protocol::custody::CustodyAuthority {
+                    publication: manifest.publication.clone(),
+                    custodian_publication: manifest.custodian_publication.clone(),
+                },
+                now,
+            )?;
+        }
+        Ok(())
     }
 
     fn observe_custodian_manifest(
@@ -259,6 +289,31 @@ impl RamfluxClient {
         Ok(Some(ramflux_protocol::custody::CustodyAuthority { publication, custodian_publication }))
     }
 
+    fn require_owned_custody_floor(
+        &self,
+        anchor: &str,
+        cached: &VerifiedRecord,
+        now: u64,
+    ) -> Result<(), SdkError> {
+        if let Some(owned) = &self.born_v3_account
+            && owned.record().body.account_anchor == anchor
+        {
+            let current = crate::custody::load_account(
+                self.account_index()?.root(),
+                owned.local_account_id(),
+                now,
+            )?;
+            if ramflux_protocol::custody::object_hash(current.record())?
+                != ramflux_protocol::custody::object_hash(cached.envelope())?
+            {
+                return Err(SdkError::InboundPending(
+                    "own custody cache is behind the durable authority floor".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn require_custody_device(
         &self,
         identity: &RootQualifiedDeviceRef,
@@ -268,6 +323,7 @@ impl RamfluxClient {
         else {
             return Ok(false);
         };
+        self.require_owned_custody_floor(identity.root_commitment(), &verified, now)?;
         self.require_fresh_custody_head(identity.root_commitment(), verified.envelope())?;
         let row = self
             .account_db()?

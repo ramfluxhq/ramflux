@@ -98,7 +98,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let born =
             if crate::custody::account_exists(self.account_index()?.root(), local_account_id)? {
-                let account = crate::custody::load_account(
+                let account = crate::custody::load_data_account(
                     self.account_index()?.root(),
                     local_account_id,
                     crate::custody::network_now()?,

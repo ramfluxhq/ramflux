@@ -48,10 +48,7 @@ impl RamfluxClient {
         )?;
         self.observe_custody_manifest(
             &ramflux_protocol::custody::CustodyManifest {
-                publication: ramflux_protocol::custody::Publication {
-                    record: account.record().clone(),
-                    compacted_ids: None,
-                },
+                publication: account.publication(),
                 custodian_publication: account.custodian_publication(
                     self.account_index()?.root(),
                     crate::custody::network_now()?,

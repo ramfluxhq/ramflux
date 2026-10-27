@@ -194,3 +194,66 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
     flow?;
     Ok(())
 }
+
+#[tokio::test]
+async fn native_fenced_account_opens_data_actor_and_refuses_legacy_proof_after_restart() -> Result {
+    let fixture = crate::client::native_test_support::Fixture::new("native-fenced-actor").await?;
+    let id = fixture.client.account_db()?.local_account_id.clone();
+    let mut native = fixture.manifest.custody.as_ref().ok_or("native")?.clone();
+    let primary = fixture.vault.primary_for_public_key(
+        &native.publication.record.body.master_certificate.body.self_signing_public_key,
+    )?;
+    let mut body = native.publication.record.body.clone();
+    body.profile.display_name = "Conflicting actor name".into();
+    native.publication.record = primary.sign_record(body)?;
+    assert!(
+        fixture
+            .client
+            .observe_custody_manifest(
+                &native,
+                &fixture.manifest.principal_commitment,
+                crate::custody::network_now()?,
+            )
+            .is_err()
+    );
+    drop(fixture.client);
+    let socket = fixture.root.0.join("fenced-actor.sock");
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _stop = Stop(stop);
+        let mut bus = connect(&socket).await?;
+        let listed = bus.request(None, "account", "account.list", json!({})).await?;
+        assert_eq!(listed["account_details"][0]["authority_blocked"], true);
+        let unlocked = bus
+            .request(
+                Some(id.clone()),
+                "account",
+                "account.unlock",
+                json!({"passphrase":"native fixture data passphrase"}),
+            )
+            .await?;
+        assert_eq!(unlocked["state"], "unlocked");
+        assert_eq!(unlocked["networking"], "networking_pending");
+        let status = bus.request(Some(id.clone()), "account", "account.status", json!({})).await?;
+        assert_eq!(status["authority_blocked"], true);
+        let proof = bus
+            .request_frame_response(LocalBusFrame::request(
+                "fenced-proof",
+                Some(id.clone()),
+                "account",
+                "device.authorize",
+                json!({}),
+            ))
+            .await?;
+        assert_eq!(proof.error.ok_or("legacy proof was granted")?.code, "NetworkingPending");
+        bus.request(Some(id.clone()), "account", "account.lock", json!({})).await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(
+        crate::serve_local_bus_until(LocalBusConfig::new(&socket, &fixture.root.0), receiver),
+        flow,
+    );
+    server?;
+    flow?;
+    Ok(())
+}
