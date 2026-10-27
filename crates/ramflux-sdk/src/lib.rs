@@ -82,6 +82,9 @@ pub use bus::{
     LocalMcpStandingApprovalSigningBody, TaskApprovalBinding, serve_local_bus,
     serve_local_bus_until,
 };
+#[cfg(feature = "itest-restore-state")]
+#[doc(hidden)]
+pub use bus::{LocalBusStartupRestoreGate, LocalBusStartupRestoreGateControl};
 pub use client::RamfluxClient;
 pub use client::contact::SdkContactSafetyNumber;
 pub use client::conversation::ConversationSummary;

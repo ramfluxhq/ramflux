@@ -15,5 +15,8 @@ thiserror.workspace = true
 clap.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
 
+[dev-dependencies]
+ramflux-sdk = { workspace = true, features = ["itest-restore-state"] }
+
 [lints]
 workspace = true

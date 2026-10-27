@@ -90,7 +90,10 @@ impl Supervisor {
                     match result {
                         Err(error)=>supervisor.backup_jobs.fail_install(&job.job_id,&error),
                         Ok((_,restored,kept_newer))=>{
-                            if let Err(error)=reopened {tracing::warn!(%error,"restored account will reopen on next unlock");}
+                            match reopened {
+                                Ok(()) => supervisor.clear_restore_state(&account),
+                                Err(error) => tracing::warn!(%error,"restored account will reopen on next unlock"),
+                            }
                             let _=supervisor.backup_jobs.change(|registry|registry.installed(&job.job_id,restored,kept_newer,super::service::now()));
                         }
                     }

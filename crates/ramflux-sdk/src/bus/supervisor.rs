@@ -114,26 +114,30 @@ impl Supervisor {
             .index
             .known_account_ids()?
             .into_iter()
-            .map(|id| local_bus_account_manifest_path(&self.config.data_root, &id))
-            .collect::<BTreeSet<_>>();
+            .map(|id| (local_bus_account_manifest_path(&self.config.data_root, &id), id))
+            .collect::<BTreeMap<_, _>>();
         if directory.exists() {
             for entry in std::fs::read_dir(directory)? {
                 let path = entry?.path();
-                if path.extension().and_then(std::ffi::OsStr::to_str) == Some("json") {
-                    paths.insert(path);
+                if path.extension().and_then(std::ffi::OsStr::to_str) == Some("json")
+                    && let Some(id) = path.file_stem().and_then(std::ffi::OsStr::to_str)
+                {
+                    paths.entry(path.clone()).or_insert_with(|| id.to_owned());
                 }
             }
         }
-        for path in paths {
-            if let Some(id) = path.file_stem().and_then(std::ffi::OsStr::to_str)
-                && crate::custody::account_exists(&self.config.data_root, id)?
-            {
+        for (path, account_id) in paths {
+            if crate::custody::account_exists(&self.config.data_root, &account_id)? {
                 continue;
             }
             let manifest = match read_local_bus_account_manifest(&path) {
                 Ok(manifest) => manifest,
                 Err(error) => {
-                    tracing::warn!(%error, "skipping unreadable account manifest");
+                    self.restore_states.borrow_mut().insert(
+                        account_id.clone(),
+                        RestoreState::Failed("manifest_unreadable".to_owned()),
+                    );
+                    tracing::warn!(%account_id, %error, "account manifest is unreadable");
                     continue;
                 }
             };
@@ -149,6 +153,10 @@ impl Supervisor {
                 .insert(manifest.local_account_id.clone(), RestoreState::Pending);
             let supervisor = Rc::clone(self);
             tasks.spawn_local(async move {
+                #[cfg(any(test, feature = "itest-restore-state"))]
+                if let Some(gate) = &supervisor.config.startup_restore_gate {
+                    gate.wait(&manifest.local_account_id).await;
+                }
                 let (outbound, _receiver) = mpsc::channel(1);
                 let connection = LocalBusConnectionState::new(0, outbound);
                 let request = LocalBusFrame::request(
@@ -452,6 +460,15 @@ impl Supervisor {
     }
     pub(super) fn remove_backup_actor(&self, id: &str) {
         self.accounts.borrow_mut().remove(id);
+    }
+    pub(super) fn clear_restore_state(&self, id: &str) {
+        self.restore_states.borrow_mut().remove(id);
+    }
+    #[cfg(test)]
+    pub(super) fn mark_restore_failed(&self, id: &str, reason: &str) {
+        self.restore_states
+            .borrow_mut()
+            .insert(id.to_owned(), RestoreState::Failed(reason.to_owned()));
     }
     pub(super) fn new_backup_actor(&self, id: &str) -> Result<AccountActor, SdkError> {
         let actor = AccountActor::start(

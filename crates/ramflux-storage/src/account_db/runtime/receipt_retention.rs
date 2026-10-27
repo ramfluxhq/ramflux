@@ -9,15 +9,6 @@ const AGE: i64 = 30 * 24 * 60 * 60;
 const PREFIXES: [&str; 2] = ["delivery-receipt/status/", "delivery-receipt/outbound/"];
 const CURSOR: &str = "delivery-receipt/retention-cursor";
 impl AccountDb {
-    /// Acquires the receipt writer before any reads in a deferred transaction.
-    /// This no-op write upgrades the transaction without changing domain state or outbox rows.
-    /// # Errors
-    /// Returns database lock or schema errors.
-    pub fn reserve_receipt_write(&self) -> Result<(), StorageError> {
-        self.connection.execute("UPDATE runtime_receipt_retention SET at=at WHERE 0", [])?;
-        Ok(())
-    }
-
     pub(super) fn install_receipt_retention_schema(&self) -> Result<(), StorageError> {
         self.connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_receipt_retention (state_kind TEXT PRIMARY KEY, at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS runtime_receipt_retention_age ON runtime_receipt_retention(at,state_kind);")?;
         Ok(())
@@ -79,7 +70,6 @@ impl AccountDb {
     pub fn retain_delivery_receipts(&self, now: i64, batch: u32) -> Result<(), StorageError> {
         let batch = batch.clamp(1, 256);
         self.write_transaction(|| {
-            self.reserve_receipt_write()?;
             // Upgrade r1 ledgers without ever deleting their durable message attribution.
             self.connection.execute("DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT state_kind FROM runtime_receipt_retention WHERE state_kind >= 'message/origin/' AND state_kind < 'message/origin0' ORDER BY state_kind LIMIT ?1)", rusqlite::params![batch])?;
             self.enroll_legacy_receipts(now, batch)?;

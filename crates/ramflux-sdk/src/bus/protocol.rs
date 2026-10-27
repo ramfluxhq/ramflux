@@ -15,6 +15,58 @@ pub struct LocalBusConfig {
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
+    #[cfg(any(test, feature = "itest-restore-state"))]
+    #[doc(hidden)]
+    pub startup_restore_gate: Option<LocalBusStartupRestoreGate>,
+}
+
+#[cfg(any(test, feature = "itest-restore-state"))]
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct LocalBusStartupRestoreGate {
+    account_id: String,
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: watch::Receiver<bool>,
+}
+
+#[cfg(any(test, feature = "itest-restore-state"))]
+#[doc(hidden)]
+pub struct LocalBusStartupRestoreGateControl {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: watch::Sender<bool>,
+}
+
+#[cfg(any(test, feature = "itest-restore-state"))]
+impl LocalBusStartupRestoreGate {
+    #[must_use]
+    pub fn new(account_id: impl Into<String>) -> (Self, LocalBusStartupRestoreGateControl) {
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (release, receiver) = watch::channel(false);
+        (
+            Self { account_id: account_id.into(), entered: entered.clone(), release: receiver },
+            LocalBusStartupRestoreGateControl { entered, release },
+        )
+    }
+
+    pub(crate) async fn wait(&self, account_id: &str) {
+        if self.account_id != account_id {
+            return;
+        }
+        self.entered.notify_one();
+        let mut release = self.release.clone();
+        while !*release.borrow() && release.changed().await.is_ok() {}
+    }
+}
+
+#[cfg(any(test, feature = "itest-restore-state"))]
+impl LocalBusStartupRestoreGateControl {
+    pub async fn entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub fn release(&self) {
+        self.release.send_replace(true);
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -1061,7 +1113,17 @@ impl LocalBusConfig {
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),
+            #[cfg(any(test, feature = "itest-restore-state"))]
+            startup_restore_gate: None,
         }
+    }
+
+    #[cfg(any(test, feature = "itest-restore-state"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_startup_restore_gate(mut self, gate: LocalBusStartupRestoreGate) -> Self {
+        self.startup_restore_gate = Some(gate);
+        self
     }
 }
 

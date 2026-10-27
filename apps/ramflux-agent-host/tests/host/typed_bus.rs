@@ -385,10 +385,13 @@ async fn startup_restore_failure_is_retryable_and_does_not_block_another_account
     let data = f.root.join("daemon");
     persisted_account(&data, "agent", "agent-secret", "wrong-agent-secret")?;
     persisted_account(&data, "other", "other-secret", "other-secret")?;
-    let config = ramflux_sdk::LocalBusConfig::new(&f.config.socket, &data);
+    let (restore_gate, restore_control) = ramflux_sdk::LocalBusStartupRestoreGate::new("agent");
+    let config = ramflux_sdk::LocalBusConfig::new(&f.config.socket, &data)
+        .with_startup_restore_gate(restore_gate);
     let (shutdown, receiver) = tokio::sync::watch::channel(false);
     let daemon = tokio::spawn(ramflux_sdk::serve_local_bus_until(config, receiver));
     let flow = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), restore_control.entered()).await?;
         let mut client = loop {
             if let Ok(client) = ramflux_sdk::LocalBusClient::connect(&f.config.socket).await {
                 break client;
@@ -397,11 +400,9 @@ async fn startup_restore_failure_is_retryable_and_does_not_block_another_account
         };
         let mut bus = RfdBus::connect(&f.config.socket, "agent").await?;
         let error = bus.request("account.status", json!({}), None).await.err().ok_or("restore")?;
-        assert!(
-            matches!(&error, Error::AccountRestorePending | Error::AccountRestoreFailed),
-            "{error:?}"
-        );
+        assert!(matches!(&error, Error::AccountRestorePending), "{error:?}");
         assert!(!error.stops_host());
+        restore_control.release();
         let failed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let response = client
@@ -458,6 +459,56 @@ async fn startup_restore_failure_is_retryable_and_does_not_block_another_account
             .ok_or("failed account row")?;
         assert_eq!(bad["state"], "restore_failed");
         assert!(bad["restore_error_code"].as_str().is_some());
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), flow).await;
+    shutdown.send_replace(true);
+    daemon.await??;
+    result??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn corrupt_startup_manifest_is_typed_and_does_not_block_another_account() -> TestResult {
+    let f = Fixture::new()?;
+    let data = f.root.join("daemon");
+    persisted_account(&data, "agent", "agent-secret", "agent-secret")?;
+    persisted_account(&data, "other", "other-secret", "other-secret")?;
+    std::fs::write(data.join("local_bus_accounts/agent.json"), b"{not a valid account manifest")?;
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let daemon = tokio::spawn(ramflux_sdk::serve_local_bus_until(
+        ramflux_sdk::LocalBusConfig::new(&f.config.socket, &data),
+        receiver,
+    ));
+    let flow = async {
+        let mut client = loop {
+            if let Ok(client) = ramflux_sdk::LocalBusClient::connect(&f.config.socket).await {
+                break client;
+            }
+            tokio::task::yield_now().await;
+        };
+        let mut bus = RfdBus::connect(&f.config.socket, "agent").await?;
+        let error = bus.request("account.status", json!({}), None).await.err().ok_or("restore")?;
+        assert!(matches!(&error, Error::AccountRestoreFailed), "{error:?}");
+        assert!(!error.stops_host());
+        let other = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match client
+                    .request(Some("other".into()), "test", "account.status", json!({}))
+                    .await
+                {
+                    Ok(status) => break Ok::<_, ramflux_sdk::SdkError>(status),
+                    Err(ramflux_sdk::SdkError::LocalBus(message))
+                        if message.starts_with("AccountRestorePending:") =>
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => break Err(error),
+                }
+            }
+        })
+        .await??;
+        assert_eq!(other["local_account_id"], "other");
         Ok::<(), Box<dyn std::error::Error>>(())
     };
     let result = tokio::time::timeout(std::time::Duration::from_secs(20), flow).await;
