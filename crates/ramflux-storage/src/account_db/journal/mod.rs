@@ -39,6 +39,9 @@ impl AccountDb {
         self.connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_journal(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,topic TEXT NOT NULL,body_json BLOB NOT NULL,source_key TEXT NOT NULL UNIQUE,sticky INTEGER NOT NULL DEFAULT 0,acknowledged INTEGER NOT NULL DEFAULT 0,subject TEXT);
         CREATE TABLE IF NOT EXISTS runtime_journal_bounds(singleton INTEGER PRIMARY KEY CHECK(singleton=1),head_seq INTEGER NOT NULL,pruned_through INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS runtime_journal_topic ON runtime_journal(topic);
+        CREATE INDEX IF NOT EXISTS runtime_journal_unrouted_envelope ON runtime_journal(
+            CASE WHEN json_valid(CAST(body_json AS TEXT)) THEN json_extract(CAST(body_json AS TEXT),'$.envelope_id') END
+        ) WHERE topic='message.unrouted';
         INSERT OR IGNORE INTO runtime_journal_bounds VALUES(1,0,0);
         CREATE TABLE IF NOT EXISTS runtime_unrouted(envelope_id TEXT PRIMARY KEY,inbox_seq INTEGER NOT NULL,entry_json BLOB NOT NULL,received_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS runtime_inbox_dead_letter(envelope_key TEXT PRIMARY KEY,entry_json BLOB NOT NULL,error_code TEXT NOT NULL,received_at INTEGER NOT NULL);

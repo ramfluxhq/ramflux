@@ -46,6 +46,10 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
         if index > 0 && started.elapsed() >= Duration::from_millis(250) {
             break;
         }
+        if account.client.account_db()?.message_is_deleted(&work.message)? {
+            discard(&account.client, &key, &work)?;
+            continue;
+        }
         let attempt_at = now_unix_timestamp();
         if work.at.saturating_add(LIFETIME) <= attempt_at || work.attempts >= ATTEMPTS {
             finish(&account.client, &key, &work, "failed")?;
@@ -98,6 +102,20 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
         }
     }
     Ok(sent)
+}
+fn discard(client: &RamfluxClient, key: &str, work: &Work) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    db.write_transaction(|| {
+        db.remove_actor_state(key)?;
+        let id = if work.status_id.is_empty() {
+            key.strip_prefix(PREFIX)
+                .ok_or_else(|| SdkError::InboundRejected("invalid receipt work key".into()))?
+        } else {
+            work.status_id.as_str()
+        };
+        db.remove_actor_state(&format!("delivery-receipt/status/{id}"))?;
+        Ok(())
+    })
 }
 fn postpone(
     client: &RamfluxClient,

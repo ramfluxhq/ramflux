@@ -126,6 +126,9 @@ impl RamfluxClient {
         if local != &self.owned_device_identity()? {
             return Err(SdkError::InboundRejected("receipt retry is not the owned device".into()));
         }
+        if self.account_db()?.message_is_deleted(message)? {
+            return Ok(None);
+        }
         let status_id = id(conversation, message, local)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
