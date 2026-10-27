@@ -37,6 +37,25 @@ impl HttpResponse {
         } else {
             deadline
         };
+        self.write_until(stream, deadline)
+    }
+    pub(crate) fn write_admin(
+        self,
+        stream: &mut TcpStream,
+        limits: HttpRequestLimits,
+        accepted_at: Instant,
+    ) -> Result<(), NodeCoreError> {
+        let deadline = accepted_at + limits.request_timeout;
+        if self.status != "408 Request Timeout" && deadline <= Instant::now() {
+            return Self::text(
+                "504 Gateway Timeout",
+                "admin operation completed after its response deadline; outcome unknown",
+            )
+            .write_until(stream, Instant::now() + Duration::from_millis(100));
+        }
+        self.write(stream, limits, accepted_at)
+    }
+    fn write_until(self, stream: &mut TcpStream, deadline: Instant) -> Result<(), NodeCoreError> {
         ramflux_node_core::write_http_response_with_deadline(
             stream,
             self.status,
