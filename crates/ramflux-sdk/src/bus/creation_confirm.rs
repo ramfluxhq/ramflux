@@ -53,7 +53,9 @@ async fn confirm(
     let _cancel = CancelOnDrop(Arc::clone(&gate));
     pending.guard_commit(gate);
     let vault = super::custody_setup::primary_provider(&supervisor.config);
+    let lease = supervisor.root_lease.borrow().clone();
     let worker = tokio::task::spawn_blocking(move || {
+        let _root_lease = lease;
         let home_node_id = revalidate_home_node(&data_root, &builtin_nodes, home_node_id)?;
         let account = pending.confirm_with_passphrase(
             &words,

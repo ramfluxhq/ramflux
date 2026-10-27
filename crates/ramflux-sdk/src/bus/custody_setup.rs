@@ -7,7 +7,7 @@ use crate::{
     custody::{CreateInput, CreationCeremony, NativePrimaryVault},
 };
 use serde::Serialize;
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use zeroize::Zeroizing;
 
 pub(super) fn handles(method: &str) -> bool {
@@ -61,9 +61,10 @@ pub(super) async fn respond(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
+    lease: Option<Arc<super::data_root_lock::DataRootLock>>,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
     validate_headers(request, ceremony)?;
-    let result = apply(request, config, ceremony).await;
+    let result = apply(request, config, ceremony, lease).await;
     // Every failed request consumes the pending ceremony, without word-level feedback.
     let result = match result {
         Ok(body) => body,
@@ -138,6 +139,7 @@ async fn apply(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
+    lease: Option<Arc<super::data_root_lock::DataRootLock>>,
 ) -> Result<ResultBody, SdkError> {
     super::requests::deadline(request)?;
     if request.kind != crate::LocalBusFrameKind::Request || request.operation_id.is_some() {
@@ -241,7 +243,7 @@ async fn apply(
                     .hidden_challenge()?,
             })
         }
-        "account.custody.confirm" => confirm(request, config, ceremony).await,
+        "account.custody.confirm" => confirm(request, config, ceremony, lease).await,
         "account.custody.cancel" | "account.create.cancel" => {
             empty(request)?;
             *ceremony = None;
@@ -254,6 +256,7 @@ async fn confirm(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
+    lease: Option<Arc<super::data_root_lock::DataRootLock>>,
 ) -> Result<ResultBody, SdkError> {
     let pending = ceremony.take().ok_or(SdkError::CustodySetupInvalid)?;
     if pending.principal_kind() != ramflux_protocol::PrincipalKind::Human {
@@ -291,6 +294,7 @@ async fn confirm(
     let vault = primary_provider(config);
     let confirmed_at = now()?;
     let account = tokio::task::spawn_blocking(move || {
+        let _root_lease = lease;
         if let Some(secret) = passphrase {
             pending.confirm_with_passphrase(&words, vault.as_ref(), confirmed_at, secret.as_bytes())
         } else {
@@ -367,7 +371,7 @@ mod tests {
             "account.create",
             serde_json::json!({"display_name":"Ordinary Human","principal_kind":"human"}),
         );
-        let bytes = respond(&mut request, &config, &mut pending).await?;
+        let bytes = respond(&mut request, &config, &mut pending, None).await?;
         let response: Frame<Pending> = serde_json::from_slice(&bytes)?;
         assert_eq!(response.bus_protocol, "ramflux.local_bus.v1");
         assert_eq!(response.kind, "response");
@@ -384,7 +388,7 @@ mod tests {
             "account.create.show_once",
             serde_json::json!({}),
         );
-        let shown = respond(&mut show, &config, &mut pending).await?;
+        let shown = respond(&mut show, &config, &mut pending, None).await?;
         let phrase: Frame<Phrase> = serde_json::from_slice(&shown)?;
         assert_eq!(phrase.body.phrase.split_whitespace().count(), 24);
         drop(phrase);
@@ -397,7 +401,7 @@ mod tests {
             serde_json::json!({}),
         );
         let challenge: Frame<Challenge> =
-            serde_json::from_slice(&respond(&mut hide, &config, &mut pending).await?)?;
+            serde_json::from_slice(&respond(&mut hide, &config, &mut pending, None).await?)?;
         let positions = challenge.body.positions;
         assert!(positions.iter().all(|position| (1..=24).contains(position)));
         assert_ne!(positions[0], positions[1]);
@@ -423,7 +427,7 @@ mod tests {
             serde_json::json!({"display_name":"Ordinary Human","principal_kind":"human"}),
         );
         assert!(matches!(
-            apply(&mut request, &config, &mut pending).await,
+            apply(&mut request, &config, &mut pending, None).await,
             Err(SdkError::CustodyVaultUnavailable)
         ));
         assert!(pending.is_none());
@@ -434,7 +438,7 @@ mod tests {
             "account.create.show_once",
             serde_json::json!({}),
         );
-        assert!(apply(&mut show, &config, &mut pending).await.is_err());
+        assert!(apply(&mut show, &config, &mut pending, None).await.is_err());
         assert!(!root.0.join("custody_accounts").exists());
         Ok(())
     }
@@ -453,7 +457,7 @@ mod tests {
             serde_json::json!({}),
         );
         assert!(matches!(
-            respond(&mut request, &config, &mut pending).await,
+            respond(&mut request, &config, &mut pending, None).await,
             Err(SdkError::CustodySetupInvalid)
         ));
         assert!(pending.is_none());

@@ -136,7 +136,9 @@ async fn confirm(
     let root = supervisor.config.data_root.clone();
     let secret = input.passphrase;
     let verification_id = id.clone();
+    let lease = supervisor.root_lease.borrow().clone();
     let secret = tokio::task::spawn_blocking(move || {
+        let _root_lease = lease;
         crate::client::account::verify_stored_data_secret(
             &root,
             &verification_id,
@@ -188,7 +190,9 @@ async fn promote(
     }
     supervisor.remove_backup_actor(&id);
     let vault = super::custody_setup::primary_provider(&supervisor.config);
+    let lease = supervisor.root_lease.borrow().clone();
     let worker = tokio::task::spawn_blocking(move || {
+        let _root_lease = lease;
         pending.confirm(
             &phrase,
             &confirmed_anchor,

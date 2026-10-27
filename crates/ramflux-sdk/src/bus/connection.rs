@@ -13,6 +13,7 @@ pub(super) async fn serve(
 ) -> Result<(), SdkError> {
     std::fs::create_dir_all(&config.data_root)?;
     set_owner_only_dir_permissions(&config.data_root)?;
+    let root_lease = super::data_root_lock::DataRootLock::acquire(&config.data_root)?;
     crate::custody::reconcile_incomplete_markers(&config.data_root)?;
     let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
     if let Some(parent) = config.socket_path.parent() {
@@ -25,6 +26,7 @@ pub(super) async fn serve(
     set_owner_only_file_permissions(&config.socket_path)?;
     let uid = std::fs::metadata(&config.socket_path)?.uid();
     let supervisor = Supervisor::new(config)?;
+    *supervisor.root_lease.borrow_mut() = Some(root_lease);
     let mut background = JoinSet::new();
     supervisor.hydrate(&mut background)?;
     tracing::info!(socket = %supervisor.config.socket_path.display(), "local bus daemon ready");
@@ -212,7 +214,7 @@ async fn custody_response(
     if frame.method == "account.create.confirm" {
         return super::creation_confirm::respond(frame, supervisor, ceremony, disconnected).await;
     }
-    super::custody_setup::respond(frame, &supervisor.config, ceremony).await
+    super::custody_setup::respond(frame, &supervisor.config, ceremony, supervisor.root_lease.borrow().clone()).await
 }
 
 async fn configure_subscription(

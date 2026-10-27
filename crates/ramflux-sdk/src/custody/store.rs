@@ -245,25 +245,41 @@ pub(crate) fn reconcile_incomplete_markers(root: &Path) -> Result<(), SdkError> 
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let id = entry.file_name().into_string().map_err(|_| invalid())?;
-        match index.account(&id) {
-            Ok(_) => {}
-            Err(ramflux_storage::StorageError::AccountNotFound(_))
-                if !entry.path().join("authority.json").try_exists()? =>
-            {
-                fs::remove_dir_all(entry.path())?;
-                tracing::warn!(
-                    local_account_id = %id,
-                    reason_code = "custody_orphan_marker_removed",
-                    "removed custody marker without an account-index reservation"
-                );
-            }
-            Err(ramflux_storage::StorageError::AccountNotFound(_)) => return Err(invalid()),
-            Err(error) => return Err(error.into()),
+        let Some(id) =
+            entry.file_name().to_str().map(str::to_owned).filter(|id| valid_id(id).is_ok())
+        else {
+            tracing::warn!(
+                reason_code = "custody_marker_invalid_name",
+                "quarantined custody marker with invalid account name"
+            );
+            continue;
+        };
+        if let Err(error) = reconcile_marker(&index, &entry.path(), &id) {
+            tracing::warn!(local_account_id=%id, reason_code="custody_marker_inconsistent", %error,
+                "quarantined inconsistent custody account; other accounts remain available");
         }
     }
     fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+fn reconcile_marker(
+    index: &ramflux_storage::AccountIndex,
+    path: &Path,
+    id: &str,
+) -> Result<(), SdkError> {
+    match index.account(id) {
+        Ok(_) => Ok(()),
+        Err(ramflux_storage::StorageError::AccountNotFound(_))
+            if !path.join("authority.json").try_exists()? =>
+        {
+            fs::remove_dir_all(path)?;
+            tracing::warn!(local_account_id=%id, reason_code="custody_orphan_marker_removed",
+                "removed custody marker without an account-index reservation");
+            Ok(())
+        }
+        Err(ramflux_storage::StorageError::AccountNotFound(_)) => Err(invalid()),
+        Err(error) => Err(error.into()),
+    }
 }
 pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Value>, SdkError> {
     let dir = root.join("custody_accounts");
@@ -274,14 +290,16 @@ pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Val
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
-            let id = entry.file_name().into_string().map_err(|_| invalid())?;
+            let Some(id) = entry.file_name().to_str().map(str::to_owned).filter(|id| valid_id(id).is_ok()) else {
+                continue;
+            };
             let summary = if let Ok(account) = load_data_account(root, &id, now) {
                 account.summary_at(now)
             } else {
                 let failed = failed_setup(root, &id)?;
                 serde_json::json!({"local_account_id":id,"state":CreationState::NetworkingPending,
                     "custody_v3_observed":true,"setup_incomplete":true,"setup_failed":failed.is_some(),
-                    "reason":failed.unwrap_or("authority_unreadable")})
+                    "reason":failed.unwrap_or("authority_unreadable"),"setup_error":"CustodySetupInvalid"})
             };
             accounts.push(summary);
         }
@@ -406,6 +424,14 @@ fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
+}
+pub(super) struct GenesisMaterial<'a> {
+    pub record: Envelope<DeviceSet>,
+    pub primary: &'a ramflux_crypto::custody::SelfSigningKey,
+    pub branch: &'a Zeroizing<[u8; 64]>,
+    pub now: u64,
+    pub data_secret: Option<&'a [u8]>,
+    pub commit_gate: Option<&'a super::CommitGate>,
 }
 pub(super) fn persist(
     root: &Path,

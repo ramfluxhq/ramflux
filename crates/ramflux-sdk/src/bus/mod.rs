@@ -20,6 +20,7 @@ pub use creation_client::{
 mod custody_response;
 mod custody_setup;
 pub mod daemon;
+mod data_root_lock;
 mod delivery_receipts;
 pub mod dispatch;
 mod events;
@@ -82,3 +83,6 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod account_error_tests;
+
+#[cfg(test)]
+mod custody_daemon_tests;
