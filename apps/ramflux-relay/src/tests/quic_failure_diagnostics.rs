@@ -95,6 +95,9 @@ fn exercise_relay(mode: &str) -> Result<(), Box<dyn std::error::Error>> {
             );
             let error = refusal.to_string();
             eprintln!("{error}");
+            assert!(error.contains("phase=handshake"), "{error}");
+            assert!(error.contains(&format!("peer={addr}")), "{error}");
+            assert!(error.contains(&format!("server_name={server_name}")), "{error}");
             assert!(error.contains("certificate not valid for name"), "{error}");
             assert_eq!(metrics.ingress_total(), 0);
         } else {

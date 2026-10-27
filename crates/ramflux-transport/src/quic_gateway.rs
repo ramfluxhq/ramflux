@@ -101,6 +101,22 @@ pub struct TcpTlsGatewayBidiStream {
     timeout: Duration,
 }
 
+// Add only connection metadata; never include TLS configuration, key material or request bodies.
+fn handshake_error(
+    error: &quinn::ConnectionError,
+    peer_addr: SocketAddr,
+    server_name: &str,
+) -> TransportError {
+    let context = |message: String| {
+        format!("{message}; phase=handshake peer={peer_addr} server_name={server_name}")
+    };
+    match crate::quic_errors::connection(error) {
+        TransportError::Tls(message) => TransportError::Tls(context(message)),
+        TransportError::Quic(message) => TransportError::Quic(context(message)),
+        other => other,
+    }
+}
+
 impl QuicGatewayClient {
     /// # Errors
     /// Returns an error when the UDP socket, TLS config, or QUIC handshake fails.
@@ -118,7 +134,7 @@ impl QuicGatewayClient {
         let connection = tokio::time::timeout(timeout, connecting)
             .await
             .map_err(|error| TransportError::Quic(format!("{error}; phase=handshake peer={peer_addr} server_name={server_name}; detail={error:?}")))?
-            .map_err(|error| crate::quic_errors::connection(&error))?;
+            .map_err(|error| handshake_error(&error, peer_addr, server_name))?;
         Ok(Self { _endpoint: endpoint, connection, timeout })
     }
 
@@ -149,7 +165,7 @@ impl QuicGatewayClient {
             .map_err(|error| QuicConnectPhase::Setup(error.to_string()))?;
         match tokio::time::timeout(handshake_timeout, connecting).await {
             Err(_elapsed) => Err(QuicConnectPhase::HandshakeTimeout),
-            Ok(Err(error)) => match crate::quic_errors::connection(&error) {
+            Ok(Err(error)) => match handshake_error(&error, peer_addr, server_name) {
                 TransportError::Tls(message) => Err(QuicConnectPhase::HandshakeSecurity(message)),
                 other => Err(QuicConnectPhase::HandshakeFailed(other.to_string())),
             },
@@ -680,6 +696,30 @@ mod relay_client_quic_config_tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn handshake_context_preserves_tls_and_availability_classification() -> TestResult {
+        let peer = "127.0.0.1:17447".parse()?;
+        let tls = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+            error_code: quinn::TransportErrorCode::crypto(42),
+            frame_type: None,
+            reason: bytes::Bytes::new(),
+        });
+        for (cause, is_tls) in [(tls, true), (quinn::ConnectionError::TimedOut, false)] {
+            let error = super::handshake_error(&cause, peer, "ramflux-relay");
+            assert_eq!(error.is_tls_failure(), is_tls);
+            assert!(matches!(
+                &error,
+                crate::TransportError::Tls(_) | crate::TransportError::Quic(_)
+            ));
+            let message = error.to_string();
+            for field in ["phase=handshake", "peer=127.0.0.1:17447", "server_name=ramflux-relay"] {
+                assert!(message.contains(field), "{message}");
+            }
+            assert!(message.contains(&cause.to_string()), "{message}");
+        }
+        Ok(())
+    }
 
     fn temp_ca_file() -> Result<std::path::PathBuf, std::io::Error> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
