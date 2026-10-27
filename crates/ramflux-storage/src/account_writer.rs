@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
 
 /// Retains this process's account writer ownership until the guard is dropped.
 ///
@@ -56,7 +55,6 @@ struct OwnerRegistry {
 }
 
 static OWNERS: OnceLock<OwnerRegistry> = OnceLock::new();
-const INHERITED_DESCRIPTOR_GRACE: Duration = Duration::from_millis(250);
 
 fn owners() -> &'static OwnerRegistry {
     OWNERS.get_or_init(|| OwnerRegistry {
@@ -84,10 +82,8 @@ impl AccountWriter {
         let directory = root.join("accounts").join(account).canonicalize()?;
         let path = directory.join(".writer.lock");
         let registry = owners();
-        let mut registered = registry
-            .owners
-            .lock()
-            .map_err(|_| std::io::Error::other("account writer registry poisoned"))?;
+        let mut registered =
+            registry.owners.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         while let Some(owner) = registered.get(&path) {
             if let Some(owner) = owner.upgrade() {
                 return Ok(owner);
@@ -97,7 +93,7 @@ impl AccountWriter {
             registered = registry
                 .teardown_complete
                 .wait(registered)
-                .map_err(|_| std::io::Error::other("account writer registry poisoned"))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
@@ -109,27 +105,13 @@ impl AccountWriter {
         let file = options
             .open(&path)
             .map_err(|source| StorageError::AccountWriterLock { path: path.clone(), source })?;
-        let deadline = Instant::now() + INHERITED_DESCRIPTOR_GRACE;
-        loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => break,
-                Err(error)
-                    if error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-                        && Instant::now() < deadline =>
-                {
-                    // A concurrently spawned child can briefly inherit the old
-                    // descriptor before close-on-exec runs. That is teardown,
-                    // not a distinct account owner.
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(error)
-                    if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-                {
-                    return Err(StorageError::AccountWriterBusy(account.to_owned()));
-                }
-                Err(error) => {
-                    return Err(StorageError::AccountWriterLock { path, source: error });
-                }
+        match file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                return Err(StorageError::AccountWriterBusy(account.to_owned()));
+            }
+            Err(error) => {
+                return Err(StorageError::AccountWriterLock { path, source: error });
             }
         }
         let owner = Arc::new(Self { file: Some(file), path: path.clone() });
@@ -141,10 +123,8 @@ impl AccountWriter {
 impl Drop for AccountWriter {
     fn drop(&mut self) {
         let registry = owners();
-        let Ok(mut registered) = registry.owners.lock() else {
-            drop(self.file.take());
-            return;
-        };
+        let mut registered =
+            registry.owners.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(test)]
         {
             let hook = DROP_HOOK
@@ -156,11 +136,22 @@ impl Drop for AccountWriter {
                 hook(&self.path);
             }
         }
-        // Close the descriptor before releasing the registry mutex. An acquire
+        // Unlock and close the descriptor before releasing the registry mutex. An acquire
         // can therefore observe either the live shared owner or a released
         // kernel lock, never the stale interval between those two states.
-        drop(self.file.take());
+        if let Some(file) = self.file.take() {
+            let _ = FileExt::unlock(&file);
+            drop(file);
+        }
         registered.remove(&self.path);
         registry.teardown_complete.notify_all();
     }
+}
+
+#[cfg(test)]
+pub(crate) fn poison_registry() {
+    let _ = std::panic::catch_unwind(|| {
+        let _registered = owners().owners.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::panic::resume_unwind(Box::new("injected account writer registry poison"));
+    });
 }

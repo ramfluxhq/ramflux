@@ -27,12 +27,12 @@ impl RamfluxClient {
         account_id: &str,
         secret: &[u8],
     ) -> Result<(), SdkError> {
+        let account_index = self.account_index()?;
+        let _writer = account_index.acquire_account_writer(account_id)?;
         let vault_secret = self.vault_secret_source()?.vault_secret(account_id)?;
         let wrapping_key = account_db_key_encryption_key(&vault_secret, secret);
-        let wrapped = self
-            .account_index()?
-            .load_wrapped_db_key(account_id)?
-            .ok_or(SdkError::AccountDbNotUnlocked)?;
+        let wrapped =
+            account_index.load_wrapped_db_key(account_id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
         let key = unwrap_with_vault_secret(&wrapping_key, &wrapped)?;
         self.account_db()?.verify_key(&key)?;
         Ok(())
@@ -344,6 +344,30 @@ mod tests {
         assert!(
             !FileVaultSecretSource::new(&root).vault_secret_path("acct").exists(),
             "a refused first unlock must not create vault material"
+        );
+
+        drop(holder);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn secret_verification_does_not_create_vault_material_before_process_ownership()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("verify-secret-process-race");
+        let index = AccountIndex::open(&root)?;
+        index.create_account("acct", "principal")?;
+        let holder = wait_for_writer_child(&root)?;
+
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        assert!(matches!(
+            client.verify_active_account_secret("acct", b"losing-secret"),
+            Err(SdkError::Storage(StorageError::AccountWriterBusy(ref account))) if account == "acct"
+        ));
+        assert!(
+            !FileVaultSecretSource::new(&root).vault_secret_path("acct").exists(),
+            "a refused verification must not create vault material"
         );
 
         drop(holder);
