@@ -42,6 +42,9 @@ struct TestNode {
 }
 impl TestNode {
     fn new(id: &str, seed: u8, registered: bool) -> TestResult<Self> {
+        Self::with_registration(id, seed, true, registered)
+    }
+    fn with_registration(id: &str, seed: u8, publish: bool, registered: bool) -> TestResult<Self> {
         let path = std::env::temp_dir().join(format!(
             "rf-mig-{}-{}.redb",
             std::process::id(),
@@ -51,7 +54,9 @@ impl TestNode {
         let core = RouterCore::new();
         core.set_node_service_signer(Some(crate::NodeServiceSigningKey::from_seed([seed; 32])));
         let pubn = publication()?;
-        core.publish_custody_record(&pubn, NOW, &store)?;
+        if publish {
+            core.publish_custody_record(&pubn, NOW, &store)?;
+        }
         if registered {
             let target =
                 ramflux_protocol::qualified_device_id(&pubn.record.body.account_anchor, "primary")?;
@@ -647,3 +652,5 @@ mod peer;
 mod courier;
 
 mod retry_history;
+
+mod control_admission;

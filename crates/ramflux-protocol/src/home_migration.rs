@@ -2,10 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 //! Cooperative born-v3 home changes over the exporter-bound custody connection.
+mod binding;
 mod control;
 mod messages;
 mod records;
 use crate::{ProtocolError, canonical_json_bytes, custody, domain};
+pub use binding::control_payload_hash;
 pub use control::*;
 pub use messages::*;
 pub use records::*;
