@@ -135,3 +135,39 @@ fn former_home_read_requires_current_home_and_exact_current_owner_control() -> T
     assert!(matches!(result?, MigrationPeerReply::Refused(Refusal::PeeringUnavailable)));
     Ok(())
 }
+
+#[test]
+fn public_peer_resolve_is_purpose_bound_and_returns_no_private_operation_state() -> TestResult {
+    let s = Scenario::prepared()?;
+    let call = s.b.node.peer_resolve_call(
+        "A",
+        ramflux_protocol::home_migration::ResolvePayload {
+            target_anchor: s.anchor.clone(),
+            after_home_hash: None,
+            limit: 64,
+            old_node_hint: None,
+        },
+        &s.authorization.body.migration_id,
+        NOW,
+    )?;
+    let reply = dispatch(&s, &call, NOW)?;
+    let MigrationPeerReply::Resolved(result) = &reply else {
+        return Err("resolve".into());
+    };
+    assert_eq!(record_hash(&result.home.record)?, s.base.hash());
+    let value = serde_json::to_value(&reply)?;
+    assert!(value["evidence"].get("backlog_progress").is_none());
+    assert!(value["evidence"].get("delivery_map").is_none());
+    let mut changed = call;
+    let MigrationPeerCall::Resolve { authentication, .. } = &mut changed else {
+        return Err("resolve".into());
+    };
+    let mut body = authentication.body.clone();
+    body.kind = ramflux_protocol::home_migration::PeerQueryKind::Attest;
+    *authentication = crypto::sign_node(body, "B", &s.b.node.key)?;
+    assert!(matches!(
+        dispatch(&s, &changed, NOW)?,
+        MigrationPeerReply::Refused(Refusal::PeeringUnavailable)
+    ));
+    Ok(())
+}

@@ -162,6 +162,7 @@ impl SealedMigration {
 /// Configured service authority. Never constructed from a request-supplied node key.
 pub struct MigrationNode {
     pub(crate) verification_jobs: std::sync::atomic::AtomicUsize,
+    pub(crate) read_budget: std::sync::Mutex<crate::home_migration_read_budget::ReadBudget>,
     pub(crate) record: Envelope<NodeIdentityRecord>,
     pub(crate) key: ed25519_dalek::SigningKey,
     pub(crate) gateway_tcp_addr: String,
@@ -197,6 +198,7 @@ impl MigrationNode {
         }
         Ok(Self {
             verification_jobs: std::sync::atomic::AtomicUsize::new(0),
+            read_budget: std::sync::Mutex::default(),
             record,
             key,
             gateway_tcp_addr: endpoints.gateway_tcp_addr,

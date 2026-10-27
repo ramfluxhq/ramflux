@@ -385,6 +385,7 @@ impl Message for PeerStatus {
 pub enum PeerQueryKind {
     Attest,
     AuthorizeRead,
+    Resolve,
 }
 /// A peer signature binds the relayed owner request before any private state is returned.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
