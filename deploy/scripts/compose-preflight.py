@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 
@@ -30,6 +29,19 @@ REQUIRED_SECURITY_INPUTS = {
     "RAMFLUX_ROUTER_ADMIN_TOKEN",
     "RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN",
 }
+PODMAN_OPTIONS = (
+    "--podman-path",
+    "--podman-args",
+    "--podman-pull-args",
+    "--podman-push-args",
+    "--podman-build-args",
+    "--podman-inspect-args",
+    "--podman-run-args",
+    "--podman-start-args",
+    "--podman-stop-args",
+    "--podman-rm-args",
+    "--podman-volume-args",
+)
 
 
 class InputError(Exception):
@@ -120,6 +132,16 @@ def path_list(value, separator, key):
     return [Path(path) for path in paths]
 
 
+def is_stdin_path(path):
+    value = str(path)
+    return (
+        value == "-"
+        or value == "/dev/stdin"
+        or value.startswith("/dev/fd/")
+        or value.startswith("/proc/self/fd/")
+    )
+
+
 def first_compose_file(files, process, cwd):
     if files:
         return next((path for path in files if str(path) != "-"), None)
@@ -165,9 +187,19 @@ def compose_options(arguments):
     parser.add_argument("-f", "--file", action="append", type=Path, default=[])
     parser.add_argument("--project-directory", type=Path)
     options, _unknown = parser.parse_known_args(arguments)
-    if any(str(path) == "-" for path in options.file):
+    if any(is_stdin_path(path) for path in options.file):
         raise InputError("COMPOSE_FILE")
     return options
+
+
+def validate_compose_file_sources(arguments):
+    compose_options(arguments)
+    configured = os.environ.get("COMPOSE_FILE")
+    if configured is None:
+        return
+    separator = os.environ.get("COMPOSE_PATH_SEPARATOR", os.pathsep)
+    if any(is_stdin_path(path) for path in path_list(configured, separator, "COMPOSE_FILE")):
+        raise InputError("COMPOSE_FILE")
 
 
 def legacy_env_files(arguments):
@@ -199,9 +231,19 @@ def provider_command(provider):
     return ["podman-compose"]
 
 
-def compose_files(arguments):
+def podman_working_directory(process, cwd):
+    configured = process.get("COMPOSE_PROJECT_DIR")
+    if configured is None:
+        return cwd
+    directory = absolute(Path(configured), cwd)
+    if not directory.is_dir():
+        raise InputError("COMPOSE_PROJECT_DIR")
+    return directory
+
+
+def compose_files(arguments, cwd=None):
     options = compose_options(arguments)
-    cwd = Path.cwd()
+    cwd = Path.cwd() if cwd is None else cwd
     files = options.file
     if not files and os.environ.get("COMPOSE_FILE") is not None:
         separator = os.environ.get("COMPOSE_PATH_SEPARATOR", os.pathsep)
@@ -213,13 +255,16 @@ def compose_files(arguments):
     for path in files:
         if "://" in str(path) or str(path).startswith("git@"):
             raise InputError("COMPOSE_FILE")
+        if is_stdin_path(path):
+            raise InputError("COMPOSE_FILE")
         resolved.append(absolute(path, cwd))
     return resolved
 
 
 def podman_profile_arguments(arguments):
     profiles = set()
-    for path in compose_files(arguments):
+    cwd = podman_working_directory(os.environ, Path.cwd())
+    for path in compose_files(arguments, cwd):
         try:
             lines = path.read_text().splitlines()
         except (OSError, UnicodeError):
@@ -229,6 +274,13 @@ def podman_profile_arguments(arguments):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
+            if re.search(r'(?:^|[{,]\s*)["\']?(?:include|extends)["\']?\s*:', stripped):
+                raise InputError("COMPOSE_PROFILES")
+            if re.search(r'["\']profiles["\']\s*:', stripped):
+                raise InputError("COMPOSE_PROFILES")
+            if "profiles" in stripped and not re.fullmatch(r"profiles:\s*.*", stripped):
+                if re.search(r"(?:^|[{,]\s*)profiles\s*:", stripped):
+                    raise InputError("COMPOSE_PROFILES")
             indent = len(line) - len(line.lstrip())
             if profile_indent is not None and (
                 indent < profile_indent
@@ -335,6 +387,7 @@ def podman_service_inputs(rendered):
     current = None
     environment_indent = None
     env_file_indent = None
+    secret_indent = None
     for line in rendered.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -348,6 +401,10 @@ def podman_service_inputs(rendered):
             indent < env_file_indent or (indent == env_file_indent and not stripped.startswith("-"))
         ):
             env_file_indent = None
+        if secret_indent is not None and (
+            indent < secret_indent or (indent == secret_indent and not stripped.startswith("-"))
+        ):
+            secret_indent = None
         if re.fullmatch(r"environment:\s*", stripped):
             current = {}
             environment_indent = indent
@@ -361,6 +418,18 @@ def podman_service_inputs(rendered):
             value = stripped.split(":", 1)[1]
             env_files.append(yaml_scalar(value))
             continue
+        if re.fullmatch(r"secrets:\s*", stripped) and indent > 0:
+            secret_indent = indent
+            continue
+        if stripped.startswith("secrets:") and indent > 0:
+            value = stripped.split(":", 1)[1]
+            if re.search(r"(?:^|[{,]\s*)type\s*:\s*['\"]?env(?:['\"]?)(?:\s*[,}]|\s*$)", value):
+                raise InputError("PODMAN_SECRET_ENV")
+            continue
+        if secret_indent is not None and re.search(
+            r"(?:^|[{,\s-])type\s*:\s*['\"]?env(?:['\"]?)(?:\s*[,}]|\s*$)", stripped
+        ):
+            raise InputError("PODMAN_SECRET_ENV")
         if env_file_indent is not None:
             listed_file = re.fullmatch(r"-\s+(.+)", stripped)
             if not listed_file:
@@ -390,32 +459,24 @@ def podman_environments(rendered):
 
 def podman_env_file_environments(paths, arguments):
     options = compose_options(arguments)
-    base = project_directory(options.file, options.project_directory, os.environ, Path.cwd())
+    cwd = podman_working_directory(os.environ, Path.cwd())
+    files = compose_files(arguments, cwd)
+    base = project_directory(files, options.project_directory, os.environ, cwd)
     return [read_env(absolute(Path(path), base), {}, {}, interpolate=False) for path in paths]
 
 
-def validate_podman_run_arguments(arguments):
-    for index, argument in enumerate(arguments):
-        match = re.fullmatch(r"(--podman-[a-z0-9-]+-args)(?:=(.*))?", argument)
-        if not match:
+def normalized_podman_option(argument):
+    name = argument.split("=", 1)[0]
+    matches = [option for option in PODMAN_OPTIONS if option.startswith(name)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def validate_podman_arguments(arguments):
+    for argument in arguments:
+        if not argument.startswith("--podman-"):
             continue
-        value = match[2]
-        if value is None:
-            if index + 1 >= len(arguments):
-                raise InputError("PODMAN_RUN_ARGS")
-            value = arguments[index + 1]
-        try:
-            nested = shlex.split(value)
-        except ValueError:
-            raise InputError("PODMAN_RUN_ARGS") from None
-        if any(
-            item in {"-e", "--env", "--env-file"}
-            or item.startswith("--env=")
-            or item.startswith("--env-file=")
-            or (item.startswith("-e") and len(item) > 2)
-            for item in nested
-        ):
-            raise InputError("PODMAN_RUN_ARGS")
+        if normalized_podman_option(argument) != "--podman-path":
+            raise InputError("PODMAN_OPTION")
 
 
 def validate_rendered(environments):
@@ -434,9 +495,9 @@ def main(argv=None):
     parser.add_argument("--provider", choices=("docker", "podman", "podman-compose"), required=True)
     options, compose_arguments = parser.parse_known_args(argv)
     try:
-        compose_options(compose_arguments)
+        validate_compose_file_sources(compose_arguments)
         if options.provider != "docker":
-            validate_podman_run_arguments(compose_arguments)
+            validate_podman_arguments(compose_arguments)
         invalid = validate_legacy_inputs(compose_arguments)
         if not invalid:
             rendered = render_config(options.provider, compose_arguments)

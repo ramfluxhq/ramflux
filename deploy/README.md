@@ -305,25 +305,28 @@ Select `docker`, `podman`, or `podman-compose` to match the command that will ru
 Preflight invokes that provider with the same Compose options and a config-only
 operation, then scans the rendered service environments. The provider therefore
 owns `.env`, `COMPOSE_ENV_FILES`, `COMPOSE_DISABLE_ENV_FILE`, project-directory,
-and precedence semantics. Rendering enables every profile; stdin Compose files are
-refused because a later invocation could consume different input. A render failure
-is a refusal. The preflight never starts containers and reports setting names rather
-than values. Explicit env files and the inferred project `.env` candidate are also
+and precedence semantics. Docker rendering enables every profile. Podman rendering
+enables profiles declared in supported local YAML forms and fails closed on profile
+sources it cannot inspect. Stdin Compose files are refused because a later invocation
+could consume different input. A render failure is a refusal. The preflight never
+starts containers and reports setting names rather than values. Explicit env files
+and the inferred project `.env` candidate are also
 inspected for legacy-name migration as a best-effort check; that input-level check
 does not claim to reproduce provider resolution. For podman-compose, service
 `env_file` inputs are scanned separately because its config output does not expand
-them; Podman provider run-argument options that inject env or env-file values are
-refused. The demo wrapper and itest harness invoke preflight automatically;
-existing frozen demo
-projects must be regenerated through their normal `up` workflow before maintenance
-commands can pass migration.
+them. Podman provider `--podman-*` options are refused except for `--podman-path`,
+and service secrets with `type: env` are refused because their values cannot be
+inspected. The demo wrapper and itest harness invoke preflight automatically;
+existing frozen demo projects must be regenerated through their normal `up`
+workflow before maintenance commands can pass migration.
 
 Rename the outer inputs according to `deploy/compose-inputs.json` (service
 variables **inside containers** retain `RAMFLUX_*`). Legacy names without an equal
 new name and conflicting pairs are refused best-effort at the input boundary.
 Rendered unresolved expressions, empty required security inputs, and public default
-admin secrets are authoritatively refused with key names only. Equal dual names support generated env
-files consumed by other tools. Remove stale exported legacy names too. Production
+admin secrets found in the rendered and separately scanned inputs are refused with
+key names only. Equal dual names support generated env files consumed by other tools.
+Remove stale exported legacy names too. Production
 Compose now requires explicit federation/router admin tokens, signing and issuer
 material, trust/cache paths, node identity, and all advertised client endpoints;
 there is no public admin-token fallback. Generate independent random secrets,
