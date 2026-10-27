@@ -439,17 +439,29 @@ pub(crate) fn handle_s8_receive_envelope(
     }
     let now = now_unix_seconds()?;
     verify_inbound_federated_forward(request, state, now, observability)?;
-    handle_verified_s8_receive_envelope(request, store, now, total_started, observability, || {
-        router_post_json(router, "/mvp0/envelope", &request.envelope)
-    })
+    let attempt_lease_seconds =
+        ramflux_transport::router_post_worst_case_timeout().as_secs().saturating_mul(2).max(1);
+    handle_verified_s8_receive_envelope(
+        request,
+        store,
+        observability,
+        InboundForwardTiming { now, total_started, attempt_lease_seconds },
+        || router_post_json(router, "/mvp0/envelope", &request.envelope),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct InboundForwardTiming {
+    now: u64,
+    total_started: std::time::Instant,
+    attempt_lease_seconds: u64,
 }
 
 fn handle_verified_s8_receive_envelope<F>(
     request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
     store: &ramflux_node_core::FederationRedbStore,
-    now: u64,
-    total_started: std::time::Instant,
     observability: Option<&FederationMeshObservability>,
+    timing: InboundForwardTiming,
     deliver: F,
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError>
 where
@@ -469,7 +481,13 @@ where
         "accepted federated envelope proof and delivering to local router"
     );
     let step_started = std::time::Instant::now();
-    let delivery = store.deliver_inbound_forward_once(&source, request, now, deliver)?;
+    let delivery = store.deliver_inbound_forward_once_with_lease(
+        &source,
+        request,
+        timing.now,
+        timing.attempt_lease_seconds,
+        deliver,
+    )?;
     let Some(delivery) = delivery else {
         tracing::info!(
             source_node_id = %request.source_node_id,
@@ -498,7 +516,7 @@ where
         delivery,
     };
     if let Some(observability) = observability {
-        observability.record_receive_total(total_started.elapsed());
+        observability.record_receive_total(timing.total_started.elapsed());
     }
     Ok(response)
 }
@@ -582,6 +600,14 @@ pub(crate) fn ensure_receive_target_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inbound_timing(now: u64) -> InboundForwardTiming {
+        InboundForwardTiming {
+            now,
+            total_started: std::time::Instant::now(),
+            attempt_lease_seconds: 20,
+        }
+    }
 
     fn inbound_handler_request()
     -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
@@ -804,9 +830,8 @@ mod tests {
             handle_verified_s8_receive_envelope(
                 &holder_request,
                 &holder_store,
-                now,
-                std::time::Instant::now(),
                 None,
+                inbound_timing(now),
                 || {
                     entered_tx.send(()).map_err(|error| {
                         ramflux_node_core::NodeCoreError::ItestHttp(error.to_string())
@@ -845,9 +870,8 @@ mod tests {
                     handle_verified_s8_receive_envelope(
                         &retry_request,
                         &retry_store,
-                        now + 1,
-                        std::time::Instant::now(),
                         None,
+                        inbound_timing(now + 1),
                         || {
                             Err(ramflux_node_core::NodeCoreError::ItestHttp(
                                 "pending retry reached router".to_owned(),
@@ -870,9 +894,8 @@ mod tests {
         let duplicate = handle_verified_s8_receive_envelope(
             &request,
             &store,
-            now + 2,
-            std::time::Instant::now(),
             None,
+            inbound_timing(now + 2),
             || {
                 Err(ramflux_node_core::NodeCoreError::ItestHttp(
                     "committed retry reached router".to_owned(),

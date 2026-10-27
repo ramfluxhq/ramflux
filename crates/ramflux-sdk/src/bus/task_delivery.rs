@@ -37,7 +37,6 @@ async fn submit(
     deadline: tokio::time::Instant,
 ) -> Result<(), SdkError> {
     let mut engine = account.take_live_engine().await?;
-    let mut reusable = true;
     let result = if let Some(destination) = &delivery.federation {
         let envelope = &delivery.envelope;
         let body = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
@@ -70,12 +69,10 @@ async fn submit(
     {
         result.map(|_| ())
     } else {
-        reusable = false;
-        Err(SdkError::InboundPending("task delivery tick budget exhausted".into()))
+        account.retire_engine(engine)?;
+        return Err(SdkError::InboundPending("task delivery tick budget exhausted".into()));
     };
-    if reusable {
-        account.put_engine(engine);
-    }
+    account.put_engine(engine);
     result
 }
 
@@ -134,7 +131,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         )?;
         let live = account.take_live_engine().await?;
-        let config = live.config.clone();
+        let mut config = live.config.clone();
+        config.previous_session_id = Some("resume-session-before-timeout".to_owned());
+        config.resume_token = Some("resume-token-before-timeout".to_owned());
+        config.last_seen_inbox_seq = 41;
         account.put_engine(GatewaySessionEngine::with_test_transport(
             config,
             Box::new(HangingLegacyGateway { last: None }),
@@ -158,6 +158,14 @@ mod tests {
         .ok_or("expected submit timeout")?;
         assert!(matches!(error, SdkError::InboundPending(_)), "unexpected error: {error:?}");
         assert!(!account.has_pooled_engine());
+        let persisted = account
+            .client
+            .projection_checkpoint(LocalBusAccountState::GATEWAY_RESUME_CHECKPOINT)?
+            .ok_or("missing gateway resume checkpoint")?;
+        let persisted: serde_json::Value = serde_json::from_str(&persisted)?;
+        assert_eq!(persisted["previous_session_id"], "resume-session-before-timeout");
+        assert_eq!(persisted["resume_token"], "resume-token-before-timeout");
+        assert_eq!(persisted["last_seen_inbox_seq"], 41);
         drop(account);
         std::fs::remove_dir_all(root)?;
         Ok(())

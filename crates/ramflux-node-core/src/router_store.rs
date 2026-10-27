@@ -15,8 +15,8 @@ use crate::{
     ROUTER_LIFECYCLE_TOMBSTONE_KEY, ROUTER_LIFECYCLE_TOMBSTONE_TABLE,
     ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE, ROUTER_REPLAY_GUARD_STATE_KEY, ROUTER_REPLAY_TUPLE_TABLE,
     ROUTER_SESSION_CHECKPOINT_KEY, ROUTER_SESSION_ENTRY_TABLE, ROUTER_SNAPSHOT_TABLE, RouterCore,
-    RouterWalStore, SessionDescriptor, SessionRegistry, inbox_retain_until, load_snapshot,
-    now_unix_seconds, save_snapshot,
+    RouterWalLocalDelivery, RouterWalStore, SessionDescriptor, SessionRegistry, inbox_retain_until,
+    load_snapshot, now_unix_seconds, save_snapshot,
 };
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -66,10 +66,24 @@ struct RouterCommitRequest {
 }
 
 enum RouterCommitOp {
-    Submission { replay_key: String, replay_expires_at: i64, entry: Option<Box<InboxEntry>> },
-    ReplayTuple { replay_key: String, replay_expires_at: i64 },
-    InboxEntry { entry: Box<InboxEntry> },
-    Fanout { replay_key: String, replay_expires_at: i64, entries: Vec<InboxEntry> },
+    Submission {
+        replay_key: String,
+        replay_expires_at: i64,
+        entry: Option<Box<InboxEntry>>,
+        local_delivery: Option<RouterWalLocalDelivery>,
+    },
+    ReplayTuple {
+        replay_key: String,
+        replay_expires_at: i64,
+    },
+    InboxEntry {
+        entry: Box<InboxEntry>,
+    },
+    Fanout {
+        replay_key: String,
+        replay_expires_at: i64,
+        entries: Vec<InboxEntry>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -193,11 +207,18 @@ fn router_apply_commit_op(
     op: &RouterCommitOp,
 ) -> Result<(), NodeCoreError> {
     match op {
-        RouterCommitOp::Submission { replay_key, replay_expires_at, entry } => {
+        RouterCommitOp::Submission { replay_key, replay_expires_at, entry, local_delivery } => {
             record_replay_tuple_in_txn(write_txn, replay_key, *replay_expires_at)?;
             if let Some(entry) = entry {
                 record_inbox_entry_in_txn(write_txn, entry)?;
-                record_local_delivery_envelope_in_txn(write_txn, entry, *replay_expires_at)?;
+                record_local_delivery_envelope_in_txn(
+                    write_txn,
+                    entry,
+                    *replay_expires_at,
+                    local_delivery
+                        .as_ref()
+                        .map(|delivery| delivery.sender_root_commitment.as_str()),
+                )?;
             }
             Ok(())
         }
@@ -209,7 +230,7 @@ fn router_apply_commit_op(
             record_replay_tuple_in_txn(write_txn, replay_key, *replay_expires_at)?;
             for entry in entries {
                 record_inbox_entry_in_txn(write_txn, entry)?;
-                record_local_delivery_envelope_in_txn(write_txn, entry, *replay_expires_at)?;
+                record_local_delivery_envelope_in_txn(write_txn, entry, *replay_expires_at, None)?;
             }
             Ok(())
         }
@@ -220,6 +241,7 @@ fn record_local_delivery_envelope_in_txn(
     write_txn: &redb::WriteTransaction,
     entry: &InboxEntry,
     expires_at: i64,
+    sender_root_commitment: Option<&str>,
 ) -> Result<(), NodeCoreError> {
     let record = LocalDeliveryEnvelopeRecord {
         target_delivery_id: entry.target_delivery_id.clone(),
@@ -229,16 +251,32 @@ fn record_local_delivery_envelope_in_txn(
     let mut table = write_txn
         .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+    let storage_key = sender_root_commitment.map_or_else(
+        || entry.envelope.envelope_id.clone(),
+        |root| local_delivery_storage_key(root, &entry.envelope.envelope_id),
+    );
     table
-        .insert(entry.envelope.envelope_id.as_str(), bytes.as_slice())
+        .insert(storage_key.as_str(), bytes.as_slice())
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     drop(table);
-    expiry_index::index_local_delivery_row(
-        write_txn,
-        entry.envelope.envelope_id.as_str(),
-        expires_at,
-    )?;
+    expiry_index::index_local_delivery_row(write_txn, storage_key.as_str(), expires_at)?;
     Ok(())
+}
+
+fn local_delivery_storage_key(sender_root_commitment: &str, envelope_id: &str) -> String {
+    format!("{}:{}{}", sender_root_commitment.len(), sender_root_commitment, envelope_id)
+}
+
+fn local_delivery_classification(
+    entry: Option<&InboxEntry>,
+    sender_root_commitment: Option<&str>,
+) -> Option<RouterWalLocalDelivery> {
+    let entry = entry?;
+    Some(RouterWalLocalDelivery {
+        sender_root_commitment: sender_root_commitment?.to_owned(),
+        envelope_id: entry.envelope.envelope_id.clone(),
+        target_delivery_id: entry.target_delivery_id.clone(),
+    })
 }
 
 fn record_replay_tuple_in_txn(
@@ -592,18 +630,34 @@ impl RouterRedbStore {
         replay_expires_at: i64,
         entry: Option<&InboxEntry>,
     ) -> Result<(), NodeCoreError> {
+        self.record_submission_increment_for_sender(replay_key, replay_expires_at, entry, None)
+    }
+
+    /// # Errors
+    /// Returns an error when the incremental submission cannot be durably recorded.
+    pub fn record_submission_increment_for_sender(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        entry: Option<&InboxEntry>,
+        sender_root_commitment: Option<&str>,
+    ) -> Result<(), NodeCoreError> {
         let save_started = Instant::now();
         let replay_started = Instant::now();
+        let local_delivery = local_delivery_classification(entry, sender_root_commitment);
         if let Some(wal) = &self.submission_wal {
-            let _location = wal.record_submission(replay_key, replay_expires_at, entry)?;
-            if let Some(entry) = entry {
-                self.record_local_delivery_envelope(entry, replay_expires_at)?;
-            }
+            let _location = wal.record_submission_classified(
+                replay_key,
+                replay_expires_at,
+                entry,
+                local_delivery,
+            )?;
         } else {
             self.commit_router_op(RouterCommitOp::Submission {
                 replay_key: replay_key.to_owned(),
                 replay_expires_at,
                 entry: entry.cloned().map(Box::new),
+                local_delivery,
             })?;
             crate::record_router_replay_guard_redb_write();
         }
@@ -620,19 +674,42 @@ impl RouterRedbStore {
         replay_expires_at: i64,
         entry: Option<&InboxEntry>,
     ) -> Result<(), NodeCoreError> {
+        self.record_submission_increment_for_sender_async(
+            replay_key,
+            replay_expires_at,
+            entry,
+            None,
+        )
+        .await
+    }
+
+    /// # Errors
+    /// Returns an error when the incremental submission cannot be durably recorded.
+    pub async fn record_submission_increment_for_sender_async(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        entry: Option<&InboxEntry>,
+        sender_root_commitment: Option<&str>,
+    ) -> Result<(), NodeCoreError> {
         let save_started = Instant::now();
         let replay_started = Instant::now();
+        let local_delivery = local_delivery_classification(entry, sender_root_commitment);
         if let Some(wal) = &self.submission_wal {
-            let _location =
-                wal.record_submission_async(replay_key, replay_expires_at, entry).await?;
-            if let Some(entry) = entry {
-                self.record_local_delivery_envelope(entry, replay_expires_at)?;
-            }
+            let _location = wal
+                .record_submission_classified_async(
+                    replay_key,
+                    replay_expires_at,
+                    entry,
+                    local_delivery,
+                )
+                .await?;
         } else {
             self.commit_router_op(RouterCommitOp::Submission {
                 replay_key: replay_key.to_owned(),
                 replay_expires_at,
                 entry: entry.cloned().map(Box::new),
+                local_delivery,
             })?;
             crate::record_router_replay_guard_redb_write();
         }
@@ -671,23 +748,13 @@ impl RouterRedbStore {
         Ok(())
     }
 
-    fn record_local_delivery_envelope(
-        &self,
-        entry: &InboxEntry,
-        expires_at: i64,
-    ) -> Result<(), NodeCoreError> {
-        let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        record_local_delivery_envelope_in_txn(&write_txn, entry, expires_at)?;
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))
-    }
-
     /// Returns whether the durable router store records this envelope as locally delivered.
     ///
     /// # Errors
     /// Returns an error when the persistent delivery projection cannot be read.
     pub fn has_local_delivery_envelope(
         &self,
+        sender_root_commitment: &str,
         envelope_id: &str,
         target_delivery_id: &str,
         now: i64,
@@ -697,14 +764,28 @@ impl RouterRedbStore {
         let table = read_txn
             .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        let Some(value) =
-            table.get(envelope_id).map_err(|source| NodeCoreError::Redb(source.to_string()))?
-        else {
-            return Ok(false);
-        };
-        let record: LocalDeliveryEnvelopeRecord = serde_json::from_slice(value.value())
-            .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
-        Ok(record.target_delivery_id == target_delivery_id && record.expires_at > now)
+        let storage_key = local_delivery_storage_key(sender_root_commitment, envelope_id);
+        for key in [storage_key.as_str(), envelope_id] {
+            if let Some(value) =
+                table.get(key).map_err(|source| NodeCoreError::Redb(source.to_string()))?
+            {
+                let record: LocalDeliveryEnvelopeRecord = serde_json::from_slice(value.value())
+                    .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+                if record.target_delivery_id == target_delivery_id && record.expires_at > now {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(self.submission_wal.as_ref().is_some_and(|wal| {
+            wal.submissions(now).iter().any(|record| {
+                record.local_delivery.as_ref().is_some_and(|delivery| {
+                    delivery.sender_root_commitment == sender_root_commitment
+                        && delivery.envelope_id == envelope_id
+                        && delivery.target_delivery_id == target_delivery_id
+                        && record.replay_expires_at > now
+                })
+            })
+        }))
     }
 
     /// # Errors

@@ -773,6 +773,7 @@ pub enum RouterSubmitOutcome {
     OfflineQueued(OfflineQueuedDelivery),
     ForwardedHomeNodeMigrated(Box<crate::HomeNodeMigrationForwardDelivery>),
     ForwardInProgress { target_delivery_id: String },
+    DuplicateFederatedForward { target_delivery_id: String },
     RejectedHomeNodeMigrated(crate::HomeNodeMigratedNackDelivery),
     RejectedDeactivated { target_delivery_id: String },
     RejectedDeleted { target_delivery_id: String },

@@ -194,11 +194,22 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
         RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
         other => return Err(format!("expected offline queue, got {other:?}").into()),
     };
-    store.record_submission_increment(&replay_key, replay_expires_at, Some(&entry))?;
+    store.record_submission_increment_for_sender(
+        &replay_key,
+        replay_expires_at,
+        Some(&entry),
+        Some(source_identity.root_commitment()),
+    )?;
     drop(store);
 
     let redb_only = RouterRedbStore::open_without_wal(&path)?;
     assert!(redb_only.load_router()?.is_none());
+    assert!(!redb_only.has_local_delivery_envelope(
+        source_identity.root_commitment(),
+        &submitted.envelope_id,
+        &submitted.target_delivery_id,
+        replay_expires_at - 1,
+    )?);
     drop(redb_only);
 
     let reopened = RouterRedbStore::open_with_wal(&path, &wal_root)?;
@@ -206,6 +217,18 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_wal_submission".to_owned()))?;
     assert_eq!(restored.resume("target_router_wal", 0, 10).len(), 1);
+    assert!(reopened.has_local_delivery_envelope(
+        source_identity.root_commitment(),
+        &submitted.envelope_id,
+        &submitted.target_delivery_id,
+        replay_expires_at - 1,
+    )?);
+    assert!(!reopened.has_local_delivery_envelope(
+        "different-sender-root",
+        &submitted.envelope_id,
+        &submitted.target_delivery_id,
+        replay_expires_at - 1,
+    )?);
     let replay = restored.submit_envelope_at(&source_identity, submitted, replay_expires_at - 1);
     assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
     let _removed = std::fs::remove_dir_all(wal_root);

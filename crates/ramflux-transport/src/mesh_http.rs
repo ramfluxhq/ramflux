@@ -27,6 +27,10 @@ impl MeshHttpTimeouts {
     const DEFAULT: Self = Self { connect: Duration::from_secs(5), total: Duration::from_secs(30) };
 }
 
+pub(crate) const fn mesh_http_post_worst_case_timeout() -> Duration {
+    MeshHttpTimeouts::DEFAULT.connect.saturating_add(MeshHttpTimeouts::DEFAULT.total)
+}
+
 #[derive(Clone, Copy)]
 struct MeshHttpClientRequest<'a> {
     method: &'a str,

@@ -51,7 +51,7 @@ pub enum RouterEnvelopeOrigin {
 pub struct RouterCore {
     pub(crate) target_shards: Vec<Mutex<RouterTargetShard>>,
     envelope_target_index_shards: Vec<Mutex<BTreeMap<String, String>>>,
-    submission_lock_shards: Vec<Mutex<()>>,
+    submission_lock_shards: Vec<Mutex<BTreeSet<String>>>,
     pub(crate) control: Mutex<RouterControlState>,
     migration_read_snapshot: ArcSwap<RouterMigrationReadSnapshot>,
     pub(crate) replay_guard_shards: Vec<Mutex<NodeReplayGuardState>>,
@@ -796,6 +796,9 @@ impl RouterCore {
             RouterSubmitOutcome::ForwardInProgress { .. } => {
                 ("forward_in_progress".to_owned(), None, None)
             }
+            RouterSubmitOutcome::DuplicateFederatedForward { .. } => {
+                ("duplicate_federated_forward".to_owned(), None, None)
+            }
             RouterSubmitOutcome::RejectedHomeNodeMigrated(_) => {
                 ("rejected_home_node_migrated".to_owned(), None, None)
             }
@@ -873,9 +876,15 @@ impl RouterCore {
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
-        let _submission = lock_unpoisoned(
+        let forwarding_key = forwarding_submission_key(source, &envelope.envelope_id);
+        let forwarding = lock_unpoisoned(
             &self.submission_lock_shards[envelope_target_index_shard_index(&envelope.envelope_id)],
         );
+        if forwarding.contains(&forwarding_key) {
+            return RouterSubmitOutcome::ForwardInProgress {
+                target_delivery_id: envelope.target_delivery_id,
+            };
+        }
         if let Err(error) = self.check_envelope_replay_once(source, &envelope, now_unix_seconds) {
             return RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
@@ -890,6 +899,7 @@ impl RouterCore {
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
+        origin: RouterEnvelopeOrigin,
         forward: F,
     ) -> RouterSubmitOutcome
     where
@@ -897,40 +907,63 @@ impl RouterCore {
             &HomeNodeMigrationForwardPlan,
         ) -> Result<FederatedEnvelopeForwardResponse, NodeCoreError>,
     {
-        let _submission = lock_unpoisoned(
-            &self.submission_lock_shards[envelope_target_index_shard_index(&envelope.envelope_id)],
-        );
-        let accepted_once =
-            match self.accept_envelope_replay_once(source, &envelope, now_unix_seconds) {
-                Ok(accepted_once) => accepted_once,
-                Err(error) => {
-                    return RouterSubmitOutcome::RejectedSecurity {
+        let shard_index = envelope_target_index_shard_index(&envelope.envelope_id);
+        let forwarding_key = forwarding_submission_key(source, &envelope.envelope_id);
+        let replayed = {
+            let mut forwarding = lock_unpoisoned(&self.submission_lock_shards[shard_index]);
+            if forwarding.contains(&forwarding_key) {
+                return RouterSubmitOutcome::ForwardInProgress {
+                    target_delivery_id: envelope.target_delivery_id,
+                };
+            }
+            let accepted_once =
+                match self.accept_envelope_replay_once(source, &envelope, now_unix_seconds) {
+                    Ok(accepted_once) => accepted_once,
+                    Err(error) => {
+                        return RouterSubmitOutcome::RejectedSecurity {
+                            target_delivery_id: envelope.target_delivery_id,
+                            reason: error.to_string(),
+                        };
+                    }
+                };
+            if !accepted_once && self.indexed_target_for_envelope(&envelope.envelope_id).is_some() {
+                if origin == RouterEnvelopeOrigin::Federation {
+                    return RouterSubmitOutcome::DuplicateFederatedForward {
                         target_delivery_id: envelope.target_delivery_id,
-                        reason: error.to_string(),
                     };
                 }
-            };
-        if !accepted_once
-            && (self.indexed_target_for_envelope(&envelope.envelope_id).is_some()
-                || self
-                    .effective_home_node_migration_for_target(
-                        &envelope.target_delivery_id,
-                        now_unix_seconds,
-                    )
-                    .is_none())
-        {
-            let replay_key = envelope_replay_tuple_key(source, &envelope);
-            return RouterSubmitOutcome::RejectedSecurity {
-                target_delivery_id: envelope.target_delivery_id,
-                reason: NodeCoreError::ReplayGuard(format!("replay: {replay_key}")).to_string(),
-            };
-        }
-        self.submit_envelope_after_replay_check_with_home_node_forward(
+                let replay_key = envelope_replay_tuple_key(source, &envelope);
+                return RouterSubmitOutcome::RejectedSecurity {
+                    target_delivery_id: envelope.target_delivery_id,
+                    reason: NodeCoreError::ReplayGuard(format!("replay: {replay_key}")).to_string(),
+                };
+            }
+            let migration = self.effective_home_node_migration_for_target(
+                &envelope.target_delivery_id,
+                now_unix_seconds,
+            );
+            if !accepted_once && migration.is_none() {
+                let replay_key = envelope_replay_tuple_key(source, &envelope);
+                return RouterSubmitOutcome::RejectedSecurity {
+                    target_delivery_id: envelope.target_delivery_id,
+                    reason: NodeCoreError::ReplayGuard(format!("replay: {replay_key}")).to_string(),
+                };
+            }
+            if migration.is_none() {
+                drop(forwarding);
+                return self.submit_envelope_after_replay_check(envelope, now_unix_seconds);
+            }
+            forwarding.insert(forwarding_key.clone());
+            !accepted_once
+        };
+        let outcome = self.submit_envelope_after_replay_check_with_home_node_forward(
             envelope,
             now_unix_seconds,
-            !accepted_once,
+            replayed,
             forward,
-        )
+        );
+        lock_unpoisoned(&self.submission_lock_shards[shard_index]).remove(&forwarding_key);
+        outcome
     }
 
     fn submit_envelope_after_replay_check(
@@ -1170,7 +1203,7 @@ impl RouterCore {
             .map(|_index| Mutex::new(BTreeMap::new()))
             .collect::<Vec<_>>();
         let submission_lock_shards = (0..ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT)
-            .map(|_index| Mutex::new(()))
+            .map(|_index| Mutex::new(BTreeSet::new()))
             .collect::<Vec<_>>();
         let replay_guard_shards = (0..ROUTER_REPLAY_GUARD_SHARD_COUNT)
             .map(|_index| Mutex::new(NodeReplayGuardState::new()))
@@ -1698,6 +1731,13 @@ fn replay_guard_shard_index(replay_key: &str) -> usize {
 
 fn envelope_target_index_shard_index(envelope_id: &str) -> usize {
     hash_shard_index(envelope_id, ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT)
+}
+
+fn forwarding_submission_key(
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope_id: &str,
+) -> String {
+    format!("{}:{}{}", source.root_commitment().len(), source.root_commitment(), envelope_id)
 }
 
 fn hash_shard_index(value: &str, shard_count: usize) -> usize {

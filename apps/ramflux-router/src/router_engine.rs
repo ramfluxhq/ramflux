@@ -33,6 +33,7 @@ pub(crate) fn submit_envelope(
     };
     state.refresh_registered_envelope_authority(&mut envelope)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
+    let sender_root_commitment = source.root_commitment().to_owned();
     let replay_expires_at = envelope
         .created_at
         .checked_add(i64::from(envelope.ttl))
@@ -40,14 +41,14 @@ pub(crate) fn submit_envelope(
     ramflux_node_core::record_router_submit_lock_wait_us(0);
     let dispatch_started = Instant::now();
     let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
-    if let Some(response) = persistent_local_replay_response(
+    if let Some(response) = persistent_local_replay_response(PersistentReplayQuery {
         store,
         origin,
-        &envelope.envelope_id,
-        &envelope.target_delivery_id,
-        &replay_key,
+        sender_root_commitment: source.root_commitment(),
+        envelope: &envelope,
+        replay_key: &replay_key,
         now_unix_seconds,
-    )? {
+    })? {
         return Ok(response);
     }
     let outcome = match home_node_forward {
@@ -55,6 +56,7 @@ pub(crate) fn submit_envelope(
             &source,
             envelope,
             now_unix_seconds,
+            origin,
             |plan| client.forward(plan),
         ),
         None => state.submit_envelope_at(&source, envelope, now_unix_seconds),
@@ -63,10 +65,11 @@ pub(crate) fn submit_envelope(
     let save_started = Instant::now();
     let persistent_entry = persistent_entry_from_outcome(&outcome);
     if should_persist_submission(&outcome)
-        && let Err(error) = store.record_submission_increment(
+        && let Err(error) = store.record_submission_increment_for_sender(
             &replay_key,
             replay_expires_at,
             persistent_entry.as_ref(),
+            Some(&sender_root_commitment),
         )
     {
         tracing::error!(
@@ -92,7 +95,7 @@ pub(crate) fn submit_envelope(
 }
 
 pub(crate) async fn submit_envelope_async(
-    state: &ramflux_node_core::RouterCore,
+    state: &std::sync::Arc<ramflux_node_core::RouterCore>,
     store: &ramflux_node_core::RouterRedbStore,
     home_node_forward: Option<&crate::router_runtime::LocalFederationForwardClient>,
     mut envelope: ramflux_protocol::Envelope,
@@ -121,6 +124,7 @@ pub(crate) async fn submit_envelope_async(
     };
     state.refresh_registered_envelope_authority(&mut envelope)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
+    let sender_root_commitment = source.root_commitment().to_owned();
     let replay_expires_at = envelope
         .created_at
         .checked_add(i64::from(envelope.ttl))
@@ -128,23 +132,32 @@ pub(crate) async fn submit_envelope_async(
     ramflux_node_core::record_router_submit_lock_wait_us(0);
     let dispatch_started = Instant::now();
     let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
-    if let Some(response) = persistent_local_replay_response(
+    if let Some(response) = persistent_local_replay_response(PersistentReplayQuery {
         store,
         origin,
-        &envelope.envelope_id,
-        &envelope.target_delivery_id,
-        &replay_key,
+        sender_root_commitment: source.root_commitment(),
+        envelope: &envelope,
+        replay_key: &replay_key,
         now_unix_seconds,
-    )? {
+    })? {
         return Ok(response);
     }
     let outcome = match home_node_forward {
-        Some(client) => state.submit_envelope_with_home_node_forward_at(
-            &source,
-            envelope,
-            now_unix_seconds,
-            |plan| client.forward(plan),
-        ),
+        Some(client) => {
+            let state = std::sync::Arc::clone(state);
+            let client = client.clone();
+            tokio::task::spawn_blocking(move || {
+                state.submit_envelope_with_home_node_forward_at(
+                    &source,
+                    envelope,
+                    now_unix_seconds,
+                    origin,
+                    |plan| client.forward(plan),
+                )
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("federation forward worker failed: {error}"))?
+        }
         None => state.submit_envelope_at(&source, envelope, now_unix_seconds),
     };
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
@@ -152,10 +165,11 @@ pub(crate) async fn submit_envelope_async(
     let persistent_entry = persistent_entry_from_outcome(&outcome);
     if should_persist_submission(&outcome)
         && let Err(error) = store
-            .record_submission_increment_async(
+            .record_submission_increment_for_sender_async(
                 &replay_key,
                 replay_expires_at,
                 persistent_entry.as_ref(),
+                Some(&sender_root_commitment),
             )
             .await
     {
@@ -269,29 +283,39 @@ pub(crate) fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-fn persistent_local_replay_response(
-    store: &ramflux_node_core::RouterRedbStore,
+#[derive(Clone, Copy)]
+struct PersistentReplayQuery<'a> {
+    store: &'a ramflux_node_core::RouterRedbStore,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
-    envelope_id: &str,
-    target_delivery_id: &str,
-    replay_key: &str,
+    sender_root_commitment: &'a str,
+    envelope: &'a ramflux_protocol::Envelope,
+    replay_key: &'a str,
     now_unix_seconds: i64,
+}
+
+fn persistent_local_replay_response(
+    query: PersistentReplayQuery<'_>,
 ) -> anyhow::Result<Option<ramflux_node_core::EnvelopeSubmitResponse>> {
-    if !store.has_local_delivery_envelope(envelope_id, target_delivery_id, now_unix_seconds)? {
+    if !query.store.has_local_delivery_envelope(
+        query.sender_root_commitment,
+        &query.envelope.envelope_id,
+        &query.envelope.target_delivery_id,
+        query.now_unix_seconds,
+    )? {
         return Ok(None);
     }
-    let outcome = match origin {
+    let outcome = match query.origin {
         ramflux_node_core::RouterEnvelopeOrigin::Federation => {
             "duplicate_federated_forward".to_owned()
         }
         ramflux_node_core::RouterEnvelopeOrigin::Gateway => format!(
             "rejected_security:{}",
-            ramflux_node_core::NodeCoreError::ReplayGuard(format!("replay: {replay_key}"))
+            ramflux_node_core::NodeCoreError::ReplayGuard(format!("replay: {}", query.replay_key))
         ),
     };
     Ok(Some(ramflux_node_core::EnvelopeSubmitResponse {
         outcome,
-        target_delivery_id: target_delivery_id.to_owned(),
+        target_delivery_id: query.envelope.target_delivery_id.clone(),
         inbox_seq: None,
         cursor: None,
         nack: None,
@@ -312,6 +336,7 @@ pub(crate) fn persistent_entry_from_outcome(
         ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => Some(queued.entry.clone()),
         ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(_)
         | ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }
+        | ramflux_node_core::RouterSubmitOutcome::DuplicateFederatedForward { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedDeactivated { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedDeleted { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
@@ -323,7 +348,8 @@ fn should_persist_submission(outcome: &ramflux_node_core::RouterSubmitOutcome) -
     match outcome {
         ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
-        | ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. } => false,
+        | ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }
+        | ramflux_node_core::RouterSubmitOutcome::DuplicateFederatedForward { .. } => false,
         ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(delivery) => {
             !delivery.replayed
         }
@@ -376,6 +402,15 @@ pub(crate) fn submit_response_from_outcome(
                 nack: None,
             }
         }
+        ramflux_node_core::RouterSubmitOutcome::DuplicateFederatedForward {
+            target_delivery_id,
+        } => ramflux_node_core::EnvelopeSubmitResponse {
+            outcome: "duplicate_federated_forward".to_owned(),
+            target_delivery_id,
+            inbox_seq: None,
+            cursor: None,
+            nack: None,
+        },
         ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) => {
             ramflux_node_core::EnvelopeSubmitResponse {
                 outcome: "rejected_home_node_migrated".to_owned(),

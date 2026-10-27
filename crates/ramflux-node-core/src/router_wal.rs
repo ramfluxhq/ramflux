@@ -42,7 +42,15 @@ pub enum RouterWalPayload {
         entry: Option<Box<InboxEntry>>,
         /// Server acceptance time; absent in records written before deadlines were logged.
         accepted_at: Option<i64>,
+        local_delivery: Option<RouterWalLocalDelivery>,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RouterWalLocalDelivery {
+    pub sender_root_commitment: String,
+    pub envelope_id: String,
+    pub target_delivery_id: String,
 }
 
 /// Postcard encodes the variant index, so new record shapes are appended, never edited.
@@ -58,6 +66,13 @@ enum StoredRouterWalPayload {
         replay_expires_at: i64,
         accepted_at: i64,
         entry: Option<Box<StoredRouterWalInboxEntry>>,
+    },
+    SubmissionClassified {
+        replay_key: String,
+        replay_expires_at: i64,
+        accepted_at: i64,
+        entry: Option<Box<StoredRouterWalInboxEntry>>,
+        local_delivery: RouterWalLocalDelivery,
     },
 }
 
@@ -93,20 +108,33 @@ impl TryFrom<&RouterWalPayload> for StoredRouterWalPayload {
 
     fn try_from(payload: &RouterWalPayload) -> Result<Self, Self::Error> {
         match payload {
-            RouterWalPayload::Submission { replay_key, replay_expires_at, entry, accepted_at } => {
+            RouterWalPayload::Submission {
+                replay_key,
+                replay_expires_at,
+                entry,
+                accepted_at,
+                local_delivery,
+            } => {
                 let entry = entry
                     .as_ref()
                     .map(|entry| StoredRouterWalInboxEntry::try_from(entry.as_ref()))
                     .transpose()?
                     .map(Box::new);
-                Ok(match accepted_at {
-                    Some(accepted_at) => Self::SubmissionAccepted {
+                Ok(match (accepted_at, local_delivery) {
+                    (Some(accepted_at), Some(local_delivery)) => Self::SubmissionClassified {
+                        replay_key: replay_key.clone(),
+                        replay_expires_at: *replay_expires_at,
+                        accepted_at: *accepted_at,
+                        entry,
+                        local_delivery: local_delivery.clone(),
+                    },
+                    (Some(accepted_at), None) => Self::SubmissionAccepted {
                         replay_key: replay_key.clone(),
                         replay_expires_at: *replay_expires_at,
                         accepted_at: *accepted_at,
                         entry,
                     },
-                    None => Self::Submission {
+                    (None, _) => Self::Submission {
                         replay_key: replay_key.clone(),
                         replay_expires_at: *replay_expires_at,
                         entry,
@@ -131,6 +159,7 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
                     replay_expires_at,
                     entry: entry.map(Box::new),
                     accepted_at: None,
+                    local_delivery: None,
                 })
             }
             StoredRouterWalPayload::SubmissionAccepted {
@@ -143,6 +172,20 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
                 replay_expires_at,
                 entry: entry.map(|entry| InboxEntry::try_from(*entry)).transpose()?.map(Box::new),
                 accepted_at: Some(accepted_at),
+                local_delivery: None,
+            }),
+            StoredRouterWalPayload::SubmissionClassified {
+                replay_key,
+                replay_expires_at,
+                accepted_at,
+                entry,
+                local_delivery,
+            } => Ok(Self::Submission {
+                replay_key,
+                replay_expires_at,
+                entry: entry.map(|entry| InboxEntry::try_from(*entry)).transpose()?.map(Box::new),
+                accepted_at: Some(accepted_at),
+                local_delivery: Some(local_delivery),
             }),
         }
     }
@@ -241,6 +284,7 @@ pub struct RouterWalSubmissionRecord {
     pub replay_expires_at: i64,
     pub entry: Option<InboxEntry>,
     pub accepted_at: Option<i64>,
+    pub local_delivery: Option<RouterWalLocalDelivery>,
     pub location: RouterWalRecordLocation,
 }
 
@@ -269,7 +313,13 @@ struct RouterWalState {
 impl RouterWalState {
     fn apply(&mut self, payload: RouterWalPayload, location: RouterWalRecordLocation) {
         match payload {
-            RouterWalPayload::Submission { replay_key, replay_expires_at, entry, accepted_at } => {
+            RouterWalPayload::Submission {
+                replay_key,
+                replay_expires_at,
+                entry,
+                accepted_at,
+                local_delivery,
+            } => {
                 if let Some(entry) = entry.as_ref() {
                     let issued =
                         self.issued_by_target.entry(entry.target_delivery_id.clone()).or_default();
@@ -280,6 +330,7 @@ impl RouterWalState {
                     replay_expires_at,
                     entry: entry.map(|entry| *entry),
                     accepted_at,
+                    local_delivery,
                     location,
                 };
                 self.index(&record);
@@ -394,11 +445,22 @@ impl RouterWalStore {
         replay_expires_at: i64,
         entry: Option<&InboxEntry>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
+        self.record_submission_classified(replay_key, replay_expires_at, entry, None)
+    }
+
+    pub(crate) fn record_submission_classified(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        entry: Option<&InboxEntry>,
+        local_delivery: Option<RouterWalLocalDelivery>,
+    ) -> Result<RouterWalRecordLocation, NodeCoreError> {
         self.writer.append(RouterWalPayload::Submission {
             replay_key: replay_key.to_owned(),
             replay_expires_at,
             entry: entry.cloned().map(Box::new),
             accepted_at: Some(router_wal_now()),
+            local_delivery,
         })
     }
 
@@ -410,12 +472,23 @@ impl RouterWalStore {
         replay_expires_at: i64,
         entry: Option<&InboxEntry>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
+        self.record_submission_classified_async(replay_key, replay_expires_at, entry, None).await
+    }
+
+    pub(crate) async fn record_submission_classified_async(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        entry: Option<&InboxEntry>,
+        local_delivery: Option<RouterWalLocalDelivery>,
+    ) -> Result<RouterWalRecordLocation, NodeCoreError> {
         self.writer
             .append_async(RouterWalPayload::Submission {
                 replay_key: replay_key.to_owned(),
                 replay_expires_at,
                 entry: entry.cloned().map(Box::new),
                 accepted_at: Some(router_wal_now()),
+                local_delivery,
             })
             .await
     }
@@ -1329,6 +1402,7 @@ mod tests {
                 replay_expires_at: 9_999_999_999,
                 entry: Some(Box::new(left_entry)),
                 accepted_at: None,
+                local_delivery: None,
             },
             shard_count,
         );
@@ -1338,6 +1412,7 @@ mod tests {
                 replay_expires_at: 9_999_999_999,
                 entry: Some(Box::new(right_entry)),
                 accepted_at: None,
+                local_delivery: None,
             },
             shard_count,
         );
@@ -1617,6 +1692,7 @@ mod tests {
             replay_expires_at: 9_999_999_999,
             entry: Some(Box::new(router_wal_inbox_entry(envelope_id, target_delivery_id))),
             accepted_at: None,
+            local_delivery: None,
         }
     }
 

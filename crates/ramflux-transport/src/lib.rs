@@ -51,6 +51,13 @@ pub use mesh_tls::{
     MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, extract_spiffe_uri_from_certificate,
 };
 pub use perf_metrics::{MeshHttpPerfSnapshot, mesh_perf_reset, mesh_perf_snapshot};
+
+/// Worst-case wall-clock budget for a router post, including QUIC probing and HTTP fallback.
+#[must_use]
+pub fn router_post_worst_case_timeout() -> std::time::Duration {
+    mesh_quic::mesh_quic_post_worst_case_timeout()
+        .saturating_add(mesh_http::mesh_http_post_worst_case_timeout())
+}
 pub use policy::{
     ShutdownDrain, ShutdownDrainPermit, TransportBackpressure, TransportBackpressurePermit,
     TransportRetryPolicy, retry_with_policy,

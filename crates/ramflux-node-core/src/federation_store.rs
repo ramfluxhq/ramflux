@@ -423,8 +423,12 @@ impl FederationRedbStore {
         request: &crate::FederatedEnvelopeForwardRequest,
         now: u64,
     ) -> Result<bool, NodeCoreError> {
-        let InboundForwardAdmission::Acquired { attempt_id } =
-            self.begin_inbound_forward(source, request, now)?
+        let InboundForwardAdmission::Acquired { attempt_id } = self.begin_inbound_forward(
+            source,
+            request,
+            now,
+            INBOUND_FORWARD_ATTEMPT_LEASE_SECONDS,
+        )?
         else {
             return Ok(false);
         };
@@ -437,6 +441,7 @@ impl FederationRedbStore {
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         request: &crate::FederatedEnvelopeForwardRequest,
         now: u64,
+        attempt_lease_seconds: u64,
     ) -> Result<InboundForwardAdmission, NodeCoreError> {
         let expires_at = inbound_forward_expires_at(request)?;
         if expires_at <= now {
@@ -493,8 +498,7 @@ impl FederationRedbStore {
                 }
                 None | Some(FederationInboundForwardSeenState::Pending { .. }) => {
                     let attempt_id = inbound_forward_attempt_id(now);
-                    let lease_until =
-                        now.saturating_add(INBOUND_FORWARD_ATTEMPT_LEASE_SECONDS).min(expires_at);
+                    let lease_until = now.saturating_add(attempt_lease_seconds).min(expires_at);
                     let record = FederationInboundForwardSeenRecord {
                         seen_key: seen_key.clone(),
                         source_node_id: request.source_node_id.clone(),
@@ -581,13 +585,36 @@ impl FederationRedbStore {
     where
         F: FnOnce() -> Result<crate::EnvelopeSubmitResponse, NodeCoreError>,
     {
-        let attempt_id = match self.begin_inbound_forward(source, request, now)? {
-            InboundForwardAdmission::Committed => return Ok(None),
-            InboundForwardAdmission::Pending => {
-                return Ok(Some(inbound_forward_in_progress_response(request)));
-            }
-            InboundForwardAdmission::Acquired { attempt_id } => attempt_id,
-        };
+        self.deliver_inbound_forward_once_with_lease(
+            source,
+            request,
+            now,
+            INBOUND_FORWARD_ATTEMPT_LEASE_SECONDS,
+            deliver,
+        )
+    }
+
+    /// # Errors
+    /// Returns an error when admission, delivery, or the durable outcome update fails.
+    pub fn deliver_inbound_forward_once_with_lease<F>(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        request: &crate::FederatedEnvelopeForwardRequest,
+        now: u64,
+        attempt_lease_seconds: u64,
+        deliver: F,
+    ) -> Result<Option<crate::EnvelopeSubmitResponse>, NodeCoreError>
+    where
+        F: FnOnce() -> Result<crate::EnvelopeSubmitResponse, NodeCoreError>,
+    {
+        let attempt_id =
+            match self.begin_inbound_forward(source, request, now, attempt_lease_seconds)? {
+                InboundForwardAdmission::Committed => return Ok(None),
+                InboundForwardAdmission::Pending => {
+                    return Ok(Some(inbound_forward_in_progress_response(request)));
+                }
+                InboundForwardAdmission::Acquired { attempt_id } => attempt_id,
+            };
         let delivery = match deliver() {
             Ok(delivery) => delivery,
             Err(error) => {

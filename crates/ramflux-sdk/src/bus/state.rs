@@ -99,7 +99,15 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) object_get_spools: BTreeMap<String, ObjectGetSpoolSession>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistedGatewayResume {
+    previous_session_id: Option<String>,
+    resume_token: Option<String>,
+    last_seen_inbox_seq: u64,
+}
+
 impl LocalBusAccountState {
+    pub(crate) const GATEWAY_RESUME_CHECKPOINT: &'static str = "gateway_session_resume.v1";
     #[cfg(test)]
     pub(crate) fn new(
         client: RamfluxClient,
@@ -278,6 +286,15 @@ impl LocalBusAccountState {
             } else {
                 let mut config = self.gateway_config.clone();
                 config.last_seen_inbox_seq = last_seen_inbox_seq;
+                if let Some(checkpoint) =
+                    self.client.projection_checkpoint(Self::GATEWAY_RESUME_CHECKPOINT)?
+                {
+                    let persisted: PersistedGatewayResume = serde_json::from_str(&checkpoint)?;
+                    config.previous_session_id = persisted.previous_session_id;
+                    config.resume_token = persisted.resume_token;
+                    config.last_seen_inbox_seq =
+                        config.last_seen_inbox_seq.max(persisted.last_seen_inbox_seq);
+                }
                 if config.device_branch.is_none()
                     && let Some(branch) = self.client.device_branch.as_ref()
                     && branch.principal_id == config.principal_id
@@ -327,6 +344,23 @@ impl LocalBusAccountState {
         if was_pending {
             self.forget_confirmed_push_clear();
         }
+    }
+
+    pub(crate) fn retire_engine(&mut self, engine: GatewaySessionEngine) -> Result<(), SdkError> {
+        self.gateway_config = engine.config.clone();
+        engine.target_delivery_id().clone_into(&mut self.target_delivery_id);
+        let persisted = PersistedGatewayResume {
+            previous_session_id: self.gateway_config.previous_session_id.clone(),
+            resume_token: self.gateway_config.resume_token.clone(),
+            last_seen_inbox_seq: self.gateway_config.last_seen_inbox_seq,
+        };
+        self.client.set_projection_checkpoint(
+            Self::GATEWAY_RESUME_CHECKPOINT,
+            &serde_json::to_string(&persisted)?,
+        )?;
+        self.engine = None;
+        drop(engine);
+        Ok(())
     }
 
     #[cfg(test)]

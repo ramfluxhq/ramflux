@@ -711,6 +711,7 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
         &source_identity,
         migrated_envelope.clone(),
         request.now + 3,
+        RouterEnvelopeOrigin::Gateway,
         |plan| {
             forwarded = true;
             assert_eq!(plan.proof_hash, migration.migration_proof_hash);
@@ -760,7 +761,7 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
     assert_forwarded_retry_is_idempotent(
         &router,
         &source_identity,
-        migrated_envelope,
+        &migrated_envelope,
         request.now + 4,
     )?;
 
@@ -771,20 +772,121 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
         &source_identity,
         expired_window,
         migration.effective_at + HOME_NODE_FORWARD_WINDOW_SECONDS + 1,
+        RouterEnvelopeOrigin::Gateway,
         |_plan| Err(NodeCoreError::ItestHttp("must not forward after window".to_owned())),
     );
     assert!(matches!(outcome, RouterSubmitOutcome::RejectedHomeNodeMigrated(_)));
     Ok(())
 }
 
+#[test]
+fn blocked_federation_forward_does_not_hold_submission_shard_lock()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn shard(envelope_id: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        envelope_id.hash(&mut hasher);
+        hasher.finish() % 64
+    }
+
+    let source = replay_source("alice_device")?;
+    let router = std::sync::Arc::new(RouterCore::new());
+    let request = registration_request(
+        &router,
+        "principal_forward_contention",
+        "device_forward_contention",
+        849,
+        None,
+        "ip_forward_contention",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let signer = NodeServiceSigningKey::from_seed([0x9a; 32]);
+    let (migration_proof, route_update) = route_update_fixture(
+        &request,
+        849,
+        "mig_forward_contention",
+        "node_new_contention.example",
+        "node-new-contention.example:7443",
+        &signer,
+    )?;
+    router.apply_home_node_migration(&migration_proof, &request.proof, request.now + 1)?;
+    router.apply_home_node_route_update_proof(&route_update, request.now + 2)?;
+    let mut blocked =
+        envelope("env_forward_contention", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
+    blocked.created_at = request.now + 3;
+    let blocked_retry = blocked.clone();
+    let blocked_shard = shard(&blocked.envelope_id);
+    let other_id = (0..10_000)
+        .map(|candidate| format!("env_unrelated_{candidate}"))
+        .find(|candidate| shard(candidate) == blocked_shard)
+        .ok_or("failed to find submission shard collision")?;
+    let mut unrelated = envelope(&other_id, "unrelated_target", DeliveryClass::OpaqueEvent);
+    unrelated.created_at = request.now + 3;
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (holder_done_tx, holder_done_rx) = std::sync::mpsc::channel();
+    let submit_now = request.now + 3;
+    let holder_router = std::sync::Arc::clone(&router);
+    let holder_source = source.clone();
+    let holder = std::thread::spawn(move || {
+        let outcome = holder_router.submit_envelope_with_home_node_forward_at(
+            &holder_source,
+            blocked,
+            submit_now,
+            RouterEnvelopeOrigin::Gateway,
+            |_| {
+                let _sent = entered_tx.send(());
+                release_rx.recv().map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+                Err(NodeCoreError::ItestHttp("released contention forward".to_owned()))
+            },
+        );
+        let _sent = holder_done_tx.send(outcome);
+    });
+    if let Err(error) = entered_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+        let outcome = holder_done_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+        return Err(format!("forward closure was not entered ({error}): {outcome:?}").into());
+    }
+    let concurrent_retry = router.submit_envelope_with_home_node_forward_at(
+        &source,
+        blocked_retry,
+        submit_now,
+        RouterEnvelopeOrigin::Gateway,
+        |_| Err(NodeCoreError::ItestHttp("pending retry must not forward".to_owned())),
+    );
+    assert!(matches!(concurrent_retry, RouterSubmitOutcome::ForwardInProgress { .. }));
+    let (submitted_tx, submitted_rx) = std::sync::mpsc::channel();
+    let other_router = std::sync::Arc::clone(&router);
+    let other_source = source.clone();
+    let other = std::thread::spawn(move || {
+        let outcome = other_router.submit_envelope_at(&other_source, unrelated, submit_now);
+        let _sent = submitted_tx.send(outcome);
+    });
+    let unrelated_outcome = submitted_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+    assert!(matches!(
+        unrelated_outcome,
+        RouterSubmitOutcome::Online(_) | RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    release_tx.send(())?;
+    let holder_outcome = holder_done_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+    assert!(matches!(holder_outcome, RouterSubmitOutcome::RejectedHomeNodeMigrated(_)));
+    holder.join().map_err(|_| "holder panicked")?;
+    other.join().map_err(|_| "unrelated submit panicked")?;
+    Ok(())
+}
+
 fn assert_forwarded_retry_is_idempotent(
     router: &RouterCore,
     source: &ramflux_crypto::RootQualifiedDeviceRef,
-    envelope: ramflux_protocol::Envelope,
+    envelope: &ramflux_protocol::Envelope,
     now: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let in_progress =
-        router.submit_envelope_with_home_node_forward_at(source, envelope.clone(), now, |plan| {
+    let new_home = RouterCore::new();
+    let in_progress = router.submit_envelope_with_home_node_forward_at(
+        source,
+        envelope.clone(),
+        now,
+        RouterEnvelopeOrigin::Gateway,
+        |plan| {
             Ok(FederatedEnvelopeForwardResponse {
                 accepted: false,
                 source_node_id: "node_old.example".into(),
@@ -797,31 +899,90 @@ fn assert_forwarded_retry_is_idempotent(
                     nack: None,
                 },
             })
-        });
+        },
+    );
     assert!(matches!(in_progress, RouterSubmitOutcome::ForwardInProgress { .. }));
 
-    let retry =
-        router.submit_envelope_with_home_node_forward_at(source, envelope, now + 1, |plan| {
-            Ok(FederatedEnvelopeForwardResponse {
-                accepted: false,
-                source_node_id: "node_old.example".into(),
-                target_node_id: plan.route.home_node.clone(),
-                delivery: EnvelopeSubmitResponse {
-                    outcome: "duplicate_federated_forward".into(),
-                    target_delivery_id: plan.envelope.target_delivery_id.clone(),
-                    inbox_seq: None,
-                    cursor: None,
-                    nack: None,
-                },
-            })
-        });
+    let retry = router.submit_envelope_with_home_node_forward_at(
+        source,
+        envelope.clone(),
+        now + 1,
+        RouterEnvelopeOrigin::Gateway,
+        |plan| real_new_home_response(&new_home, source, plan, now + 1),
+    );
     let RouterSubmitOutcome::ForwardedHomeNodeMigrated(retry) = retry else {
         return Err(format!("expected idempotent migrated retry, got {retry:?}").into());
     };
     assert!(retry.replayed);
-    assert_eq!(retry.delivery.outcome, "duplicate_federated_forward");
-    assert_eq!(retry.delivery.inbox_seq, None, "retry created no second inbox entry");
+    assert_eq!(retry.delivery.outcome, "offline_queued");
+    assert_eq!(new_home.resume(&envelope.target_delivery_id, 0, 10).len(), 1);
+
+    let committed_retry = router.submit_envelope_with_home_node_forward_at(
+        source,
+        envelope.clone(),
+        now + 2,
+        RouterEnvelopeOrigin::Gateway,
+        |plan| real_new_home_response(&new_home, source, plan, now + 2),
+    );
+    let RouterSubmitOutcome::ForwardedHomeNodeMigrated(committed_retry) = committed_retry else {
+        return Err(format!("expected committed migrated retry, got {committed_retry:?}").into());
+    };
+    assert!(committed_retry.replayed);
+    assert_eq!(committed_retry.delivery.outcome, "duplicate_federated_forward");
+    assert_eq!(committed_retry.delivery.inbox_seq, None, "retry created no second inbox entry");
+    assert_eq!(new_home.resume(&envelope.target_delivery_id, 0, 10).len(), 1);
     Ok(())
+}
+
+fn real_new_home_response(
+    new_home: &RouterCore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    plan: &HomeNodeMigrationForwardPlan,
+    now: i64,
+) -> Result<FederatedEnvelopeForwardResponse, NodeCoreError> {
+    let outcome = new_home.submit_envelope_with_home_node_forward_at(
+        source,
+        plan.envelope.clone(),
+        now,
+        RouterEnvelopeOrigin::Federation,
+        |_| Err(NodeCoreError::ItestHttp("new home must not forward".to_owned())),
+    );
+    let delivery = match outcome {
+        RouterSubmitOutcome::Online(delivery) => EnvelopeSubmitResponse {
+            outcome: "online".to_owned(),
+            target_delivery_id: delivery.target_delivery_id,
+            inbox_seq: Some(delivery.inbox_seq),
+            cursor: None,
+            nack: None,
+        },
+        RouterSubmitOutcome::OfflineQueued(delivery) => EnvelopeSubmitResponse {
+            outcome: "offline_queued".to_owned(),
+            target_delivery_id: delivery.entry.target_delivery_id,
+            inbox_seq: Some(delivery.entry.inbox_seq),
+            cursor: None,
+            nack: None,
+        },
+        RouterSubmitOutcome::DuplicateFederatedForward { target_delivery_id } => {
+            EnvelopeSubmitResponse {
+                outcome: "duplicate_federated_forward".to_owned(),
+                target_delivery_id,
+                inbox_seq: None,
+                cursor: None,
+                nack: None,
+            }
+        }
+        other => {
+            return Err(NodeCoreError::ItestHttp(format!(
+                "unexpected real new-home outcome: {other:?}"
+            )));
+        }
+    };
+    Ok(FederatedEnvelopeForwardResponse {
+        accepted: true,
+        source_node_id: "node_old.example".to_owned(),
+        target_node_id: plan.route.home_node.clone(),
+        delivery,
+    })
 }
 
 #[test]
@@ -848,16 +1009,26 @@ fn production_forward_path_rejects_local_duplicate_with_or_without_later_migrati
         &source,
         submitted.clone(),
         request.now,
+        RouterEnvelopeOrigin::Gateway,
         |_| Err(NodeCoreError::ItestHttp("no migration must not forward".into())),
     );
     assert!(matches!(
         first,
         RouterSubmitOutcome::Online(_) | RouterSubmitOutcome::OfflineQueued(_)
     ));
-    let duplicate = router.submit_envelope_with_home_node_forward_at(
+    let federated_duplicate = router.submit_envelope_with_home_node_forward_at(
         &source,
         submitted.clone(),
         request.now + 1,
+        RouterEnvelopeOrigin::Federation,
+        |_| Err(NodeCoreError::ItestHttp("local duplicate must not forward".into())),
+    );
+    assert!(matches!(federated_duplicate, RouterSubmitOutcome::DuplicateFederatedForward { .. }));
+    let duplicate = router.submit_envelope_with_home_node_forward_at(
+        &source,
+        submitted.clone(),
+        request.now + 2,
+        RouterEnvelopeOrigin::Gateway,
         |_| Err(NodeCoreError::ItestHttp("duplicate must not forward".into())),
     );
     assert!(matches!(duplicate, RouterSubmitOutcome::RejectedSecurity { .. }));
@@ -871,13 +1042,14 @@ fn production_forward_path_rejects_local_duplicate_with_or_without_later_migrati
         "node-new-local-duplicate.example:7443",
         &signer,
     )?;
-    router.apply_home_node_migration(&migration_proof, &request.proof, request.now + 2)?;
-    router.apply_home_node_route_update_proof(&route_update, request.now + 3)?;
+    router.apply_home_node_migration(&migration_proof, &request.proof, request.now + 3)?;
+    router.apply_home_node_route_update_proof(&route_update, request.now + 4)?;
     let mut forwarded = false;
     let after_migration = router.submit_envelope_with_home_node_forward_at(
         &source,
         submitted,
-        request.now + 4,
+        request.now + 5,
+        RouterEnvelopeOrigin::Gateway,
         |_| {
             forwarded = true;
             Err(NodeCoreError::ItestHttp("local duplicate must not forward after migration".into()))
@@ -927,6 +1099,7 @@ fn home_node_migration_new_home_accepts_forwarded_local_delivery()
         &source_identity,
         forwarded,
         request.now + 3,
+        RouterEnvelopeOrigin::Federation,
         |_plan| Err(NodeCoreError::ItestHttp("new home must not re-forward".to_owned())),
     );
 
@@ -991,6 +1164,7 @@ fn home_node_migration_forward_failure_or_loop_marker_falls_back_to_nack()
         &source_identity,
         failed_forward,
         request.now + 3,
+        RouterEnvelopeOrigin::Gateway,
         |_plan| Err(NodeCoreError::ItestHttp("peer unavailable".to_owned())),
     );
     let RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) = outcome else {
@@ -1010,6 +1184,7 @@ fn home_node_migration_forward_failure_or_loop_marker_falls_back_to_nack()
         &source_identity,
         loop_guarded,
         request.now + 4,
+        RouterEnvelopeOrigin::Gateway,
         |_plan| Err(NodeCoreError::ItestHttp("must not forward twice".to_owned())),
     );
     assert!(matches!(outcome, RouterSubmitOutcome::RejectedHomeNodeMigrated(_)));

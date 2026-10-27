@@ -1158,6 +1158,12 @@ fn mesh_quic_connect_timeout() -> Duration {
     duration_from_millis_env(MESH_QUIC_CONNECT_TIMEOUT_MS_ENV, MESH_QUIC_CONNECT_TIMEOUT_DEFAULT)
 }
 
+pub(crate) fn mesh_quic_post_worst_case_timeout() -> Duration {
+    MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT
+        .saturating_add(mesh_quic_connect_timeout())
+        .saturating_add(MESH_QUIC_REQUEST_TIMEOUT)
+}
+
 fn mesh_quic_connect_breaker_cooldown() -> Duration {
     duration_from_millis_env(
         MESH_QUIC_CONNECT_BREAKER_COOLDOWN_MS_ENV,
