@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::admin_http::{FederationAdminHttpContext, handle_admin_request};
 use crate::public_http::{FederationPublicHttpContext, handle_public_request};
+use crate::public_source_limits::{PublicSourceLimitConfig, PublicSourceLimits};
 use crate::test_certificates::{issue_test_ca, issue_test_service_cert, temp_cert_root};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -351,6 +352,13 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
         discovery: admin.discovery.clone(),
     };
     let active = Arc::new(AtomicUsize::new(0));
+    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(
+        8,
+        100,
+        100,
+        32,
+        Duration::from_secs(30),
+    ));
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut first = TcpStream::connect(listener.local_addr()?)?;
     let (stream, _) = listener.accept()?;
@@ -360,6 +368,7 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
         active.clone(),
         1,
         crate::http_limits::defaults(true),
+        &source_limits,
     )
     .ok_or("first connection rejected")?;
     assert_eq!(active.load(Ordering::Acquire), 1);
@@ -372,7 +381,8 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
             public.clone(),
             active.clone(),
             1,
-            crate::http_limits::defaults(true)
+            crate::http_limits::defaults(true),
+            &source_limits
         )
         .is_none()
     );
@@ -392,12 +402,103 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
         active.clone(),
         1,
         crate::http_limits::defaults(true),
+        &source_limits,
     )
     .ok_or("slot not released")?;
     failed.write_all(b"GET /mvp1/prekey/root HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
     worker.join().map_err(|_| "worker panicked")?;
     failed.read_to_string(&mut String::new())?;
     assert_eq!(active.load(Ordering::Acquire), 0);
+    drop(admin);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers() -> TestResult {
+    use std::sync::atomic::AtomicUsize;
+
+    let root = temp_cert_root("http-source-rate")?;
+    let admin = context(&root)?;
+    let public = FederationPublicHttpContext {
+        router: admin.router.clone(),
+        discovery: admin.discovery.clone(),
+    };
+    let active = Arc::new(AtomicUsize::new(0));
+    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(
+        1,
+        1,
+        1,
+        32,
+        Duration::from_secs(30),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+
+    let mut first = TcpStream::connect(listener.local_addr()?)?;
+    first.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    let worker = crate::public_http::spawn_public_connection(
+        stream,
+        public.clone(),
+        active.clone(),
+        8,
+        crate::http_limits::defaults(true),
+        &source_limits,
+    )
+    .ok_or("first request refused")?;
+
+    let mut excess = TcpStream::connect(listener.local_addr()?)?;
+    excess.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    assert!(
+        crate::public_http::spawn_public_connection(
+            stream,
+            public.clone(),
+            active.clone(),
+            8,
+            crate::http_limits::defaults(true),
+            &source_limits,
+        )
+        .is_none()
+    );
+    let mut refusal = String::new();
+    excess.read_to_string(&mut refusal)?;
+    assert!(refusal.starts_with("HTTP/1.1 503"), "{refusal}");
+    assert_eq!(
+        refusal.split_once("\r\n\r\n").ok_or("missing response body")?.1,
+        "service unavailable"
+    );
+
+    first.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+    let mut response = String::new();
+    first.read_to_string(&mut response)?;
+    worker.join().map_err(|_| "worker panicked")?;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+    let mut second = TcpStream::connect(listener.local_addr()?)?;
+    second.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    let worker = crate::public_http::spawn_public_connection(
+        stream,
+        public,
+        active,
+        8,
+        crate::http_limits::defaults(true),
+        &source_limits,
+    )
+    .ok_or("rate-limited connection rejected before request")?;
+    second.write_all(
+        b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.99\r\n\r\n",
+    )?;
+    response.clear();
+    second.read_to_string(&mut response)?;
+    worker.join().map_err(|_| "worker panicked")?;
+    assert!(response.starts_with("HTTP/1.1 429"), "{response}");
+    assert_eq!(
+        response.split_once("\r\n\r\n").ok_or("missing response body")?.1,
+        "too many requests"
+    );
+
     drop(admin);
     std::fs::remove_dir_all(root)?;
     Ok(())
