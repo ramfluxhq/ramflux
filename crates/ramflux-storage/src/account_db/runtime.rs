@@ -7,7 +7,7 @@ mod acknowledgements;
 mod actor_backoff;
 mod config;
 mod control;
-mod message_origin;
+pub(super) mod message_origin;
 mod operations;
 mod outbox;
 mod own_copy;

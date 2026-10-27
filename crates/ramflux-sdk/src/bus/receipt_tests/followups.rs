@@ -177,7 +177,7 @@ fn message_attribution_survives_receipt_expiry_and_is_removed_only_with_its_mess
     for _ in 0..3 {
         db.retain_delivery_receipts(now_unix_timestamp() + 90 * 24 * 60 * 60, 128)?;
     }
-    assert_eq!(receiver.message_origin("thread", "origin")?, Some(original));
+    assert_eq!(receiver.message_origin("thread", "origin")?, Some(original.clone()));
     let after = crate::bus::readers::read(&receiver, &request)?;
     for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"] {
         assert_eq!(after["messages"][0][field], before["messages"][0][field]);
@@ -185,6 +185,19 @@ fn message_attribution_survives_receipt_expiry_and_is_removed_only_with_its_mess
     }
     receiver.delete_direct_message("thread", "origin", "local", "deleted-origin")?;
     assert!(receiver.message_origin("thread", "origin")?.is_none());
+    let stale_key = format!(
+        "message/origin/{}",
+        ramflux_crypto::blake3_256_base64url(
+            "ramflux.delivery-receipt.v1",
+            &ramflux_protocol::canonical_json_bytes(&("thread", "origin", ""))?
+        )
+    );
+    db.persist_actor_state(&stale_key, &original)?;
+    let deleted = crate::bus::readers::read(&receiver, &request)?;
+    assert_eq!(deleted["messages"][0]["deleted"], true);
+    for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"] {
+        assert!(deleted["messages"][0][field].is_null());
+    }
     drop(receiver);
     drop(sender);
     std::fs::remove_dir_all(root)?;

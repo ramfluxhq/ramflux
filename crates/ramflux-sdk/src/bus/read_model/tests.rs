@@ -43,7 +43,6 @@ impl Fixture {
         )
     }
 }
-
 #[test]
 fn empty_directories_and_self_identity_are_readable() -> Result<(), SdkError> {
     let f = Fixture::new()?;

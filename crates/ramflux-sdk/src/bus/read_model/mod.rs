@@ -157,7 +157,14 @@ fn legacy_list(
             break;
         }
         for id in &ids {
-            let row = rows::row(client, directory, id)?;
+            let row = if directory == "approval" && id.starts_with("task_approval_") {
+                client.task_remote_approval_by_id(id)?
+            } else {
+                Some(rows::row(client, directory, id)?)
+            };
+            let Some(row) = row else {
+                continue;
+            };
             if !budget.admit(&row)? {
                 return Err(invalid("legacy list exceeds frame limit; use cursor/limit"));
             }
