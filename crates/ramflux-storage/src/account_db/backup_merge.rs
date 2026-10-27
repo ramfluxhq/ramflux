@@ -39,7 +39,8 @@ fn skip_merge_table(table: &str) -> bool {
             | "contact_request_decision"
             | "contact_link_decision"
             | "contact_message_fence_retention"
-    ) || table.starts_with("backup_archived_")
+    ) || table.starts_with("runtime_home_migration_")
+        || table.starts_with("backup_archived_")
         || table == "account_key_check"
         || table.starts_with("schema_")
         || matches!(
@@ -385,6 +386,7 @@ impl BackupDatabase {
         let transaction = self.db.unchecked_transaction()?;
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind));")?;
         super::message_footprint::install(&self.db)?;
+        super::home_migration::strip_from_backup(&self.db)?;
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
         super::backup_retirement::archive_outbound_state(&self.db)?;
         transaction.commit()?;
