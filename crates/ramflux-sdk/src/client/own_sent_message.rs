@@ -310,9 +310,8 @@ impl RamfluxClient {
         }
         let db = self.account_db()?;
         let known = db.load_actor_state::<String>(&alias_key(&own_row_id(source, envelope)?))?;
-        let imported = packet
-            .ciphertext_hash
-            .as_deref()
+        let ciphertext_hash = packet.ciphertext_hash.as_deref();
+        let imported = ciphertext_hash
             .map(|hash| db.load_actor_state::<serde_json::Value>(&imported_ciphertext_key(hash)))
             .transpose()?
             .flatten()
@@ -328,7 +327,7 @@ impl RamfluxClient {
                         known.as_deref() == Some(row.message_id.as_str())
                             || imported_id == Some(row.message_id.as_str())
                             || (!row.encrypted_body.is_empty()
-                                && packet.ciphertext_hash.as_deref()
+                                && ciphertext_hash
                                     == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str()))
                     },
                     |v| {
@@ -361,12 +360,7 @@ impl RamfluxClient {
         }
         if history && candidate.as_ref().is_some_and(|row| row.deleted) {
             // Keep authenticated replay aliases without restoring deleted content or attribution.
-            self.index_own_sent_projection(
-                source,
-                envelope,
-                &id,
-                packet.ciphertext_hash.as_deref(),
-            )?;
+            self.index_own_sent_projection(source, envelope, &id, ciphertext_hash)?;
             return Ok(true);
         }
         db.store_message_content(conversation, &id, &body)?;
@@ -385,7 +379,7 @@ impl RamfluxClient {
                 at,
             },
             &id,
-            packet.ciphertext_hash.as_deref(),
+            ciphertext_hash,
         )?;
         Ok(true)
     }
