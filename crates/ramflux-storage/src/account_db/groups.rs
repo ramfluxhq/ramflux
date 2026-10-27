@@ -595,13 +595,7 @@ impl AccountDb {
                 applied_at,
                 actor,
             )?;
-            self.connection.execute(
-                "UPDATE direct_message_projection
-                SET deleted = 1, encrypted_body = x''
-              WHERE conversation_id = ?1 AND message_id = ?2 AND deleted = 0",
-                params![delete.group_id, delete.target_message_id],
-            )?;
-            self.remove_message_origin(&delete.group_id, &delete.target_message_id)?;
+            self.scrub_message_for_deletion(&delete.group_id, &delete.target_message_id, None)?;
             self.connection.execute(
                 "INSERT OR REPLACE INTO group_message_tombstone_projection
                 (group_id, message_id, tombstone_id, actor_device_id, delete_scope,

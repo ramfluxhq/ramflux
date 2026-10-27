@@ -26,6 +26,7 @@ mod group_delivery;
 pub mod io;
 mod journal;
 mod lifecycle;
+mod message_projection;
 mod metadata;
 mod mutations;
 mod native_account;
