@@ -60,6 +60,7 @@ impl BackupJobs {
         let mut metadata =
             format::load_metadata(&staging.directory().join("identity.sealed"), staging.key())?;
         let id = metadata.manifest.local_account_id.clone();
+        let _writer = self.index.acquire_account_writer(&id)?;
         let lease =
             self.generations.try_acquire(&id)?.ok_or_else(|| refused("install_in_progress"))?;
         let incoming = staging.directory().join("account.db");

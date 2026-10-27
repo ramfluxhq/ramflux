@@ -79,9 +79,11 @@ impl AccountDb {
         local_account_id: &str,
         key: &AccountDbKey,
     ) -> Result<Self, StorageError> {
+        // Preserve AccountNotFound, then select the generation under ownership.
+        index.account(local_account_id)?;
+        let writer = crate::account_writer::AccountWriter::acquire(index.root(), local_account_id)?;
         let account = index.account(local_account_id)?;
         let path = index.root().join(account.db_relative_path);
-        let writer = crate::account_writer::AccountWriter::acquire(index.root(), local_account_id)?;
         let connection = Connection::open_account_writer(&path, writer)?;
         apply_key(&connection, key)?;
         connection.execute_batch("PRAGMA synchronous=FULL;")?;

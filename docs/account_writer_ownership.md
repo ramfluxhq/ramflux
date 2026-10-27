@@ -11,10 +11,14 @@ generations; it is not placed beside a generation-specific database file.
 Connections in the owning process share the file descriptor lease. Their actual
 write transactions still serialize through SQLite `BEGIN IMMEDIATE` and the
 five-second busy timeout. The ownership lock does not replace SQLite locking.
-Query-only readers, pinned backup readers, private snapshot/staging databases and
-the account index do not acquire or prolong account writer ownership. Each live
-writer worker retains ownership until all its clones close and its SQLite thread
-has finished closing the database.
+Query-only readers, pinned backup readers and private snapshot/staging databases
+do not acquire or prolong account writer ownership. Opening the account index
+alone does not acquire ownership. Account creation/replacement and generation
+selection take the account lease before changing their index pointer. Quiesced
+restore holds it across identity checks, copying the selected generation and
+installation; generation cleanup takes it before reclaiming files and skips
+accounts owned by another process. Each live writer worker retains ownership
+until all its clones close and its SQLite thread has finished closing the database.
 
 ## Expiry, lost holders and backup
 
@@ -38,8 +42,9 @@ holder. A snapshot/restore regression checks destination ownership independently
 
 Advisory locking requires a local filesystem with working advisory locks and
 cooperating product processes. External SQLite tools that bypass this API are
-outside this ownership contract. Do not open a live account through the private
-`BackupDatabase` staging API or copy/remove an active account directory.
+outside this ownership contract. Use `BackupDatabase` on a selected generation
+only while quiesced and holding `AccountIndex::acquire_account_writer`; do not use
+it as an active live writer or copy/remove an active account directory.
 
 ## Managed transactions and source guard
 

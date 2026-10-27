@@ -105,6 +105,11 @@ pub(super) fn recover_generations(
         let name = account.file_name();
         let Some(id) = name.to_str() else { continue };
         let Some(_lease) = locks.try_acquire(id)? else { continue };
+        let _writer = match index.acquire_account_writer(id) {
+            Ok(writer) => writer,
+            Err(ramflux_storage::StorageError::AccountWriterBusy(_)) => continue,
+            Err(error) => return Err(error.into()),
+        };
         let selected = match index.account(id) {
             Ok(row) => Some(data_root.join(row.db_relative_path)),
             Err(ramflux_storage::StorageError::AccountNotFound(_)) => None,

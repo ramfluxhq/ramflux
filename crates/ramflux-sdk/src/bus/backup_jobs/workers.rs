@@ -380,7 +380,9 @@ impl BackupJobs {
         match self.index.account(id) {
             Err(ramflux_storage::StorageError::AccountNotFound(_)) => Ok(false),
             Err(_) => Err(failure(BackupFailureCode::Unreadable)),
-            Ok(record) => {
+            Ok(_) => {
+                let _writer = self.index.acquire_account_writer(id).map_err(storage_error)?;
+                let record = self.index.account(id).map_err(storage_error)?;
                 if record.principal_commitment != metadata.manifest.principal_commitment {
                     return Err(failure(BackupFailureCode::RootConflict));
                 }
