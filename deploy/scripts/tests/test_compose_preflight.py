@@ -62,6 +62,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_public_default_secret_is_refused_even_with_new_or_equal_names(self):
         for text in ['RF_COMPOSE_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token',
+                     "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=' ramflux-local-admin-token '",
                      'RAMFLUX_ROUTER_ADMIN_TOKEN=ramflux-local-admin-token\n'
                      'RF_COMPOSE_ROUTER_ADMIN_TOKEN=ramflux-local-admin-token']:
             result = self.run_check(text)

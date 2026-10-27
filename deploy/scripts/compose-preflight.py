@@ -9,7 +9,6 @@ import sys
 
 MAPPING = json.loads((Path(__file__).resolve().parents[1] / "compose-inputs.json").read_text())
 PUBLIC_SECRET = "ramflux-local-admin-token"
-KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 EXPRESSION = re.compile(r"\$\$|\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-|:\?|\?|:\+|\+)([^{}]*))?\}")
 
 
@@ -95,7 +94,7 @@ def validate(values):
             invalid.update((old, new))
     for key, value in values.items():
         if key.startswith(("RAMFLUX_", "RF_COMPOSE_")):
-            if value == PUBLIC_SECRET or "${" in value:
+            if value.strip() == PUBLIC_SECRET or "${" in value:
                 invalid.add(key)
     return sorted(invalid)
 
