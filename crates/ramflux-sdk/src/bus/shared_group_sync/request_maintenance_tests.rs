@@ -65,3 +65,19 @@ fn shared_group_packet_selection_backs_off_bad_row_without_hiding_healthy_packet
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn bad_deadline_item_does_not_abort_later_courier_work() -> Result<(), SdkError> {
+    let root = crate::bus::runtime_tests::root("transfer-deadline-continues");
+    let mut account = staged_account(&root)?;
+    let bad = "group-transfer/pending/!bad";
+    account.client.account_db()?.persist_actor_state(bad, &serde_json::json!({"bad":true}))?;
+    let now = now_unix_timestamp();
+    assert_eq!(flush_with_clock(&mut account, || now).await?, 0);
+    let db = account.client.account_db()?;
+    assert!(db.actor_state_exists(&format!("{}{bad}", maintenance::BACKOFF))?);
+    assert!(db.load_actor_state::<String>("group-courier/cursor")?.is_some());
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

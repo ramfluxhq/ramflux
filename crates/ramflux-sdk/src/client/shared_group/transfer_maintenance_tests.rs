@@ -166,3 +166,94 @@ fn bad_item_warnings_are_rate_limited_across_retry_and_connection_restart() -> R
     drop(reader);
     f.close()
 }
+
+#[test]
+fn storage_wrapped_verification_failure_is_backed_off_as_bad_data() -> Result<(), SdkError> {
+    let f = Fixture::new("deadline-wrapped-verification")?;
+    let db = f.phone.account_db()?;
+    let id = "test-deadline/wrapped-verification";
+    assert!(
+        maintenance::item_result::<()>(
+            db,
+            id,
+            now_unix_timestamp(),
+            Err(SdkError::Storage(StorageError::Crypto(CryptoError::VerifyFailed))),
+        )?
+        .is_none()
+    );
+    assert!(db.actor_state_exists(&format!("{}{id}", maintenance::BACKOFF))?);
+    f.close()
+}
+
+#[test]
+fn tampered_group_state_backs_off_while_unrelated_expired_lease_releases() -> Result<(), SdkError> {
+    let f = Fixture::new("deadline-tampered-group-state")?;
+    f.laptop.reserve_group_transfer(&f.probe, &f.base)?;
+    f.laptop.account_db()?.persist_actor_state(
+        &key(PENDING, "group"),
+        &Pending { probe: f.probe.clone(), replies: BTreeMap::new(), expires_at: i64::MAX },
+    )?;
+
+    f.phone.shared_group_create("unrelated", "thread-unrelated", None, "target-phone")?;
+    let unrelated = f.phone.shared_group_change(
+        "unrelated",
+        "target-phone",
+        GroupStateChange::Add {
+            member: f.next.owned_group_actor("target-next")?.identity,
+            role: SharedGroupRole::Member,
+        },
+    )?;
+    f.laptop.accept_shared_group_state(&unrelated, "target-laptop")?;
+    let mut unrelated_probe = f.probe.clone();
+    unrelated_probe.id = ramflux_protocol::encode_base64url([98; 32]);
+    unrelated_probe.base = unrelated.snapshot().clone();
+    f.laptop.reserve_group_transfer(&unrelated_probe, &unrelated)?;
+
+    let mut damaged = f.base.snapshot().clone();
+    damaged.signature = ramflux_protocol::encode_base64url([0; 64]);
+    f.laptop.account_db()?.persist_actor_state(
+        &format!("group-state/{}", ramflux_protocol::encode_base64url("group")),
+        &damaged,
+    )?;
+    let now = f.probe.expires_at.max(unrelated_probe.expires_at) + 301;
+    f.laptop.advance_group_transfer_deadlines(now)?;
+    assert!(f.laptop.account_db()?.actor_state_exists(&format!(
+        "{}{}",
+        maintenance::BACKOFF,
+        key(PENDING, "group")
+    ))?);
+    assert!(!f.laptop.account_db()?.actor_state_exists(&key(LEASE, "unrelated"))?);
+    f.close()
+}
+
+#[test]
+fn full_bad_data_backoff_table_skips_without_aborting_scan() -> Result<(), SdkError> {
+    let f = Fixture::new("deadline-backoff-cap")?;
+    let db = f.phone.account_db()?;
+    db.write_transaction(|| -> Result<(), SdkError> {
+        for n in 0..8192 {
+            let id = format!("test-cap/{n:04}");
+            db.persist_actor_state(&id, &serde_json::json!({"bad":true}))?;
+            db.persist_actor_state(
+                &format!("{}{id}", maintenance::BACKOFF),
+                &serde_json::json!({"next_at":i64::MAX,"expires_at":i64::MAX}),
+            )?;
+        }
+        Ok(())
+    })?;
+    let warnings = Warnings::default();
+    let _subscriber = tracing::subscriber::set_default(warnings.clone());
+    assert!(
+        maintenance::item_result::<()>(
+            db,
+            "test-deadline/cap",
+            now_unix_timestamp(),
+            Err(SdkError::InboundRejected("bad persisted row".into())),
+        )?
+        .is_none()
+    );
+    assert_eq!(db.actor_state_usage(maintenance::BACKOFF)?.0, 8192);
+    assert!(!db.actor_state_exists(&format!("{}test-deadline/cap", maintenance::BACKOFF))?);
+    assert_eq!(warnings.0.load(Ordering::Relaxed), 1);
+    f.close()
+}
