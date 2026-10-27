@@ -243,7 +243,7 @@ is not the commit proof: its body may report outcomes but cannot activate a home
 | Commit proof / `ramflux.identity.home_commit.v1` | `migration_id:N, account_anchor:H, old_node:Id, destination_node:Id, destination_key:K, previous_home_hash:H, next_home_epoch:U, authority_record_hash:H, authorization_hash:H, offer_hash:H, seal_hash:H, commit_deadline:Time, committed_at:Time, forward_until:Time, backlog_manifest_hash:H` | node A |
 | Node commit delivery / `ramflux.identity.home_commit_delivery.v1` | `migration_id:N, account_anchor:H, source_node:Id, audience_node:Id, authorization_hash:H, offer_hash:H, seal_hash:H, admission_evidence_hash:H, nonce:N, issued_at:Time, expires_at:Time` | node B |
 | Home attestation / `ramflux.identity.home_admission_attestation.v1` | `account_anchor:H, audience_node:Id, previous_home_hash:H, authority_record_hash:H, device_set_epoch:U, delivery_map_hash:H, nonce:N, issued_at:Time, expires_at:Time` | node A |
-| Noncommit fence / `ramflux.identity.home_noncommit_fence.v1` | `migration_id:N, authorization_hash:H, seal_hash:H, fenced_at:Time` | node A |
+| Noncommit fence / `ramflux.identity.home_noncommit_fence.v1` | `migration_id:N, authorization_hash:H, seal_hash:H?, fenced_at:Time` | node A |
 
 Identifiers are at most 256 UTF-8 bytes; origins/endpoints are at most 2048 and
 are parsed by their explicit URL/address type, not the Id grammar. Actor refs and
@@ -351,22 +351,31 @@ that derived hash. No extra primary signature after commit is needed, so B can
 complete a cooperative move while the initiating client is asleep.
 
 ResolveResult is exactly `{home:RecordEvidence,predecessors:[RecordEvidence]}`.
-RecordEvidence is `{record:HomeRecord,
+RecordEvidence is `{authority:Publication,record:HomeRecord,
 management_certificate_chain:[Envelope<MasterCertificate>],
 actor_certificate:Envelope<BranchCertificate>?,node_record:Envelope<NodeIdentityRecord>}`.
 Each committed entry supplies **its own historical evidence**, never just a
 current directory lookup. Genesis has an empty management chain and null actor;
 its node record verifies its node signer. A committed entry's node record is
 that of its commit issuer (the preceding home). The authorization names the
-next home's pinned key. Offer/admission ids, seal/activation receipts, full device
-rosters and delivery maps are not contact-resolution fields.
+next home's pinned key. The authority publication supplies the signed device set and compacted membership
+evidence needed to verify its hash, manager and the actor's non-revoked membership.
+Offer/admission ids, seal/activation receipts and delivery maps are not
+contact-resolution fields.
 
 Predecessors are ordered oldest-to-newest from the caller's cached hash (or
 genesis) and link without gaps to home. For each non-genesis entry, derive A's
 signer key from the previous verified record; verify A's node record, embedded
 proof, every referenced hash and management/actor signatures. committed_at must
-be inside that actor's lease and certified manager range and nondecreasing along
-the chain. Preserve known later home/custody floors. A contact that missed three
+be inside that actor's branch lease and nondecreasing along the chain.
+Manager ranges never decrease along the home chain. Same-range certificate forks
+are fenced; a later custody floor does not invalidate earlier historical moves.
+A's proof signs the authority_record_hash of its stored current record and thus
+establishes the manager's validity at commit. Never compare client master
+certificate issued_at with A's committed_at. Verify every record's authority hash,
+manager certificate and active non-revoked actor membership against its own
+publication. A recovery certificate can be signed while a move is commit_pending,
+then published after activation; contacts still accept the older valid move. Preserve known later home/custody floors. A contact that missed three
 moves including a primary replacement must verify all three historical
 certificate sets; compacting the current roster cannot erase this evidence.
 The typed historical verifier does not relax current-session branch proofs.
@@ -381,10 +390,10 @@ entry point and higher-range publication; direct publication must not bypass it.
 A/B persist the guard with migration transitions, serialize recovery publication
 and the A commit against the same account state, and retain it across restart.
 If recovery already won, the stale move fails `authority_update_required` before
-A commits. If migration won, recovery cannot install a new manager between commit
-and B activation. Normal current-custody publication/branch revocation remains
-available and never rolls back the committed home. Release the guard only after
-verified activation or proved noncommit. Integrating primary recovery into an
+A commits. If migration won, B refuses replacement until activation. A releases its own
+recovery guard atomically at commit because it is no longer the home. Normal current-custody publication/branch revocation remains
+available and never rolls back the committed home. B releases its guard only after verified activation or proved noncommit. A
+retains no guard after commit or proved noncommit. Integrating primary recovery into an
 in-doubt move is **MIGRATE-RECOVERY-01**, not an undocumented reconfirmation state
 that can leave both homes unusable. B still fails closed on conflicting custody
 floors; it must accept the same current publication needed for authorized sessions.
@@ -477,12 +486,21 @@ B's seal, management/actor signatures and **A's own stored current v3 head**.
 Verify the exact predecessor and custody range, admission deadline, actor lease
 and revocations, destination pin/admission, map, 600-second maximum and allowed
 24-hour forwarding duration. Do not accept a caller-supplied `now`. An A status
-query for an unknown id must include the verified seal/authorization evidence
+query for an unknown authorization must include the verified Authorization alone
 before A can assert deadline expiry; an arbitrary guessed id does not acquire a
-terminal fence. The terminal noncommit CAS and commit CAS share the same lock/
+terminal fence. Both CAS operations are keyed by authorization_hash, not the seal
+or migration id. Check the permanent commit index first; an existing commit
+returns its proof. An optional seal_hash on a fence is diagnostic only: B matches
+the authorization hash. Only account authority can cancel before expiry; mesh
+peers can request status/expiry and cannot cancel. The terminal noncommit CAS and commit CAS share the same lock/
 durable state, so a delayed request cannot win after A has proved noncommit.
 
 A applies both commit_deadline and the account-time/A-clock hard bound above.
+All commit, fence and cleanup checks use max(now, persisted trusted-time floor),
+so rollback cannot revive a first commit after its fence was pruned. Admitted A/B
+clocks must stay within S=300 seconds; attestation checks this bound. A uses B's
+signed deadline without an added grace interval, so honest skew can shorten the
+usable window; the independent account-signed hard bound is never extended.
 The commit must be one durable transaction/atomic batch that:
 
 - CASes home base E/hash to this unique E+1;
@@ -677,7 +695,7 @@ it cannot use a revoked actor's pre-commit authorization to evade A's checks.
 | `intent` | Verify pins, local v3 mode and known home; persist id/base. | Checking destination. |
 | `prepare_sent` | Retry same request or query B; persist signed offer. | Requesting admission. |
 | `awaiting_custody_unlock` | Confirm exact target/base, load separate custody authority and sign authorization. | Unlock/confirm migration. |
-| `seal_sent` | Query B before retry; aborted/expired is terminal; sealed recovers its deadline. | Authorizing move. |
+| `seal_sent` | Query B or query A with the Authorization; on A fence enter aborted/expired; aborted/expired is terminal; sealed recovers its deadline. | Authorizing move. |
 | `sealed` | Persist B receipt; B's durable `commit_pending_at_A` courier runs independently. | Waiting for old home; cancellation races A commit. |
 | `commit_pending` | Query A/B; pause uncertain outgoing submissions; never activate from a timer. | Waiting / needs attention if A unavailable. |
 | `activate_sent` | Submit/recover A proof at B or observe B's autonomous receipt-based activation. Query B after a lost reply. | Activating destination. |
@@ -872,7 +890,9 @@ existing proxy-receipt mode. `router_wal.rs`/`router.rs` install dormant inboxes
 no delivery ACK before the matching commit proof activates that exact home.
 `apps/ramflux-router/src/router_runtime.rs` runs the durable courier on admitted
 mesh via `apps/ramflux-federation/src/flow.rs` and `federation_crypto.rs`, relayed
-to `/internal/home-migration/{attest,commit,status}` in `admin_http.rs`. Implement
+to federation `apps/ramflux-federation/src/admin_http.rs`, then router internal
+`/internal/home-migration/{attest,commit,status}` in
+`apps/ramflux-router/src/handlers.rs`. Implement
 A-clock-bound deadline queries and the 16-per-peer in-doubt cap.
 
 **SRV-01d old home A:** attest atomically creates node Genesis; commit against
@@ -989,3 +1009,42 @@ never constructs a destination proof from its seed or calls an admin apply route
 Implementation remains gated on design approval, the merged forwarding train,
 completed v3-only ordinary clients and realnet evidence. Native unit/bus evidence
 must not be described as this live acceptance boundary.
+
+## Checkpoint corrections: authorization finality and historical authority
+
+Without a cached head, accept genesis only from the independently pinned node
+already used for this contact, including the issuer of a signed migrated refusal.
+An arbitrary admitted node cannot bootstrap another contact's home. B asks A to
+attest only when requester.account_anchor equals the target anchor. The closed
+A-bound AttestRequest carries the owner's Signed<Control> with action attest,
+audience A, fresh nonce, current authority hash and a HOME_ATTEST_REQUEST-framed
+payload hash over {account_anchor,destination_node,nonce}. A verifies this before
+creating genesis. B-to-A terminal queries use a node-signed PeerStatus containing
+version, account_anchor, migration_id, authorization_hash, audience_node,
+destination_node, nonce, issued_at and expires_at under home_peer_status.v1;
+peer admission and destination matching remain mandatory. Neither peer request
+grants cancellation authority.
+
+Prepare.expires_at must be after issued_at and no more than 300 seconds later.
+A cancel from seal_sent requires only the verified Authorization; B withholding
+its seal reply cannot wedge the owner's terminal query. After the signed hard
+bound A reissues a fence from that Authorization, after checking permanent proofs.
+The fence remains until that bound regardless of peer-supplied operation fields.
+Use a separate home_backlog_manifest.v1 domain for the high-water cursor manifest.
+
+SDK-01a re-stores a primary credential into a versioned Keychain item with
+userPresence (security-framework 3.7.0), reads it back under OS presence, then
+journal-deletes the old flags-0 item. Resume this journal after crashes; do not
+enable migration while an old unprotected primary item remains. Access-control
+flags cannot be changed in place. Branch items keep flags 0 so routine sessions
+do not prompt. Existence checks use attributes only or authentication-UI-skip;
+never trigger presence by probing whether an item exists. The provider has no
+custom operation prompt text API, so the UI explains the destination separately.
+A daemon must run in the user's GUI/login session for OS interaction; headless
+or noninteractive daemons refuse rather than silently bypass presence. Previously
+copied primary seeds remain a residual risk. The two-Mac manual demo step checks
+both successful presence and cancel-without-commit.
+
+The SDK s51 work item refers to the separate ramflux-itest repository. Its final
+fixture uses real account signatures and both live homes; product tests cannot
+substitute for that acceptance boundary.
