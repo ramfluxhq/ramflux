@@ -38,23 +38,23 @@ impl RamfluxClient {
         now: u64,
     ) -> Result<(), SdkError> {
         let verified = verify_native_authority(manifest, expected, now)?;
-        if let Some(human) = &manifest.custodian_publication {
-            self.observe_custody_manifest(
-                &CustodyManifest {
-                    publication: human.clone(),
-                    custodian_publication: None,
-                    devices: Vec::new(),
-                },
-                &human.record.body.account_anchor,
-                now,
-            )?;
-        }
+        self.observe_custodian_manifest(manifest, now)?;
         let db = self.account_db()?;
         let state_key = key(expected)?;
         // Persist a detected fence even though the caller receives a refusal.
         let outcome = db.write_transaction(|| -> Result<PinOutcome, SdkError> {
             let mut state =
                 db.load_actor_state::<RetainedAuthority>(&state_key)?.unwrap_or_default();
+            let previous_devices =
+                state.publication.as_ref().map_or_else(Vec::new, |publication| {
+                    publication
+                        .record
+                        .body
+                        .devices
+                        .iter()
+                        .map(|entry| entry.device_id.clone())
+                        .collect()
+                });
             let outcome = state.pins.observe(&verified)?;
             if outcome == PinOutcome::Advanced
                 || (outcome == PinOutcome::Unchanged && state.publication.is_none())
@@ -63,8 +63,13 @@ impl RamfluxClient {
                 state.custodian.clone_from(&manifest.custodian_publication);
             }
             db.persist_actor_state(&state_key, &state)?;
+            if outcome != PinOutcome::Fenced {
+                self.apply_custody_retirements(&verified, &previous_devices)?;
+            }
+
             Ok(outcome)
         })?;
+        self.finish_pair_retirement()?;
         if outcome == PinOutcome::Fenced {
             return Err(invalid("custody authority equivocation fenced"));
         }
@@ -128,6 +133,25 @@ impl RamfluxClient {
         })
     }
 
+    fn observe_custodian_manifest(
+        &self,
+        manifest: &CustodyManifest,
+        now: u64,
+    ) -> Result<(), SdkError> {
+        if let Some(human) = &manifest.custodian_publication {
+            self.observe_custody_manifest(
+                &CustodyManifest {
+                    publication: human.clone(),
+                    custodian_publication: None,
+                    devices: Vec::new(),
+                },
+                &human.record.body.account_anchor,
+                now,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) fn custody_mode_observed(&self, anchor: &str) -> Result<bool, SdkError> {
         Ok(self
             .born_v3_account
@@ -185,6 +209,13 @@ impl RamfluxClient {
         )?;
         state.pins.require_current(&verified)?;
         Ok(Some(verified))
+    }
+
+    pub(crate) fn custody_epoch_floor(&self, anchor: &str) -> Result<Option<u64>, SdkError> {
+        Ok(self
+            .account_db()?
+            .load_actor_state::<RetainedAuthority>(&key(anchor)?)?
+            .and_then(|state| state.pins.accepted_epoch_floor(anchor)))
     }
 
     pub(crate) fn retire_custody_directory_payload(&self, anchor: &str) -> Result<(), SdkError> {

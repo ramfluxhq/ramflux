@@ -10,6 +10,7 @@ mod message_origin;
 mod operations;
 mod outbox;
 mod ratchet_metadata;
+mod ratchet_retirement;
 mod receipt_retention;
 mod recovery;
 mod retention;

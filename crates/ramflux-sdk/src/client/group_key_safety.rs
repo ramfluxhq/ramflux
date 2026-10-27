@@ -19,9 +19,7 @@ impl RamfluxClient {
             // principal. It never lends the claimant that pin's membership or write authority.
             for root in db.pinned_group_root_metadata(&manifest.principal_id, &device.device_id)? {
                 if let Ok(identity) = self.device_identity_for_root(&root, &device.device_id)
-                    && self
-                        .observed_device_set(&root)?
-                        .is_some_and(|record| record.principal_id == manifest.principal_id)
+                    && self.group_pin_owner_matches(&root, &manifest.principal_id)?
                 {
                     identities.insert(identity);
                 }
@@ -112,5 +110,13 @@ impl RamfluxClient {
             }
         }
         Ok(())
+    }
+    fn group_pin_owner_matches(&self, root: &str, principal: &str) -> Result<bool, SdkError> {
+        Ok(self
+            .current_custody_authority(root, crate::custody::network_now()?)?
+            .is_some_and(|record| record.envelope().body.principal_id == principal)
+            || self
+                .observed_device_set(root)?
+                .is_some_and(|record| record.principal_id == principal))
     }
 }

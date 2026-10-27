@@ -40,6 +40,21 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    pub(super) fn directory_snapshot_is_obsolete(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<bool, SdkError> {
+        if let Some(native) = &manifest.custody {
+            return Ok(self
+                .custody_epoch_floor(&manifest.principal_commitment)?
+                .is_some_and(|floor| floor > native.publication.record.body.device_set_epoch));
+        }
+        Ok(self
+            .observed_device_set(&manifest.principal_commitment)?
+            .zip(manifest.signed_device_set.as_ref())
+            .is_some_and(|(current, old)| current.device_set_epoch > old.device_set_epoch))
+    }
+
     /// Only called after the same-root envelope and encrypted history object authenticate.
     pub(super) fn restore_own_history_authority(
         &self,
@@ -61,11 +76,7 @@ impl RamfluxClient {
                 ));
             }
             super::contact::verify_device_manifest(manifest, &manifest.principal_commitment)?;
-            if self
-                .observed_device_set(&manifest.principal_commitment)?
-                .zip(manifest.signed_device_set.as_ref())
-                .is_some_and(|(current, old)| current.device_set_epoch > old.device_set_epoch)
-            {
+            if self.directory_snapshot_is_obsolete(manifest)? {
                 continue;
             }
             self.persist_identity_directory(manifest)?;
