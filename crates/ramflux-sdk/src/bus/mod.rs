@@ -18,6 +18,7 @@ mod group_delivery;
 pub mod io;
 mod journal;
 mod lifecycle;
+mod message_projection;
 mod metadata;
 mod mutations;
 pub(crate) mod own_device_copy;

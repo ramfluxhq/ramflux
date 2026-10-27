@@ -30,6 +30,7 @@ mod contact_requests;
 pub mod conversation_list;
 pub mod conversation_projection;
 pub mod conversation_state;
+mod deleted_messages;
 pub mod device_directory;
 mod device_metadata;
 pub mod friend;
@@ -63,6 +64,7 @@ mod voice;
 
 pub struct AccountDb {
     pub local_account_id: String,
+    principal_commitment: String,
     pub path: PathBuf,
     mode: EncryptionMode,
     current_key: AccountDbKey,
@@ -92,6 +94,7 @@ impl AccountDb {
         verify_or_install_key_fingerprint(&connection, key)?;
         let db = Self {
             local_account_id: local_account_id.to_owned(),
+            principal_commitment: account.principal_commitment,
             path,
             mode,
             current_key: key.clone(),
@@ -109,6 +112,7 @@ impl AccountDb {
         crate::schema_receipt_identity::upgrade(&db.connection)?;
         crate::schema_group_sender_identity::upgrade(&db.connection)?;
         crate::schema_group_control_identity::upgrade(&db.connection)?;
+        db.scrub_deleted_messages()?;
         Ok(db)
     }
 

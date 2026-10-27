@@ -91,29 +91,27 @@ impl AccountDb {
         }
         drop(statement);
 
-        let mut tombstones = Vec::new();
-        for message_id in message_ids {
-            let tombstone_id = disappearing_tombstone_id(conversation_id, &message_id);
-            self.connection.execute(
-                "UPDATE direct_message_projection
-                    SET deleted = 1, encrypted_body = x''
-                  WHERE conversation_id = ?1 AND message_id = ?2 AND deleted = 0",
-                params![conversation_id, message_id],
-            )?;
-            self.connection.execute(
-                "INSERT OR REPLACE INTO message_tombstone_projection
-                    (tombstone_id, conversation_id, message_id, delete_scope, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![tombstone_id, conversation_id, message_id, policy.scope, now],
-            )?;
-            self.remove_message_origin(conversation_id, &message_id)?;
-            tombstones.push(MessageTombstoneRecord {
-                tombstone_id,
-                conversation_id: conversation_id.to_owned(),
-                message_id,
-                delete_scope: policy.scope.clone(),
-            });
-        }
+        let tombstones = self.write_transaction(|| {
+            let mut tombstones = Vec::new();
+            for message_id in message_ids {
+                let tombstone_id = disappearing_tombstone_id(conversation_id, &message_id);
+                self.scrub_message_for_deletion(conversation_id, &message_id, None)?;
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO message_tombstone_projection
+                        (tombstone_id, conversation_id, message_id, delete_scope, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![tombstone_id, conversation_id, message_id, policy.scope, now],
+                )?;
+                tombstones.push(MessageTombstoneRecord {
+                    tombstone_id,
+                    conversation_id: conversation_id.to_owned(),
+                    message_id,
+                    delete_scope: policy.scope.clone(),
+                });
+            }
+            Ok::<Vec<MessageTombstoneRecord>, StorageError>(tombstones)
+        })?;
+        self.checkpoint_retired_secrets_if_committed()?;
         Ok(tombstones)
     }
 
