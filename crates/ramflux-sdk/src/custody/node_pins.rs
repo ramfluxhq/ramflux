@@ -235,3 +235,68 @@ pub(super) fn log_unbound(root: &Path) -> Result<(), SdkError> {
     file.sync_all()?;
     Ok(())
 }
+
+impl NodePins {
+    pub(super) fn dm_was_acknowledged(&self, key: &str, now: u64) -> Result<bool, SdkError> {
+        let _lock = self.lock()?;
+        let path = self.root.join("dm-receipts.json");
+        if !path.try_exists()? {
+            return Ok(false);
+        }
+        let receipts: std::collections::BTreeMap<String, u64> = read(&path, 512 * 1024)?;
+        Ok(receipts.get(key).is_some_and(|expiry| *expiry >= now))
+    }
+    pub(super) fn remember_dm_acknowledgement(
+        &self,
+        key: String,
+        expiry: u64,
+        now: u64,
+    ) -> Result<(), SdkError> {
+        let _lock = self.lock()?;
+        let path = self.root.join("dm-receipts.json");
+        let mut receipts: std::collections::BTreeMap<String, u64> = if path.try_exists()? {
+            read(&path, 512 * 1024)?
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        receipts.retain(|_, until| *until >= now);
+        if receipts.contains_key(&key) {
+            return Ok(());
+        }
+        if receipts.len() >= 4096 {
+            return Err(ramflux_protocol::custody::CustodyRefusal::Capacity.into());
+        }
+        if expiry < now {
+            return Err(invalid());
+        }
+        receipts.insert(key, expiry);
+        let temporary = self.root.join(format!(
+            ".dm-receipts-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        create(&temporary, &serde_json::to_vec(&receipts)?)?;
+        fs::rename(temporary, path)?;
+        fs::File::open(&self.root)?.sync_all()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    #[test]
+    fn acknowledged_dm_receipts_survive_reopen_until_signed_expiry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::custody::tests::Root::new()?;
+        let pins = NodePins::new(&root.0, "node", &ramflux_crypto::fixture_public_key_base64url())?;
+        assert!(!pins.dm_was_acknowledged("message", 100)?);
+        pins.remember_dm_acknowledgement("message".into(), 200, 100)?;
+        let restored =
+            NodePins::new(&root.0, "node", &ramflux_crypto::fixture_public_key_base64url())?;
+        assert!(restored.dm_was_acknowledged("message", 101)?);
+        pins.remember_dm_acknowledgement("message".into(), 200, 101)?;
+        assert!(!restored.dm_was_acknowledged("message", 201)?);
+        assert!(pins.remember_dm_acknowledgement("expired".into(), 200, 201).is_err());
+        Ok(())
+    }
+}

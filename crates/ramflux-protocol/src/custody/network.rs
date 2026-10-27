@@ -136,6 +136,9 @@ pub enum CustodyServerFrame {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodyMeshRequest {
+    Disconnect {
+        connection_id: String,
+    },
     NodeIdentity {
         record_hash: Option<String>,
     },

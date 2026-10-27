@@ -173,8 +173,16 @@ fn interval(start: u64, until: u64, overlap: u64) -> Result<(), CryptoError> {
     Ok(())
 }
 fn structure(body: &NodeIdentityRecord) -> Result<(), CryptoError> {
+    if let Some(hash) = &body.client_tls_certificate_sha256 {
+        bytes(hash, 32)?;
+    }
     if body.schema != domain::CUSTODY_NODE_RECORD || body.version != 1 {
         return Err(reject("unsupported custody node record"));
+    }
+    if body.channel_binding_modes.contains(&ramflux_protocol::custody::BindingMode::DirectExporter)
+        && body.client_tls_certificate_sha256.is_none()
+    {
+        return Err(reject("direct custody mode requires a public certificate pin"));
     }
     id(&body.node_id)?;
     key(&body.node_signing_public_key)?;

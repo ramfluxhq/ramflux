@@ -24,10 +24,16 @@ impl Drop for Shutdown {
     }
 }
 async fn create(socket: &Path, id: &str, principal: &str) -> Result<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut bus = loop {
         match CustodyBusClient::connect(socket).await {
             Ok(c) => break c,
-            Err(crate::SdkError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(crate::SdkError::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) && tokio::time::Instant::now() < deadline =>
+            {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             Err(e) => return Err(e.into()),
@@ -53,13 +59,14 @@ async fn create(socket: &Path, id: &str, principal: &str) -> Result<String> {
     assert_eq!(confirmed.state, CreationState::NetworkingPending);
     Ok(anchor)
 }
-fn node(now: u64) -> Result<ramflux_crypto::custody::VerifiedNodeRecord> {
+fn node(now: u64, certificate_hash: String) -> Result<ramflux_crypto::custody::VerifiedNodeRecord> {
     let key = ramflux_crypto::fixture_signing_key();
     let body = NodeIdentityRecord {
         schema: ramflux_protocol::domain::CUSTODY_NODE_RECORD.into(),
         version: 1,
         node_id: "node".into(),
         node_signing_public_key: ramflux_protocol::encode_base64url(key.verifying_key().to_bytes()),
+        client_tls_certificate_sha256: Some(certificate_hash),
         epoch: 1,
         previous_record_hash: None,
         issued_at: now,
@@ -133,7 +140,7 @@ async fn start_server(
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
         ramflux_transport::tcp_gateway_server_config(&ramflux_transport::MeshTlsConfig {
             ca_cert: ca.clone(),
-            service_cert: cert,
+            service_cert: cert.clone(),
             service_key: key,
         })?,
     ));
@@ -141,8 +148,7 @@ async fn start_server(
     let store = Arc::new(ramflux_node_core::RouterRedbStore::open(root.0.join("router.redb"))?);
     store.save_router(&router)?;
     let service = Arc::new(ramflux_node_core::CustodyService::new(
-        node(super::network::now()?)?,
-        "router".into(),
+        node(super::network::now()?, ramflux_transport::custody_certificate_file_hash(&cert)?)?,
         false,
         &store,
         super::network::now()?,
@@ -196,15 +202,22 @@ async fn custody_live_bus_creation_tls_registration_session_and_bidirectional_dm
             ca_certificate: ca.clone(),
             node_id: "node".into(),
             node_public_key: ramflux_crypto::fixture_public_key_base64url(),
-            audience: "router".into(),
+            audience: "node".into(),
             binding_mode: BindingMode::DirectExporter,
             allow_no_channel_binding: false,
+            allow_experimental_native_dm: true,
             timeout: Duration::from_secs(15),
         };
         let mut alice = CustodyConnection::connect(network("alice"), vault.clone()).await?;
         let mut bob = CustodyConnection::connect(network("bob"), vault.clone()).await?;
         assert_eq!(alice.account().state(), CreationState::Live);
         assert_eq!(bob.account().state(), CreationState::Live);
+        bob.experimental_native_dm = false;
+        assert!(matches!(
+            bob.receive_dm(0).await,
+            Err(crate::SdkError::CustodyNetwork(CustodyRefusal::Unsupported))
+        ));
+        bob.experimental_native_dm = true;
         let alice_ref = DeviceRef {
             account_anchor: alice_anchor,
             device_id: "primary".into(),

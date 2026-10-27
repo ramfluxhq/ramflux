@@ -19,6 +19,7 @@ fn node_body() -> NodeIdentityRecord {
         version: 1,
         node_id: "node".into(),
         node_signing_public_key: encode_base64url(key(8).verifying_key().to_bytes()),
+        client_tls_certificate_sha256: Some(encode_base64url([29; 32])),
         epoch: 1,
         previous_record_hash: None,
         issued_at: NOW,
@@ -39,7 +40,7 @@ fn node_body() -> NodeIdentityRecord {
             overlap_until: NOW + 2_591_900 + 605_400,
             status: ReceiptKeyStatus::Active,
             proxy_id: "gateway".into(),
-            audiences: vec!["router".into()],
+            audiences: vec!["node".into()],
         }],
         revoked_proxy_key_ids: vec![],
         channel_binding_modes: vec![BindingMode::DirectExporter, BindingMode::HomeRelayReceipt],
@@ -63,7 +64,8 @@ fn authority() -> TestResult<VerifiedRecord> {
 fn challenge(mode: BindingMode) -> BranchChallenge {
     BranchChallenge {
         challenge_nonce: encode_base64url([9; 32]),
-        audience: "router".into(),
+        action_hash: encode_base64url([8; 32]),
+        audience: "node".into(),
         binding_mode: mode,
         issued_at: NOW,
         expires_at: NOW + 300,
@@ -89,7 +91,8 @@ fn proof(mode: BindingMode) -> TestResult<Envelope<BranchProofV3>> {
             record_hash: object_hash(authority.envelope())?,
             proof_id: encode_base64url([10; 32]),
             challenge_nonce: encode_base64url([9; 32]),
-            audience: "router".into(),
+            action_hash: encode_base64url([8; 32]),
+            audience: "node".into(),
             binding_mode: mode,
             transport_binding: branch_exporter_hash(&[20; 32]),
             issued_at: NOW,
@@ -144,11 +147,12 @@ fn direct_proof_requires_the_same_live_tls_exporter_challenge_audience_and_domai
         )
         .is_err()
     );
-    for field in ["audience", "nonce", "mode", "domain"] {
+    for field in ["audience", "nonce", "action", "mode", "domain"] {
         let mut altered = proof.clone();
         match field {
             "audience" => altered.body.audience = "other-service".into(),
             "nonce" => altered.body.challenge_nonce = encode_base64url([22; 32]),
+            "action" => altered.body.action_hash = encode_base64url([23; 32]),
             "mode" => altered.body.binding_mode = BindingMode::NoChannelBinding,
             _ => {}
         }

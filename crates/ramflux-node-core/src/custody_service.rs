@@ -67,7 +67,6 @@ impl CustodyService {
     /// Rejects unadvertised no-binding mode and persistence/continuity failures.
     pub fn new(
         node: VerifiedNodeRecord,
-        audience: String,
         allow_unbound: bool,
         store: &RouterRedbStore,
         now: u64,
@@ -78,6 +77,7 @@ impl CustodyService {
             return Err(CustodyRefusal::BindingRefused);
         }
         store.observe_custody_node(&node, now).map_err(persistence)?;
+        let audience = node.envelope().body.node_id.clone();
         Ok(Self {
             node,
             audience,
@@ -85,6 +85,17 @@ impl CustodyService {
             leases: Mutex::new(CustodyLeases::default()),
             admission: Mutex::new(()),
         })
+    }
+    /// Compare a separately provisioned public listener certificate with signed metadata.
+    #[must_use]
+    pub fn accepts_public_certificate(&self, hash: &str) -> bool {
+        self.node.envelope().body.client_tls_certificate_sha256.as_deref() == Some(hash)
+    }
+    /// Release disconnected grants without removing consumed nonce/proof markers.
+    pub fn disconnect(&self, peer: &str, connection: &str) {
+        if let Ok(holder) = holder(peer, connection) {
+            self.leases().disconnect(&holder);
+        }
     }
     fn leases(&self) -> std::sync::MutexGuard<'_, CustodyLeases> {
         self.leases.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -124,6 +135,10 @@ impl CustodyService {
             ..scope
         };
         match request {
+            CustodyMeshRequest::Disconnect { connection_id } => {
+                self.leases().disconnect(&holder(scope.peer, &connection_id)?);
+                Ok(CustodyServerFrame::Closed)
+            }
             CustodyMeshRequest::NodeIdentity { record_hash } => {
                 let store = scope.store;
                 let record = if let Some(hash) = record_hash {

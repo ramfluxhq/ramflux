@@ -32,6 +32,8 @@ pub struct CustodyNetworkConfig {
     pub audience: String,
     pub binding_mode: BindingMode,
     pub allow_no_channel_binding: bool,
+    /// Explicit temporary non-forward-secret DM opt-in; normal clients leave this false.
+    pub allow_experimental_native_dm: bool,
     pub timeout: Duration,
 }
 /// Owns a live TLS connection and its session; neither is serializable or backed up.
@@ -43,6 +45,7 @@ pub struct CustodyConnection {
     pub(super) pins: NodePins,
     pub(super) session: Option<CustodySession>,
     pub(super) timeout: Duration,
+    pub(super) experimental_native_dm: bool,
     mode: BindingMode,
     audience: String,
 }
@@ -109,6 +112,14 @@ impl CustodyConnection {
         {
             return Err(CustodyRefusal::BindingRefused.into());
         }
+        if binding_mode == BindingMode::DirectExporter {
+            let expected = record
+                .body
+                .client_tls_certificate_sha256
+                .as_deref()
+                .ok_or(CustodyRefusal::BindingRefused)?;
+            ramflux_transport::verify_custody_peer_certificate(&stream, expected)?;
+        }
         let pins = super::discovery::authenticate(&config, &mut stream, *record).await?;
         if binding_mode == BindingMode::NoChannelBinding {
             tracing::warn!(node_id=%config.node_id,"custody connection explicitly uses no_channel_binding");
@@ -125,6 +136,7 @@ impl CustodyConnection {
             pins,
             session: None,
             timeout: config.timeout,
+            experimental_native_dm: config.allow_experimental_native_dm,
             mode: binding_mode,
             audience,
         };
@@ -176,6 +188,9 @@ impl CustodyConnection {
         Ok(())
     }
 
+    pub(super) fn require_experimental_dm(&self) -> Result<(), SdkError> {
+        if self.experimental_native_dm { Ok(()) } else { Err(CustodyRefusal::Unsupported.into()) }
+    }
     #[must_use]
     pub fn session(&self) -> Option<&CustodySession> {
         self.session.as_ref()
@@ -222,7 +237,10 @@ impl CustodyConnection {
         )
         .await?;
         let CustodyServerFrame::Challenge { challenge } = response else { return Err(invalid()) };
-        if challenge.binding_mode != self.mode || challenge.audience != self.audience {
+        if challenge.binding_mode != self.mode
+            || challenge.audience != self.audience
+            || challenge.action_hash != ramflux_protocol::custody::custody_action_hash(&action)?
+        {
             return Err(CustodyRefusal::BindingRefused.into());
         }
         let nonce: [u8; 32] = ramflux_protocol::decode_base64url(&challenge.challenge_nonce)
@@ -251,6 +269,7 @@ impl CustodyConnection {
                 record_hash: object_hash(self.account.record())?,
                 proof_id: random()?,
                 challenge_nonce: challenge.challenge_nonce,
+                action_hash: challenge.action_hash,
                 audience: challenge.audience,
                 binding_mode: self.mode,
                 transport_binding: branch_exporter_hash(&material),
