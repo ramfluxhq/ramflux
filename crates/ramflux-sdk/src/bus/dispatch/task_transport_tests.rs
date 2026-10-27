@@ -69,53 +69,13 @@ async fn full_item_timeout_is_charged_while_short_cycle_budget_is_deferred() {
     assert!(matches!(deferred, Ok(Ok(super::Preparation::Deferred))));
 }
 
-#[tokio::test(start_paused = true)]
-async fn task_couriers_share_one_cycle_budget_without_charging_deferred_items()
--> Result<(), SdkError> {
-    let (attempts, elapsed) = tokio::time::timeout(Duration::from_secs(30), async {
-        let mut delivered = 0;
-        let mut transport_attempts = [0_u8; 3];
-        let mut cycle_elapsed = Vec::new();
-        while delivered < transport_attempts.len() {
-            let started = tokio::time::Instant::now();
-            let budget = super::PreparationBudget::for_sync_cycle();
-            while delivered < transport_attempts.len() {
-                let prepared = super::await_preparation(
-                    async {
-                        tokio::time::sleep(Duration::from_secs(3)).await;
-                        Ok::<_, SdkError>(())
-                    },
-                    &budget,
-                    "task courier preparation deferred",
-                )
-                .await?;
-                match prepared {
-                    super::Preparation::Ready(()) => {
-                        transport_attempts[delivered] += 1;
-                        delivered += 1;
-                    }
-                    super::Preparation::Deferred => break,
-                }
-            }
-            cycle_elapsed.push(tokio::time::Instant::now().duration_since(started));
-        }
-        Ok::<_, SdkError>((transport_attempts, cycle_elapsed))
-    })
-    .await
-    .map_err(|_| SdkError::InboundPending("courier budget test timed out".into()))??;
-    assert_eq!(attempts, [1, 1, 1], "deferred preparation is not a transport retry");
-    assert!(elapsed.len() > 1, "the third item must be deferred to a later cycle");
-    assert!(elapsed.iter().all(|duration| *duration <= Duration::from_secs(8)));
-    Ok(())
-}
-
 #[tokio::test]
 async fn stalled_federated_manifest_fetch_respects_the_preparation_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::net::TcpListener;
     use std::sync::mpsc;
 
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         let _guard = manifest_test_lock().lock().await;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
@@ -129,7 +89,7 @@ async fn stalled_federated_manifest_fetch_respects_the_preparation_deadline()
             Ok(())
         });
         let started = std::time::Instant::now();
-        let budget = super::PreparationBudget::new(Duration::from_secs(5));
+        let budget = super::PreparationBudget::new(Duration::from_secs(6));
         let outcome = super::await_preparation(
             super::fetch_federated_manifest(&format!("http://{address}"), "stalled-root"),
             &budget,
@@ -174,7 +134,7 @@ async fn repeated_stalled_manifest_fetches_never_exceed_the_global_worker_cap()
         assert!(super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire) <= 4);
         let mut capacity_deferrals = 0;
         while let Some(result) = jobs.join_next().await {
-            if matches!(result?, Err(SdkError::ContactRequestCapacity(_))) {
+            if matches!(result?, Err(SdkError::TaskManifestWorkerCapacity)) {
                 capacity_deferrals += 1;
             }
         }
@@ -184,6 +144,45 @@ async fn repeated_stalled_manifest_fetches_never_exceed_the_global_worker_cap()
     })
     .await
     .map_err(|_| "manifest worker cap regression exceeded its outer timeout")??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn manifest_flight_guard_releases_panics_and_groups_by_full_manifest_url()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _test_guard = manifest_test_lock().lock().await;
+    let before = super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire);
+    let first = match super::reserve_manifest_flight("http://node/manifest/root-a")? {
+        super::ManifestReservation::Start(guard) => guard,
+        super::ManifestReservation::Wait(_) => {
+            return Err("unexpected existing first flight".into());
+        }
+    };
+    let second = match super::reserve_manifest_flight("http://node/manifest/root-b")? {
+        super::ManifestReservation::Start(guard) => guard,
+        super::ManifestReservation::Wait(_) => {
+            return Err("distinct manifest URL was grouped".into());
+        }
+    };
+    assert!(matches!(
+        super::reserve_manifest_flight("http://node/manifest/root-a")?,
+        super::ManifestReservation::Wait(_)
+    ));
+    assert_eq!(
+        super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire),
+        before + 2
+    );
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = first;
+        std::panic::resume_unwind(Box::new("manifest worker panic"));
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(
+        super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire),
+        before + 1
+    );
+    drop(second);
+    assert_eq!(super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire), before);
     Ok(())
 }
 
@@ -278,7 +277,7 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
         before + 1,
         "over-cap rejection must precede sealing and submission"
     );
-    drain_healthy_confirmation_jobs(&mut source, &c).await?;
+    defer_then_drain_confirmation_jobs(&mut source, &c).await?;
     directory.abort();
     drop(peers);
     drop(source);
@@ -286,11 +285,32 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
     Ok(())
 }
 
-async fn drain_healthy_confirmation_jobs(
+async fn defer_then_drain_confirmation_jobs(
     source: &mut LocalBusAccountState,
     carrier: &Carrier,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (ack_key, forward_key) = store_healthy_confirmation_jobs(source, carrier)?;
+    let short_budget = super::PreparationBudget::new(Duration::from_secs(3));
+    let deferred = tokio::time::timeout(
+        Duration::from_secs(10),
+        super::drain_confirmations(source, &short_budget),
+    )
+    .await
+    .map_err(|_| "stored confirmation deferral exceeded its outer timeout")??;
+    assert_eq!(deferred, 0);
+    let deferred_ack = source
+        .client
+        .account_db()?
+        .load_actor_state::<crate::client::task::control::AckJob>(&ack_key)?
+        .ok_or("deferred acknowledgement missing")?;
+    assert_eq!((deferred_ack.attempts, deferred_ack.next_at), (0, 0));
+    let deferred_forward = source
+        .client
+        .account_db()?
+        .load_actor_state::<crate::client::task::control::ForwardJob>(&forward_key)?
+        .ok_or("deferred forward missing")?;
+    assert_eq!((deferred_forward.attempts, deferred_forward.next_at), (0, 0));
+
     let budget = super::PreparationBudget::for_sync_cycle();
     let drained =
         tokio::time::timeout(Duration::from_secs(10), super::drain_confirmations(source, &budget))

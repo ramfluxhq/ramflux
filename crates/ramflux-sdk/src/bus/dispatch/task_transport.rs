@@ -15,9 +15,11 @@ use std::sync::{
 // Preparation refreshes verified own and peer directories before sealing. Keep
 // task couriers bounded while allowing normal latency on CPU-constrained hosts.
 const TASK_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
-const TASK_COURIER_PREPARATION_BUDGET: Duration = Duration::from_secs(8);
+const TASK_COURIER_PREPARATION_BUDGET: Duration = Duration::from_secs(12);
+const TASK_APPROVAL_PREPARATION_BUDGET: Duration = Duration::from_secs(6);
 
 pub(crate) struct PreparationBudget {
+    started: tokio::time::Instant,
     deadline: tokio::time::Instant,
 }
 
@@ -27,19 +29,31 @@ impl PreparationBudget {
     }
 
     pub(super) fn new(duration: Duration) -> Self {
-        Self { deadline: tokio::time::Instant::now() + duration }
+        let started = tokio::time::Instant::now();
+        Self { started, deadline: started + duration }
     }
 
-    pub(super) fn exhausted(&self) -> bool {
-        tokio::time::Instant::now() >= self.deadline
+    pub(super) fn approval_share(&self) -> Self {
+        Self {
+            started: self.started,
+            deadline: self.deadline.min(self.started + TASK_APPROVAL_PREPARATION_BUDGET),
+        }
     }
 
-    fn next_timeout(&self) -> Option<(Duration, bool)> {
+    pub(super) fn can_start_item(&self) -> bool {
         let remaining = self.deadline.saturating_duration_since(tokio::time::Instant::now());
-        (!remaining.is_zero()).then_some((
-            remaining.min(TASK_PREPARATION_TIMEOUT),
-            remaining < TASK_PREPARATION_TIMEOUT,
-        ))
+        remaining >= TASK_PREPARATION_TIMEOUT
+    }
+
+    fn next_timeout(&self) -> Option<Duration> {
+        self.can_start_item().then_some(TASK_PREPARATION_TIMEOUT)
+    }
+}
+
+pub(super) fn rotate_to_cursor<T>(rows: &mut [(String, T)], cursor: usize) {
+    if !rows.is_empty() {
+        let offset = cursor % rows.len();
+        rows.rotate_left(offset);
     }
 }
 
@@ -54,24 +68,16 @@ pub(super) async fn await_preparation<T>(
     budget: &PreparationBudget,
     deferred: &'static str,
 ) -> Result<Preparation<T>, SdkError> {
-    let Some((timeout, budget_limited)) = budget.next_timeout() else {
+    let Some(timeout) = budget.next_timeout() else {
         return Ok(Preparation::Deferred);
     };
     match tokio::time::timeout(timeout, future).await {
         Ok(Ok(value)) => Ok(Preparation::Ready(value)),
-        Ok(Err(SdkError::ContactRequestCapacity(reason))) => {
-            tracing::debug!(
-                deferred,
-                reason,
-                "task courier preparation deferred without retry charge"
-            );
+        Ok(Err(SdkError::TaskManifestWorkerCapacity)) => {
+            tracing::debug!(deferred, "task courier preparation deferred without retry charge");
             Ok(Preparation::Deferred)
         }
         Ok(Err(error)) => Err(error),
-        Err(_) if budget_limited => {
-            tracing::debug!(deferred, "task courier cycle budget exhausted without retry charge");
-            Ok(Preparation::Deferred)
-        }
         Err(_) => Err(SdkError::InboundPending(deferred.to_owned())),
     }
 }
@@ -147,6 +153,17 @@ pub(super) enum Mode<'a> {
     Ack(&'a crate::client::task::control::Ack),
     Own,
 }
+
+#[cfg(test)]
+async fn test_preparation_override(
+    thread: &Value,
+) -> Option<Result<Vec<SealedDelivery>, SdkError>> {
+    if let Some(delay) = thread["test_preparation_delay_ms"].as_u64() {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+    (thread["test_preparation_ready"] == true).then(|| Ok(Vec::new()))
+}
+
 pub(super) async fn prepare(
     account: &LocalBusAccountState,
     engine: &mut GatewaySessionEngine,
@@ -155,8 +172,8 @@ pub(super) async fn prepare(
     mode: Mode<'_>,
 ) -> Result<Vec<SealedDelivery>, SdkError> {
     #[cfg(test)]
-    if let Some(delay) = thread["test_preparation_delay_ms"].as_u64() {
-        tokio::time::sleep(Duration::from_millis(delay)).await;
+    if let Some(result) = test_preparation_override(thread).await {
+        return result;
     }
     let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -372,25 +389,41 @@ pub(crate) async fn drain_confirmations(
     account: &mut LocalBusAccountState,
     budget: &PreparationBudget,
 ) -> Result<usize, SdkError> {
-    use crate::client::task::control::{AckJob, ForwardJob};
+    let forward_first = account.task_forward_first;
+    account.task_forward_first = !forward_first;
+    if forward_first {
+        let forwards = drain_forwards(account, budget).await?;
+        let acknowledgements = drain_acknowledgements(account, budget).await?;
+        Ok(forwards + acknowledgements)
+    } else {
+        let acknowledgements = drain_acknowledgements(account, budget).await?;
+        let forwards = drain_forwards(account, budget).await?;
+        Ok(acknowledgements + forwards)
+    }
+}
+
+async fn drain_acknowledgements(
+    account: &mut LocalBusAccountState,
+    budget: &PreparationBudget,
+) -> Result<usize, SdkError> {
+    use crate::client::task::control::AckJob;
     let now = now_unix_timestamp();
     let mut sent = 0;
     let mut jobs =
         account.client.account_db()?.task_record_page::<AckJob>("task/ack/", "task/ack/", 65)?;
-    jobs.sort_by(|left, right| {
-        (left.1.next_at, left.1.attempts, &left.0).cmp(&(
-            right.1.next_at,
-            right.1.attempts,
-            &right.0,
-        ))
-    });
+    jobs.sort_by(|left, right| left.0.cmp(&right.0));
+    rotate_to_cursor(&mut jobs, account.task_ack_cursor);
     for (key, mut job) in jobs.into_iter().filter(|(_, j)| j.next_at <= now).take(2) {
         if job.attempts >= 8 || now.saturating_sub(job.created_at) > 600 {
             account.client.account_db()?.delete_task_state(&key)?;
             continue;
         }
+        if !budget.can_start_item() {
+            break;
+        }
         let c = job.ack.original()?;
         let result = send_control(account, &c, Mode::Ack(&job.ack), budget).await;
+        account.task_ack_cursor = account.task_ack_cursor.wrapping_add(1);
         if matches!(&result, Ok(Preparation::Ready(()))) {
             let original = job.ack.original()?;
             let hash = crate::client::task::certificate::carrier_hash(&original)?;
@@ -402,7 +435,7 @@ pub(crate) async fn drain_confirmations(
             account.client.account_db()?.delete_task_state(&key)?;
             sent += 1;
         } else if matches!(&result, Ok(Preparation::Deferred)) {
-            if budget.exhausted() {
+            if !budget.can_start_item() {
                 break;
             }
         } else {
@@ -411,31 +444,40 @@ pub(crate) async fn drain_confirmations(
             account.client.account_db()?.persist_actor_state(&key, &job)?;
         }
     }
+    Ok(sent)
+}
+
+async fn drain_forwards(
+    account: &mut LocalBusAccountState,
+    budget: &PreparationBudget,
+) -> Result<usize, SdkError> {
+    use crate::client::task::control::ForwardJob;
+    let now = now_unix_timestamp();
+    let mut sent = 0;
     let mut jobs = account.client.account_db()?.task_record_page::<ForwardJob>(
         "task/forward/",
         "task/forward/",
         65,
     )?;
-    jobs.sort_by(|left, right| {
-        (left.1.next_at, left.1.attempts, &left.0).cmp(&(
-            right.1.next_at,
-            right.1.attempts,
-            &right.0,
-        ))
-    });
+    jobs.sort_by(|left, right| left.0.cmp(&right.0));
+    rotate_to_cursor(&mut jobs, account.task_forward_cursor);
     for (key, mut job) in jobs.into_iter().filter(|(_, j)| j.next_at <= now).take(2) {
         if job.attempts >= 8 || now.saturating_sub(job.created_at) > 600 {
             account.client.account_db()?.delete_task_state(&key)?;
             continue;
         }
+        if !budget.can_start_item() {
+            break;
+        }
         let history = account.client.task_history(&job.conversation_id, &job.task_id)?;
         if let Some(last) = history.events.last() {
             let result = send_control(account, &last.carrier, Mode::Own, budget).await;
+            account.task_forward_cursor = account.task_forward_cursor.wrapping_add(1);
             if matches!(&result, Ok(Preparation::Ready(()))) {
                 account.client.account_db()?.delete_task_state(&key)?;
                 sent += 1;
             } else if matches!(&result, Ok(Preparation::Deferred)) {
-                if budget.exhausted() {
+                if !budget.can_start_item() {
                     break;
                 }
             } else {
@@ -574,25 +616,25 @@ async fn fetch_federated_manifest(
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
     let url = url.to_owned();
     let commitment = commitment.to_owned();
-    let flight = loop {
-        match reserve_manifest_flight(&url)? {
+    let flight_key = format!("{}/mvp1/device-manifest/{commitment}", url.trim_end_matches('/'));
+    let guard = loop {
+        match reserve_manifest_flight(&flight_key)? {
             ManifestReservation::Wait(flight) => {
                 let notified = flight.complete.notified();
                 if !flight.finished.load(Ordering::Acquire) {
                     notified.await;
                 }
             }
-            ManifestReservation::Start(flight) => break flight,
+            ManifestReservation::Start(guard) => break guard,
         }
     };
     tokio::task::spawn_blocking(move || {
-        let result = crate::client::contact::fetch_verified_device_manifest_from_url_bounded(
+        let _guard = guard;
+        crate::client::contact::fetch_verified_device_manifest_from_url_bounded(
             &url,
             &commitment,
             TASK_PREPARATION_TIMEOUT,
-        );
-        finish_manifest_flight(&url, &flight);
-        result
+        )
     })
     .await
     .map_err(|error| SdkError::LocalBus(format!("federated manifest worker failed: {error}")))?
@@ -606,8 +648,19 @@ struct ManifestFlight {
 }
 
 enum ManifestReservation {
-    Start(Arc<ManifestFlight>),
+    Start(ManifestFlightGuard),
     Wait(Arc<ManifestFlight>),
+}
+
+struct ManifestFlightGuard {
+    key: String,
+    flight: Arc<ManifestFlight>,
+}
+
+impl Drop for ManifestFlightGuard {
+    fn drop(&mut self) {
+        finish_manifest_flight(&self.key, &self.flight);
+    }
 }
 
 fn manifest_flights() -> &'static Mutex<std::collections::HashMap<String, Arc<ManifestFlight>>> {
@@ -630,13 +683,13 @@ fn reserve_manifest_flight(url: &str) -> Result<ManifestReservation, SdkError> {
         .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             (count < MAX_MANIFEST_WORKERS).then_some(count + 1)
         })
-        .map_err(|_| SdkError::ContactRequestCapacity("manifest worker capacity is full".into()))?;
+        .map_err(|_| SdkError::TaskManifestWorkerCapacity)?;
     let flight = Arc::new(ManifestFlight {
         complete: tokio::sync::Notify::new(),
         finished: std::sync::atomic::AtomicBool::new(false),
     });
     flights.insert(url.to_owned(), Arc::clone(&flight));
-    Ok(ManifestReservation::Start(flight))
+    Ok(ManifestReservation::Start(ManifestFlightGuard { key: url.to_owned(), flight }))
 }
 
 fn finish_manifest_flight(url: &str, flight: &Arc<ManifestFlight>) {
