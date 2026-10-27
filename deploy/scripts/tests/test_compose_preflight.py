@@ -69,6 +69,16 @@ class PreflightTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn('ramflux-local-admin-token', result.stderr)
 
+    def test_quoted_control_escapes_cannot_hide_the_public_default_token(self):
+        for escape in ('f', 'v', 'n', 'r', 't'):
+            text = 'RF_COMPOSE_FEDERATION_ADMIN_TOKEN="' + chr(92) + escape
+            text += 'ramflux-local-admin-token' + chr(92) + escape + '"'
+            with self.subTest(escape=escape):
+                result = self.run_check(text)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('RF_COMPOSE_FEDERATION_ADMIN_TOKEN', result.stderr)
+                self.assertNotIn('ramflux-local-admin-token', result.stderr)
+
     def test_interpolation_uses_process_then_previous_files_and_quoted_literals_remain_literal(self):
         values = preflight.read_env(self._file("export RF_COMPOSE_NODE_ID=${HOST_NAME:-fallback}\n"),
                                     {}, {'HOST_NAME': 'example.test'})

@@ -77,8 +77,9 @@ def read_env(path, earlier, process):
                 if single:
                     value = value.replace("\\'", "'")
                 else:
-                    escapes = {'n': '\n', 'r': '\r', 't': '\t', '\\': '\\', '"': '"'}
-                    value = re.sub(r'\\([nrt\\"])', lambda m: escapes[m[1]], value)
+                    escapes = {'a': '\a', 'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r',
+                               't': '\t', 'v': '\v', '\\': '\\', '"': '"'}
+                    value = re.sub(r'\\([abfnrtv\\"])', lambda m: escapes[m[1]], value)
             else:
                 value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
             values[key] = value if single else expand(value, {**values, **process}, key)
