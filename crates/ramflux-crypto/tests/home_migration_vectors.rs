@@ -240,7 +240,7 @@ fn fence_vector() -> TestResult<Value> {
             ("version".into(), serde_json::json!(1)),
             ("migration_id".into(), serde_json::json!(hash(19))),
             ("authorization_hash".into(), serde_json::json!(hash(19))),
-            ("seal_hash".into(), serde_json::json!(hash(19))),
+            ("seal_hash".into(), serde_json::Value::Null),
             ("fenced_at".into(), serde_json::json!(NOW)),
         ]
         .into_iter()
@@ -265,12 +265,28 @@ fn vectors() -> TestResult<Value> {
         delivery_vector(&authority)?,
         attestation_vector(&authority)?,
         fence_vector()?,
+        row(&sign_node(
+            PeerStatus {
+                version: 1,
+                account_anchor: authority.envelope().body.account_anchor.clone(),
+                migration_id: hash(19),
+                authorization_hash: hash(20),
+                audience_node: "A".into(),
+                destination_node: "B".into(),
+                nonce: hash(21),
+                issued_at: NOW,
+                expires_at: NOW + 60,
+            },
+            "B",
+            &key(9),
+        )?)?,
     ]);
 
     let genesis = genesis(&authority)?;
     let committed = transition(&genesis.record, &primary, &branch, &authority, ("B", 9), NOW)?;
     Ok(json!({"messages":rows,"genesis":genesis,"genesis_hash":record_hash(&genesis.record)?,
         "committed_home":committed,"committed_home_hash":record_hash(&committed.record)?,
+        "backlog_manifest_hash":ramflux_protocol::custody::framed_hash(domain::HOME_BACKLOG_MANIFEST, &json!([{ "account_anchor":authority.envelope().body.account_anchor, "migration_id":hash(19), "target_delivery_id":"delivery", "high_water":7, "next_seq":0, "progress":{"scheduled":1,"forwarded":0,"receiver_acked":0,"expired":0,"rejected":0,"evidence_required":0,"remaining":1}}]))?,
         "delivery_map_hash":delivery_map_hash(&[DeliveryMapEntry{device_ref:reference.clone(),target_delivery_id:"delivery".into()}])?}))
 }
 #[test]
@@ -338,6 +354,7 @@ fn every_type_rejects_cross_schema_role_field_and_signature_substitution() -> Te
     reject_substitutions::<NodeCommitDelivery>(&messages[7]["signed"])?;
     reject_substitutions::<HomeAttestation>(&messages[8]["signed"])?;
     reject_substitutions::<NoncommitFence>(&messages[9]["signed"])?;
+    reject_substitutions::<PeerStatus>(&messages[10]["signed"])?;
 
     Ok(())
 }
@@ -370,7 +387,7 @@ fn three_missed_moves_with_primary_replacement_verify_and_destination_replay_fai
     let mut certificate = body.master_certificate.body.clone();
     certificate.self_signing_public_key = next_primary.public_key();
     certificate.range_index = 2;
-    certificate.issued_at = NOW + FORWARD_SECONDS;
+    certificate.issued_at = NOW + FORWARD_SECONDS + 180;
     certificate.cert_id = hash(50);
     certificate.previous_certificate_hash = Some(object_hash(&body.master_certificate)?);
     body.master_certificate = master.certify(certificate)?;
@@ -413,6 +430,8 @@ fn three_missed_moves_with_primary_replacement_verify_and_destination_replay_fai
         node_key: &pin,
         home_epoch: 0,
         home_hash: None,
+        cached_manager_range: 0,
+        cached_manager_certificate_hash: None,
     };
     let verified = verify_home_chain(&result, &trust, NOW + 2 * FORWARD_SECONDS + 2)?;
     assert_eq!(verified.epoch(), 3);
@@ -437,6 +456,16 @@ fn three_missed_moves_with_primary_replacement_verify_and_destination_replay_fai
     let mut missing = result.clone();
     missing.predecessors[2].actor_certificate = None;
     assert!(verify_home_chain(&missing, &trust, NOW + 2 * FORWARD_SECONDS + 2).is_err());
+    let decreasing = transition(
+        &result.predecessors[2].record,
+        &primary,
+        &branch,
+        &authority,
+        ("D", 11),
+        NOW + 2 * FORWARD_SECONDS + 2,
+    )?;
+    let rollback = ResolveResult { home: decreasing, predecessors: result.predecessors.clone() };
+    assert!(verify_home_chain(&rollback, &trust, NOW + 2 * FORWARD_SECONDS + 2).is_err());
     let mut missing = result;
     missing.predecessors.swap(1, 2);
     assert!(verify_home_chain(&missing, &trust, NOW + 2 * FORWARD_SECONDS + 2).is_err());
