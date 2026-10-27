@@ -18,6 +18,7 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      RAMFLUX_SHUTDOWN_GRACE_SECONDS: "${RF_COMPOSE_SHUTDOWN_GRACE_SECONDS:-1}"
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL:?see deploy/compose-inputs.json migration}"
       RAMFLUX_CUSTODY_HANDSHAKE_POOL: "${RF_COMPOSE_CUSTODY_HANDSHAKE_POOL:-}"
       RAMFLUX_CUSTODY_AUTHENTICATED_POOL: "${RF_COMPOSE_CUSTODY_AUTHENTICATED_POOL:-}"
@@ -60,6 +61,7 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      RAMFLUX_SHUTDOWN_GRACE_SECONDS: "${RF_COMPOSE_SHUTDOWN_GRACE_SECONDS:-1}"
       RAMFLUX_ROUTER_ADMIN_TOKEN: "${RF_COMPOSE_ROUTER_ADMIN_TOKEN:?see deploy/compose-inputs.json migration}"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_URL: "http://ramflux-federation:18084/internal/home-node-migration/forward"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:?see deploy/compose-inputs.json migration}"
@@ -97,6 +99,7 @@ services:
     # Secrets are 0640: the owning group reads them although every capability is dropped.
     group_add: ["${RAMFLUX_SECRET_GID:-0}"]
     environment:
+      RAMFLUX_SHUTDOWN_GRACE_SECONDS: "${RF_COMPOSE_SHUTDOWN_GRACE_SECONDS:-1}"
       RAMFLUX_NOTIFY_ROUTE_KEY_FILE: "/etc/ramflux/mesh/route.key"
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL:?see deploy/compose-inputs.json migration}"
     volumes:
@@ -125,6 +128,7 @@ services:
     tmpfs: ["/tmp"]
     group_add: ["${RAMFLUX_SECRET_GID:-0}"]
     environment:
+      RAMFLUX_SHUTDOWN_GRACE_SECONDS: "${RF_COMPOSE_SHUTDOWN_GRACE_SECONDS:-1}"
       RAMFLUX_FEDERATION_PUBLIC_MAX_HEADER_BYTES: "${RF_COMPOSE_FEDERATION_PUBLIC_MAX_HEADER_BYTES:-8192}"
       RAMFLUX_FEDERATION_PUBLIC_MAX_BODY_BYTES: "${RF_COMPOSE_FEDERATION_PUBLIC_MAX_BODY_BYTES:-65536}"
       RAMFLUX_FEDERATION_PUBLIC_REQUEST_TIMEOUT_SECONDS: "${RF_COMPOSE_FEDERATION_PUBLIC_REQUEST_TIMEOUT_SECONDS:-10}"
@@ -193,6 +197,7 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      RAMFLUX_SHUTDOWN_GRACE_SECONDS: "${RF_COMPOSE_SHUTDOWN_GRACE_SECONDS:-1}"
       # No relay object HMAC key: v3 (Ed25519 issuer trust) is the only production
       # object data plane; the default/production relay loads no HMAC key (T22-A3).
       RAMFLUX_RELAY_CLIENT_QUIC_ADDR: "0.0.0.0:17447"
@@ -244,6 +249,8 @@ services:
     cap_drop: ["ALL"]
     read_only: true
     tmpfs: ["/tmp"]
+    environment:
+      RAMFLUX_SHUTDOWN_GRACE_SECONDS: "${RF_COMPOSE_SHUTDOWN_GRACE_SECONDS:-1}"
     volumes:
       - node-privacy:/etc/ramflux/config/node-identity
       - signaling-redb:/var/lib/ramflux/signaling
@@ -273,6 +280,7 @@ services:
     tmpfs: ["/tmp"]
     group_add: ["${RAMFLUX_SECRET_GID:-0}"]
     environment:
+      RAMFLUX_SHUTDOWN_GRACE_SECONDS: "${RF_COMPOSE_SHUTDOWN_GRACE_SECONDS:-1}"
       RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE: "/etc/ramflux/node-identity/node-signing.key"
     volumes:
       - node-privacy:/etc/ramflux/config/node-identity

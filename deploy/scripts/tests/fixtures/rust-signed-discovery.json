@@ -1,0 +1,18 @@
+{
+  "schema": "ramflux.well_known_client.v1",
+  "node_id": "node.example.org",
+  "node_public_key": "GX9rI-FshTLGq8g4-s1ep4m-DHaykgM0A5v6iz02jWE",
+  "node_ca_cert_pem": "line one\n \t \" \\ / \u007f \u2028 café 😀",
+  "gateway_quic_addr": "node.example.org:443",
+  "gateway_tcp_addr": "node.example.org:443",
+  "gateway_server_name": "ramflux-gateway",
+  "relay_quic_addr": "node.example.org:17447",
+  "relay_server_name": "ramflux-relay",
+  "prekey_http_url": "https://node.example.org",
+  "signaling_turn_addr": "node.example.org:3478",
+  "protocol_versions": ["v1"],
+  "client_capabilities": ["prekey"],
+  "updated_at": 1000,
+  "expires_at": 2000,
+  "signature": "xqNbfEkGv24Fo_wVE0ZwWfJbsE56XU36IQzXXnFpZL7L6OoeT_4K5nIxZmfgSUjMdV1ZSjpke_8vB6-sxd_qDA"
+}
