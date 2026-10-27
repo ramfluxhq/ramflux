@@ -11,7 +11,7 @@ use ramflux_protocol::custody::{
     DeviceRef, MAX_CUSTODY_FRAME_BYTES, Publication, custody_session_action_hash, decode,
     object_hash,
 };
-use ramflux_transport::{GatewayTcpTlsStream, read_custody_tcp_frame, write_custody_tcp_frame};
+use ramflux_transport::GatewayTcpTlsStream;
 use std::{
     net::SocketAddr,
     path::PathBuf,
@@ -37,11 +37,11 @@ pub struct CustodyNetworkConfig {
     pub timeout: Duration,
 }
 /// Owns a live TLS connection and its session; neither is serializable or backed up.
-pub struct CustodyConnection {
+pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     pub(super) account: BornAccount,
     pub(super) device: DeviceRef,
     pub(super) credentials: BranchCredentials,
-    pub(super) stream: GatewayTcpTlsStream,
+    pub(super) stream: S,
     pub(super) pins: NodePins,
     pub(super) session: Option<CustodySession>,
     pub(super) timeout: Duration,
@@ -49,7 +49,7 @@ pub struct CustodyConnection {
     mode: BindingMode,
     audience: String,
 }
-pub(super) fn now() -> Result<u64, SdkError> {
+pub(crate) fn now() -> Result<u64, SdkError> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SdkError::CustodySetupInvalid)?
@@ -68,29 +68,15 @@ pub(super) fn fields() -> ramflux_protocol::SignedFields {
         signature: String::new(),
     }
 }
-impl CustodyConnection {
-    /// Publish, register and establish a session using the current locally verified v3 record.
+impl CustodyConnection<GatewayTcpTlsStream> {
+    /// Establish an experimental standalone native connection.
     /// # Errors
-    /// Rejects missing custody state, keychain failure, node-pin changes, exporter failure and
-    /// every typed router refusal. It never retries with legacy or weaker binding modes.
+    /// Rejects unavailable credentials, invalid node pins, channel binding and router refusals.
     pub async fn connect(
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
     ) -> Result<Self, SdkError> {
-        if config.binding_mode == BindingMode::NoChannelBinding && !config.allow_no_channel_binding
-        {
-            return Err(CustodyRefusal::BindingRefused.into());
-        }
-        let root = config.account_root.clone();
-        let account_id = config.account_id.clone();
-        let device_id = config.device_id.clone();
-        let (account, device, credentials) = tokio::task::spawn_blocking(move || {
-            let account = super::load_account(&root, &account_id, now()?)?;
-            let (device, credentials) = account.credentials(vault.as_ref(), &device_id, now()?)?;
-            Ok::<_, SdkError>((account, device, credentials))
-        })
-        .await
-        .map_err(|_| invalid())??;
+        let prepared = Self::prepare(&config, vault).await?;
         let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
             "0.0.0.0:0".parse().map_err(|_| invalid())?,
             config.gateway_address,
@@ -99,7 +85,36 @@ impl CustodyConnection {
             config.timeout,
         )
         .await?;
-        let mut stream = tls.into_tls_stream();
+        Self::authenticate_stream(config, tls.into_tls_stream(), prepared).await
+    }
+}
+impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> {
+    pub(crate) async fn prepare(
+        config: &CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+    ) -> Result<(BornAccount, DeviceRef, BranchCredentials), SdkError> {
+        if config.binding_mode == BindingMode::NoChannelBinding && !config.allow_no_channel_binding
+        {
+            return Err(CustodyRefusal::BindingRefused.into());
+        }
+        let root = config.account_root.clone();
+        let account_id = config.account_id.clone();
+        let device_id = config.device_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let account = super::load_account(&root, &account_id, now()?)?;
+            let (device, credentials) = account.credentials(vault.as_ref(), &device_id, now()?)?;
+            Ok::<_, SdkError>((account, device, credentials))
+        })
+        .await
+        .map_err(|_| invalid())?
+    }
+
+    pub(crate) async fn authenticate_stream(
+        config: CustodyNetworkConfig,
+        mut stream: S,
+        prepared: (BornAccount, DeviceRef, BranchCredentials),
+    ) -> Result<Self, SdkError> {
+        let (account, device, credentials) = prepared;
         let open = CustodyClientFrame::CustodyOpen { binding_mode: config.binding_mode };
         let response = exchange(&mut stream, &open, config.timeout).await?;
         let CustodyServerFrame::NodeIdentity { record, audience, binding_mode, .. } = response
@@ -118,7 +133,7 @@ impl CustodyConnection {
                 .client_tls_certificate_sha256
                 .as_deref()
                 .ok_or(CustodyRefusal::BindingRefused)?;
-            ramflux_transport::verify_custody_peer_certificate(&stream, expected)?;
+            stream.verify_custody_certificate_pin(expected)?;
         }
         let pins = super::discovery::authenticate(&config, &mut stream, *record).await?;
         if binding_mode == BindingMode::NoChannelBinding {
@@ -144,6 +159,15 @@ impl CustodyConnection {
         connection.persist_live(&config.account_root).await?;
         Ok(connection)
     }
+    pub(crate) async fn into_gateway_parts(
+        mut self,
+    ) -> Result<(S, BornAccount, DeviceRef, BranchCredentials), SdkError> {
+        let session_id = self.session.take().ok_or(CustodyRefusal::SessionRequired)?.session_id;
+        let frame = CustodyClientFrame::GatewayHandoff { session_id };
+        self.stream.send_frame(&serde_json::to_vec(&frame)?).await?;
+        Ok((self.stream, self.account, self.device, self.credentials))
+    }
+
     async fn register(&mut self) -> Result<(), SdkError> {
         let publication =
             Publication { record: self.account.record().clone(), compacted_ids: None };
@@ -206,25 +230,10 @@ impl CustodyConnection {
             .then_some("This connection does not bind account proofs to the TLS channel.")
     }
     pub(super) fn signed_prekey(&self) -> ramflux_crypto::X25519KeyPair {
-        // Domain-separated branch-only derivation keeps the prekey stable across reconnects
-        // without adding a portable credential file or involving the primary signer.
-        let secret = zeroize::Zeroizing::new(self.credentials.agreement.secret.to_bytes());
-        let seed = zeroize::Zeroizing::new(ramflux_crypto::blake3_keyed_derive(
-            &secret,
-            b"ramflux.identity.custody_signed_prekey.v1",
-        ));
-        ramflux_crypto::X25519KeyPair::from_seed(*seed)
+        ramflux_crypto::X25519KeyPair::from_seed(*self.credentials.signed_prekey_seed())
     }
     pub(super) fn prekey_bundle(&self) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
-        let signed = self.signed_prekey();
-        Ok(ramflux_crypto::create_prekey_bundle(
-            &self.credentials.signing,
-            &self.credentials.agreement,
-            "custody-prekey-v1",
-            &signed,
-            None,
-            None,
-        )?)
+        self.credentials.prekey_bundle()
     }
     async fn prove(&mut self, action: CustodyProofAction) -> Result<CustodyServerFrame, SdkError> {
         let response = exchange(
@@ -248,7 +257,7 @@ impl CustodyConnection {
             .try_into()
             .map_err(|_| invalid())?;
         // Mandatory even when an operator and the client explicitly choose no binding.
-        let material = ramflux_transport::custody_tcp_exporter(&self.stream, &nonce)?;
+        let material = self.stream.custody_exporter(&nonce)?;
         let certificate = self
             .account
             .record()
@@ -355,14 +364,18 @@ impl CustodyConnection {
         Ok(*peer)
     }
 }
-pub(super) async fn exchange(
-    stream: &mut GatewayTcpTlsStream,
+pub(super) async fn exchange<S: ramflux_transport::GatewaySessionTransport + ?Sized>(
+    stream: &mut S,
     request: &CustodyClientFrame,
     timeout: Duration,
 ) -> Result<CustodyServerFrame, SdkError> {
     tokio::time::timeout(timeout, async {
-        write_custody_tcp_frame(stream, &serde_json::to_vec(request)?).await?;
-        let bytes = read_custody_tcp_frame(stream).await?;
+        let bytes = serde_json::to_vec(request)?;
+        if bytes.len() > MAX_CUSTODY_FRAME_BYTES {
+            return Err(invalid());
+        }
+        stream.send_frame(&bytes).await?;
+        let bytes = stream.recv_custody_frame().await?;
         let response: CustodyServerFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
         if let CustodyServerFrame::Refused { code } = response {
             return Err(code.into());

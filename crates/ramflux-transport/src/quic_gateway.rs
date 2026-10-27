@@ -20,6 +20,28 @@ pub type GatewaySessionFrameFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;
 
 pub trait GatewaySessionFrameSink {
+    /// Verify a signed public-listener certificate pin against this actual TLS connection.
+    /// # Errors
+    /// Refuses transports without a directly observable public TLS certificate.
+    fn verify_custody_certificate_pin(&self, expected: &str) -> Result<(), TransportError> {
+        let _ = expected;
+        Err(TransportError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "transport has no custody certificate pin",
+        )))
+    }
+
+    /// Obtain binding material from this connection's actual TLS handshake.
+    /// # Errors
+    /// Refuses transports without access to an authenticated TLS 1.3 exporter.
+    fn custody_exporter(&self, nonce: &[u8; 32]) -> Result<[u8; 32], TransportError> {
+        let _ = nonce;
+        Err(TransportError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "transport has no custody exporter",
+        )))
+    }
+
     /// # Errors
     /// Returns an error when the frame is too large or cannot be written to the transport.
     fn send_frame<'a>(&'a mut self, frame: &'a [u8]) -> GatewaySessionFrameFuture<'a, ()>;
@@ -31,6 +53,42 @@ pub trait GatewaySessionFrameSink {
 
 pub trait GatewaySessionFrameSource {
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>>;
+
+    /// Read custody frames with their stricter wire budget. Network implementations
+    /// enforce that limit before allocating the advertised body.
+    fn recv_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        let pending = self.recv_frame();
+        Box::pin(async move {
+            let bytes = pending.await?;
+            if bytes.len() > ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES {
+                return Err(TransportError::FrameTooLarge { len: bytes.len() });
+            }
+            Ok(bytes)
+        })
+    }
+}
+
+impl<T: GatewaySessionFrameSink + ?Sized> GatewaySessionFrameSink for Box<T> {
+    fn custody_exporter(&self, nonce: &[u8; 32]) -> Result<[u8; 32], TransportError> {
+        (**self).custody_exporter(nonce)
+    }
+    fn verify_custody_certificate_pin(&self, expected: &str) -> Result<(), TransportError> {
+        (**self).verify_custody_certificate_pin(expected)
+    }
+    fn send_frame<'a>(&'a mut self, frame: &'a [u8]) -> GatewaySessionFrameFuture<'a, ()> {
+        (**self).send_frame(frame)
+    }
+    fn finish(&mut self) -> Result<(), TransportError> {
+        (**self).finish()
+    }
+}
+impl<T: GatewaySessionFrameSource + ?Sized> GatewaySessionFrameSource for Box<T> {
+    fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        (**self).recv_frame()
+    }
+    fn recv_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        (**self).recv_custody_frame()
+    }
 }
 
 pub trait GatewaySessionTransport: GatewaySessionFrameSink + GatewaySessionFrameSource {}
@@ -87,6 +145,7 @@ fn quic_request_phase_from_transport(error: TransportError) -> QuicRequestPhase 
 }
 
 pub struct QuicGatewayBidiStream {
+    connection: quinn::Connection,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
     timeout: Duration,
@@ -288,7 +347,12 @@ impl QuicGatewayClient {
             .await
             .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?
             .map_err(|error| crate::quic_errors::connection(&error))?;
-        Ok(QuicGatewayBidiStream { send, recv, timeout: self.timeout })
+        Ok(QuicGatewayBidiStream {
+            connection: self.connection.clone(),
+            send,
+            recv,
+            timeout: self.timeout,
+        })
     }
 
     /// # Errors
@@ -480,6 +544,9 @@ impl TcpTlsGatewayBidiStream {
 }
 
 impl GatewaySessionFrameSink for QuicGatewayBidiStream {
+    fn custody_exporter(&self, nonce: &[u8; 32]) -> Result<[u8; 32], TransportError> {
+        crate::custody_quic_exporter(&self.connection, nonce)
+    }
     fn send_frame<'a>(&'a mut self, frame: &'a [u8]) -> GatewaySessionFrameFuture<'a, ()> {
         Box::pin(async move {
             tokio::time::timeout(self.timeout, write_quic_raw_frame(&mut self.send, frame))
@@ -495,6 +562,15 @@ impl GatewaySessionFrameSink for QuicGatewayBidiStream {
 }
 
 impl GatewaySessionFrameSource for QuicGatewayBidiStream {
+    fn recv_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(async move {
+            tokio::time::timeout(self.timeout, crate::read_custody_tcp_frame(&mut self.recv))
+                .await
+                .map_err(|error| {
+                    TransportError::Io(io::Error::new(io::ErrorKind::TimedOut, error))
+                })?
+        })
+    }
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
             tokio::time::timeout(self.timeout, read_quic_raw_frame(&mut self.recv))
@@ -505,6 +581,12 @@ impl GatewaySessionFrameSource for QuicGatewayBidiStream {
 }
 
 impl GatewaySessionFrameSink for TcpTlsGatewayBidiStream {
+    fn verify_custody_certificate_pin(&self, expected: &str) -> Result<(), TransportError> {
+        crate::verify_custody_peer_certificate(&self.stream, expected)
+    }
+    fn custody_exporter(&self, nonce: &[u8; 32]) -> Result<[u8; 32], TransportError> {
+        crate::custody_tcp_exporter(&self.stream, nonce)
+    }
     fn send_frame<'a>(&'a mut self, frame: &'a [u8]) -> GatewaySessionFrameFuture<'a, ()> {
         Box::pin(async move {
             tokio::time::timeout(self.timeout, write_tcp_raw_frame(&mut self.stream, frame))
@@ -519,6 +601,15 @@ impl GatewaySessionFrameSink for TcpTlsGatewayBidiStream {
 }
 
 impl GatewaySessionFrameSource for TcpTlsGatewayBidiStream {
+    fn recv_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(async move {
+            tokio::time::timeout(self.timeout, crate::read_custody_tcp_frame(&mut self.stream))
+                .await
+                .map_err(|error| {
+                    TransportError::Io(io::Error::new(io::ErrorKind::TimedOut, error))
+                })?
+        })
+    }
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
             tokio::time::timeout(self.timeout, read_tcp_raw_frame(&mut self.stream)).await.map_err(
@@ -555,7 +646,24 @@ impl GatewaySessionFrameSink for WriteHalf<GatewayTcpTlsStream> {
     }
 }
 
+impl GatewaySessionFrameSink for GatewayTcpTlsStream {
+    fn custody_exporter(&self, nonce: &[u8; 32]) -> Result<[u8; 32], TransportError> {
+        crate::custody_tcp_exporter(self, nonce)
+    }
+    fn verify_custody_certificate_pin(&self, expected: &str) -> Result<(), TransportError> {
+        crate::verify_custody_peer_certificate(self, expected)
+    }
+    fn send_frame<'a>(&'a mut self, frame: &'a [u8]) -> GatewaySessionFrameFuture<'a, ()> {
+        Box::pin(async move { write_tcp_raw_frame(self, frame).await })
+    }
+    fn finish(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
 impl GatewaySessionFrameSource for GatewayTcpTlsStream {
+    fn recv_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(async move { crate::read_custody_tcp_frame(self).await })
+    }
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move { read_tcp_raw_frame(self).await })
     }

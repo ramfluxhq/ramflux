@@ -62,6 +62,7 @@ pub(super) fn gateway_registered_key(
         },
     )?;
     Ok(DeviceAuthKeyResponse {
+        custody_authority: None,
         root_public_key: Some(ramflux_protocol::encode_base64url(
             root.signing_key.verifying_key().to_bytes(),
         )),

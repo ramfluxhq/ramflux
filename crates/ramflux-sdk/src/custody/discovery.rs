@@ -10,12 +10,11 @@ use crate::SdkError;
 use ramflux_protocol::custody::{
     CustodyClientFrame, CustodyRefusal, CustodyServerFrame, Envelope, NodeIdentityRecord,
 };
-use ramflux_transport::GatewayTcpTlsStream;
 use std::collections::BTreeSet;
 const MAX_CHAIN_RECORDS: usize = 64;
-pub(super) async fn authenticate(
+pub(super) async fn authenticate<S: ramflux_transport::GatewaySessionTransport + ?Sized>(
     config: &CustodyNetworkConfig,
-    stream: &mut GatewayTcpTlsStream,
+    stream: &mut S,
     record: Envelope<NodeIdentityRecord>,
 ) -> Result<NodePins, SdkError> {
     let root = config.account_root.clone();

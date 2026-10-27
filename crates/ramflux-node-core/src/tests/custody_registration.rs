@@ -12,6 +12,9 @@ use zeroize::Zeroizing;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 pub(super) fn native(principal: &str, seed: u8) -> TestResult<crate::CustodyPublication> {
+    native_at(principal, seed, 1_760_000_000)
+}
+fn native_at(principal: &str, seed: u8, now: u64) -> TestResult<crate::CustodyPublication> {
     let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[seed; 32])?)?;
     let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
     let branch = ramflux_crypto::create_device_branch(principal, "primary", 1, [seed + 2; 32]);
@@ -24,7 +27,7 @@ pub(super) fn native(principal: &str, seed: u8) -> TestResult<crate::CustodyPubl
         GenesisInput {
             principal_kind: ramflux_protocol::PrincipalKind::Human,
             display_name: "Human".into(),
-            issued_at: 1_760_000_000,
+            issued_at: now,
             master_cert_id: ramflux_protocol::encode_base64url([seed + 4; 32]),
             branch_cert_id: ramflux_protocol::encode_base64url([seed + 5; 32]),
             external_human_primary: None,
@@ -283,6 +286,82 @@ fn custody_ownership_survives_scoped_legacy_admission_and_journal_replay() -> Te
                     publication.record.body.issued_at
                 )?
                 .is_some()
+        );
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn custody_ordinary_directory_uses_native_authority_and_current_signed_prekeys() -> TestResult {
+    let path = temp_store_path("custody-ordinary-directory")?;
+    let now = crate::now_unix_seconds();
+    let publication = native_at("ordinary-alice", 10, now)?;
+    let branch = ramflux_crypto::create_device_branch("ordinary-alice", "primary", 1, [12; 32]);
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed([13; 32]);
+    let signed = ramflux_crypto::X25519KeyPair::from_seed([99; 32]);
+    let bundle =
+        ramflux_crypto::create_prekey_bundle(&branch, &agreement, "signed-1", &signed, None, None)?;
+    let address =
+        ramflux_protocol::qualified_device_id(&publication.record.body.account_anchor, "primary")?;
+    {
+        let store = RouterRedbStore::open_without_wal(&path)?;
+        let router = RouterCore::new();
+        store.save_router(&router)?;
+        router.publish_custody_record(&publication, now, &store)?;
+        let response = router.mvp1_device_auth_key_checked(&address)?.ok_or("native auth key")?;
+        assert!(response.custody_authority.is_some());
+        assert!(response.signed_device_set.is_none());
+        assert!(response.root_public_key.is_none());
+        let identity = response.authenticated_device_identity_for("message", now)?;
+        assert_eq!(identity.storage_key(), address);
+        let mut mixed = response;
+        mixed.root_public_key =
+            Some(publication.record.body.master_certificate.body.master_public_key.clone());
+        assert!(mixed.authenticated_device_identity_for("message", now).is_err());
+        let request =
+            crate::PrekeyPublishRequest { device_id: "primary".into(), bundle: bundle.clone() };
+        assert!(router.publish_custody_prekey(&request, now, &store)?.is_some());
+        let fetched = router.custody_prekey_response(&address, now, &store)?.ok_or("prekey")?;
+        assert_eq!(fetched.bundle, Some(bundle.clone()));
+        let manifest = router
+            .custody_manifest(&publication.record.body.account_anchor, now, &store)?
+            .ok_or("manifest")?;
+        assert_eq!(manifest.publication.record, publication.record);
+        assert_eq!(manifest.devices.len(), 1);
+        assert_eq!(manifest.devices[0].target_delivery_id, address);
+        router.upsert_session(crate::SessionDescriptor {
+            target_delivery_id: address.clone(),
+            device_id: "primary".into(),
+            gateway_id: "gateway".into(),
+            session_id: "session".into(),
+            device_epoch: 1,
+            session_seq: now,
+            last_cursor: None,
+            push_alias_hash: None,
+            lifecycle: crate::SessionLifecycle::Live,
+        })?;
+        let lookup = crate::PrincipalLookupRequest {
+            principal_id: "ordinary-alice".into(),
+            session_id: "session".into(),
+            requester_device_id: "primary".into(),
+            target_delivery_id: address.clone(),
+            gateway_id: "gateway".into(),
+            source: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        };
+        let found = router.authenticated_principal_lookup(&lookup, now, &store)?;
+        assert!(found.reason_code.is_none());
+        let found = found.manifest.ok_or("authenticated native manifest")?;
+        assert!(found.signed_device_set.is_none());
+        assert!(found.devices.is_empty());
+        assert_eq!(found.custody.ok_or("native evidence")?, manifest);
+        let mut forged = request;
+        forged.bundle.device_identity_ed25519_public =
+            ramflux_crypto::fixture_public_key_base64url();
+        assert!(router.publish_custody_prekey(&forged, now, &store).is_err());
+        assert_eq!(
+            router.custody_prekey_response(&address, now, &store)?.ok_or("retained prekey")?.bundle,
+            Some(bundle)
         );
     }
     std::fs::remove_file(path)?;

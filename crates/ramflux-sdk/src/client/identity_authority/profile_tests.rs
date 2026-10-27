@@ -307,7 +307,7 @@ fn profile_manifest_requires_root_authentication_and_unique_authorized_devices()
     unbound.devices[0] = foreign.manifest()?.devices.remove(0);
     unbound.devices[0].principal_id.clone_from(&full.principal_id);
     unbound.devices[0].principal_commitment.clone_from(&full.principal_commitment);
-    unbound.devices[0].branch_proof.principal_id.clone_from(&full.principal_id);
+    unbound.devices[0].legacy_proof_mut()?.principal_id.clone_from(&full.principal_id);
     assert!(verify_manifest(&unbound, &full.principal_commitment).is_err());
     Ok(())
 }

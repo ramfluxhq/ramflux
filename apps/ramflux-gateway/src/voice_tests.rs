@@ -35,6 +35,7 @@ fn identity(
         },
     )?;
     let manifest = DeviceManifestResponse {
+        custody: None,
         signed_device_set: Some(set),
         principal_id: name.into(),
         principal_commitment: commitment.clone(),

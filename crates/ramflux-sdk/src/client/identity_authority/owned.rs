@@ -10,6 +10,9 @@ use ramflux_protocol::{
 use serde_json::json;
 impl RamfluxClient {
     pub(crate) fn local_principal_kind(&self) -> Result<PrincipalKind, SdkError> {
+        if let Some(account) = &self.born_v3_account {
+            return Ok(account.record().body.principal_kind);
+        }
         if let Ok(db) = self.account_db() {
             let path =
                 local_bus_account_manifest_path(self.account_index()?.root(), &db.local_account_id);
@@ -156,7 +159,8 @@ impl RamfluxClient {
                         .devices
                         .iter()
                         .find(|d| d.device_id == device)
-                        .and_then(|d| d.branch_proof.key_binding.as_ref().map(|_| &d.branch_proof))
+                        .and_then(|device| device.branch_proof.as_ref())
+                        .filter(|proof| proof.key_binding.is_some())
                 })
                 .ok_or_else(|| {
                     invalid(&format!("migration requires a root-bound authorization for {device}"))

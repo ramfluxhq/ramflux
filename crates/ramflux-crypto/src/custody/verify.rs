@@ -259,3 +259,26 @@ fn verified_revocations(
     }
     Ok((revoked, compacted_bytes))
 }
+
+/// Verify complete public custody evidence without obtaining a primary signing credential.
+/// The caller must independently enforce its current durable pins for both accounts.
+/// # Errors
+/// Rejects invalid signatures, malformed evidence or an invalid external custodian.
+pub fn verify_publication(
+    authority: &ramflux_protocol::custody::CustodyAuthority,
+    now: u64,
+) -> Result<VerifiedRecord, CryptoError> {
+    let human = authority
+        .custodian_publication
+        .as_ref()
+        .map(|publication| {
+            verify_record(&publication.record, now, publication.compacted_ids.as_deref(), None)
+        })
+        .transpose()?;
+    verify_record(
+        &authority.publication.record,
+        now,
+        authority.publication.compacted_ids.as_deref(),
+        human.as_ref(),
+    )
+}

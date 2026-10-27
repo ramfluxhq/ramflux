@@ -33,6 +33,16 @@ impl RamfluxClient {
             .source_principal_commitment
             .as_deref()
             .ok_or_else(|| invalid("legacy A2I has no verified root"))?;
+        if let Some(authority) =
+            self.current_custody_authority(root, crate::custody::network_now()?)?
+        {
+            if event.source_principal_id.as_deref()
+                != Some(authority.envelope().body.principal_id.as_str())
+            {
+                return Err(invalid("A2I principal differs from native authority"));
+            }
+            return self.device_identity_for_root(root, &event.source_device_id);
+        }
         let record =
             self.observed_device_set(root)?.ok_or_else(|| invalid("A2I authority unavailable"))?;
         if event.source_principal_id.as_deref() != Some(&record.principal_id) {

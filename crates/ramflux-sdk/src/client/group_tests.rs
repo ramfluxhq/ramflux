@@ -66,6 +66,7 @@ fn device_public_key(principal: &str, device: &str, seed: [u8; 32]) -> Result<St
     let commitment = root_for(principal);
     let now = now_unix_timestamp();
     let mut manifest = SdkDeviceManifestResponse {
+        custody: None,
         principal_id: principal.into(),
         principal_commitment: commitment.clone(),
         root_public_key: ramflux_protocol::encode_base64url(
@@ -80,7 +81,7 @@ fn device_public_key(principal: &str, device: &str, seed: [u8; 32]) -> Result<St
             branch_public_key: public.clone(),
             target_delivery_id: device.into(),
             branch_authorized_event_id: format!("authorized:{device}"),
-            branch_proof: ramflux_crypto::authorize_device_branch_v2(
+            branch_proof: Some(ramflux_crypto::authorize_device_branch_v2(
                 &root,
                 &branch,
                 ramflux_crypto::BranchAuthorization {
@@ -91,7 +92,7 @@ fn device_public_key(principal: &str, device: &str, seed: [u8; 32]) -> Result<St
                     principal_kind: ramflux_protocol::PrincipalKind::Human,
                     agreement_identity_public_key: identity.public,
                 },
-            )?,
+            )?),
             prekey_bundle: ramflux_crypto::create_prekey_bundle(
                 &branch, &identity, "signed", &signed, None, None,
             )?,

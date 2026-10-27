@@ -11,6 +11,35 @@ impl RamfluxClient {
         &self,
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
+        if let Some(native) = &manifest.custody {
+            super::verify::verify_manifest_authority(manifest, &manifest.principal_commitment)?;
+            self.observe_custody_manifest(
+                native,
+                &manifest.principal_commitment,
+                crate::custody::network_now()?,
+            )?;
+            self.check_directory_ownership(manifest)?;
+            self.account_db()?
+                .write_transaction(|| self.record_pinned_group_key_changes(manifest))?;
+            self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+                for device in &manifest.devices {
+                    self.rotate_verified_group_pins(manifest, device)?;
+                }
+                self.account_db()?.persist_actor_state(
+                    &format!("identity/manifest-root/{}", manifest.principal_commitment),
+                    manifest,
+                )?;
+                self.account_db()?.persist_actor_state(
+                    &format!("identity/manifest/{}", manifest.principal_id),
+                    manifest,
+                )?;
+                Ok(())
+            })?;
+            return Ok(());
+        }
+        if self.custody_mode_observed(&manifest.principal_commitment)? {
+            return Err(SdkError::CustodyModeDowngrade);
+        }
         super::verify::verify_manifest_authority(manifest, &manifest.principal_commitment)?;
         let material = verify_manifest(manifest, &manifest.principal_commitment);
         let ready =
@@ -198,7 +227,7 @@ impl RamfluxClient {
                 && row["signing_public_key"] == entry.branch_public_key
                 && row["device_epoch"] == entry.device_epoch
             {
-                row["proof_issued_at"] = json!(entry.branch_proof.issued_at);
+                row["proof_issued_at"] = json!(entry.legacy_proof()?.issued_at);
                 db.persist_client_record("device", identity.storage_key(), &row)?;
             }
         }
@@ -249,7 +278,7 @@ impl RamfluxClient {
         )?;
         for device in &manifest.devices {
             self.rotate_verified_group_pins(manifest, device)?;
-            db.persist_client_record("device",&device.device_id,&json!({"device_id":device.device_id,"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key,"target_delivery_id":device.target_delivery_id,"device_epoch":device.device_epoch,"revoked":false,"authority_epoch":record.device_set_epoch,"proof_expires_at":device.branch_proof.expires_at,"proof_issued_at":device.branch_proof.issued_at}))?;
+            db.persist_client_record("device",&device.device_id,&json!({"device_id":device.device_id,"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key,"target_delivery_id":device.target_delivery_id,"device_epoch":device.device_epoch,"revoked":false,"authority_epoch":record.device_set_epoch,"proof_expires_at":device.legacy_proof()?.expires_at,"proof_issued_at":device.legacy_proof()?.issued_at}))?;
         }
         if changed {
             db.append_journal(&format!("identity-safety:{}:{}",manifest.principal_commitment,record.device_set_epoch),"safety.changed",&json!({"principal_id":manifest.principal_id,"device_set_epoch":record.device_set_epoch,"reason":"root_signed_device_set_changed"}),crate::prelude::now_unix_timestamp(),None)?;

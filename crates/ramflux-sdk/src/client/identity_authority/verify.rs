@@ -10,6 +10,17 @@ pub(crate) fn verify_manifest(
     expected: &str,
 ) -> Result<(), SdkError> {
     verify_manifest_authority(manifest, expected)?;
+    if let Some(native) = &manifest.custody {
+        super::custody_directory::verify_native_material(
+            native,
+            expected,
+            crate::custody::network_now()?,
+        )?;
+        if crate::prekey::SdkDeviceManifestResponse::from_native((**native).clone())? != *manifest {
+            return Err(invalid("native directory projection mismatch"));
+        }
+        return Ok(());
+    }
     let root = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
     let record =
         manifest.signed_device_set.as_ref().ok_or_else(|| invalid("missing signed set"))?;
@@ -31,9 +42,9 @@ pub(crate) fn verify_manifest(
         let bundle = &device.prekey_bundle;
         if device.principal_id != manifest.principal_id
             || device.principal_commitment != expected
-            || device.branch_proof.principal_id != manifest.principal_id
-            || device.branch_proof.device_id != device.device_id
-            || device.branch_proof.device_epoch != device.device_epoch
+            || device.legacy_proof()?.principal_id != manifest.principal_id
+            || device.legacy_proof()?.device_id != device.device_id
+            || device.legacy_proof()?.device_epoch != device.device_epoch
             || bundle.identity_commitment != manifest.principal_id
             || bundle.device_id != device.device_id
             || bundle.device_epoch != device.device_epoch
@@ -50,13 +61,13 @@ pub(crate) fn verify_manifest(
         };
         ramflux_crypto::verify_root_bound_key_authorization(
             &root,
-            &device.branch_proof,
+            device.legacy_proof()?,
             &binding,
             "ramflux-node",
             "device.delivery.bind",
             // The current signed set grants durable authority; authenticate this historical
             // registration artifact at issuance rather than using its clock as a lookup lease.
-            device.branch_proof.issued_at,
+            device.legacy_proof()?.issued_at,
         )?;
         let keys = ramflux_crypto::device_key_commitments(
             &binding.branch_signing_public_key,
@@ -83,8 +94,28 @@ pub(crate) fn ready_manifest(
     mut manifest: SdkDeviceManifestResponse,
     now: i64,
 ) -> SdkDeviceManifestResponse {
+    if let Some(native) = &mut manifest.custody {
+        let trusted_now = u64::try_from(now).unwrap_or_default();
+        let evidence = ramflux_protocol::custody::CustodyAuthority {
+            publication: native.publication.clone(),
+            custodian_publication: native.custodian_publication.clone(),
+        };
+        if let Ok(authority) = ramflux_crypto::custody::verify_publication(&evidence, trusted_now) {
+            native.devices.retain(|device| {
+                authority.authorize(&device.device_ref, "message", trusted_now).is_ok()
+            });
+            if let Ok(ready) =
+                crate::prekey::SdkDeviceManifestResponse::from_native((**native).clone())
+            {
+                return ready;
+            }
+        }
+        return manifest;
+    }
     manifest.devices.retain(|device| {
-        ramflux_crypto::branch_proof_material_is_ready(device.branch_proof.issued_at, now)
+        device.branch_proof.as_ref().is_some_and(|proof| {
+            ramflux_crypto::branch_proof_material_is_ready(proof.issued_at, now)
+        })
     });
     manifest
 }
@@ -93,6 +124,22 @@ pub(crate) fn verify_manifest_authority(
     manifest: &SdkDeviceManifestResponse,
     expected: &str,
 ) -> Result<(), SdkError> {
+    if let Some(native) = &manifest.custody {
+        super::custody_directory::verify_native_authority(
+            native,
+            expected,
+            crate::custody::network_now()?,
+        )?;
+        if manifest.signed_device_set.is_some()
+            || manifest.principal_id != native.publication.record.body.principal_id
+            || manifest.principal_commitment != expected
+            || manifest.root_public_key
+                != native.publication.record.body.master_certificate.body.master_public_key
+        {
+            return Err(invalid("native directory identity mismatch"));
+        }
+        return Ok(());
+    }
     if manifest.devices.len() > 1024 || serde_json::to_vec(manifest)?.len() > 8 * 1024 * 1024 {
         return Err(invalid("manifest budget exceeded"));
     }
@@ -127,6 +174,31 @@ impl crate::RamfluxClient {
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
         bundle: &ramflux_crypto::PrekeyBundle,
     ) -> Result<(), SdkError> {
+        if let Some(authority) = self
+            .current_custody_authority(identity.root_commitment(), crate::custody::network_now()?)?
+        {
+            let reference = ramflux_protocol::custody::DeviceRef {
+                account_anchor: identity.root_commitment().into(),
+                device_id: identity.device_id().into(),
+                device_epoch: bundle.device_epoch,
+            };
+            let cert =
+                authority.authorize(&reference, "message", crate::custody::network_now()?)?;
+            if bundle.identity_commitment != authority.envelope().body.principal_id
+                || bundle.device_id != identity.device_id()
+                || bundle.device_identity_ed25519_public != cert.branch_signing_public_key
+                || ramflux_protocol::encode_base64url(bundle.identity_key)
+                    != cert.agreement_identity_public_key
+                || bundle.identity_key != bundle.device_agreement_x25519_public
+            {
+                return Err(invalid("native prekey differs from current authority"));
+            }
+            ramflux_crypto::verify_prekey_bundle(
+                &ramflux_crypto::verifying_key_from_base64url(&cert.branch_signing_public_key)?,
+                bundle,
+            )?;
+            return Ok(());
+        }
         let remote = identity.storage_key();
         let record = {
             self.require_cached_root_authority(identity)?;

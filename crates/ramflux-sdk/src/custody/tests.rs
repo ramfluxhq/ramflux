@@ -40,6 +40,21 @@ pub(crate) struct TestVault {
     fail_branch: AtomicBool,
 }
 impl TestVault {
+    pub(crate) fn primary_for_public_key(
+        &self,
+        public: &str,
+    ) -> std::result::Result<SelfSigningKey, SdkError> {
+        let entries = self.secrets.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        for bytes in entries.values().filter(|bytes| bytes.len() == 32) {
+            let mut seed = Zeroizing::new([0; 32]);
+            seed.copy_from_slice(bytes);
+            let key = SelfSigningKey::from_vault_seed(&seed);
+            if key.public_key() == public {
+                return Ok(key);
+            }
+        }
+        Err(SdkError::CustodyVaultUnavailable)
+    }
     fn put(&self, reference: &str, bytes: &[u8]) -> std::result::Result<(), SdkError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(SdkError::CustodyVaultUnavailable);
@@ -75,6 +90,24 @@ impl PrimaryVault for TestVault {
         let mut seed = Zeroizing::new([0; 32]);
         seed.copy_from_slice(bytes);
         Ok(SelfSigningKey::from_vault_seed(&seed))
+    }
+    fn load_branch(
+        &self,
+        reference: &str,
+        principal: &str,
+        device: &ramflux_protocol::custody::DeviceRef,
+    ) -> std::result::Result<BranchCredentials, SdkError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(SdkError::CustodyVaultUnavailable);
+        }
+        let secrets = self.secrets.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let bytes = secrets
+            .get(reference)
+            .filter(|bytes| bytes.len() == 64)
+            .ok_or(SdkError::CustodyVaultUnavailable)?;
+        let mut seeds = Zeroizing::new([0; 64]);
+        seeds.copy_from_slice(bytes);
+        BranchCredentials::from_vault_seeds(principal, device, &seeds)
     }
     fn store_branch(
         &self,
