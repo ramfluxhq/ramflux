@@ -11,14 +11,14 @@ use ramflux_crypto::custody::SelfSigningKey;
 use std::sync::{Arc, Condvar, Mutex};
 use tokio::sync::watch;
 use zeroize::Zeroizing;
-struct Shutdown(watch::Sender<bool>);
+pub(super) struct Shutdown(pub(super) watch::Sender<bool>);
 impl Drop for Shutdown {
     fn drop(&mut self) {
         let _ = self.0.send(true);
     }
 }
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-async fn connect(path: &std::path::Path) -> Result<CustodyBusClient> {
+pub(super) async fn connect(path: &std::path::Path) -> Result<CustodyBusClient> {
     // Binding creates the socket path before listener readiness; restart may also leave
     // the previous socket present briefly. Retry only these transient startup errors.
     for _ in 0..500 {
@@ -215,7 +215,8 @@ async fn custody_disabled_and_oversized_request_ids_have_no_side_effects() -> Re
         "account.custody.begin",
         serde_json::to_value(input("disabled"))?,
     );
-    let reply = crate::bus::custody_setup::respond(&mut disabled, &config, &mut ceremony).await?;
+    let reply =
+        crate::bus::custody_setup::respond(&mut disabled, &config, &mut ceremony, None).await?;
     assert!(std::str::from_utf8(&reply)?.contains("CustodyCreationDisabled"));
     assert!(!root.0.join("custody_accounts/disabled").exists());
     assert_eq!(
@@ -232,7 +233,7 @@ async fn custody_disabled_and_oversized_request_ids_have_no_side_effects() -> Re
         serde_json::to_value(input("oversized"))?,
     );
     assert!(matches!(
-        crate::bus::custody_setup::respond(&mut oversized, &config, &mut ceremony).await,
+        crate::bus::custody_setup::respond(&mut oversized, &config, &mut ceremony, None).await,
         Err(SdkError::CustodySetupInvalid)
     ));
     assert!(!root.0.join("custody_accounts/oversized").exists());
@@ -472,5 +473,59 @@ async fn disconnect_during_confirm_finishes_a_complete_pending_account() -> Resu
     vault.release();
     server?;
     flow?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn custody_shutdown_cannot_release_the_data_root_while_confirmation_is_blocked() -> Result {
+    struct Release(Arc<BlockingVault>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let root = Root::new()?;
+    let socket = root.0.join("bus.sock");
+    let vault = Arc::new(BlockingVault::new());
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.enable_born_v3_creation = true;
+    config.custody_vault = Some(vault.clone());
+    let second = LocalBusConfig::new(root.0.join("second.sock"), &root.0);
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _shutdown = Shutdown(stop.clone());
+        let _release = Release(vault.clone());
+        let mut bus = connect(&socket).await?;
+        bus.begin(&input("late-confirm")).await?;
+        let phrase = bus.show_once().await?;
+        let answers = words(&phrase, bus.hidden_challenge().await?)?;
+        let confirm = tokio::spawn(async move { bus.confirm(&answers).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), vault.entered.notified()).await?;
+        stop.send(true)?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while socket.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let attempt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::serve_local_bus_until(second, stop.subscribe()),
+        )
+        .await?;
+        assert!(
+            matches!(attempt, Err(SdkError::Io(e)) if e.kind()==std::io::ErrorKind::WouldBlock)
+        );
+        assert!(root.0.join("custody_accounts/late-confirm").exists());
+        assert!(!root.0.join("second.sock").exists());
+        vault.release();
+        let _ = confirm.await;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    vault.release();
+    server?;
+    flow?;
+    assert!(root.0.join("custody_accounts/late-confirm/authority.json").exists());
     Ok(())
 }

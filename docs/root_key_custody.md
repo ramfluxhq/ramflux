@@ -172,7 +172,9 @@ use zeroizing wrappers. Residual library-boundary copies remain: BIP39
 `to_entropy_array` returns an entropy array by value before it enters a zeroizing
 wrapper; X25519 `StaticSecret::from(*seed)` copies its input seed; HKDF 0.12 retains
 an internal PRK that it does not zeroize on drop; and serde_json may allocate a
-non-zeroizing deserializer scratch buffer for escaped confirmation words. These
+non-zeroizing deserializer scratch buffer for escaped confirmation words. The
+Unicode NFKD `Decompositions` iterator uses a non-zeroizing `TinyVec` buffer, which
+can spill to the heap for runs of more than four combining marks. These
 copies are bounded and short-lived but are not claimed to be synchronously scrubbed.
 Setup replies serialize directly into one fixed zeroizing output buffer.
 
@@ -843,3 +845,30 @@ account/data backup APIs.
 The local signed record is ready for a later publication implementation; its
 presence is not evidence of remote acceptance, account networking or live custody
 rollout. The proposed legacy public binding remains pending owner confirmation.
+
+### Local daemon ownership and pin updates
+
+A daemon takes an exclusive, nonblocking OS lock on `daemon.lock` in its data root
+before reconciling markers or replacing a socket. The inode is never unlinked.
+Different socket paths do not permit two daemons to own one data root. A detached
+custody-confirm worker retains this lease until its vault and durable publication
+work completes, including after disconnect or daemon shutdown.
+
+Startup quarantines inconsistent custody markers per account, with a structured
+`custody_marker_inconsistent` reason; invalid names use `custody_marker_invalid_name`.
+These entries do not stop unrelated accounts. A corrupt authority remains fenced
+from legacy creation/unlock, and account listing reports an incomplete pending
+account with `CustodySetupInvalid`. A marker with neither an index row nor public
+authority can be removed only while holding the data-root lease.
+
+New legacy bus creation uses the same insert-only account-index reservation as
+custody. Replace-capable library and restore callers retain their compatibility
+semantics; custody still checks manifest and reservation ownership at publication.
+
+The SDK stores only pin hashes and floors in local `authority.json`. Any future
+local head advance must call `observe_with_previous` with the separately stored,
+accepted `record`, rather than `observe`, so a valid conflict can retain its
+same-range evidence. Old accepted-record cache copies are pruned before conflict
+pairs; at most the newest eight fenced ranges are retained within the total 4 MiB budget.
+A current-range master-certificate conflict is checked before revision rollback.
+Superseded ranges remain ordinary rollback rejections.
