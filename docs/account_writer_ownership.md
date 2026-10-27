@@ -11,6 +11,8 @@ generations; it is not placed beside a generation-specific database file.
 Connections in the owning process share the file descriptor lease. Their actual
 write transactions still serialize through SQLite `BEGIN IMMEDIATE` and the
 five-second busy timeout. The ownership lock does not replace SQLite locking.
+One process registry serializes sharing and final descriptor teardown, so a new
+acquire cannot open a second descriptor while the previous registry entry exists.
 Query-only readers, pinned backup readers and private snapshot/staging databases
 do not acquire or prolong account writer ownership. Opening the account index
 alone does not acquire ownership. Account creation/replacement and generation
@@ -76,8 +78,11 @@ APIs, including associated-function and UFCS forms inside `connection.call`, and
 raw SQL transaction starts/terminators, including `concat!`-built statements.
 Exceptions name exact functions: managed entrypoints/acquisition, commit and
 rollback-on-drop in `database.rs`,
-`BackupDatabase::enqueue_restore_events` and `BackupDatabase::merge_backup` on
-private staging databases. Read-only backup snapshots need no raw-SQL exception.
+`BackupDatabase::enqueue_restore_events` and
+`BackupDatabase::merge_backup_with_group_actor` on private staging databases.
+Read-only backup snapshots need no raw-SQL exception. Transaction keywords
+supplied through `format!` substitutions and calls through aliased rusqlite types
+remain explicit review items; the source guard cannot resolve Rust values or types.
 Other functions in those files remain checked. Test-only code is excluded; the
 checker is a source guard, not a substitute for Rust types or SQL review.
 

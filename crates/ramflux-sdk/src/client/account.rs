@@ -138,9 +138,9 @@ impl RamfluxClient {
         if born.is_some() && wrapped.is_none() {
             return Err(SdkError::CustodySetupInvalid);
         }
+        let account_index = self.account_index()?;
         let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
         let key_encryption_key = account_db_key_encryption_key(&vault_secret, secret);
-        let account_index = self.account_index()?;
         let key = if let Some(wrapped) = wrapped {
             unwrap_with_vault_secret(&key_encryption_key, &wrapped)?
         } else {
@@ -406,6 +406,10 @@ mod tests {
         assert!(
             index.load_wrapped_db_key("acct")?.is_none(),
             "a refused first unlock must not publish its generated wrapped key"
+        );
+        assert!(
+            !FileVaultSecretSource::new(&root).vault_secret_path("acct").exists(),
+            "a refused first unlock must not create vault material"
         );
 
         drop(holder);
