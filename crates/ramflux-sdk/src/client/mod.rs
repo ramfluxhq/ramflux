@@ -35,6 +35,8 @@ pub(crate) mod inbox_failure;
 pub mod mcp_a2ui;
 mod native_branch;
 mod native_safety;
+#[cfg(test)]
+pub(crate) mod native_test_support;
 pub mod object;
 mod own_contact;
 pub(crate) mod own_device_copy;

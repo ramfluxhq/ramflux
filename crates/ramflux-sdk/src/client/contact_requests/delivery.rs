@@ -7,23 +7,25 @@ use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 const PREFIX: &str = "contact-request/send/";
 #[derive(Clone, Deserialize, Serialize)]
-struct Intent {
-    kind: Decision,
-    request_id: String,
-    requester_root: String,
-    target_root: String,
-    peer_root: String,
-    note: Option<String>,
-    expires_at: i64,
+pub(super) struct Intent {
+    pub(super) kind: Decision,
+    pub(super) request_id: String,
+    pub(super) requester_root: String,
+    pub(super) target_root: String,
+    pub(super) peer_root: String,
+    pub(super) note: Option<String>,
+    pub(super) expires_at: i64,
     #[serde(default)]
-    issued_at: i64,
+    pub(super) issued_at: i64,
     #[serde(default)]
-    nonce: String,
-    attempts: u8,
-    next_at: i64,
-    delivered: BTreeSet<(String, String)>,
+    pub(super) nonce: String,
+    pub(super) attempts: u8,
+    pub(super) next_at: i64,
+    pub(super) delivered: BTreeSet<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) native_approval: Option<super::native_delivery::Approved>,
 }
-fn key(intent: &Intent) -> String {
+pub(super) fn key(intent: &Intent) -> String {
     format!(
         "{PREFIX}{}",
         ramflux_protocol::hash_base64url(
@@ -145,6 +147,7 @@ impl RamfluxClient {
             attempts: 0,
             next_at: now_unix_timestamp(),
             delivered: BTreeSet::new(),
+            native_approval: None,
         };
         let id = key(&selector);
         let stored = self.account_db()?.load_actor_state::<Intent>(&id)?;
@@ -271,6 +274,7 @@ impl RamfluxClient {
             attempts: 0,
             next_at: now,
             delivered: BTreeSet::new(),
+            native_approval: None,
         };
         let record = ContactRequestRecord {
             contact_identity_commitment: peer.principal_commitment.clone(),
@@ -349,6 +353,7 @@ impl RamfluxClient {
                 attempts: 0,
                 next_at: now_unix_timestamp(),
                 delivered: BTreeSet::new(),
+                native_approval: None,
             },
         );
         match queued {
@@ -460,23 +465,27 @@ async fn deliver(
             .await?;
     client.persist_identity_directory(&own_manifest)?;
     client.persist_identity_directory(&peer)?;
-    let control = super::wire::sign(
-        client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        super::wire::Body {
-            schema: super::wire::DOMAIN.into(),
-            kind: intent.kind,
-            request_id: intent.request_id.clone(),
-            requester_root: intent.requester_root.clone(),
-            target_root: intent.target_root.clone(),
-            actor_root: own.root_commitment().into(),
-            issued_at: intent.issued_at,
-            expires_at: intent.expires_at,
-            nonce: intent.nonce.clone(),
-            note: intent.note.clone(),
-            manifest: own_manifest,
-        },
-    )?;
-    let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&control)?);
+    let bytes = if own_manifest.custody.is_some() {
+        super::native_delivery::approve(client, &engine.config, intent, &own_manifest).await?
+    } else {
+        let control = super::wire::sign(
+            client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            super::wire::Body {
+                schema: super::wire::DOMAIN.into(),
+                kind: intent.kind,
+                request_id: intent.request_id.clone(),
+                requester_root: intent.requester_root.clone(),
+                target_root: intent.target_root.clone(),
+                actor_root: own.root_commitment().into(),
+                issued_at: intent.issued_at,
+                expires_at: intent.expires_at,
+                nonce: intent.nonce.clone(),
+                note: intent.note.clone(),
+                manifest: own_manifest,
+            },
+        )?;
+        zeroize::Zeroizing::new(serde_json::to_vec(&control)?)
+    };
     if peer.devices.len() > 64 {
         return Err(invalid("contact request device fanout exceeds budget"));
     }

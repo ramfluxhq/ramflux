@@ -194,7 +194,8 @@ fn native_directory_request(
 ) -> bool {
     config.custody.is_some()
         && request.method == "GET"
-        && request.path.starts_with("/mvp1/device-manifest/")
+        && (request.path.starts_with("/mvp1/device-manifest/")
+            || request.path.starts_with(ramflux_protocol::custody::CUSTODY_HISTORY_PATH_PREFIX))
 }
 
 async fn sdk_quic_gateway_request(

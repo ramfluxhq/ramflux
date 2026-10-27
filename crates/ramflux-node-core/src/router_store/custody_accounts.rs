@@ -114,6 +114,7 @@ impl RouterRedbStore {
         if bytes.len() > 16 * 1024 * 1024 {
             return Err(NodeCoreError::Capacity { resource: "custody account authority bytes" });
         }
+        self.prune_custody_history(now)?;
         let tx = self.db.begin_write().map_err(error)?;
         {
             let mut accounts = tx.open_table(ACCOUNTS).map_err(error)?;
@@ -149,6 +150,16 @@ impl RouterRedbStore {
                 for key in expired {
                     budgets.remove(key.as_str()).map_err(error)?;
                 }
+            }
+            if let Some(previous) = accounts.get(anchor).map_err(error)? {
+                let previous: CustodyAccountState =
+                    serde_json::from_slice(previous.value()).map_err(error)?;
+                super::custody_history::retain(
+                    &tx,
+                    &previous.publication,
+                    &state.publication,
+                    now,
+                )?;
             }
             accounts.insert(anchor, bytes.as_slice()).map_err(error)?;
         }
