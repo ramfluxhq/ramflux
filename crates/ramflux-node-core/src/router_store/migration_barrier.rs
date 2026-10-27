@@ -1,32 +1,31 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Mailbox high-water capture inside the home commit's existing redb transaction.
-use super::{
-    NodeCoreError, ROUTER_INBOX_ENTRY_TABLE, ReadableTable, RouterRedbStore, expiry_index,
-    inbox_entry_storage_key,
-};
+//! Capture the same WAL/redb/ACK/retention view used by delivery recovery before cutover.
+use super::{NodeCoreError, RouterRedbStore};
 use crate::MigrationBacklogCursor;
 use ramflux_protocol::home_migration::{BacklogProgress, DeliveryMapEntry};
 impl RouterRedbStore {
     pub(crate) fn migration_backlog_barrier(
-        tx: &redb::WriteTransaction,
+        &self,
         anchor: &str,
         id: &str,
         map: &[DeliveryMapEntry],
         now: u64,
     ) -> Result<Vec<MigrationBacklogCursor>, NodeCoreError> {
-        let table = tx.open_table(ROUTER_INBOX_ENTRY_TABLE).map_err(db_error)?;
+        // The caller holds mapped submission stripes through the subsequent redb commit.
+        // Resolve legacy WAL deadlines before opening that write transaction.
+        let (inbox, _) = self.load_delivery_state(
+            i64::try_from(now).map_err(|e| NodeCoreError::Redb(e.to_string()))?,
+        )?;
         let mut result = Vec::with_capacity(map.len());
         for target in map {
-            let start = inbox_entry_storage_key(&target.target_delivery_id, 0);
-            let end = inbox_entry_storage_key(&target.target_delivery_id, u64::MAX);
             let mut high_water = 0;
             let mut count = 0_u64;
-            for row in table.range(start.as_str()..=end.as_str()).map_err(db_error)? {
-                let (_, value) = row.map_err(db_error)?;
-                let (entry, until) = expiry_index::decode_entry(value.value())?;
-                if until > i64::try_from(now).unwrap_or(i64::MAX) {
+            for (entry, until) in inbox.pending_entries_with_deadline() {
+                if entry.target_delivery_id == target.target_delivery_id
+                    && until > i64::try_from(now).unwrap_or(i64::MAX)
+                {
                     high_water = high_water.max(entry.inbox_seq);
                     count += 1;
                 }
@@ -46,7 +45,4 @@ impl RouterRedbStore {
         }
         Ok(result)
     }
-}
-fn db_error(e: impl std::fmt::Display) -> NodeCoreError {
-    NodeCoreError::Redb(e.to_string())
 }
