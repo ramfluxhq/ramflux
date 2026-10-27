@@ -224,7 +224,7 @@ else:
         self.assertEqual(owner["settings"]["DEMO_VERSION"], "demo-test")
         self.assertEqual(owner["version_history"], [])
         self.assertIn("RAMFLUX_VERSION=demo-test", (self.state / "runtime.env").read_text())
-        self.assertIn("--no-build", self.compose_commands()[-1])
+        self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
         for name, value in identity.items():
             self.assertEqual((self.state / name).read_bytes(), value)
         self.assertIn("use upgrade for DEMO_VERSION only",
@@ -251,7 +251,7 @@ else:
         self.assertIn("rollback command:", result.stdout)
         inspect_images = [args[2] for args in self.commands() if args[:2] == ["image", "inspect"]]
         self.assertEqual(len(inspect_images), 14)
-        self.assertIn("--no-build", self.compose_commands()[-1])
+        self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
 
     def test_admin_opt_in_uses_saved_overlay_and_refuses_conflicting_ports(self):
         with self.env_file.open("a") as output:
@@ -281,6 +281,7 @@ else:
         expected = "docker" if self.PROVIDER == "docker" else "podman-compose"
         self.assertEqual(compose_up["name"], expected)
         self.assertEqual(compose_up["cwd"], str(self.state))
+        self.assertEqual(compose_up["args"][-3:], ["up", "-d", "--build"])
         ca = (self.state / "certs/ca.pem").read_bytes()
         owner = (self.state / "owner.token").read_text()
         self.run_script("up")
