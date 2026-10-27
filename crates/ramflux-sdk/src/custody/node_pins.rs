@@ -262,8 +262,14 @@ impl NodePins {
         if !path.try_exists()? {
             return Ok(false);
         }
-        let receipts: std::collections::BTreeMap<String, u64> = read(&path, 512 * 1024)?;
-        Ok(receipts.get(key).is_some_and(|expiry| *expiry >= now))
+        let mut receipts: std::collections::BTreeMap<String, u64> = read(&path, 512 * 1024)?;
+        receipts.retain(|_, expiry| *expiry >= now);
+        let acknowledged = receipts.contains_key(key);
+        if receipts.is_empty() {
+            fs::remove_file(&path)?;
+            fs::File::open(path.parent().ok_or_else(invalid)?)?.sync_all()?;
+        }
+        Ok(acknowledged)
     }
     pub(super) fn remember_dm_acknowledgement(
         &self,

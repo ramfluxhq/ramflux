@@ -40,7 +40,9 @@ its durable opaque inbox. Current root-qualified authority, branch signatures an
 recipient-side AEAD are verified; it does not install a legacy gateway push
 session or silently use a cross-node directory. Reception enforces the signed
 creation time and TTL (at most one day). An invalid, future or expired message is
-dropped and counted without preventing later valid entries in the same inbox page.
+dropped, counted and acknowledged so a full rejected page cannot hide later valid
+entries. Lookup, local receipt-storage and transport failures remain retryable and
+do not advance the inbox.
 After the caller accepts a decrypted message, `ack_dm` fsyncs its receiver-scoped
 receipt before sending the real inbox ACK. Up to 4096 receipts per authenticated
 sender are retained through their signed expiry, across reconnect/restart; one
@@ -134,20 +136,31 @@ Router restart invalidates every grant. No grants are serialized, backed up or
 restored. Durable registration and `Live` survive, but reconnect authenticates again.
 Listener admission permits four live connections/streams per IP, eight per /24 or
 /64, sixteen per /48, and four streams per QUIC connection. Gateway/direct global
-caps remain 32/64, with fifteen-minute authenticated lifetimes. At a full cap, a
-lighter prefix evicts the oldest unauthenticated holder from the heaviest /24 or
-/48; revoked holders cannot authenticate or process another frame. Source open-rate
+caps remain 32/64, with fifteen-minute authenticated lifetimes. Each listener also
+caps authenticated connections per account anchor at four by default; operators may
+set `RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL` to a value from 1 through
+64. At a full cap, a lighter prefix evicts the oldest holder from the heaviest /24
+or /48. Authenticated holders within their computed prefix share are protected;
+authenticated holders above it remain evictable. Ties use monotonic admission age,
+never prefix text. Revocation cancels the connection task and closes its transport
+immediately, so an evicted holder cannot finish authentication or process another
+frame. Source open-rate
 windows and idle LRU accounting apply before a slot is granted. The direct public
 TLS handshake has a five-second deadline; subsequent unauthenticated reads,
 processing and writes share the short whole-exchange deadline. Slow reading does
 not retain a pre-auth slot indefinitely.
 
 New principal admission is durable and atomic with its per-account publication.
-The defaults are sixteen per node per minute and 256 per node per day. Each /24,
+The defaults are sixteen per node per minute and 256 per node per day. Set them
+with `RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_MINUTE` and
+`RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY`; malformed, zero or out-of-range settings
+refuse node startup instead of silently selecting another limit. Each /24,
 /64 and /48 receives at most one thirty-second of the configured global daily
 budget (rounded up), additionally capped by the prior eight-per-small-prefix and
 thirty-two-per-/48 daily ceilings. Thus eight /48s cannot consume the node-wide
-budget reserved for fresh prefixes. A node supports at most
+budget reserved for fresh prefixes. The process-local challenge window retires
+oldest prefix work as needed to reserve two challenges for a newly active prefix,
+so registration followed by session establishment fits the same minute. A node supports at most
 65,536 custody accounts. Clock rollback never resets a budget: correct the clock
 and retry after the retained window. Existing-account updates do not charge a
 new-principal budget; an identical re-publish performs no durable write.

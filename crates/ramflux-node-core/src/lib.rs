@@ -26,7 +26,8 @@ pub use source_privacy::{source_ip_hash, source_ip_hash_with_key};
 mod custody_authority;
 mod custody_ingress;
 pub use custody_ingress::{
-    CustodyIngressLimiter, CustodyIngressPermit, custody_auth_timeout, custody_source_prefixes,
+    CustodyIngressLimiter, CustodyIngressPermit, custody_auth_timeout,
+    custody_authenticated_session_limit, custody_source_prefixes,
 };
 mod identity_authority;
 pub use custody_authority::CustodyPublication;

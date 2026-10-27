@@ -17,6 +17,8 @@ pub enum NodeCoreError {
     ConfigRead { path: std::path::PathBuf, source: std::io::Error },
     #[error("cannot parse config {path}: {source}")]
     ConfigParse { path: std::path::PathBuf, source: toml::de::Error },
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(String),
     #[error("cannot create node store directory {path}: {source}")]
     StoreDirectory { path: std::path::PathBuf, source: std::io::Error },
     #[error("node store does not exist: {path}")]

@@ -470,10 +470,13 @@ impl RouterRedbStore {
         };
         let submission_wal = wal_root.map(RouterWalStore::open).transpose()?;
         let custody_new_principals_per_day =
-            router_u64_env(CUSTODY_NEW_PRINCIPALS_PER_DAY_ENV, 256).clamp(32, 65_536);
-        let custody_new_principals_per_minute =
-            router_u64_env(CUSTODY_NEW_PRINCIPALS_PER_MINUTE_ENV, 16)
-                .min(custody_new_principals_per_day);
+            custody_budget_env(CUSTODY_NEW_PRINCIPALS_PER_DAY_ENV, 256, 32, 65_536)?;
+        let custody_new_principals_per_minute = custody_budget_env(
+            CUSTODY_NEW_PRINCIPALS_PER_MINUTE_ENV,
+            16,
+            1,
+            custody_new_principals_per_day,
+        )?;
         Ok(Self {
             db,
             path: path.to_path_buf(),
@@ -1524,6 +1527,42 @@ fn router_usize_env(name: &str, default: usize) -> usize {
 
 fn router_u64_env(name: &str, default: u64) -> u64 {
     crate::environment::parsed::<u64>(name).filter(|value| *value > 0).unwrap_or(default)
+}
+
+fn custody_budget_env(
+    name: &str,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, NodeCoreError> {
+    let value = match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(NodeCoreError::InvalidConfiguration(format!("{name} must be valid UTF-8")));
+        }
+    };
+    custody_budget_value(name, value.as_deref(), default, minimum, maximum)
+}
+
+fn custody_budget_value(
+    name: &str,
+    value: Option<&str>,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, NodeCoreError> {
+    let value = value.map_or(Ok(default), str::parse::<u64>).map_err(|_| {
+        NodeCoreError::InvalidConfiguration(format!(
+            "{name} must be an integer in {minimum}..={maximum}"
+        ))
+    })?;
+    if !(minimum..=maximum).contains(&value) {
+        return Err(NodeCoreError::InvalidConfiguration(format!(
+            "{name} must be in {minimum}..={maximum}"
+        )));
+    }
+    Ok(value)
 }
 
 fn router_group_commit_enabled() -> bool {

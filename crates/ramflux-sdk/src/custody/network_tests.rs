@@ -174,6 +174,46 @@ async fn start_server(
     });
     Ok((address, ca, server))
 }
+async fn submit_invalid_dm_page(sender: &mut CustodyConnection, target: &DeviceRef) -> Result {
+    let peer = sender.lookup(target).await?;
+    for sequence in 0..100_u8 {
+        let bytes = [sequence];
+        let mut envelope = ramflux_protocol::Envelope {
+            schema: ramflux_protocol::domain::ENVELOPE.into(),
+            version: 1,
+            domain: ramflux_protocol::domain::ENVELOPE.into(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: super::network::fields(),
+            envelope_id: ramflux_protocol::encode_base64url([sequence; 32]),
+            source_principal_id: sender.account.record().body.principal_id.clone(),
+            source_device_id: sender.device.device_id.clone(),
+            target_delivery_id: peer.target_delivery_id.clone(),
+            routing_set_id: None,
+            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            priority: ramflux_protocol::Priority::Normal,
+            ttl: 300,
+            created_at: i64::try_from(super::network::now()?)?,
+            encrypted_payload: ramflux_protocol::encode_base64url(bytes),
+            payload_hash: ramflux_crypto::blake3_256_base64url(
+                "ramflux.identity.custody_dm_payload.v1",
+                &bytes,
+            ),
+        };
+        envelope
+            .ext
+            .ext
+            .insert("source_root_commitment".into(), sender.device.account_anchor.clone().into());
+        envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+            &sender.credentials.signing,
+        );
+        assert!(matches!(
+            sender.request(CustodySessionAction::Submit { envelope: Box::new(envelope) }).await?,
+            CustodyServerFrame::Submitted { .. }
+        ));
+    }
+    Ok(())
+}
 #[tokio::test]
 async fn custody_live_bus_creation_tls_registration_session_and_bidirectional_dm() -> Result {
     let root = Root(std::env::temp_dir().join(format!(
@@ -225,6 +265,7 @@ async fn custody_live_bus_creation_tls_registration_session_and_bidirectional_dm
         };
         let bob_ref =
             DeviceRef { account_anchor: bob_anchor, device_id: "primary".into(), device_epoch: 1 };
+        submit_invalid_dm_page(&mut alice, &bob_ref).await?;
         let id = alice.send_dm(&bob_ref, b"born-v3 confidential hello").await?;
         let messages = bob.receive_dm(0).await?;
         assert_eq!(messages.len(), 1);

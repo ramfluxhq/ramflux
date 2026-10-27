@@ -197,4 +197,18 @@ mod tests {
         restored.charge(172_800, 8, 8, false)?;
         Ok(())
     }
+    #[test]
+    fn custody_budget_configuration_refuses_invalid_or_out_of_range_values() {
+        assert_eq!(super::super::custody_budget_value("BUDGET", None, 16, 1, 32).ok(), Some(16));
+        assert_eq!(
+            super::super::custody_budget_value("BUDGET", Some("32"), 16, 1, 32).ok(),
+            Some(32)
+        );
+        for invalid in ["", "0", "33", "many"] {
+            assert!(
+                super::super::custody_budget_value("BUDGET", Some(invalid), 16, 1, 32).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
 }

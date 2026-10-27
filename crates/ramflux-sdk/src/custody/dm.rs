@@ -33,6 +33,44 @@ struct InboxDelivery {
     target_delivery_id: String,
     envelope: ramflux_protocol::Envelope,
 }
+#[derive(Clone)]
+struct RejectedDelivery {
+    inbox_seq: u64,
+    envelope_id: String,
+}
+enum ReceiveDmResult {
+    Message(CustodyDm),
+    AlreadyAcknowledged(RejectedDelivery),
+}
+enum ReceiveDmFailure {
+    Invalid(RejectedDelivery),
+    Transient(SdkError),
+}
+struct ValidatedDelivery {
+    inbox_seq: u64,
+    envelope: ramflux_protocol::Envelope,
+    packet: Packet,
+    rejected: RejectedDelivery,
+}
+impl From<SdkError> for ReceiveDmFailure {
+    fn from(error: SdkError) -> Self {
+        Self::Transient(error)
+    }
+}
+fn classify_lookup_failure(error: SdkError, rejected: RejectedDelivery) -> ReceiveDmFailure {
+    match error {
+        error @ (SdkError::Transport(_)
+        | SdkError::Io(_)
+        | SdkError::CustodyNetwork(
+            ramflux_protocol::custody::CustodyRefusal::AuthorityUnavailable
+            | ramflux_protocol::custody::CustodyRefusal::Capacity
+            | ramflux_protocol::custody::CustodyRefusal::PersistenceUnavailable
+            | ramflux_protocol::custody::CustodyRefusal::SessionExpired
+            | ramflux_protocol::custody::CustodyRefusal::SessionRequired,
+        )) => ReceiveDmFailure::Transient(error),
+        _ => ReceiveDmFailure::Invalid(rejected),
+    }
+}
 
 /// Authenticated decrypted delivery. Plaintext is erased when the value drops.
 pub struct CustodyDm {
@@ -74,15 +112,50 @@ fn message_expiry(created_at: i64, ttl: u32, current: u64) -> Result<u64, SdkErr
     }
     Ok(expires_at)
 }
-fn append_received<T>(messages: &mut Vec<T>, result: Result<Option<T>, SdkError>) -> bool {
-    match result {
-        Ok(Some(message)) => messages.push(message),
-        Ok(None) => {}
-        Err(_) => return false,
-    }
-    true
-}
 impl CustodyConnection {
+    fn validate_dm_delivery(
+        &self,
+        entry: serde_json::Value,
+        after_seq: u64,
+        own_bundle_hash: &[u8; 32],
+    ) -> Result<ValidatedDelivery, ReceiveDmFailure> {
+        let entry: InboxDelivery = serde_json::from_value(entry).map_err(SdkError::from)?;
+        let envelope = entry.envelope;
+        let rejected = RejectedDelivery {
+            inbox_seq: entry.inbox_seq,
+            envelope_id: envelope.envelope_id.clone(),
+        };
+        let expected_target = ramflux_protocol::qualified_device_id(
+            &self.device.account_anchor,
+            &self.device.device_id,
+        )
+        .map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?;
+        if envelope.envelope_id.len() > 256
+            || entry.inbox_seq <= after_seq
+            || entry.target_delivery_id != expected_target
+            || envelope.target_delivery_id != expected_target
+        {
+            return Err(ReceiveDmFailure::Invalid(rejected));
+        }
+        let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
+            .map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?;
+        if payload_hash(&bytes) != envelope.payload_hash {
+            return Err(ReceiveDmFailure::Invalid(rejected));
+        }
+        let packet: Packet =
+            decode(&bytes, 1024 * 1024).map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?;
+        if packet.schema != DM_DOMAIN
+            || packet.target != self.device
+            || packet.bundle_hash != *own_bundle_hash
+            || packet.source.device_id != envelope.source_device_id
+            || envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
+                != Some(packet.source.account_anchor.as_str())
+        {
+            return Err(ReceiveDmFailure::Invalid(rejected));
+        }
+        Ok(ValidatedDelivery { inbox_seq: entry.inbox_seq, envelope, packet, rejected })
+    }
+
     /// Send a DM under authenticated root-qualified source/target authority.
     /// Every envelope uses a fresh ephemeral/bootstrap and a single-message ratchet;
     /// this path never restores an old ratchet or reuses its message key after reconnect.
@@ -176,23 +249,49 @@ impl CustodyConnection {
     /// Rejects spoofed source/target/bootstrap, signature or commitment failures; no synthetic ack.
     pub async fn receive_dm(&mut self, after_seq: u64) -> Result<Vec<CustodyDm>, SdkError> {
         self.require_experimental_dm()?;
-        let CustodyServerFrame::Inbox { entries } =
-            self.request(CustodySessionAction::Inbox { after_seq, limit: 100 }).await?
-        else {
-            return Err(invalid());
-        };
         let mut messages = Vec::new();
         let bundle = self.prekey_bundle()?;
         let own_bundle_hash = bundle_hash(&bundle)?;
-        for entry in entries {
-            let result = self.receive_one_dm(entry, after_seq, &bundle, &own_bundle_hash).await;
-            if !append_received(&mut messages, result) {
-                let total = DM_RECEIVE_DROPS.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-                tracing::warn!(
-                    reason = "invalid_or_expired",
-                    total,
-                    "dropped one custody DM while continuing the inbox batch"
-                );
+        let mut scan_after = after_seq;
+        // Continue beyond one full rejected page so a hundred hostile entries cannot hide the
+        // first valid delivery. The four-page work cap keeps one poll bounded.
+        for _ in 0..4 {
+            let CustodyServerFrame::Inbox { entries } = self
+                .request(CustodySessionAction::Inbox { after_seq: scan_after, limit: 100 })
+                .await?
+            else {
+                return Err(invalid());
+            };
+            let page_len = entries.len();
+            if page_len == 0 {
+                break;
+            }
+            for entry in entries {
+                match self.receive_one_dm(entry, scan_after, &bundle, &own_bundle_hash).await {
+                    Ok(ReceiveDmResult::Message(message)) => {
+                        scan_after = scan_after.max(message.inbox_seq);
+                        messages.push(message);
+                    }
+                    Ok(ReceiveDmResult::AlreadyAcknowledged(delivery)) => {
+                        self.ack_delivery(&delivery).await?;
+                        scan_after = scan_after.max(delivery.inbox_seq);
+                    }
+                    Err(ReceiveDmFailure::Invalid(delivery)) => {
+                        self.ack_delivery(&delivery).await?;
+                        scan_after = scan_after.max(delivery.inbox_seq);
+                        let total =
+                            DM_RECEIVE_DROPS.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                        tracing::warn!(
+                            reason = "invalid_or_expired",
+                            total,
+                            "settled one rejected custody DM while continuing the inbox batch"
+                        );
+                    }
+                    Err(ReceiveDmFailure::Transient(error)) => return Err(error),
+                }
+            }
+            if page_len < 100 {
+                break;
             }
         }
         Ok(messages)
@@ -204,69 +303,55 @@ impl CustodyConnection {
         after_seq: u64,
         bundle: &ramflux_crypto::PrekeyBundle,
         own_bundle_hash: &[u8; 32],
-    ) -> Result<Option<CustodyDm>, SdkError> {
-        let entry: InboxDelivery = serde_json::from_value(entry)?;
-        let envelope = entry.envelope;
-        let expected_target = ramflux_protocol::qualified_device_id(
-            &self.device.account_anchor,
-            &self.device.device_id,
-        )?;
-        if envelope.envelope_id.len() > 256
-            || entry.inbox_seq <= after_seq
-            || entry.target_delivery_id != expected_target
-            || envelope.target_delivery_id != expected_target
-        {
-            return Err(invalid());
-        }
-        let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
-            .map_err(|_| invalid())?;
-        if payload_hash(&bytes) != envelope.payload_hash {
-            return Err(invalid());
-        }
-        let packet: Packet = decode(&bytes, 1024 * 1024)?;
-        if packet.schema != DM_DOMAIN
-            || packet.target != self.device
-            || packet.bundle_hash != *own_bundle_hash
-            || packet.source.device_id != envelope.source_device_id
-            || envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
-                != Some(packet.source.account_anchor.as_str())
-        {
-            return Err(invalid());
-        }
-        let peer = self.lookup(&packet.source).await?;
+    ) -> Result<ReceiveDmResult, ReceiveDmFailure> {
+        let ValidatedDelivery { inbox_seq, envelope, packet, rejected } =
+            self.validate_dm_delivery(entry, after_seq, own_bundle_hash)?;
+        let peer = self
+            .lookup(&packet.source)
+            .await
+            .map_err(|error| classify_lookup_failure(error, rejected.clone()))?;
         if envelope.source_principal_id != peer.publication.record.body.principal_id {
-            return Err(invalid());
+            return Err(ReceiveDmFailure::Invalid(rejected));
         }
         let authority = super::node_pins::verify_authority(
             &peer.publication,
             peer.custodian_publication.as_ref(),
             now()?,
-        )?;
-        let cert = authority.authorize(&packet.source, "message", now()?)?;
+        )
+        .map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?;
+        let cert = authority
+            .authorize(&packet.source, "message", now()?)
+            .map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?;
         if ramflux_protocol::encode_base64url(packet.initiator_identity)
             != cert.agreement_identity_public_key
         {
-            return Err(invalid());
+            return Err(ReceiveDmFailure::Invalid(rejected));
         }
+        let signed_bytes = ramflux_protocol::envelope_sender_signed_bytes(&envelope)
+            .map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?;
         ramflux_crypto::verify_canonical_signature(
-            &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+            &signed_bytes,
             &envelope.signed.signature,
             &cert.branch_signing_public_key,
-        )?;
+        )
+        .map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?;
         let current = now()?;
-        let expires_at = message_expiry(envelope.created_at, envelope.ttl, current)?;
+        let expires_at = message_expiry(envelope.created_at, envelope.ttl, current)
+            .map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?;
         let replay_key = ramflux_protocol::hash_base64url(
             "ramflux.identity.custody_dm_receipt.v1",
             &ramflux_protocol::canonical_json_bytes(&(
                 &self.device,
                 &packet.source,
                 &envelope.envelope_id,
-            ))?,
+            ))
+            .map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?,
         );
         let receipt_sender = ramflux_protocol::qualified_device_id(
             &packet.source.account_anchor,
             &packet.source.device_id,
-        )?;
+        )
+        .map_err(|_| ReceiveDmFailure::Invalid(rejected.clone()))?;
         let pins = self.pins.clone();
         let lookup_key = replay_key.clone();
         let lookup_sender = receipt_sender.clone();
@@ -276,11 +361,13 @@ impl CustodyConnection {
         .await
         .map_err(|_| invalid())??
         {
-            return Ok(None);
+            return Ok(ReceiveDmResult::AlreadyAcknowledged(rejected));
         }
-        let plaintext = self.decrypt_packet(&packet, bundle, own_bundle_hash)?;
-        Ok(Some(CustodyDm {
-            inbox_seq: entry.inbox_seq,
+        let plaintext = self
+            .decrypt_packet(&packet, bundle, own_bundle_hash)
+            .map_err(|_| ReceiveDmFailure::Invalid(rejected))?;
+        Ok(ReceiveDmResult::Message(CustodyDm {
+            inbox_seq,
             envelope_id: envelope.envelope_id,
             source: packet.source,
             plaintext,
@@ -292,6 +379,30 @@ impl CustodyConnection {
     }
 }
 impl CustodyConnection {
+    async fn ack_delivery(&mut self, delivery: &RejectedDelivery) -> Result<(), SdkError> {
+        let mut ack = ramflux_protocol::Ack {
+            schema: ramflux_protocol::domain::ACK.into(),
+            version: 1,
+            domain: ramflux_protocol::domain::ACK.into(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: fields(),
+            ack_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+            envelope_id: delivery.envelope_id.clone(),
+            receiver_device_id: self.device.device_id.clone(),
+            received_at: i64::try_from(now()?).map_err(|_| invalid())?,
+            cursor_after: None,
+        };
+        ack.ext.ext.insert("inbox_seq".into(), delivery.inbox_seq.into());
+        ack.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
+            &self.credentials.signing,
+            &ack,
+        )?;
+        match self.request(CustodySessionAction::Ack { ack: Box::new(ack) }).await? {
+            CustodyServerFrame::Acked { inbox_seq } if inbox_seq == delivery.inbox_seq => Ok(()),
+            _ => Err(invalid()),
+        }
+    }
+
     fn decrypt_packet(
         &self,
         packet: &Packet,
@@ -348,27 +459,11 @@ impl CustodyConnection {
         })
         .await
         .map_err(|_| invalid())??;
-        let mut ack = ramflux_protocol::Ack {
-            schema: ramflux_protocol::domain::ACK.into(),
-            version: 1,
-            domain: ramflux_protocol::domain::ACK.into(),
-            ext: ramflux_protocol::Ext::default(),
-            signed: fields(),
-            ack_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+        self.ack_delivery(&RejectedDelivery {
+            inbox_seq: message.inbox_seq,
             envelope_id: message.envelope_id.clone(),
-            receiver_device_id: self.device.device_id.clone(),
-            received_at: i64::try_from(now()?).map_err(|_| invalid())?,
-            cursor_after: None,
-        };
-        ack.ext.ext.insert("inbox_seq".into(), message.inbox_seq.into());
-        ack.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
-            &self.credentials.signing,
-            &ack,
-        )?;
-        match self.request(CustodySessionAction::Ack { ack: Box::new(ack) }).await? {
-            CustodyServerFrame::Acked { inbox_seq } if inbox_seq == message.inbox_seq => Ok(()),
-            _ => Err(invalid()),
-        }
+        })
+        .await
     }
 }
 
@@ -386,10 +481,28 @@ mod replay_tests {
         Ok(())
     }
     #[test]
-    fn invalid_message_does_not_discard_a_later_valid_batch_entry() {
-        let mut messages = Vec::new();
-        assert!(!append_received(&mut messages, message_expiry(100, 300, 401).map(|_| Some(1_u8))));
-        assert!(append_received(&mut messages, Ok(Some(2_u8))));
-        assert_eq!(messages, [2]);
+    fn rejected_delivery_retains_only_the_fields_needed_to_advance() {
+        let delivery = RejectedDelivery { inbox_seq: 7, envelope_id: "message".into() };
+        assert_eq!(delivery.inbox_seq, 7);
+        assert_eq!(delivery.envelope_id, "message");
+    }
+    #[test]
+    fn storage_and_lookup_failures_remain_transient() {
+        let failure: ReceiveDmFailure = SdkError::Io(std::io::Error::other("retry")).into();
+        assert!(matches!(failure, ReceiveDmFailure::Transient(SdkError::Io(_))));
+        let rejected = RejectedDelivery { inbox_seq: 1, envelope_id: "message".into() };
+        assert!(matches!(
+            classify_lookup_failure(
+                SdkError::CustodyNetwork(
+                    ramflux_protocol::custody::CustodyRefusal::PersistenceUnavailable
+                ),
+                rejected.clone(),
+            ),
+            ReceiveDmFailure::Transient(_)
+        ));
+        assert!(matches!(
+            classify_lookup_failure(SdkError::CustodySetupInvalid, rejected),
+            ReceiveDmFailure::Invalid(_)
+        ));
     }
 }

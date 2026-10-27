@@ -109,15 +109,18 @@ impl CustodyLeases {
             return Err(CustodyRefusal::Capacity);
         }
         let admission = self.sources.admit(source_ip, tick).ok_or(CustodyRefusal::Capacity)?;
-        if let crate::custody_ingress::BudgetAdmission::Evicted(prefix) = admission
-            && let Some(nonce) = self
-                .by_prefix
-                .get(&prefix)
-                .and_then(|entries| entries.first())
-                .map(|(_, nonce)| nonce.clone())
-        {
-            self.untrack(&nonce);
-            self.challenges.remove(&nonce);
+        if let crate::custody_ingress::BudgetAdmission::Evicted(prefixes) = admission {
+            for prefix in prefixes {
+                if let Some(nonce) = self
+                    .by_prefix
+                    .get(&prefix)
+                    .and_then(|entries| entries.first())
+                    .map(|(_, nonce)| nonce.clone())
+                {
+                    self.untrack(&nonce);
+                    self.challenges.remove(&nonce);
+                }
+            }
         }
         if self.pending_count >= GLOBAL_LIMIT {
             let oldest = self
@@ -433,7 +436,9 @@ mod tests {
         }
         assert_eq!(ipv4.pending_count, 1024);
         ipv4.issue(intent("198.51.100.7".into(), "honest-v4".into()), 100, tick)?;
-        assert_eq!(ipv4.pending_count, 1024, "one heavy-prefix challenge is evicted");
+        assert_eq!(ipv4.pending_count, 1023, "two slots are reserved for the fresh prefix");
+        ipv4.issue(intent("198.51.100.7".into(), "honest-v4".into()), 100, tick)?;
+        assert_eq!(ipv4.pending_count, 1024);
 
         let mut ipv6 = CustodyLeases::default();
         sequence = 0;
@@ -460,6 +465,24 @@ mod tests {
         }
         assert_eq!(sequence, 256);
         ipv6.issue(intent("2001:db8:ffff::1".into(), "honest-v6".into()), 100, tick)?;
+        Ok(())
+    }
+    #[test]
+    fn full_global_window_reserves_two_challenges_for_a_fresh_prefix() -> Result {
+        let tick = Instant::now();
+        let mut pool = CustodyLeases::default();
+        for prefix in 0..1024_u16 {
+            pool.issue(
+                intent(format!("2001:db8:{prefix:x}::1"), format!("attacker-{prefix}")),
+                100,
+                tick,
+            )?;
+        }
+        assert_eq!(pool.pending_count, 1024);
+        pool.issue(intent("2001:db8:ffff::1".into(), "honest".into()), 100, tick)?;
+        pool.issue(intent("2001:db8:ffff::1".into(), "honest".into()), 100, tick)?;
+        assert_eq!(pool.by_holder.get("honest").map(BTreeSet::len), Some(2));
+        assert_eq!(pool.pending_count, 1024);
         Ok(())
     }
     #[test]

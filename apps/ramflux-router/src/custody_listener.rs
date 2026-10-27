@@ -39,7 +39,11 @@ pub(crate) fn start(
         service_key: private_key,
     })?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
-    let capacity = ramflux_node_core::CustodyIngressLimiter::new(64);
+    let authenticated_per_principal = ramflux_node_core::custody_authenticated_session_limit()?;
+    let capacity = ramflux_node_core::CustodyIngressLimiter::with_authenticated_limit(
+        64,
+        authenticated_per_principal,
+    );
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     std::thread::Builder::new().name("custody-direct-tls".into()).spawn(move || {
         runtime.block_on(async move {
@@ -65,14 +69,8 @@ pub(crate) fn start(
                 let acceptor = acceptor.clone();
                 let router = Arc::clone(&router);
                 tokio::spawn(async move {
-                    let run = async {
-                        if permit.is_revoked() {
-                            anyhow::bail!("custody admission revoked")
-                        }
+                    let connection = async {
                         let tls = accept_tls(&acceptor, socket).await?;
-                        if permit.is_revoked() {
-                            anyhow::bail!("custody admission revoked")
-                        }
                         serve(
                             GatewayTcpTlsStream::Server(tls),
                             router,
@@ -80,6 +78,13 @@ pub(crate) fn start(
                             &permit,
                         )
                         .await
+                    };
+                    let run = async {
+                        tokio::select! {
+                            biased;
+                            () = permit.revoked() => anyhow::bail!("custody admission revoked"),
+                            result = connection => result,
+                        }
                     };
                     if let Err(error) = tokio::time::timeout(Duration::from_mins(15), run)
                         .await
@@ -117,9 +122,6 @@ async fn serve(
     )
     .await??;
     for _ in 0..2048 {
-        if permit.is_revoked() {
-            anyhow::bail!("custody admission revoked")
-        }
         let deadline = if authenticated {
             tokio::time::Instant::now() + Duration::from_secs(330)
         } else {
@@ -146,12 +148,13 @@ async fn serve(
             }),
         )
         .await??;
-        authenticated |= matches!(
-            &response,
-            ramflux_protocol::custody::CustodyServerFrame::SessionEstablished { .. }
-        );
-        if authenticated {
-            permit.mark_authenticated();
+        if let ramflux_protocol::custody::CustodyServerFrame::SessionEstablished { session } =
+            &response
+        {
+            if !permit.mark_authenticated(&session.device_ref.account_anchor) {
+                anyhow::bail!("custody authenticated session capacity exhausted")
+            }
+            authenticated = true;
         }
         tokio::time::timeout_at(
             deadline,

@@ -3,7 +3,7 @@
 
 //! Process-local prefix admission; live holders are never imported from durable state.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     net::IpAddr,
     sync::{
         Arc, Mutex,
@@ -11,6 +11,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tokio::sync::Notify;
+
+const DEFAULT_AUTHENTICATED_SESSIONS_PER_PRINCIPAL: usize = 4;
+const AUTHENTICATED_SESSIONS_PER_PRINCIPAL_ENV: &str =
+    "RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL";
 
 /// Bound the whole unauthenticated custody exchange, independently of idle activity.
 /// # Errors
@@ -31,6 +36,36 @@ pub fn custody_auth_timeout() -> Result<Duration, crate::NodeCoreError> {
         ));
     }
     Ok(Duration::from_millis(millis))
+}
+/// Bound authenticated custody connections owned by one principal on each listener.
+/// # Errors
+/// Rejects malformed, zero, or greater-than-64 configuration values.
+pub fn custody_authenticated_session_limit() -> Result<usize, crate::NodeCoreError> {
+    let value = match std::env::var(AUTHENTICATED_SESSIONS_PER_PRINCIPAL_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => {
+            return Ok(DEFAULT_AUTHENTICATED_SESSIONS_PER_PRINCIPAL);
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(crate::NodeCoreError::InvalidConfiguration(format!(
+                "{AUTHENTICATED_SESSIONS_PER_PRINCIPAL_ENV} must be valid UTF-8"
+            )));
+        }
+    };
+    parse_authenticated_session_limit(&value)
+}
+fn parse_authenticated_session_limit(value: &str) -> Result<usize, crate::NodeCoreError> {
+    let limit = value.parse::<usize>().map_err(|_| {
+        crate::NodeCoreError::InvalidConfiguration(format!(
+            "{AUTHENTICATED_SESSIONS_PER_PRINCIPAL_ENV} must be an integer in 1..=64"
+        ))
+    })?;
+    if !(1..=64).contains(&limit) {
+        return Err(crate::NodeCoreError::InvalidConfiguration(format!(
+            "{AUTHENTICATED_SESSIONS_PER_PRINCIPAL_ENV} must be in 1..=64"
+        )));
+    }
+    Ok(limit)
 }
 /// Simultaneous IP and network-prefix budgets, normalizing IPv4-mapped IPv6.
 #[must_use]
@@ -58,10 +93,11 @@ struct Bucket {
     touched: u64,
     count: u32,
     active: usize,
+    admissions: VecDeque<u64>,
 }
 pub(crate) enum BudgetAdmission {
     Admitted,
-    Evicted(String),
+    Evicted(Vec<String>),
 }
 #[derive(Default)]
 pub(crate) struct CustodySourceBudget {
@@ -90,10 +126,12 @@ impl CustodySourceBudget {
             touched: 0,
             count: 0,
             active: 0,
+            admissions: VecDeque::new(),
         });
         if tick.saturating_duration_since(bucket.started) >= Duration::from_secs(60) {
             bucket.started = tick;
             bucket.count = 0;
+            bucket.admissions.clear();
         }
         self.sequence = self.sequence.saturating_add(1);
         bucket.touched = self.sequence;
@@ -101,6 +139,7 @@ impl CustodySourceBudget {
             return false;
         }
         bucket.count += 1;
+        bucket.admissions.push_back(self.sequence);
         true
     }
     pub(crate) fn admit(&mut self, source: IpAddr, tick: Instant) -> Option<BudgetAdmission> {
@@ -130,27 +169,57 @@ impl CustodySourceBudget {
             .map(|(_, bucket)| count(bucket))
             .sum();
         let incoming = self.buckets.get(share).map_or(0, count);
-        let mut evicted = None;
+        let mut evicted = Vec::new();
         if global >= 1024 {
-            let heaviest = self
-                .buckets
-                .iter()
-                .filter(|(key, _)| key.ends_with("/24") || key.ends_with("/48"))
-                .map(|(key, bucket)| (key.clone(), count(bucket), bucket.touched))
-                .filter(|(_, count, _)| *count > incoming)
-                .max_by_key(|(_, count, touched)| (*count, std::cmp::Reverse(*touched)));
-            let (key, _, _) = heaviest?;
-            if let Some(bucket) = self.buckets.get_mut(&key) {
-                bucket.count = bucket.count.saturating_sub(1);
+            // A fresh prefix gets room for both registration and session challenges. If every
+            // donor is already at the two-challenge floor, retire one oldest donor prefix in
+            // full instead of leaving several active prefixes below that floor.
+            let mut needed = if incoming < 2 { usize::try_from(2 - incoming).ok()? } else { 1 };
+            while needed > 0 {
+                let candidates: Vec<_> = self
+                    .buckets
+                    .iter()
+                    .filter(|(key, bucket)| {
+                        (key.ends_with("/24") || key.ends_with("/48"))
+                            && key.as_str() != share
+                            && count(bucket) > 0
+                    })
+                    .map(|(key, bucket)| {
+                        (
+                            key.clone(),
+                            count(bucket),
+                            bucket.admissions.front().copied().unwrap_or(u64::MAX),
+                        )
+                    })
+                    .collect();
+                let max_count = candidates.iter().map(|(_, value, _)| *value).max()?;
+                if incoming >= 2 && max_count <= incoming {
+                    return None;
+                }
+                let (key, donor_count, _) = candidates
+                    .into_iter()
+                    .filter(|(_, value, _)| *value == max_count)
+                    .min_by_key(|(_, _, oldest)| *oldest)?;
+                let transfer = if max_count <= 2 { usize::try_from(donor_count).ok()? } else { 1 };
+                let bucket = self.buckets.get_mut(&key)?;
+                for _ in 0..transfer {
+                    bucket.count = bucket.count.saturating_sub(1);
+                    bucket.admissions.pop_front();
+                    evicted.push(key.clone());
+                }
+                needed = needed.saturating_sub(transfer);
             }
-            evicted = Some(key);
         }
         for (n, key) in prefixes.iter().enumerate() {
             if !self.charge(key, [32, 128, 256][n], tick, usize::MAX) {
                 return None;
             }
         }
-        Some(evicted.map_or(BudgetAdmission::Admitted, BudgetAdmission::Evicted))
+        Some(if evicted.is_empty() {
+            BudgetAdmission::Admitted
+        } else {
+            BudgetAdmission::Evicted(evicted)
+        })
     }
 }
 struct ActiveHolder {
@@ -160,6 +229,8 @@ struct ActiveHolder {
     admitted: u64,
     revoked: Arc<AtomicBool>,
     authenticated: Arc<AtomicBool>,
+    principal: Option<String>,
+    revocation: Arc<Notify>,
 }
 struct State {
     sources: CustodySourceBudget,
@@ -170,19 +241,26 @@ struct State {
 /// Shared listener admission. An owned permit releases on EOF, cancellation or timeout.
 pub struct CustodyIngressLimiter {
     limit: usize,
+    authenticated_per_principal: usize,
     state: Mutex<State>,
 }
 pub struct CustodyIngressPermit {
     limiter: Arc<CustodyIngressLimiter>,
     holder: u64,
     revoked: Arc<AtomicBool>,
-    authenticated: Arc<AtomicBool>,
+    revocation: Arc<Notify>,
 }
 impl CustodyIngressLimiter {
     #[must_use]
     pub fn new(limit: usize) -> Arc<Self> {
+        Self::with_authenticated_limit(limit, DEFAULT_AUTHENTICATED_SESSIONS_PER_PRINCIPAL)
+    }
+    /// Construct a listener pool with an already validated per-principal authenticated cap.
+    #[must_use]
+    pub fn with_authenticated_limit(limit: usize, authenticated_per_principal: usize) -> Arc<Self> {
         Arc::new(Self {
             limit,
+            authenticated_per_principal,
             state: Mutex::new(State {
                 sources: CustodySourceBudget::default(),
                 connections: BTreeMap::new(),
@@ -215,26 +293,29 @@ impl CustodyIngressLimiter {
         let share = keys.last()?.clone();
         let evicted_holder = if state.holders.len() >= self.limit {
             let mut counts = BTreeMap::<&str, usize>::new();
-            for holder in state
-                .holders
-                .values()
-                .filter(|holder| !holder.authenticated.load(Ordering::Acquire))
-            {
+            for holder in state.holders.values() {
                 *counts.entry(&holder.share).or_default() += 1;
             }
             let incoming = counts.get(share.as_str()).copied().unwrap_or(0);
-            let heavy = counts
-                .into_iter()
-                .filter(|(_, count)| *count > incoming)
-                .max_by_key(|(_, count)| *count)
-                .map(|(prefix, _)| prefix)?;
+            let active_prefixes = counts.len() + usize::from(!counts.contains_key(share.as_str()));
+            let fair_share = self.limit.div_ceil(active_prefixes.max(1));
             state
                 .holders
                 .iter()
                 .filter(|(_, holder)| {
-                    holder.share == heavy && !holder.authenticated.load(Ordering::Acquire)
+                    let prefix_count = counts.get(holder.share.as_str()).copied().unwrap_or(0);
+                    prefix_count > incoming
+                        && (!holder.authenticated.load(Ordering::Acquire)
+                            || prefix_count > fair_share)
                 })
-                .min_by_key(|(_, holder)| holder.admitted)
+                .min_by_key(|(_, holder)| {
+                    (
+                        std::cmp::Reverse(
+                            counts.get(holder.share.as_str()).copied().unwrap_or_default(),
+                        ),
+                        holder.admitted,
+                    )
+                })
                 .map(|(id, _)| *id)
         } else {
             None
@@ -255,6 +336,7 @@ impl CustodyIngressLimiter {
         let holder = state.sequence;
         let revoked = Arc::new(AtomicBool::new(false));
         let authenticated = Arc::new(AtomicBool::new(false));
+        let revocation = Arc::new(Notify::new());
         state.holders.insert(
             holder,
             ActiveHolder {
@@ -264,14 +346,17 @@ impl CustodyIngressLimiter {
                 admitted: holder,
                 revoked: Arc::clone(&revoked),
                 authenticated: Arc::clone(&authenticated),
+                principal: None,
+                revocation: Arc::clone(&revocation),
             },
         );
-        Some(CustodyIngressPermit { limiter: Arc::clone(self), holder, revoked, authenticated })
+        Some(CustodyIngressPermit { limiter: Arc::clone(self), holder, revoked, revocation })
     }
     fn remove_holder(state: &mut State, holder: u64, revoke: bool) {
         let Some(holder) = state.holders.remove(&holder) else { return };
         if revoke {
             holder.revoked.store(true, Ordering::Release);
+            holder.revocation.notify_one();
         }
         for key in &holder.keys {
             if let Some(bucket) = state.sources.buckets.get_mut(key) {
@@ -294,9 +379,44 @@ impl CustodyIngressPermit {
     pub fn is_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire)
     }
-    /// Protect this holder from unauthenticated fair-share eviction after proof succeeds.
-    pub fn mark_authenticated(&self) {
-        self.authenticated.store(true, Ordering::Release);
+    /// Mark this holder authenticated if the principal still owns capacity on this listener.
+    /// A holder evicted during proof processing can never become authenticated afterwards.
+    #[must_use]
+    pub fn mark_authenticated(&self, principal: &str) -> bool {
+        let mut state =
+            self.limiter.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(existing) = state.holders.get(&self.holder) else { return false };
+        if existing.revoked.load(Ordering::Acquire) {
+            return false;
+        }
+        if let Some(current) = &existing.principal {
+            return current == principal;
+        }
+        let count = state
+            .holders
+            .values()
+            .filter(|holder| holder.principal.as_deref() == Some(principal))
+            .count();
+        if principal.is_empty()
+            || principal.len() > 512
+            || count >= self.limiter.authenticated_per_principal
+        {
+            CustodyIngressLimiter::remove_holder(&mut state, self.holder, true);
+            return false;
+        }
+        let Some(holder) = state.holders.get_mut(&self.holder) else { return false };
+        holder.principal = Some(principal.to_owned());
+        holder.authenticated.store(true, Ordering::Release);
+        true
+    }
+    /// Complete when fair-share admission revokes this holder.
+    pub async fn revoked(&self) {
+        loop {
+            if self.is_revoked() {
+                return;
+            }
+            self.revocation.notified().await;
+        }
     }
 }
 impl Drop for CustodyIngressPermit {
@@ -392,23 +512,114 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn fair_share_never_revokes_an_authenticated_holder() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn authenticated_holders_are_protected_only_inside_their_prefix_share()
+    -> Result<(), Box<dyn std::error::Error>> {
         let tick = Instant::now();
         let limiter = CustodyIngressLimiter::new(4);
-        let held: Vec<_> = (1..=4)
-            .map(|host| {
-                limiter
-                    .acquire(IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, host)), None, tick)
-                    .ok_or("holder")
-            })
-            .collect::<Result<_, _>>()?;
-        held[0].mark_authenticated();
+        let first = limiter.acquire("203.0.113.1".parse()?, None, tick).ok_or("first")?;
+        let second = limiter.acquire("203.0.113.2".parse()?, None, tick).ok_or("second")?;
+        assert!(first.mark_authenticated("principal-a"));
+        assert!(second.mark_authenticated("principal-b"));
+        let third = limiter.acquire("192.0.2.1".parse()?, None, tick).ok_or("third")?;
+        let fourth = limiter.acquire("192.0.2.2".parse()?, None, tick).ok_or("fourth")?;
         let honest =
             limiter.acquire("198.51.100.7".parse()?, None, tick).ok_or("fresh prefix refused")?;
         assert!(!honest.is_revoked());
-        assert!(!held[0].is_revoked());
-        assert_eq!(held[1..].iter().filter(|permit| permit.is_revoked()).count(), 1);
+        assert!(!first.is_revoked());
+        assert!(!second.is_revoked());
+        assert_eq!([third.is_revoked(), fourth.is_revoked()].into_iter().filter(|v| *v).count(), 1);
         Ok(())
+    }
+    #[test]
+    fn one_principal_cannot_fill_an_authenticated_listener_pool()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (limit, prefixes) in [(32, 4_u8), (64, 8_u8)] {
+            let tick = Instant::now();
+            let limiter = CustodyIngressLimiter::with_authenticated_limit(limit, 4);
+            let mut held = Vec::new();
+            for net in 0..prefixes {
+                for host in 1..=2 {
+                    for _ in 0..4 {
+                        let permit = limiter
+                            .acquire(
+                                IpAddr::V4(std::net::Ipv4Addr::new(203, 0, net, host)),
+                                None,
+                                tick,
+                            )
+                            .ok_or("attacker holder")?;
+                        let authenticated = permit.mark_authenticated("one-account-anchor");
+                        held.push((permit, authenticated));
+                    }
+                }
+            }
+            assert_eq!(held.iter().filter(|(_, authenticated)| *authenticated).count(), 4);
+            let honest = limiter
+                .acquire("198.51.100.7".parse()?, None, tick)
+                .ok_or("fresh prefix refused")?;
+            assert!(!honest.is_revoked());
+        }
+        Ok(())
+    }
+    #[test]
+    fn authenticated_over_share_prefixes_remain_evictable() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let tick = Instant::now();
+        let limiter = CustodyIngressLimiter::with_authenticated_limit(32, 4);
+        let mut held = Vec::new();
+        for net in 0..4_u8 {
+            for host in 1..=8_u8 {
+                let permit = limiter
+                    .acquire(IpAddr::V4(std::net::Ipv4Addr::new(203, 0, net, host)), None, tick)
+                    .ok_or("holder")?;
+                assert!(permit.mark_authenticated(&format!("principal-{net}-{host}")));
+                held.push(permit);
+            }
+        }
+        let honest =
+            limiter.acquire("198.51.100.7".parse()?, None, tick).ok_or("fresh prefix refused")?;
+        assert!(!honest.is_revoked());
+        assert_eq!(held.iter().filter(|permit| permit.is_revoked()).count(), 1);
+        Ok(())
+    }
+    #[test]
+    fn tied_prefixes_evict_by_holder_age_not_prefix_order() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for victim in ["1.1.1.7", "99.1.1.7"] {
+            let tick = Instant::now();
+            let limiter = CustodyIngressLimiter::new(32);
+            let attackers: Vec<_> = (0..31_u8)
+                .map(|net| {
+                    limiter
+                        .acquire(IpAddr::V4(std::net::Ipv4Addr::new(203, 0, net, 1)), None, tick)
+                        .ok_or("attacker")
+                })
+                .collect::<Result<_, _>>()?;
+            let victim = limiter.acquire(victim.parse()?, None, tick).ok_or("victim")?;
+            let churn = limiter.acquire("198.51.100.7".parse()?, None, tick).ok_or("churn")?;
+            assert!(!victim.is_revoked());
+            assert!(!churn.is_revoked());
+            assert!(attackers[0].is_revoked());
+        }
+        Ok(())
+    }
+    #[test]
+    fn evicted_holder_cancellation_is_immediately_observable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tick = Instant::now();
+        let limiter = CustodyIngressLimiter::new(1);
+        let victim = limiter.acquire("203.0.113.1".parse()?, None, tick).ok_or("victim")?;
+        let replacement =
+            limiter.acquire("198.51.100.1".parse()?, None, tick).ok_or("replacement")?;
+        assert!(victim.is_revoked());
+        assert!(!replacement.is_revoked());
+        tokio::runtime::Builder::new_current_thread().build()?.block_on(victim.revoked());
+        Ok(())
+    }
+    #[test]
+    fn authenticated_session_limit_configuration_is_strict() {
+        assert_eq!(parse_authenticated_session_limit("4").ok(), Some(4));
+        for invalid in ["", "0", "65", "four"] {
+            assert!(parse_authenticated_session_limit(invalid).is_err(), "accepted {invalid}");
+        }
     }
 }
