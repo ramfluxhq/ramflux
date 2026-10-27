@@ -166,6 +166,7 @@ fn router_store_failure_rolls_back_authority_and_session_and_allows_retry() -> T
     let router = RouterCore::new();
     let request = registration_request(&router, "alice", "phone", 1, None, "192.0.2.1")?;
     let store = RouterRedbStore::open(&path)?;
+    let mut expected_registry = serde_json::to_value(router.mvp1_identities_snapshot())?;
     store.fail_next_registration_admission();
 
     let failure = router.register_identity_durable(&request, &store);
@@ -174,6 +175,14 @@ fn router_store_failure_rolls_back_authority_and_session_and_allows_retry() -> T
     );
     assert!(router.signed_device_set(&request.principal_commitment).is_none());
     assert!(router.session(&request.target_delivery_id).is_none());
+    let source = request.source_ip_hash.clone().ok_or("source hash missing")?;
+    expected_registry["registration_times_by_source_ip"] =
+        serde_json::json!({source: [request.now]});
+    assert_eq!(
+        serde_json::to_value(router.mvp1_identities_snapshot())?,
+        expected_registry,
+        "store failure must roll back the full registry except for the documented failed-attempt charge"
+    );
     let stored = store.load_router()?.unwrap_or_default();
     assert!(stored.signed_device_set(&request.principal_commitment).is_none());
     assert!(stored.session(&request.target_delivery_id).is_none());
@@ -249,6 +258,11 @@ fn downgrade_snapshot_change_causes_typed_reupgrade_refusal_without_epoch_rollba
         let db = redb::Database::open(&path)?;
         let txn = db.begin_write()?;
         txn.open_table(SNAPSHOTS)?.insert("identity_registry", downgraded_bytes.as_slice())?;
+        let mut budgets = txn.open_table(BUDGETS)?;
+        budgets.retain(|_, _| false)?;
+        budgets
+            .insert("obsolete-old-binary-budget", serde_json::to_vec(&vec![1_i64])?.as_slice())?;
+        drop(budgets);
         txn.commit()?;
     }
 
@@ -270,6 +284,39 @@ fn downgrade_snapshot_change_causes_typed_reupgrade_refusal_without_epoch_rollba
     );
     drop(bytes);
     drop(snapshots);
+    drop(txn);
+    drop(db);
+    let report = RouterRedbStore::discard_stale_identity_journal(&path)?;
+    assert_eq!(report.discarded_rows, 1);
+    assert!(report.affected_root_ids.contains(&first.principal_commitment));
+    let recovered = RouterRedbStore::open_existing(&path)?;
+    assert_eq!(recovered.pending_identity_admission_count()?, 0);
+    let recovered_registry =
+        recovered.load_router()?.ok_or("recovered router missing")?.mvp1_identities_snapshot();
+    assert_eq!(
+        recovered_registry
+            .signed_device_set(&first.principal_commitment)
+            .ok_or("recovered latest set missing")?
+            .device_set_epoch,
+        2
+    );
+    drop(recovered);
+    let db = redb::Database::open(&path)?;
+    let txn = db.begin_read()?;
+    let budgets = txn.open_table(BUDGETS)?;
+    let stored_budgets = budgets
+        .iter()?
+        .map(|row| {
+            let (key, value) = row?;
+            Ok::<_, Box<dyn std::error::Error>>((
+                key.value().to_owned(),
+                serde_json::from_slice(value.value())?,
+            ))
+        })
+        .collect::<Result<std::collections::BTreeMap<String, Vec<i64>>, _>>()?;
+    assert_eq!(&stored_budgets, recovered_registry.registration_budgets());
+    assert!(!stored_budgets.contains_key("obsolete-old-binary-budget"));
+    drop(budgets);
     drop(txn);
     drop(db);
     clean(&path);

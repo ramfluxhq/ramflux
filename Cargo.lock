@@ -2621,6 +2621,7 @@ dependencies = [
  "ramflux-node-core",
  "ramflux-protocol",
  "ramflux-transport",
+ "redb",
  "serde_json",
  "socket2",
  "tokio",

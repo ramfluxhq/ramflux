@@ -50,6 +50,16 @@ fn apply<T: Clone>(target: &mut BTreeMap<String, T>, changes: &Changes<T>) {
     }
 }
 impl RegistrationDelta {
+    pub(crate) fn affected_root_ids(&self) -> BTreeSet<String> {
+        self.identity_authority_fences
+            .keys()
+            .chain(self.signed_device_sets.keys())
+            .chain(self.root_public_keys_by_commitment.keys())
+            .cloned()
+            .chain(self.receipts.iter().filter_map(|receipt| receipt.root.clone()))
+            .collect()
+    }
+
     fn between(before: &IdentityRegistry, after: &IdentityRegistry) -> Self {
         let old: BTreeMap<_, _> = before.root_seen_proofs.iter().map(|r| (&r.key, r)).collect();
         let next: BTreeSet<_> = after.root_seen_proofs.iter().map(|r| &r.key).collect();

@@ -4,6 +4,7 @@
 mod handlers;
 mod identity_authority;
 mod lifecycle;
+mod operator;
 mod retention;
 mod router_engine;
 mod router_runtime;
@@ -38,10 +39,25 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     }
     tracing_subscriber::fmt().with_target(false).init();
     let checkpoint_only = std::env::args().any(|arg| arg == "--checkpoint-identity-registry");
+    let discard_stale = std::env::args().any(|arg| arg == "--discard-stale-identity-journal");
+    if checkpoint_only && discard_stale {
+        anyhow::bail!(
+            "--checkpoint-identity-registry and --discard-stale-identity-journal are mutually exclusive"
+        );
+    }
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
         let redb_path = ramflux_node_core::effective_redb_path(&config);
+        if checkpoint_only || discard_stale {
+            let path = operator::resolved_store_path(&config)?;
+            let command = if checkpoint_only {
+                operator::IdentityJournalCommand::Checkpoint
+            } else {
+                operator::IdentityJournalCommand::DiscardStale
+            };
+            return operator::run(command, &path);
+        }
         let store = ramflux_node_core::RouterRedbStore::open(redb_path)?;
         let router = match store.load_router()? {
             Some(router) => router,
@@ -51,11 +67,6 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         if let Some(signer) = ramflux_node_core::node_service_signing_key_from_config(&config)? {
             router.set_node_franking_public_key(Some(signer.public_key_base64url().to_owned()));
             router.set_node_service_signer(Some(signer));
-        }
-        if checkpoint_only {
-            router.persist_identity_registry(&store)?;
-            println!("ramflux-router:identity-registry-checkpoint-complete");
-            return Ok(());
         }
         tracing::info!(service, node_id = config.node_id, "router store initialized");
         let home_node_forward = local_federation_forward_client_from_env(&config);
@@ -75,12 +86,12 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             return Ok(());
         }
         wait_for_shutdown_signal()?;
-        router.state().persist_identity_registry(router.store())?;
+        operator::checkpoint_for_shutdown(router.state(), router.store())?;
         tracing::info!(service, "router identity registry checkpointed for shutdown");
         return Ok(());
     }
-    if checkpoint_only {
-        anyhow::bail!("--checkpoint-identity-registry requires --config");
+    if checkpoint_only || discard_stale {
+        anyhow::bail!("identity registry maintenance commands require --config");
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {

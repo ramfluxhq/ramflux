@@ -19,12 +19,16 @@ pub enum NodeCoreError {
     ConfigParse { path: std::path::PathBuf, source: toml::de::Error },
     #[error("cannot create node store directory {path}: {source}")]
     StoreDirectory { path: std::path::PathBuf, source: std::io::Error },
+    #[error("node store does not exist: {path}")]
+    StoreDoesNotExist { path: std::path::PathBuf },
     #[error("redb operation failed: {0}")]
     Redb(String),
     #[error(
-        "identity admission journal base mismatch: snapshot={snapshot_hash} journal={journal_hash}; restore the pre-downgrade store or drain the journal before downgrading"
+        "identity admission journal base mismatch: snapshot={snapshot_hash} journal={journal_hash}; stop the router and run --discard-stale-identity-journal against this store; restoring a pre-downgrade backup can roll back authority changes"
     )]
     IdentityAdmissionJournalBaseMismatch { snapshot_hash: String, journal_hash: String },
+    #[error("identity admission journal has no stale rows to discard")]
+    IdentityAdmissionJournalNotStale,
     #[error("router snapshot serialization failed: {0}")]
     SnapshotSerialization(String),
     #[error("config service_id {actual} does not match expected {expected}")]

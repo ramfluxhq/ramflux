@@ -514,8 +514,11 @@ operator can force the same checkpoint and empty the journal with:
 ramflux-router --config /path/to/router.toml --checkpoint-identity-registry
 ```
 
-The command exits successfully only after printing
-`ramflux-router:identity-registry-checkpoint-complete`.
+Run the command with the same working directory and state/configuration environment
+as the service. It opens an existing store only: it will not create a missing store.
+The first output line prints the resolved absolute store path; verify it before
+accepting the final
+`ramflux-router:identity-registry-checkpoint-complete drained_rows=<count>` line.
 
 Before downgrading to a binary that predates the admission journal:
 
@@ -537,9 +540,26 @@ Before downgrading to a binary that predates the admission journal:
 If steps 1-3 are skipped, undrained admissions and their replay receipts are not
 visible to the older binary; affected clients must re-register while it runs.
 If the older binary rewrites the snapshot, a later re-upgrade intentionally
-refuses the stale journal rather than rolling authority back. Do not delete the
-journal to bypass that refusal. Restore the pre-downgrade backup, run the current
-binary's checkpoint command, and repeat the downgrade procedure.
+refuses the stale journal rather than rolling authority back. With the router
+stopped, preserve a backup of the current downgraded store, then run the current
+binary in the service environment:
+
+```sh
+ramflux-router --config /path/to/router.toml --discard-stale-identity-journal
+```
+
+Verify the printed absolute store path and require the final
+`ramflux-router:identity-registry-discard-complete` line. The command removes
+only journal rows bound to a different snapshot, reports their count and affected
+root identifiers, and rebuilds admission budgets from the surviving state. The
+current snapshot and matching rows win; stale rows are never applied. Clients
+whose admissions were discarded must register again.
+
+Restoring the pre-downgrade backup is an alternative only when rolling back all
+authority changes made by the older binary is explicitly acceptable. Restore it,
+run the current binary's checkpoint command, and repeat the downgrade procedure.
+Do not manually delete the journal or use a pre-downgrade backup as a routine
+recovery shortcut: either can discard newer authority state without an audit trail.
 
 This bounds recovery replay; a checkpoint still scales with the complete registry.
 The source-budget index has the existing 4096-bucket bound. Ownership validation

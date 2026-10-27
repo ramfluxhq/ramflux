@@ -30,6 +30,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 ramflux-crypto = { workspace = true }
+redb = { workspace = true }
 
 [lints]
 workspace = true

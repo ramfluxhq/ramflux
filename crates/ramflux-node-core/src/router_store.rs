@@ -32,6 +32,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 mod expiry_index;
 mod identity_registry;
 mod retention;
+pub use identity_registry::IdentityJournalDiscardReport;
 
 const ROUTER_COMMIT_BATCH_MAX_ENV: &str = "RAMFLUX_ROUTER_COMMIT_BATCH_MAX";
 const ROUTER_COMMIT_BATCH_MAX_DEFAULT: usize = 256;
@@ -267,7 +268,21 @@ impl RouterRedbStore {
         } else {
             None
         };
-        Self::open_with_wal_root(path, wal_root.as_deref())
+        Self::open_with_wal_root(path, wal_root.as_deref(), true)
+    }
+
+    /// Opens an existing router store without creating a file or parent directory.
+    ///
+    /// # Errors
+    /// Returns an error when the store is missing, locked, malformed, or cannot be upgraded.
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
+        let path = path.as_ref();
+        if !path.is_file() {
+            return Err(NodeCoreError::StoreDoesNotExist { path: path.to_path_buf() });
+        }
+        let wal_root =
+            if router_wal_enabled() { Some(router_wal_root_for_redb_path(path)) } else { None };
+        Self::open_with_wal_root(path, wal_root.as_deref(), false)
     }
 
     #[cfg(test)]
@@ -275,20 +290,22 @@ impl RouterRedbStore {
         path: impl AsRef<Path>,
         wal_root: impl AsRef<Path>,
     ) -> Result<Self, NodeCoreError> {
-        Self::open_with_wal_root(path, Some(wal_root.as_ref()))
+        Self::open_with_wal_root(path, Some(wal_root.as_ref()), true)
     }
 
     #[cfg(test)]
     pub(crate) fn open_without_wal(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
-        Self::open_with_wal_root(path, None)
+        Self::open_with_wal_root(path, None, true)
     }
 
     fn open_with_wal_root(
         path: impl AsRef<Path>,
         wal_root: Option<&Path>,
+        create: bool,
     ) -> Result<Self, NodeCoreError> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent()
+        if create
+            && let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
             fs::create_dir_all(parent).map_err(|source| NodeCoreError::StoreDirectory {
@@ -297,7 +314,7 @@ impl RouterRedbStore {
             })?;
         }
         let db = Arc::new(
-            redb::Database::create(path)
+            if create { redb::Database::create(path) } else { redb::Database::open(path) }
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?,
         );
         let write_txn =

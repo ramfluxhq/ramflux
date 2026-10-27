@@ -12,6 +12,8 @@ use redb::ReadableTableMetadata;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::path::Path;
 
 const ADMISSIONS: TableDefinition<u64, &[u8]> =
     TableDefinition::new("router_identity_admission_v1");
@@ -26,6 +28,13 @@ const MISSING_SNAPSHOT_HASH_DOMAIN: &str = "ramflux.identity_admission.missing_s
 struct RegistrationJournalEntry {
     base_snapshot_hash: String,
     delta: RegistrationDelta,
+}
+
+/// Result of discarding journal rows that do not extend the stored snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityJournalDiscardReport {
+    pub discarded_rows: u64,
+    pub affected_root_ids: Vec<String>,
 }
 
 fn error(error: impl std::fmt::Display) -> NodeCoreError {
@@ -68,10 +77,18 @@ pub(super) fn initialize_budgets(
     registry: &IdentityRegistry,
 ) -> Result<(), NodeCoreError> {
     let read = db.begin_read().map_err(error)?;
-    match read.open_table(BUDGETS) {
-        Ok(_) => return Ok(()),
-        Err(redb::TableError::TableDoesNotExist(_)) => {}
+    let journal_is_empty = match read.open_table(ADMISSIONS) {
+        Ok(table) => table.is_empty().map_err(error)?,
+        Err(redb::TableError::TableDoesNotExist(_)) => true,
         Err(e) => return Err(error(e)),
+    };
+    let budgets_exist = match read.open_table(BUDGETS) {
+        Ok(_) => true,
+        Err(redb::TableError::TableDoesNotExist(_)) => false,
+        Err(e) => return Err(error(e)),
+    };
+    if budgets_exist && !journal_is_empty {
+        return Ok(());
     }
     drop(read);
     let txn = db.begin_write().map_err(error)?;
@@ -137,6 +154,88 @@ pub(super) fn replay(
     Ok(())
 }
 impl RouterRedbStore {
+    /// Discards only admission rows whose base differs from the current snapshot.
+    ///
+    /// The store must already exist and be offline. Stale deltas are never applied; the current
+    /// snapshot and any journal rows that still extend it remain authoritative.
+    ///
+    /// # Errors
+    /// Returns an error for a missing or locked store, malformed state, or no stale rows.
+    pub fn discard_stale_identity_journal(
+        path: impl AsRef<Path>,
+    ) -> Result<IdentityJournalDiscardReport, NodeCoreError> {
+        let path = path.as_ref();
+        if !path.is_file() {
+            return Err(NodeCoreError::StoreDoesNotExist { path: path.to_path_buf() });
+        }
+        let db = redb::Database::open(path).map_err(error)?;
+        let txn = db.begin_write().map_err(error)?;
+        let (current_snapshot_hash, mut effective_registry) = {
+            let snapshots = txn.open_table(ROUTER_SNAPSHOT_TABLE).map_err(error)?;
+            let bytes = snapshots.get(ROUTER_IDENTITY_REGISTRY_KEY).map_err(error)?;
+            match bytes {
+                Some(bytes) => (
+                    snapshot_hash(Some(bytes.value())),
+                    serde_json::from_slice(bytes.value()).map_err(error)?,
+                ),
+                None => (snapshot_hash(None), IdentityRegistry::default()),
+            }
+        };
+        let mut stale_keys = Vec::new();
+        let mut retained_bytes = 0_u64;
+        let mut affected_root_ids = BTreeSet::new();
+        {
+            let admissions = txn.open_table(ADMISSIONS).map_err(error)?;
+            for row in admissions.iter().map_err(error)? {
+                let (key, bytes) = row.map_err(error)?;
+                let entry: RegistrationJournalEntry =
+                    serde_json::from_slice(bytes.value()).map_err(error)?;
+                if entry.base_snapshot_hash == current_snapshot_hash {
+                    retained_bytes = retained_bytes
+                        .saturating_add(u64::try_from(bytes.value().len()).unwrap_or(u64::MAX));
+                    entry.delta.apply(&mut effective_registry);
+                } else {
+                    stale_keys.push(key.value());
+                    affected_root_ids.extend(entry.delta.affected_root_ids());
+                }
+            }
+        }
+        if stale_keys.is_empty() {
+            txn.abort().map_err(error)?;
+            return Err(NodeCoreError::IdentityAdmissionJournalNotStale);
+        }
+        let discarded_rows = u64::try_from(stale_keys.len()).unwrap_or(u64::MAX);
+        {
+            let mut admissions = txn.open_table(ADMISSIONS).map_err(error)?;
+            for key in stale_keys {
+                admissions.remove(key).map_err(error)?;
+            }
+        }
+        txn.open_table(ROUTER_SNAPSHOT_TABLE)
+            .map_err(error)?
+            .insert(JOURNAL_BYTES_KEY, retained_bytes.to_le_bytes().as_slice())
+            .map_err(error)?;
+        write_budgets(&txn, &effective_registry)?;
+        txn.commit().map_err(error)?;
+        Ok(IdentityJournalDiscardReport {
+            discarded_rows,
+            affected_root_ids: affected_root_ids.into_iter().collect(),
+        })
+    }
+
+    /// Returns the number of pending identity admission rows.
+    ///
+    /// # Errors
+    /// Returns a durable storage error when the journal cannot be read.
+    pub fn pending_identity_admission_count(&self) -> Result<u64, NodeCoreError> {
+        let txn = self.db.begin_read().map_err(error)?;
+        match txn.open_table(ADMISSIONS) {
+            Ok(table) => table.len().map_err(error),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(0),
+            Err(source) => Err(error(source)),
+        }
+    }
+
     /// Authority, replay receipt and session become durable together, before publication.
     pub(crate) fn record_registration_admission(
         &self,

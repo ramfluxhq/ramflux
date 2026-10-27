@@ -130,7 +130,7 @@ pub use relay::*;
 pub use replay_guard::*;
 pub use retention::*;
 pub use router::*;
-pub use router_store::RouterRedbStore;
+pub use router_store::{IdentityJournalDiscardReport, RouterRedbStore};
 pub use router_wal::*;
 pub use service_signing::*;
 pub use session::*;
