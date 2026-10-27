@@ -4,6 +4,7 @@
 //! Minimal MVP-0 cryptographic helpers for protocol fixtures.
 
 pub mod backup_stream;
+pub mod custody;
 mod device_reference;
 pub mod object_verification;
 pub use device_reference::RootQualifiedDeviceRef;

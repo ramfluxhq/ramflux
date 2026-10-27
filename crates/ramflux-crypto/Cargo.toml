@@ -13,6 +13,8 @@ ramflux-core = { workspace = true }
 ramflux-protocol = { workspace = true }
 aes-gcm = { version = "0.10.3", features = ["zeroize"] }
 argon2 = "0.5.3"
+bip39 = { version = "=3.0.0", default-features = false, features = ["std", "zeroize"] }
+unicode-normalization = "0.1.25"
 hkdf = "0.12.4"
 base64 = "0.22"
 blake3 = "1.8.5"
