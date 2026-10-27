@@ -533,16 +533,40 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                 .request_frame(request("read", "alice", "conversation.list", serde_json::json!({})))
                 .await?;
             let mut found = false;
-            for _ in 0..2 {
-                let event = tokio::time::timeout(Duration::from_secs(2), client.next_event())
-                    .await
-                    .map_err(|_| failure("outbox replay timed out"))??;
+            let mut migration = false;
+            let mut friend = false;
+            let mut sequence = 0;
+            // Startup replays the migration marker as well as the friend and domain changes.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+            for _ in 0..3 {
+                let event = tokio::time::timeout_at(
+                    deadline.min(tokio::time::Instant::now() + Duration::from_secs(2)),
+                    client.next_event(),
+                )
+                .await
+                .map_err(|_| failure("outbox replay timed out"))??;
                 assert_eq!(event.method, "state.changed");
                 assert_eq!(event.account_id.as_deref(), Some("alice"));
-                assert!(event.body["sequence"].as_i64().is_some_and(|value| value > 0));
-                found |= event.body["table_name"] == "local_event_log";
+                let next = event.body["sequence"].as_i64().ok_or_else(|| failure("sequence"))?;
+                assert!(next > sequence);
+                sequence = next;
+                match event.body["table_name"].as_str() {
+                    Some("runtime_actor_state") => {
+                        assert_eq!(
+                            event.body["keys"]["state_kind"],
+                            crate::client::contact_verification::MIGRATION_MARKER
+                        );
+                        migration = true;
+                    }
+                    Some("friend_link_projection") => {
+                        assert_eq!(event.body["keys"]["link_id"], "friend");
+                        friend = true;
+                    }
+                    Some("local_event_log") => found = true,
+                    _ => return Err(failure("unexpected startup outbox change")),
+                }
             }
-            assert!(found);
+            assert!(found && migration && friend);
             drop(client);
             let _ = server.await;
             supervisor.shutdown().await?;
