@@ -85,7 +85,8 @@ fn a_peer_cannot_preclaim_a_future_own_copy_row_id() -> Result<(), SdkError> {
     outgoing.recipient_device_id = Some(receiver.id.clone());
     outgoing.target_delivery_id = receiver.id.clone();
     let entry = seal(&peer, &receiver, outgoing, b"peer preclaim")?;
-    let peer_id = receiver.client.projection_id(&entry)?;
+    let routing = receiver.client.open_routed(&entry, &receiver.id)?.routing;
+    let peer_id = receiver.client.projection_id(&entry, &routing)?;
     assert_ne!(peer_id, expected, "a peer must not reserve a future own-copy identifier");
     receiver.client.send_direct_message("peer-thread", &peer_id, &peer.reference()?, &[])?;
     receiver.client.account_db()?.store_message_content(
