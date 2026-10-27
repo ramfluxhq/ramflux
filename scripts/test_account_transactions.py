@@ -45,6 +45,14 @@ class TransactionGuardTests(unittest.TestCase):
     def test_comments_literals_and_triggers_are_not_method_calls(self):
         self.check('fn write() { /* db.savepoint()? */ // db.transaction()?\n let x = "db.savepoint()"; }', False)
         self.check('fn upgrade() { db.execute_batch("CREATE TRIGGER t AFTER INSERT ON x BEGIN SELECT 1; END;")?; }', False)
+        self.check('fn upgrade() { db.execute_batch("CREATE TRIGGER t AFTER INSERT ON x BEGIN SELECT CASE WHEN 1 THEN 2 END; END;")?; }', False)
+        for source in (
+            'fn harmless() { let channel = "release"; }',
+            'fn harmless() { let message = "End of stream"; }',
+            'fn harmless() { map.insert("commit", value); }',
+            'fn harmless() { db.execute("SELECT ?", ["commit"])?; }',
+        ):
+            self.check(source, False)
 
     def test_tests_are_excluded_but_production_after_them_is_not(self):
         self.check('#[cfg(test)] mod tests { fn x() { db.savepoint()?; } }', False)
@@ -52,7 +60,8 @@ class TransactionGuardTests(unittest.TestCase):
         self.check('#[cfg(test)] mod tests {}\nfn write() { db.savepoint()?; }')
 
     def test_allowlist_is_function_scoped(self):
-        self.check('fn merge_backup() { db.execute_batch("BEGIN IMMEDIATE")?; }', False, 'account_db/backup_merge.rs')
+        self.check('fn merge_backup_with_group_actor() { db.execute_batch("BEGIN IMMEDIATE")?; }', False, 'account_db/backup_merge.rs')
+        self.check('fn merge_backup() { db.execute_batch("BEGIN IMMEDIATE")?; }', True, 'account_db/backup_merge.rs')
         self.check('fn live_write() { db.execute_batch("BEGIN IMMEDIATE")?; }', True, 'account_db/backup_merge.rs')
         self.check('fn transaction() { db.execute_batch("BEGIN IMMEDIATE")?; }', False, 'database.rs')
         self.check('fn call() { db.savepoint()?; }', True, 'database.rs')

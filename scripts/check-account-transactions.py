@@ -6,6 +6,9 @@
 This is a conservative source guard, not a Rust or SQL type checker. Managed
 connections are crate-private; scan every production Rust file in that crate.
 Exceptions name an exact function, never a whole staging/snapshot source file.
+Transaction keywords supplied through format! substitutions and calls through
+aliased rusqlite types remain review responsibilities because this lightweight
+source scanner cannot resolve Rust values or types.
 """
 import argparse
 import re
@@ -19,12 +22,13 @@ ALLOW = {
     ('database.rs', 'commit'): 'managed transaction completion boundary',
     ('database.rs', 'drop'): 'managed transaction rollback boundary',
     ('account_db/backup_database.rs', 'enqueue_restore_events'): 'private restore staging database',
-    ('account_db/backup_merge.rs', 'merge_backup'): 'private restore staging database',
+    ('account_db/backup_merge.rs', 'merge_backup_with_group_actor'): 'private restore staging database',
 }
 METHOD = re.compile(r'\.\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\s*(?:::\s*<[^;{}]*>)?\s*\(')
 ASSOCIATED = re.compile(r'\b(?:Transaction|Savepoint)\s*::\s*(?:new(?:_unchecked)?|with_name)\b|(?:\bConnection\s*|<[^;{}>]*\bConnection[^;{}>]*>\s*)::\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\b')
 SQL = re.compile(r'(?:^|;)\s*(?:BEGIN|SAVEPOINT|COMMIT|END|ROLLBACK|RELEASE)\b', re.I)
 FUNCTION = re.compile(r'\bfn\s+(\w+)\s*(?:<[^{}]*>)?\s*\(')
+SQL_METHOD = re.compile(r'\.\s*(?:execute|execute_batch|prepare|prepare_cached|query_row)\s*\(')
 
 
 def lex(source):
@@ -100,14 +104,64 @@ def closing_pair(masked, opening, left='(', right=')'):
     return len(masked)
 
 
-def contains_transaction_sql(value):
+def first_argument_end(masked, opening):
+    """Return the first top-level comma or the call's closing parenthesis."""
+    parens = brackets = braces = 0
+    for i in range(opening + 1, len(masked)):
+        char = masked[i]
+        if char == '(':
+            parens += 1
+        elif char == ')':
+            if parens == 0 and brackets == 0 and braces == 0:
+                return i
+            parens -= 1
+        elif char == '[':
+            brackets += 1
+        elif char == ']':
+            brackets -= 1
+        elif char == '{':
+            braces += 1
+        elif char == '}':
+            braces -= 1
+        elif char == ',' and parens == 0 and brackets == 0 and braces == 0:
+            return i
+    return len(masked)
+
+
+def without_trigger_programs(value):
     # Trigger programs use BEGIN/END as grammar, not transaction boundaries.
-    without_triggers = re.sub(
-        r'\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b.*?\bEND\s*;?',
-        ' ',
-        value,
-        flags=re.I | re.S,
-    )
+    trigger = re.compile(r'\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b', re.I)
+    token = re.compile(r'\b(BEGIN|CASE|END)\b', re.I)
+    result, cursor = [], 0
+    while match := trigger.search(value, cursor):
+        result.append(value[cursor:match.start()])
+        begin = re.search(r'\bBEGIN\b', value[match.end():], re.I)
+        if begin is None:
+            result.append(value[match.start():])
+            return ''.join(result)
+        body = match.end() + begin.end()
+        depth, end = 1, None
+        for marker in token.finditer(value, body):
+            word = marker[1].upper()
+            if word == 'CASE':
+                depth += 1
+            elif word == 'END':
+                depth -= 1
+                if depth == 0:
+                    end = marker.end()
+                    break
+        if end is None:
+            result.append(value[match.start():])
+            return ''.join(result)
+        cursor = end
+        if cursor < len(value) and value[cursor] == ';':
+            cursor += 1
+    result.append(value[cursor:])
+    return ''.join(result)
+
+
+def contains_transaction_sql(value):
+    without_triggers = without_trigger_programs(value)
     without_comments = re.sub(r'/\*.*?\*/|--[^\n]*', ' ', without_triggers, flags=re.S)
     return bool(SQL.search(without_comments))
 
@@ -137,15 +191,22 @@ def violations(source, path):
     hits.extend(
         (match.start(), 'raw transaction/savepoint API') for match in ASSOCIATED.finditer(masked)
     )
-    for offset, value in strings:
-        if contains_transaction_sql(value):
-            hits.append((offset, 'raw SQL transaction/savepoint'))
-    for match in re.finditer(r'\bconcat\s*!\s*\(', masked):
+    sql_calls = []
+    for match in SQL_METHOD.finditer(masked):
         opening = masked.find('(', match.start())
-        end = closing_pair(masked, opening)
-        joined = ''.join(value for offset, value in strings if opening < offset < end)
-        if contains_transaction_sql(joined):
-            hits.append((match.start(), 'raw SQL transaction/savepoint'))
+        sql_calls.append((opening, first_argument_end(masked, opening)))
+    for opening, end in sql_calls:
+        for offset, value in strings:
+            if opening < offset < end and contains_transaction_sql(value):
+                hits.append((offset, 'raw SQL transaction/savepoint'))
+        for match in re.finditer(r'\bconcat\s*!\s*\(', masked[opening:end]):
+            concat_opening = masked.find('(', opening + match.start())
+            concat_end = closing_pair(masked, concat_opening)
+            joined = ''.join(
+                value for offset, value in strings if concat_opening < offset < concat_end
+            )
+            if contains_transaction_sql(joined):
+                hits.append((opening + match.start(), 'raw SQL transaction/savepoint'))
     found = []
     for offset, reason in hits:
         if any(start <= offset < end for start, end in tests):

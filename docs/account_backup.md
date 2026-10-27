@@ -72,7 +72,8 @@ AEAD and fsync completion. Hard-link publication falls back to an exclusive no-r
 estimated before writing and checked between bounded copy/write batches. Partial
 output and encrypted staging are removed on cancellation or failure.
 
-Typed failures: `wrong_passphrase`, `tampered`, `truncated`, `unsupported_version`,
+Typed failures: `account_busy` (retryable, message `account in use by another
+process`), `wrong_passphrase`, `tampered`, `truncated`, `unsupported_version`,
 `insufficient_space` (needed_bytes, available_bytes), `unreadable`, `not_writable`,
 `staging_expired`, `interrupted`, `attachment_mismatch`, `attachments_unavailable`, `identity_rollback`,
 `root_conflict`. A wrong passphrase fails immediately after header authentication,

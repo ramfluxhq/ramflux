@@ -75,13 +75,13 @@ impl RamfluxClient {
         if crate::custody::account_exists(self.account_index()?.root(), local_account_id)? {
             return Err(SdkError::NetworkingPending);
         }
-        let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
-        let key_encryption_key = account_db_key_encryption_key(&vault_secret, secret);
         let account_index = self.account_index()?;
         // The wrapped key and encrypted database are one writer-owned unit. In
         // particular, a competing first unlock must not replace the wrapped key
         // before discovering that another process owns the database.
         let _writer = account_index.acquire_account_writer(local_account_id)?;
+        let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
+        let key_encryption_key = account_db_key_encryption_key(&vault_secret, secret);
         let key = if let Some(wrapped) = account_index.load_wrapped_db_key(local_account_id)? {
             unwrap_with_vault_secret(&key_encryption_key, &wrapped)?
         } else {
@@ -340,6 +340,10 @@ mod tests {
         assert!(
             index.load_wrapped_db_key("acct")?.is_none(),
             "a refused first unlock must not publish its generated wrapped key"
+        );
+        assert!(
+            !FileVaultSecretSource::new(&root).vault_secret_path("acct").exists(),
+            "a refused first unlock must not create vault material"
         );
 
         drop(holder);

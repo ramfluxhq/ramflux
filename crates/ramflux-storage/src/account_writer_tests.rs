@@ -6,7 +6,7 @@
 use crate::{AccountDb, AccountDbKey, AccountIndex, StorageError};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -225,14 +225,57 @@ fn same_process_reacquire_waits_until_the_previous_descriptor_is_closed() -> Tes
 }
 
 #[test]
-fn writer_lock_filesystem_error_names_the_lock_path() {
-    let path = std::path::PathBuf::from("/data/accounts/acct/.writer.lock");
-    let error = StorageError::AccountWriterLock {
-        path: path.clone(),
-        source: std::io::Error::new(std::io::ErrorKind::Unsupported, "locks unavailable"),
+fn same_process_registry_stress_never_reports_account_busy() -> TestResult {
+    const THREADS: usize = 8;
+    const CYCLES: usize = 2_000;
+    let (root, writer) = crate::tests::test_db("same-process-writer-stress")?;
+    drop(writer);
+    let start = Arc::new(Barrier::new(THREADS));
+    let mut workers = Vec::new();
+    for _ in 0..THREADS {
+        let root = root.clone();
+        let start = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || -> Result<usize, StorageError> {
+            let index = AccountIndex::open(root)?;
+            start.wait();
+            let mut busy = 0;
+            for _ in 0..CYCLES {
+                match index.acquire_account_writer("acct") {
+                    Ok(lease) => drop(lease),
+                    Err(StorageError::AccountWriterBusy(_)) => busy += 1,
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(busy)
+        }));
+    }
+    let mut busy = 0;
+    for worker in workers {
+        busy += worker.join().map_err(|_| "writer stress thread panicked")??;
+    }
+    assert_eq!(busy, 0, "same-process registry handoff must never surface as account busy");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn writer_lock_filesystem_error_names_the_real_lock_path() -> TestResult {
+    let (root, writer) = crate::tests::test_db("writer-lock-open-error")?;
+    drop(writer);
+    let account = root.join("accounts/acct");
+    let path = account.join(".writer.lock");
+    std::fs::remove_file(&path)?;
+    std::fs::create_dir(&path)?;
+    let expected = account.canonicalize()?.join(".writer.lock");
+    let Err(error) = AccountIndex::open(&root)?.acquire_account_writer("acct") else {
+        return Err("directory lock path unexpectedly opened".into());
     };
     let message = error.to_string();
     assert!(message.contains("account writer lock failed"));
     assert!(message.contains(path.to_string_lossy().as_ref()));
-    assert!(message.contains("locks unavailable"));
+    assert!(
+        matches!(error, StorageError::AccountWriterLock { path: ref failed, .. } if failed == &expected)
+    );
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
