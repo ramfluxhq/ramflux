@@ -56,6 +56,12 @@ Message origin attribution is never swept: it survives with the message and is r
 through message deletion/tombstones, independently of receipt status. Origins enrolled
 by older receipt retention ledgers are also protected.
 
+Deleting a message prevents any new receipt work and erases its message-origin record.
+Receipt work that was already pending may temporarily retain the peer routing address
+needed to finish the authenticated receipt. The courier removes that work after it is
+sent, terminally fails, or expires under the bounds above; it is never a message-history
+or export surface.
+
 ## Client compatibility and attribution
 
 `message.receipt.delivered` remains accepted. It is an idempotent no-op for `pending`
