@@ -75,7 +75,8 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
             account.put_engine(GatewaySessionEngine::with_test_transport(config,
                 Box::new(PublicationFault {
                     inner:Gateway {last:None,pending_cursor:None,blocked:None,
-                        cancelled:Arc::new(AtomicBool::new(false)),submits:Arc::new(AtomicUsize::new(0))},
+                        cancelled:Arc::new(AtomicBool::new(false)),submits:Arc::new(AtomicUsize::new(0)),
+                        cancelled_notice:None},
                     root:fixture_root,entered:Some(entered),release:fixture_release,
                 })));
             Ok(account)

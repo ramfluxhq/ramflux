@@ -40,5 +40,5 @@ mod server_retention_r4;
 mod server_retention_r5;
 mod server_retention_r6;
 
-mod registration_persistence;
 mod custody;
+mod registration_persistence;
