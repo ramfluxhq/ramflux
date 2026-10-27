@@ -165,6 +165,10 @@ it is statically compatible with the target: use the same CPU architecture and a
 compatible glibc (or an intentionally static build). Keep the tool executable and
 set its absolute target-host path as `DEMO_TOOL`.
 
+Federation header, body, timeout and connection limits are validated before every
+local command. An invalid value therefore also blocks `status`, `logs`, `down` and
+`down --purge`; correct the operator env before retrying the maintenance command.
+
 ### Optional voice UDP overlay
 
 Set `RAMFLUX_DEMO_VOICE_UDP_PORT=59449` in the operator env file, or append

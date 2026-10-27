@@ -95,9 +95,11 @@ The override is never included by demo-node.sh or normal production Compose.
 `RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS` each default to 64 concurrent connections;
 valid values are 1..4096 and invalid configuration fails startup. Excess connections
 receive a generic 503 without spawning another worker on either listener. Slots are released after
-success, request failure or worker termination. The existing request read timeout
-still applies. Public 500 responses contain only `internal server error`; causes
-are logged privately. Per-source-IP rate limiting is separate follow-up work.
+success, request failure or normal worker return. Production uses `panic = "abort"`,
+so a worker panic terminates the process rather than unwinding and releasing only
+that slot. The existing request read timeout still applies. Public 500 responses
+contain only `internal server error`; causes are logged privately. Per-source-IP
+rate limiting is separate follow-up work.
 
 For host runs, set `RAMFLUX_FEDERATION_PUBLIC_ADDR` and
 `RAMFLUX_FEDERATION_ADMIN_ADDR` to distinct available addresses, for example
@@ -156,16 +158,21 @@ Per-IP rate limiting remains follow-up work.
 
 Federation responses are serialized before socket writes. Every write uses the
 remaining request budget, with at most five seconds for response delivery; partial
-progress never renews either deadline. Mesh/router work retains its own transport
-timeouts, but cannot restart the response budget. A read which exhausts its budget
-may send only the 408 rejection using a separate 100 ms allowance. Failed writes
+progress never renews either deadline, including on kernels whose socket timeout can
+restart within one large write call, because each syscall is capped at 64 KiB.
+Mesh/router work retains its own transport timeouts, but cannot restart the response
+budget. A read which exhausts its budget may send only the 408 rejection using a
+separate 100 ms allowance. If admin handler work completes after the response budget,
+the server sends a bounded 504 stating that the operation outcome is unknown; callers
+must reconcile state before retrying a non-idempotent request. Failed partial writes
 are logged and closed; no second response is appended to a partial response.
 
 After a complete response the server shuts down its write half, then drains unread
 request bytes with a fixed buffer until EOF or 100 ms, capped by the remaining
-request budget. Oversized finite headers therefore receive a complete 413 rather
-than a truncated status line. A peer which streams indefinitely beyond the drain
-budget may still see a reset after the response; it cannot prolong a worker slot.
+request budget. Small oversized headers which finish arriving within that drain
+window receive a complete 413 rather than a truncated status line. A larger or slow
+finite header, or a peer which streams indefinitely beyond the drain budget, may
+still see a reset after the response; it cannot prolong a worker slot.
 The over-cap 503 remains best-effort, with no drain on the accept thread.
 
 The demo validates all six header/body/deadline inputs and both connection caps

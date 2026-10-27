@@ -373,6 +373,7 @@ pub fn write_http_response_with_deadline(
     body: &[u8],
     deadline: std::time::Instant,
 ) -> Result<(), NodeCoreError> {
+    const MAX_WRITE_CHUNK_BYTES: usize = 64 * 1024;
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -390,7 +391,8 @@ pub fn write_http_response_with_deadline(
         stream
             .set_write_timeout(Some(timeout))
             .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
-        match stream.write(remaining) {
+        let chunk = &remaining[..remaining.len().min(MAX_WRITE_CHUNK_BYTES)];
+        match stream.write(chunk) {
             Ok(0) => return Err(NodeCoreError::ItestHttp("response write returned zero".into())),
             Ok(count) => remaining = &remaining[count..],
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
