@@ -65,8 +65,8 @@ pub use home_node_migration::{
 };
 pub use identity::{
     BranchProofAdmission, BranchProofDocument, DeviceBranch, DeviceRevocationReplayGuard,
-    IdentityRoot, authorize_device_branch, create_device_branch, create_identity_root,
-    verify_branch_proof, verifying_key_from_base64url,
+    IdentityRoot, authorize_device_branch, create_device_branch, create_device_branch_from_seed,
+    create_identity_root, verify_branch_proof, verifying_key_from_base64url,
 };
 pub use kdf::{
     Blake3DomainHasher, MIN_RECOVERY_SECRET_BYTES, RecoverySecret, blake3_256,

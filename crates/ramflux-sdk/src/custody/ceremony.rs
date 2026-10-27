@@ -50,16 +50,14 @@ impl std::fmt::Debug for CreationCeremony {
 impl CreationCeremony {
     /// Prepare only when explicitly enabled; the default-off path generates no recovery material.
     /// # Errors
-    /// Rejects disabled setup, existing account ids, invalid names and unsupported custodians.
-    pub fn begin(
-        enabled: bool,
+    /// Rejects existing account ids, invalid names and unsupported custodians. The capability is
+    /// constructible only by the local bus after it verifies the default-off creation option.
+    pub(crate) fn begin(
+        _capability: &crate::bus::custody_setup::CreationCapability,
         root: &Path,
         input: CreateInput,
         now: u64,
     ) -> Result<Self, SdkError> {
-        if !enabled {
-            return Err(SdkError::CustodyCreationDisabled);
-        }
         valid_id(&input.local_account_id)?;
         ramflux_protocol::validate_device_name(&input.device_id)?;
         if input.principal_id.is_empty()
@@ -112,11 +110,11 @@ impl CreationCeremony {
         })
     }
     #[must_use]
-    pub fn account_anchor(&self) -> &str {
+    pub(crate) fn account_anchor(&self) -> &str {
         &self.anchor
     }
     #[must_use]
-    pub const fn deadline(&self) -> Instant {
+    pub(crate) const fn deadline(&self) -> Instant {
         self.deadline
     }
     fn live(&mut self) -> Result<(), SdkError> {
@@ -129,7 +127,7 @@ impl CreationCeremony {
     /// Return the only display copy; the trusted frontend must erase it before requesting words.
     /// # Errors
     /// Rejects repeat display or expiration and destroys the pending phrase on error.
-    pub fn show_once(&mut self) -> Result<Zeroizing<String>, SdkError> {
+    pub(crate) fn show_once(&mut self) -> Result<Zeroizing<String>, SdkError> {
         self.live()?;
         if self.phase != Phase::Unshown {
             self.phrase = None;
@@ -141,7 +139,7 @@ impl CreationCeremony {
     /// Call only after hiding/erasing the display; choose distinct uniform positions now.
     /// # Errors
     /// Rejects incorrect ordering, replay, expiry or randomness failure; clears secrets on error.
-    pub fn hidden_challenge(&mut self) -> Result<[u8; 3], SdkError> {
+    pub(crate) fn hidden_challenge(&mut self) -> Result<[u8; 3], SdkError> {
         self.live()?;
         if self.phase != Phase::Shown {
             self.phrase = None;
@@ -163,7 +161,7 @@ impl CreationCeremony {
     /// Consume the ceremony on every attempt, with no per-word feedback or retries.
     /// # Errors
     /// Rejects bad confirmation/expiry, unavailable vaults and incomplete durable creation.
-    pub fn confirm(
+    pub(crate) fn confirm(
         mut self,
         words: &[Zeroizing<String>; 3],
         vault: &dyn PrimaryVault,
@@ -185,13 +183,13 @@ impl CreationCeremony {
         let primary = SelfSigningKey::generate()?;
         let signing = random()?;
         let agreement = random()?;
-        let branch = ramflux_crypto::create_device_branch(
+        let branch = ramflux_crypto::create_device_branch_from_seed(
             &self.input.principal_id,
             &self.input.device_id,
             1,
-            *signing,
+            &signing,
         );
-        let agreement_key = ramflux_crypto::X25519KeyPair::from_seed(*agreement);
+        let agreement_key = ramflux_crypto::X25519KeyPair::from_seed_ref(&agreement);
         let human = self
             .input
             .custodian_account_id
@@ -252,8 +250,13 @@ mod tests {
     #[test]
     fn custody_expiration_destroys_pending_phrase() -> Result<(), Box<dyn std::error::Error>> {
         let root = crate::custody::tests::Root::new()?;
-        let mut ceremony =
-            CreationCeremony::begin(true, &root.0, crate::custody::tests::input("expired"), 100)?;
+        let capability = crate::bus::custody_setup::test_creation_capability();
+        let mut ceremony = CreationCeremony::begin(
+            &capability,
+            &root.0,
+            crate::custody::tests::input("expired"),
+            100,
+        )?;
         ceremony.deadline = Instant::now();
         assert!(ceremony.show_once().is_err());
         assert!(ceremony.phrase.is_none());

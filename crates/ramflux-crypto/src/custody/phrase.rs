@@ -76,12 +76,20 @@ impl RecoveryPhrase {
     /// Access a zeroizing copy only for the explicit local show-once ceremony.
     #[must_use]
     pub fn display_words(&self) -> Zeroizing<String> {
-        Zeroizing::new(self.0.to_string())
+        let mut words = Zeroizing::new(String::with_capacity(256));
+        for word in self.0.words() {
+            if !words.is_empty() {
+                words.push(' ');
+            }
+            words.push_str(word);
+        }
+        words
     }
     /// Obtain the original checked entropy for HKDF, not a BIP39 wallet seed.
     #[must_use]
-    pub fn entropy(&self) -> Zeroizing<Vec<u8>> {
-        Zeroizing::new(self.0.to_entropy())
+    pub(super) fn entropy(&self) -> (Zeroizing<[u8; 33]>, usize) {
+        let (entropy, len) = self.0.to_entropy_array();
+        (Zeroizing::new(entropy), len)
     }
     /// Compare a saved word against one one-based challenge position, using the same normalization.
     /// # Errors

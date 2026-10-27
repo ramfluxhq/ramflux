@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("custody authority conflict fenced: {alert:?}")]
+    CustodyConflict { alert: Box<ramflux_crypto::custody::CustodyConflictAlert> },
     #[error("source authority refused: {reason_code:?}")]
     SourceAuthorityRefused { reason_code: crate::EnvelopeAuthorityReason },
     #[error("capacity: {resource}")]

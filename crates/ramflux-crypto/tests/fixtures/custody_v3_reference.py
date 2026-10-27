@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Span Brain
-"""Independent, public nonproduction vector: Python cryptography 50.0.2 / blake3 1.0.11.
+"""Independent public vector: cryptography 50.0.2, blake3 1.0.11, mnemonic 0.21.
 
 Run with the packages above installed; all object strings are ASCII and all numbers
 are safe integers, so sorted compact JSON is exactly JCS for this restricted vector.
 No production keys or network operations are used. The BIP39 entropy transcription
 is the standard all-zero 256-bit vector; PBKDF2 is deliberately never invoked.
 """
+import argparse
 import base64
 import json
 from pathlib import Path
 import blake3
+from mnemonic import Mnemonic
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -43,6 +45,7 @@ def sign(key, tag, body):
 
 def generate():
     entropy = bytes(32)
+    phrase = Mnemonic("english").to_mnemonic(entropy)
     seed = HKDF(algorithm=hashes.SHA256(), length=32, salt=bytes(32),
                 info=b"ramflux.identity.master.v1").derive(entropy)
     master = Ed25519PrivateKey.from_private_bytes(seed)
@@ -86,7 +89,7 @@ def generate():
     }
     record = sign(primary, "ramflux.identity.signed_device_set.v3", body)
     return {"profile": "ramflux-recovery-v1", "entropy_hex": entropy.hex(),
-        "phrase": " ".join(["abandon"] * 23 + ["art"]), "master_seed_hex": seed.hex(),
+        "phrase": phrase, "master_seed_hex": seed.hex(),
         "self_signing_seed_hex": (bytes([2]) * 32).hex(), "branch_seed_hex": (bytes([3]) * 32).hex(),
         "agreement_seed_hex": (bytes([4]) * 32).hex(), "master_public_key": b64(public(master)),
         "account_anchor": anchor, "master_certificate_hash": object_hash(cert),
@@ -96,6 +99,9 @@ def generate():
 
 
 if __name__ == "__main__":
-    output = Path(__file__).with_name("custody_v3.json")
-    output.write_text(json.dumps(generate(), indent=2, sort_keys=True) + "\n")
+    parser = argparse.ArgumentParser(description="Write a public custody v3 test vector")
+    parser.add_argument("output", type=Path, help="new output path; existing files are refused")
+    output = parser.parse_args().output
+    with output.open("x", encoding="utf-8") as target:
+        target.write(json.dumps(generate(), indent=2, sort_keys=True) + "\n")
     print("Wrote public nonproduction vector:", output)

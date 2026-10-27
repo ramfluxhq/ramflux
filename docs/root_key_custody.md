@@ -166,6 +166,12 @@ wrapped capsule or backup. A new phrase derives a new master: there is no
 same-identity "rotate forgotten phrase" operation. Copies of the same user-held
 phrase are the same authority, not revocable recovery credentials.
 
+Release builds use `panic = "abort"`, so a panic does not unwind and cannot run
+zeroizing destructors. Keep every phrase, entropy and seed buffer scoped to the
+shortest possible ceremony step, disable core dumps and secret-bearing crash
+reporting during setup, and do not treat drop-time erasure as protection from a
+process snapshot taken while the secret is live.
+
 ## One device-set v3 record and one floor
 
 Extend the existing signed device-set/profile family. Device-set v3 carries the

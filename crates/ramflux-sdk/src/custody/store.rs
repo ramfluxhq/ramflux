@@ -98,14 +98,22 @@ pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Val
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let id = entry.file_name().into_string().map_err(|_| invalid())?;
-            let summary=load_account(root,&id,now).map_or_else(
-                |_|serde_json::json!({"local_account_id":id,"state":CreationState::NetworkingPending,"custody_v3_observed":true,"setup_incomplete":true}),
-                |account|account.summary());
-            accounts.push(summary);
+            accounts.push(account_summary(root, &id, now)?);
         }
     }
     accounts.sort_by(|a, b| a["local_account_id"].as_str().cmp(&b["local_account_id"].as_str()));
     Ok(accounts)
+}
+pub(crate) fn account_summary(
+    root: &Path,
+    id: &str,
+    now: u64,
+) -> Result<serde_json::Value, SdkError> {
+    if directory(root, id)?.join("authority.json").try_exists()? {
+        return load_account(root, id, now).map(|account| account.summary());
+    }
+    Ok(serde_json::json!({"local_account_id":id,"state":CreationState::NetworkingPending,
+        "custody_v3_observed":true,"setup_incomplete":true}))
 }
 /// Read public authority without unlocking the primary vault. Malformed or incomplete
 /// custody state fails closed; it is never reinterpreted as a legacy manifest.
@@ -197,10 +205,6 @@ pub(super) fn persist(
     let verified = verify_record(&record, now, None, human.as_ref())?;
     let mut pins = AuthorityPins::default();
     pins.observe(&verified)?;
-    // The existing transactional index arbitrates birth against concurrent legacy creation.
-    // A reservation left by a later failure is never retried as a legacy account.
-    ramflux_storage::AccountIndex::open(root)?
-        .create_account(&input.local_account_id, &record.body.account_anchor)?;
     let parent = root.join("custody_accounts");
     if !parent.try_exists()? {
         private_directory(&parent)?;
@@ -209,6 +213,15 @@ pub(super) fn persist(
     let dir = directory(root, &input.local_account_id)?;
     private_directory(&dir)?; // Exclusive reservation is itself a fail-closed mode latch.
     fs::File::open(&parent)?.sync_all()?;
+    // The directory is the custody-specific crash marker. Create it before the transactional
+    // index reservation so no index-only state can be confused with an in-progress legacy birth.
+    if let Err(error) = ramflux_storage::AccountIndex::open(root)?
+        .create_account(&input.local_account_id, &record.body.account_anchor)
+    {
+        let _ = fs::remove_dir(&dir);
+        let _ = fs::File::open(&parent).and_then(|directory| directory.sync_all());
+        return Err(error.into());
+    }
     let reference = ramflux_protocol::hash_base64url(
         "ramflux.local.custody_vault_reference.v1",
         &[

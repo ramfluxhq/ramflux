@@ -186,8 +186,10 @@ different id/body, is equivocation: fence that range, retain both as evidence,
 alert and require a strictly higher master-certified range. Invalid signatures
 cannot poison pins. Any higher range is acceptable, including gaps; no `+1` check.
 Within a range, require strictly increasing revisions or the identical envelope
-hash for retransmission. A same-epoch different valid record fences that head
-until a higher non-conflicting authority head resolves it; no last-writer-wins.
+hash for retransmission. A same-epoch different valid record fences that range;
+only a non-conflicting master certificate in a strictly higher range clears the
+operational block. A later revision under either same-range key cannot clear it;
+there is no last-writer-wins recovery.
 
 Recovery selects `max(all observed authenticated ranges) + 1`, retries above
 returned authenticated conflicts, and never wraps on exhaustion. Skipped ranges
@@ -1045,7 +1047,9 @@ These are planned acceptance vectors, not executed implementation tests:
 The complete canonical bytes, nested signatures, hashes and inputs are published
 in [custody_v3.json](../crates/ramflux-crypto/tests/fixtures/custody_v3.json).
 The independent [Python reference](../crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py)
-uses cryptography 50.0.2 and blake3 1.0.11, separately from the Rust implementation.
+uses cryptography 50.0.2, blake3 1.0.11 and mnemonic 0.21, separately from the Rust
+implementation. It derives the BIP39 phrase from entropy and requires a new explicit output
+path; it never selects or overwrites this checked-in fixture itself.
 These are public test keys and must never be used for real identities.
 
 | Input or result | Value |

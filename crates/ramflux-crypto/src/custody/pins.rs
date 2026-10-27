@@ -4,7 +4,7 @@
 //! Durable authenticated mode, certificate, head and denial floors.
 use super::{VerifiedRecord, validate::reject};
 use crate::CryptoError;
-use ramflux_protocol::custody::{decode_epoch, object_hash};
+use ramflux_protocol::custody::{DeviceSet, Envelope, decode_epoch, object_hash};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,13 +26,42 @@ struct AccountPin {
     hash: String,
     revoked_ids: BTreeSet<String>,
     devices: BTreeMap<String, (u64, String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_record: Option<Envelope<DeviceSet>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    conflicts: BTreeMap<u64, CustodyConflictEvidence>,
+}
+/// Authenticated conflict class surfaced to callers as a blocking security alert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustodyConflictKind {
+    MasterCertificate,
+    RecordHead,
+}
+/// Typed blocking alert. Hashes identify both complete envelopes retained in evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustodyConflictAlert {
+    pub account_anchor: String,
+    pub range_index: u64,
+    pub kind: CustodyConflictKind,
+    pub accepted_record_hash: String,
+    pub conflicting_record_hash: String,
+}
+/// The first complete authenticated conflict pair retained for one fenced range.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustodyConflictEvidence {
+    pub alert: CustodyConflictAlert,
+    pub accepted: Envelope<DeviceSet>,
+    pub conflicting: Envelope<DeviceSet>,
 }
 /// A valid conflict must be durably recorded even though it grants no authority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PinOutcome {
     Advanced,
     Unchanged,
-    Fenced,
+    Fenced(CustodyConflictAlert),
 }
 impl AuthorityPins {
     /// Once observed, a born-v3 anchor can never authorize a legacy record.
@@ -63,59 +92,138 @@ impl AuthorityPins {
     /// # Errors
     /// Rejects rollback, immutable identity changes, erased denials or branch-key regression.
     pub fn observe(&mut self, record: &VerifiedRecord) -> Result<PinOutcome, CryptoError> {
+        self.observe_with_previous(record, None)
+    }
+    /// Observe with a separately stored current envelope, used to upgrade old pin snapshots that
+    /// predate embedded evidence retention.
+    /// # Errors
+    /// Rejects rollback, immutable identity changes, erased denials or unavailable conflict proof.
+    pub fn observe_with_previous(
+        &mut self,
+        record: &VerifiedRecord,
+        previous: Option<&Envelope<DeviceSet>>,
+    ) -> Result<PinOutcome, CryptoError> {
         let body = &record.envelope().body;
         let range = decode_epoch(body.device_set_epoch)?.0;
         let certificate = object_hash(&body.master_certificate)?;
         let hash = object_hash(record.envelope())?;
         let devices = indexed_devices(record)?;
         if let Some(pin) = self.accounts.get_mut(&body.account_anchor) {
-            if pin.principal_id != body.principal_id || pin.principal_kind != body.principal_kind {
-                return Err(reject("custody immutable identity changed"));
-            }
-            if pin.certificates.get(&range).is_some_and(|old| old != &certificate) {
-                pin.fenced_ranges.insert(range);
-                return Ok(PinOutcome::Fenced);
-            }
-            if body.device_set_epoch < pin.epoch {
-                return Err(reject("custody epoch rollback"));
-            }
-            if body.device_set_epoch == pin.epoch {
-                if pin.hash != hash {
-                    pin.fenced_ranges.insert(range);
-                    return Ok(PinOutcome::Fenced);
-                }
-                return Ok(if pin.fenced_ranges.contains(&range) {
-                    PinOutcome::Fenced
-                } else {
-                    PinOutcome::Unchanged
-                });
-            }
-            if pin.fenced_ranges.contains(&range) {
-                return Ok(PinOutcome::Fenced);
-            }
-            validate_transition(pin, record)?;
-            pin.certificates.insert(range, certificate);
-            pin.epoch = body.device_set_epoch;
-            pin.hash = hash;
-            pin.revoked_ids.extend(record.revoked_ids().iter().cloned());
-            pin.devices.extend(devices);
-        } else {
-            self.accounts.insert(
-                body.account_anchor.clone(),
-                AccountPin {
-                    principal_id: body.principal_id.clone(),
-                    principal_kind: body.principal_kind,
-                    certificates: BTreeMap::from([(range, certificate)]),
-                    fenced_ranges: BTreeSet::new(),
-                    epoch: body.device_set_epoch,
-                    hash,
-                    revoked_ids: record.revoked_ids().clone(),
-                    devices,
-                },
-            );
+            return observe_existing(pin, record, previous, range, certificate, hash, devices);
         }
+        self.accounts.insert(
+            body.account_anchor.clone(),
+            AccountPin {
+                principal_id: body.principal_id.clone(),
+                principal_kind: body.principal_kind,
+                certificates: BTreeMap::from([(range, certificate)]),
+                fenced_ranges: BTreeSet::new(),
+                epoch: body.device_set_epoch,
+                hash,
+                revoked_ids: record.revoked_ids().clone(),
+                devices,
+                current_record: Some(record.envelope().clone()),
+                conflicts: BTreeMap::new(),
+            },
+        );
         Ok(PinOutcome::Advanced)
     }
+    /// Return the durable first authenticated conflict pair for operator review.
+    #[must_use]
+    pub fn conflict_evidence(&self, anchor: &str, range: u64) -> Option<&CustodyConflictEvidence> {
+        self.accounts.get(anchor)?.conflicts.get(&range)
+    }
+}
+
+fn observe_existing(
+    pin: &mut AccountPin,
+    record: &VerifiedRecord,
+    previous: Option<&Envelope<DeviceSet>>,
+    range: u64,
+    certificate: String,
+    hash: String,
+    devices: BTreeMap<String, (u64, String, String)>,
+) -> Result<PinOutcome, CryptoError> {
+    let body = &record.envelope().body;
+    if pin.principal_id != body.principal_id || pin.principal_kind != body.principal_kind {
+        return Err(reject("custody immutable identity changed"));
+    }
+    if pin.certificates.get(&range).is_some_and(|old| old != &certificate) {
+        return fence(
+            pin,
+            record.envelope(),
+            previous,
+            range,
+            CustodyConflictKind::MasterCertificate,
+        );
+    }
+    if body.device_set_epoch < pin.epoch {
+        return Err(reject("custody epoch rollback"));
+    }
+    if body.device_set_epoch == pin.epoch {
+        if pin.hash != hash {
+            return fence(pin, record.envelope(), previous, range, CustodyConflictKind::RecordHead);
+        }
+        if pin.fenced_ranges.contains(&range) {
+            let alert = pin
+                .conflicts
+                .get(&range)
+                .ok_or_else(|| reject("custody conflict evidence unavailable"))?
+                .alert
+                .clone();
+            return Ok(PinOutcome::Fenced(alert));
+        }
+        if pin.current_record.is_none() {
+            pin.current_record = Some(record.envelope().clone());
+        }
+        return Ok(PinOutcome::Unchanged);
+    }
+    if pin.fenced_ranges.contains(&range) {
+        return fence(pin, record.envelope(), previous, range, CustodyConflictKind::RecordHead);
+    }
+    validate_transition(pin, record)?;
+    pin.certificates.insert(range, certificate);
+    pin.epoch = body.device_set_epoch;
+    pin.hash = hash;
+    pin.current_record = Some(record.envelope().clone());
+    pin.revoked_ids.extend(record.revoked_ids().iter().cloned());
+    pin.devices.extend(devices);
+    Ok(PinOutcome::Advanced)
+}
+
+fn fence(
+    pin: &mut AccountPin,
+    conflicting: &Envelope<DeviceSet>,
+    previous: Option<&Envelope<DeviceSet>>,
+    range: u64,
+    kind: CustodyConflictKind,
+) -> Result<PinOutcome, CryptoError> {
+    pin.fenced_ranges.insert(range);
+    if let Some(evidence) = pin.conflicts.get(&range) {
+        return Ok(PinOutcome::Fenced(evidence.alert.clone()));
+    }
+    let accepted = pin
+        .current_record
+        .as_ref()
+        .or(previous)
+        .ok_or_else(|| reject("custody conflict evidence unavailable"))?
+        .clone();
+    let alert = CustodyConflictAlert {
+        account_anchor: conflicting.body.account_anchor.clone(),
+        range_index: range,
+        kind,
+        accepted_record_hash: object_hash(&accepted)?,
+        conflicting_record_hash: object_hash(conflicting)?,
+    };
+    pin.conflicts.insert(
+        range,
+        CustodyConflictEvidence {
+            alert: alert.clone(),
+            accepted,
+            conflicting: conflicting.clone(),
+        },
+    );
+    Ok(PinOutcome::Fenced(alert))
 }
 
 fn validate_transition(pin: &AccountPin, record: &VerifiedRecord) -> Result<(), CryptoError> {

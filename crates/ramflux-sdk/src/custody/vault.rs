@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 /// Implementations must be non-synchronizing, primary-local and independent of data unlock.
 /// No bus method exposes these credentials; public authority reads do not load them.
-pub trait PrimaryVault {
+pub trait PrimaryVault: Send + Sync {
     /// Check provider availability before asking a user to save recovery material.
     /// # Errors
     /// Fails closed when the provider is unsupported, locked or lacks host entitlements.
