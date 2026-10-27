@@ -100,16 +100,36 @@ def validate(values):
     return sorted(invalid)
 
 
+def validate_compose(paths, values):
+    """Check required interpolation independently of the provider's :? support."""
+    invalid = set()
+    for path in paths:
+        try:
+            source = path.read_text()
+        except (OSError, UnicodeError):
+            raise InputError("COMPOSE_FILE") from None
+        for match in EXPRESSION.finditer(source):
+            if match[3] not in (":?", "?"):
+                continue
+            key = match[1] or match[2]
+            value = values.get(key)
+            if value is None or (match[3] == ":?" and not value.strip()) or "${" in value:
+                invalid.add(key)
+    return sorted(invalid)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--env-file', action='append', type=Path, default=[])
+    parser.add_argument('--compose-file', action='append', type=Path, default=[])
     args = parser.parse_args(argv)
     files = args.env_file or ([Path('.env')] if Path('.env').is_file() else [])
     try:
         values = {}
         for path in files:
             values = read_env(path, values, os.environ)
-        invalid = validate({**values, **os.environ})
+        effective = {**values, **os.environ}
+        invalid = sorted(set(validate(effective) + validate_compose(args.compose_file, effective)))
     except InputError as error:
         invalid = [str(error)]
     if invalid:

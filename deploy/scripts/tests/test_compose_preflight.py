@@ -99,3 +99,23 @@ class PreflightTests(unittest.TestCase):
         with self.assertRaises(preflight.InputError) as error:
             preflight.read_env(self.root / 'absent', {}, {})
         self.assertEqual(str(error.exception), 'ENV_FILE')
+
+    def test_required_compose_inputs_refuse_absent_empty_and_expressions_without_values(self):
+        compose = self._file('KEY: "${RAMFLUX_FEDERATION_TRUST_ENDPOINT:?DO_NOT_LOG}"\n')
+        key = 'RAMFLUX_FEDERATION_TRUST_ENDPOINT'
+        for values in ({}, {key: ''}, {key: '  '}, {key: '${PRIVATE_VALUE}'}):
+            self.assertEqual(preflight.validate_compose([compose], values), [key])
+        self.assertEqual(preflight.validate_compose([compose], {key: 'https://example.test'}), [])
+        result = subprocess.run([sys.executable, str(SCRIPT), '--compose-file', str(compose)],
+                                cwd=self.root, env={'PATH': os.environ['PATH']},
+                                text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr.strip(), 'Compose input migration required: ' + key)
+        self.assertNotIn('DO_NOT_LOG', result.stderr)
+
+    def test_required_compose_checks_follow_env_precedence_and_keep_optional_defaults(self):
+        compose = self._file('A: "${RF_COMPOSE_NODE_ID:?private diagnostic}"\n'
+                             'B: "${OPTIONAL:-default}"\n')
+        self.assertEqual(preflight.validate_compose([compose], {'RF_COMPOSE_NODE_ID': 'node'}), [])
+        with self.assertRaises(preflight.InputError):
+            preflight.validate_compose([self.root / 'missing'], {})

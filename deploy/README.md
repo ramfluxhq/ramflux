@@ -26,7 +26,7 @@ Migrate the mapped names in operator Compose env files or exported Compose input
 Names absent from the map, including published-port variables and the required
 federation offline-root pin, retain their existing spelling. **Breaking operator
 migration:** production security/identity inputs must now be explicitly configured;
-unset or empty required inputs fail closed. Only optional inputs retain `:-`
+unset or empty required inputs must fail the mandatory preflight. Only optional inputs retain `:-`
 defaults. Explicit migrated values and shared references retain their values.
 Run the [mandatory preflight](#mandatory-compose-input-preflight-breaking-operator-migration)
 with the same env files before every Compose command.
@@ -252,10 +252,20 @@ Use the same user's default engine context for every operation.
 Before **every** Compose invocation (including config, logs and down), run:
 
 ```sh
-python3 deploy/scripts/compose-preflight.py --env-file /path/to/operator.env
+python3 deploy/scripts/compose-preflight.py --env-file /path/to/operator.env \
+  --compose-file deploy/docker-compose.yml
 # Use exactly the same env files, in the same order, and the same process environment:
 docker compose --env-file /path/to/operator.env -f deploy/docker-compose.yml config
 ```
+
+Pass every selected Compose file with repeated `--compose-file` arguments. This
+checks required interpolation inputs before calling the provider. `${VAR:?message}`
+is advisory under podman-compose 1.3.0: it can leave an unresolved expression and
+return success from `config`. A successful `config` is not a security check.
+The enforced controls are preflight refusal of missing/empty required inputs and
+unresolved input expressions (key names only), then independent service startup
+refusal of unresolved security settings with `unexpanded environment setting: KEY`.
+Docker Compose v2 additionally rejects missing `:?` inputs during `config`.
 
 With no explicit env file, preflight reads `.env` in the current directory. Repeated
 `--env-file` arguments apply in order; process environment wins. Run both commands
