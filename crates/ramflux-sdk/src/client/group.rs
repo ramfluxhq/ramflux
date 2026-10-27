@@ -1123,3 +1123,7 @@ impl RamfluxClient {
 #[cfg(test)]
 #[path = "group_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "group_native_tests.rs"]
+mod native_tests;

@@ -21,17 +21,7 @@ pub(crate) async fn dispatch(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
     if request.method != "call.list" {
-        let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-            &state.config.data_root,
-            account_id,
-        ))?;
-        if manifest.client_mode != LocalBusClientMode::AttendedCli
-            || manifest.kind.as_deref().unwrap_or("human") != "human"
-        {
-            return Err(SdkError::CapabilityDenied(
-                "voice calls require an attended human account".into(),
-            ));
-        }
+        require_attended_human(state, account_id)?;
     }
     let account = local_bus_account_mut(state, account_id)?;
     recover(account)?;
@@ -66,6 +56,24 @@ pub(crate) async fn dispatch(
         tracing::warn!("call signaling queued for retry");
     }
     Ok(local_bus_ok(serde_json::to_value(row)?))
+}
+fn require_attended_human(state: &LocalBusDaemonState, id: &str) -> Result<(), SdkError> {
+    let native = local_bus_account(state, id)?.client.born_v3_account.as_ref();
+    let attended_human = if let Some(native) = native {
+        native.record().body.principal_kind == ramflux_protocol::PrincipalKind::Human
+    } else {
+        let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
+            &state.config.data_root,
+            id,
+        ))?;
+        manifest.client_mode == LocalBusClientMode::AttendedCli
+            && manifest.kind.as_deref().unwrap_or("human") == "human"
+    };
+    if attended_human {
+        Ok(())
+    } else {
+        Err(SdkError::CapabilityDenied("voice calls require an attended human account".into()))
+    }
 }
 async fn invite(
     account: &mut LocalBusAccountState,

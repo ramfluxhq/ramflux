@@ -169,7 +169,18 @@ pub(crate) fn create(
     vault: &dyn PrimaryVault,
     now: u64,
 ) -> Result<BornAccount> {
-    let mut ceremony = CreationCeremony::begin(true, root, input(id), now)?;
+    create_with_device(root, id, "primary", vault, now)
+}
+pub(crate) fn create_with_device(
+    root: &Path,
+    id: &str,
+    device: &str,
+    vault: &dyn PrimaryVault,
+    now: u64,
+) -> Result<BornAccount> {
+    let mut input = input(id);
+    input.device_id = device.into();
+    let mut ceremony = CreationCeremony::begin(true, root, input, now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     Ok(ceremony.confirm(&words(&phrase, positions)?, vault, now)?)
