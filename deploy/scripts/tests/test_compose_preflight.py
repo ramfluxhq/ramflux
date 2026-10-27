@@ -101,7 +101,26 @@ class PreflightUnitTests(unittest.TestCase):
         self.assertEqual(
             run.call_args.args[0],
             ["docker", "compose", "--env-file", "operator.env", "-p", "project", "-f",
-             "compose.yml", "config", "--format", "json"],
+             "compose.yml", "--profile", "*", "config", "--format", "json"],
+        )
+
+    def test_podman_render_enables_every_declared_profile(self):
+        compose = self.root / "compose.yaml"
+        compose.write_text("""services:
+  one:
+    profiles: [voice, admin]
+  two:
+    profiles:
+      - metrics
+""")
+        rendered = subprocess.CompletedProcess([], 0, "services: {}\n", "")
+        with mock.patch.object(preflight.Path, "cwd", return_value=self.root), \
+                mock.patch.object(preflight.subprocess, "run", return_value=rendered) as run:
+            preflight.render_config("podman-compose", ["-f", str(compose)])
+        self.assertEqual(
+            run.call_args.args[0],
+            ["podman-compose", "-f", str(compose), "--profile", "admin", "--profile",
+             "metrics", "--profile", "voice", "config"],
         )
 
     def test_docker_json_scans_public_unresolved_and_empty_security_values(self):
@@ -138,6 +157,35 @@ class PreflightUnitTests(unittest.TestCase):
 
     def test_podman_yaml_allows_services_without_environment(self):
         self.assertEqual(preflight.podman_environments("services:\n  probe:\n    image: scratch\n"), [])
+
+    def test_podman_env_files_are_scanned_relative_to_the_compose_file(self):
+        project = self.root / "project"
+        project.mkdir()
+        compose = project / "compose.yaml"
+        compose.write_text("services: {}\n")
+        (project / "service.env").write_text(
+            "RAMFLUX_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token\n"
+            "RAMFLUX_PRIVATE_PATH=/run/${UNRESOLVED}/key\n"
+        )
+        rendered = "services:\n  probe:\n    env_file:\n      - service.env\n"
+        environments, paths = preflight.podman_service_inputs(rendered)
+        with mock.patch.object(preflight.Path, "cwd", return_value=self.root):
+            environments.extend(
+                preflight.podman_env_file_environments(paths, ["-f", str(compose)])
+            )
+        self.assertEqual(
+            preflight.validate_rendered(environments),
+            {"RAMFLUX_FEDERATION_ADMIN_TOKEN", "RAMFLUX_PRIVATE_PATH"},
+        )
+
+    def test_podman_run_arguments_with_environment_sources_are_refused(self):
+        for arguments in [
+            ["--podman-run-args=-e RAMFLUX_TOKEN=value"],
+            ["--podman-up-args", "--env-file operator.env"],
+        ]:
+            with self.subTest(arguments=arguments), self.assertRaises(preflight.InputError) as error:
+                preflight.validate_podman_run_arguments(arguments)
+            self.assertEqual(str(error.exception), "PODMAN_RUN_ARGS")
 
     def test_render_failure_reports_only_a_stable_key(self):
         failed = subprocess.CompletedProcess([], 1, "DO_NOT_LOG", "DO_NOT_LOG")
@@ -196,7 +244,10 @@ class ProviderBypassTests(unittest.TestCase):
             wrapper.chmod(0o700)
         return environment
 
-    def run_preflight(self, provider, cwd, arguments=(), environment=None, stdin=None):
+    def run_preflight(
+        self, provider, cwd, arguments=(), environment=None, stdin=None,
+        expected_key="RAMFLUX_FEDERATION_ADMIN_TOKEN",
+    ):
         process = self.provider_environment(provider)
         process.update(environment or {})
         result = subprocess.run(
@@ -209,7 +260,7 @@ class ProviderBypassTests(unittest.TestCase):
             timeout=30,
         )
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn("RAMFLUX_FEDERATION_ADMIN_TOKEN", result.stderr)
+        self.assertIn(expected_key, result.stderr)
         self.assertNotIn(preflight.PUBLIC_SECRET, result.stderr)
 
     def test_docker_process_compose_file_cannot_hide_cwd_dotenv(self):
@@ -236,7 +287,8 @@ class ProviderBypassTests(unittest.TestCase):
         (compose.parent / ".env").write_text(
             "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token\n")
         self.run_preflight("docker", self.root,
-                           arguments=("-f", "-", "-f", str(compose)), stdin="services: {}\n")
+                           arguments=("-f", "-", "-f", str(compose)), stdin="services: {}\n",
+                           expected_key="COMPOSE_FILE")
 
     def test_podman_file_elsewhere_cannot_hide_cwd_dotenv(self):
         compose = self.compose_file(self.root / "project")
@@ -255,6 +307,34 @@ class ProviderBypassTests(unittest.TestCase):
             "podman-compose",
             empty,
             environment={"COMPOSE_DISABLE_ENV_FILE": "1", "COMPOSE_PROJECT_DIR": str(self.root / "project")},
+        )
+
+    def test_podman_service_env_file_is_scanned(self):
+        project = self.root / "project"
+        compose = project / "compose.yaml"
+        project.mkdir()
+        (project / "service.env").write_text(
+            "RAMFLUX_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token\n"
+        )
+        compose.write_text("""services:
+  probe:
+    image: scratch
+    env_file:
+      - service.env
+""")
+        self.run_preflight("podman-compose", self.root, arguments=("-f", str(compose)))
+
+    def test_podman_run_args_cannot_inject_environment(self):
+        compose = self.compose_file(self.root / "project")
+        self.run_preflight(
+            "podman-compose",
+            self.root,
+            arguments=(
+                "--podman-run-args=-e RAMFLUX_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token",
+                "-f",
+                str(compose),
+            ),
+            expected_key="PODMAN_RUN_ARGS",
         )
 
 
