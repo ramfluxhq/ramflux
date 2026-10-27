@@ -81,6 +81,7 @@ impl BackupDatabase {
                     THEN coalesce(p.capability_revoked_at,(SELECT max(d.decided_at,0)/1000 FROM contact_link_decision d WHERE d.link_id=p.link_id)) ELSE p.capability_revoked_at END
             WHERE (EXISTS(SELECT 1 FROM incoming.friend_link_projection source WHERE source.link_id=p.link_id)
                 OR EXISTS(SELECT 1 FROM backup_source_link_consent source WHERE source.link_id=p.link_id))
+              AND p.state<>'removed'
               AND (p.state IN ('accepted','pending') OR (p.blocked=0 AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=p.link_id AND d.state='blocked')))
               AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=p.link_id AND d.state IN ('blocked','declined'));")?;
         Ok(())
