@@ -44,6 +44,7 @@ mod group_retention;
 mod group_snapshot;
 pub mod groups;
 pub mod history;
+pub(crate) mod home_migration;
 pub mod identity_verification;
 pub mod journal;
 pub mod mcp;
