@@ -201,7 +201,7 @@ impl BackupDatabase {
             self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;
-            self.db.execute_batch("UPDATE direct_message_projection SET deleted=1,encrypted_body=x'' WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; DROP TABLE backup_local_consent; DROP TABLE backup_source_consent; DROP TABLE backup_local_link_consent; DROP TABLE backup_source_link_consent; COMMIT;")?;
+            self.finish_merge()?;
             Ok(report)
         })();
         if result.is_err() {
@@ -215,6 +215,28 @@ impl BackupDatabase {
         Ok(statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    fn finish_merge(&self) -> Result<(), StorageError> {
+        self.db.execute_batch("UPDATE direct_message_projection SET deleted=1,encrypted_body=x'' WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id));")?;
+        self.remove_deleted_message_origins()?;
+        self.db.execute_batch("DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; DROP TABLE backup_local_consent; DROP TABLE backup_source_consent; DROP TABLE backup_local_link_consent; DROP TABLE backup_source_link_consent; COMMIT;")?;
+        Ok(())
+    }
+    fn remove_deleted_message_origins(&self) -> Result<(), StorageError> {
+        let messages = {
+            let mut statement = self.db.prepare(
+                "SELECT conversation_id,message_id FROM direct_message_projection WHERE deleted=1",
+            )?;
+            statement
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (conversation, message) in messages {
+            let key = super::runtime::message_origin::message_origin_key(&conversation, &message)?;
+            self.db.execute("DELETE FROM runtime_actor_state WHERE state_kind=?1", [&key])?;
+            self.db.execute("DELETE FROM runtime_receipt_retention WHERE state_kind=?1", [&key])?;
+        }
+        Ok(())
     }
     fn prepare_conversation_counts(&self) -> Result<(), StorageError> {
         // These scratch indexes live in the encrypted private generation, not SQLite temp files.

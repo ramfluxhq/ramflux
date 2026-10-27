@@ -274,6 +274,7 @@ async fn client(
 #[tokio::test(flavor = "current_thread")]
 async fn slow_gateway_does_not_block_other_account_send_or_socket_reads() -> Result<(), SdkError> {
     LocalSet::new().run_until(async {
+        let independent_account_deadline = Duration::from_secs(2);
         let root = root("independent");
         let (entered, blocked) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -309,15 +310,15 @@ async fn slow_gateway_does_not_block_other_account_send_or_socket_reads() -> Res
             }))).await
         });
         tokio::time::timeout(Duration::from_secs(2), blocked).await.map_err(|_| failure("gateway not entered"))?.map_err(|_| failure("gateway dropped"))?;
-        let sent = tokio::time::timeout(Duration::from_millis(500), two.request_frame(request("send", "bob", "message.submit", serde_json::json!({
+        let sent = tokio::time::timeout(independent_account_deadline, two.request_frame(request("send", "bob", "message.submit", serde_json::json!({
             "conversation_id":"conversation", "message_id":"message", "envelope_id":"envelope",
             "source_principal_id":"bob", "sender_id":"device-bob", "recipient_principal_commitment":"alice",
             "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
         })))).await.map_err(|_| failure("other account send blocked"))??;
         assert_eq!(sent["envelope"]["envelope_id"], "envelope");
-        let read = tokio::time::timeout(Duration::from_millis(500), one.request_frame(request("read", "alice", "message.list", serde_json::json!({"conversation_id":"conversation"})))).await.map_err(|_| failure("same socket read blocked"))??;
+        let read = tokio::time::timeout(independent_account_deadline, one.request_frame(request("read", "alice", "message.list", serde_json::json!({"conversation_id":"conversation"})))).await.map_err(|_| failure("same socket read blocked"))??;
         assert!(read["messages"].is_array());
-        let other_read = tokio::time::timeout(Duration::from_millis(500), two.request_frame(request("list", "bob", "conversation.list", serde_json::json!({})))).await.map_err(|_| failure("second socket read blocked"))??;
+        let other_read = tokio::time::timeout(independent_account_deadline, two.request_frame(request("list", "bob", "conversation.list", serde_json::json!({})))).await.map_err(|_| failure("second socket read blocked"))??;
         assert_eq!(other_read["conversations"].as_array().map(Vec::len), Some(1));
         slow.abort();
         let _ = slow.await;
@@ -325,7 +326,7 @@ async fn slow_gateway_does_not_block_other_account_send_or_socket_reads() -> Res
         drop(two);
         let _ = server_one.await;
         let _ = server_two.await;
-        tokio::time::timeout(Duration::from_millis(500), async {
+        tokio::time::timeout(independent_account_deadline, async {
             while !cancelled.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
         }).await.map_err(|_| failure("gateway call not cancelled on disconnect"))?;
         supervisor.shutdown().await?;

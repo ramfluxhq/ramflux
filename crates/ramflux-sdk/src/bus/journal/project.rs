@@ -24,7 +24,7 @@ pub(crate) fn project(
                 let mut row = db.client_message_metadata(message)?.unwrap_or_else(
                     || json!({"id":message,"conversation_id":conversation,"removed":true}),
                 );
-                let origin = client.message_origin(conversation, message)?.unwrap_or(Value::Null);
+                let origin = visible_message_origin(client, conversation, message, &row)?;
                 for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"]
                 {
                     row[field] = origin[field].clone();
@@ -110,6 +110,19 @@ pub(crate) fn project(
         ));
     }
     Ok(events)
+}
+
+fn visible_message_origin(
+    client: &RamfluxClient,
+    conversation: &str,
+    message: &str,
+    row: &Value,
+) -> Result<Value, SdkError> {
+    if row["deleted"].as_bool() == Some(true) {
+        Ok(Value::Null)
+    } else {
+        Ok(client.message_origin(conversation, message)?.unwrap_or(Value::Null))
+    }
 }
 
 fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Result<(), SdkError> {

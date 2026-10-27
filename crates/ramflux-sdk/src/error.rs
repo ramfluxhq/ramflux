@@ -9,6 +9,10 @@ use crate::prelude::*;
 pub enum SdkError {
     #[error("account not open: {0}")]
     AccountNotOpen(String),
+    #[error("account restore is pending: {0}")]
+    AccountRestorePending(String),
+    #[error("account restore failed for {account_id}: {reason}")]
+    AccountRestoreFailed { account_id: String, reason: String },
     #[error("{code}: {message}")]
     LocalBusRefused { code: String, message: String, body: Box<serde_json::Value> },
     #[error("{message}")]

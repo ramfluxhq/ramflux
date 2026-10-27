@@ -89,6 +89,8 @@ async fn startup_restore_failure_emits_structured_error_and_allows_retry() -> Re
             manifest.account_secret = "invalid-startup-secret".to_owned();
             write_local_bus_account_manifest(&root, &manifest)?;
             let supervisor = Supervisor::new(LocalBusConfig::new(root.join("bus.sock"), &root))?;
+            let (outbound, _events) = mpsc::channel(8);
+            let connection = LocalBusConnectionState::new(2, outbound);
             let (mut client, server) = client(Rc::clone(&supervisor), 1).await?;
             client
                 .request_frame(request(
@@ -111,6 +113,22 @@ async fn startup_restore_failure_emits_structured_error_and_allows_retry() -> Re
                 event.body["error"]["message"].as_str().is_some_and(|message| !message.is_empty())
             );
             assert!(!serde_json::to_string(&event)?.contains("invalid-startup-secret"));
+            assert!(matches!(
+                supervisor
+                    .request(
+                        request("status", "alice", "account.status", serde_json::json!({})),
+                        &connection
+                    )
+                    .await,
+                Err(SdkError::AccountRestoreFailed { .. })
+            ));
+            let list = supervisor
+                .request(
+                    request("list", "alice", "account.list", serde_json::json!({})),
+                    &connection,
+                )
+                .await?;
+            assert_eq!(list.body["account_details"][0]["state"], "restore_failed");
             let unlocked = client
                 .request_frame(request(
                     "retry",
@@ -120,6 +138,13 @@ async fn startup_restore_failure_emits_structured_error_and_allows_retry() -> Re
                 ))
                 .await?;
             assert_eq!(unlocked["local_account_id"], "alice");
+            let list = supervisor
+                .request(
+                    request("list-again", "alice", "account.list", serde_json::json!({})),
+                    &connection,
+                )
+                .await?;
+            assert_eq!(list.body["account_details"][0]["state"], "unlocked");
             assert!(
                 client
                     .request_frame(request(

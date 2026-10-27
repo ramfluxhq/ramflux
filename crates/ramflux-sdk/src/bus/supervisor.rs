@@ -9,6 +9,12 @@ use crate::prelude::*;
 use std::cell::RefCell;
 use tokio::sync::oneshot;
 
+#[derive(Clone)]
+enum RestoreState {
+    Pending,
+    Failed(String),
+}
+
 pub(super) struct Supervisor {
     pub(super) config: LocalBusConfig,
     owner: RefCell<std::rc::Weak<Supervisor>>,
@@ -20,6 +26,7 @@ pub(super) struct Supervisor {
     pub(super) installing: RefCell<BTreeSet<String>>,
     backup_expiry: RefCell<Option<tokio::task::JoinHandle<()>>>,
     accounts: RefCell<BTreeMap<String, AccountActor>>,
+    restore_states: RefCell<BTreeMap<String, RestoreState>>,
     subscribers: Rc<RefCell<BTreeMap<u64, LocalBusSubscriber>>>,
     events: mpsc::Sender<EventBatch>,
     event_receiver: RefCell<Option<mpsc::Receiver<EventBatch>>>,
@@ -62,6 +69,7 @@ impl Supervisor {
             nodes: RefCell::new(nodes),
             node_actor,
             accounts: RefCell::new(BTreeMap::new()),
+            restore_states: RefCell::new(BTreeMap::new()),
             subscribers: Rc::new(RefCell::new(BTreeMap::new())),
             streams: RefCell::new(BTreeMap::new()),
             attended: RefCell::new(BTreeMap::new()),
@@ -128,6 +136,9 @@ impl Supervisor {
             {
                 continue;
             }
+            self.restore_states
+                .borrow_mut()
+                .insert(manifest.local_account_id.clone(), RestoreState::Pending);
             let supervisor = Rc::clone(self);
             tasks.spawn_local(async move {
                 let (outbound, _receiver) = mpsc::channel(1);
@@ -140,10 +151,30 @@ impl Supervisor {
                     serde_json::json!({"passphrase":manifest.account_secret}),
                 );
                 let body = match supervisor.request(request.clone(), &connection).await {
-                    Ok(_) => serde_json::json!({"state":"unlocked"}),
+                    Ok(_) => {
+                        supervisor.restore_states.borrow_mut().remove(&manifest.local_account_id);
+                        serde_json::json!({"state":"unlocked"})
+                    }
                     Err(error) => {
-                        tracing::warn!(%error, "account restore failed");
-                        serde_json::json!({"state":"failed", "error":local_bus_error(&request, &error).error})
+                        let opened = supervisor
+                            .accounts
+                            .borrow()
+                            .get(&manifest.local_account_id)
+                            .is_some_and(AccountActor::is_open);
+                        if opened {
+                            supervisor
+                                .restore_states
+                                .borrow_mut()
+                                .remove(&manifest.local_account_id);
+                            serde_json::json!({"state":"unlocked"})
+                        } else {
+                            supervisor.restore_states.borrow_mut().insert(
+                                manifest.local_account_id.clone(),
+                                RestoreState::Failed(local_bus_error_code(&error).to_owned()),
+                            );
+                            tracing::warn!(%error, "account restore failed");
+                            serde_json::json!({"state":"failed", "error":local_bus_error(&request, &error).error})
+                        }
                     }
                 };
                 supervisor.broadcast(&[local_bus_event(
@@ -213,8 +244,9 @@ impl Supervisor {
             }
             "account.switch" => {
                 let id = request_account_id(&request)?.to_owned();
+                self.require_restore_ready(&id, false)?;
                 if !self.accounts.borrow().contains_key(&id) {
-                    return Err(not_open(&id));
+                    return Err(self.account_unavailable(&id));
                 }
                 self.set_active(&id).await?;
                 return Ok(reply(serde_json::json!({"active_account_id": id})));
@@ -265,6 +297,7 @@ impl Supervisor {
             request.method.as_str(),
             "account.create" | "account.unlock" | "account.backup.import"
         );
+        self.require_restore_ready(&id, creating)?;
         let actor = if let Some(actor) = actor {
             actor
         } else if creating {
@@ -278,7 +311,7 @@ impl Supervisor {
             self.accounts.borrow_mut().insert(id.clone(), actor.clone());
             actor
         } else {
-            return Err(not_open(&id));
+            return Err(self.account_unavailable(&id));
         };
         let locking = request.method == "account.lock";
         let mut request = command(request, connection);
@@ -286,6 +319,7 @@ impl Supervisor {
         request.nodes = Some(self.nodes.borrow().clone());
         let response = actor.request(request).await;
         if creating && response.is_ok() {
+            self.restore_states.borrow_mut().remove(&id);
             self.set_active(&id).await?;
             self.set_unlocked(&id, true).await?;
         }
@@ -321,17 +355,20 @@ impl Supervisor {
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         let active = active.filter(|id| accounts.contains(id));
+        let restore_states = self.restore_states.borrow().clone();
         let mut known = known;
         for row in &mut known {
-            row["state"] = serde_json::json!(if row
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| accounts.iter().any(|account| account == id))
-            {
-                "unlocked"
-            } else {
-                "locked"
+            let id =
+                row.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+            row["state"] = serde_json::json!(match restore_states.get(&id) {
+                Some(RestoreState::Pending) => "restore_pending",
+                Some(RestoreState::Failed(_)) => "restore_failed",
+                None if accounts.iter().any(|account| account == &id) => "unlocked",
+                None => "locked",
             });
+            if let Some(RestoreState::Failed(reason)) = restore_states.get(&id) {
+                row["restore_error_code"] = serde_json::json!(reason);
+            }
         }
         Ok(reply(
             serde_json::json!({"accounts":accounts, "account_details":known, "active_account_id":active}),
@@ -409,6 +446,23 @@ impl Supervisor {
         self.accounts.borrow().get(id).cloned()
     }
 
+    fn account_unavailable(&self, id: &str) -> SdkError {
+        match self.restore_states.borrow().get(id) {
+            Some(RestoreState::Pending) => SdkError::AccountRestorePending(id.to_owned()),
+            Some(RestoreState::Failed(reason)) => {
+                SdkError::AccountRestoreFailed { account_id: id.to_owned(), reason: reason.clone() }
+            }
+            None => not_open(id),
+        }
+    }
+
+    fn require_restore_ready(&self, id: &str, allow_unlock: bool) -> Result<(), SdkError> {
+        if !allow_unlock && self.restore_states.borrow().contains_key(id) {
+            return Err(self.account_unavailable(id));
+        }
+        Ok(())
+    }
+
     pub(super) fn stop_requested(&self) -> watch::Receiver<bool> {
         self.stop_requested.subscribe()
     }
@@ -461,7 +515,9 @@ impl Supervisor {
             return self.subscribe_backup_stream(request, connection).await;
         }
         let id = request_account_id(&request)?;
-        let actor = self.accounts.borrow().get(id).cloned().ok_or_else(|| not_open(id))?;
+        self.require_restore_ready(id, false)?;
+        let actor =
+            self.accounts.borrow().get(id).cloned().ok_or_else(|| self.account_unavailable(id))?;
         if let Some(task) = self.streams.borrow_mut().remove(&connection.connection_id) {
             task.abort();
         }
