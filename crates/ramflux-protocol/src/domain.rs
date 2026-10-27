@@ -126,7 +126,9 @@ pub const HOME_BACKLOG_MANIFEST: &str = "ramflux.identity.home_backlog_manifest.
 pub const HOME_ATTEST_REQUEST: &str = "ramflux.identity.home_attest_request.v1";
 pub const HOME_PEER_STATUS: &str = "ramflux.identity.home_peer_status.v1";
 
-pub const ALL: [&str; 115] = [
+pub const HOME_PEER_QUERY: &str = "ramflux.identity.home_peer_query.v1";
+
+pub const ALL: [&str; 116] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -242,6 +244,7 @@ pub const ALL: [&str; 115] = [
     HOME_BACKLOG_MANIFEST,
     HOME_ATTEST_REQUEST,
     HOME_PEER_STATUS,
+    HOME_PEER_QUERY,
 ];
 
 #[cfg(test)]

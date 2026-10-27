@@ -275,7 +275,7 @@ fn clock(tx: &redb::WriteTransaction, now: u64) -> Result<u64, NodeCoreError> {
     table.insert("floor", now).map_err(storage)?;
     Ok(now)
 }
-fn map_for(authority: &VerifiedRecord) -> Result<Vec<DeliveryMapEntry>, NodeCoreError> {
+pub(crate) fn map_for(authority: &VerifiedRecord) -> Result<Vec<DeliveryMapEntry>, NodeCoreError> {
     authority
         .envelope()
         .body

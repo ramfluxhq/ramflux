@@ -164,5 +164,8 @@ mod custody_delivery;
 mod custody_service;
 pub use custody_service::{CustodyService, CustodyTlsContext};
 
+mod home_migration_peer;
+mod home_migration_peer_dispatch;
+pub use home_migration_peer::{MigrationPeerCall, MigrationPeerReply};
 mod home_migration_service;
 pub use home_migration_service::{HomeMigrationMesh, HomeMigrationService};
