@@ -139,3 +139,25 @@ fn an_unexpanded_optional_runtime_uses_its_default_with_a_key_only_warning()
     assert!(!logs.contains(literal));
     Ok(())
 }
+
+#[test]
+fn public_default_admin_tokens_are_refused_at_shared_service_startup()
+-> Result<(), Box<dyn std::error::Error>> {
+    for key in [
+        "RAMFLUX_ROUTER_ADMIN_TOKEN",
+        "RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN",
+        "RAMFLUX_FEDERATION_ADMIN_TOKEN",
+    ] {
+        let fixture = Fixture::new()?;
+        let output = fixture.command(None).env(key, "ramflux-local-admin-token").output()?;
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.status.success(), "{key} unexpectedly allowed startup: {logs}");
+        assert!(logs.contains(key), "{logs}");
+        assert!(!logs.contains("ramflux-local-admin-token"), "token must stay redacted");
+    }
+    Ok(())
+}

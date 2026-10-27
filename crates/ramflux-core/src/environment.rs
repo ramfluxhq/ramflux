@@ -33,10 +33,15 @@ pub const OPTIONAL_EXPRESSION_KEYS: &[&str] = &[
     "RAMFLUX_ROUTER_WAL_BENCH",
 ];
 
+const PUBLIC_ADMIN_TOKEN: &str = "ramflux-local-admin-token";
+
 /// Reject unresolved non-optional input without exposing its value.
 /// # Errors
 /// Returns only the setting name for an unresolved value outside the optional allowlist.
 pub fn validate_input(name: &str, value: &std::ffi::OsStr) -> Result<(), String> {
+    if value.to_str().is_some_and(|value| value.trim() == PUBLIC_ADMIN_TOKEN) {
+        return Err(format!("public default token in environment setting: {name}"));
+    }
     if value.as_encoded_bytes().windows(2).any(|pair| pair == b"${") {
         if !OPTIONAL_EXPRESSION_KEYS.contains(&name) {
             return Err(format!("unexpanded environment setting: {name}"));
@@ -195,6 +200,18 @@ mod tests {
         for key in OPTIONAL_EXPRESSION_KEYS {
             assert!(validate_input(key, "${OPTIONAL}".as_ref()).is_ok());
             assert_eq!(configured_value(key, Some("${OPTIONAL}")), None);
+        }
+    }
+
+    #[test]
+    fn public_default_admin_token_is_rejected_for_every_service_setting() {
+        for key in [
+            "RAMFLUX_ROUTER_ADMIN_TOKEN",
+            "RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN",
+            "RAMFLUX_FEDERATION_ADMIN_TOKEN",
+        ] {
+            let error = validate_input(key, format!(" \t{PUBLIC_ADMIN_TOKEN}\n").as_ref()).err();
+            assert_eq!(error, Some(format!("public default token in environment setting: {key}")));
         }
     }
 
