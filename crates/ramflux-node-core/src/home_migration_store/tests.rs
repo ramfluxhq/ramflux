@@ -117,7 +117,7 @@ impl Scenario {
         let attested = a.core.attest_home_migration(
             a.store()?,
             &a.node,
-            AttestMigration { account_anchor: &anchor, destination: "B", nonce: &nonce },
+            AttestMigration { request: &attest_request(&anchor, "B", &nonce, NOW)? },
             NOW,
         )?;
         let base = crypto::verify_home_chain(
@@ -128,6 +128,8 @@ impl Scenario {
                 node_key: &public(8),
                 home_epoch: 0,
                 home_hash: None,
+                cached_manager_range: 0,
+                cached_manager_certificate_hash: None,
             },
             NOW,
         )?;
@@ -204,6 +206,10 @@ impl Scenario {
                 node_key: &public(8),
                 home_epoch: 0,
                 home_hash: Some(self.base.hash()),
+                cached_manager_range: 1,
+                cached_manager_certificate_hash: Some(&object_hash(
+                    &publication()?.record.body.master_certificate,
+                )?),
             },
             NOW + 2,
         )?)
@@ -226,16 +232,16 @@ fn seal_commit_and_activation_survive_each_lost_reply_without_timer_activation()
             .phase,
         Phase::Sealed
     );
-    assert!(s.b.store()?.activate_home_migration(&s.b.node, &s.base, NOW + 1).is_err());
+    assert!(s.b.store()?.activate_home_migration(&s.b.node, &resolve(&s.base), NOW + 1).is_err());
     let committed = s.commit(&op)?;
     s.a.restart()?;
     let retry = s.commit(&op)?;
     assert_eq!(retry, committed);
     assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
     let verified = s.verify(committed)?;
-    s.b.store()?.activate_home_migration(&s.b.node, &verified, NOW + 2)?;
+    s.b.store()?.activate_home_migration(&s.b.node, &resolve(&verified), NOW + 2)?;
     s.b.restart()?;
-    s.b.store()?.activate_home_migration(&s.b.node, &verified, NOW + 2)?;
+    s.b.store()?.activate_home_migration(&s.b.node, &resolve(&verified), NOW + 2)?;
     assert!(s.b.store()?.home_migration_target_active(&s.target)?);
     assert_eq!(s.b.store()?.migration_home(&s.anchor)?.ok_or("head")?.record.epoch(), 1);
     assert!(!s.b.store()?.home_migration_blocks_recovery(&s.anchor)?);
@@ -272,10 +278,10 @@ fn failed_seal_source_commit_and_activation_roll_back_every_table() -> TestResul
     assert!(!s.a.store()?.home_migration_blocks_recovery(&s.anchor)?);
     let verified = s.verify(s.commit(&op)?)?;
     s.b.fail_commit()?;
-    assert!(s.b.store()?.activate_home_migration(&s.b.node, &verified, NOW + 2).is_err());
+    assert!(s.b.store()?.activate_home_migration(&s.b.node, &resolve(&verified), NOW + 2).is_err());
     assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
     assert!(s.b.store()?.migration_home(&s.anchor)?.is_none());
-    s.b.store()?.activate_home_migration(&s.b.node, &verified, NOW + 2)?;
+    s.b.store()?.activate_home_migration(&s.b.node, &resolve(&verified), NOW + 2)?;
     Ok(())
 }
 #[test]
@@ -298,6 +304,7 @@ fn source_cancellation_fence_is_relayable_and_permanently_beats_late_commit() ->
     s.a.restart()?;
     assert!(s.commit(&op).is_err());
     s.b.store()?.accept_home_noncommit_fence(&fence, &s.anchor, NOW + 2)?;
+    assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
     s.b.restart()?;
     assert_eq!(
         s.b.store()?
@@ -340,7 +347,7 @@ fn proof_index_survives_transient_operation_compaction_and_refuses_a_false_fence
     Ok(())
 }
 #[test]
-fn expired_prepares_release_live_admission_budgets_and_clock_rollback_is_refused() -> TestResult {
+fn expired_prepares_release_live_admission_budgets_and_clock_rollback_uses_floor() -> TestResult {
     let s = Scenario::prepared()?;
     assert_eq!(
         s.b.store()?.cleanup_home_migrations(s.offer.body.accept_until + SKEW_SECONDS + 1)?,
@@ -360,7 +367,7 @@ fn expired_prepares_release_live_admission_budgets_and_clock_rollback_is_refused
     assert_eq!(budget.get("live")?.ok_or("budget")?.value(), 0);
     assert_eq!(budget.get(s.anchor.as_str())?.ok_or("budget")?.value(), 0);
     assert_eq!(budget.get("unsealed")?.ok_or("budget")?.value(), 0);
-    assert!(s.b.store()?.cleanup_home_migrations(NOW).is_err());
+    assert_eq!(s.b.store()?.cleanup_home_migrations(NOW)?, 0);
     Ok(())
 }
 #[test]
@@ -369,7 +376,9 @@ fn wrong_destination_and_changed_seal_cannot_activate_even_a_valid_source_proof(
     let op = s.seal()?;
     let verified = s.verify(s.commit(&op)?)?;
     let evil = TestNode::new("C", 10, false)?;
-    assert!(s.b.store()?.activate_home_migration(&evil.node, &verified, NOW + 2).is_err());
+    assert!(
+        s.b.store()?.activate_home_migration(&evil.node, &resolve(&verified), NOW + 2).is_err()
+    );
     assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
     let tx = s.b.store()?.migration_db().begin_write()?;
     let key = op_key(&s.anchor, &op.prepare.body.migration_id, MigrationRole::Destination)?;
@@ -377,7 +386,7 @@ fn wrong_destination_and_changed_seal_cannot_activate_even_a_valid_source_proof(
     wrong.seal.as_mut().ok_or("seal")?.body.state_version += 1;
     write(&tx, OPS, &key, &wrong)?;
     tx.commit()?;
-    assert!(s.b.store()?.activate_home_migration(&s.b.node, &verified, NOW + 2).is_err());
+    assert!(s.b.store()?.activate_home_migration(&s.b.node, &resolve(&verified), NOW + 2).is_err());
     Ok(())
 }
 
@@ -413,12 +422,23 @@ fn primary_recovery_cannot_bypass_pending_guard_through_direct_publication() -> 
         Err(NodeCoreError::HomeMigration(Refusal::MigrationInProgress))
     ));
     let record = s.commit(&op)?;
-    assert!(matches!(
-        s.a.core.publish_custody_record(&replacement, NOW + 2, s.a.store()?),
-        Err(NodeCoreError::HomeMigration(Refusal::MigrationInProgress))
-    ));
-    s.b.store()?.activate_home_migration(&s.b.node, &s.verify(record)?, NOW + 2)?;
+    let historical = record.clone();
+    assert!(!s.a.store()?.home_migration_blocks_recovery(&s.anchor)?);
+    s.a.core.publish_custody_record(&replacement, NOW + 2, s.a.store()?)?;
+    let FenceOutcome::Committed(existing) = s.a.core.fence_home_authorization(
+        s.a.store()?,
+        &s.a.node,
+        &s.authorization,
+        NOW + 2,
+        true,
+    )?
+    else {
+        return Err("existing permanent proof must win".into());
+    };
+    assert_eq!(*existing, record);
+    s.b.store()?.activate_home_migration(&s.b.node, &resolve(&s.verify(record)?), NOW + 2)?;
     s.b.core.publish_custody_record(&replacement, NOW + 2, s.b.store()?)?;
+    assert_eq!(s.verify(historical)?.epoch(), 1);
     assert_eq!(s.b.store()?.migration_home(&s.anchor)?.ok_or("home")?.record.epoch(), 1);
     Ok(())
 }
@@ -431,7 +451,7 @@ fn competitor(s: &Scenario) -> TestResult<(TestNode, MigrationOperation)> {
     let attested = s.a.core.attest_home_migration(
         s.a.store()?,
         &s.a.node,
-        AttestMigration { account_anchor: &s.anchor, destination: "C", nonce: &nonce },
+        AttestMigration { request: &attest_request(&s.anchor, "C", &nonce, NOW + 1)? },
         NOW + 1,
     )?;
     let mut prepare =
@@ -571,3 +591,50 @@ fn recovery_winning_before_source_commit_invalidates_move_and_fence_releases_des
 }
 
 mod wal_barrier;
+
+fn resolve(home: &VerifiedHome) -> ResolveResult {
+    ResolveResult { home: home.evidence().clone(), predecessors: vec![] }
+}
+
+fn attest_request(
+    anchor: &str,
+    destination: &str,
+    nonce: &str,
+    now: u64,
+) -> TestResult<ramflux_protocol::home_migration::AttestRequest> {
+    use ramflux_protocol::home_migration::{AttestPayload, AttestRequest, Control};
+    let payload = AttestPayload {
+        account_anchor: anchor.into(),
+        destination_node: destination.into(),
+        nonce: nonce.into(),
+    };
+    let authority = verify_record(&publication()?.record, now, None, None)?;
+    let branch = ramflux_crypto::create_device_branch("vector.example", "primary", 1, [3; 32]);
+    let control = crypto::sign_actor(
+        Control {
+            version: 1,
+            action: Action::Attest,
+            audience_node: "A".into(),
+            migration_id: hash(19),
+            requester: ramflux_protocol::custody::DeviceRef {
+                account_anchor: anchor.into(),
+                device_id: "primary".into(),
+                device_epoch: 1,
+            },
+            authority_record_hash: object_hash(authority.envelope())?,
+            payload_hash: ramflux_protocol::custody::framed_hash(
+                ramflux_protocol::domain::HOME_ATTEST_REQUEST,
+                &payload,
+            )?,
+            nonce: nonce.into(),
+            issued_at: now,
+            expires_at: now + 60,
+        },
+        &branch,
+        &authority,
+        now,
+    )?;
+    Ok(AttestRequest { control, payload })
+}
+
+mod terminal;
