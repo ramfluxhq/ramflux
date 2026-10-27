@@ -26,6 +26,21 @@ class PreflightUnitTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
+    def test_relay_trust_inputs_refuse_empty_and_unresolved_rendered_values(self):
+        keys = (
+            "RAMFLUX_FEDERATION_TRUST_ENDPOINT",
+            "RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY",
+            "RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID",
+        )
+        for key in keys:
+            for value in ("", "  ", "${S70_DO_NOT_LOG:?private-sentinel}"):
+                docker = json.dumps({"services": {"relay": {"environment": {key: value}}}})
+                podman = f"services:\n  relay:\n    environment:\n      {key}: {json.dumps(value)}\n"
+                for environments in (preflight.docker_environments(docker),
+                                     preflight.podman_environments(podman)):
+                    self.assertEqual(preflight.validate_rendered(environments), {key})
+        self.assertEqual(preflight.validate_rendered([{key: "concrete" for key in keys}]), set())
+
     def test_legacy_names_are_best_effort_and_values_are_never_reported(self):
         env_file = self.root / "operator.env"
         env_file.write_text("RAMFLUX_NODE_ID=DO_NOT_LOG\n")

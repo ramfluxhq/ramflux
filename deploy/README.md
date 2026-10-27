@@ -325,6 +325,16 @@ python3 deploy/scripts/compose-preflight.py --provider docker \
 docker compose --env-file /path/to/operator.env -f deploy/docker-compose.yml config
 ```
 
+`${VAR:?message}` is advisory under podman-compose 1.3.0: it can preserve an
+unresolved expression and return success from `config`. A successful `config`
+alone is not a security check. The enforced controls are preflight refusal of
+empty required security settings and unresolved expressions in rendered inputs
+(setting names only), followed by independent service startup refusal of unresolved
+security settings with `unexpanded environment setting: KEY`. Docker Compose v2
+additionally rejects missing `:?` inputs while rendering; preflight reports that
+failure as `Compose preflight refused settings: CONFIG_RENDER` without provider
+output or input values.
+
 Select `docker`, `podman`, or `podman-compose` to match the command that will run.
 Preflight invokes that provider with the same Compose options and a config-only
 operation, then scans the rendered service environments. The provider therefore
