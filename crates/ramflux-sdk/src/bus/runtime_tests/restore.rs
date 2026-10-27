@@ -4,6 +4,7 @@
 //! Startup restore races and authenticated repeated unlocks.
 
 use super::*;
+use crate::bus::LocalBusStartupRestoreGate;
 
 fn persisted_account(root: &Path) -> Result<(), SdkError> {
     drop(account(root, "alice", None, Arc::new(AtomicBool::new(false)))?);
@@ -28,17 +29,30 @@ async fn restore_event(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn immediate_unlock_and_startup_restore_succeed_in_both_orders() -> Result<(), SdkError> {
+async fn explicit_unlock_and_startup_restore_race_succeeds_in_both_orders() -> Result<(), SdkError>
+{
     LocalSet::new()
         .run_until(async {
             for restore_first in [false, true] {
                 let root = root("restore-race");
                 persisted_account(&root)?;
-                let config = LocalBusConfig::new(root.join("bus.sock"), &root);
+                let mut config = LocalBusConfig::new(root.join("bus.sock"), &root);
+                let restore_control = if restore_first {
+                    None
+                } else {
+                    let (gate, control) = LocalBusStartupRestoreGate::new("alice");
+                    config = config.with_startup_restore_gate(gate);
+                    Some(control)
+                };
                 let supervisor = Supervisor::new(config)?;
                 let mut events = subscribe_restore(&supervisor);
                 let mut background = tokio::task::JoinSet::new();
                 supervisor.hydrate(&mut background)?;
+                if let Some(control) = &restore_control {
+                    tokio::time::timeout(Duration::from_secs(5), control.entered())
+                        .await
+                        .map_err(|_| failure("startup restore must enter its test gate"))?;
+                }
                 let (outbound, _receiver) = mpsc::channel(8);
                 let connection = LocalBusConnectionState::new(1, outbound);
                 if restore_first {
@@ -54,6 +68,7 @@ async fn immediate_unlock_and_startup_restore_succeed_in_both_orders() -> Result
                 let response = supervisor.request(unlock.clone(), &connection).await?;
                 assert_eq!(response.body["local_account_id"], "alice");
                 if !restore_first {
+                    restore_control.as_ref().ok_or_else(|| failure("restore gate"))?.release();
                     assert_eq!(restore_event(&mut events).await?.body["state"], "unlocked");
                 }
                 assert_eq!(supervisor.request(unlock, &connection).await?.body, response.body);
