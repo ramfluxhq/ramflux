@@ -445,6 +445,12 @@ impl QuicGatewayBidiStream {
 }
 
 impl TcpTlsGatewayBidiStream {
+    /// Retain the live TLS object for channel-bound custody RPC instead of splitting it.
+    #[must_use]
+    pub fn into_tls_stream(self) -> GatewayTcpTlsStream {
+        self.stream
+    }
+
     #[must_use]
     pub fn split(self) -> (ReadHalf<GatewayTcpTlsStream>, WriteHalf<GatewayTcpTlsStream>) {
         tokio::io::split(self.stream)

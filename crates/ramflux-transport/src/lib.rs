@@ -117,3 +117,8 @@ mod tests {
         ));
     }
 }
+
+mod custody_binding;
+pub use custody_binding::{
+    custody_quic_exporter, custody_tcp_exporter, read_custody_tcp_frame, write_custody_tcp_frame,
+};
