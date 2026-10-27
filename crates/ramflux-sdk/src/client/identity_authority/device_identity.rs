@@ -77,6 +77,14 @@ impl RamfluxClient {
             .client_record("identity", principal)?
             .and_then(|record| record["contact_identity_commitment"].as_str().map(str::to_owned))
         {
+            if let Some(authority) =
+                self.current_custody_authority(&root, crate::custody::network_now()?)?
+            {
+                if authority.envelope().body.principal_id != principal {
+                    return Err(invalid("peer custody principal mismatch"));
+                }
+                return self.device_identity_for_root(&root, name);
+            }
             if self.observed_device_set(&root)?.is_none_or(|set| set.principal_id != principal) {
                 return Err(invalid("peer signed-set principal mismatch"));
             }
@@ -171,6 +179,14 @@ impl RamfluxClient {
         name: &str,
     ) -> Result<RootQualifiedDeviceRef, SdkError> {
         super::verify_manifest(manifest, &manifest.principal_commitment)?;
+        if let Some(native) = &manifest.custody {
+            let authority = super::custody_directory::verify_native_authority(
+                native,
+                &manifest.principal_commitment,
+                crate::custody::network_now()?,
+            )?;
+            return Ok(RootQualifiedDeviceRef::from_custody_record(&authority, name)?);
+        }
         let public = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
         Ok(RootQualifiedDeviceRef::from_signed_device_set(
             &public,

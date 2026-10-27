@@ -37,7 +37,7 @@ pub(crate) fn handle_itest_request(
     if crate::identity_authority::handle_itest_identity_authority(stream, &request, router)? {
         return Ok(());
     }
-    if handle_itest_device_lookup(stream, &request, router.state())? {
+    if handle_itest_device_lookup(stream, &request, router)? {
         return Ok(());
     }
     match (request.method.as_str(), request.path.as_str()) {
@@ -120,7 +120,7 @@ fn handle_itest_directory_request(
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            let response = handle_mvp1_prekey_fetch(path, router.state())?;
+            let response = handle_mvp1_prekey_fetch(path, router.state(), router.store())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => {
@@ -131,7 +131,7 @@ fn handle_itest_directory_request(
             )?;
         }
         ("GET", path) if is_identity_manifest_path(path) => {
-            let response = handle_mvp1_device_manifest_fetch(path, router.state());
+            let response = handle_mvp1_device_manifest_fetch(path, router.state(), router.store())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => {
@@ -531,7 +531,8 @@ fn handle_mesh_device_lookup(
     let state = router.state();
     let value = match (method, path) {
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            handle_mvp1_prekey_fetch(path, state).and_then(|r| Ok(serde_json::to_value(r)?))
+            handle_mvp1_prekey_fetch(path, state, router.store())
+                .and_then(|r| Ok(serde_json::to_value(r)?))
         }
         ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => {
             handle_mvp1_device_auth_key_fetch(path, state)
@@ -637,7 +638,7 @@ fn handle_mesh_general_value(
         )),
         ("POST", "/mvp1/principal-lookup") => authenticated_principal_mesh_response(body, router),
         ("GET", path) if is_identity_manifest_path(path) => {
-            let response = handle_mvp1_device_manifest_fetch(path, router.state());
+            let response = handle_mvp1_device_manifest_fetch(path, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
         ("GET", path) if path.starts_with("/mvp1/inbox/") => {
@@ -875,13 +876,14 @@ pub(crate) fn handle_mvp1_identity_register(
 fn handle_itest_device_lookup(
     stream: &mut TcpStream,
     request: &ramflux_node_core::NodeHttpRequest,
-    state: &ramflux_node_core::RouterCore,
+    router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<bool> {
+    let state = router.state();
     if request.method != "GET" {
         return Ok(false);
     }
     let result = if request.path.starts_with("/mvp1/prekey/") {
-        handle_mvp1_prekey_fetch(&request.path, state)
+        handle_mvp1_prekey_fetch(&request.path, state, router.store())
             .and_then(|r| serde_json::to_value(r).map_err(anyhow::Error::from))
     } else if request.path.starts_with("/mvp1/device-auth-key/") {
         handle_mvp1_device_auth_key_fetch(&request.path, state)
@@ -992,8 +994,15 @@ fn handle_mvp1_prekey_publish(
         device_id = %request.device_id,
         "router decoded mvp1 prekey publish"
     );
-    let response = state.mvp1_publish_prekey(request)?;
-    state.persist_identity_registry(store)?;
+    let response = if let Some(native) =
+        state.publish_custody_prekey(&request, ramflux_node_core::now_unix_seconds(), store)?
+    {
+        native
+    } else {
+        let response = state.mvp1_publish_prekey(request)?;
+        state.persist_identity_registry(store)?;
+        response
+    };
     tracing::info!(
         device_id = %response.device_id,
         has_bundle = response.bundle.is_some(),
@@ -1006,9 +1015,16 @@ fn handle_mvp1_prekey_publish(
 fn handle_mvp1_prekey_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
 ) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
     let device_id = path.trim_start_matches("/mvp1/prekey/");
-    let response = state.mvp1_prekey_checked(device_id)?;
+    let response = if let Some(native) =
+        state.custody_prekey_response(device_id, ramflux_node_core::now_unix_seconds(), store)?
+    {
+        native
+    } else {
+        state.mvp1_prekey_checked(device_id)?
+    };
     tracing::info!(
         device_id = %response.device_id,
         has_bundle = response.bundle.is_some(),
@@ -1025,16 +1041,21 @@ fn is_identity_manifest_path(path: &str) -> bool {
 fn handle_mvp1_device_manifest_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> Option<ramflux_node_core::DeviceManifestResponse> {
+    store: &ramflux_node_core::RouterRedbStore,
+) -> anyhow::Result<Option<ramflux_node_core::DeviceManifestResponse>> {
     let principal_commitment = path.trim_start_matches("/mvp1/device-manifest/");
-    let response = state.mvp1_device_manifest(principal_commitment);
+    let response = state.ordinary_device_manifest(
+        principal_commitment,
+        ramflux_node_core::now_unix_seconds(),
+        store,
+    )?;
     tracing::info!(
         principal_commitment,
         found = response.is_some(),
         device_count = response.as_ref().map_or(0, |manifest| manifest.devices.len()),
         "router mvp1 device manifest fetch outcome"
     );
-    response
+    Ok(response)
 }
 
 fn handle_mvp1_inbox_fetch(
@@ -1074,9 +1095,11 @@ fn authenticated_principal_mesh_response(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
     let request: ramflux_node_core::PrincipalLookupRequest = serde_json::from_slice(body)?;
-    let response = router
-        .state()
-        .mvp1_authenticated_principal_lookup(&request, ramflux_node_core::now_unix_seconds());
+    let response = router.state().authenticated_principal_lookup(
+        &request,
+        ramflux_node_core::now_unix_seconds(),
+        router.store(),
+    )?;
     Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
 }
 

@@ -56,10 +56,10 @@ pub use policy::{
     TransportRetryPolicy, retry_with_policy,
 };
 pub use quic_gateway::{
-    GatewaySessionFrameSink, GatewaySessionFrameSource, GatewaySessionTransport,
-    GatewayTcpTlsStream, QuicConnectPhase, QuicGatewayBidiStream, QuicGatewayClient,
-    QuicRequestPhase, RelayClientQuicConfig, TcpTlsGatewayBidiStream, TcpTlsGatewayClient,
-    read_gateway_session_json, read_quic_json_frame, relay_client_quic_health,
+    GatewaySessionFrameFuture, GatewaySessionFrameSink, GatewaySessionFrameSource,
+    GatewaySessionTransport, GatewayTcpTlsStream, QuicConnectPhase, QuicGatewayBidiStream,
+    QuicGatewayClient, QuicRequestPhase, RelayClientQuicConfig, TcpTlsGatewayBidiStream,
+    TcpTlsGatewayClient, read_gateway_session_json, read_quic_json_frame, relay_client_quic_health,
     write_gateway_session_json, write_quic_json_frame, write_quic_json_message,
 };
 pub use relay_quic_pool::{

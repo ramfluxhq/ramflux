@@ -65,6 +65,35 @@ impl RamfluxClient {
         Ok(self.account_index()?.active_account()?)
     }
 
+    pub(crate) fn seal_born_account_data(
+        &self,
+        local_account_id: &str,
+        secret: &[u8],
+    ) -> Result<(), SdkError> {
+        let index = self.account_index()?;
+        let account = crate::custody::load_account(
+            index.root(),
+            local_account_id,
+            crate::custody::network_now()?,
+        )?;
+        if index.account(local_account_id)?.principal_commitment
+            != account.record().body.account_anchor
+            || index.load_wrapped_db_key(local_account_id)?.is_some()
+        {
+            return Err(SdkError::CustodySetupInvalid);
+        }
+        let local_secret =
+            zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);
+        let wrapping =
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&local_secret, secret));
+        let key = AccountDbKey::generate()?;
+        let db = AccountDb::open(index, local_account_id, &key)?;
+        let wrapped = db.wrap_current_db_key(&wrapping)?;
+        index.store_wrapped_db_key(local_account_id, &wrapped)?;
+        drop(db);
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn unlock_account(
@@ -72,13 +101,30 @@ impl RamfluxClient {
         local_account_id: &str,
         secret: &[u8],
     ) -> Result<(), SdkError> {
-        if crate::custody::account_exists(self.account_index()?.root(), local_account_id)? {
-            return Err(SdkError::NetworkingPending);
+        let born =
+            if crate::custody::account_exists(self.account_index()?.root(), local_account_id)? {
+                let account = crate::custody::load_account(
+                    self.account_index()?.root(),
+                    local_account_id,
+                    crate::custody::network_now()?,
+                )?;
+                if self.account_index()?.account(local_account_id)?.principal_commitment
+                    != account.record().body.account_anchor
+                {
+                    return Err(SdkError::CustodySetupInvalid);
+                }
+                Some(Box::new(account))
+            } else {
+                None
+            };
+        let wrapped = self.account_index()?.load_wrapped_db_key(local_account_id)?;
+        if born.is_some() && wrapped.is_none() {
+            return Err(SdkError::CustodySetupInvalid);
         }
         let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
         let key_encryption_key = account_db_key_encryption_key(&vault_secret, secret);
         let account_index = self.account_index()?;
-        let key = if let Some(wrapped) = account_index.load_wrapped_db_key(local_account_id)? {
+        let key = if let Some(wrapped) = wrapped {
             unwrap_with_vault_secret(&key_encryption_key, &wrapped)?
         } else {
             let generated = AccountDbKey::generate()?;
@@ -96,9 +142,15 @@ impl RamfluxClient {
             generated
         };
         let mut db = AccountDb::open(account_index, local_account_id, &key)?;
+        if born.is_some() {
+            self.identity_root = None;
+            self.device_branch = None;
+            self.reader_device_identity = None;
+        }
         if let Some(device_branch) = self.device_branch.clone() {
             db.set_device_signer(device_branch);
         }
+        self.born_v3_account = born;
         self.active_account_db = Some(db);
         Ok(())
     }

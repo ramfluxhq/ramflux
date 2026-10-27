@@ -121,21 +121,13 @@ impl RamfluxClient {
                 (&own_commitment, &manifest.principal_commitment)
             };
             self.establish_friend_link(&link_id, requester, target)?;
-            let own_material =
-                super::contact::contact_safety_material_from_manifest(&own_manifest)?;
-            let contact_material =
-                super::contact::contact_safety_material_from_manifest(&manifest)?;
-            identity["safety_number"] =
-                json!(ramflux_crypto::safety_number(&own_material, &contact_material));
-            if let Some(safety) = verification {
-                self.commit_contact_safety(
-                    safety,
-                    &own_material,
-                    &contact_material,
-                    &own_gateway.device_id,
-                )?;
-                identity["root_source"] = json!(crate::ContactRootSource::Verified);
-            }
+            self.resolve_contact_safety(
+                &mut identity,
+                &own_manifest,
+                &manifest,
+                verification,
+                &own_gateway.device_id,
+            )?;
 
             db.persist_client_record("identity", principal, &identity)?;
             self.stage_own_contact(&manifest, &link_id)?;

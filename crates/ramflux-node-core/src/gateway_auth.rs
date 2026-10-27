@@ -116,7 +116,9 @@ pub fn validate_gateway_auth_with_replay(
     registered: &DeviceAuthKeyResponse,
 ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
     validate_gateway_auth(open, auth, now, registered)?;
-    let source = registered.authenticated_device_identity()?;
+    let trusted_now = u64::try_from(now)
+        .map_err(|_| NodeCoreError::ItestHttp("trusted gateway time unavailable".into()))?;
+    let source = registered.authenticated_device_identity_for("register", trusted_now)?;
     if auth.device_proof.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
         != Some(source.root_commitment())
     {

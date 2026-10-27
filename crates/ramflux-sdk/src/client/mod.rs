@@ -31,6 +31,8 @@ pub mod identity;
 pub mod identity_authority;
 pub(crate) mod inbox_failure;
 pub mod mcp_a2ui;
+mod native_branch;
+mod native_safety;
 pub mod object;
 mod own_contact;
 pub(crate) mod own_device_copy;

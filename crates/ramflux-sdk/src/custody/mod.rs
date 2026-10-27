@@ -87,3 +87,5 @@ pub use dm::CustodyDm;
 mod network_tests;
 
 mod discovery;
+
+pub(crate) use network::now as network_now;

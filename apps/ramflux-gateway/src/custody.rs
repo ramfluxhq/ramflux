@@ -8,7 +8,7 @@ use ramflux_crypto::custody::{
 };
 use ramflux_protocol::custody::{
     BindingMode, CUSTODY_RPC_PATH, CustodyClientFrame, CustodyMeshRequest, CustodyRefusal,
-    CustodyServerFrame, MAX_CUSTODY_FRAME_BYTES, decode,
+    CustodyServerFrame, CustodySession, MAX_CUSTODY_FRAME_BYTES, decode,
 };
 use ramflux_transport::{GatewayTcpTlsStream, read_custody_tcp_frame, write_custody_tcp_frame};
 use std::{collections::BTreeSet, time::Duration};
@@ -19,12 +19,31 @@ pub(crate) fn is_open(bytes: &[u8]) -> bool {
         v.get("frame_type").and_then(serde_json::Value::as_str) == Some("custody_open")
     })
 }
+/// A connection-local grant issued by the receiving router after native possession proof.
+/// No public fields or deserialization can manufacture a handoff from client JSON.
+pub(crate) struct GatewayGrant {
+    session: CustodySession,
+    deadline: std::time::Instant,
+}
+impl GatewayGrant {
+    pub(crate) fn deadline(&self) -> std::time::Instant {
+        self.deadline
+    }
+    pub(crate) fn session(&self) -> &CustodySession {
+        &self.session
+    }
+    pub(crate) fn live(&self, now: u64) -> bool {
+        self.session.expires_at > now && std::time::Instant::now() < self.deadline
+    }
+}
+
 struct Proxy {
     node: VerifiedNodeRecord,
     signer: Option<ed25519_dalek::SigningKey>,
     connection: String,
     mode: BindingMode,
     session_ids: BTreeSet<String>,
+    handoff_session: Option<GatewayGrant>,
     router: Option<crate::RouterMeshClient>,
     auth_deadline: tokio::time::Instant,
 }
@@ -102,6 +121,7 @@ impl Proxy {
                 connection: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
                 mode,
                 session_ids: BTreeSet::new(),
+                handoff_session: None,
                 router: Some(context.router.clone()),
                 auth_deadline,
             },
@@ -128,6 +148,15 @@ impl Proxy {
             // A connection retains only its latest session; an old id cannot become a bearer.
             self.session_ids.clear();
             self.session_ids.insert(session.session_id.clone());
+            let remaining =
+                session.expires_at.saturating_sub(ramflux_node_core::now_unix_seconds()).min(300);
+            self.handoff_session = Some(GatewayGrant {
+                session: session.clone(),
+                deadline: std::time::Instant::now() + Duration::from_secs(remaining),
+            });
+        } else if matches!(result, CustodyServerFrame::Closed) {
+            self.session_ids.clear();
+            self.handoff_session = None;
         }
         Ok(result)
     }
@@ -189,7 +218,7 @@ impl Proxy {
                     action,
                 }
             }
-            CustodyClientFrame::CustodyOpen { .. } => {
+            CustodyClientFrame::CustodyOpen { .. } | CustodyClientFrame::GatewayHandoff { .. } => {
                 return Err(CustodyRefusal::InvalidInput.into());
             }
         };
@@ -207,6 +236,19 @@ fn capacity() -> &'static std::sync::Arc<ramflux_node_core::CustodyIngressLimite
     LIMIT.get_or_init(|| ramflux_node_core::CustodyIngressLimiter::new(32))
 }
 impl Proxy {
+    fn handoff(&mut self, session_id: &str) -> anyhow::Result<GatewayGrant> {
+        let grant = self
+            .handoff_session
+            .take()
+            .filter(|grant| {
+                grant.session.session_id == session_id
+                    && self.session_ids.contains(session_id)
+                    && grant.live(ramflux_node_core::now_unix_seconds())
+            })
+            .ok_or(CustodyRefusal::SessionRequired)?;
+        self.session_ids.clear();
+        Ok(grant)
+    }
     fn deadline(&self) -> tokio::time::Instant {
         if self.session_ids.is_empty() {
             self.auth_deadline
@@ -254,6 +296,22 @@ async fn tcp_inner(
         let bytes =
             tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut stream)).await??;
         let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
+        if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
+            let grant = proxy.handoff(session_id)?;
+            let first =
+                tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut stream)).await??;
+            let first = ramflux_protocol::parse_i_json(&first)?;
+            let (recv, send) = tokio::io::split(stream);
+            drop(proxy);
+            return Box::pin(crate::session::handle_gateway_custody_session_transport(
+                Box::new(send),
+                Box::new(recv),
+                context,
+                first,
+                grant,
+            ))
+            .await;
+        }
         let observed = nonce(&frame)?
             .map(|nonce| {
                 ramflux_transport::custody_tcp_exporter(&stream, &nonce)
@@ -295,6 +353,21 @@ async fn quic_inner(
         let deadline = proxy.deadline();
         let bytes = tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut recv)).await??;
         let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
+        if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
+            let grant = proxy.handoff(session_id)?;
+            let first =
+                tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut recv)).await??;
+            let first = ramflux_protocol::parse_i_json(&first)?;
+            drop(proxy);
+            return Box::pin(crate::session::handle_gateway_custody_session_transport(
+                Box::new(send),
+                Box::new(recv),
+                context,
+                first,
+                grant,
+            ))
+            .await;
+        }
         let observed = nonce(&frame)?
             .map(|nonce| {
                 ramflux_transport::custody_quic_exporter(&connection, &nonce)

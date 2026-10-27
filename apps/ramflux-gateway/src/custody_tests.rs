@@ -131,6 +131,7 @@ fn exercise(
         connection: ramflux_protocol::encode_base64url([11; 32]),
         mode: BindingMode::HomeRelayReceipt,
         session_ids: BTreeSet::new(),
+        handoff_session: None,
         router: None,
         auth_deadline: tokio::time::Instant::now() + Duration::from_secs(10),
     };
@@ -282,4 +283,74 @@ async fn gateway_proxy_receipt_uses_actual_quic_exporter_and_rejects_relay() -> 
         )
     })
     .await?
+}
+
+#[test]
+fn native_handoff_is_one_use_and_requires_the_exact_live_registered_authority() -> Result {
+    let now = ramflux_node_core::now_unix_seconds();
+    let AuthorityFixture { node, branch, publication, .. } = authority(now)?;
+    let anchor = publication.record.body.account_anchor.clone();
+    let session = CustodySession {
+        session_id: ramflux_protocol::encode_base64url([31; 32]),
+        device_ref: DeviceRef {
+            account_anchor: anchor.clone(),
+            device_id: "primary".into(),
+            device_epoch: 1,
+        },
+        target_delivery_id: ramflux_protocol::qualified_device_id(&anchor, "primary")?,
+        record_hash: object_hash(&publication.record)?,
+        proof_hash: ramflux_protocol::encode_base64url([32; 32]),
+        binding_mode: BindingMode::HomeRelayReceipt,
+        expires_at: now + 100,
+    };
+    let key = ramflux_node_core::DeviceAuthKeyResponse {
+        principal_id: "alice".into(),
+        device_id: "primary".into(),
+        device_epoch: 1,
+        branch_public_key: ramflux_protocol::encode_base64url(
+            branch.signing_key.verifying_key().to_bytes(),
+        ),
+        target_delivery_id: session.target_delivery_id.clone(),
+        revoked: false,
+        root_public_key: None,
+        signed_device_set: None,
+        custody_authority: Some(Box::new(CustodyAuthority {
+            publication,
+            custodian_publication: None,
+        })),
+    };
+    let grant = || GatewayGrant {
+        session: session.clone(),
+        deadline: std::time::Instant::now() + Duration::from_secs(100),
+    };
+    let mut proxy = Proxy {
+        node,
+        signer: None,
+        connection: ramflux_protocol::encode_base64url([33; 32]),
+        mode: BindingMode::HomeRelayReceipt,
+        session_ids: BTreeSet::from([session.session_id.clone()]),
+        handoff_session: Some(grant()),
+        router: None,
+        auth_deadline: tokio::time::Instant::now() + Duration::from_secs(100),
+    };
+    let taken = proxy.handoff(&session.session_id)?;
+    assert!(proxy.handoff(&session.session_id).is_err());
+    assert!(proxy.session_ids.is_empty());
+    assert!(crate::session::native_handoff_matches(&key, Some(&taken), now)?);
+    assert!(!crate::session::native_handoff_matches(&key, None, now)?);
+    let mut mismatched = grant();
+    mismatched.session.record_hash = ramflux_protocol::encode_base64url([34; 32]);
+    assert!(!crate::session::native_handoff_matches(&key, Some(&mismatched), now)?);
+    mismatched = grant();
+    mismatched.session.device_ref.device_epoch += 1;
+    assert!(!crate::session::native_handoff_matches(&key, Some(&mismatched), now)?);
+    mismatched = grant();
+    mismatched.deadline = std::time::Instant::now();
+    assert!(!crate::session::native_handoff_matches(&key, Some(&mismatched), now)?);
+    assert!(!crate::session::native_handoff_matches(&key, Some(&taken), now + 100)?);
+    proxy.session_ids.insert(session.session_id.clone());
+    proxy.handoff_session = Some(grant());
+    assert!(proxy.handoff("wrong-session").is_err());
+    assert!(proxy.handoff(&session.session_id).is_err());
+    Ok(())
 }

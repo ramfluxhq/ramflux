@@ -21,6 +21,9 @@ impl IdentityRegistry {
         root: &str,
         name: &str,
     ) -> Option<RootQualifiedDeviceRef> {
+        if self.custody_anchor_known(root) {
+            return self.custody_device_identity(root, name);
+        }
         let public = ramflux_crypto::verifying_key_from_base64url(
             self.root_public_keys_by_commitment.get(root)?,
         )
@@ -33,6 +36,9 @@ impl IdentityRegistry {
         principal: &str,
         name: &str,
     ) -> Option<RootQualifiedDeviceRef> {
+        if let Some(anchor) = self.custody_anchor_for_principal(principal) {
+            return self.custody_device_identity(anchor, name);
+        }
         let public =
             ramflux_crypto::verifying_key_from_base64url(self.root_public_keys.get(principal)?)
                 .ok()?;
@@ -44,6 +50,17 @@ impl IdentityRegistry {
         &self,
         session: &crate::SessionDescriptor,
     ) -> Option<RootQualifiedDeviceRef> {
+        if let Ok(Some((anchor, name))) =
+            ramflux_protocol::parse_qualified_device_id(&session.target_delivery_id)
+            && self.custody_anchor_known(&anchor)
+        {
+            let identity = self.custody_device_identity(&anchor, &name)?;
+            let authority =
+                self.custody_device_auth_key(&identity, crate::now_unix_seconds()).ok()??;
+            return (authority.device_id == session.device_id
+                && authority.device_epoch == session.device_epoch)
+                .then_some(identity);
+        }
         let mut records = self.devices.values().filter(|record| {
             record.target_delivery_id == session.target_delivery_id
                 && record.device_id == session.device_id
@@ -175,6 +192,7 @@ impl IdentityRegistry {
         devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
         let principal = devices.first()?.principal_id.clone();
         Some(crate::DeviceManifestResponse {
+            custody: None,
             principal_id: principal,
             principal_commitment: commitment.into(),
             root_public_key: public.clone(),

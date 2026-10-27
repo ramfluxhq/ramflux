@@ -12,6 +12,9 @@ impl RamfluxClient {
         if *local != self.owned_device_identity()? {
             return Err(super::invalid("pair local root mismatch"));
         }
+        if self.born_v3_account.is_some() {
+            self.require_current_device_authorization(local)?;
+        }
         if self
             .account_db()?
             .load_actor_state::<bool>(&Self::device_revocation_key(local))?
@@ -31,6 +34,13 @@ impl RamfluxClient {
             return Ok(false);
         }
         if db.load_actor_state::<bool>(&Self::device_revocation_key(remote))?.unwrap_or(false) {
+            return Ok(false);
+        }
+        if self
+            .current_custody_authority(remote.root_commitment(), crate::custody::network_now()?)?
+            .is_some()
+            && self.require_current_device_authorization(remote).is_err()
+        {
             return Ok(false);
         }
         let Some(record) = db.client_record("device", remote.storage_key())? else {

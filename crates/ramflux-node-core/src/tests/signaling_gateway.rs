@@ -594,6 +594,7 @@ fn gateway_auth_rejects_fixture_signature_when_registered_branch_key_differs()
     let open = gateway_open_frame("device_branch_bound", "nonce_branch_bound");
     let auth = gateway_auth_frame(&open, "request_branch_bound", 1_760_000_000)?;
     let registered = DeviceAuthKeyResponse {
+        custody_authority: None,
         root_public_key: None,
         signed_device_set: None,
         principal_id: "alice".to_owned(),

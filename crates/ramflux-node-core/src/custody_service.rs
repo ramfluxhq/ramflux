@@ -221,6 +221,9 @@ impl CustodyService {
             let observed =
                 context.exporter.as_ref().map(ramflux_crypto::custody::branch_exporter_hash);
             let request = match frame {
+                CustodyClientFrame::GatewayHandoff { .. } => {
+                    return Err(CustodyRefusal::Unsupported);
+                }
                 CustodyClientFrame::CustodyOpen { binding_mode } => {
                     if binding_mode != context.mode {
                         return Err(CustodyRefusal::BindingRefused);

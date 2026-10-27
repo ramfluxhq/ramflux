@@ -39,11 +39,11 @@ impl RamfluxClient {
             own.root_commitment()
         ))? && let Some(device) =
             manifest.devices.iter().find(|device| device.device_id == own.device_id())
+            && let Some(proof) = &device.branch_proof
             && now
-                >= device.branch_proof.issued_at.saturating_add(
-                    (device.branch_proof.expires_at.saturating_sub(device.branch_proof.issued_at))
-                        / 2,
-                )
+                >= proof
+                    .issued_at
+                    .saturating_add((proof.expires_at.saturating_sub(proof.issued_at)) / 2)
         {
             return Ok(true);
         }

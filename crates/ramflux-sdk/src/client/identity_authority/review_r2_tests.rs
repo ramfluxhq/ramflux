@@ -44,10 +44,10 @@ fn expired_proof_keeps_durable_device_authority_but_new_registration_still_requi
     observe(&peer.client, &manifest)?;
     let now = now_unix_timestamp();
     let old = manifest.devices.iter_mut().find(|d| d.device_id == "two").ok_or("sibling")?;
-    old.branch_proof.issued_at = now - 7200;
-    old.branch_proof.expires_at = now - 3601;
-    old.branch_proof.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-        &ramflux_crypto::branch_proof_signing_bytes(&old.branch_proof)?,
+    old.legacy_proof_mut()?.issued_at = now - 7200;
+    old.legacy_proof_mut()?.expires_at = now - 3601;
+    old.legacy_proof_mut()?.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_crypto::branch_proof_signing_bytes(old.legacy_proof()?)?,
         owner.client.identity_root.as_ref().ok_or("root")?.signing_key.to_bytes(),
     );
     let mut entries = manifest.signed_device_set.as_ref().ok_or("set")?.devices.clone();
@@ -93,7 +93,7 @@ fn expired_proof_keeps_durable_device_authority_but_new_registration_still_requi
     )?;
     let owner_key = &owner.client.identity_root.as_ref().ok_or("root")?.signing_key.verifying_key();
     let proof =
-        &manifest.devices.iter().find(|d| d.device_id == "two").ok_or("proof")?.branch_proof;
+        manifest.devices.iter().find(|d| d.device_id == "two").ok_or("proof")?.legacy_proof()?;
     assert!(
         ramflux_crypto::verify_root_bound_branch_proof(
             owner_key,

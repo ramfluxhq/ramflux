@@ -140,6 +140,7 @@ async fn submit_while_replacing(
         )?))),
         context.clone(),
         runtime,
+        None,
     ));
     tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await?;
     // The router has committed and the old loop is writing the reply. A replacement
@@ -476,6 +477,7 @@ async fn submit_then_heartbeat(
             Box::new(source),
             context.clone(),
             runtime,
+            None,
         ),
     )
     .await?

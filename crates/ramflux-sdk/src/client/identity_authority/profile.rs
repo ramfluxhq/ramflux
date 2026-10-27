@@ -120,7 +120,7 @@ impl RamfluxClient {
     pub fn verified_identity_profile(
         &self,
         principal: &str,
-    ) -> Result<Option<SignedIdentityProfile>, SdkError> {
+    ) -> Result<Option<super::profile_read::VerifiedIdentityProfile>, SdkError> {
         Ok(self.verified_profile_facts(principal)?.map(|facts| facts.profile.clone()))
     }
 }

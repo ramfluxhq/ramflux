@@ -161,6 +161,8 @@ pub struct DeviceManifestEntry {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceManifestResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody: Option<Box<ramflux_protocol::custody::CustodyManifest>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_device_set: Option<ramflux_protocol::SignedDeviceSetRecord>,
     pub principal_id: String,
     pub principal_commitment: String,
@@ -170,6 +172,8 @@ pub struct DeviceManifestResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceAuthKeyResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody_authority: Option<Box<ramflux_protocol::custody::CustodyAuthority>>,
     #[serde(default)]
     pub root_public_key: Option<String>,
     #[serde(default)]
@@ -636,6 +640,13 @@ impl IdentityRegistry {
         Ok(())
     }
 
+    pub(crate) fn bound_principal_root(&self, principal: &str) -> Option<&str> {
+        self.principal_root_bindings
+            .get(principal)
+            .or_else(|| self.root_public_keys.get(principal))
+            .map(String::as_str)
+    }
+
     pub(crate) fn reserve_custody_principal(&mut self, principal_id: &str, master: &str) {
         self.principal_root_bindings
             .entry(principal_id.to_owned())
@@ -861,6 +872,7 @@ impl IdentityRegistry {
             .map(|set| set.principal_id.clone())
             .or_else(|| devices.first().map(|device| device.principal_id.clone()))?;
         Some(DeviceManifestResponse {
+            custody: None,
             signed_device_set,
             principal_id,
             principal_commitment: principal_commitment.to_owned(),
@@ -879,11 +891,18 @@ impl IdentityRegistry {
         &self,
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Option<DeviceAuthKeyResponse> {
+        if self.custody_anchor_known(identity.root_commitment()) {
+            return self
+                .custody_device_auth_key(identity, crate::now_unix_seconds())
+                .ok()
+                .flatten();
+        }
         let device = self.device_record(identity)?;
         if !self.record_is_revoked(device) && !self.device_is_usable(identity) {
             return None;
         }
         Some(DeviceAuthKeyResponse {
+            custody_authority: None,
             root_public_key: self
                 .root_public_keys_by_commitment
                 .get(&device.principal_commitment)

@@ -3,6 +3,7 @@
 
 //! Root-authenticated device authority, monotonic observation and local root publication.
 mod custody_directory;
+pub(crate) use custody_directory::native_fingerprint as native_authority_fingerprint;
 mod device_identity;
 pub(crate) mod device_namespace;
 mod directory;
@@ -46,6 +47,12 @@ impl RamfluxClient {
         let Some(commitment) = identity["contact_identity_commitment"].as_str() else {
             return Ok(None);
         };
+        if let Some(authority) =
+            self.current_custody_authority(commitment, crate::custody::network_now()?)?
+        {
+            return Ok((authority.envelope().body.principal_id == principal)
+                .then_some(authority.envelope().body.principal_kind));
+        }
         let record = self
             .account_db()?
             .load_actor_state::<SignedDeviceSetRecord>(&record_key(commitment))?;
@@ -81,14 +88,7 @@ impl RamfluxClient {
         value: serde_json::Value,
         expected: &str,
     ) -> Result<(), SdkError> {
-        if self
-            .born_v3_account
-            .as_ref()
-            .is_some_and(|account| account.record().body.account_anchor == expected)
-        {
-            return Err(SdkError::CustodyModeDowngrade);
-        }
-        let manifest = serde_json::from_value(value)?;
+        let manifest: crate::prekey::SdkDeviceManifestResponse = serde_json::from_value(value)?;
         verify::verify_manifest_authority(&manifest, expected)?;
         self.persist_identity_directory(&manifest)
     }
@@ -152,7 +152,7 @@ impl RamfluxClient {
                     .devices
                     .iter()
                     .find(|entry| entry.device_id == raw)
-                    .map(|entry| entry.branch_proof.issued_at)
+                    .and_then(|entry| entry.branch_proof.as_ref().map(|proof| proof.issued_at))
             })
         });
         let issued = issued.ok_or_else(|| {
@@ -172,3 +172,6 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod custody_directory_tests;

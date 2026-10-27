@@ -13,7 +13,9 @@ mod validate;
 mod verify;
 pub use keys::{MasterKey, SelfSigningKey};
 pub use phrase::RecoveryPhrase;
-pub use verify::{CapacityLimit, CapacityPressure, VerifiedRecord, verify_record};
+pub use verify::{
+    CapacityLimit, CapacityPressure, VerifiedRecord, verify_publication, verify_record,
+};
 
 #[cfg(test)]
 mod tests;
@@ -37,3 +39,6 @@ pub use node_identity::{
 
 #[cfg(test)]
 mod network_tests;
+
+mod safety;
+pub use safety::{safety_fingerprint, safety_number};

@@ -142,9 +142,13 @@ impl GatewaySessionEngine {
 
     async fn connect_inner(mut config: GatewaySessionConfig) -> Result<Self, SdkError> {
         config.refresh_auth_window();
-        let (transport, mut stream, active_transport_kind) =
+        let custody = super::custody::prepare(&config).await?;
+        let (transport, stream, active_transport_kind) =
             open_gateway_session_transport(&config).await?;
         config.transport_kind = active_transport_kind;
+        let mut stream =
+            Box::pin(super::custody::authenticate(custody, stream, &mut config)).await?;
+        config.refresh_auth_window();
         let open = gateway_fresh_open_frame(&config)?;
         write_gateway_client_frame(&mut *stream, &GatewayClientFrame::Open { open: open.clone() })
             .await?;

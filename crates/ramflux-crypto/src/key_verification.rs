@@ -121,14 +121,17 @@ pub fn safety_fingerprint(
 
 #[must_use]
 pub fn safety_number(first: &ContactSafetyMaterial, second: &ContactSafetyMaterial) -> Vec<String> {
-    let fingerprint = safety_fingerprint(first, second);
+    render_safety_fingerprint(&safety_fingerprint(first, second))
+}
+
+pub(crate) fn render_safety_fingerprint(fingerprint: &[u8; 32]) -> Vec<String> {
     let unbiased_limit = (u64::from(u32::MAX) + 1) / 100_000 * 100_000;
     let mut groups = Vec::with_capacity(12);
     for index in 0..12 {
         let mut attempt = 0_u32;
         loop {
             let mut bytes = Vec::with_capacity(37);
-            bytes.extend_from_slice(&fingerprint);
+            bytes.extend_from_slice(fingerprint);
             bytes.push(index);
             bytes.extend_from_slice(&attempt.to_be_bytes());
             let candidate_hash = blake3_256("ramflux.safety_number.group.v1", &bytes);

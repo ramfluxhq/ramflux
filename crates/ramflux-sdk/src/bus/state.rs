@@ -272,7 +272,7 @@ impl LocalBusAccountState {
             let connected = if let Some(engine) = self.engine.as_mut() {
                 gateway_session_timeout(
                     "gateway ensure live",
-                    engine.ensure_live(last_seen_inbox_seq),
+                    Box::pin(engine.ensure_live(last_seen_inbox_seq)),
                 )
                 .await
             } else {
@@ -289,7 +289,7 @@ impl LocalBusAccountState {
                 self.engine = Some(
                     gateway_session_timeout(
                         "gateway connect",
-                        GatewaySessionEngine::connect(config),
+                        Box::pin(GatewaySessionEngine::connect(config)),
                     )
                     .await?,
                 );

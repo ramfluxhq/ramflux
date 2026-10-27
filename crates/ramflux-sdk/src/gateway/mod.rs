@@ -10,3 +10,6 @@ pub use engine::*;
 pub(crate) use helpers::*;
 pub use protocol::*;
 pub use push_route::*;
+
+mod custody;
+pub use custody::GatewayCustodyConfig;

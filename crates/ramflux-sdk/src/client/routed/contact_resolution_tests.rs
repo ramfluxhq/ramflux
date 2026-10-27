@@ -569,12 +569,13 @@ async fn two_hour_old_accounts_resolve_add_contacts_and_authorize_new_prekeys()
             }
             .ok_or(SdkError::IdentityRootMissing)?;
             for device in &mut manifest.devices {
-                device.branch_proof.issued_at = now - 7200;
-                device.branch_proof.expires_at = now - 3600;
-                device.branch_proof.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-                    &ramflux_crypto::branch_proof_signing_bytes(&device.branch_proof)?,
-                    root.signing_key.to_bytes(),
-                );
+                device.legacy_proof_mut()?.issued_at = now - 7200;
+                device.legacy_proof_mut()?.expires_at = now - 3600;
+                device.legacy_proof_mut()?.signature =
+                    ramflux_crypto::sign_canonical_bytes_with_seed(
+                        &ramflux_crypto::branch_proof_signing_bytes(device.legacy_proof()?)?,
+                        root.signing_key.to_bytes(),
+                    );
             }
         }
     }
@@ -591,7 +592,7 @@ async fn two_hour_old_accounts_resolve_add_contacts_and_authorize_new_prekeys()
         let identity =
             client.device_identity_for_root(&manifest.principal_commitment, &device.device_id)?;
         client.verify_root_bound_prekey(&identity, &device.prekey_bundle)?;
-        assert!(device.branch_proof.expires_at < now);
+        assert!(device.legacy_proof()?.expires_at < now);
     }
     Ok(())
 }

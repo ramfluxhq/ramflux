@@ -168,6 +168,28 @@ pub struct BranchCredentials {
     pub(crate) agreement: ramflux_crypto::X25519KeyPair,
 }
 impl BranchCredentials {
+    pub(crate) fn signed_prekey_seed(&self) -> Zeroizing<[u8; 32]> {
+        // Stable branch-only bootstrap material. Bootstrap forward secrecy requires
+        // rotating random prekeys and erasure; tracked separately from identity custody.
+        let secret = Zeroizing::new(self.agreement.secret.to_bytes());
+        Zeroizing::new(ramflux_crypto::blake3_keyed_derive(
+            &secret,
+            b"ramflux.identity.custody_signed_prekey.v1",
+        ))
+    }
+
+    pub(crate) fn prekey_bundle(&self) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
+        let signed = ramflux_crypto::X25519KeyPair::from_seed(*self.signed_prekey_seed());
+        Ok(ramflux_crypto::create_prekey_bundle(
+            &self.signing,
+            &self.agreement,
+            "custody-prekey-v1",
+            &signed,
+            None,
+            None,
+        )?)
+    }
+
     /// Provider boundary for a branch-only entry, separate from primary credentials.
     /// # Errors
     /// Rejects invalid device names and zero epochs.

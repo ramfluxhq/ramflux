@@ -196,14 +196,14 @@ fn substituted_branch_or_agreement_key_and_real_v1_proof_never_enter_the_cache()
         ramflux_crypto::create_prekey_bundle(branch, &identity, "signed", &signed, None, None)?;
     assert!(observe(&peer.client, &forged).is_err());
     forged = original.clone();
-    forged.devices[0].branch_proof = ramflux_crypto::authorize_device_branch(
+    forged.devices[0].branch_proof = Some(ramflux_crypto::authorize_device_branch(
         owner.client.identity_root.as_ref().ok_or("root")?,
         branch,
         "ramflux-node",
         vec!["device.delivery.bind".into()],
         now_unix_timestamp(),
         now_unix_timestamp() + 3600,
-    )?;
+    )?);
     assert!(observe(&peer.client, &forged).is_err());
     forged.signed_device_set = None;
     assert!(observe(&peer.client, &forged).is_err());
@@ -285,14 +285,14 @@ fn migration_requires_independent_root_binding_for_every_legacy_device_and_reuse
     legacy.signed_device_set = None;
     for d in &mut legacy.devices {
         let actor = if d.device_id == first.id { &first } else { &second };
-        d.branch_proof = ramflux_crypto::authorize_device_branch(
+        d.branch_proof = Some(ramflux_crypto::authorize_device_branch(
             actor.client.identity_root.as_ref().ok_or("root")?,
             actor.client.device_branch.as_ref().ok_or("branch")?,
             "ramflux-node",
             vec!["device.delivery.bind".into()],
             now_unix_timestamp(),
             now_unix_timestamp() + 3600,
-        )?;
+        )?);
     }
     assert!(first.client.prepare_owned_authority(Some(&legacy)).is_err());
     let now = now_unix_timestamp();

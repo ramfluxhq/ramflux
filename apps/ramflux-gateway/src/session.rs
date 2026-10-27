@@ -138,10 +138,31 @@ pub(crate) async fn handle_gateway_tcp_tls_stream(
 }
 
 pub(crate) async fn handle_gateway_session_transport(
+    send: Box<dyn ramflux_transport::GatewaySessionFrameSink + Send>,
+    recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,
+    context: GatewayQuicContext,
+    first_frame: ramflux_node_core::GatewayClientFrame,
+) -> anyhow::Result<()> {
+    Box::pin(handle_gateway_session_transport_inner(send, recv, context, first_frame, None)).await
+}
+
+pub(crate) async fn handle_gateway_custody_session_transport(
+    send: Box<dyn ramflux_transport::GatewaySessionFrameSink + Send>,
+    recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,
+    context: GatewayQuicContext,
+    first_frame: ramflux_node_core::GatewayClientFrame,
+    grant: super::custody::GatewayGrant,
+) -> anyhow::Result<()> {
+    Box::pin(handle_gateway_session_transport_inner(send, recv, context, first_frame, Some(grant)))
+        .await
+}
+
+async fn handle_gateway_session_transport_inner(
     mut send: Box<dyn ramflux_transport::GatewaySessionFrameSink + Send>,
     mut recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,
     context: GatewayQuicContext,
     first_frame: ramflux_node_core::GatewayClientFrame,
+    grant: Option<super::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
     if matches!(first_frame, ramflux_node_core::GatewayClientFrame::IdentityRegister { .. }) {
         write_gateway_frame(
@@ -197,6 +218,10 @@ pub(crate) async fn handle_gateway_session_transport(
         return Ok(());
     };
 
+    if !require_native_handoff(&mut *send, &registered_auth_key, grant.as_ref()).await? {
+        return Ok(());
+    }
+
     let auth_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
     let auth_result = {
         let mut gateway = gateway_state(&context.state)?;
@@ -235,7 +260,75 @@ pub(crate) async fn handle_gateway_session_transport(
     else {
         return Ok(());
     };
-    run_registered_gateway_session(send, recv, context, runtime).await
+    run_registered_gateway_session(send, recv, context, runtime, grant).await
+}
+
+async fn require_native_handoff(
+    send: &mut (impl ramflux_transport::GatewaySessionFrameSink + ?Sized),
+    registered: &ramflux_node_core::DeviceAuthKeyResponse,
+    grant: Option<&super::custody::GatewayGrant>,
+) -> anyhow::Result<bool> {
+    if native_handoff_matches(registered, grant, ramflux_node_core::now_unix_seconds())? {
+        return Ok(true);
+    }
+    write_gateway_frame(
+        send,
+        &ramflux_node_core::GatewayServerFrame::Nack {
+            reason: "native_channel_bound_authentication_required".into(),
+        },
+    )
+    .await?;
+    Ok(false)
+}
+
+pub(crate) fn native_handoff_matches(
+    registered: &ramflux_node_core::DeviceAuthKeyResponse,
+    grant: Option<&super::custody::GatewayGrant>,
+    now: u64,
+) -> anyhow::Result<bool> {
+    match (&registered.custody_authority, grant) {
+        (None, None) => Ok(true),
+        (Some(authority), Some(grant)) => {
+            let session = grant.session();
+            Ok(grant.live(now)
+                && session.device_ref.account_anchor
+                    == authority.publication.record.body.account_anchor
+                && session.device_ref.device_id == registered.device_id
+                && session.device_ref.device_epoch == registered.device_epoch
+                && session.record_hash
+                    == ramflux_protocol::custody::object_hash(&authority.publication.record)?)
+        }
+        _ => Ok(false),
+    }
+}
+
+async fn validate_native_frame(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    grant: &super::custody::GatewayGrant,
+    frame: &ramflux_node_core::GatewayClientFrame,
+) -> anyhow::Result<()> {
+    use ramflux_node_core::GatewayClientFrame as Frame;
+    let now = ramflux_node_core::now_unix_seconds();
+    anyhow::ensure!(grant.live(now), "native grant expired");
+    let key: Option<ramflux_node_core::DeviceAuthKeyResponse> = router_get_json_async(
+        &context.router,
+        &format!("/mvp1/device-auth-key/{}", runtime.source_identity.storage_key()),
+    )
+    .await?;
+    let key = key.ok_or_else(|| anyhow::anyhow!("native branch unavailable"))?;
+    anyhow::ensure!(native_handoff_matches(&key, Some(grant), now)?, "native authority changed");
+    let capability = match frame {
+        Frame::OwnDeviceFanout { .. } => "sync",
+        Frame::VoiceLease { .. } => "call",
+        Frame::PrekeyPublish { .. } | Frame::IdentityRegister { .. } => "register",
+        _ => "message",
+    };
+    anyhow::ensure!(
+        key.authenticated_device_identity_for(capability, now)? == runtime.source_identity,
+        "native session source changed"
+    );
+    Ok(())
 }
 
 async fn run_registered_gateway_session(
@@ -243,6 +336,7 @@ async fn run_registered_gateway_session(
     recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,
     context: GatewayQuicContext,
     runtime: GatewaySessionRuntime,
+    native: Option<super::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
     let target_delivery_id = runtime.target_delivery_id.clone();
     let session_id = runtime.session_id.clone();
@@ -255,6 +349,7 @@ async fn run_registered_gateway_session(
         context.clone(),
         runtime,
         Some(registration.closed),
+        native,
     )
     .await;
     context.hub.unregister(&target_delivery_id, registration.token).await;
@@ -558,7 +653,7 @@ pub(crate) async fn run_gateway_session_loop(
 ) -> anyhow::Result<()> {
     // This helper enters after authentication; mirror the session opened by that phase.
     refresh_session_activity(&context, &runtime)?;
-    run_gateway_session_loop_until_closed(send, recv, context, runtime, None).await
+    run_gateway_session_loop_until_closed(send, recv, context, runtime, None, None).await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -568,6 +663,7 @@ async fn run_gateway_session_loop_until_closed(
     context: GatewayQuicContext,
     runtime: GatewaySessionRuntime,
     mut closed: Option<tokio::sync::watch::Receiver<bool>>,
+    native: Option<super::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
     // One serial push route worker per session; dropping it with the loop cancels it.
     let mut route_control: Option<crate::push_registration::RouteControlQueue> = None;
@@ -576,6 +672,11 @@ async fn run_gateway_session_loop_until_closed(
         // its router commit and before its reply. Finish the request before checking again.
         let incoming = tokio::select! {
             biased;
+            () = async {
+                if let Some(grant) = native.as_ref() {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(grant.deadline())).await;
+                } else { std::future::pending::<()>().await; }
+            } => return Ok(()),
             () = async {
                 if let Some(closed) = closed.as_mut() {
                     if !*closed.borrow() { let _ = closed.changed().await; }
@@ -611,6 +712,19 @@ async fn run_gateway_session_loop_until_closed(
                 continue;
             }
         };
+        if let Some(grant) = native.as_ref()
+            && let Err(error) = validate_native_frame(&context, &runtime, grant, &frame).await
+        {
+            tracing::debug!(%error, "native session authority no longer permits request");
+            write_gateway_handle(
+                &send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: "native_session_authority_refused".into(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
         refresh_session_activity(&context, &runtime)?;
         let request_kind = super::session_response::request_kind(&frame);
         let result = async {

@@ -138,8 +138,16 @@ fn apply(
             let map = request
                 .body
                 .as_object_mut()
-                .filter(|m| m.len() == 1)
+                .filter(|map| (1..=2).contains(&map.len()))
                 .ok_or(SdkError::CustodySetupInvalid)?;
+            let passphrase = match map.remove("passphrase") {
+                Some(serde_json::Value::String(secret)) => Some(Zeroizing::new(secret)),
+                None => None,
+                Some(_) => return Err(SdkError::CustodySetupInvalid),
+            };
+            if map.len() != 1 {
+                return Err(SdkError::CustodySetupInvalid);
+            }
             let values = map
                 .get_mut("words")
                 .and_then(serde_json::Value::as_array_mut)
@@ -157,6 +165,11 @@ fn apply(
                 *target = Zeroizing::new(word);
             }
             let account = pending.confirm(&words, primary_vault(config), now()?)?;
+            if let Some(secret) = passphrase {
+                let mut client = crate::RamfluxClient::new();
+                client.open_account_index(&config.data_root)?;
+                client.seal_born_account_data(account.local_account_id(), secret.as_bytes())?;
+            }
             Ok(ResultBody::NetworkingPending { account: account.summary() })
         }
         "account.custody.cancel" => {

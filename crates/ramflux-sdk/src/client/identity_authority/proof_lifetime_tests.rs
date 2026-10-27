@@ -100,7 +100,7 @@ fn legacy_constructor_renewal_has_a_distinct_time_bound_identifier() -> TestResu
 fn durable_manifest_proof_age_is_bounded_to_thirty_days_with_an_injectable_clock() -> TestResult {
     let owner = Actor::new("alice", "one", 71, 72, 1)?;
     let manifest = owner.manifest()?;
-    let issued = manifest.devices[0].branch_proof.issued_at;
+    let issued = manifest.devices[0].legacy_proof()?.issued_at;
     let root = &manifest.principal_commitment;
     verify_manifest(&manifest, root)?;
     assert_eq!(
@@ -138,7 +138,7 @@ fn one_dormant_device_never_invalidates_live_siblings_or_becomes_revoked() -> Te
             &manifest.principal_commitment,
             issued,
         )?;
-        entry.branch_proof = request.proof;
+        entry.branch_proof = Some(request.proof);
         manifest.devices.push(entry);
     }
     test_support::sign_manifest(
@@ -233,7 +233,7 @@ fn an_omitted_stale_advertisement_preserves_fresh_pre_upgrade_cached_material() 
         &stale.principal_commitment,
         now_unix_timestamp() - 31 * 86400,
     )?;
-    stale.devices[0].branch_proof = request.proof;
+    stale.devices[0].branch_proof = Some(request.proof);
     receiver.client.persist_identity_directory(&stale)?;
     assert_eq!(receiver.client.trusted_device(&identity)?["device_id"], "phone");
     assert_eq!(
@@ -277,16 +277,18 @@ fn assert_served_ready_manifest(
 fn unready_material_never_bypasses_root_bound_key_checks() -> TestResult {
     let owner = Actor::new("alice", "future", 71, 72, 1)?;
     let mut manifest = owner.manifest()?;
-    manifest.devices[0].branch_proof = owner
-        .client
-        .mvp1_identity_registration_request_at(
-            "future",
-            "future",
-            "future-proof",
-            &manifest.principal_commitment,
-            now_unix_timestamp() + 3600,
-        )?
-        .proof;
+    manifest.devices[0].branch_proof = Some(
+        owner
+            .client
+            .mvp1_identity_registration_request_at(
+                "future",
+                "future",
+                "future-proof",
+                &manifest.principal_commitment,
+                now_unix_timestamp() + 3600,
+            )?
+            .proof,
+    );
     verify_manifest(&manifest, &manifest.principal_commitment)?;
     assert_eq!(
         super::super::verify::ready_manifest(manifest.clone(), now_unix_timestamp()).devices.len(),
@@ -299,7 +301,7 @@ fn unready_material_never_bypasses_root_bound_key_checks() -> TestResult {
         verify_manifest(&substituted, &manifest.principal_commitment).is_err(),
         "unready cannot authenticate a substituted key"
     );
-    manifest.devices[0].branch_proof.signature = "forged".into();
+    manifest.devices[0].legacy_proof_mut()?.signature = "forged".into();
     assert!(
         verify_manifest(&manifest, &manifest.principal_commitment).is_err(),
         "unready cannot authenticate an invalid proof"

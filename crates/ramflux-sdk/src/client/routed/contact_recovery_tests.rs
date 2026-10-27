@@ -315,7 +315,7 @@ async fn invalid_directory_signatures_return_a_typed_manifest_error_without_a_co
     let mut a = Fixture::new("alice", 21)?;
     let mut b = Fixture::new("bob", 31)?;
     let d = Directory::new(&a, &b).await?;
-    d.records.lock().map_err(|_| invalid("mutex"))?[1].devices[0].branch_proof.signature =
+    d.records.lock().map_err(|_| invalid("mutex"))?[1].devices[0].legacy_proof_mut()?.signature =
         ramflux_protocol::encode_base64url([0; 64]);
     let mut s = state(&mut a, &mut b, &d)?;
     let error = call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"}))

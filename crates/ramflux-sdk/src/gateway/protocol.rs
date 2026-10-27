@@ -65,6 +65,7 @@ impl GatewaySessionTransportKind {
 #[derive(Clone, Debug)]
 pub struct GatewaySessionConfig {
     pub(crate) custody_networking_pending: bool,
+    pub(crate) custody: Option<super::GatewayCustodyConfig>,
     pub transport_kind: GatewaySessionTransportKind,
     pub bind_addr: SocketAddr,
     pub gateway_addr: SocketAddr,
@@ -169,6 +170,7 @@ impl GatewaySessionConfig {
         let now = now_unix_timestamp();
         Self {
             custody_networking_pending: false,
+            custody: None,
             transport_kind: parts.transport_kind,
             bind_addr: parts.bind_addr,
             gateway_addr: parts.gateway_addr,
@@ -213,9 +215,22 @@ impl GatewaySessionConfig {
     /// # Errors
     /// Rejects missing or inconsistent account identity state.
     pub fn with_account_identity(
-        self,
+        mut self,
         client: &crate::RamfluxClient,
     ) -> Result<Self, crate::SdkError> {
+        if let Some(account) = &client.born_v3_account {
+            let custody = self.custody.as_ref().ok_or(crate::SdkError::NetworkingPending)?;
+            if custody.account_id != account.local_account_id()
+                || custody.account_root != client.account_index()?.root()
+            {
+                return Err(crate::SdkError::CustodySetupInvalid);
+            }
+            self.principal_id.clone_from(&account.record().body.principal_id);
+            self.device_branch = None;
+            self.source_identity = None;
+            self.custody_networking_pending = false;
+            return Ok(self);
+        }
         client.require_legacy_networking()?;
         self.with_owned_device(
             client.identity_root.as_ref().ok_or(crate::SdkError::IdentityRootMissing)?,
@@ -233,6 +248,16 @@ impl GatewaySessionConfig {
         self
     }
 
+    /// Authenticate this account through native v3 proof before entering the ordinary engine.
+    #[must_use]
+    pub fn with_native_custody(mut self, custody: super::GatewayCustodyConfig) -> Self {
+        self.custody = Some(custody);
+        self.custody_networking_pending = false;
+        self.device_branch = None;
+        self.source_identity = None;
+        self
+    }
+
     /// Bind gateway attribution to a device under the account's owned root.
     /// # Errors
     /// Rejects a root/branch mismatch or an invalid device name.
@@ -241,6 +266,9 @@ impl GatewaySessionConfig {
         root: &ramflux_crypto::IdentityRoot,
         branch: ramflux_crypto::DeviceBranch,
     ) -> Result<Self, crate::SdkError> {
+        if self.custody.is_some() {
+            return Err(crate::SdkError::CustodyModeDowngrade);
+        }
         if self.custody_networking_pending {
             return Err(crate::SdkError::NetworkingPending);
         }

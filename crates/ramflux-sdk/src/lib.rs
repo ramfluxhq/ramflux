@@ -111,14 +111,14 @@ pub use federation::{
     SdkFederatedSubmitResponse,
 };
 pub use gateway::{
-    GatewayAuthFrame, GatewayClientFrame, GatewayCursor, GatewayDirectMessage, GatewayInboxEntry,
-    GatewayOpenFrame, GatewayOwnDeviceFanoutDelivery, GatewayOwnDeviceFanoutFrame,
-    GatewayOwnDeviceFanoutResponse, GatewayPlaintextDelivery, GatewayPushProvider,
-    GatewayPushRouteDeregistration, GatewayPushRouteDeregistrationFrame, GatewayPushRouteFrame,
-    GatewayPushRouteRefusal, GatewayPushRouteRegistration, GatewayQuicEndpointConfig,
-    GatewayResumeFrame, GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine,
-    GatewaySessionEstablishedFrame, GatewaySessionState, GatewaySessionTransportKind,
-    GatewaySubmitFrame, GatewayTcpTlsEndpointConfig, PushRouteRetry,
+    GatewayAuthFrame, GatewayClientFrame, GatewayCursor, GatewayCustodyConfig,
+    GatewayDirectMessage, GatewayInboxEntry, GatewayOpenFrame, GatewayOwnDeviceFanoutDelivery,
+    GatewayOwnDeviceFanoutFrame, GatewayOwnDeviceFanoutResponse, GatewayPlaintextDelivery,
+    GatewayPushProvider, GatewayPushRouteDeregistration, GatewayPushRouteDeregistrationFrame,
+    GatewayPushRouteFrame, GatewayPushRouteRefusal, GatewayPushRouteRegistration,
+    GatewayQuicEndpointConfig, GatewayResumeFrame, GatewayServerFrame, GatewaySessionConfig,
+    GatewaySessionEngine, GatewaySessionEstablishedFrame, GatewaySessionState,
+    GatewaySessionTransportKind, GatewaySubmitFrame, GatewayTcpTlsEndpointConfig, PushRouteRetry,
 };
 pub use group::SdkGroupSenderKeyDistribution;
 pub use object::{OBJECT_PUT_PROTOCOL_VERSION, SdkObjectKeySlot, SdkObjectSharePackage};
@@ -136,3 +136,5 @@ pub use surface_refusal::SurfaceRefusalCode;
 mod task_refusal;
 mod task_warnings;
 pub use task_refusal::TaskRefusalCode;
+
+pub use client::identity_authority::profile_read::VerifiedIdentityProfile;

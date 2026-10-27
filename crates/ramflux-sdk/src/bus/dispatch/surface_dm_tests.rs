@@ -49,7 +49,8 @@ async fn two_device_peer_retries_keep_one_logical_timeline_and_safe_failed_fallb
     assert_eq!(source.client.direct_messages("thread")?.len(), 1);
     let envelopes = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     assert_eq!(envelopes.len(), 3);
-    assert_deliveries(&root, address, &source.client, &mut peers, envelopes, &timeline).await?;
+    Box::pin(assert_deliveries(&root, address, &source.client, &mut peers, envelopes, &timeline))
+        .await?;
     directory.abort();
     drop(peers);
     drop(source);
