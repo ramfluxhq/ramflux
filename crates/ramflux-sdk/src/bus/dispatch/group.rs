@@ -890,7 +890,8 @@ pub(crate) async fn dispatch_group_send_request(
             body.target_delivery_id.clone(),
         ) {
             let created_at = now_unix_timestamp();
-            let recipients = super::super::group_delivery::directory(&account.client, &body.group_id)?;
+            let recipients =
+                super::super::group_delivery::directory(&account.client, &body.group_id)?;
             let recipient = recipients
                 .iter()
                 .filter(|row| {
@@ -976,7 +977,8 @@ pub(crate) async fn dispatch_group_send_request(
             let mut sender_key_distribution = Vec::new();
             for route in routes.iter().cloned() {
                 if let Some(distribution) =
-                    dispatch_group_sender_key_distribution(account, &body.group_id, route, None).await?
+                    dispatch_group_sender_key_distribution(account, &body.group_id, route, None)
+                        .await?
                 {
                     sender_key_distribution.push(distribution);
                 }
@@ -1019,8 +1021,9 @@ pub(crate) async fn dispatch_group_send_request(
                     account.put_engine(engine);
                     message.encrypted_body = serde_json::to_vec(&sealed?)?;
                     let engine = account.take_live_engine().await?;
-                    let forwarded =
-                        account.client.forward_federated_gateway_message(&engine, &message, federation);
+                    let forwarded = account
+                        .client
+                        .forward_federated_gateway_message(&engine, &message, federation);
                     account.put_engine(engine);
                     federated.push(serde_json::to_value(forwarded?)?);
                 } else {
