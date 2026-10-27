@@ -87,15 +87,17 @@ fn copy(reference: &str, data: bool, interactive: bool) -> Result<Option<CFType>
     let query = CFDictionary::from_CFType_pairs(&fields);
     let mut value = std::ptr::null();
     // SAFETY: query is a live immutable dictionary; value receives a create-rule result.
-    let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut value) };
+    let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &raw mut value) };
+    // SAFETY: Any non-null copy result follows the create rule, including an anomalous
+    // result accompanying an error. Wrap it before branching so every exit releases it.
+    let owned = (!value.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(value) });
     if status == errSecItemNotFound {
         return Ok(None);
     }
-    if status != 0 || value.is_null() {
+    if status != 0 {
         return Err(unavailable());
     }
-    // SAFETY: A successful copy returned one owned CF object. This wrapper releases it.
-    Ok(Some(unsafe { CFType::wrap_under_create_rule(value) }))
+    owned.map(Some).ok_or_else(unavailable)
 }
 impl Items for KeychainItems {
     fn exists(&self, reference: &str) -> Result<bool, SdkError> {
