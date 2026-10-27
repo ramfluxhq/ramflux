@@ -207,3 +207,53 @@ fn cutover_waits_for_receiver_ack_and_uses_the_settled_view() -> TestResult {
     assert_eq!(progress.remaining, 0);
     Ok(())
 }
+
+#[test]
+fn indexed_barrier_counts_each_delivery_once_and_preserves_settled_replay_receipts() -> TestResult {
+    let mut s = Scenario::prepared()?;
+    let sealed = s.seal()?;
+    let mut queued = super::wal_barrier::entry(&s.target);
+    for sequence in 1..=64 {
+        queued.inbox_seq = sequence;
+        queued.envelope.envelope_id = format!("indexed-{sequence}");
+        s.a.store()?.record_submission_increment_for_sender(
+            &format!("replay-{sequence}"),
+            i64::MAX / 2,
+            Some(&queued),
+            Some("verified-sender"),
+        )?;
+        s.a.store()?.record_inbox_entry(&queued)?;
+    }
+    s.a.store()?.record_ack_increment(
+        &crate::CursorAckState {
+            target_delivery_id: s.target.clone(),
+            inbox_seq: 60,
+            issued_inbox_seq: 64,
+            settled_inbox_seq: 32,
+            last_acknowledged_inbox_seq: Some(60),
+            acked_inbox_seqs: [60].into(),
+            ..Default::default()
+        },
+        "indexed-60",
+    )?;
+    for restart in [false, true] {
+        if restart {
+            s.a.restart()?;
+        }
+        let cursors = s.a.store()?.migration_backlog_barrier(
+            &s.anchor,
+            &s.authorization.body.migration_id,
+            &sealed.delivery_map,
+            NOW + 2,
+        )?;
+        assert_eq!(cursors[0].high_water, 64);
+        assert_eq!(cursors[0].progress.scheduled, 31);
+        assert!(s.a.store()?.has_local_delivery_envelope(
+            "verified-sender",
+            "indexed-10",
+            &s.target,
+            i64::try_from(NOW + 2)?
+        )?);
+    }
+    Ok(())
+}
