@@ -43,8 +43,9 @@ holder. A snapshot/restore regression checks destination ownership independently
 Advisory locking requires a local filesystem with working advisory locks and
 cooperating product processes. External SQLite tools that bypass this API are
 outside this ownership contract. Use `BackupDatabase` on a selected generation
-only while quiesced and holding `AccountIndex::acquire_account_writer`; do not use
-it as an active live writer or copy/remove an active account directory.
+only while holding `AccountIndex::acquire_account_writer` for restore checks;
+quiesce it before copying or replacing it. Ordinary live writes use `AccountDb`.
+Do not copy/remove an active account directory.
 
 ## Managed transactions and source guard
 

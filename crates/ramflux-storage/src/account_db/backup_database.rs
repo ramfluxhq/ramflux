@@ -20,7 +20,7 @@ pub struct BackupDatabase {
     pub(crate) db: rusqlite::Connection,
 }
 impl BackupDatabase {
-    /// Opens a private snapshot or a quiesced generation under an account writer lease.
+    /// Opens a private snapshot or an owner-guarded generation for restore checks.
     /// Never use this worker handle as an active live account writer.
     /// # Errors
     /// Returns authentication, schema or I/O errors.
