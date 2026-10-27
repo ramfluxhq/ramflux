@@ -126,7 +126,6 @@ impl RamfluxClient {
         let status_id = id(conversation, message, local)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
-            db.reserve_receipt_write()?;
             let status_key = format!("delivery-receipt/status/{status_id}");
             let Some(status) = db.load_actor_state::<Value>(&status_key)? else { return Ok(None) };
             if status["state"] != "failed" {

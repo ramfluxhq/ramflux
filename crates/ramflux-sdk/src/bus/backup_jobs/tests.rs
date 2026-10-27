@@ -542,8 +542,11 @@ async fn r2_older_epoch_archive_merges_without_rolling_back_live_identity() -> T
                     .ok_or("archive")?
                     .merge
             );
+            supervisor.mark_restore_failed("alice", "wrong_passphrase");
             call(&supervisor, "account.restore.install", None, json!({"job_id":id})).await?;
             finished(&supervisor, id, BackupJobState::Done).await?;
+            let status = call(&supervisor, "account.status", Some("alice"), json!({})).await?;
+            assert_eq!(status["local_account_id"], "alice");
             let kept =
                 read_local_bus_account_manifest(&local_bus_account_manifest_path(&root, "alice"))?;
             assert_eq!(kept.devices, local.devices);
