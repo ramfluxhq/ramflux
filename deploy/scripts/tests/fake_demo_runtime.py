@@ -35,6 +35,12 @@ if normalized == ["compose", "version"]:
     else:
         print("Docker Compose version v2.30.0" if provider == "docker" else "podman-compose version: 1.3.0")
     sys.exit(0)
+if args[:2] == ["image", "inspect"]:
+    image = args[2]
+    if image in control.get("missing_images", []):
+        sys.exit(1)
+    print("[]")
+    sys.exit(0)
 
 state = root / "data"
 deployed = root / "deployed"

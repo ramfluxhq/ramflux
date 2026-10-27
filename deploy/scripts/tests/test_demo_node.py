@@ -36,7 +36,13 @@ class DemoNodeTests(unittest.TestCase):
                 sys.executable, fixture, "--fixture-root", self.root, "--name", name,
             )) + ' "$@"\n'
             self.executable(name, wrapper)
-        self.executable("cargo", "#!/bin/sh\nexit 0\n")
+        self.cargo_journal = self.root / "cargo.jsonl"
+        self.executable(
+            "cargo",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> "
+            + shlex.quote(str(self.cargo_journal))
+            + "\nexit 0\n",
+        )
         self.executable("rustup", "#!/bin/sh\nexit 1\n")
         tool = '''#!/usr/bin/env python3
 from pathlib import Path
@@ -100,6 +106,46 @@ else:
 
     def compose_commands(self):
         return [args for args in self.commands() if args[0] == "compose" and args != ["compose", "version"]]
+
+    def enable_prebuilt_images(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_PREBUILT_IMAGES=1\n")
+
+    def test_default_up_builds_locally_and_uses_compose_build(self):
+        self.run_script("up")
+        self.assertTrue(self.cargo_journal.is_file())
+        compose_up = next(args for args in self.compose_commands() if "up" in args)
+        self.assertIn("--build", compose_up)
+        self.assertNotIn("--no-build", compose_up)
+        self.assertFalse(any(args[:2] == ["image", "inspect"] for args in self.commands()))
+
+    def test_prebuilt_up_skips_local_build_after_all_images_are_verified(self):
+        self.enable_prebuilt_images()
+        self.run_script("up")
+        self.assertFalse(self.cargo_journal.exists())
+        expected = {
+            f"ghcr.io/ramfluxhq/ramflux-{service}:demo-test"
+            for service in ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
+        }
+        inspected = {args[2] for args in self.commands() if args[:2] == ["image", "inspect"]}
+        self.assertEqual(inspected, expected)
+        compose_up = next(args for args in self.compose_commands() if "up" in args)
+        self.assertIn("--no-build", compose_up)
+        self.assertNotIn("--build", compose_up)
+
+    def test_prebuilt_up_fails_closed_with_every_missing_image(self):
+        self.enable_prebuilt_images()
+        missing = [
+            "ghcr.io/ramfluxhq/ramflux-gateway:demo-test",
+            "ghcr.io/ramfluxhq/ramflux-retention:demo-test",
+        ]
+        self.control.write_text(json.dumps({"missing_images": missing}))
+        result = self.run_script("up", success=False)
+        for image in missing:
+            self.assertIn(image, result.stderr)
+        self.assertIn("missing prebuilt demo images", result.stderr)
+        self.assertFalse(self.cargo_journal.exists())
+        self.assertFalse(any("up" in args for args in self.compose_commands()))
 
     def test_requires_env_and_refuses_unowned_data(self):
         self.run_script("up", env_file=self.root / "missing.env", success=False)

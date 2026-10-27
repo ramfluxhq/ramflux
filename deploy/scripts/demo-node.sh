@@ -40,6 +40,7 @@ DEMO_TURN_PORT=${DEMO_TURN_PORT:-59478}
 DEMO_MESH_PORT=${DEMO_MESH_PORT:-59453}
 DEMO_BIND_ADDR=${DEMO_BIND_ADDR:-0.0.0.0}
 DEMO_VERSION=${DEMO_VERSION:-$DEMO_PROJECT}
+DEMO_PREBUILT_IMAGES=${DEMO_PREBUILT_IMAGES:-0}
 DEMO_HEALTH_TIMEOUT_SECONDS=${DEMO_HEALTH_TIMEOUT_SECONDS:-180}
 DEMO_HEALTH_POLL_SECONDS=${DEMO_HEALTH_POLL_SECONDS:-2}
 for seconds in "$DEMO_HEALTH_TIMEOUT_SECONDS" "$DEMO_HEALTH_POLL_SECONDS"; do
@@ -55,6 +56,7 @@ case "$DEMO_NODE_ID" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'invalid DEMO_NODE_ID' ;; e
 case "$DEMO_PROJECT" in [a-z0-9]*) ;; *) fail 'invalid DEMO_PROJECT' ;; esac
 case "$DEMO_PROJECT" in *[!a-z0-9_-]*) fail 'invalid DEMO_PROJECT' ;; esac
 case "$DEMO_VERSION" in ''|*[!a-zA-Z0-9_.-]*|.*|-*) fail 'invalid DEMO_VERSION image tag' ;; esac
+case "$DEMO_PREBUILT_IMAGES" in 0|1) ;; *) fail 'DEMO_PREBUILT_IMAGES must be 0 or 1' ;; esac
 case "$DEMO_BIND_ADDR" in ''|*[!0-9.]*) fail 'DEMO_BIND_ADDR must be an IPv4 bind address' ;; esac
 for port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TURN_PORT" "$DEMO_MESH_PORT"; do
   case "$port" in ''|*[!0-9]*) fail 'ports must be integers' ;; esac
@@ -143,6 +145,20 @@ if [ -z "$compose_provider" ]; then
 fi
 printf 'compose provider: %s (runtime: %s)\n' "$compose_provider" "$container_engine"
 runtime() { clean_env "$container_engine" "$@"; }
+check_prebuilt_images() {
+  missing=
+  for service in gateway router notify federation relay signaling retention; do
+    image="ghcr.io/ramfluxhq/ramflux-$service:$DEMO_VERSION"
+    if ! runtime image inspect "$image" >/dev/null 2>&1; then
+      missing="${missing}${missing:+
+}$image"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    printf 'missing prebuilt demo images:\n%s\n' "$missing" >&2
+    fail 'load every listed image into the selected container engine before retrying'
+  fi
+}
 check_resources() {
   for kind in container volume network; do
     case "$kind" in
@@ -363,8 +379,13 @@ RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450
 ENV
     fi
     python3 "$script_dir/compose-env.py" "$state/runtime.env"
-    sh "$script_dir/build-prod-images.sh"
-    compose up -d --build
+    if [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
+      check_prebuilt_images
+      compose up -d --no-build
+    else
+      sh "$script_dir/build-prod-images.sh"
+      compose up -d --build
+    fi
     wait_for_services
     printf 'demo URL: %s\n' "$origin"
     ;;

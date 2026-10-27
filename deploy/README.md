@@ -83,6 +83,8 @@ DEMO_MESH_PORT=59453
 DEMO_BIND_ADDR=0.0.0.0
 # Image tag defaults to DEMO_PROJECT, isolating demo image tags across projects.
 DEMO_VERSION=ramflux-demo
+# Opt in only after loading all seven matching images into this host's engine.
+# DEMO_PREBUILT_IMAGES=1
 # Health wait controls can change without changing the project identity/settings:
 DEMO_HEALTH_TIMEOUT_SECONDS=180
 DEMO_HEALTH_POLL_SECONDS=2
@@ -118,6 +120,50 @@ sh deploy/scripts/demo-node.sh down /path/to/demo.env
 # Explicitly destroy only this project's named volumes and private trust directory:
 sh deploy/scripts/demo-node.sh down /path/to/demo.env --purge
 ```
+
+### Prebuilt images for hosts that cannot compile
+
+The default `up` path remains a local Rust build followed by Compose `--build`.
+For a small target host, build and export the seven images on a separate Linux
+host with the same CPU architecture. Choose one immutable `DEMO_VERSION` tag and
+use it for every image:
+
+```sh
+cd /path/to/ramflux
+DEMO_VERSION=release-2026-10-27
+sh deploy/scripts/build-prod-images.sh
+for service in gateway router notify federation relay signaling retention; do
+  docker build -f deploy/Dockerfile --build-arg "BIN=ramflux-$service" \
+    -t "ghcr.io/ramfluxhq/ramflux-$service:$DEMO_VERSION" .
+done
+docker save \
+  $(for service in gateway router notify federation relay signaling retention; do
+      printf 'ghcr.io/ramfluxhq/ramflux-%s:%s ' "$service" "$DEMO_VERSION"
+    done) \
+  -o ramflux-demo-images.tar
+```
+
+Use `podman build` and `podman save` instead when Podman is the selected engine.
+Copy the archive to the target, load it into the same engine/user context used by
+the demo wrapper, and add the matching values to the operator env file:
+
+```sh
+docker load -i ramflux-demo-images.tar  # or: podman load -i ...
+DEMO_VERSION=release-2026-10-27
+DEMO_PREBUILT_IMAGES=1
+```
+
+With this explicit opt-in, `up` still runs configuration preflight but skips the
+local Cargo build and invokes Compose with `--no-build`. Before Compose starts,
+the wrapper inspects all seven exact `ghcr.io/ramfluxhq/ramflux-<service>:TAG`
+images in the detected engine. It lists every missing image and exits without
+starting the project if any image is absent. It never pulls or substitutes tags.
+
+`DEMO_TOOL` remains required for initialization, local `status`, and remote
+verification. A `demo-node-tool` binary may be copied from a build host only when
+it is statically compatible with the target: use the same CPU architecture and a
+compatible glibc (or an intentionally static build). Keep the tool executable and
+set its absolute target-host path as `DEMO_TOOL`.
 
 ### Optional voice UDP overlay
 
