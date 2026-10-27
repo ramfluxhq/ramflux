@@ -124,16 +124,17 @@ impl Supervisor {
             }
         }
         for (path, account_id) in paths {
-            let manifest = match read_local_bus_account_manifest(&path) {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    self.restore_states.borrow_mut().insert(
-                        account_id.clone(),
-                        RestoreState::Failed("manifest_unreadable".to_owned()),
-                    );
-                    tracing::warn!(%account_id, %error, "account manifest is unreadable");
-                    continue;
-                }
+            let Ok(manifest) = read_local_bus_account_manifest(&path) else {
+                self.restore_states.borrow_mut().insert(
+                    account_id.clone(),
+                    RestoreState::Failed("manifest_unreadable".to_owned()),
+                );
+                tracing::warn!(
+                    %account_id,
+                    reason_code = "manifest_unreadable",
+                    "account manifest is unreadable"
+                );
+                continue;
             };
             if self
                 .index
@@ -350,8 +351,15 @@ impl Supervisor {
             let mut known=Vec::new();
             for id in index.known_account_ids()? {
                 let path=local_bus_account_manifest_path(&root,&id);
-                let manifest=super::daemon::account_manifest_available(&path).then(||read_local_bus_account_manifest(&path)).transpose()?;
-                known.push(serde_json::json!({"id":id,"label":manifest.as_ref().and_then(|m|m.label.as_ref()),"kind":manifest.as_ref().and_then(|m|m.kind.as_ref()),"principal_id":manifest.as_ref().map(|m|&m.principal_id)}));
+                let (manifest,unreadable)=if super::daemon::account_manifest_available(&path) {
+                    if let Ok(manifest)=read_local_bus_account_manifest(&path) {
+                        (Some(manifest),false)
+                    }else{
+                        tracing::warn!(account_id=%id,reason_code="manifest_unreadable","account list omitted unreadable manifest metadata");
+                        (None,true)
+                    }
+                }else{(None,false)};
+                known.push((serde_json::json!({"id":id,"label":manifest.as_ref().and_then(|m|m.label.as_ref()),"kind":manifest.as_ref().and_then(|m|m.kind.as_ref()),"principal_id":manifest.as_ref().map(|m|&m.principal_id)}),unreadable));
             }
             Ok((index.active_account()?,known))
         })
@@ -367,19 +375,23 @@ impl Supervisor {
         let active = active.filter(|id| accounts.contains(id));
         let restore_states = self.restore_states.borrow().clone();
         let mut known = known;
-        for row in &mut known {
+        for (row, manifest_unreadable) in &mut known {
             let id =
                 row.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
             row["state"] = serde_json::json!(match restore_states.get(&id) {
                 Some(RestoreState::Pending) => "restore_pending",
                 Some(RestoreState::Failed(_)) => "restore_failed",
+                None if *manifest_unreadable => "restore_failed",
                 None if accounts.iter().any(|account| account == &id) => "unlocked",
                 None => "locked",
             });
             if let Some(RestoreState::Failed(reason)) = restore_states.get(&id) {
                 row["restore_error_code"] = serde_json::json!(reason);
+            } else if *manifest_unreadable {
+                row["restore_error_code"] = serde_json::json!("manifest_unreadable");
             }
         }
+        let known = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
         Ok(reply(
             serde_json::json!({"accounts":accounts, "account_details":known, "active_account_id":active}),
         ))

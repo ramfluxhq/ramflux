@@ -9,7 +9,41 @@ use ramflux_sdk::{
     SurfaceRefusalCode as Code,
 };
 use serde_json::json;
+use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing_subscriber::util::SubscriberInitExt;
+
+#[derive(Clone)]
+struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("log capture lock poisoned"))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn install_log_capture() -> Result<Arc<Mutex<Vec<u8>>>, Box<dyn std::error::Error>> {
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let writer = SharedLogWriter(logs.clone());
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish()
+        .try_init()?;
+    Ok(logs)
+}
 #[tokio::test]
 async fn typed_refusal_code_survives_sdk_transport_without_leaking_or_parsing_diagnostics()
 -> TestResult {
@@ -474,7 +508,12 @@ async fn corrupt_startup_manifest_is_typed_and_does_not_block_another_account() 
     let data = f.root.join("daemon");
     persisted_account(&data, "agent", "agent-secret", "agent-secret")?;
     persisted_account(&data, "other", "other-secret", "other-secret")?;
-    std::fs::write(data.join("local_bus_accounts/agent.json"), b"{not a valid account manifest")?;
+    let secret = "manifest-secret-must-never-escape-7f934c";
+    let manifest_path = data.join("local_bus_accounts/agent.json");
+    let mut corrupt: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    corrupt["root_seed"] = json!(secret);
+    std::fs::write(&manifest_path, serde_json::to_vec(&corrupt)?)?;
+    let logs = install_log_capture()?;
     let (shutdown, receiver) = tokio::sync::watch::channel(false);
     let daemon = tokio::spawn(ramflux_sdk::serve_local_bus_until(
         ramflux_sdk::LocalBusConfig::new(&f.config.socket, &data),
@@ -509,6 +548,27 @@ async fn corrupt_startup_manifest_is_typed_and_does_not_block_another_account() 
         })
         .await??;
         assert_eq!(other["local_account_id"], "other");
+        let list = client
+            .request_frame_response(LocalBusFrame::request(
+                "list",
+                None,
+                "test",
+                "account.list",
+                json!({}),
+            ))
+            .await?;
+        assert!(list.error.is_none(), "{list:?}");
+        let rows = list.body["account_details"].as_array().ok_or("account rows")?;
+        assert_eq!(rows.len(), 2);
+        let bad = rows.iter().find(|row| row["id"] == "agent").ok_or("bad account row")?;
+        assert_eq!(bad["state"], "restore_failed");
+        assert_eq!(bad["restore_error_code"], "manifest_unreadable");
+        assert!(rows.iter().any(|row| row["id"] == "other"));
+        assert!(!serde_json::to_string(&list)?.contains(secret));
+        let captured = logs.lock().map_err(|_| "log capture lock poisoned")?.clone();
+        let captured = String::from_utf8_lossy(&captured);
+        assert!(captured.contains("manifest_unreadable"), "{captured}");
+        assert!(!captured.contains(secret), "{captured}");
         Ok::<(), Box<dyn std::error::Error>>(())
     };
     let result = tokio::time::timeout(std::time::Duration::from_secs(20), flow).await;

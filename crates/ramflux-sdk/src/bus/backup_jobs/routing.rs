@@ -87,12 +87,14 @@ impl Supervisor {
                     }.await;
                     supervisor.installing.borrow_mut().remove(&account);
                     let reopened=if supervisor.index.account(&account).is_ok(){supervisor.restart_backup_actor(&account,&context).await}else{Ok(())};
+                    if reopened.is_ok() {
+                        supervisor.clear_restore_state(&account);
+                    }
                     match result {
                         Err(error)=>supervisor.backup_jobs.fail_install(&job.job_id,&error),
                         Ok((_,restored,kept_newer))=>{
-                            match reopened {
-                                Ok(()) => supervisor.clear_restore_state(&account),
-                                Err(error) => tracing::warn!(%error,"restored account will reopen on next unlock"),
+                            if let Err(error) = reopened {
+                                tracing::warn!(%error,"restored account will reopen on next unlock");
                             }
                             let _=supervisor.backup_jobs.change(|registry|registry.installed(&job.job_id,restored,kept_newer,super::service::now()));
                         }

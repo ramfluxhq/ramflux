@@ -92,7 +92,8 @@ pub(super) async fn complete(
 }
 
 pub(super) async fn import_account_id(request: &LocalBusFrame) -> Result<String, SdkError> {
-    let body: LocalBusAccountBackupImportRequest = serde_json::from_value(request.body.clone())?;
+    let body: LocalBusAccountBackupImportRequest = serde_json::from_value(request.body.clone())
+        .map_err(|_| SdkError::LocalBus("invalid account request".to_owned()))?;
     tokio::task::spawn_blocking(move || local_bus_backup_account_id(body))
         .await
         .map_err(|error| SdkError::LocalBus(format!("backup inspection failed: {error}")))?

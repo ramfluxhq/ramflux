@@ -69,10 +69,10 @@ pub(crate) fn read_local_bus_account_manifest(
         && root.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists()
         && let Some(bytes) = AccountIndex::open(root)?.backup_generation_manifest(id)?
     {
-        return Ok(serde_json::from_slice(&bytes)?);
+        return serde_json::from_slice(&bytes).map_err(|_| SdkError::AccountManifestUnreadable);
     }
-    let bytes = std::fs::read(path)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    let bytes = std::fs::read(path).map_err(|_| SdkError::AccountManifestUnreadable)?;
+    serde_json::from_slice(&bytes).map_err(|_| SdkError::AccountManifestUnreadable)
 }
 
 fn manifest_index_location(path: &Path) -> Option<(&Path, &str)> {
