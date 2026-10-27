@@ -145,12 +145,13 @@ impl AuthorityPins {
     pub fn conflict_evidence(&self, anchor: &str, range: u64) -> Option<&CustodyConflictEvidence> {
         self.accounts.get(anchor)?.conflicts.get(&range)
     }
-    /// Number of full conflict pairs discarded to enforce evidence retention bounds.
+    /// Number of accepted-record copies or conflict pairs discarded by retention bounds.
     #[must_use]
     pub fn pruned_evidence(&self, anchor: &str) -> u64 {
         self.accounts.get(anchor).map_or(0, |pin| pin.pruned_evidence)
     }
     /// Remove full record copies when only current hashes and certificate pins are needed locally.
+    /// Subsequent observations must pass the separately stored head to `observe_with_previous`.
     pub fn discard_retained_records(&mut self) {
         for pin in self.accounts.values_mut() {
             pin.current_record = None;
@@ -173,7 +174,7 @@ fn observe_existing(
     if pin.principal_id != body.principal_id || pin.principal_kind != body.principal_kind {
         return Err(reject("custody immutable identity changed"));
     }
-    if body.device_set_epoch < pin.epoch {
+    if range < decode_epoch(pin.epoch)?.0 {
         return Err(reject("custody epoch rollback"));
     }
     if pin.certificates.get(&range).is_some_and(|old| old != &certificate) {
@@ -184,6 +185,9 @@ fn observe_existing(
             range,
             CustodyConflictKind::MasterCertificate,
         );
+    }
+    if body.device_set_epoch < pin.epoch {
+        return Err(reject("custody epoch rollback"));
     }
     if body.device_set_epoch == pin.epoch {
         if pin.hash != hash {
@@ -277,26 +281,29 @@ fn same_range_record<'a>(
 }
 
 fn prune_evidence(pin: &mut AccountPin, retained_conflict: Option<u64>) -> Result<(), CryptoError> {
-    loop {
-        let bytes =
-            ramflux_protocol::canonical_json_bytes(&(&pin.range_records, &pin.conflicts))?.len();
-        if pin.conflicts.len() <= MAX_CONFLICT_RANGES
-            && pin.range_records.len() <= MAX_CONFLICT_RANGES
-            && bytes <= MAX_CONFLICT_EVIDENCE_BYTES
-        {
-            return Ok(());
-        }
-        if let Some(oldest) =
-            pin.conflicts.keys().copied().find(|range| Some(*range) != retained_conflict)
-        {
-            pin.conflicts.remove(&oldest);
-        } else if let Some(oldest) = pin.range_records.keys().next().copied() {
-            pin.range_records.remove(&oldest);
-        } else {
-            return Err(reject("custody conflict evidence exceeds retention budget"));
-        }
+    // current_record already retains the accepted head for same-range conflict pairing.
+    // Superseded accepted copies must never displace evidence of a fenced range.
+    pin.pruned_evidence = pin.pruned_evidence.saturating_add(pin.range_records.len() as u64);
+    pin.range_records.clear();
+    let mut bytes = ramflux_protocol::canonical_json_bytes(&pin.conflicts)?.len();
+    while pin.conflicts.len() > MAX_CONFLICT_RANGES || bytes + 5 > MAX_CONFLICT_EVIDENCE_BYTES {
+        let oldest = pin
+            .conflicts
+            .keys()
+            .copied()
+            .find(|range| Some(*range) != retained_conflict)
+            .ok_or_else(|| reject("custody conflict evidence exceeds retention budget"))?;
+        let entry_bytes = ramflux_protocol::canonical_json_bytes(&BTreeMap::from([(
+            oldest,
+            &pin.conflicts[&oldest],
+        )]))?
+        .len();
+        let separator = usize::from(pin.conflicts.len() > 1);
+        bytes = bytes.saturating_sub(entry_bytes - 2 + separator);
+        pin.conflicts.remove(&oldest);
         pin.pruned_evidence = pin.pruned_evidence.saturating_add(1);
     }
+    Ok(())
 }
 
 fn validate_transition(pin: &AccountPin, record: &VerifiedRecord) -> Result<(), CryptoError> {
@@ -407,3 +414,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod regression_tests;
