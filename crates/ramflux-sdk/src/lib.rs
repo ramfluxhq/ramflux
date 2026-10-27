@@ -22,6 +22,10 @@ mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;
 mod client;
+pub use client::home_migration::{
+    HomeMigrationJournal, MigrationApprovalPlan, MigrationApprovalResult, MigrationIntent,
+    MigrationPhase, MigrationProgress,
+};
 pub mod custody;
 mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};

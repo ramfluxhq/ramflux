@@ -13,10 +13,8 @@ pub(crate) fn project(
     let db = client.account_db()?;
     let keys = &entry.keys;
     let mut events = Vec::new();
-    if entry.table_name == "backup_restore" {
-        let pending = db.load_actor_state::<bool>("backup/reestablishing")?.unwrap_or(false);
-        events.push(("account.restored".into(),json!({"local_account_id":keys["local_account_id"],"job_id":keys["job_id"],"secure_sessions":if pending{"reestablishing"}else{"ready"}}),None));
-        return Ok(events);
+    if let Some(projected) = project_account_job(db, entry)? {
+        return Ok(projected);
     }
     if let Some(conversation) = field(keys, "conversation_id") {
         if let Some(message) = field(keys, "message_id") {
@@ -286,6 +284,28 @@ fn project_contact(
         ));
     }
     Ok(())
+}
+
+fn project_account_job(
+    db: &ramflux_storage::AccountDb,
+    entry: &AccountOutboxEntry,
+) -> Result<Option<Vec<Projection>>, SdkError> {
+    let mut events = Vec::new();
+    let keys = &entry.keys;
+    if entry.table_name == "home_migration_progress" {
+        let body =
+            db.home_migration_transition(entry.row_id)?.ok_or(SdkError::HomeMigrationRefused(
+                ramflux_protocol::home_migration::Refusal::StorageUnavailable,
+            ))?;
+        events.push(("home_migration.progress".into(), body, None));
+        return Ok(Some(events));
+    }
+    if entry.table_name == "backup_restore" {
+        let pending = db.load_actor_state::<bool>("backup/reestablishing")?.unwrap_or(false);
+        events.push(("account.restored".into(),json!({"local_account_id":keys["local_account_id"],"job_id":keys["job_id"],"secure_sessions":if pending{"reestablishing"}else{"ready"}}),None));
+        return Ok(Some(events));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
