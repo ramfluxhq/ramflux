@@ -28,11 +28,14 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "si
 
 [dev-dependencies]
 ramflux-sdk = { workspace = true, features = ["itest-restore-state"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+ramflux-sdk = { workspace = true, features = ["itest-restore-state"] }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
 ed25519-dalek.workspace = true
 bytes.workspace = true
 http-body-util = "0.1"

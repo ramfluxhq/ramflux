@@ -179,6 +179,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::ReplayMismatch => "ReplayMismatch",
         SdkError::AccountRestorePending(_) => "AccountRestorePending",
         SdkError::AccountRestoreFailed { .. } => "AccountRestoreFailed",
+        SdkError::AccountManifestUnreadable => "ManifestUnreadable",
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
         SdkError::Storage(StorageError::Protocol(
             ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
