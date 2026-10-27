@@ -189,7 +189,7 @@ impl Scenario {
             self.a.store()?,
             &self.a.node,
             CommitMigration {
-                sealed: op,
+                sealed: &op.sealed_evidence()?,
                 peer: MigrationPeer { node_id: "B", node_key: &public(9) },
             },
             NOW + 2,
@@ -285,7 +285,10 @@ fn source_cancellation_fence_is_relayable_and_permanently_beats_late_commit() ->
     let result = s.a.core.fence_home_migration(
         s.a.store()?,
         &s.a.node,
-        CommitMigration { sealed: &op, peer: MigrationPeer { node_id: "B", node_key: &public(9) } },
+        CommitMigration {
+            sealed: &op.sealed_evidence()?,
+            peer: MigrationPeer { node_id: "B", node_key: &public(9) },
+        },
         NOW + 2,
         true,
     )?;
@@ -322,7 +325,10 @@ fn proof_index_survives_transient_operation_compaction_and_refuses_a_false_fence
     let result = s.a.core.fence_home_migration(
         s.a.store()?,
         &s.a.node,
-        CommitMigration { sealed: &op, peer: MigrationPeer { node_id: "B", node_key: &public(9) } },
+        CommitMigration {
+            sealed: &op.sealed_evidence()?,
+            peer: MigrationPeer { node_id: "B", node_key: &public(9) },
+        },
         NOW + 2,
         true,
     )?;
@@ -477,6 +483,8 @@ fn concurrent_destinations_from_one_base_can_commit_exactly_one_successor() -> T
     let s = Scenario::prepared()?;
     let b = s.seal()?;
     let (_c, c) = competitor(&s)?;
+    let b = b.sealed_evidence()?;
+    let c = c.sealed_evidence()?;
     let store = s.a.store()?;
     let results = std::thread::scope(|scope| -> TestResult<_> {
         let left = scope.spawn(|| {
@@ -546,7 +554,10 @@ fn recovery_winning_before_source_commit_invalidates_move_and_fence_releases_des
     let result = s.a.core.fence_home_migration(
         s.a.store()?,
         &s.a.node,
-        CommitMigration { sealed: &op, peer: MigrationPeer { node_id: "B", node_key: &public(9) } },
+        CommitMigration {
+            sealed: &op.sealed_evidence()?,
+            peer: MigrationPeer { node_id: "B", node_key: &public(9) },
+        },
         NOW + 2,
         true,
     )?;

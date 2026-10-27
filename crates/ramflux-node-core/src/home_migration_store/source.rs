@@ -30,7 +30,7 @@ pub struct AttestedHome {
 }
 #[derive(Clone, Copy)]
 pub struct CommitMigration<'a> {
-    pub sealed: &'a MigrationOperation,
+    pub sealed: &'a super::SealedMigration,
     pub peer: MigrationPeer<'a>,
 }
 pub enum FenceOutcome {
@@ -121,9 +121,8 @@ impl RouterCore {
         now: u64,
     ) -> Result<RecordEvidence, NodeCoreError> {
         let CommitMigration { sealed, peer } = input;
-        let auth =
-            sealed.authorization.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
-        let seal = sealed.seal.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+        let auth = &sealed.authorization;
+        let seal = &sealed.seal;
         let a = &auth.body;
         self.with_migration_authority(&a.account_anchor, now, |authority| {
             let tx = store.migration_db().begin_write().map_err(storage)?;
@@ -187,12 +186,11 @@ impl RouterCore {
             };
             save_head(&tx, &evidence)?;
             write(&tx, PROOFS, &key, &record_hash(&evidence.record).map_err(storage)?)?;
-            let mut source = sealed.clone();
-            source.base = current;
+            let mut source = sealed.source_operation(current, now)?;
             source.role = MigrationRole::Source;
             source.phase = Phase::Committed;
             source.proof = Some((**commit_proof).clone());
-            source.state_version += 1;
+            source.state_version = 1;
             source.recovery_guard = true;
             write(&tx, OPS, &key, &source)?;
             tx.open_table(GUARDS)
@@ -225,8 +223,8 @@ impl RouterCore {
         cancel: bool,
     ) -> Result<FenceOutcome, NodeCoreError> {
         let CommitMigration { sealed, peer } = input;
-        let a = sealed.authorization.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
-        let s = sealed.seal.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+        let a = &sealed.authorization;
+        let s = &sealed.seal;
         self.with_migration_authority(&a.body.account_anchor, now, |authority| {
             let tx = store.migration_db().begin_write().map_err(storage)?;
             clock(&tx, now)?;
@@ -286,7 +284,9 @@ impl RouterCore {
             )
             .map_err(auth_error)?;
             if now <= crypto::hard_deadline(&a.body).map_err(auth_error)? {
-                let mut old = sealed.clone();
+                let base: RecordEvidence = read(&tx, RECORDS, &a.body.previous_home_hash)?
+                    .ok_or_else(|| refusal(Refusal::BaseMismatch))?;
+                let mut old = sealed.source_operation(base, now)?;
                 old.role = MigrationRole::Source;
                 old.phase = Phase::Expired;
                 old.fence = Some(fence.clone());
@@ -301,14 +301,14 @@ impl RouterCore {
 }
 fn verify_sealed(
     node: &MigrationNode,
-    sealed: &MigrationOperation,
+    sealed: &super::SealedMigration,
     peer: MigrationPeer<'_>,
     authority: &VerifiedRecord,
     check_current: bool,
 ) -> Result<(), NodeCoreError> {
-    let auth = sealed.authorization.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+    let auth = &sealed.authorization;
     let a = &auth.body;
-    let seal = sealed.seal.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+    let seal = &sealed.seal;
     crypto::verify_signatures(auth).map_err(auth_error)?;
     crypto::verify_signatures(&sealed.prepare).map_err(auth_error)?;
     crypto::verify_node(&sealed.offer, peer.node_id, peer.node_key).map_err(auth_error)?;
@@ -372,13 +372,13 @@ struct CommitMoment {
 }
 fn committed_evidence(
     node: &MigrationNode,
-    sealed: &MigrationOperation,
+    sealed: &super::SealedMigration,
     authority: &VerifiedRecord,
     moment: CommitMoment,
 ) -> Result<RecordEvidence, NodeCoreError> {
-    let auth = sealed.authorization.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+    let auth = &sealed.authorization;
     let a = &auth.body;
-    let seal = sealed.seal.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+    let seal = &sealed.seal;
     let CommitMoment { now, deadline, backlog_hash } = moment;
     let proof = crypto::sign_node(
         CommitProof {
