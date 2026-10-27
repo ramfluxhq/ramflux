@@ -5,6 +5,7 @@
 
 mod canonical_json;
 pub mod client_discovery;
+pub mod custody;
 pub use client_discovery::*;
 pub mod a2ui_state;
 mod core_types;
