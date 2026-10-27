@@ -487,3 +487,69 @@ material ages under the same policy and becomes usable again after a valid renew
 Gateway hub registrations use unique monotonic tokens even when a resume reuses a
 session ID. Peer delivery has a two-second deadline; failure closes that exact
 registration, so partial frames cannot remain on a reusable client stream.
+
+## Incremental registration persistence
+
+Registration admission copies only the candidate root's affected identity/device
+records, ownership conflicts for its requested delivery target, and the bounded
+replay-receipt set. Other roots' authority and prekeys stay in place. A failed
+admission or failed persistence restores the candidate entries without publishing
+a session or consuming its proof. Source-rate charges retain their existing
+failed-attempt semantics.
+
+The router keeps the existing JSON identity snapshot and appends admission deltas
+in redb. Each transaction commits the authority changes, live proof receipt,
+changed source-rate buckets and bound session together. Only changed entries are
+serialized; unrelated authority and unchanged rate buckets are not rewritten.
+Every journal row carries a hash of the exact base snapshot it extends. Startup
+fails with an operator-visible `identity admission journal base mismatch` error
+instead of replaying rows when that snapshot was changed by another binary.
+A checkpoint replaces the snapshot and clears its delta prefix atomically on the
+128th pending admission or before pending deltas reach 4 MiB. Explicit full
+identity publications, lifecycle cleanup and graceful router shutdown on SIGINT
+or SIGTERM also checkpoint the current state. With the router stopped, an
+operator can force the same checkpoint and empty the journal with:
+
+```sh
+ramflux-router --config /path/to/router.toml --checkpoint-identity-registry
+```
+
+The command exits successfully only after printing
+`ramflux-router:identity-registry-checkpoint-complete`.
+
+Before downgrading to a binary that predates the admission journal:
+
+1. Remove the router from admission traffic and wait for in-flight requests to
+   finish.
+2. Send SIGTERM to the current router and wait for a clean exit. The shutdown
+   path checkpoints the registry.
+3. While the router remains stopped, run the current binary with
+   `--config /path/to/router.toml --checkpoint-identity-registry`. Require the
+   completion line above; do not continue on an error.
+4. Back up the redb file and its redb WAL directory before starting the older
+   binary.
+5. Start the older binary against the drained store. Keep the backup until the
+   downgrade and later re-upgrade have been verified.
+6. Before re-upgrading, stop the older binary cleanly and take another backup,
+   then start the new binary. Because the pre-downgrade journal was empty, the
+   older binary's snapshot becomes the new journal base.
+
+If steps 1-3 are skipped, undrained admissions and their replay receipts are not
+visible to the older binary; affected clients must re-register while it runs.
+If the older binary rewrites the snapshot, a later re-upgrade intentionally
+refuses the stale journal rather than rolling authority back. Do not delete the
+journal to bypass that refusal. Restore the pre-downgrade backup, run the current
+binary's checkpoint command, and repeat the downgrade procedure.
+
+This bounds recovery replay; a checkpoint still scales with the complete registry.
+The source-budget index has the existing 4096-bucket bound. Ownership validation
+and the migration read projection still scan existing metadata; this change does
+not make total admission CPU cost independent of registry size.
+
+Existing snapshot-only stores need no export or data conversion. The current
+reader loads their exact identity records, adds any committed deltas in order,
+and retains historical replay fences. Snapshot field names and signed identity
+formats are unchanged. Older binaries do not read the new delta table; use the
+drain procedure above before they open the same store.
+The shared-NAT receipt setting above and its default/root/global caps are
+unchanged.

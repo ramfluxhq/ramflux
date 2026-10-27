@@ -89,7 +89,7 @@ impl IdentityRegistry {
             })
             .or_else(|| self.legacy_device_record(device))
     }
-    fn legacy_device_keys(identity: &RootQualifiedDeviceRef) -> [String; 2] {
+    pub(crate) fn legacy_device_keys(identity: &RootQualifiedDeviceRef) -> [String; 2] {
         [
             identity.device_id().into(),
             format!("{}:{}", identity.root_commitment(), identity.device_id()),

@@ -39,3 +39,5 @@ mod server_retention_r3_api;
 mod server_retention_r4;
 mod server_retention_r5;
 mod server_retention_r6;
+
+mod registration_persistence;

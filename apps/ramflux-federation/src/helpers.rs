@@ -209,7 +209,7 @@ mod router_quic_tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::mpsc;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     use super::*;
 
@@ -382,18 +382,10 @@ mod router_quic_tests {
         tls: ramflux_transport::MeshTlsConfig,
     }
 
-    fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ramflux_federation_{name}_{}_{}",
-            std::process::id(),
-            nanos
-        ));
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        std::fs::create_dir_all(&root)?;
-        Ok(root)
+    fn temp_cert_root(
+        name: &str,
+    ) -> Result<crate::test_directories::TestDirectory, Box<dyn std::error::Error>> {
+        Ok(crate::test_directories::temp_cert_root(name)?)
     }
 
     fn issue_test_ca(root: &Path) -> Result<TestCa, Box<dyn std::error::Error>> {

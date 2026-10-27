@@ -710,7 +710,6 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::mpsc;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
@@ -789,7 +788,6 @@ mod tests {
             )?;
 
         assert_eq!(response.owner_service, "federation");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -873,8 +871,7 @@ mod tests {
 
     impl Drop for TestMeshContext {
         fn drop(&mut self) {
-            let _removed = std::fs::remove_file(&self.store_path);
-            let _removed = std::fs::remove_dir_all(self.store_path.with_extension("redb.wal"));
+            let _removed = crate::test_directories::remove_store_path(&self.store_path);
         }
     }
 
@@ -965,17 +962,11 @@ mod tests {
     }
 
     fn temp_path(test_name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        Ok(std::env::temp_dir().join(format!(
-            "ramflux-federation-{test_name}-{}-{}",
-            std::process::id(),
-            elapsed.as_nanos()
-        )))
+        Ok(crate::test_directories::temp_store_path(test_name)?)
     }
 
     fn cleanup_store(path: &Path) {
-        let _removed = std::fs::remove_file(path);
-        let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));
+        let _removed = crate::test_directories::remove_store_path(path);
     }
 
     fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {

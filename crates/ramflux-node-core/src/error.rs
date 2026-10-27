@@ -21,6 +21,10 @@ pub enum NodeCoreError {
     StoreDirectory { path: std::path::PathBuf, source: std::io::Error },
     #[error("redb operation failed: {0}")]
     Redb(String),
+    #[error(
+        "identity admission journal base mismatch: snapshot={snapshot_hash} journal={journal_hash}; restore the pre-downgrade store or drain the journal before downgrading"
+    )]
+    IdentityAdmissionJournalBaseMismatch { snapshot_hash: String, journal_hash: String },
     #[error("router snapshot serialization failed: {0}")]
     SnapshotSerialization(String),
     #[error("config service_id {actual} does not match expected {expected}")]

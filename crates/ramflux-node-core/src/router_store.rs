@@ -30,6 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod expiry_index;
+mod identity_registry;
 mod retention;
 
 const ROUTER_COMMIT_BATCH_MAX_ENV: &str = "RAMFLUX_ROUTER_COMMIT_BATCH_MAX";
@@ -49,6 +50,8 @@ pub struct RouterRedbStore {
     submission_wal: Option<RouterWalStore>,
     identity_registry_writes: std::sync::atomic::AtomicU64,
     foreign_authority_writes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    fail_next_registration_admission: std::sync::atomic::AtomicBool,
 }
 
 struct RouterCommitWriter {
@@ -334,7 +337,7 @@ impl RouterRedbStore {
         mailbox_keys::upgrade(&write_txn)?;
         expiry_index::upgrade(&write_txn)?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        let legacy_registry: IdentityRegistry =
+        let mut legacy_registry: IdentityRegistry =
             load_snapshot(&db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
                 .unwrap_or_default();
         crate::foreign_device_store::initialize(
@@ -342,6 +345,8 @@ impl RouterRedbStore {
             crate::foreign_device_store::Namespace::Router,
             Some(&legacy_registry.foreign_device_heads),
         )?;
+        identity_registry::replay(&db, &mut legacy_registry)?;
+        identity_registry::initialize_budgets(&db, &legacy_registry)?;
         let commit_writer = if router_group_commit_enabled() {
             Some(RouterCommitWriter::start(Arc::clone(&db))?)
         } else {
@@ -355,6 +360,8 @@ impl RouterRedbStore {
             submission_wal,
             identity_registry_writes: std::sync::atomic::AtomicU64::new(0),
             foreign_authority_writes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            fail_next_registration_admission: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -676,39 +683,16 @@ impl RouterRedbStore {
         &self,
         registry: &IdentityRegistry,
     ) -> Result<(), NodeCoreError> {
-        save_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY, registry)?;
+        let txn = self.db.begin_write().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        identity_registry::checkpoint(&txn, registry)?;
+        txn.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Atomically commit registration authority, its replay receipt, and its bound session.
-    /// # Errors
-    /// Returns serialization or durable storage errors without a partial admission.
-    pub(crate) fn record_registration_admission(
-        &self,
-        registry: &IdentityRegistry,
-        session: &SessionDescriptor,
-    ) -> Result<(), NodeCoreError> {
-        let identity_bytes = serialize_value(registry)?;
-        let session_bytes = serialize_value(session)?;
-        let txn = self.db.begin_write().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-        {
-            let mut snapshots = txn
-                .open_table(ROUTER_SNAPSHOT_TABLE)
-                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-            snapshots
-                .insert(ROUTER_IDENTITY_REGISTRY_KEY, identity_bytes.as_slice())
-                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-            let mut sessions = txn
-                .open_table(ROUTER_SESSION_ENTRY_TABLE)
-                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-            sessions
-                .insert(session.target_delivery_id.as_str(), session_bytes.as_slice())
-                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-        }
-        txn.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-        self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+    #[cfg(test)]
+    pub(crate) fn fail_next_registration_admission(&self) {
+        self.fail_next_registration_admission.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn observe_foreign_device_set(
@@ -730,7 +714,7 @@ impl RouterRedbStore {
     pub fn foreign_authority_write_count(&self) -> u64 {
         self.foreign_authority_writes.load(std::sync::atomic::Ordering::Relaxed)
     }
-    /// Number of successful authority snapshot writes by this store instance (diagnostics).
+    /// Number of successful identity authority transactions by this store instance (diagnostics).
     #[must_use]
     pub fn identity_registry_write_count(&self) -> u64 {
         self.identity_registry_writes.load(std::sync::atomic::Ordering::Relaxed)
@@ -808,17 +792,11 @@ impl RouterRedbStore {
         identity_registry: &IdentityRegistry,
         lifecycle_record: &AccountLifecycleRecord,
     ) -> Result<(), NodeCoreError> {
-        let identity_bytes = serialize_value(identity_registry)?;
         let lifecycle_bytes = serialize_value(lifecycle_record)?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
-            let mut snapshot_table = write_txn
-                .open_table(ROUTER_SNAPSHOT_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            snapshot_table
-                .insert(ROUTER_IDENTITY_REGISTRY_KEY, identity_bytes.as_slice())
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            identity_registry::checkpoint(&write_txn, identity_registry)?;
 
             let mut lifecycle_table = write_txn
                 .open_table(ROUTER_LIFECYCLE_RECORD_TABLE)
@@ -1023,6 +1001,7 @@ impl RouterRedbStore {
         let mut mvp1_identities: IdentityRegistry =
             load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
                 .unwrap_or_default();
+        identity_registry::replay(&self.db, &mut mvp1_identities)?;
         if mvp1_identities.migrate_legacy_registration_receipts(now) {
             self.record_identity_registry(&mvp1_identities)?;
         }

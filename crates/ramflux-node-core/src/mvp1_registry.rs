@@ -15,6 +15,8 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub(crate) mod registration;
+
 pub const IDENTITY_BIND_AUDIENCE: &str = "ramflux-node";
 pub const IDENTITY_BIND_CAPABILITY: &str = "device.delivery.bind";
 
@@ -289,11 +291,9 @@ impl IdentityRegistry {
         request: &IdentityRegisterRequest,
     ) -> Result<(SessionDescriptor, RegistrationTrustTier), NodeCoreError> {
         let tier = self.validate_registration_policy(request)?;
-        let mut candidate = self.clone();
-        candidate.authorize_root_bound_registration(request)?;
-        let result = candidate.register_admitted_identity(request, tier)?;
-        *self = candidate;
-        Ok(result)
+        let prepared = self.prepare_registration(request, tier)?;
+        prepared.apply_to(self).commit();
+        Ok((prepared.session, prepared.tier))
     }
     pub(crate) fn register_admitted_identity(
         &mut self,

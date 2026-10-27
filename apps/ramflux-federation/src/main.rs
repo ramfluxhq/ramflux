@@ -18,6 +18,8 @@ mod public_http;
 mod state;
 #[cfg(test)]
 mod test_certificates;
+#[cfg(test)]
+mod test_directories;
 
 use std::sync::Arc;
 

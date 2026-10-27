@@ -37,6 +37,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         return run_mesh_health_smoke(service);
     }
     tracing_subscriber::fmt().with_target(false).init();
+    let checkpoint_only = std::env::args().any(|arg| arg == "--checkpoint-identity-registry");
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
@@ -51,6 +52,11 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             router.set_node_franking_public_key(Some(signer.public_key_base64url().to_owned()));
             router.set_node_service_signer(Some(signer));
         }
+        if checkpoint_only {
+            router.persist_identity_registry(&store)?;
+            println!("ramflux-router:identity-registry-checkpoint-complete");
+            return Ok(());
+        }
         tracing::info!(service, node_id = config.node_id, "router store initialized");
         let home_node_forward = local_federation_forward_client_from_env(&config);
         let state = Arc::new(router);
@@ -60,13 +66,21 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         serve_router_mesh_from_env(&config, &router)?;
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
-            return serve_itest_http(&router);
+            let result = serve_itest_http(&router);
+            router.state().persist_identity_registry(router.store())?;
+            return result;
         }
         if std::env::args().any(|arg| arg == "--once") {
+            router.state().persist_identity_registry(router.store())?;
             return Ok(());
         }
-        std::thread::park();
+        wait_for_shutdown_signal()?;
+        router.state().persist_identity_registry(router.store())?;
+        tracing::info!(service, "router identity registry checkpointed for shutdown");
         return Ok(());
+    }
+    if checkpoint_only {
+        anyhow::bail!("--checkpoint-identity-registry requires --config");
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
@@ -74,6 +88,28 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     }
     std::thread::park();
     Ok(())
+}
+
+fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        #[cfg(unix)]
+        {
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result?,
+                signal = terminate.recv() => {
+                    if signal.is_none() {
+                        anyhow::bail!("SIGTERM handler closed before receiving a signal");
+                    }
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        tokio::signal::ctrl_c().await?;
+        Ok(())
+    })
 }
 
 fn run_mesh_health_smoke(service: &'static str) -> anyhow::Result<()> {

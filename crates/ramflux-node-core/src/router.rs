@@ -452,10 +452,9 @@ impl RouterCore {
                         && prior.branch_public_key == request.branch_public_key
                         && prior.target_delivery_id == request.target_delivery_id
                 });
-            let mut candidate = control.mvp1_identities.clone();
-            candidate.authorize_root_bound_registration(request)?;
-            let (mut session, tier) =
-                candidate.register_admitted_identity(request, registration_trust_tier)?;
+            let prepared =
+                control.mvp1_identities.prepare_registration(request, registration_trust_tier)?;
+            let mut session = prepared.session.clone();
             let mut target = self.target_shard(&session.target_delivery_id);
             if let Some(existing) = target.registry.session(&session.target_delivery_id) {
                 if renewal
@@ -469,17 +468,16 @@ impl RouterCore {
                     session.last_cursor.clone_from(&existing.last_cursor);
                 }
             }
-            let mut sessions = target.registry.clone();
-            // Validate the session before consuming or persisting any proof. Stale session
-            // rejection must leave this exact signed registration available for a later retry.
-            sessions.upsert_session(session.clone())?;
+            // The target lock keeps this validation true until durable publication.
+            target.registry.validate_session_update(&session)?;
+            let guard = prepared.apply_to(&mut control.mvp1_identities);
             if let Some(store) = store {
-                store.record_registration_admission(&candidate, &session)?;
+                store.record_registration_admission(guard.registry, &prepared.delta, &session)?;
             }
-            control.mvp1_identities = candidate;
-            target.registry = sessions;
+            guard.commit();
+            target.registry.restore_session(session);
             self.refresh_migration_read_snapshot_from_control(&control);
-            tier
+            prepared.tier
         };
         Ok(IdentityRegistrationResponse {
             principal_id: request.proof.principal_id.clone(),

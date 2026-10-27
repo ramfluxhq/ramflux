@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) struct TestCa {
     cert: PathBuf,
@@ -15,18 +14,10 @@ pub(crate) struct TestPeerCerts {
     pub(crate) ca_pem: String,
 }
 
-pub(crate) fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
-    let root = std::env::temp_dir().join(format!(
-        "ramflux-federation-certs-{name}-{}-{}",
-        std::process::id(),
-        elapsed.as_nanos()
-    ));
-    if root.exists() {
-        std::fs::remove_dir_all(&root)?;
-    }
-    std::fs::create_dir_all(&root)?;
-    Ok(root)
+pub(crate) fn temp_cert_root(
+    name: &str,
+) -> Result<crate::test_directories::TestDirectory, Box<dyn std::error::Error>> {
+    Ok(crate::test_directories::temp_cert_root(name)?)
 }
 
 pub(crate) fn issue_test_ca(root: &Path) -> Result<TestCa, Box<dyn std::error::Error>> {

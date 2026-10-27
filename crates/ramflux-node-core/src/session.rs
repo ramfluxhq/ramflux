@@ -61,14 +61,22 @@ impl SessionRegistry {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn upsert_session(&mut self, descriptor: SessionDescriptor) -> Result<(), NodeCoreError> {
+        self.validate_session_update(&descriptor)?;
+        self.sessions_by_target.insert(descriptor.target_delivery_id.clone(), descriptor);
+        Ok(())
+    }
+
+    pub(crate) fn validate_session_update(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<(), NodeCoreError> {
         if let Some(existing) = self.sessions_by_target.get(&descriptor.target_delivery_id)
-            && is_stale_session_update(existing, &descriptor)
+            && is_stale_session_update(existing, descriptor)
         {
             return Err(NodeCoreError::StaleSessionUpdate {
-                target_delivery_id: descriptor.target_delivery_id,
+                target_delivery_id: descriptor.target_delivery_id.clone(),
             });
         }
-        self.sessions_by_target.insert(descriptor.target_delivery_id.clone(), descriptor);
         Ok(())
     }
 
