@@ -345,6 +345,22 @@ fi
 printf 'compose provider: %s (runtime: %s)\n' "$compose_provider" "$container_engine"
 compose() (
   cd "$state"
+  case "$compose_provider" in
+    docker-v2|docker-wrapper) preflight_provider=docker ;;
+    podman-compose) preflight_provider=podman-compose ;;
+    podman-wrapper) preflight_provider=podman ;;
+  esac
+  if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
+    clean_env python3 "$script_dir/compose-preflight.py" \
+      --provider "$preflight_provider" --env-file "$state/runtime.env" \
+      -p "$DEMO_PROJECT" -f "$state/compose.yml" -f "$state/compose.voice.yml" \
+      -f "$state/demo-override.json" || exit 1
+  else
+    clean_env python3 "$script_dir/compose-preflight.py" \
+      --provider "$preflight_provider" --env-file "$state/runtime.env" \
+      -p "$DEMO_PROJECT" -f "$state/compose.yml" \
+      -f "$state/demo-override.json" || exit 1
+  fi
   set -- -f "$state/demo-override.json" "$@"
   if [ -n "$DEMO_ADMIN_LOOPBACK_PORT" ]; then
     set -- -f "$state/compose.admin.yml" "$@"
@@ -353,7 +369,6 @@ compose() (
     set -- -f "$state/compose.voice.yml" "$@"
   fi
   set -- --env-file "$state/runtime.env" -p "$DEMO_PROJECT" -f "$state/compose.yml" "$@"
-  clean_env python3 "$script_dir/compose-preflight.py" --env-file "$state/runtime.env" || exit 1
   case "$compose_provider" in
     docker-v2|docker-wrapper) clean_env docker compose "$@" ;;
     podman-compose) clean_env podman-compose "$@" ;;

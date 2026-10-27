@@ -79,9 +79,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING (operators):** Compose inputs use `RF_COMPOSE_*` names listed in
   `deploy/compose-inputs.json`. Migrate existing env files, explicitly provide all
   production security/identity inputs, and run `deploy/scripts/compose-preflight.py`
-  with the same `--env-file` arguments before every Compose command. Public default
+  with the same provider arguments before every Compose command. Public default
   admin tokens are rejected; replace them with fresh random secrets. The demo
-  generator and integration harness supply their own tokens and run preflight.
+  generator and integration harness supply their own tokens and run the selected
+  provider's config render as preflight. Services also refuse the known public
+  admin-token value at startup, including outside Compose.
 
 - Demo node deployments can opt into the voice UDP overlay with an env setting
   or command-line port, retaining the existing base deployment when unset. Voice
