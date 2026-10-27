@@ -264,8 +264,8 @@ impl Connection {
                 connection: self,
                 committed: false,
                 savepoint,
-                _writer: writer,
-                _mode: Some(TransactionModeRegistration {
+                writer_registration: writer,
+                mode_registration: Some(TransactionModeRegistration {
                     connection: self,
                     id: transaction_id,
                     armed: true,
@@ -276,8 +276,8 @@ impl Connection {
             connection: self,
             committed: false,
             savepoint,
-            _writer: None,
-            _mode: None,
+            writer_registration: None,
+            mode_registration: None,
         })
     }
 }
@@ -375,12 +375,12 @@ pub(crate) struct Transaction<'a> {
     connection: &'a Connection,
     committed: bool,
     savepoint: Option<String>,
-    _writer: Option<WriterRegistration>,
-    _mode: Option<TransactionModeRegistration<'a>>,
+    writer_registration: Option<WriterRegistration>,
+    mode_registration: Option<TransactionModeRegistration<'a>>,
 }
 impl Transaction<'_> {
     fn is_current(&self) -> bool {
-        self._mode.as_ref().is_none_or(|registration| {
+        self.mode_registration.as_ref().is_none_or(|registration| {
             self.connection
                 .inner
                 .transaction_mode
@@ -393,11 +393,15 @@ impl Transaction<'_> {
     pub(crate) fn pin_read_snapshot(mut self) -> Result<()> {
         let query_only: bool =
             self.connection.query_row("PRAGMA query_only", [], |row| row.get(0))?;
-        if !query_only || self.savepoint.is_some() || self._writer.is_some() || !self.is_current() {
+        if !query_only
+            || self.savepoint.is_some()
+            || self.writer_registration.is_some()
+            || !self.is_current()
+        {
             return Err(Error::InvalidQuery);
         }
         self.committed = true;
-        if let Some(mode) = &mut self._mode {
+        if let Some(mode) = &mut self.mode_registration {
             mode.armed = false;
         }
         Ok(())
