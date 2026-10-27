@@ -645,6 +645,16 @@ impl OpaqueDeviceInbox {
         self.checkpoint_due.insert(target.to_owned());
     }
 
+    /// Highest allocated/recovered sequence, including settled or expired deliveries.
+    #[must_use]
+    pub(crate) fn issued_sequence(&self, target: &str) -> u64 {
+        self.next_seq.get(target).copied().unwrap_or(1).saturating_sub(1).max(
+            self.cursors.get(target).map_or(0, |cursor| {
+                cursor.issued_inbox_seq.max(cursor.inbox_seq).max(cursor.settled_inbox_seq)
+            }),
+        )
+    }
+
     #[must_use]
     pub fn cursor_state(&self, target_delivery_id: &str) -> Option<&CursorAckState> {
         self.cursors.get(target_delivery_id)
