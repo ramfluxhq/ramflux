@@ -329,20 +329,17 @@ fn node_rotation_keeps_old_receipt_valid_but_cannot_rebind_its_key_identity() ->
     let current = node(next.clone())?;
     let old_id = old.envelope().body.proxy_keys[0].key_id.clone();
     let old_public = old.envelope().body.proxy_keys[0].public_key.clone();
+    let binding = old.key_bindings().find(|(id, _)| *id == old_id).ok_or("key binding")?.1;
     old.verify_successor(
         &current,
-        |id| (id == old_id).then(|| (old_public.clone(), "node_proxy:gateway".into())),
+        |id| (id == old_id).then(|| binding.clone()),
         |public| (public == old_public).then(|| old_id.clone()),
     )?;
     check_proxy(&proof, &receipt, &old, &current)?;
     next.proxy_keys[0].public_key = encode_base64url(key(19).verifying_key().to_bytes());
     assert!(
-        old.verify_successor(
-            &node(next)?,
-            |id| (id == old_id).then(|| (old_public.clone(), "node_proxy:gateway".into())),
-            |_| None
-        )
-        .is_err()
+        old.verify_successor(&node(next)?, |id| (id == old_id).then(|| binding.clone()), |_| None)
+            .is_err()
     );
     Ok(())
 }

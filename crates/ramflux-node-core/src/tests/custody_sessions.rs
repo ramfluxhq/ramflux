@@ -419,3 +419,50 @@ fn custody_node_history_retains_keys_and_rejects_rollback_or_rebinding_after_res
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[test]
+fn custody_node_key_signing_deadline_cannot_restart_after_overlap_history_is_removed() -> Result {
+    let path = temp_store_path("custody-key-deadline")?;
+    let (first, _) = node()?;
+    let root = SigningKey::from_bytes(&[8; 32]);
+    let later = NOW + 606_001;
+    let mut body = first.envelope().body.clone();
+    body.epoch = 2;
+    body.previous_record_hash = Some(first.hash().into());
+    body.issued_at = later;
+    body.proxy_keys.clear();
+    let removed = sign_node_identity_record(&root, body)?;
+    let removed = verify_node_identity_record(
+        &removed,
+        "node",
+        &ramflux_protocol::encode_base64url(root.verifying_key().to_bytes()),
+        later,
+    )?;
+    {
+        let store = RouterRedbStore::open_without_wal(&path)?;
+        store.observe_custody_node(&first, NOW)?;
+        store.observe_custody_node(&removed, later)?;
+    }
+    {
+        let store = RouterRedbStore::open_without_wal(&path)?;
+        let mut body = removed.envelope().body.clone();
+        body.epoch = 3;
+        body.previous_record_hash = Some(removed.hash().into());
+        body.issued_at = later + 1;
+        let mut key = first.envelope().body.proxy_keys[0].clone();
+        key.not_before = later;
+        key.sign_until = later + 1000;
+        key.overlap_until = later + 606_000;
+        body.proxy_keys = vec![key];
+        let recycled = sign_node_identity_record(&root, body)?;
+        let recycled = verify_node_identity_record(
+            &recycled,
+            "node",
+            &ramflux_protocol::encode_base64url(root.verifying_key().to_bytes()),
+            later + 1,
+        )?;
+        assert!(store.observe_custody_node(&recycled, later + 1).is_err());
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
