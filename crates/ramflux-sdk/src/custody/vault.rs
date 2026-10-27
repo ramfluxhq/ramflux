@@ -20,9 +20,16 @@ pub trait PrimaryVault: Send + Sync {
     /// # Errors
     /// Rejects unavailable or corrupt primary credentials. No portable export API exists.
     fn load_primary(&self, reference: &str) -> Result<SelfSigningKey, SdkError>;
+    /// Check migration provider availability without prompting or loading branch credentials.
+    /// This is never a grant of user presence.
+    /// # Errors
+    /// Refuses unsupported providers with the migration-specific typed error.
+    fn home_authorization_preflight(&self) -> Result<(), SdkError> {
+        Err(super::home_authorization::unavailable())
+    }
     /// Sign a stored migration proposal after enforcing independent user presence.
     /// # Errors
-    /// The default refuses: a data unlock or an existing load_primary implementation is insufficient.
+    /// The default refuses: a data unlock or an existing `load_primary` implementation is insufficient.
     fn sign_home_authorization(
         &self,
         _request: HomeAuthorizationRequest<'_>,
@@ -75,6 +82,17 @@ mod native;
 #[cfg(any(target_os = "macos", test))]
 mod presence;
 impl PrimaryVault for NativePrimaryVault {
+    fn home_authorization_preflight(&self) -> Result<(), SdkError> {
+        #[cfg(target_os = "macos")]
+        {
+            native::preflight().map_err(|_| super::home_authorization::unavailable())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(super::home_authorization::unavailable())
+        }
+    }
+
     fn sign_home_authorization(
         &self,
         request: HomeAuthorizationRequest<'_>,

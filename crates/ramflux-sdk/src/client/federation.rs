@@ -191,15 +191,6 @@ impl RamfluxClient {
             body_ciphertext,
         )?)
     }
-
-    /// # Errors
-    /// Returns an error when validation, serialization, storage, or state checks fail.
-    pub fn migrate_home_node(
-        &mut self,
-        migration: HomeNodeMigration,
-    ) -> Result<HomeNodeMigration, SdkError> {
-        Ok(self.federation_mesh.migrate_home_node(migration)?)
-    }
 }
 
 fn post_federated_envelope_forward(

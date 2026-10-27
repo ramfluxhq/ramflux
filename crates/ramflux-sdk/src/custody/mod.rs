@@ -9,7 +9,7 @@ pub use bus::{ConfirmedAccount, CustodyBusClient};
 pub(crate) use commit_gate::CommitGate;
 mod secret_buffer;
 pub(crate) use secret_buffer::serialize_secret;
-mod home_authorization;
+pub(crate) mod home_authorization;
 mod store;
 mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
@@ -81,7 +81,7 @@ impl crate::RamfluxClient {
 pub(crate) mod tests;
 
 #[cfg(any(test, feature = "itest-memory-vault"))]
-mod memory_vault;
+pub(crate) mod memory_vault;
 #[cfg(feature = "itest-memory-vault")]
 pub use memory_vault::MemoryPrimaryVault;
 
