@@ -37,10 +37,14 @@ fn native_manifest(
     })
 }
 fn receiver(root: &Root, vault: &TestVault, now: u64) -> TestResult<RamfluxClient> {
-    create(&root.0, "receiver", vault, now)?;
+    let account = create(&root.0, "receiver", vault, now)?;
     let mut client = RamfluxClient::new();
     client.open_account_index(&root.0)?;
-    client.seal_born_account_data("receiver", b"test-passphrase")?;
+    client.seal_new_account_data(
+        "receiver",
+        &account.record().body.account_anchor,
+        b"test-passphrase",
+    )?;
     client.unlock_account("receiver", b"test-passphrase")?;
     Ok(client)
 }

@@ -75,7 +75,7 @@ mod tests {
         let mut client = RamfluxClient::new();
         client.open_account_index(&root.0)?;
         assert!(client.unlock_account("data-only", b"not-yet-sealed").is_err());
-        client.seal_born_account_data("data-only", b"correct-passphrase")?;
+        client.seal_new_account_data("data-only", &anchor, b"correct-passphrase")?;
         client.unlock_account("data-only", b"correct-passphrase")?;
         assert!(client.identity_root.is_none());
         assert!(client.device_branch.is_none());

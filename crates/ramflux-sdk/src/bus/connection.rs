@@ -115,7 +115,7 @@ pub(super) async fn handle(
     let result = loop {
         tokio::select! {
             _ = disconnected.changed() => break Ok(()),
-            () = tokio::time::sleep_until(ceremony.as_ref().map_or_else(|| tokio::time::Instant::now()+std::time::Duration::from_secs(3600), |c| c.deadline().into())), if ceremony.is_some() => { ceremony=None; },
+            () = tokio::time::sleep_until(ceremony.as_ref().map_or_else(|| tokio::time::Instant::now()+std::time::Duration::from_secs(3600), |c| c.deadline().into())), if ceremony.as_ref().is_some_and(|pending| !pending.is_expired()) => { if let Some(pending) = ceremony.as_mut() { pending.expire(); } },
             frame = frames.recv(), if requests.len() < 64 => {
                 let mut incoming = match frame {
                     None => break Ok(()),

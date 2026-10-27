@@ -15,8 +15,10 @@ pub enum SdkError {
     CustodyModeDowngrade,
     #[error("born-v3 creation is disabled")]
     CustodyCreationDisabled,
-    #[error("invalid or expired custody setup")]
+    #[error("invalid custody setup")]
     CustodySetupInvalid,
+    #[error("custody setup expired")]
+    CustodyExpired,
     #[error("recovery confirmation failed; setup cancelled")]
     CustodyConfirmationFailed,
     #[error("non-synchronizing primary vault unavailable; no file fallback")]

@@ -129,6 +129,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
         SdkError::CustodyCreationDisabled => "CustodyCreationDisabled",
         SdkError::CustodySetupInvalid => "CustodySetupInvalid",
+        SdkError::CustodyExpired => "CustodyExpired",
         SdkError::CustodyConfirmationFailed => "CustodyConfirmationFailed",
         SdkError::CustodyVaultUnavailable => "CustodyVaultUnavailable",
         SdkError::CustodyRandomUnavailable => "CustodyRandomUnavailable",

@@ -38,6 +38,7 @@ pub(crate) struct TestVault {
     secrets: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
     pub(crate) fail: AtomicBool,
     fail_branch: AtomicBool,
+    commit_obstacle: Mutex<Option<PathBuf>>,
 }
 impl TestVault {
     pub(crate) fn primary_for_public_key(
@@ -68,6 +69,13 @@ impl TestVault {
     }
 }
 impl PrimaryVault for TestVault {
+    fn delete(&self, reference: &str) -> std::result::Result<(), SdkError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(SdkError::CustodyVaultUnavailable);
+        }
+        self.secrets.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.remove(reference);
+        Ok(())
+    }
     fn preflight(&self) -> std::result::Result<(), SdkError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(SdkError::CustodyVaultUnavailable);
@@ -117,7 +125,13 @@ impl PrimaryVault for TestVault {
         if self.fail_branch.load(Ordering::SeqCst) {
             return Err(SdkError::CustodyVaultUnavailable);
         }
-        self.put(reference, &**seeds)
+        self.put(reference, &**seeds)?;
+        if let Some(path) =
+            self.commit_obstacle.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.take()
+        {
+            std::fs::write(path, b"incomplete test reservation")?;
+        }
+        Ok(())
     }
 }
 pub(crate) fn input(id: &str) -> CreateInput {
@@ -330,7 +344,7 @@ fn custody_partial_vault_import_cannot_be_retried_as_a_legacy_account() -> Resul
         legacy.unlock_account("partial", b"data-secret"),
         Err(SdkError::NetworkingPending)
     ));
-    assert_eq!(vault.secrets.lock().map_err(|_| "vault lock")?.len(), 1);
+    assert_eq!(vault.secrets.lock().map_err(|_| "vault lock")?.len(), 0);
     Ok(())
 }
 
@@ -371,5 +385,19 @@ fn custody_loading_requires_a_separate_client_from_an_existing_legacy_identity()
         Some(original.principal_id.as_str())
     );
     assert!(legacy.born_v3_account.is_none());
+    Ok(())
+}
+
+#[test]
+fn custody_final_publication_failure_deletes_both_new_vault_entries() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    *vault.commit_obstacle.lock().map_err(|_| "vault lock")? =
+        Some(root.0.join("custody_accounts/final-failure/authority.json"));
+    assert!(create(&root.0, "final-failure", &vault, 100).is_err());
+    assert_eq!(vault.secrets.lock().map_err(|_| "vault lock")?.len(), 0);
+    assert!(account_exists(&root.0, "final-failure")?);
+    assert!(load_account(&root.0, "final-failure", 100).is_err());
+    assert!(!root.0.join("local_bus_accounts/final-failure.json").exists());
     Ok(())
 }
