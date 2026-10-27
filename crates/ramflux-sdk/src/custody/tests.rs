@@ -285,6 +285,7 @@ fn custody_confirmed_authority_reloads_with_latch_and_without_phrase_or_master_o
     }
     let path = root.0.join("custody_accounts/new/authority.json");
     let bytes = std::fs::read(&path)?;
+    assert!(bytes.len() < 600_000);
     let text = std::str::from_utf8(&bytes)?;
     for forbidden in [
         phrase.as_str(),
@@ -293,6 +294,9 @@ fn custody_confirmed_authority_reloads_with_latch_and_without_phrase_or_master_o
         "self_signing_seed",
         "account_secret",
         "device_seed",
+        "current_record",
+        "range_records",
+        "conflicts",
     ] {
         assert!(!text.contains(forbidden));
     }

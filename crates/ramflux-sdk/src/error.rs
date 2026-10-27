@@ -79,6 +79,8 @@ pub enum SdkError {
     CustodySetupInvalid,
     #[error("custody setup expired")]
     CustodyExpired,
+    #[error("account id was claimed by another creation flow")]
+    CustodyAccountConflict,
     #[error("recovery confirmation failed; setup cancelled")]
     CustodyConfirmationFailed,
     #[error("non-synchronizing primary vault unavailable; no file fallback")]

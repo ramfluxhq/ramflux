@@ -234,6 +234,37 @@ pub(crate) fn account_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
     }
     Ok(directory(root, id)?.try_exists()?)
 }
+pub(crate) fn reconcile_incomplete_markers(root: &Path) -> Result<(), SdkError> {
+    let parent = root.join("custody_accounts");
+    if !parent.try_exists()? {
+        return Ok(());
+    }
+    let index = ramflux_storage::AccountIndex::open(root)?;
+    for entry in fs::read_dir(&parent)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().into_string().map_err(|_| invalid())?;
+        match index.account(&id) {
+            Ok(_) => {}
+            Err(ramflux_storage::StorageError::AccountNotFound(_))
+                if !entry.path().join("authority.json").try_exists()? =>
+            {
+                fs::remove_dir_all(entry.path())?;
+                tracing::warn!(
+                    local_account_id = %id,
+                    reason_code = "custody_orphan_marker_removed",
+                    "removed custody marker without an account-index reservation"
+                );
+            }
+            Err(ramflux_storage::StorageError::AccountNotFound(_)) => return Err(invalid()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
 pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Value>, SdkError> {
     let dir = root.join("custody_accounts");
     if !dir.try_exists()? {
@@ -376,14 +407,6 @@ fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     file.sync_all()?;
     Ok(())
 }
-pub(super) struct GenesisMaterial<'a> {
-    pub record: Envelope<DeviceSet>,
-    pub primary: &'a ramflux_crypto::custody::SelfSigningKey,
-    pub branch: &'a Zeroizing<[u8; 64]>,
-    pub now: u64,
-    pub data_secret: Option<&'a [u8]>,
-    pub commit_gate: Option<&'a super::CommitGate>,
-}
 pub(super) fn persist(
     root: &Path,
     input: &super::CreateInput,
@@ -396,10 +419,7 @@ pub(super) fn persist(
     let verified = verify_record(&record, now, None, human.as_ref())?;
     let mut pins = AuthorityPins::default();
     pins.observe(&verified)?;
-    // The transactional index arbitrates concurrent native creation.
-    // A reservation left by a later failure remains blocked for reconciliation.
-    ramflux_storage::AccountIndex::open(root)?
-        .create_account(&input.local_account_id, &record.body.account_anchor)?;
+    pins.discard_retained_records();
     let parent = root.join("custody_accounts");
     if !parent.try_exists()? {
         private_directory(&parent)?;
@@ -408,6 +428,17 @@ pub(super) fn persist(
     let dir = directory(root, &input.local_account_id)?;
     private_directory(&dir)?; // Exclusive reservation is itself a fail-closed mode latch.
     fs::File::open(&parent)?.sync_all()?;
+    // Create the crash marker before the insert-only index reservation. Startup can remove
+    // a marker with neither an index row nor authority without retiring the account id.
+    let index = ramflux_storage::AccountIndex::open(root)?;
+    if let Err(error) = index.reserve_account(&input.local_account_id, &record.body.account_anchor) {
+        fs::remove_dir(&dir)?;
+        fs::File::open(&parent)?.sync_all()?;
+        return match error {
+            ramflux_storage::StorageError::AccountAlreadyExists(_) => Err(SdkError::CustodyAccountConflict),
+            error => Err(error.into()),
+        };
+    }
     let reference = ramflux_protocol::hash_base64url(
         "ramflux.local.custody_vault_reference.v1",
         &[

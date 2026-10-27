@@ -216,6 +216,52 @@ async fn custody_bus_unavailable_provider_refuses_before_phrase_display() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn custody_oversized_request_ids_have_no_side_effects() -> Result {
+    let root = Root::new()?;
+    let vault = Arc::new(TestVault::default());
+    let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
+    config.custody_vault = Some(vault.clone());
+    let mut ceremony = None;
+    let mut oversized = LocalBusFrame::request(
+        "x".repeat(129),
+        None,
+        "account",
+        "account.custody.begin",
+        serde_json::to_value(input("oversized"))?,
+    );
+    assert!(matches!(
+        crate::bus::custody_setup::respond(&mut oversized, &config, &mut ceremony).await,
+        Err(SdkError::CustodySetupInvalid)
+    ));
+    assert!(!root.0.join("custody_accounts/oversized").exists());
+    assert_eq!(vault.entry_count()?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_removes_an_orphan_marker_and_releases_its_id() -> Result {
+    let root = Root::new()?;
+    let marker = root.0.join("custody_accounts/reusable");
+    std::fs::create_dir_all(&marker)?;
+    let socket = root.0.join("bus.sock");
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.custody_vault = Some(Arc::new(TestVault::default()));
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _shutdown = Shutdown(stop.clone());
+        let mut bus = connect(&socket).await?;
+        assert!(!marker.exists());
+        assert_ne!(bus.begin(&input("reusable")).await?, "");
+        stop.send(true)?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    server?;
+    flow?;
+    Ok(())
+}
+
 struct BlockingVault {
     inner: TestVault,
     entered: tokio::sync::Notify,
@@ -291,6 +337,51 @@ async fn custody_confirm_vault_and_fsync_work_does_not_stall_the_daemon_thread()
         assert_eq!(status["accounts"], 0);
         vault.release();
         assert_eq!(confirm.await??.state, CreationState::NetworkingPending);
+        stop.send(true)?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    vault.release();
+    server?;
+    flow?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn disconnect_during_confirm_finishes_a_complete_pending_account() -> Result {
+    let root = Root::new()?;
+    let socket = root.0.join("bus.sock");
+    let vault = Arc::new(BlockingVault::new());
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.custody_vault = Some(vault.clone());
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _shutdown = Shutdown(stop.clone());
+        let mut bus = connect(&socket).await?;
+        bus.begin(&input("disconnect-confirm")).await?;
+        let phrase = bus.show_once().await?;
+        let positions = bus.hidden_challenge().await?;
+        let answers = words(&phrase, positions)?;
+        let confirm = tokio::spawn(async move { bus.confirm(&answers).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), vault.entered.notified()).await?;
+        confirm.abort();
+        let _ = confirm.await;
+        vault.release();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !root.0.join("custody_accounts/disconnect-confirm/authority.json").exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            crate::custody::load_account(
+                &root.0,
+                "disconnect-confirm",
+                super::custody_setup::now()?
+            )?
+            .state(),
+            CreationState::NetworkingPending
+        );
         stop.send(true)?;
         Ok::<_, Box<dyn std::error::Error>>(())
     };

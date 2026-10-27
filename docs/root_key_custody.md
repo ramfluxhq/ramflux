@@ -191,6 +191,16 @@ wrapped capsule or backup. A new phrase derives a new master: there is no
 same-identity "rotate forgotten phrase" operation. Copies of the same user-held
 phrase are the same authority, not revocable recovery credentials.
 
+The stage-1 Rust implementation preallocates its normalization, phrase-display
+and setup-frame buffers so secret-bearing writes cannot reallocate. Owned buffers
+use zeroizing wrappers. Residual library-boundary copies remain: BIP39
+`to_entropy_array` returns an entropy array by value before it enters a zeroizing
+wrapper; X25519 `StaticSecret::from(*seed)` copies its input seed; HKDF 0.12 retains
+an internal PRK that it does not zeroize on drop; and serde_json may allocate a
+non-zeroizing deserializer scratch buffer for escaped confirmation words. These
+copies are bounded and short-lived but are not claimed to be synchronously scrubbed.
+Setup replies serialize directly into one fixed zeroizing output buffer.
+
 Release builds use `panic = "abort"`, so a panic does not unwind and cannot run
 zeroizing destructors. Keep every phrase, entropy and seed buffer scoped to the
 shortest possible ceremony step, disable core dumps and secret-bearing crash
@@ -244,6 +254,10 @@ range and raises the takeover alert until a higher range is certified. Accept
 **any** higher range, not only the next integer. Recovery chooses the maximum
 observed range plus one, querying all available trusted checkpoints, and retries
 higher on conflict. A primary cannot spend revisions outside its certified range.
+Clearing a same-range fence requires an explicit user-started recovery ceremony
+with the recovery phrase that certifies a higher range; no primary-only, network,
+operator-file-edit or automatic startup action clears it. If the phrase is lost,
+the fenced identity cannot resume management and the user must create a new identity.
 Genesis starts at v3 range 1. Native mode rejects legacy records regardless of
 their numeric epoch. Exhaustion is a typed
 refusal, never wraparound. No globally latest range can be proved against
@@ -756,3 +770,7 @@ pins live under `custody_accounts/<local_account_id>/`. Reading them does not
 unlock the primary signer. Creation failure removes newly written credential
 entries; unresolved reservations remain blocked for reconciliation. No phrase,
 master or primary vault credential enters ordinary data archives.
+A startup marker with neither an index reservation nor public authority is an
+interrupted pre-reservation step. Startup removes it with a structured reason so
+the id can be retried. Native creation uses an insert-only index reservation;
+failed post-reservation writes remain latched and cannot fall back to legacy setup.

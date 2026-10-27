@@ -117,7 +117,9 @@ impl IdentityRegistry {
         self.check_principal_root_ownership(&body.principal_id, master)?;
         let mut pins = self.custody.pins_for(anchor);
         let previous = self.custody.records.get(anchor).map(|entry| &entry.record);
+        let pruned_before = pins.pruned_evidence(anchor);
         let outcome = pins.observe_with_previous(&verified, previous).map_err(|error| crypto(&error))?;
+        log_pruned_evidence(anchor, pruned_before, pins.pruned_evidence(anchor));
         let custody = Arc::make_mut(&mut self.custody);
         custody.account_pins.insert(anchor.clone(), pins);
         custody.principals.entry(body.principal_id.clone()).or_insert_with(|| master.clone());
@@ -216,6 +218,7 @@ impl RouterCore {
         )?;
         let mut pins = registry.custody.pins_for(anchor);
         let previous = registry.custody.records.get(anchor).map(|entry| &entry.record);
+        let pruned_before = pins.pruned_evidence(anchor);
         let outcome = pins.observe_with_previous(&verified, previous).map_err(|error| crypto(&error))?;
         if outcome == PinOutcome::Unchanged {
             return Ok(publication.record.clone());
@@ -230,6 +233,7 @@ impl RouterCore {
         } else {
             publication.clone()
         };
+        log_pruned_evidence(anchor, pruned_before, pins.pruned_evidence(anchor));
         let state = CustodyAccountState { publication: accepted, pins };
         let is_new = !registry.custody.records.contains_key(anchor);
         if is_new && registry.custody.records.len() >= 65_536 {
@@ -338,5 +342,12 @@ impl RouterCore {
         registry.custody.require_current(&verified).map_err(|e| crypto(&e))?;
         // Hold the same authority lock through the durable home transition.
         work(&verified, publication)
+    }
+}
+
+fn log_pruned_evidence(anchor: &str, before: u64, after: u64) {
+    if after > before {
+        tracing::warn!(account_anchor = %anchor, dropped = after - before,
+            "dropped older custody conflict evidence to enforce retention bounds");
     }
 }
