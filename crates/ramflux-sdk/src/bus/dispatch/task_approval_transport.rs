@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Private pair controls for task approvals, independent of compacted signed event histories.
-use super::task_transport::{Target, await_preparation, direct_targets, own_targets, seal};
+use super::task_transport::{
+    Preparation, PreparationBudget, Target, await_preparation, direct_targets, own_targets, seal,
+};
 use crate::bus::task_delivery::Delivery;
 use crate::client::task::invalid;
 use crate::prelude::*;
@@ -12,23 +14,27 @@ pub(super) async fn send(
     conversation: &str,
     recipient: &str,
     body: &[u8],
-) -> Result<(), SdkError> {
+    budget: &PreparationBudget,
+) -> Result<Preparation<()>, SdkError> {
     crate::client::task::check_delivery_size(body.len())?;
     let mut engine = account.take_live_engine().await?;
     let result = await_preparation(
         prepare(account, &mut engine, conversation, recipient, body),
+        budget,
         "task approval preparation deferred",
     )
     .await;
     account.put_engine(engine);
-    let deliveries = result?;
+    let Preparation::Ready(deliveries) = result? else {
+        return Ok(Preparation::Deferred);
+    };
     crate::bus::task_delivery::submit_until(
         account,
         deliveries,
         tokio::time::Instant::now() + Duration::from_secs(1),
     )
     .await?;
-    Ok(())
+    Ok(Preparation::Ready(()))
 }
 
 async fn prepare(
@@ -111,15 +117,23 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn approval_preparation_allows_slow_verified_directory_refresh() {
-        let result = await_preparation(
-            async {
-                tokio::time::sleep(Duration::from_millis(1_250)).await;
-                Ok::<_, SdkError>(())
-            },
-            "task approval preparation deferred",
-        )
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let budget = PreparationBudget::for_sync_cycle();
+            await_preparation(
+                async {
+                    tokio::time::sleep(Duration::from_millis(1_250)).await;
+                    Ok::<_, SdkError>(())
+                },
+                &budget,
+                "task approval preparation deferred",
+            )
+            .await
+        })
         .await;
-        assert!(result.is_ok(), "a slow verified directory refresh must remain deliverable");
+        assert!(
+            matches!(result, Ok(Ok(Preparation::Ready(())))),
+            "a slow verified directory refresh must remain deliverable"
+        );
     }
 
     #[test]

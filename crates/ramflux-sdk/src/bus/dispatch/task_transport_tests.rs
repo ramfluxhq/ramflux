@@ -12,15 +12,101 @@ use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 #[tokio::test(start_paused = true)]
 async fn confirmation_preparation_allows_slow_verified_directory_refresh() {
-    let result = super::await_preparation(
-        async {
-            tokio::time::sleep(Duration::from_millis(1_250)).await;
-            Ok::<_, SdkError>(())
-        },
-        "task confirmation preparation deferred",
-    )
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        let budget = super::PreparationBudget::for_sync_cycle();
+        super::await_preparation(
+            async {
+                tokio::time::sleep(Duration::from_millis(1_250)).await;
+                Ok::<_, SdkError>(())
+            },
+            &budget,
+            "task confirmation preparation deferred",
+        )
+        .await
+    })
     .await;
-    assert!(result.is_ok(), "a slow verified directory refresh must remain deliverable");
+    assert!(
+        matches!(outcome, Ok(Ok(super::Preparation::Ready(())))),
+        "a slow verified directory refresh must remain deliverable"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn task_couriers_share_one_cycle_budget_without_charging_deferred_items()
+-> Result<(), SdkError> {
+    let (attempts, elapsed) = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut delivered = 0;
+        let mut transport_attempts = [0_u8; 3];
+        let mut cycle_elapsed = Vec::new();
+        while delivered < transport_attempts.len() {
+            let started = tokio::time::Instant::now();
+            let budget = super::PreparationBudget::for_sync_cycle();
+            while delivered < transport_attempts.len() {
+                let prepared = super::await_preparation(
+                    async {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        Ok::<_, SdkError>(())
+                    },
+                    &budget,
+                    "task courier preparation deferred",
+                )
+                .await?;
+                match prepared {
+                    super::Preparation::Ready(()) => {
+                        transport_attempts[delivered] += 1;
+                        delivered += 1;
+                    }
+                    super::Preparation::Deferred => break,
+                }
+            }
+            cycle_elapsed.push(tokio::time::Instant::now().duration_since(started));
+        }
+        Ok::<_, SdkError>((transport_attempts, cycle_elapsed))
+    })
+    .await
+    .map_err(|_| SdkError::InboundPending("courier budget test timed out".into()))??;
+    assert_eq!(attempts, [1, 1, 1], "deferred preparation is not a transport retry");
+    assert!(elapsed.len() > 1, "the third item must be deferred to a later cycle");
+    assert!(elapsed.iter().all(|duration| *duration <= Duration::from_secs(8)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stalled_federated_manifest_fetch_respects_the_preparation_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || -> Result<(), String> {
+            let (stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            accepted_tx.send(()).map_err(|error| error.to_string())?;
+            release_rx.recv_timeout(Duration::from_secs(10)).map_err(|error| error.to_string())?;
+            drop(stream);
+            Ok(())
+        });
+        let started = std::time::Instant::now();
+        let budget = super::PreparationBudget::new(Duration::from_secs(5));
+        let outcome = super::await_preparation(
+            super::fetch_federated_manifest(&format!("http://{address}"), "stalled-root"),
+            &budget,
+            "task federated manifest preparation deferred",
+        )
+        .await;
+        assert!(matches!(outcome, Ok(super::Preparation::Deferred)));
+        assert!(started.elapsed() < Duration::from_secs(7));
+        accepted_rx.recv_timeout(Duration::from_secs(1))?;
+        release_tx.send(())?;
+        server.join().map_err(|_| "stalled manifest server panicked")??;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+    .await
+    .map_err(|_| "stalled manifest test exceeded its outer timeout")??;
+    Ok(())
 }
 
 #[tokio::test]
@@ -235,13 +321,16 @@ async fn private_task_approvals_are_pair_encrypted_only_to_the_requester_among_g
         sdk_device_signed_fields("device-sender", ""),
     )?;
     let anchor = source.client.sign_task_event(event, "anchor".into(), None)?;
-    super::super::task_approval_transport::send(
+    let budget = super::PreparationBudget::for_sync_cycle();
+    let prepared = super::super::task_approval_transport::send(
         &mut source,
         &anchor.conversation_id,
         "peer-0",
         b"PRIVATE_MCP_ARGUMENTS",
+        &budget,
     )
     .await?;
+    assert!(matches!(prepared, super::Preparation::Ready(())));
     let envelopes = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     assert_eq!(envelopes.len(), 1, "the unrelated group member receives no approval payload");
     assert_eq!(envelopes[0].target_delivery_id, "peer-0");
