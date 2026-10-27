@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Non-synchronizing primary credentials; never falls back to the data vault or a file.
+use super::HomeAuthorizationRequest;
 use crate::SdkError;
 use ramflux_crypto::custody::SelfSigningKey;
 use zeroize::Zeroizing;
@@ -19,6 +20,18 @@ pub trait PrimaryVault: Send + Sync {
     /// # Errors
     /// Rejects unavailable or corrupt primary credentials. No portable export API exists.
     fn load_primary(&self, reference: &str) -> Result<SelfSigningKey, SdkError>;
+    /// Sign a stored migration proposal after enforcing independent user presence.
+    /// # Errors
+    /// The default refuses: a data unlock or an existing load_primary implementation is insufficient.
+    fn sign_home_authorization(
+        &self,
+        _request: HomeAuthorizationRequest<'_>,
+    ) -> Result<
+        ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Authorization>,
+        SdkError,
+    > {
+        Err(super::home_authorization::unavailable())
+    }
     /// Load only the branch credential for network possession; never loads master authority.
     /// # Errors
     /// Rejects unsupported providers and missing/corrupt branch entries.
@@ -45,60 +58,33 @@ pub trait PrimaryVault: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativePrimaryVault;
 #[cfg(target_os = "macos")]
-mod native {
-    use super::{SdkError, Zeroizing};
-    use security_framework::passwords::{
-        PasswordOptions, delete_generic_password_options, generic_password,
-        set_generic_password_options,
-    };
-    const SERVICE: &str = "org.ramflux.identity.primary.v1";
-    fn options(reference: &str) -> PasswordOptions {
-        let mut options = PasswordOptions::new_generic_password(SERVICE, reference);
-        options.use_protected_keychain();
-        options.set_access_synchronized(Some(false));
-        options
-    }
-    pub(super) fn preflight() -> Result<(), SdkError> {
-        match generic_password(options("provider-availability-probe")) {
-            Ok(bytes) => {
-                drop(Zeroizing::new(bytes));
-                Ok(())
-            }
-            Err(error) if error.code() == -25300 => Ok(()),
-            Err(_) => Err(SdkError::CustodyVaultUnavailable),
-        }
-    }
-    pub(super) fn put(reference: &str, secret: &[u8]) -> Result<(), SdkError> {
-        match generic_password(options(reference)) {
-            Ok(bytes) => {
-                drop(Zeroizing::new(bytes));
-                return Err(SdkError::CustodyVaultUnavailable);
-            }
-            Err(error) if error.code() == -25300 => {}
-            Err(_) => return Err(SdkError::CustodyVaultUnavailable),
-        }
-        let mut insertion = options(reference);
-        let access = security_framework::access_control::SecAccessControl::create_with_protection(
-            Some(security_framework::access_control::ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly), 0,
-        ).map_err(|_|SdkError::CustodyVaultUnavailable)?;
-        insertion.set_access_control(access);
-        set_generic_password_options(secret, insertion)
-            .map_err(|_| SdkError::CustodyVaultUnavailable)
-    }
-    pub(super) fn delete(reference: &str) -> Result<(), SdkError> {
-        match delete_generic_password_options(options(reference)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.code() == -25300 => Ok(()),
-            Err(_) => Err(SdkError::CustodyVaultUnavailable),
-        }
-    }
-    pub(super) fn get(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        generic_password(options(reference))
-            .map(Zeroizing::new)
-            .map_err(|_| SdkError::CustodyVaultUnavailable)
-    }
-}
+mod native;
+#[cfg(any(target_os = "macos", test))]
+mod presence;
 impl PrimaryVault for NativePrimaryVault {
+    fn sign_home_authorization(
+        &self,
+        request: HomeAuthorizationRequest<'_>,
+    ) -> Result<
+        ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Authorization>,
+        SdkError,
+    > {
+        #[cfg(target_os = "macos")]
+        {
+            let primary = presence::approved_primary(
+                &native::KeychainItems,
+                request.primary_reference(),
+                request.expected_primary_public_key(),
+            )?;
+            let now = super::home_authorization::now()?.max(request.requested_at);
+            request.sign_once(&primary, now)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = request;
+            Err(super::home_authorization::unavailable())
+        }
+    }
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
         #[cfg(target_os = "macos")]
         {
@@ -118,7 +104,7 @@ impl PrimaryVault for NativePrimaryVault {
     ) -> Result<BranchCredentials, SdkError> {
         #[cfg(target_os = "macos")]
         {
-            let bytes = native::get(reference)?;
+            let bytes = native::get_branch(reference)?;
             let mut seeds = Zeroizing::new([0; 64]);
             if bytes.len() != 64 {
                 return Err(SdkError::CustodyVaultUnavailable);
@@ -146,7 +132,7 @@ impl PrimaryVault for NativePrimaryVault {
     fn store_new(&self, reference: &str, key: &SelfSigningKey) -> Result<(), SdkError> {
         #[cfg(target_os = "macos")]
         {
-            native::put(reference, &*key.vault_seed())
+            native::store_primary(reference, &*key.vault_seed())
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -157,7 +143,7 @@ impl PrimaryVault for NativePrimaryVault {
     fn load_primary(&self, reference: &str) -> Result<SelfSigningKey, SdkError> {
         #[cfg(target_os = "macos")]
         {
-            let bytes = native::get(reference)?;
+            let bytes = native::get_primary(reference)?;
             let mut seed = Zeroizing::new([0; 32]);
             if bytes.len() != 32 {
                 return Err(SdkError::CustodyVaultUnavailable);
@@ -174,7 +160,7 @@ impl PrimaryVault for NativePrimaryVault {
     fn store_branch(&self, reference: &str, seeds: &Zeroizing<[u8; 64]>) -> Result<(), SdkError> {
         #[cfg(target_os = "macos")]
         {
-            native::put(reference, &**seeds)
+            native::store_branch(reference, &**seeds)
         }
         #[cfg(not(target_os = "macos"))]
         {

@@ -7,6 +7,8 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("home migration refused: {0:?}")]
+    HomeMigrationRefused(ramflux_protocol::home_migration::Refusal),
     #[error("custody networking refused: {0}")]
     CustodyNetwork(#[from] ramflux_protocol::custody::CustodyRefusal),
     #[error("born-v3 network registration is pending; legacy proofs are forbidden")]
