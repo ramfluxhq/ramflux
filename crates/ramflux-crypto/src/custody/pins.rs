@@ -3,7 +3,7 @@
 
 //! Durable authenticated mode, certificate, head and denial floors.
 use super::{VerifiedRecord, validate::reject};
-use crate::CryptoError;
+use crate::{CryptoError, RootQualifiedDeviceRef};
 use ramflux_protocol::custody::{decode_epoch, object_hash};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -111,8 +111,10 @@ impl AuthorityPins {
             pin.hash = hash;
             pin.revoked_ids.extend(record.revoked_ids().iter().cloned());
             for device in &body.devices {
+                let qualified =
+                    RootQualifiedDeviceRef::from_custody_record(record, &device.device_id)?;
                 pin.devices.insert(
-                    device.device_id.clone(),
+                    qualified.device_id().to_owned(),
                     (
                         device.device_epoch,
                         device.signing_key_commitment.clone(),
@@ -135,16 +137,18 @@ impl AuthorityPins {
                         .devices
                         .iter()
                         .map(|d| {
-                            (
-                                d.device_id.clone(),
+                            Ok::<_, CryptoError>((
+                                RootQualifiedDeviceRef::from_custody_record(record, &d.device_id)?
+                                    .device_id()
+                                    .to_owned(),
                                 (
                                     d.device_epoch,
                                     d.signing_key_commitment.clone(),
                                     d.agreement_key_commitment.clone(),
                                 ),
-                            )
+                            ))
                         })
-                        .collect(),
+                        .collect::<Result<_, _>>()?,
                 },
             );
         }
@@ -154,19 +158,21 @@ impl AuthorityPins {
 
 fn validate_transition(pin: &AccountPin, record: &VerifiedRecord) -> Result<(), CryptoError> {
     let body = &record.envelope().body;
-    if body.devices.len() > ramflux_protocol::custody::MAX_ENROLLMENT_ROSTER
-        && body.devices.iter().any(|device| {
-            device.status == ramflux_protocol::DeviceSetStatus::Active
-                && !pin.devices.contains_key(&device.device_id)
-        })
-    {
+    let mut enrolling = false;
+    for device in &body.devices {
+        let qualified = RootQualifiedDeviceRef::from_custody_record(record, &device.device_id)?;
+        enrolling |= device.status == ramflux_protocol::DeviceSetStatus::Active
+            && !pin.devices.contains_key(qualified.device_id());
+    }
+    if body.devices.len() > ramflux_protocol::custody::MAX_ENROLLMENT_ROSTER && enrolling {
         return Err(reject("custody enrollment reserve exhausted; prioritize revocation"));
     }
     if !pin.revoked_ids.is_subset(record.revoked_ids()) {
         return Err(reject("custody revocation rollback"));
     }
     for device in &body.devices {
-        if let Some((epoch, signing, agreement)) = pin.devices.get(&device.device_id)
+        let qualified = RootQualifiedDeviceRef::from_custody_record(record, &device.device_id)?;
+        if let Some((epoch, signing, agreement)) = pin.devices.get(qualified.device_id())
             && (device.device_epoch < *epoch
                 || (device.device_epoch == *epoch
                     && (device.signing_key_commitment != *signing

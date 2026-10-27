@@ -212,14 +212,7 @@ pub fn verify_record(
     } else if compacted_ids.is_some_and(|ids| !ids.is_empty()) {
         return Err(reject("revocation evidence has no signed checkpoint"));
     }
-    for device in &body.devices {
-        if device.status == DeviceSetStatus::Revoked {
-            revoked.insert(device.device_id.clone());
-        } else if revoked.contains(&device.device_id) {
-            return Err(reject("compacted device cannot reactivate"));
-        }
-    }
-    Ok(VerifiedRecord {
+    let mut verified = VerifiedRecord {
         envelope: envelope.clone(),
         revoked,
         encoded_bytes,
@@ -227,5 +220,16 @@ pub fn verify_record(
         human_custodian: (master.custody_kind == CustodyKind::ExternalHuman)
             .then(|| human_custodian.cloned().map(Box::new))
             .flatten(),
-    })
+    };
+    // Only authenticated record members may index this account's denial floor.
+    for device in &body.devices {
+        let qualified =
+            crate::RootQualifiedDeviceRef::from_custody_record(&verified, &device.device_id)?;
+        if device.status == DeviceSetStatus::Revoked {
+            verified.revoked.insert(qualified.device_id().to_owned());
+        } else if verified.revoked.contains(qualified.device_id()) {
+            return Err(reject("compacted device cannot reactivate"));
+        }
+    }
+    Ok(verified)
 }
