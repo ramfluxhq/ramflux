@@ -617,16 +617,31 @@ impl IdentityRegistry {
         &self,
         request: &IdentityRegisterRequest,
     ) -> Result<(), NodeCoreError> {
+        self.check_principal_root_ownership(&request.proof.principal_id, &request.root_public_key)
+    }
+
+    pub(crate) fn check_principal_root_ownership(
+        &self,
+        principal_id: &str,
+        root_public_key: &str,
+    ) -> Result<(), NodeCoreError> {
         if self
             .principal_root_bindings
-            .get(&request.proof.principal_id)
-            .or_else(|| self.root_public_keys.get(&request.proof.principal_id))
-            .is_some_and(|root| root != &request.root_public_key)
+            .get(principal_id)
+            .or_else(|| self.root_public_keys.get(principal_id))
+            .is_some_and(|root| root != root_public_key)
         {
             return Err(NodeCoreError::PrincipalIdTaken);
         }
         Ok(())
     }
+
+    pub(crate) fn reserve_custody_principal(&mut self, principal_id: &str, master: &str) {
+        self.principal_root_bindings
+            .entry(principal_id.to_owned())
+            .or_insert_with(|| master.to_owned());
+    }
+
     fn check_registration_ownership(
         &self,
         request: &IdentityRegisterRequest,
