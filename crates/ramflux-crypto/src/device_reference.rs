@@ -68,13 +68,16 @@ impl RootQualifiedDeviceRef {
     /// Name a branch only from fully verified born-v3 authority.
     /// The caller must enforce durable head pins before granting operations.
     /// # Errors
-    /// Rejects a device absent from the authenticated roster.
+    /// Rejects a device absent from both the authenticated roster and revocation membership.
+    /// Compacted revoked identities remain nameable solely for history and denial cleanup.
     pub fn from_custody_record(
         record: &crate::custody::VerifiedRecord,
         device: &str,
     ) -> Result<Self, CryptoError> {
         let body = &record.envelope().body;
-        if !body.devices.iter().any(|entry| entry.device_id == device) {
+        if !body.devices.iter().any(|entry| entry.device_id == device)
+            && !record.revoked_ids().contains(device)
+        {
             return Err(CryptoError::IdentityAuthority("device absent from custody set"));
         }
         Self::authenticated(body.account_anchor.clone(), device)

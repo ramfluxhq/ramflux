@@ -48,6 +48,13 @@ impl AuthorityPins {
         }
     }
 
+    /// Epoch of the retained accepted head, including when its range is fenced.
+    /// This read is a rollback floor and never grants current authority.
+    #[must_use]
+    pub fn accepted_epoch_floor(&self, anchor: &str) -> Option<u64> {
+        self.accounts.get(anchor).map(|pin| pin.epoch)
+    }
+
     /// Once observed, a born-v3 anchor can never authorize a legacy record.
     #[must_use]
     pub fn permits_legacy(&self, anchor: &str) -> bool {

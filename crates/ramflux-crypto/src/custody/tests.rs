@@ -29,6 +29,47 @@ pub(super) fn fixture() -> Result<(serde_json::Value, SelfSigningKey, Envelope<D
     )?;
     Ok((v, primary, record))
 }
+
+#[test]
+fn compacted_native_revocation_is_nameable_for_cleanup_and_never_authorizes_a_branch() -> Result {
+    let (_, primary, genesis) = fixture()?;
+    let now = genesis.body.issued_at;
+    let names = vec!["retired-member".to_owned()];
+    let mut body = genesis.body.clone();
+    body.device_set_epoch += 1;
+    body.previous_record_hash = Some(object_hash(&genesis)?);
+    let checkpoint = RevokedCheckpoint {
+        schema: domain::CUSTODY_REVOKED_CHECKPOINT.into(),
+        version: 1,
+        account_anchor: body.account_anchor.clone(),
+        master_certificate_hash: object_hash(&body.master_certificate)?,
+        device_set_epoch: body.device_set_epoch,
+        previous_checkpoint_hash: None,
+        list_hash: framed_hash(domain::CUSTODY_REVOKED_LIST, &names)?,
+        count: 1,
+        compacted_before: now - 7_776_000,
+        issued_at: now,
+    };
+    let signature = crate::sign_canonical_bytes_with_seed(
+        &signing_bytes(domain::CUSTODY_REVOKED_CHECKPOINT, &checkpoint)?,
+        *primary.vault_seed(),
+    );
+    body.revoked_device_checkpoint = Some(Envelope { body: checkpoint, signature });
+    let record = primary.sign_record(body)?;
+    let verified = verify_record(&record, now, Some(&names), None)?;
+    let retired = crate::RootQualifiedDeviceRef::from_custody_record(&verified, "retired-member")?;
+    assert_eq!(retired.root_commitment(), genesis.body.account_anchor);
+    assert!(
+        crate::RootQualifiedDeviceRef::from_custody_record(&verified, "unknown-member").is_err()
+    );
+    let reference = DeviceRef {
+        account_anchor: retired.root_commitment().into(),
+        device_id: retired.device_id().into(),
+        device_epoch: 1,
+    };
+    assert!(verified.authorize(&reference, "message", now).is_err());
+    Ok(())
+}
 #[test]
 fn independent_python_vector_matches_every_canonical_byte_signature_and_hash() -> Result {
     let (vector, _, record) = fixture()?;
