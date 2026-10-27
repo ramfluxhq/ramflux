@@ -47,13 +47,14 @@ fn signed_authority_change_marks_manual_verification_stale_without_changing_acti
     db.remove_actor_state(&stamp_key)?;
     assert_eq!(
         peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
-        "verified"
+        "verification_stale"
     );
-    assert_eq!(
-        db.load_actor_state::<String>(&stamp_key)?,
-        Some(stamp.clone()),
-        "a missing legacy stamp is baselined on first matching read"
+    assert!(
+        db.load_actor_state::<String>(&stamp_key)?.is_none(),
+        "reads cannot repair a missing stamp after migration"
     );
+    peer.client.mark_contact_safety_verified(&signed.principal_commitment, "peer")?;
+    assert_eq!(db.load_actor_state::<String>(&stamp_key)?, Some(stamp.clone()));
     let next = with_revoked_device(&owner, &signed, &late)?;
     observe(&peer.client, &next)?;
     let row = crate::bus::read_model::row(&peer.client, "identity", "owner")?;

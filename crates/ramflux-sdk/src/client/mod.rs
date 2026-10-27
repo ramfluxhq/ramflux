@@ -12,6 +12,7 @@ pub(crate) mod contact_requests;
 pub(crate) mod contact_resolution;
 pub(crate) mod contact_roots;
 mod contact_safety_preview;
+pub(crate) mod contact_verification;
 pub mod conversation;
 mod deferred_attachment;
 pub(crate) mod delivery_receipts;

@@ -108,6 +108,14 @@ async fn out_of_band_safety_preview_is_non_mutating_and_confirmation_promotes_th
     ));
     let verified=call(&mut s,"alice","contact.verify",json!({"principal_id":"bob","contact_identity_commitment":root,"replace_provisional_root":old})).await?;
     assert_eq!(verified["safety_number"], preview["safety_number"]);
+    let set = client(&s)?.observed_device_set(&root)?.ok_or_else(|| invalid("verified set"))?;
+    assert_eq!(
+        client(&s)?
+            .account_db()?
+            .load_actor_state::<String>(&format!("identity/safety_verified_set/{root}"))?,
+        Some(crate::client::identity_authority::set_fingerprint(&set)?),
+        "confirmed contact resolution persists the authority stamp"
+    );
     assert_eq!(client(&s)?.contact_entry("bob")?["root_source"], "verified");
     assert_eq!(
         client(&s)?

@@ -71,12 +71,23 @@ hash, matching `identity.directory` even for tombstone-only changes. Stored manu
 verification is retained for audit. A fresh manual verification without an observed
 signed set can remain `verified` for its synthetic safety material; this does not
 authenticate a kind. Legacy v0.1.0 verifications without an authority stamp are
-baselined to the current observed signed set on first writer read, only when the
-current active-device hash still matches the verified one. Reader pools perform
-this migration on their writer before opening query-only snapshots. An existing
-stamp is never replaced by migration: later authority changes are
-`verification_stale` until explicit re-verification. A mismatched active-device
-hash is stale and cannot create a migration stamp.
+baselined once per account at the first writer unlock after upgrade, only when the
+current active-device hash still matches the verified one. Eligible stamps and
+`identity/safety-verification-migration/v1` commit atomically; a failed migration
+leaves no completion marker and can be retried. Reader pools check that marker
+before opening query-only snapshots and do not repeat a completed scan.
+Verification reads never write stamps. After migration, an unstamped record with
+observed signed authority is `verification_stale` until explicit re-verification;
+new confirmation writers persist their authority stamp in the verification
+transaction. An existing stamp is never replaced by migration, and later authority
+changes remain stale. A mismatched active-device hash cannot acquire a migration
+stamp. Legacy verifications imported after a completed migration also require
+explicit confirmation when they lack signed-authority stamps.
+
+Without an observed signed set, all views compare the synthetic safety-material
+hash, ignoring a legacy card row's historical device hash. This can preserve
+manual verification but never authenticates a public kind. A prior authority stamp
+whose signed set is now unavailable still reads stale.
 
 Task actor metadata exposes the actual `actor_kind` alongside
 `actor_kind_verified`. A signed public profile and a current member device are

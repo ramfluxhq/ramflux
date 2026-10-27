@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after a sibling restriction arrives. Consent and object-revocation journal IDs
   identify each decision while preserving immutable event replay and old rows.
 
+- Confirmed contact safety writes its signed-authority stamp in the verification
+  transaction. Legacy baselining runs once per account behind a durable marker;
+  reads no longer stamp later unstamped records. Legacy card contacts without a
+  signed set report the same synthetic safety state across all contact views.
+
 ### Security
 
 - Only local contact unblock restores local request consent; peer unblock controls
@@ -55,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Outstanding public renames survive stale restores by rebasing their epoch;
   intents with confirmation saved locally do not overwrite later sibling renames.
 - Legacy v0.1.0 manual contact verifications acquire a signed-authority stamp on
-  first read when the active-device hash is unchanged; contacts without signed
+  the first writer unlock after upgrade when the active-device hash is unchanged;
+  contacts without signed
   authority can still verify synthetic safety material without authenticating a
   kind. Hash or later stamped-authority changes require explicit re-verification.
 - Refine the proposed root-custody design with proxy exporter receipts, bounded

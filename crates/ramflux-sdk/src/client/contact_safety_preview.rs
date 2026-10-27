@@ -19,14 +19,8 @@ impl RamfluxClient {
         if hash != safety.safety_number_hash || device_set != safety.contact_device_set_hash {
             return Err(ContactReason::RootConflict.into());
         }
-        self.account_db()?.mark_contact_verified(ContactVerificationUpdate {
-            contact_identity_commitment: &safety.contact_identity_commitment,
-            safety_number_hash: &hash,
-            device_set_hash: &device_set,
-            lineage_head: &safety.contact_lineage_head,
-            verified_at: now_unix_timestamp(),
-            verified_by_device_id: device,
-        })?;
+        // The shared writer records the confirmation and complete authority stamp atomically.
+        self.record_contact_safety_verified(&safety.contact_identity_commitment, device, safety)?;
         Ok(())
     }
 
