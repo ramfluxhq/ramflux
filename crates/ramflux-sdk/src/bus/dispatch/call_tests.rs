@@ -235,3 +235,28 @@ fn generated_call_ids_are_full_length_and_never_look_like_cli_flags() -> Result<
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn native_call_mutation_gate_needs_no_legacy_manifest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = crate::client::native_test_support::Fixture::new("native-call-gate").await?;
+    let id = fixture.client.account_db()?.local_account_id.clone();
+    let root = fixture.root.0.clone();
+    assert!(!local_bus_account_manifest_path(&root, &id).exists());
+    let account = LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config,
+        fixture.manifest.principal_commitment,
+    );
+    let state = LocalBusDaemonState {
+        account_index: None,
+        nodes: crate::node::NodeStore::default(),
+        config: LocalBusConfig::new(root.join("bus.sock"), &root),
+        accounts: BTreeMap::from([(id.clone(), account)]),
+        active_account_id: None,
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    };
+    require_attended_human(&state, &id)?;
+    Ok(())
+}
