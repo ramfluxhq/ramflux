@@ -9,6 +9,9 @@ mod backup_jobs;
 pub mod client;
 mod connection;
 mod control_state;
+mod creation_client;
+mod creation_confirm;
+pub use creation_client::{LocalBusCreationClient, LocalBusPendingCreation};
 mod custody_response;
 mod custody_setup;
 pub mod daemon;
@@ -21,6 +24,7 @@ mod journal;
 mod lifecycle;
 mod metadata;
 mod mutations;
+mod native_account;
 pub(crate) mod own_device_copy;
 pub mod protocol;
 pub(crate) mod read_model;
@@ -55,3 +59,6 @@ pub(crate) use readers::test_account_reader_request;
 
 #[cfg(test)]
 mod custody_setup_tests;
+
+#[cfg(test)]
+mod native_account_tests;

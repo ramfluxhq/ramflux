@@ -10,6 +10,9 @@ impl RamfluxClient {
         if let Some(account) = &self.born_v3_account {
             return Ok(account.record().body.account_anchor.clone());
         }
+        if let Some(reader) = &self.reader_device_identity {
+            return Ok(reader.root_commitment().into());
+        }
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         Ok(ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key()))
     }
@@ -17,6 +20,14 @@ impl RamfluxClient {
     pub(crate) fn own_master_public_key(&self) -> Result<String, SdkError> {
         if let Some(account) = &self.born_v3_account {
             return Ok(account.record().body.master_certificate.body.master_public_key.clone());
+        }
+        if let Some(reader) = &self.reader_device_identity
+            && let Some(authority) = self.current_custody_authority(
+                reader.root_commitment(),
+                crate::custody::network_now()?,
+            )?
+        {
+            return Ok(authority.envelope().body.master_certificate.body.master_public_key.clone());
         }
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         Ok(ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes()))

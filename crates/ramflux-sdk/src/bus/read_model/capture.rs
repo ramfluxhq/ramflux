@@ -64,9 +64,24 @@ fn initialize_own_identity(account: &LocalBusAccountState) -> Result<(), SdkErro
     let mut devices = identity["devices"].as_array().cloned().unwrap_or_default();
     let mut device = devices.iter().find(|d|d["device_id"]==config.device_id).cloned().unwrap_or_else(||json!({"id":config.device_id,"device_id":config.device_id,"label":null,"last_seen":null}));
     device["target_delivery_id"] = json!(config.target_delivery_id);
-    device["signing_public_key"] = json!(account.client.device_branch.as_ref().map(|branch| {
-        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())
-    }));
+    if let Some(branch) = &account.client.device_branch {
+        device["signing_public_key"] = json!(ramflux_protocol::encode_base64url(
+            branch.signing_key.verifying_key().to_bytes()
+        ));
+    }
+    if let Some(native) = &account.client.born_v3_account
+        && let Some(certificate) = native
+            .record()
+            .body
+            .devices
+            .iter()
+            .find(|entry| entry.device_id == config.device_id)
+            .and_then(|entry| entry.branch_certificate.as_ref())
+    {
+        // This is verified historical metadata, not a fresh capability grant. Data reads
+        // must remain available after a branch lease expires or its vault is locked.
+        device["signing_public_key"] = json!(certificate.body.branch_signing_public_key);
+    }
     devices.retain(|d| d["device_id"] != config.device_id);
     devices.push(device);
     identity["devices"] = json!(devices);

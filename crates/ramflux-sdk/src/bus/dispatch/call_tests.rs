@@ -57,7 +57,7 @@ async fn media_key_replies_cannot_be_replayed_from_generic_operation_receipts()
     let mut frame = request("call.media.session", &id);
     frame.operation_id = Some("media-key-request".into());
     let command = AccountCommand {
-        backup: None,
+        private: None,
         request: frame,
         connection_id: 1,
         topics: BTreeSet::new(),

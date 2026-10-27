@@ -88,7 +88,7 @@ async fn r3_merge_preserves_local_undownloaded_references_and_reports_them_separ
         let reference=json!({"reference":{"object_id":"local-pending","manifest_hash":"unavailable-local-hash","plaintext_hash":"unavailable-plain-hash"}});
         client.account_db()?.persist_actor_state("attachment/reference/local-pending",&reference)?;drop(client);
         let actor=supervisor.new_backup_actor("alice")?;let (outbound,_events)=mpsc::channel(16);
-        actor.request(crate::bus::actor::AccountCommand{backup:None,request:LocalBusFrame::request("unlock",Some("alice".into()),"account","account.unlock",json!({"passphrase":"account-test-secret"})),connection_id:1,topics:BTreeSet::new(),attended:true,nodes:None,outbound,reply:None}).await?;
+        actor.request(crate::bus::actor::AccountCommand{private:None,request:LocalBusFrame::request("unlock",Some("alice".into()),"account","account.unlock",json!({"passphrase":"account-test-secret"})),connection_id:1,topics:BTreeSet::new(),attended:true,nodes:None,outbound,reply:None}).await?;
         let row=call(&supervisor,"account.restore.verify",None,json!({"input_path":archive,"passphrase":secret})).await?;
         let id=row["job"]["job_id"].as_str().ok_or("job")?;finished(&supervisor,id,BackupJobState::Verified).await?;
         call(&supervisor,"account.restore.install",None,json!({"job_id":id})).await?;

@@ -126,6 +126,11 @@ impl AccountDb {
         self.device_signer = Some(device_signer);
     }
 
+    /// Stop signing new local events when the selected branch credential is removed.
+    pub fn clear_device_signer(&mut self) {
+        self.device_signer = None;
+    }
+
     pub(crate) const fn device_signer(&self) -> Option<&ramflux_crypto::DeviceBranch> {
         self.device_signer.as_ref()
     }

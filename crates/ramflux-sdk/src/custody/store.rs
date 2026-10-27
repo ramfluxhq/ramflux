@@ -25,6 +25,8 @@ pub enum CreationState {
 pub(super) struct StoredAuthority {
     schema: String,
     local_account_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    local_device_id: String,
     state: CreationState,
     custody_v3_observed: bool,
     pub(super) primary_vault_ref: String,
@@ -48,6 +50,18 @@ impl BornAccount {
     #[must_use]
     pub fn local_account_id(&self) -> &str {
         &self.stored.local_account_id
+    }
+    pub(crate) fn local_device_id(&self) -> Result<&str, SdkError> {
+        let id = if self.stored.local_device_id.is_empty() {
+            match self.record().body.devices.as_slice() {
+                [only] => only.device_id.as_str(),
+                _ => return Err(invalid()),
+            }
+        } else {
+            &self.stored.local_device_id
+        };
+        ramflux_protocol::validate_device_name(id)?;
+        Ok(id)
     }
     #[must_use]
     pub fn record(&self) -> &Envelope<DeviceSet> {
@@ -75,7 +89,7 @@ impl BornAccount {
     #[must_use]
     pub fn summary(&self) -> serde_json::Value {
         serde_json::json!({"local_account_id":self.local_account_id(),"principal_id":self.stored.record.body.principal_id,
-            "account_anchor":self.stored.record.body.account_anchor,"kind":self.stored.record.body.principal_kind,
+            "account_anchor":self.stored.record.body.account_anchor,"kind":self.stored.record.body.principal_kind,"display_name":self.stored.record.body.profile.display_name,
             "state":self.state(),"custody_v3_observed":true,"vault_class":self.stored.vault_class})
     }
 }
@@ -187,6 +201,7 @@ pub(super) struct GenesisMaterial<'a> {
     pub branch: &'a Zeroizing<[u8; 64]>,
     pub now: u64,
     pub data_secret: Option<&'a [u8]>,
+    pub commit_gate: Option<&'a super::CommitGate>,
 }
 pub(super) fn persist(
     root: &Path,
@@ -194,7 +209,7 @@ pub(super) fn persist(
     material: GenesisMaterial<'_>,
     vault: &dyn PrimaryVault,
 ) -> Result<BornAccount, SdkError> {
-    let GenesisMaterial { record, primary: key, branch, now, data_secret } = material;
+    let GenesisMaterial { record, primary: key, branch, now, data_secret, commit_gate } = material;
     let human =
         input.custodian_account_id.as_ref().map(|id| load_human(root, id, now)).transpose()?;
     let verified = verify_record(&record, now, None, human.as_ref())?;
@@ -243,6 +258,7 @@ pub(super) fn persist(
         let stored = StoredAuthority {
             schema: "ramflux.local.custody_account.v1".into(),
             local_account_id: input.local_account_id.clone(),
+            local_device_id: input.device_id.clone(),
             state: CreationState::NetworkingPending,
             custody_v3_observed: true,
             primary_vault_ref: reference.clone(),
@@ -252,6 +268,9 @@ pub(super) fn persist(
             pins,
             custodian_account_id: input.custodian_account_id.clone(),
         };
+        if let Some(gate) = commit_gate {
+            gate.commit()?;
+        }
         write_public(
             &dir.join("authority.json"),
             &ramflux_protocol::canonical_json_bytes(&stored)?,
@@ -295,6 +314,9 @@ impl BornAccount {
         device_id: &str,
         now: u64,
     ) -> Result<(ramflux_protocol::custody::DeviceRef, super::BranchCredentials), SdkError> {
+        if device_id != self.local_device_id()? {
+            return Err(invalid());
+        }
         let entry = self
             .record()
             .body

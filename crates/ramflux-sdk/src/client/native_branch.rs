@@ -66,8 +66,23 @@ impl RamfluxClient {
             crate::custody::network_now()?,
         )?;
         let previous_account = self.born_v3_account.replace(Box::new(account));
+        let signer = credentials.signing.clone();
         let previous = self.device_branch.replace(credentials.signing);
+        if let Some(db) = self.active_account_db.as_mut() {
+            db.set_device_signer(signer);
+        } else {
+            self.device_branch = previous;
+            self.born_v3_account = previous_account;
+            return Err(SdkError::AccountDbNotUnlocked);
+        }
         if let Err(error) = self.persist_owned_private_prekey(&identity, &state) {
+            if let Some(db) = self.active_account_db.as_mut() {
+                if let Some(signer) = previous.as_ref() {
+                    db.set_device_signer(signer.clone());
+                } else {
+                    db.clear_device_signer();
+                }
+            }
             self.device_branch = previous;
             self.born_v3_account = previous_account;
             return Err(error);
@@ -145,6 +160,25 @@ mod tests {
             ramflux_crypto::X25519KeyPair::from_seed(before.signed_prekey_seed).public
         );
         assert!(client.identity_root.is_none());
+        client.append_event("native-data-marker", "native.data", b"native signed history")?;
+        let history = client.account_db()?.export_history_bundle("primary", "other-device")?;
+        let event = history
+            .encrypted_event_batch
+            .iter()
+            .find(|event| event.event_id == "native-data-marker")
+            .ok_or("history marker")?;
+        assert_ne!(event.signature, "");
+        assert_eq!(event.source_device_public_key, before.bundle.device_identity_ed25519_public);
+        let signing = serde_json::json!({
+            "event_id":event.event_id, "event_type":event.event_type, "actor_principal_id":event.actor_principal_id,
+            "actor_device_id":event.actor_device_id, "device_counter":event.device_counter, "lamport_time":event.lamport_time,
+            "created_at":event.created_at, "event_body":event.event_body,
+        });
+        ramflux_crypto::verify_device_branch_signature(
+            &event.source_device_public_key,
+            &signing,
+            &event.signature,
+        )?;
         drop(client);
         let mut client = RamfluxClient::new();
         client.open_account_index(&root.0)?;

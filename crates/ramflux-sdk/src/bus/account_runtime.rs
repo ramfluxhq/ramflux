@@ -85,8 +85,11 @@ impl AccountRuntime {
             super::read_model::initialize(account)?;
             let db = account.client.account_db()?;
             let path = local_bus_account_manifest_path(&self.state.config.data_root, &self.id);
-            let node_id =
-                super::sync_status::optional_manifest(&path).and_then(|manifest| manifest.node_id);
+            let node_id = if account.client.born_v3_account.is_some() {
+                db.load_actor_state::<String>("account/node-id")?
+            } else {
+                super::sync_status::optional_manifest(&path).and_then(|manifest| manifest.node_id)
+            };
             db.persist_actor_state("sync/node-id", &node_id)?;
             let tick = db.journal_bounds()?.head_seq;
             db.append_journal(
@@ -211,9 +214,30 @@ impl AccountRuntime {
     }
 
     async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
-        if let Some(backup) = command.backup.take() {
+        if let Some(backup) = command.private.take() {
             match backup {
-                super::actor::BackupCommand::Capture(reply) => {
+                super::actor::PrivateCommand::NativeUnlock { passphrase, reply } => {
+                    if !reply.is_closed() {
+                        let result =
+                            super::native_account::unlock(&mut self.state, &self.id, passphrase)
+                                .await;
+                        if reply.is_closed() {
+                            self.close_readers().await;
+                            self.state.accounts.remove(&self.id);
+                            return Ok(false);
+                        }
+                        let result = match self.initialize_readers() {
+                            Ok(()) => result,
+                            Err(error) => Err(error),
+                        };
+                        let result = match self.publish(&command.request).await {
+                            Ok(()) => result,
+                            Err(error) => Err(error),
+                        };
+                        let _ = reply.send(result);
+                    }
+                }
+                super::actor::PrivateCommand::Capture(reply) => {
                     if !reply.is_closed() {
                         let result = (|| {
                             let account = local_bus_account(&self.state, &self.id)?;

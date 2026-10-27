@@ -67,6 +67,7 @@ pub(crate) struct ObjectGetSpoolSession {
 }
 
 pub(crate) struct LocalBusAccountState {
+    pub(crate) native_setup: Option<LocalBusConfig>,
     pub(crate) activation_pending: bool,
     pub(crate) client: RamfluxClient,
     pub(crate) engine: Option<GatewaySessionEngine>,
@@ -109,6 +110,7 @@ impl LocalBusAccountState {
         let gateway_config = engine.config.clone();
         let target_delivery_id = engine.target_delivery_id().to_owned();
         Self {
+            native_setup: None,
             activation_pending: false,
             client,
             engine: Some(engine),
@@ -140,6 +142,7 @@ impl LocalBusAccountState {
     ) -> Self {
         let target_delivery_id = gateway_config.target_delivery_id.clone();
         Self {
+            native_setup: None,
             activation_pending: false,
             client,
             engine: None,
@@ -217,19 +220,37 @@ impl LocalBusAccountState {
         Ok(())
     }
 
+    async fn prepare_native_branch(&mut self) -> Result<(), SdkError> {
+        super::native_account::configure_pending(self).await?;
+        let custody = self.gateway_config.custody.as_ref().ok_or(SdkError::NetworkingPending)?;
+        if self.client.device_branch.is_none() {
+            self.client
+                .initialize_born_v3_branch(
+                    &self.gateway_config.device_id,
+                    std::sync::Arc::clone(&custody.vault),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn ensure_gateway_live(
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SdkError>> + '_>> {
         Box::pin(async move {
             let root = self.client.account_index()?.root().to_path_buf();
             let id = self.client.account_db()?.local_account_id.clone();
+            let native = self.client.born_v3_account.is_some();
+            if native {
+                self.prepare_native_branch().await?;
+            }
             let path = local_bus_account_manifest_path(&root, &id);
-            let mut pending = if super::daemon::account_manifest_available(&path) {
+            let mut pending = if !native && super::daemon::account_manifest_available(&path) {
                 Some(read_local_bus_account_manifest(&path)?)
             } else {
                 None
             };
-            let refresh_due = self.client.own_proof_refresh_due(now_unix_timestamp())?;
+            let refresh_due = !native && self.client.own_proof_refresh_due(now_unix_timestamp())?;
             if let Some(manifest) =
                 pending.as_ref().filter(|manifest| manifest.activation_pending || refresh_due)
             {
@@ -296,6 +317,9 @@ impl LocalBusAccountState {
                 Ok(())
             };
             connected?;
+            if native {
+                super::native_account::finish_connection(self)?;
+            }
             self.persist_push_route_seq();
             if self.gateway_config.push_route_clear_pending {
                 self.forget_confirmed_push_clear();
