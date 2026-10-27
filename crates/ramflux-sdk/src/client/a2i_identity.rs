@@ -11,9 +11,8 @@ impl RamfluxClient {
         &self,
         event: &mut A2iControlEvent,
     ) -> Result<RootQualifiedDeviceRef, SdkError> {
-        let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let source = RootQualifiedDeviceRef::for_owned_device(root, branch)?;
+        let source = self.owned_device_identity()?;
         bind(event, &branch.principal_id, &source)?;
         Ok(source)
     }

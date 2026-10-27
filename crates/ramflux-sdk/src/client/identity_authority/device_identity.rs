@@ -12,13 +12,18 @@ impl RamfluxClient {
     /// Rejects missing owned root/branch state or inconsistent account ownership.
     pub fn owned_device_identity(&self) -> Result<RootQualifiedDeviceRef, SdkError> {
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if let Some(device) = self.own_custody_device(&branch.device_id)? {
+            return Ok(device);
+        }
         Ok(RootQualifiedDeviceRef::for_owned_device(
             self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             branch,
         )?)
     }
     pub(crate) fn read_device_identity(&self) -> Result<Option<RootQualifiedDeviceRef>, SdkError> {
-        if self.identity_root.is_some() && self.device_branch.is_some() {
+        if (self.born_v3_account.is_some() || self.identity_root.is_some())
+            && self.device_branch.is_some()
+        {
             return self.owned_device_identity().map(Some);
         }
         Ok(self.reader_device_identity.clone())
@@ -27,6 +32,14 @@ impl RamfluxClient {
         &self,
         selector: &str,
     ) -> Result<RootQualifiedDeviceRef, SdkError> {
+        if let Some(account) = &self.born_v3_account {
+            let device = match ramflux_protocol::parse_qualified_device_id(selector)? {
+                Some((root, name)) if root == account.record().body.account_anchor => name,
+                Some(_) => return Err(invalid("own account device root mismatch")),
+                None => selector.to_owned(),
+            };
+            return self.own_custody_device(&device)?.ok_or(SdkError::IdentityRootMissing);
+        }
         let owner = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let device = if let Some((root, name)) =
             ramflux_protocol::parse_qualified_device_id(selector)?
@@ -49,10 +62,7 @@ impl RamfluxClient {
         if branch.device_id != device {
             return Err(invalid("local device context mismatch"));
         }
-        Ok(RootQualifiedDeviceRef::for_owned_device(
-            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            branch,
-        )?)
+        self.owned_device_identity()
     }
     pub(crate) fn peer_device_identity(
         &self,
@@ -96,6 +106,9 @@ impl RamfluxClient {
         root: &str,
         device: &str,
     ) -> Result<RootQualifiedDeviceRef, SdkError> {
+        if self.born_v3_account.as_ref().is_some_and(|a| a.record().body.account_anchor == root) {
+            return self.own_custody_device(device)?.ok_or(SdkError::IdentityRootMissing);
+        }
         if let (Some(own), Some(branch)) = (&self.identity_root, &self.device_branch)
             && branch.device_id == device
             && ramflux_crypto::identity_root_commitment(&own.signing_key.verifying_key()) == root
@@ -106,6 +119,11 @@ impl RamfluxClient {
             && ramflux_crypto::identity_root_commitment(&own.signing_key.verifying_key()) == root
         {
             return Ok(RootQualifiedDeviceRef::for_owned_account_device(own, device)?);
+        }
+        let now = u64::try_from(crate::time::now_unix_timestamp())
+            .map_err(|_| invalid("invalid authority clock"))?;
+        if let Some(authority) = self.current_custody_authority(root, now)? {
+            return Ok(RootQualifiedDeviceRef::from_custody_record(&authority, device)?);
         }
         let db = self.account_db()?;
         let record: SignedDeviceSetRecord =

@@ -4,6 +4,7 @@
 pub mod a2i;
 mod a2i_identity;
 pub mod account;
+mod account_authority;
 mod backup_activation;
 mod backup_contacts;
 pub(crate) mod call;
