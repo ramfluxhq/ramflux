@@ -4,6 +4,7 @@
 //! Account runtime persistence facade.
 
 mod acknowledgements;
+mod actor_backoff;
 mod config;
 mod control;
 mod message_origin;

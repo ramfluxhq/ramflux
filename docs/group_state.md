@@ -111,11 +111,28 @@ transfer's epoch, can make that delayed transfer stale for the sibling and its
 followers and leave a group fork. The issue deadline does not bound delivery time;
 clock skew can make this release overlap the issuer's last valid issue instant.
 
-Deadline maintenance checks at most 128 pending proposals, 4096 reservations and
-512 cancellation deliveries per tick. Each item updates in its own transaction;
-a failing item is logged and left for retry under the existing retention bounds
-while healthy deadline items and other group courier work continue. Transfer-delivery collection also skips a
-failed item rather than letting it block request/result selection.
+Deadline maintenance visits at most 128 eligible pending proposals, 4096 eligible
+reservations and 512 eligible cancellation deliveries per tick. Mutating items
+use independent transactions; ordinary non-cancellation send rows are read without
+a writer transaction. SQLite, filesystem and other operational failures stop the
+scan and defer the courier tick, rather than retrying every remaining item against
+a failing database. Only recognized malformed/invalid item data is skipped.
+
+Bad items keep their original rows and security fences. A separate durable retry
+marker excludes them from page selection for five minutes, so they cannot pin
+the first page and starve later healthy work. Repaired rows become eligible after
+that interval and clear their marker on success. Warnings are limited to one per
+account per fifteen minutes, including across restart. Retry metadata is bounded
+and expired/orphan metadata is pruned in bounded batches when recording a bad item. Operational failures
+while recording that metadata also stop the scan; they are not bad-data errors.
+
+Pending proposals and lease rows have no generic expiry/row-cap retention janitor;
+normal transfer completion/cancellation/release owns their lifecycle. Only send
+rows have the existing send-queue expiry/retention policy. Backoff does not delete
+a malformed lease or declare its reservation released; user operations still
+fail closed on that original data until it can be repaired. Transfer-delivery
+collection uses the same bad-data backoff and operational-error policy before
+selecting request/result traffic.
 
 On the first courier tick after the issue deadline plus five minutes, an issuer
 without a committed transfer stages a durable signed cancellation. Siblings also

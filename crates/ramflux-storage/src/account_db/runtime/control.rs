@@ -91,7 +91,7 @@ impl AccountDb {
     }
 }
 
-fn namespace_end(prefix: &str) -> Result<String, StorageError> {
+pub(super) fn namespace_end(prefix: &str) -> Result<String, StorageError> {
     let mut bytes = prefix.as_bytes().to_vec();
     let last = bytes.pop().filter(|byte| *byte < 127).ok_or(StorageError::AuthorizationRejected)?;
     bytes.push(last + 1);
