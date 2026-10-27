@@ -44,7 +44,16 @@ pub(super) fn decide(
     crate::client::task::require_local_human(&manifest.client_mode, Some(kind))?;
     Ok(Some(local_bus_account(state, account_id)?.client.decide_task_approval(id, approved)?))
 }
-pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+#[cfg(test)]
+async fn drive(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    let budget = super::task_transport::PreparationBudget::for_sync_cycle();
+    drive_with_budget(account, &budget).await
+}
+
+pub(crate) async fn drive_with_budget(
+    account: &mut LocalBusAccountState,
+    budget: &super::task_transport::PreparationBudget,
+) -> Result<usize, SdkError> {
     if let Err(error) = apply_decisions(account) {
         tracing::warn!(%error,"task approval decision scan deferred");
     }
@@ -82,22 +91,35 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
             continue;
         };
         let request = job.packet.request();
-        attempted += 1;
         let result = super::task_approval_transport::send(
             account,
             &request.binding.conversation_id,
             job.packet.recipient(),
             &bytes,
+            budget,
         )
         .await;
+        if matches!(&result, Ok(super::task_transport::Preparation::Deferred)) {
+            if budget.exhausted() {
+                break;
+            }
+            continue;
+        }
+        attempted += 1;
         if let Err(error) = &result {
             tracing::debug!(%error, job = %storage, "task approval transport attempt deferred");
         }
         crate::error_policy::task_scan(
             &storage,
-            record_delivery(account, &storage, &mut job, result.is_ok(), now),
+            record_delivery(
+                account,
+                &storage,
+                &mut job,
+                matches!(&result, Ok(super::task_transport::Preparation::Ready(()))),
+                now,
+            ),
         )?;
-        if result.is_ok() {
+        if matches!(&result, Ok(super::task_transport::Preparation::Ready(()))) {
             sent += 1;
         }
         if attempted >= 2 {

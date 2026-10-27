@@ -11,14 +11,51 @@ use std::future::Future;
 // Preparation refreshes verified own and peer directories before sealing. Keep
 // task couriers bounded while allowing normal latency on CPU-constrained hosts.
 const TASK_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
+const TASK_COURIER_PREPARATION_BUDGET: Duration = Duration::from_secs(8);
+
+pub(crate) struct PreparationBudget {
+    deadline: tokio::time::Instant,
+}
+
+impl PreparationBudget {
+    pub(crate) fn for_sync_cycle() -> Self {
+        Self::new(TASK_COURIER_PREPARATION_BUDGET)
+    }
+
+    fn new(duration: Duration) -> Self {
+        Self { deadline: tokio::time::Instant::now() + duration }
+    }
+
+    pub(super) fn exhausted(&self) -> bool {
+        tokio::time::Instant::now() >= self.deadline
+    }
+
+    fn next_timeout(&self) -> Option<Duration> {
+        let remaining = self.deadline.saturating_duration_since(tokio::time::Instant::now());
+        (!remaining.is_zero()).then_some(remaining.min(TASK_PREPARATION_TIMEOUT))
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum Preparation<T> {
+    Ready(T),
+    Deferred,
+}
 
 pub(super) async fn await_preparation<T>(
     future: impl Future<Output = Result<T, SdkError>>,
+    budget: &PreparationBudget,
     deferred: &'static str,
-) -> Result<T, SdkError> {
-    tokio::time::timeout(TASK_PREPARATION_TIMEOUT, future)
-        .await
-        .map_err(|_| SdkError::InboundPending(deferred.into()))?
+) -> Result<Preparation<T>, SdkError> {
+    let Some(timeout) = budget.next_timeout() else {
+        return Ok(Preparation::Deferred);
+    };
+    if let Ok(result) = tokio::time::timeout(timeout, future).await {
+        result.map(Preparation::Ready)
+    } else {
+        tracing::debug!(deferred, "task courier preparation deferred without retry charge");
+        Ok(Preparation::Deferred)
+    }
 }
 
 #[derive(Clone)]
@@ -311,6 +348,7 @@ pub(super) async fn seal(
 /// Confirmation and same-root forwarding are bounded independently of inbound processing.
 pub(crate) async fn drain_confirmations(
     account: &mut LocalBusAccountState,
+    budget: &PreparationBudget,
 ) -> Result<usize, SdkError> {
     use crate::client::task::control::{AckJob, ForwardJob};
     let now = now_unix_timestamp();
@@ -323,8 +361,8 @@ pub(crate) async fn drain_confirmations(
             continue;
         }
         let c = job.ack.original()?;
-        let result = send_control(account, &c, Mode::Ack(&job.ack)).await;
-        if result.is_ok() {
+        let result = send_control(account, &c, Mode::Ack(&job.ack), budget).await;
+        if matches!(&result, Ok(Preparation::Ready(()))) {
             let original = job.ack.original()?;
             let hash = crate::client::task::certificate::carrier_hash(&original)?;
             account.client.account_db()?.persist_actor_state(
@@ -334,6 +372,10 @@ pub(crate) async fn drain_confirmations(
             account.client.account_db()?.prune_task_diagnostics("task/ack_sent/", 1024)?;
             account.client.account_db()?.delete_task_state(&key)?;
             sent += 1;
+        } else if matches!(&result, Ok(Preparation::Deferred)) {
+            if budget.exhausted() {
+                break;
+            }
         } else {
             job.attempts += 1;
             job.next_at = now.saturating_add(2_i64.pow(job.attempts.min(6)));
@@ -352,10 +394,14 @@ pub(crate) async fn drain_confirmations(
         }
         let history = account.client.task_history(&job.conversation_id, &job.task_id)?;
         if let Some(last) = history.events.last() {
-            let result = send_control(account, &last.carrier, Mode::Own).await;
-            if result.is_ok() {
+            let result = send_control(account, &last.carrier, Mode::Own, budget).await;
+            if matches!(&result, Ok(Preparation::Ready(()))) {
                 account.client.account_db()?.delete_task_state(&key)?;
                 sent += 1;
+            } else if matches!(&result, Ok(Preparation::Deferred)) {
+                if budget.exhausted() {
+                    break;
+                }
             } else {
                 job.attempts += 1;
                 job.next_at = now.saturating_add(2_i64.pow(job.attempts.min(6)));
@@ -371,7 +417,8 @@ pub(super) async fn send_control(
     account: &mut LocalBusAccountState,
     c: &Carrier,
     mode: Mode<'_>,
-) -> Result<(), SdkError> {
+    budget: &PreparationBudget,
+) -> Result<Preparation<()>, SdkError> {
     let thread = account
         .client
         .account_db()?
@@ -380,18 +427,21 @@ pub(super) async fn send_control(
     let mut engine = account.take_live_engine().await?;
     let result = await_preparation(
         prepare(account, &mut engine, c, &thread, mode),
+        budget,
         "task confirmation preparation deferred",
     )
     .await;
     account.put_engine(engine);
-    let deliveries = result?;
+    let Preparation::Ready(deliveries) = result? else {
+        return Ok(Preparation::Deferred);
+    };
     super::super::task_delivery::submit_until(
         account,
         deliveries,
         tokio::time::Instant::now() + Duration::from_secs(1),
     )
     .await?;
-    Ok(())
+    Ok(Preparation::Ready(()))
 }
 
 pub(super) async fn direct_targets(
@@ -437,8 +487,7 @@ pub(super) async fn direct_targets(
             .recipient_prekey_url
             .as_deref()
             .ok_or_else(|| invalid("task federated peer prekey URL missing"))?;
-        let manifest =
-            crate::client::contact::fetch_verified_device_manifest_from_url(url, commitment)?;
+        let manifest = fetch_federated_manifest(url, commitment).await?;
         client.persist_identity_directory(&manifest)?;
         manifest
     } else {
@@ -460,6 +509,19 @@ pub(super) async fn direct_targets(
             })
         })
         .collect::<Result<_, SdkError>>()
+}
+
+async fn fetch_federated_manifest(
+    url: &str,
+    commitment: &str,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let url = url.to_owned();
+    let commitment = commitment.to_owned();
+    tokio::task::spawn_blocking(move || {
+        crate::client::contact::fetch_verified_device_manifest_from_url(&url, &commitment)
+    })
+    .await
+    .map_err(|error| SdkError::LocalBus(format!("federated manifest worker failed: {error}")))?
 }
 
 pub(super) async fn own_targets(

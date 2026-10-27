@@ -100,15 +100,22 @@ async fn run_with_receive_clock(
             0
         }
     };
-    let approvals = match super::dispatch::task_approval::drive(account).await {
-        Ok(n) => n,
-        Err(error) => {
-            tracing::warn!(%error,"task approval delivery deferred");
-            0
-        }
+    let task_preparation = super::dispatch::task_transport::PreparationBudget::for_sync_cycle();
+    let approvals =
+        match super::dispatch::task_approval::drive_with_budget(account, &task_preparation).await {
+            Ok(n) => n,
+            Err(error) => {
+                tracing::warn!(%error,"task approval delivery deferred");
+                0
+            }
     };
     let tasks_applied = account.client.retry_pending_tasks(now_unix_timestamp())?;
-    let task_sent = match super::dispatch::task_transport::drain_confirmations(account).await {
+    let task_sent = match super::dispatch::task_transport::drain_confirmations(
+        account,
+        &task_preparation,
+    )
+    .await
+    {
         Ok(n) => n,
         Err(error) => {
             tracing::warn!(%error,"task confirmation deferred");
