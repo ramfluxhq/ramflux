@@ -352,13 +352,7 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
         discovery: admin.discovery.clone(),
     };
     let active = Arc::new(AtomicUsize::new(0));
-    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(
-        8,
-        100,
-        100,
-        32,
-        Duration::from_secs(30),
-    ));
+    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(8, 16, 32));
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut first = TcpStream::connect(listener.local_addr()?)?;
     let (stream, _) = listener.accept()?;
@@ -425,13 +419,9 @@ fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers(
         discovery: admin.discovery.clone(),
     };
     let active = Arc::new(AtomicUsize::new(0));
-    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(
-        1,
-        1,
-        1,
-        32,
-        Duration::from_secs(30),
-    ));
+    let source_limits = PublicSourceLimits::new(
+        PublicSourceLimitConfig::for_test(1, 16, 32).with_request_rate(1, 1),
+    );
     let listener = TcpListener::bind("127.0.0.1:0")?;
 
     let mut first = TcpStream::connect(listener.local_addr()?)?;
@@ -498,6 +488,92 @@ fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers(
         response.split_once("\r\n\r\n").ok_or("missing response body")?.1,
         "too many requests"
     );
+
+    drop(admin);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn source_slot_releases_after_error_and_timeout_and_full_idle_table_admits() -> TestResult {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    let root = temp_cert_root("http-source-release")?;
+    let admin = context(&root)?;
+    let public = FederationPublicHttpContext {
+        router: admin.router.clone(),
+        discovery: admin.discovery.clone(),
+    };
+    let active = Arc::new(AtomicUsize::new(0));
+    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(1, 16, 4));
+    let limits = ramflux_node_core::HttpRequestLimits {
+        request_timeout: Duration::from_millis(100),
+        ..crate::http_limits::defaults(true)
+    };
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+
+    let mut malformed = TcpStream::connect(listener.local_addr()?)?;
+    malformed.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    let worker = crate::public_http::spawn_public_connection(
+        stream,
+        public.clone(),
+        active.clone(),
+        8,
+        limits,
+        &source_limits,
+    )
+    .ok_or("malformed request connection refused")?;
+    malformed.write_all(b"GET /healthz HTTP/1.1\r\nContent-Length: -1\r\n\r\n")?;
+    worker.join().map_err(|_| "worker panicked")?;
+    let mut response = String::new();
+    malformed.read_to_string(&mut response)?;
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+
+    let mut trickler = TcpStream::connect(listener.local_addr()?)?;
+    trickler.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    let worker = crate::public_http::spawn_public_connection(
+        stream,
+        public.clone(),
+        active.clone(),
+        8,
+        limits,
+        &source_limits,
+    )
+    .ok_or("source slot not released after request error")?;
+    trickler.write_all(b"G")?;
+    worker.join().map_err(|_| "worker panicked")?;
+    response.clear();
+    trickler.read_to_string(&mut response)?;
+    assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+
+    let now = Instant::now();
+    for third in 1..=8_u8 {
+        let source = IpAddr::V4(Ipv4Addr::new(198, 51, third, 1));
+        drop(source_limits.acquire_connection(source, now).map_err(|error| format!("{error:?}"))?);
+    }
+    assert_eq!(source_limits.tracked_sources(), 4);
+
+    let mut healthy = TcpStream::connect(listener.local_addr()?)?;
+    healthy.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    let worker = crate::public_http::spawn_public_connection(
+        stream,
+        public,
+        active,
+        8,
+        limits,
+        &source_limits,
+    )
+    .ok_or("full idle table refused a new real source")?;
+    healthy.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+    worker.join().map_err(|_| "worker panicked")?;
+    response.clear();
+    healthy.read_to_string(&mut response)?;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
     drop(admin);
     std::fs::remove_dir_all(root)?;

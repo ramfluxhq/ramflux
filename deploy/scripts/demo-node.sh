@@ -202,7 +202,28 @@ runtime() { clean_env "$container_engine" "$@"; }
 check_prebuilt_images() {
   clean_env python3 "$script_dir/demo-image-check.py" "$container_engine" "${1:-$DEMO_VERSION}"
 }
-
+RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on
+if [ "$container_engine" = podman ]; then
+  rootless_network_mode=$(runtime info --format json | python3 -c '
+import json
+import sys
+data = json.load(sys.stdin)
+host = data.get("host") or data.get("Host") or {}
+security = host.get("security") or host.get("Security") or {}
+if not bool(security.get("rootless", security.get("Rootless", False))):
+    print("rootful")
+else:
+    print(str(host.get("rootlessNetworkCmd") or host.get("RootlessNetworkCmd") or "unknown").lower())
+') || fail 'cannot determine the rootless Podman network mode'
+  case "$rootless_network_mode" in
+    rootful|pasta) RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on ;;
+    rootlessport|slirp4netns|unknown)
+      RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=off
+      printf 'warning: per-source federation limits disabled because rootless Podman mode %s does not preserve client source addresses\n' "$rootless_network_mode" >&2
+      ;;
+    *) fail 'unsupported rootless Podman network mode' ;;
+  esac
+fi
 check_resources() {
   for kind in container volume network; do
     case "$kind" in
@@ -489,7 +510,11 @@ RAMFLUX_FEDERATION_PUBLIC_PORT=$DEMO_BIND_ADDR:$DEMO_HTTP_PORT
 RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=$DEMO_ADMIN_LOOPBACK_PORT
 RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS=$RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS
 RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS=$RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS
+RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=$RAMFLUX_FEDERATION_PER_SOURCE_LIMITS
 RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS_PER_SOURCE=${RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS_PER_SOURCE:-8}
+RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS_PER_PREFIX=${RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS_PER_PREFIX:-16}
+RAMFLUX_FEDERATION_PUBLIC_CONNECTION_RATE_PER_SECOND=${RAMFLUX_FEDERATION_PUBLIC_CONNECTION_RATE_PER_SECOND:-20}
+RAMFLUX_FEDERATION_PUBLIC_CONNECTION_BURST=${RAMFLUX_FEDERATION_PUBLIC_CONNECTION_BURST:-40}
 RAMFLUX_FEDERATION_PUBLIC_REQUEST_RATE_PER_SECOND=${RAMFLUX_FEDERATION_PUBLIC_REQUEST_RATE_PER_SECOND:-20}
 RAMFLUX_FEDERATION_PUBLIC_REQUEST_BURST=${RAMFLUX_FEDERATION_PUBLIC_REQUEST_BURST:-40}
 RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY=${RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY:-4096}
