@@ -42,8 +42,11 @@ if args[:2] == ["image", "inspect"]:
     print("[]")
     sys.exit(0)
 if args == ["info", "--format", "json"]:
-    mode = control.get("rootless_network_mode", "pasta")
-    print(json.dumps({"host": {"security": {"rootless": True}, "rootlessNetworkCmd": mode}}))
+    print(json.dumps({"host": {
+        "security": {"rootless": control.get("rootless", provider != "docker")},
+        "serviceIsRemote": control.get("service_is_remote", False),
+        "os": control.get("host_os", "linux"),
+    }}))
     sys.exit(0)
 
 state = root / "data"
