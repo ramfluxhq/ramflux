@@ -7,10 +7,12 @@ use super::actor::{AccountActor, AccountCommand, ActorResponse};
 use super::events::EventBatch;
 use crate::prelude::*;
 use std::cell::RefCell;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(super) struct Supervisor {
     pub(super) config: LocalBusConfig,
+    pub(super) root_lease: RefCell<Option<Arc<super::data_root_lock::DataRootLock>>>,
     owner: RefCell<std::rc::Weak<Supervisor>>,
     pub(super) index: AccountIndex,
     nodes: RefCell<crate::node::NodeStore>,
@@ -46,6 +48,7 @@ impl Supervisor {
             events.clone(),
         )?;
         let supervisor = Rc::new(Self {
+            root_lease: RefCell::new(None),
             owner: RefCell::new(std::rc::Weak::new()),
             backup_jobs: super::backup_jobs::BackupJobs::new(&config.data_root, index.clone())?,
             daemon_attended: RefCell::new(BTreeSet::default()),

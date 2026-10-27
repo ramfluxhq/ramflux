@@ -11,6 +11,7 @@ mod connection;
 mod control_state;
 pub(crate) mod custody_setup;
 pub mod daemon;
+mod data_root_lock;
 mod delivery_receipts;
 pub mod dispatch;
 mod events;
@@ -56,3 +57,6 @@ pub(crate) use readers::test_account_reader_request;
 
 #[cfg(test)]
 mod custody_setup_tests;
+
+#[cfg(test)]
+mod custody_daemon_tests;

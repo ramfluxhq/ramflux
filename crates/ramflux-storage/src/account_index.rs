@@ -335,3 +335,6 @@ fn add_local_account_column_if_missing(
     ))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod reservation_tests;

@@ -73,12 +73,13 @@ pub(super) async fn respond(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
+    lease: Option<Arc<super::data_root_lock::DataRootLock>>,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
     if request.request_id.len() > crate::custody::SETUP_REQUEST_ID_BYTES {
         *ceremony = None;
         return Err(SdkError::CustodySetupInvalid);
     }
-    let result = apply(request, config, ceremony).await;
+    let result = apply(request, config, ceremony, lease).await;
     // Every failed request consumes the pending ceremony, without word-level feedback.
     let result = match result {
         Ok(body) => body,
@@ -118,6 +119,7 @@ async fn apply(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
+    lease: Option<Arc<super::data_root_lock::DataRootLock>>,
 ) -> Result<ResultBody, SdkError> {
     let capability = CreationCapability::from_config(config)?;
     super::requests::deadline(request)?;
@@ -184,6 +186,7 @@ async fn apply(
             let vault = primary_vault(config);
             let confirmed_at = now()?;
             let account = tokio::task::spawn_blocking(move || {
+                let _root_lease = lease;
                 pending.confirm(&words, vault.as_ref(), confirmed_at)
             })
             .await

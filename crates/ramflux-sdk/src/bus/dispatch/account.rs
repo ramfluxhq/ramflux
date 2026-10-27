@@ -172,7 +172,7 @@ pub(crate) async fn local_bus_account_create(
             "account creation requires reconciliation: index exists without a manifest".to_owned(),
         ));
     }
-    client.create_account(&body.local_account_id, &body.principal_commitment)?;
+    client.account_index()?.reserve_account(&body.local_account_id, &body.principal_commitment)?;
     if state.account_index.is_none() {
         client.set_active_account(&body.local_account_id)?;
     }

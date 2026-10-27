@@ -13,6 +13,7 @@ pub(super) async fn serve(
 ) -> Result<(), SdkError> {
     std::fs::create_dir_all(&config.data_root)?;
     set_owner_only_dir_permissions(&config.data_root)?;
+    let root_lease = super::data_root_lock::DataRootLock::acquire(&config.data_root)?;
     crate::custody::reconcile_incomplete_markers(&config.data_root)?;
     let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
     if let Some(parent) = config.socket_path.parent() {
@@ -25,6 +26,7 @@ pub(super) async fn serve(
     set_owner_only_file_permissions(&config.socket_path)?;
     let uid = std::fs::metadata(&config.socket_path)?.uid();
     let supervisor = Supervisor::new(config)?;
+    *supervisor.root_lease.borrow_mut() = Some(root_lease);
     let mut background = JoinSet::new();
     supervisor.hydrate(&mut background)?;
     let result = accept(listener, uid, supervisor, shutdown).await;
@@ -127,7 +129,8 @@ pub(super) async fn handle(
                     },
                 };
                 if super::custody_setup::handles(&incoming.frame()?.method) {
-                    let bytes = super::custody_setup::respond(incoming.frame()?, &supervisor.config, &mut ceremony).await?;
+                    let lease = supervisor.root_lease.borrow().clone();
+                    let bytes = super::custody_setup::respond(incoming.frame()?, &supervisor.config, &mut ceremony, lease).await?;
                     tokio::time::timeout(Duration::from_secs(10),secrets.send(bytes)).await.map_err(|_|closed())?.map_err(|_|closed())?;
                     continue;
                 }
