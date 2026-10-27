@@ -6,6 +6,7 @@ mod lease;
 #[cfg(test)]
 mod native_tests;
 pub(crate) mod state;
+use crate::client::identity_authority::NativeOperation;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use ramflux_protocol::{CallControl, CallEndpoint, CallRow};
 use serde_json::json;
@@ -62,6 +63,7 @@ impl RamfluxClient {
     }
     pub(crate) fn call_local_endpoint(&self) -> Result<CallEndpoint, SdkError> {
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Call)?;
         Ok(CallEndpoint {
             principal_id: device.principal_id.clone(),
             device_id: device.device_id.clone(),
@@ -115,6 +117,7 @@ impl RamfluxClient {
             return Err(invalid("envelope binding"));
         }
         let identity = self.call_device_identity(&c.sender)?;
+        self.require_native_operation(&identity, NativeOperation::Call)?;
         let sender = self.trusted_device(&identity)?;
         if sender["principal_id"] != c.sender.principal_id {
             return Err(invalid("sender principal differs from root authority"));

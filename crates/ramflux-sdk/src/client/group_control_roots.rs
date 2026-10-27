@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Signed group root context and bounded provenance for legacy invite/accept resolution.
+use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 use ramflux_protocol::{
     GroupDeviceRoots, GroupEvent, GroupEventBody, group_event_member, parse_qualified_device_id,
@@ -195,6 +196,7 @@ impl RamfluxClient {
         group: &str,
     ) -> Result<String, SdkError> {
         let actor_identity = self.group_control_actor_identity(event, group)?;
+        self.require_native_operation(&actor_identity, NativeOperation::Group)?;
         let actor = actor_identity.storage_key().to_owned();
         let public = if let GroupEventBody::MemberAccepted { invite_id, invitee_identity, .. } =
             &event.body
