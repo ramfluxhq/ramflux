@@ -5,6 +5,45 @@
 use crate::ContactReason;
 use crate::prelude::*;
 impl RamfluxClient {
+    pub(crate) fn resolve_contact_safety(
+        &self,
+        identity: &mut serde_json::Value,
+        own: &SdkDeviceManifestResponse,
+        peer: &SdkDeviceManifestResponse,
+        verification: Option<&SdkContactSafetyNumber>,
+        device: &str,
+    ) -> Result<(), SdkError> {
+        let own_material = super::contact::contact_safety_material_from_manifest(own)?;
+        let peer_material = super::contact::contact_safety_material_from_manifest(peer)?;
+        self.capture_contact_safety(
+            identity,
+            &peer.principal_commitment,
+            &own_material,
+            &peer_material,
+        )?;
+        if let Some(safety) = verification {
+            self.commit_contact_safety(safety, &own_material, &peer_material, device)?;
+            identity["root_source"] = serde_json::json!(crate::ContactRootSource::Verified);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn capture_contact_safety(
+        &self,
+        identity: &mut serde_json::Value,
+        peer: &str,
+        own_material: &ramflux_crypto::ContactSafetyMaterial,
+        peer_material: &ramflux_crypto::ContactSafetyMaterial,
+    ) -> Result<(), SdkError> {
+        let (number, version) = if self.born_v3_account.is_some() {
+            (self.native_safety_number(peer)?.safety_number, 2)
+        } else {
+            (ramflux_crypto::safety_number(own_material, peer_material), 1)
+        };
+        identity["safety_number"] = serde_json::json!(number);
+        identity["safety_number_algorithm_version"] = serde_json::json!(version);
+        Ok(())
+    }
     pub(crate) fn commit_contact_safety(
         &self,
         safety: &SdkContactSafetyNumber,
@@ -12,6 +51,22 @@ impl RamfluxClient {
         peer: &ramflux_crypto::ContactSafetyMaterial,
         device: &str,
     ) -> Result<(), SdkError> {
+        if self.born_v3_account.is_some() {
+            let current = self.native_safety_number(&safety.contact_identity_commitment)?;
+            if safety.algorithm_version != 2
+                || safety.self_identity_commitment != current.self_identity_commitment
+                || safety.safety_number_hash != current.safety_number_hash
+                || safety.contact_device_set_hash != current.contact_device_set_hash
+            {
+                return Err(ContactReason::RootConflict.into());
+            }
+            self.record_contact_safety_verified(
+                &safety.contact_identity_commitment,
+                device,
+                &current,
+            )?;
+            return Ok(());
+        }
         let hash =
             ramflux_protocol::encode_base64url(ramflux_crypto::safety_fingerprint(own, peer));
         let device_set =
@@ -39,10 +94,7 @@ impl RamfluxClient {
         {
             return Err(ContactReason::RootConflict.into());
         }
-        let own = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let own_root = identity_root_public_key_commitment(&ramflux_protocol::encode_base64url(
-            own.signing_key.verifying_key().to_bytes(),
-        ))?;
+        let own_root = self.own_account_anchor()?;
         let fetch = |root: String| async move {
             let manifest: Option<SdkDeviceManifestResponse> =
                 sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
@@ -58,10 +110,28 @@ impl RamfluxClient {
             return Err(ContactReason::RootConflict.into());
         }
         let own = fetch(own_root.clone()).await?;
+        if self.born_v3_account.is_some() {
+            let verify = |manifest: &SdkDeviceManifestResponse| -> Result<_, SdkError> {
+                let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
+                Ok(ramflux_crypto::custody::verify_publication(
+                    &ramflux_protocol::custody::CustodyAuthority {
+                        publication: native.publication.clone(),
+                        custodian_publication: native.custodian_publication.clone(),
+                    },
+                    crate::custody::network_now()?,
+                )?)
+            };
+            return super::native_safety::safety_from_native(
+                &verify(&own)?,
+                &verify(&peer)?,
+                "unverified".into(),
+            );
+        }
         let a = super::contact::contact_safety_material_from_manifest(&own)?;
         let b = super::contact::contact_safety_material_from_manifest(&peer)?;
         let fingerprint = ramflux_crypto::safety_fingerprint(&a, &b);
         Ok(SdkContactSafetyNumber {
+            algorithm_version: 1,
             contact_identity_commitment: root.into(),
             self_identity_commitment: own_root,
             safety_number: ramflux_crypto::safety_number(&a, &b),

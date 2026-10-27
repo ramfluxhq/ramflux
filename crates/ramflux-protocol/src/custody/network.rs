@@ -48,11 +48,29 @@ pub enum CustodySessionAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodyClientFrame {
-    CustodyOpen { binding_mode: BindingMode },
-    NodeIdentity { record_hash: Option<String> },
-    Challenge { device_ref: DeviceRef, action: CustodyProofAction },
-    Prove { action: CustodyProofAction, proof: Box<Envelope<BranchProofV3>> },
-    Request { session_id: String, request: Box<crate::SignedRequest>, action: CustodySessionAction },
+    CustodyOpen {
+        binding_mode: BindingMode,
+    },
+    NodeIdentity {
+        record_hash: Option<String>,
+    },
+    Challenge {
+        device_ref: DeviceRef,
+        action: CustodyProofAction,
+    },
+    Prove {
+        action: CustodyProofAction,
+        proof: Box<Envelope<BranchProofV3>>,
+    },
+    Request {
+        session_id: String,
+        request: Box<crate::SignedRequest>,
+        action: CustodySessionAction,
+    },
+    /// Switch this authenticated connection into the ordinary gateway session protocol.
+    GatewayHandoff {
+        session_id: String,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +110,13 @@ pub struct CustodyPeer {
     pub device_ref: DeviceRef,
     pub target_delivery_id: String,
     pub prekey_bundle: Value,
+}
+/// Signed native account evidence, independently checked against the caller's durable pins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustodyAuthority {
+    pub publication: Publication,
+    pub custodian_publication: Option<Publication>,
 }
 /// Complete v3 directory evidence and the currently registered branch prekeys.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

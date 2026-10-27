@@ -50,28 +50,8 @@ pub struct SdkPrekeyResponse {
     pub(crate) target_delivery_id: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct SdkDeviceManifestEntry {
-    pub(crate) principal_id: String,
-    pub(crate) principal_commitment: String,
-    pub(crate) device_id: String,
-    pub(crate) device_epoch: u64,
-    pub(crate) branch_public_key: String,
-    pub(crate) target_delivery_id: String,
-    pub(crate) branch_proof: BranchProofDocument,
-    pub(crate) prekey_bundle: ramflux_crypto::PrekeyBundle,
-    pub(crate) branch_authorized_event_id: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct SdkDeviceManifestResponse {
-    #[serde(default)]
-    pub(crate) signed_device_set: Option<ramflux_protocol::SignedDeviceSetRecord>,
-    pub(crate) principal_id: String,
-    pub(crate) principal_commitment: String,
-    pub(crate) root_public_key: String,
-    pub(crate) devices: Vec<SdkDeviceManifestEntry>,
-}
+mod manifest;
+pub(crate) use manifest::{SdkDeviceManifestEntry, SdkDeviceManifestResponse};
 
 pub fn identity_root_public_key_commitment(root_public_key: &str) -> Result<String, SdkError> {
     let root_public_key_bytes = ramflux_protocol::decode_base64url(root_public_key)
@@ -208,6 +188,15 @@ where
     Ok(serde_json::from_value(response.body)?)
 }
 
+fn native_directory_request(
+    config: &GatewaySessionConfig,
+    request: &ramflux_transport::GatewayQuicRequest,
+) -> bool {
+    config.custody.is_some()
+        && request.method == "GET"
+        && request.path.starts_with("/mvp1/device-manifest/")
+}
+
 async fn sdk_quic_gateway_request(
     config: &GatewaySessionConfig,
     request: &ramflux_transport::GatewayQuicRequest,
@@ -222,6 +211,20 @@ async fn sdk_quic_gateway_request(
     )
     .await?;
     client.set_session_timeout(config.timeout);
+    if native_directory_request(config, request) {
+        let mut stream = client.open_bidi_stream().await?;
+        return tokio::time::timeout(timeout, async {
+            ramflux_transport::write_gateway_session_json(&mut stream, request).await?;
+            let bytes =
+                ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(&mut stream)
+                    .await?;
+            Ok(ramflux_protocol::parse_i_json(&bytes)?)
+        })
+        .await
+        .map_err(|_| {
+            SdkError::GatewaySessionRejected("native directory request timed out".into())
+        })?;
+    }
     Ok(client.request(request).await?)
 }
 
@@ -243,6 +246,12 @@ async fn sdk_tcp_tls_gateway_request(
         )
         .await?;
         ramflux_transport::write_gateway_session_json(&mut stream, request).await?;
+        if native_directory_request(config, request) {
+            let bytes =
+                ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(&mut stream)
+                    .await?;
+            return Ok(ramflux_protocol::parse_i_json(&bytes)?);
+        }
         Ok(ramflux_transport::read_gateway_session_json(&mut stream).await?)
     })
     .await

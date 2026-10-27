@@ -103,6 +103,7 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
     )?;
     let endpoint = server.local_addr()?.to_string();
     let expected = ramflux_node_core::DeviceManifestResponse {
+        custody: None,
         signed_device_set: None,
         principal_id: "bob".into(),
         principal_commitment: "bob-root".into(),

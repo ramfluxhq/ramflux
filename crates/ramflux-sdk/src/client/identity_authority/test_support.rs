@@ -13,11 +13,12 @@ pub(crate) fn sign_manifest(
     let kind = manifest
         .devices
         .first()
-        .and_then(|d| d.branch_proof.key_binding.as_ref())
+        .and_then(|d| d.branch_proof.as_ref())
+        .and_then(|proof| proof.key_binding.as_ref())
         .map_or(PrincipalKind::Human, |b| b.principal_kind);
     let mut entries = Vec::new();
     for device in &mut manifest.devices {
-        device.branch_proof.key_binding = Some(DeviceKeyBinding {
+        device.legacy_proof_mut()?.key_binding = Some(DeviceKeyBinding {
             version: 2,
             principal_kind: kind,
             branch_signing_public_key: device.branch_public_key.clone(),
@@ -25,8 +26,8 @@ pub(crate) fn sign_manifest(
                 device.prekey_bundle.identity_key,
             ),
         });
-        device.branch_proof.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-            &ramflux_crypto::branch_proof_signing_bytes(&device.branch_proof)?,
+        device.legacy_proof_mut()?.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+            &ramflux_crypto::branch_proof_signing_bytes(device.legacy_proof()?)?,
             root.signing_key.to_bytes(),
         );
         let keys = ramflux_crypto::device_key_commitments(
@@ -60,6 +61,7 @@ pub(crate) fn manifest(client: &RamfluxClient) -> Result<SdkDeviceManifestRespon
     let commitment = ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key());
     let now = crate::prelude::now_unix_timestamp();
     let mut manifest = SdkDeviceManifestResponse {
+        custody: None,
         signed_device_set: None,
         principal_id: device.principal_id.clone(),
         principal_commitment: commitment.clone(),
@@ -75,12 +77,12 @@ pub(crate) fn manifest(client: &RamfluxClient) -> Result<SdkDeviceManifestRespon
                 device.signing_key.verifying_key().to_bytes(),
             ),
             target_delivery_id: device.device_id.clone(),
-            branch_proof: client.authorize_current_device(
+            branch_proof: Some(client.authorize_current_device(
                 "ramflux-node",
                 vec!["device.delivery.bind".into()],
                 now,
                 now.saturating_add(3600),
-            )?,
+            )?),
             prekey_bundle: client
                 .load_x3dh_private_state(&client.local_device_identity(&device.device_id)?)?
                 .bundle,
@@ -140,6 +142,7 @@ pub(crate) fn remote_manifest(
     let commitment = ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key());
     let now = crate::prelude::now_unix_timestamp();
     let mut manifest = SdkDeviceManifestResponse {
+        custody: None,
         principal_id: principal.into(),
         principal_commitment: commitment.clone(),
         root_public_key: ramflux_protocol::encode_base64url(
@@ -156,7 +159,7 @@ pub(crate) fn remote_manifest(
             ),
             target_delivery_id: format!("delivery-{name}"),
             branch_authorized_event_id: format!("authorized:{name}"),
-            branch_proof: ramflux_crypto::authorize_device_branch_v2(
+            branch_proof: Some(ramflux_crypto::authorize_device_branch_v2(
                 &root,
                 &branch,
                 ramflux_crypto::BranchAuthorization {
@@ -167,7 +170,7 @@ pub(crate) fn remote_manifest(
                     principal_kind: PrincipalKind::Human,
                     agreement_identity_public_key: identity.public,
                 },
-            )?,
+            )?),
             prekey_bundle: ramflux_crypto::create_prekey_bundle(
                 &branch, &identity, "signed", &signed, None, None,
             )?,

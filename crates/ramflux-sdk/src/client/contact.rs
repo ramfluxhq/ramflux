@@ -49,6 +49,10 @@ impl RamfluxClient {
         &self,
         contact_identity_commitment: &str,
     ) -> Result<SdkContactSafetyNumber, SdkError> {
+        if self.born_v3_account.is_some() {
+            self.require_native_safety_link(contact_identity_commitment)?;
+            return self.native_safety_number(contact_identity_commitment);
+        }
         let material = self.contact_safety_material_pair(contact_identity_commitment)?;
         let fingerprint =
             ramflux_crypto::safety_fingerprint(&material.self_material, &material.contact_material);
@@ -60,6 +64,7 @@ impl RamfluxClient {
             Some(&ramflux_protocol::encode_base64url(device_set_hash)),
         )?;
         Ok(SdkContactSafetyNumber {
+            algorithm_version: 1,
             contact_identity_commitment: contact_identity_commitment.to_owned(),
             self_identity_commitment: material.self_identity_commitment,
             safety_number,
@@ -83,6 +88,18 @@ impl RamfluxClient {
         gateway: &GatewaySessionConfig,
         contact_identity_commitment: &str,
     ) -> Result<SdkContactSafetyNumber, SdkError> {
+        if self.born_v3_account.is_some() {
+            self.require_native_safety_link(contact_identity_commitment)?;
+            let own = self.own_account_anchor()?;
+            self.cache_verified_device_manifest(gateway, &own, "contact.safety_number").await?;
+            self.cache_verified_device_manifest(
+                gateway,
+                contact_identity_commitment,
+                "contact.safety_number",
+            )
+            .await?;
+            return self.native_safety_number(contact_identity_commitment);
+        }
         let material = self
             .contact_safety_material_pair_via_gateway(gateway, contact_identity_commitment)
             .await?;
@@ -96,6 +113,7 @@ impl RamfluxClient {
             Some(&ramflux_protocol::encode_base64url(device_set_hash)),
         )?;
         Ok(SdkContactSafetyNumber {
+            algorithm_version: 1,
             contact_identity_commitment: contact_identity_commitment.to_owned(),
             self_identity_commitment: material.self_identity_commitment,
             safety_number,
@@ -116,6 +134,9 @@ impl RamfluxClient {
         commitment: &str,
         device_set_hash: Option<&str>,
     ) -> Result<String, SdkError> {
+        if let Some(state) = self.native_safety_verification_state(commitment)? {
+            return Ok(state);
+        }
         super::contact_verification::verification_state(
             self.account_db()?,
             commitment,
@@ -410,6 +431,20 @@ impl RamfluxClient {
                 verified_at: now_unix_timestamp(),
                 verified_by_device_id,
             })?;
+            if let Some(authority) = self.current_custody_authority(
+                contact_identity_commitment,
+                crate::custody::network_now()?,
+            )? {
+                let current = super::identity_authority::native_authority_fingerprint(&authority)?;
+                if safety.algorithm_version != 2 || safety.contact_device_set_hash != current {
+                    return Err(SdkError::ContactInput(crate::ContactReason::RootConflict));
+                }
+                self.account_db()?.persist_actor_state(
+                    &format!("identity/safety_verified_set/{contact_identity_commitment}"),
+                    &current,
+                )?;
+                return Ok(result);
+            }
             if let Some(record) = self.observed_device_set(contact_identity_commitment)? {
                 self.account_db()?.persist_actor_state(
                     &format!("identity/safety_verified_set/{contact_identity_commitment}"),
@@ -899,6 +934,7 @@ impl RamfluxClient {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SdkContactSafetyNumber {
+    pub algorithm_version: u32,
     pub contact_identity_commitment: String,
     pub self_identity_commitment: String,
     pub safety_number: Vec<String>,
@@ -1177,6 +1213,7 @@ mod tests {
             None,
         )?;
         let mut manifest = SdkDeviceManifestResponse {
+            custody: None,
             signed_device_set: None,
             principal_id: principal_id.to_owned(),
             principal_commitment: principal_commitment.clone(),
@@ -1188,7 +1225,7 @@ mod tests {
                 device_epoch: 1,
                 branch_public_key,
                 target_delivery_id: format!("target_{device_id}"),
-                branch_proof,
+                branch_proof: Some(branch_proof),
                 prekey_bundle,
                 branch_authorized_event_id: format!("device.branch_authorized:{device_id}:1"),
             }],
@@ -1230,7 +1267,7 @@ mod tests {
             [0x34; 32],
         )?;
         let expected = manifest.principal_commitment.clone();
-        manifest.devices[0].branch_proof.signature = "tampered".to_owned();
+        manifest.devices[0].legacy_proof_mut()?.signature = "tampered".to_owned();
 
         assert!(verify_device_manifest(&manifest, &expected).is_err());
         Ok(())

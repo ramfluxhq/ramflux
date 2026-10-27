@@ -202,6 +202,7 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
         None,
     )?;
     let mut manifest = crate::prekey::SdkDeviceManifestResponse {
+        custody: None,
         signed_device_set: None,
         principal_id: "alice".into(),
         principal_commitment: commitment.clone(),
@@ -215,7 +216,7 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
                 branch.signing_key.verifying_key().to_bytes(),
             ),
             target_delivery_id: "alice-new-target".into(),
-            branch_proof: proof,
+            branch_proof: Some(proof),
             prekey_bundle: bundle,
             branch_authorized_event_id: "alice-new:authorized".into(),
         }],

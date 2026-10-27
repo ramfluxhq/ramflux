@@ -44,9 +44,7 @@ impl RamfluxClient {
             object_id: object_id.to_owned(),
             conversation_id: conversation.to_owned(),
             recipient_device_id: remote.to_owned(),
-            source_principal_commitment: self.identity_root.as_ref().map(|root| {
-                ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key())
-            }),
+            source_principal_commitment: Some(self.own_account_anchor()?),
             x3dh: header,
             ciphertext,
         })

@@ -14,3 +14,5 @@ pub use push_route::*;
 #[cfg(test)]
 #[path = "submit_tests.rs"]
 mod submit_tests;
+mod custody;
+pub use custody::GatewayCustodyConfig;

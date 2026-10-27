@@ -4,17 +4,24 @@
 //! Request-scoped profile verification and warning-only public-name collision lookup.
 use super::{invalid, record_key};
 use crate::{RamfluxClient, SdkError};
-use ramflux_protocol::{
-    ActorType, DeviceSetStatus, PrincipalKind, SignedDeviceSetRecord, SignedIdentityProfile,
-};
+use ramflux_protocol::{ActorType, DeviceSetStatus, PrincipalKind, SignedDeviceSetRecord};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+/// Public profile facts authenticated by account authority; this is not a signed wire record.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct VerifiedIdentityProfile {
+    pub principal_id: String,
+    pub principal_commitment: String,
+    pub kind: PrincipalKind,
+    pub display_name: String,
+    pub epoch: u64,
+}
 #[derive(Clone)]
 pub(crate) struct VerifiedProfileFacts {
-    pub profile: SignedIdentityProfile,
+    pub profile: VerifiedIdentityProfile,
     active_devices: BTreeSet<String>,
 }
 impl VerifiedProfileFacts {
@@ -46,6 +53,45 @@ pub(crate) struct ProfileReadCache {
     #[cfg(test)]
     checks: usize,
 }
+fn native_profile_facts(
+    authority: &ramflux_crypto::custody::VerifiedRecord,
+    principal: &str,
+    commitment: &str,
+) -> Result<VerifiedProfileFacts, SdkError> {
+    let body = &authority.envelope().body;
+    if body.principal_id != principal {
+        return Err(invalid("native profile ownership mismatch"));
+    }
+    let now = crate::custody::network_now()?;
+    let active_devices = body
+        .devices
+        .iter()
+        .filter(|entry| {
+            authority
+                .authorize(
+                    &ramflux_protocol::custody::DeviceRef {
+                        account_anchor: commitment.into(),
+                        device_id: entry.device_id.clone(),
+                        device_epoch: entry.device_epoch,
+                    },
+                    "message",
+                    now,
+                )
+                .is_ok()
+        })
+        .map(|entry| entry.device_id.clone())
+        .collect();
+    Ok(VerifiedProfileFacts {
+        profile: VerifiedIdentityProfile {
+            principal_id: principal.into(),
+            principal_commitment: commitment.into(),
+            kind: body.principal_kind,
+            display_name: body.profile.display_name.clone(),
+            epoch: body.device_set_epoch,
+        },
+        active_devices,
+    })
+}
 type Slot = RefCell<Option<Box<ProfileReadCache>>>;
 struct Scope<'a> {
     slot: &'a Slot,
@@ -75,6 +121,12 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let Some(row) = db.client_record("identity", principal)? else { return Ok(None) };
         let Some(commitment) = row["contact_identity_commitment"].as_str() else { return Ok(None) };
+        if let Some(authority) =
+            self.current_custody_authority(commitment, crate::custody::network_now()?)?
+        {
+            return Ok(Some(Arc::new(native_profile_facts(&authority, principal, commitment)?)));
+        }
+
         let Some(record) = db.load_actor_state::<SignedDeviceSetRecord>(&record_key(commitment))?
         else {
             return Ok(None);
@@ -121,7 +173,13 @@ impl RamfluxClient {
         let result = ramflux_crypto::verify_signed_device_set(&public, &record)
             .map(|()| {
                 Arc::new(VerifiedProfileFacts {
-                    profile: profile.clone(),
+                    profile: VerifiedIdentityProfile {
+                        principal_id: profile.principal_id.clone(),
+                        principal_commitment: profile.principal_commitment.clone(),
+                        kind: profile.kind,
+                        display_name: profile.display_name.clone(),
+                        epoch: profile.epoch,
+                    },
                     active_devices: record
                         .devices
                         .iter()

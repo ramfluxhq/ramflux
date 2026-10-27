@@ -245,7 +245,25 @@ pub(super) fn persist(
 }
 
 impl BornAccount {
-    pub(super) fn credentials(
+    pub(crate) fn custodian_publication(
+        &self,
+        root: &Path,
+        now: u64,
+    ) -> Result<Option<ramflux_protocol::custody::Publication>, SdkError> {
+        self.stored
+            .custodian_account_id
+            .as_ref()
+            .map(|id| {
+                let human = load_account(root, id, now)?;
+                Ok(ramflux_protocol::custody::Publication {
+                    record: human.record().clone(),
+                    compacted_ids: None,
+                })
+            })
+            .transpose()
+    }
+
+    pub(crate) fn credentials(
         &self,
         vault: &dyn PrimaryVault,
         device_id: &str,
