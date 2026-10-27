@@ -25,7 +25,8 @@ impl Wire {
                     bundle: remote
                         .client
                         .load_x3dh_private_state(&remote.client.local_device_identity(&remote.id)?)?
-                        .bundle,
+                        .bundle
+                        .clone(),
                     responses: VecDeque::new(),
                     sent: sent.clone(),
                 }),
@@ -53,6 +54,8 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
                         bundle: Some(self.bundle.clone()),
                         principal_commitment: device_id.clone(),
                         target_delivery_id: Some(device_id),
+                        one_time_prekey_exhausted: false,
+                        available_one_time_prekeys: 8,
                     },
                 },
                 GatewayClientFrame::Submit { submit } => {
@@ -175,7 +178,8 @@ fn group_bootstrap(
     let bundle = receiver
         .client
         .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
-        .bundle;
+        .bundle
+        .clone();
     let (mut session, header, bundle) = sender.client.new_send_pair(
         &sender.client.local_device_identity(&sender.id)?,
         &message,

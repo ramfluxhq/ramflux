@@ -89,6 +89,7 @@ impl RamfluxClient {
             self.load_x3dh_private_state(&self.local_device_identity(own_device_id)?)?;
         let own_identity = X25519KeyPair::from_seed(own_state.identity_seed);
         let ephemeral = X25519KeyPair::random()?;
+        let initial_ratchet = X25519KeyPair::random()?;
         let bundle_hash = prekey_bundle_hash(&recipient_bundle)?;
         let initiator_device_id_hash = dm_device_id_hash(own_device_id);
         let recipient_device_id_hash = dm_device_id_hash(recipient_device_id);
@@ -110,14 +111,14 @@ impl RamfluxClient {
             recipient_bundle: &recipient_bundle,
             associated_data: &bootstrap_aad,
             prekey_bundle_hash: &bundle_hash,
-            initial_ratchet_public: ephemeral.public,
+            initial_ratchet_public: initial_ratchet.public,
         })?;
         let session = ramflux_crypto::DmSession::initiator_with_remote_ratchet(
             output.root_seed,
             initiator_device_id_hash,
             recipient_device_id_hash,
             output.bootstrap_transcript_hash,
-            &ephemeral,
+            &initial_ratchet,
             recipient_bundle.signed_prekey,
         )?;
         let header = SdkDmX3dhHeader {
@@ -126,6 +127,7 @@ impl RamfluxClient {
             bootstrap_envelope_id: None,
             initiator_identity_public: own_identity.public,
             initiator_ephemeral_public: ephemeral.public,
+            initiator_ratchet_public: initial_ratchet.public,
             initiator_device_id_hash,
             recipient_device_id_hash,
             recipient_device_id: recipient_device_id.to_owned(),
@@ -159,9 +161,10 @@ impl RamfluxClient {
         header: &SdkDmX3dhHeader,
         aad: &[u8],
     ) -> Result<ramflux_crypto::DmSession, SdkError> {
-        let own_state = self
-            .load_x3dh_private_state(&self.local_device_identity(&header.recipient_device_id)?)?;
+        let recipient = self.local_device_identity(&header.recipient_device_id)?;
+        let own_state = self.load_x3dh_private_state(&recipient)?;
         let identity = X25519KeyPair::from_seed(own_state.identity_seed);
+        let now = now_unix_timestamp();
         let signed_prekey_seed = if own_state.signed_prekey_id == header.recipient_signed_prekey_id
         {
             own_state.signed_prekey_seed
@@ -169,12 +172,12 @@ impl RamfluxClient {
             own_state
                 .previous_signed_prekeys
                 .iter()
-                .find(|key| key.id == header.recipient_signed_prekey_id)
+                .find(|key| key.id == header.recipient_signed_prekey_id && key.erase_after > now)
                 .map(|key| key.seed)
                 .ok_or_else(|| {
                     SdkError::LocalBus(format!(
                         "signed prekey id mismatch for {}",
-                        header.recipient_device_id
+                        recipient.storage_key()
                     ))
                 })?
         };
@@ -205,7 +208,7 @@ impl RamfluxClient {
             recipient_one_time_prekey_id: header.recipient_one_time_prekey_id.as_deref(),
             associated_data: &bootstrap_aad,
             prekey_bundle_hash: &header.prekey_bundle_hash,
-            initial_ratchet_public: header.initiator_ephemeral_public,
+            initial_ratchet_public: header.initiator_ratchet_public,
         })?;
         if output.bootstrap_transcript_hash != header.bootstrap_transcript_hash {
             return Err(SdkError::LocalBus("X3DH bootstrap transcript hash mismatch".to_owned()));
@@ -218,10 +221,9 @@ impl RamfluxClient {
             &signed_prekey,
         )?;
         if let Some(id) = header.recipient_one_time_prekey_id.as_ref() {
-            self.account_db()?.persist_actor_state(
-                &format!("x3dh/pending-consumption/{}", session.session_id),
-                &(header.recipient_device_id.clone(), id.clone()),
-            )?;
+            self.pending_opk_consumptions
+                .borrow_mut()
+                .insert(session.session_id.clone(), (recipient, id.clone()));
         }
         Ok(session)
     }
@@ -233,26 +235,31 @@ impl RamfluxClient {
         direction: &str,
         session: &ramflux_crypto::DmSession,
     ) -> Result<(), SdkError> {
-        self.persist_dm_session_snapshot(
-            conversation_id,
-            envelope_id,
-            direction,
-            &session.snapshot(),
-        )?;
+        let db = self.account_db()?;
+        db.write_transaction(|| -> Result<(), SdkError> {
+            self.persist_dm_session_snapshot(
+                conversation_id,
+                envelope_id,
+                direction,
+                &session.snapshot(),
+            )?;
+            if direction == "recv" {
+                self.consume_pending_one_time_prekey(&session.session_id)?;
+            }
+            Ok(())
+        })?;
         if direction == "recv" {
-            self.consume_pending_one_time_prekey(&session.session_id)?;
+            self.pending_opk_consumptions.borrow_mut().remove(&session.session_id);
         }
-        Ok(())
+        self.finish_pair_retirement()
     }
 
     pub(super) fn consume_pending_one_time_prekey(&self, session_id: &str) -> Result<(), SdkError> {
-        let key = format!("x3dh/pending-consumption/{session_id}");
-        let Some((device_id, prekey_id)) =
-            self.account_db()?.load_actor_state::<(String, String)>(&key)?
+        let Some((device, prekey_id)) =
+            self.pending_opk_consumptions.borrow().get(session_id).cloned()
         else {
             return Ok(());
         };
-        let device = self.local_device_identity(&device_id)?;
         let mut state = self.load_x3dh_private_state(&device)?;
         let index = state
             .one_time_prekeys
@@ -261,7 +268,7 @@ impl RamfluxClient {
             .ok_or_else(|| SdkError::LocalBus("one-time prekey already consumed".to_owned()))?;
         state.one_time_prekeys.remove(index);
         self.persist_owned_private_prekey(&device, &state)?;
-        self.account_db()?.remove_actor_state(&key)?;
+        self.account_db()?.persist_actor_state("secrets/retired", &true)?;
         Ok(())
     }
 

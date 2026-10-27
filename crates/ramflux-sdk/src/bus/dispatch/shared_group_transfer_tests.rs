@@ -219,7 +219,7 @@ async fn deliver(
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
-    account.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+    Box::pin(account.client.apply_routed_entry(&mut engine, &pool, &entry, false)).await?;
     Ok(())
 }
 #[tokio::test]

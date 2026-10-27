@@ -45,6 +45,16 @@ fn one_time_prekeys_are_leased_once_and_exhaustion_is_counted_across_restart() -
     let first = registry.take_prekey_bundle(&identity, "source", 1_100)?.ok_or("first")?.0;
     let second = registry.take_prekey_bundle(&identity, "source", 1_101)?.ok_or("second")?.0;
     assert_ne!(first.one_time_prekey_id, second.one_time_prekey_id);
+    assert_eq!(first.one_time_prekey_ids.len(), 0);
+    assert_eq!(first.one_time_prekey_x25519_public.len(), 0);
+    verify_prekey_bundle(&f.device.signing_key.verifying_key(), &first)?;
+    let mut unleased = first.clone();
+    unleased.one_time_prekey_id = Some("opk-2".to_owned());
+    unleased.one_time_prekey = Some(one_time[1].1);
+    assert!(
+        verify_prekey_bundle(&f.device.signing_key.verifying_key(), &unleased).is_err(),
+        "a fetcher must not be able to substitute a pooled but unleased OPK"
+    );
     let exhausted = registry.take_prekey_bundle(&identity, "source", 1_102)?.ok_or("fallback")?;
     assert!(exhausted.1);
     assert!(exhausted.0.one_time_prekey_id.is_none());
@@ -56,10 +66,135 @@ fn one_time_prekeys_are_leased_once_and_exhaustion_is_counted_across_restart() -
     let replay = restored.take_prekey_bundle(&identity, "source", 1_103)?.ok_or("replay")?;
     assert!(replay.1, "idempotent publication replenished consumed OPKs");
     assert_eq!(restored.prekey_exhaustion_fallbacks(), 2);
-    for _ in 4..120 {
-        let _ = restored.take_prekey_bundle(&identity, "source", 1_103)?;
-    }
+    let _ = restored.take_prekey_bundle(&identity, "source", 1_104)?;
+    let _ = restored.take_prekey_bundle(&identity, "source", 1_105)?;
     assert!(restored.take_prekey_bundle(&identity, "source", 1_103).is_err());
+    Ok(())
+}
+
+#[test]
+fn authenticated_prekey_leases_limit_each_pair_without_blocking_other_fetchers() -> TestResult {
+    let target = Fixture::named("target", "target-device", 31)?;
+    let first = Fixture::named("first", "first-device", 41)?;
+    let second = Fixture::named("second", "second-device", 51)?;
+    let router = RouterCore::new();
+    for fixture in [&target, &first, &second] {
+        router.mvp1_register_identity(&fixture.request)?;
+    }
+    let signed = X25519KeyPair::from_seed([61; 32]);
+    let one_time = (0_u8..8)
+        .map(|index| {
+            (
+                format!("opk-{index}"),
+                X25519KeyPair::from_seed([index.saturating_add(70); 32]).public,
+            )
+        })
+        .collect::<Vec<_>>();
+    router.mvp1_publish_prekey(PrekeyPublishRequest {
+        device_id: target.device.device_id.clone(),
+        bundle: create_rotating_prekey_bundle_with_lineage(
+            &target.device,
+            &target.device.signing_key,
+            &target.x,
+            &PrekeyBundleOptions {
+                signed_prekey_id: "target-signed",
+                signed_prekey: &signed,
+                signed_prekey_created_at: 1_000,
+                signed_prekey_expires_at: 2_593_000,
+                one_time_prekeys: &one_time,
+                prekey_bundle_counter: 1,
+            },
+        )?,
+    })?;
+    let lookup = RootQualifiedDeviceRef::for_owned_device(&target.root, &target.device)?
+        .storage_key()
+        .to_owned();
+    let anonymous = router.mvp1_prekey_checked(&lookup)?;
+    assert!(anonymous.bundle.as_ref().is_some_and(|bundle| {
+        bundle.one_time_prekey_id.is_none() && bundle.one_time_prekey_ids.is_empty()
+    }));
+    assert_eq!(anonymous.available_one_time_prekeys, 8);
+
+    let lease = |fixture: &Fixture| PrekeyLeaseRequest {
+        device_id: lookup.clone(),
+        fetcher_root_commitment: fixture.request.principal_commitment.clone(),
+        fetcher_device_id: fixture.device.device_id.clone(),
+        source_prefix: "203.0.113.0/24".into(),
+    };
+    for now in 1_100..1_103 {
+        let (response, _) = router.mvp1_prekey_lease(&lease(&first), now)?;
+        assert!(response.bundle.and_then(|bundle| bundle.one_time_prekey_id).is_some());
+    }
+    assert!(router.mvp1_prekey_lease(&lease(&first), 1_103).is_err());
+    let (other, _) = router.mvp1_prekey_lease(&lease(&second), 1_104)?;
+    assert!(other.bundle.and_then(|bundle| bundle.one_time_prekey_id).is_some());
+
+    let mut unknown = lease(&second);
+    unknown.fetcher_root_commitment = "unknown-root".into();
+    assert!(router.mvp1_prekey_lease(&unknown, 1_105).is_err());
+    Ok(())
+}
+
+#[test]
+fn one_time_prekey_lease_persists_as_a_per_device_delta() -> TestResult {
+    let target = Fixture::named("target", "target-device", 71)?;
+    let fetcher = Fixture::named("fetcher", "fetcher-device", 81)?;
+    let path = std::env::temp_dir().join(format!(
+        "ramflux-prekey-lease-{}.redb",
+        ramflux_protocol::encode_base64url(random_32()?)
+    ));
+    let store = RouterRedbStore::open(&path)?;
+    let router = RouterCore::new();
+    router.register_identity_durable(&target.request, &store)?;
+    router.register_identity_durable(&fetcher.request, &store)?;
+    let one_time = (0_u8..4)
+        .map(|index| {
+            (
+                format!("durable-opk-{index}"),
+                X25519KeyPair::from_seed([index.saturating_add(90); 32]).public,
+            )
+        })
+        .collect::<Vec<_>>();
+    router.mvp1_publish_prekey(PrekeyPublishRequest {
+        device_id: target.device.device_id.clone(),
+        bundle: create_rotating_prekey_bundle_with_lineage(
+            &target.device,
+            &target.device.signing_key,
+            &target.x,
+            &PrekeyBundleOptions {
+                signed_prekey_id: "durable-signed",
+                signed_prekey: &X25519KeyPair::from_seed([89; 32]),
+                signed_prekey_created_at: 1_000,
+                signed_prekey_expires_at: 2_593_000,
+                one_time_prekeys: &one_time,
+                prekey_bundle_counter: 1,
+            },
+        )?,
+    })?;
+    router.persist_identity_registry(&store)?;
+    let request = PrekeyLeaseRequest {
+        device_id: RootQualifiedDeviceRef::for_owned_device(&target.root, &target.device)?
+            .storage_key()
+            .to_owned(),
+        fetcher_root_commitment: fetcher.request.principal_commitment.clone(),
+        fetcher_device_id: fetcher.device.device_id.clone(),
+        source_prefix: "2001:db8:1:2::/64".into(),
+    };
+    let full_writes = store.identity_registry_write_count();
+    let (first, state) = router.mvp1_prekey_lease(&request, 1_100)?;
+    store.record_prekey_lease_state(&state)?;
+    assert_eq!(store.identity_registry_write_count(), full_writes);
+    let first_id = first.bundle.and_then(|bundle| bundle.one_time_prekey_id).ok_or("first")?;
+    drop((router, store));
+
+    let reopened = RouterRedbStore::open(&path)?;
+    let restored = reopened.load_router()?.ok_or("router")?;
+    let (second, _) = restored.mvp1_prekey_lease(&request, 1_101)?;
+    let second_id = second.bundle.and_then(|bundle| bundle.one_time_prekey_id).ok_or("second")?;
+    assert_ne!(first_id, second_id);
+    assert_eq!(second.available_one_time_prekeys, 2);
+    drop(reopened);
+    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]

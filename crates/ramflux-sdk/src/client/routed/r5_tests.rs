@@ -31,7 +31,8 @@ pub(super) fn fresh(
     let bundle = receiver
         .client
         .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
-        .bundle;
+        .bundle
+        .clone();
     let (mut session, header, bundle) = sender.client.new_send_pair(
         &sender.client.local_device_identity(&sender.id)?,
         &msg,
@@ -161,6 +162,8 @@ impl ramflux_transport::GatewaySessionFrameSink for ResetWire {
                         bundle: Some(self.bundle.clone()),
                         principal_commitment: "alice".to_owned(),
                         target_delivery_id: Some("alice".to_owned()),
+                        one_time_prekey_exhausted: false,
+                        available_one_time_prekeys: 8,
                     },
                 },
                 GatewayClientFrame::Submit { submit } => {
@@ -232,7 +235,8 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
         bundle: alice
             .client
             .load_x3dh_private_state(&alice.client.local_device_identity("alice")?)?
-            .bundle,
+            .bundle
+            .clone(),
         responses: VecDeque::new(),
         sent: sent.clone(),
     };

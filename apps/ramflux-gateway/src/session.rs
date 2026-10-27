@@ -642,11 +642,18 @@ async fn run_gateway_session_loop_until_closed(
                         .await?;
                 }
                 ramflux_node_core::GatewayClientFrame::PrekeyFetch { device_id } => {
-                    let response: ramflux_node_core::PrekeyResponse = router_get_json_async(
-                        &context.router,
-                        &format!("/mvp1/prekey/{device_id}"),
-                    )
-                    .await?;
+                    let request = ramflux_node_core::PrekeyLeaseRequest {
+                        device_id,
+                        fetcher_root_commitment: runtime
+                            .source_identity
+                            .root_commitment()
+                            .to_owned(),
+                        fetcher_device_id: runtime.source_identity.device_id().to_owned(),
+                        source_prefix: prekey_source_prefix(context.remote_addr.ip()),
+                    };
+                    let response: ramflux_node_core::PrekeyResponse =
+                        router_post_json_async(&context.router, "/mvp1/prekey/lease", &request)
+                            .await?;
                     write_gateway_handle(
                         &send,
                         &ramflux_node_core::GatewayServerFrame::Prekey { response },
@@ -766,6 +773,19 @@ async fn run_gateway_session_loop_until_closed(
                 )
                 .await?;
             }
+        }
+    }
+}
+
+fn prekey_source_prefix(source: std::net::IpAddr) -> String {
+    match source {
+        std::net::IpAddr::V4(address) => {
+            let octets = address.octets();
+            format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2])
+        }
+        std::net::IpAddr::V6(address) => {
+            let segments = address.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", segments[0], segments[1], segments[2], segments[3])
         }
     }
 }

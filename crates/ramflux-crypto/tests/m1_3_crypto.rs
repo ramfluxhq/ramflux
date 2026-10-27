@@ -358,7 +358,7 @@ fn m_p0_2_kat_vectors_are_stable() -> Result<(), CryptoError> {
     assert_eq!(initiator, recipient);
     assert_eq!(
         hex::encode(initiator.bootstrap_transcript_hash),
-        "e62aa7c2d27e54013816d240d1109dda9720876ac9f9ed4848a84dfeaef93d27"
+        "11ea935beccb096a92d360dff6bd8a679ba1f628852c69dfc11a5afa58f2045c"
     );
     let mut alice = DmSession::initiator(
         initiator.root_seed,
@@ -375,11 +375,11 @@ fn m_p0_2_kat_vectors_are_stable() -> Result<(), CryptoError> {
     let dm = alice.encrypt(b"kat-dm", b"kat-ad")?;
     let dm_plain = bob.decrypt(&dm, b"kat-ad")?;
     assert_eq!(dm_plain, b"kat-dm");
-    assert_eq!(dm.session_id, "wyrW-6t266V1NodQX7ab3FdjQC390qOn5ZV00qb_dpk");
-    assert_eq!(dm.header_hash, "0FQOnIf_0dKlxDDyYyJSVcYZOK4zAJ7KKcn1Eu8Codk");
-    assert_eq!(dm.key_commitment, "lK_ai6JlBoR9cciFyAhlvi3bd1UZ4Lhzr_ac31lZSjg");
-    assert_eq!(dm.franking_commitment, "GUFVRwTRsiM5TfnsvCpJbRQJJgYQKb7EtkkIzEjx-Pk");
-    assert_eq!(dm.ciphertext_hash, "BL_UUTdmMMYbRLD8Gtgxu1M298jkCwC8ffG_EliCqso");
+    assert_eq!(dm.session_id, "lvqvFes2QwSoNvmQ3cl8cKGBXyu8PdGF1YaKzg8xh7Q");
+    assert_eq!(dm.header_hash, "8M8eea7V7FawZ99EEOqIBNTKsfK6XEdqoe3YEuwN-NI");
+    assert_eq!(dm.key_commitment, "zAtITl-HpfDaFU7WQuUU7Uf5-2lgLQ54-KqoDOg_nyc");
+    assert_eq!(dm.franking_commitment, "V_pCNEHBnb4CPHQtwAAMOAzZ1xKrSvhh3AEDWTrHOqk");
+    assert_eq!(dm.ciphertext_hash, "9kjSCZswV_sQ3NQSUZLt6QBw8q8-WLMkqoPsleUiwXk");
 
     let mut skipped_alice = DmSession::initiator(
         initiator.root_seed,
@@ -397,9 +397,9 @@ fn m_p0_2_kat_vectors_are_stable() -> Result<(), CryptoError> {
     let skipped_second = skipped_alice.encrypt(b"kat-skip-1", b"kat-skip-ad")?;
     assert_eq!(skipped_bob.decrypt(&skipped_second, b"kat-skip-ad")?, b"kat-skip-1");
     assert_eq!(skipped_bob.decrypt(&skipped_first, b"kat-skip-ad")?, b"kat-skip-0");
-    assert_eq!(skipped_first.header_hash, "0FQOnIf_0dKlxDDyYyJSVcYZOK4zAJ7KKcn1Eu8Codk");
-    assert_eq!(skipped_second.header_hash, "GP68vVLJf2X1KfXvXxVpUx9lXuoH-wzij9RRavCkwTE");
-    assert_eq!(skipped_second.key_commitment, "CfA79qPnCn42CUWwxF6SCUcyGl6qI3h9WKs8YOshxac");
+    assert_eq!(skipped_first.header_hash, "8M8eea7V7FawZ99EEOqIBNTKsfK6XEdqoe3YEuwN-NI");
+    assert_eq!(skipped_second.header_hash, "m75PZnJ7z5Yvty9KKIssNd0pZxuE7WL1BEC8m4vUOck");
+    assert_eq!(skipped_second.key_commitment, "v_ztkmKsO0RhYVtzxv05MRHR9xTAGIiJ58qV1-jWbdQ");
 
     let signing_key = SigningKey::from_bytes(&[0x07; 32]);
     let membership = membership_commitment_hash(
@@ -446,7 +446,7 @@ fn m_p0_2_kat_vectors_are_stable() -> Result<(), CryptoError> {
     );
     assert_eq!(
         node_tag,
-        "9WULyqMe2LfoiHj8lrZe5nOMiFxwAv0g67vghJ7vrXJvjrD0r4_9pBmPAp3glnyu6wYmKVXuj1YkclyyBjZ3AA"
+        "HZrUr1kCsHPKGP35pyBxb4sVB7GUEh-i_V_iSJp__f61FK8WbcdsX366GY6BSsY8pgk-gyG5A5MP6_YdDEBuCw"
     );
     let mut tampered = dm.clone();
     tampered.commitment = "tampered".to_owned();

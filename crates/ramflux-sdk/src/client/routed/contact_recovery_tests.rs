@@ -263,7 +263,8 @@ async fn legacy_friend_requests_bind_participants_to_the_authenticated_sender_be
         super::super::review::trust(&b, &a)?;
         b.client.establish_friend_link("prior-friend", "alice", "bob")?;
         let mut message = message("legacy-control", "history");
-        let bundle = b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle;
+        let bundle =
+            b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle.clone();
         let (mut session, header) =
             a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
         let body = serde_json::to_vec(
@@ -388,7 +389,8 @@ async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arriv
     super::super::review::trust(&b, &a)?;
     b.client.establish_friend_link("prior-friend", "alice", "bob")?;
     let mut message = message("legacy-control", "history");
-    let bundle = b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle;
+    let bundle =
+        b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle.clone();
     let (mut session, header) =
         a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
     let body = serde_json::to_vec(

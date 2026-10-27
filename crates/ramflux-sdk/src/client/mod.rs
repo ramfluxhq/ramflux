@@ -60,6 +60,8 @@ pub struct RamfluxClient {
     pub(crate) node_relay_options: Option<crate::object::RelayTransferOptions>,
     pub(crate) profile_read_cache:
         std::cell::RefCell<Option<Box<identity_authority::profile_read::ProfileReadCache>>>,
+    pub(crate) pending_opk_consumptions:
+        Box<std::cell::RefCell<BTreeMap<String, (ramflux_crypto::RootQualifiedDeviceRef, String)>>>,
     pub(crate) identity_root: Option<IdentityRoot>,
     pub(crate) reader_device_identity: Option<ramflux_crypto::RootQualifiedDeviceRef>,
     pub(crate) device_branch: Option<DeviceBranch>,
@@ -80,6 +82,7 @@ impl Default for RamfluxClient {
             voice_transition: std::cell::RefCell::new(None),
             node_relay_options: None,
             profile_read_cache: std::cell::RefCell::new(None),
+            pending_opk_consumptions: Box::new(std::cell::RefCell::new(BTreeMap::new())),
             identity_root: None,
             reader_device_identity: None,
             device_branch: None,

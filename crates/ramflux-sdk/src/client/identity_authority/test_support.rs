@@ -83,7 +83,8 @@ pub(crate) fn manifest(client: &RamfluxClient) -> Result<SdkDeviceManifestRespon
             )?,
             prekey_bundle: client
                 .load_x3dh_private_state(&client.local_device_identity(&device.device_id)?)?
-                .bundle,
+                .bundle
+                .clone(),
             branch_authorized_event_id: format!(
                 "device.branch_authorized:{}:{}",
                 device.device_id, device.device_epoch

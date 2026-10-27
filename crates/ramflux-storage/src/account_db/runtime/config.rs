@@ -50,6 +50,13 @@ impl AccountDb {
         Ok(true)
     }
 
+    /// Reports whether SQLite secure deletion is active for this account connection.
+    /// # Errors
+    /// Returns SQLite query errors.
+    pub fn secure_delete_enabled(&self) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0))? != 0)
+    }
+
     /// Opens an independently owned, query-only encrypted connection with the same key.
     ///
     /// # Errors

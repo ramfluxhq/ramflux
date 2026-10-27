@@ -161,7 +161,17 @@ impl crate::RamfluxClient {
         if bundle.signed_prekey_expires_at > 0
             && bundle.signed_prekey_expires_at <= crate::time::now_unix_timestamp()
         {
-            return Err(invalid("recipient signed prekey expired"));
+            self.account_db()?.persist_actor_state(
+                &format!("x3dh/prekey-refresh-required/{remote}"),
+                &serde_json::json!({
+                    "type": "x3dh.signed_prekey.refresh_required.v1",
+                    "device": remote,
+                    "signed_prekey_id": bundle.signed_prekey_id,
+                    "expired_at": bundle.signed_prekey_expires_at,
+                    "observed_at": crate::time::now_unix_timestamp()
+                }),
+            )?;
+            return Err(invalid("recipient signed prekey is older than 30 days; refresh required"));
         }
         Ok(())
     }

@@ -140,6 +140,8 @@ impl DirectorySession {
                 principal_commitment: entry.principal_commitment.clone(),
                 bundle: Some(entry.prekey_bundle.clone()),
                 target_delivery_id: Some(entry.target_delivery_id.clone()),
+                one_time_prekey_exhausted: false,
+                available_one_time_prekeys: 8,
             },
         })
     }

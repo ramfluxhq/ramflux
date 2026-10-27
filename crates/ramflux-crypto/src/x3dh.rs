@@ -54,6 +54,8 @@ impl fmt::Debug for X3dhOutput {
 }
 
 pub struct BootstrapTranscriptInput<'a> {
+    pub initiator_identity_public: &'a [u8; 32],
+    pub recipient_identity_public: &'a [u8; 32],
     pub initiator_device_id_hash: &'a [u8; 32],
     pub recipient_device_id_hash: &'a [u8; 32],
     pub recipient_signed_prekey_id: &'a str,
@@ -88,6 +90,8 @@ pub fn x3dh_initiator(input: &X3dhInitiatorInput<'_>) -> Result<X3dhOutput, Cryp
         input.prekey_bundle_hash,
         input.associated_data,
         &BootstrapTranscriptInput {
+            initiator_identity_public: &input.initiator_identity.public,
+            recipient_identity_public: &input.recipient_bundle.identity_key,
             initiator_device_id_hash: &input.initiator_device_id_hash,
             recipient_device_id_hash: &input.recipient_device_id_hash,
             recipient_signed_prekey_id: &input.recipient_bundle.signed_prekey_id,
@@ -123,6 +127,8 @@ pub fn x3dh_recipient(input: &X3dhRecipientInput<'_>) -> Result<X3dhOutput, Cryp
         input.prekey_bundle_hash,
         input.associated_data,
         &BootstrapTranscriptInput {
+            initiator_identity_public: &input.initiator_identity_public,
+            recipient_identity_public: &input.recipient_identity.public,
             initiator_device_id_hash: &input.initiator_device_id_hash,
             recipient_device_id_hash: &input.recipient_device_id_hash,
             recipient_signed_prekey_id: input.recipient_signed_prekey_id,
@@ -166,15 +172,27 @@ fn derive_x3dh_output(
 #[must_use]
 pub fn bootstrap_transcript_hash(input: &BootstrapTranscriptInput<'_>) -> [u8; 32] {
     let mut transcript = Vec::new();
-    transcript.extend_from_slice(ramflux_protocol::domain::X3DH_INITIAL_SECRET.as_bytes());
-    transcript.extend_from_slice(input.initiator_device_id_hash);
-    transcript.extend_from_slice(input.recipient_device_id_hash);
-    transcript.extend_from_slice(input.recipient_signed_prekey_id.as_bytes());
-    if let Some(one_time_id) = input.recipient_one_time_prekey_id {
-        transcript.extend_from_slice(one_time_id.as_bytes());
-    }
-    transcript.extend_from_slice(input.initiator_ephemeral_public);
-    transcript.extend_from_slice(input.prekey_bundle_hash);
-    transcript.extend_from_slice(input.initial_ratchet_public);
+    append_transcript_field(
+        &mut transcript,
+        ramflux_protocol::domain::X3DH_INITIAL_SECRET.as_bytes(),
+    );
+    append_transcript_field(&mut transcript, input.initiator_identity_public);
+    append_transcript_field(&mut transcript, input.recipient_identity_public);
+    append_transcript_field(&mut transcript, input.initiator_device_id_hash);
+    append_transcript_field(&mut transcript, input.recipient_device_id_hash);
+    append_transcript_field(&mut transcript, input.recipient_signed_prekey_id.as_bytes());
+    append_transcript_field(
+        &mut transcript,
+        input.recipient_one_time_prekey_id.map_or(&[][..], str::as_bytes),
+    );
+    append_transcript_field(&mut transcript, input.initiator_ephemeral_public);
+    append_transcript_field(&mut transcript, input.prekey_bundle_hash);
+    append_transcript_field(&mut transcript, input.initial_ratchet_public);
     blake3_256(ramflux_protocol::domain::X3DH_INITIAL_SECRET, &transcript)
+}
+
+fn append_transcript_field(transcript: &mut Vec<u8>, value: &[u8]) {
+    let length = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    transcript.extend_from_slice(&length.to_be_bytes());
+    transcript.extend_from_slice(value);
 }

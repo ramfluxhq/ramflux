@@ -614,6 +614,10 @@ fn handle_mesh_general_value(
             let response = handle_mvp1_prekey_publish(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
+        ("POST", "/mvp1/prekey/lease") => {
+            let response = handle_mvp1_prekey_lease(body, router)?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
         ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => Ok(MeshResponse::json(
             "401 Unauthorized",
             serde_json::to_vec(&unauthenticated_principal_lookup())?,
@@ -975,8 +979,12 @@ fn handle_mvp1_prekey_publish(
         device_id = %request.device_id,
         "router decoded mvp1 prekey publish"
     );
+    let root_commitment = request.bundle.identity_commitment.clone();
+    let device_id = request.device_id.clone();
     let response = state.mvp1_publish_prekey(request)?;
     state.persist_identity_registry(store)?;
+    store
+        .record_prekey_lease_state(&state.mvp1_prekey_lease_state(&root_commitment, &device_id)?)?;
     tracing::info!(
         device_id = %response.device_id,
         has_bundle = response.bundle.is_some(),
@@ -992,13 +1000,8 @@ fn handle_mvp1_prekey_fetch(
     source: Option<&str>,
 ) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
     let device_id = path.trim_start_matches("/mvp1/prekey/");
-    let response = if let Some(source) = source {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-        router.state().mvp1_prekey_checked_from(device_id, source, i64::try_from(now.as_secs())?)?
-    } else {
-        router.state().mvp1_prekey_checked(device_id)?
-    };
-    router.state().persist_identity_registry(router.store())?;
+    let _ = source;
+    let response = router.state().mvp1_prekey_checked(device_id)?;
     tracing::info!(
         device_id = %response.device_id,
         has_bundle = response.bundle.is_some(),
@@ -1009,6 +1012,18 @@ fn handle_mvp1_prekey_fetch(
     if response.prekey_exhaustion_warning {
         tracing::warn!(device_id = %response.device_id, "one-time prekey pool exhausted; using signed-prekey-only bootstrap");
     }
+    Ok(response)
+}
+
+fn handle_mvp1_prekey_lease(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
+    let request: ramflux_node_core::PrekeyLeaseRequest = serde_json::from_slice(body)?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+    let (response, state) =
+        router.state().mvp1_prekey_lease(&request, i64::try_from(now.as_secs())?)?;
+    router.store().record_prekey_lease_state(&state)?;
     Ok(response)
 }
 

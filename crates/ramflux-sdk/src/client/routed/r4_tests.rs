@@ -31,7 +31,8 @@ fn bootstrap(
     let bundle = receiver
         .client
         .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
-        .bundle;
+        .bundle
+        .clone();
     let (mut session, header, bundle) = sender.client.new_send_pair(
         &sender.client.local_device_identity(&sender.id)?,
         &msg,
@@ -307,7 +308,10 @@ async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Resul
     let (mut sending, header) = alice.client.create_send_dm_session_from_bundle(
         &msg,
         "bob",
-        bob.client.load_x3dh_private_state(&bob.client.local_device_identity("bob")?)?.bundle,
+        bob.client
+            .load_x3dh_private_state(&bob.client.local_device_identity("bob")?)?
+            .bundle
+            .clone(),
         "alice",
     )?;
     let receiving = bob.client.load_or_create_recv_dm_session(&conversation, header.as_ref())?;
@@ -550,7 +554,8 @@ async fn acknowledging_a2i_control_persists_the_decision_beyond_the_memory_cache
         "a2i.acknowledge",
         serde_json::json!({"event_id":"ack-event"}),
     );
-    crate::bus::dispatch::a2i_a2ui::dispatch_a2i_bus_request(&request, &mut state).await?;
+    Box::pin(crate::bus::dispatch::a2i_a2ui::dispatch_a2i_bus_request(&request, &mut state))
+        .await?;
     let account = state.accounts.get_mut("bob").ok_or_else(|| invalid("account"))?;
     account.pending_a2i.clear();
     let events = account.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?;

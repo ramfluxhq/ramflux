@@ -314,7 +314,9 @@ pub(crate) async fn dispatch_local_bus_request(
             super::dispatch::call::dispatch(request, state).await
         }
         method if method.starts_with("bot.") => dispatch_bot_bus_request(request, state),
-        method if method.starts_with("a2i.") => dispatch_a2i_bus_request(request, state).await,
+        method if method.starts_with("a2i.") => {
+            Box::pin(dispatch_a2i_bus_request(request, state)).await
+        }
         method if method.starts_with("a2ui.") => {
             dispatch_a2ui_bus_request(request, state, connection)
         }

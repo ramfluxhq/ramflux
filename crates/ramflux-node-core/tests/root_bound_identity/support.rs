@@ -14,9 +14,16 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let root = create_identity_root("alice", [11; 32]);
-        let device = create_device_branch("alice", "alice-device", 1, [12; 32]);
-        let x = X25519KeyPair::from_seed([14; 32]);
+        Self::named("alice", "alice-device", 11)
+    }
+    pub fn named(
+        principal: &str,
+        device_id: &str,
+        seed: u8,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let root = create_identity_root(principal, [seed; 32]);
+        let device = create_device_branch(principal, device_id, 1, [seed.saturating_add(1); 32]);
+        let x = X25519KeyPair::from_seed([seed.saturating_add(3); 32]);
         let proof = authorize_device_branch_v2(
             &root,
             &device,
@@ -54,7 +61,7 @@ impl Fixture {
             branch_public_key: encode_base64url(device.signing_key.verifying_key().to_bytes()),
             device_set: Some(record),
             proof,
-            target_delivery_id: "target".into(),
+            target_delivery_id: format!("target-{device_id}"),
             gateway_id: "gateway".into(),
             session_id: "session".into(),
             push_alias_hash: None,

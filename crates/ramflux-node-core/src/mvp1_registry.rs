@@ -140,6 +140,14 @@ pub struct PrekeyPublishRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PrekeyLeaseRequest {
+    pub device_id: String,
+    pub fetcher_root_commitment: String,
+    pub fetcher_device_id: String,
+    pub source_prefix: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PrekeyResponse {
     pub device_id: String,
     pub bundle: Option<ramflux_crypto::PrekeyBundle>,
@@ -149,6 +157,16 @@ pub struct PrekeyResponse {
     pub one_time_prekey_exhausted: bool,
     #[serde(skip)]
     pub prekey_exhaustion_warning: bool,
+    #[serde(default)]
+    pub available_one_time_prekeys: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PrekeyLeaseState {
+    pub storage_key: String,
+    pub available: std::collections::VecDeque<String>,
+    pub consumed: BTreeSet<String>,
+    pub exhaustion_fallbacks: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -260,10 +278,14 @@ pub struct IdentityRegistry {
     available_one_time_prekeys: BTreeMap<String, std::collections::VecDeque<String>>,
     #[serde(default)]
     consumed_one_time_prekeys: BTreeMap<String, BTreeSet<String>>,
-    #[serde(default)]
+    #[serde(skip)]
     prekey_fetch_times_by_source: BTreeMap<String, Vec<i64>>,
+    #[serde(skip)]
+    prekey_fetch_times_by_fetcher: BTreeMap<String, Vec<i64>>,
+    #[serde(skip)]
+    prekey_fetch_times_by_pair: BTreeMap<String, Vec<i64>>,
     #[serde(default)]
-    prekey_exhaustion_fallbacks: u64,
+    prekey_exhaustion_fallbacks: BTreeMap<String, u64>,
     #[serde(default, deserialize_with = "load_registration_policy")]
     registration_policy: RegistrationPolicy,
     #[serde(default)]
@@ -290,6 +312,28 @@ fn normalize_registration_policy(mut policy: RegistrationPolicy) -> Registration
         policy.registration_window_seconds = defaults.registration_window_seconds;
     }
     policy
+}
+
+fn charge_prekey_budget(
+    budgets: &mut BTreeMap<String, Vec<i64>>,
+    key: &str,
+    now: i64,
+    limit: usize,
+    label: &str,
+) -> Result<(), NodeCoreError> {
+    let events = budgets.entry(key.to_owned()).or_default();
+    events.retain(|seen| now.saturating_sub(*seen) < 60 * 60);
+    if events.len() >= limit {
+        return Err(NodeCoreError::ItestHttp(format!("prekey {label} rate limited")));
+    }
+    events.push(now);
+    if budgets.len() > 4096 {
+        let victim = budgets.keys().find(|candidate| candidate.as_str() != key).cloned();
+        if let Some(victim) = victim {
+            budgets.remove(&victim);
+        }
+    }
+    Ok(())
 }
 
 impl IdentityRegistry {
@@ -785,25 +829,33 @@ impl IdentityRegistry {
         source: &str,
         now: i64,
     ) -> Result<Option<(ramflux_crypto::PrekeyBundle, bool, bool)>, NodeCoreError> {
+        self.lease_prekey_bundle(identity, source, source, source, now)
+    }
+
+    /// Atomically leases at most one public OPK under independent requester, pair, and prefix
+    /// budgets. The requester values have already been authenticated by the router registry.
+    /// # Errors
+    /// Rejects a requester which exceeds any lease budget.
+    pub fn lease_prekey_bundle(
+        &mut self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+        fetcher: &str,
+        pair: &str,
+        source_prefix: &str,
+        now: i64,
+    ) -> Result<Option<(ramflux_crypto::PrekeyBundle, bool, bool)>, NodeCoreError> {
         if !self.device_is_usable(identity) {
             return Ok(None);
         }
-        let events = self.prekey_fetch_times_by_source.entry(source.to_owned()).or_default();
-        events.retain(|seen| now.saturating_sub(*seen) < 60);
-        if events.len() >= 120 {
-            return Err(NodeCoreError::ItestHttp("prekey fetch rate limited".into()));
-        }
-        events.push(now);
-        if self.prekey_fetch_times_by_source.len() > 4096 {
-            let victim = self
-                .prekey_fetch_times_by_source
-                .keys()
-                .find(|candidate| candidate.as_str() != source)
-                .cloned();
-            if let Some(victim) = victim {
-                self.prekey_fetch_times_by_source.remove(&victim);
-            }
-        }
+        charge_prekey_budget(&mut self.prekey_fetch_times_by_fetcher, fetcher, now, 60, "fetcher")?;
+        charge_prekey_budget(&mut self.prekey_fetch_times_by_pair, pair, now, 3, "pair")?;
+        charge_prekey_budget(
+            &mut self.prekey_fetch_times_by_source,
+            source_prefix,
+            now,
+            120,
+            "source prefix",
+        )?;
         let storage_key = Self::device_storage_key(identity);
         let mut bundle = self
             .prekey_bundles
@@ -823,22 +875,89 @@ impl IdentityRegistry {
                 .ok_or_else(|| NodeCoreError::ItestHttp("one-time prekey pool mismatch".into()))?;
             bundle.one_time_prekey_id = Some(id.clone());
             bundle.one_time_prekey = bundle.one_time_prekey_x25519_public.get(index).copied();
+            bundle.one_time_prekey_signature =
+                bundle.one_time_prekey_signatures.get(index).cloned();
+            bundle.one_time_prekey_ids.clear();
+            bundle.one_time_prekey_x25519_public.clear();
+            bundle.one_time_prekey_signatures.clear();
             self.consumed_one_time_prekeys.entry(storage_key).or_default().insert(id);
             return Ok(Some((bundle.clone(), false, false)));
         }
         bundle.one_time_prekey_id = None;
         bundle.one_time_prekey = None;
+        bundle.one_time_prekey_signature = None;
         let exhausted = !bundle.one_time_prekey_ids.is_empty();
+        bundle.one_time_prekey_ids.clear();
+        bundle.one_time_prekey_x25519_public.clear();
+        bundle.one_time_prekey_signatures.clear();
         if exhausted {
-            self.prekey_exhaustion_fallbacks = self.prekey_exhaustion_fallbacks.saturating_add(1);
+            let count = self.prekey_exhaustion_fallbacks.entry(storage_key.clone()).or_default();
+            *count = count.saturating_add(1);
         }
-        let warn = exhausted && self.prekey_exhaustion_fallbacks.is_power_of_two();
+        let warn = exhausted
+            && self
+                .prekey_exhaustion_fallbacks
+                .get(&storage_key)
+                .is_some_and(|count| count.is_power_of_two());
         Ok(Some((bundle.clone(), exhausted, warn)))
     }
 
     #[must_use]
-    pub const fn prekey_exhaustion_fallbacks(&self) -> u64 {
-        self.prekey_exhaustion_fallbacks
+    pub fn prekey_exhaustion_fallbacks(&self) -> u64 {
+        self.prekey_exhaustion_fallbacks.values().copied().sum()
+    }
+
+    #[must_use]
+    pub fn available_one_time_prekeys(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> usize {
+        self.available_one_time_prekeys
+            .get(&Self::device_storage_key(identity))
+            .map_or(0, std::collections::VecDeque::len)
+    }
+
+    #[must_use]
+    pub fn prekey_lease_state(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> PrekeyLeaseState {
+        let storage_key = Self::device_storage_key(identity);
+        PrekeyLeaseState {
+            available: self
+                .available_one_time_prekeys
+                .get(&storage_key)
+                .cloned()
+                .unwrap_or_default(),
+            consumed: self.consumed_one_time_prekeys.get(&storage_key).cloned().unwrap_or_default(),
+            exhaustion_fallbacks: self
+                .prekey_exhaustion_fallbacks
+                .get(&storage_key)
+                .copied()
+                .unwrap_or_default(),
+            storage_key,
+        }
+    }
+
+    pub(crate) fn restore_prekey_lease_state(&mut self, state: PrekeyLeaseState) {
+        self.available_one_time_prekeys.insert(state.storage_key.clone(), state.available);
+        self.consumed_one_time_prekeys.insert(state.storage_key.clone(), state.consumed);
+        self.prekey_exhaustion_fallbacks.insert(state.storage_key, state.exhaustion_fallbacks);
+    }
+
+    #[must_use]
+    pub fn public_prekey_bundle(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Option<ramflux_crypto::PrekeyBundle> {
+        let mut bundle = self.prekey_bundle(identity)?.clone();
+        bundle.one_time_prekey_ids.clear();
+        bundle.one_time_prekey_x25519_public.clear();
+        bundle.one_time_prekey_signatures.clear();
+        bundle.one_time_prekey_id = None;
+        bundle.one_time_prekey = None;
+        bundle.one_time_prekey_signature = None;
+        Some(bundle)
     }
 
     #[must_use]

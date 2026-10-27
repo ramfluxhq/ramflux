@@ -6,14 +6,14 @@
 use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, HomeNodeMigrationRecord,
     HomeNodeRouteRecord, IdentityLifecycleTombstone, IdentityLineageEventRecord, IdentityRegistry,
-    InboxEntry, NodeCoreError, NodeReplayGuardState, OpaqueDeviceInbox, ROUTER_ABUSE_REPORT_KEY,
+    InboxEntry, NodeCoreError, NodeReplayGuardState, OpaqueDeviceInbox, PrekeyLeaseState, ROUTER_ABUSE_REPORT_KEY,
     ROUTER_ABUSE_REPORT_TABLE, ROUTER_CURSOR_STATE_TABLE, ROUTER_DEACTIVATED_TARGET_TABLE,
     ROUTER_DEACTIVATED_TARGETS_KEY, ROUTER_DELETED_TARGET_TABLE, ROUTER_DELETED_TARGETS_KEY,
     ROUTER_HOME_NODE_MIGRATION_KEY, ROUTER_HOME_NODE_ROUTE_KEY, ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
     ROUTER_IDENTITY_LINEAGE_HEADS_KEY, ROUTER_IDENTITY_REGISTRY_KEY, ROUTER_INBOX_ENTRY_TABLE,
     ROUTER_INBOX_SLICE_KEY, ROUTER_LIFECYCLE_RECORD_TABLE, ROUTER_LIFECYCLE_STATE_KEY,
     ROUTER_LIFECYCLE_TOMBSTONE_KEY, ROUTER_LIFECYCLE_TOMBSTONE_TABLE,
-    ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE, ROUTER_REPLAY_GUARD_STATE_KEY, ROUTER_REPLAY_TUPLE_TABLE,
+    ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE, ROUTER_PREKEY_LEASE_TABLE, ROUTER_REPLAY_GUARD_STATE_KEY, ROUTER_REPLAY_TUPLE_TABLE,
     ROUTER_SESSION_CHECKPOINT_KEY, ROUTER_SESSION_ENTRY_TABLE, ROUTER_SNAPSHOT_TABLE, RouterCore,
     RouterWalLocalDelivery, RouterWalStore, SessionDescriptor, SessionRegistry, inbox_retain_until,
     load_snapshot, now_unix_seconds, save_snapshot,
@@ -441,6 +441,9 @@ impl RouterRedbStore {
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
             let _table = write_txn
                 .open_table(ROUTER_ABUSE_REPORT_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_PREKEY_LEASE_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
         mailbox_keys::upgrade(&write_txn)?;
@@ -889,6 +892,14 @@ impl RouterRedbStore {
         self.fail_next_registration_admission.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Persist one device's OPK lease cursor without rewriting the identity registry.
+    /// # Errors
+    /// Returns serialization or durable storage errors.
+    pub fn record_prekey_lease_state(&self, state: &PrekeyLeaseState) -> Result<(), NodeCoreError> {
+        self.insert_table_value(ROUTER_PREKEY_LEASE_TABLE, &state.storage_key, state)
+    
+    }
+
     pub(crate) fn observe_foreign_device_set(
         &self,
         record: &ramflux_protocol::SignedDeviceSetRecord,
@@ -1075,7 +1086,10 @@ impl RouterRedbStore {
         let mut registry = self.load_session_registry()?;
         let now = i64::try_from(now_unix_seconds()).unwrap_or(i64::MAX);
         let (mut inbox, replay_guard_state) = self.load_delivery_state(now)?;
-        let mvp1_identities = self.load_identity_registry(now)?;
+        let mut mvp1_identities = self.load_identity_registry(now)?;
+        for state in load_table_values::<PrekeyLeaseState>(&self.db, ROUTER_PREKEY_LEASE_TABLE)? {
+            mvp1_identities.restore_prekey_lease_state(state);
+        }
         let foreign_device_heads = crate::foreign_device_store::load(
             &self.db,
             crate::foreign_device_store::Namespace::Router,

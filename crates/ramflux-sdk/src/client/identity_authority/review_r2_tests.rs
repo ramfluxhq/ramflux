@@ -119,6 +119,52 @@ fn own_proof_refresh_is_due_at_half_the_proof_lifetime() -> TestResult {
 }
 
 #[test]
+fn signed_prekey_remains_reachable_after_rotation_age_and_requires_refresh_after_thirty_days()
+-> TestResult {
+    let recipient = Actor::new("alice", "phone", 221, 222, 1)?;
+    let sender = Actor::new("bob", "phone", 223, 224, 1)?;
+    let manifest = recipient.manifest()?;
+    observe(&sender.client, &manifest)?;
+    let device = recipient.client.local_device_identity("phone")?;
+    let private = recipient.client.load_x3dh_private_state(&device)?;
+    let identity = ramflux_crypto::X25519KeyPair::from_seed(private.identity_seed);
+    let branch = recipient.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let remote = sender.client.device_identity_for_root(&manifest.principal_commitment, "phone")?;
+    let now = now_unix_timestamp();
+    let bundle_at_age = |age_days: i64| {
+        let created_at = now.saturating_sub(age_days * 24 * 60 * 60);
+        ramflux_crypto::create_rotating_prekey_bundle_with_lineage(
+            branch,
+            &branch.signing_key,
+            &identity,
+            &ramflux_crypto::PrekeyBundleOptions {
+                signed_prekey_id: "signed:availability",
+                signed_prekey: &ramflux_crypto::X25519KeyPair::from_seed([225; 32]),
+                signed_prekey_created_at: created_at,
+                signed_prekey_expires_at: created_at.saturating_add(30 * 24 * 60 * 60),
+                one_time_prekeys: &[],
+                prekey_bundle_counter: 2,
+            },
+        )
+    };
+    sender.client.verify_root_bound_prekey(&remote, &bundle_at_age(8)?)?;
+    let Err(error) = sender.client.verify_root_bound_prekey(&remote, &bundle_at_age(31)?) else {
+        return Err("a signed prekey older than 30 days did not require refresh".into());
+    };
+    assert!(error.to_string().contains("older than 30 days; refresh required"));
+    let warning = sender
+        .client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(&format!(
+            "x3dh/prekey-refresh-required/{}",
+            remote.storage_key()
+        ))?
+        .ok_or("missing signed-prekey refresh event")?;
+    assert_eq!(warning["type"], "x3dh.signed_prekey.refresh_required.v1");
+    Ok(())
+}
+
+#[test]
 fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_pin_intact()
 -> TestResult {
     let alice = Actor::new("alice", "alice", 21, 22, 1)?;

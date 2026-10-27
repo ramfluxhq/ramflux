@@ -48,6 +48,10 @@ pub struct SdkPrekeyResponse {
     pub(crate) principal_commitment: String,
     #[serde(default)]
     pub(crate) target_delivery_id: Option<String>,
+    #[serde(default)]
+    pub(crate) one_time_prekey_exhausted: bool,
+    #[serde(default)]
+    pub(crate) available_one_time_prekeys: u32,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]

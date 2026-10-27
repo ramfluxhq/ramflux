@@ -137,17 +137,32 @@ impl RamfluxClient {
 mod tests {
     use super::*;
     fn account() -> Result<(std::path::PathBuf, RamfluxClient), SdkError> {
+        account_named("account", "alice", "phone", 11, 12)
+    }
+    fn account_named(
+        label: &str,
+        principal: &str,
+        device: &str,
+        root_seed: u8,
+        device_seed: u8,
+    ) -> Result<(std::path::PathBuf, RamfluxClient), SdkError> {
         let path = std::env::temp_dir().join(format!(
-            "rf-private-prekeys-{}",
+            "rf-private-prekeys-{label}-{}",
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
         ));
         let mut client = RamfluxClient::new();
-        client.create_identity_root("alice", [11; 32]);
-        client.create_device_branch("alice", "phone", 1, [12; 32]);
+        client.create_identity_root(principal, [root_seed; 32]);
+        client.create_device_branch(principal, device, 1, [device_seed; 32]);
         client.open_account_index(&path)?;
-        client.create_account("alice", "alice")?;
-        client.unlock_account("alice", b"private-prekey-test")?;
-        client.initialize_and_publish_prekey_bundle("alice", "phone", "mailbox", [12; 32], None)?;
+        client.create_account(principal, principal)?;
+        client.unlock_account(principal, b"private-prekey-test")?;
+        client.initialize_and_publish_prekey_bundle(
+            principal,
+            device,
+            "mailbox",
+            [device_seed; 32],
+            None,
+        )?;
         Ok((path, client))
     }
     fn legacy(client: &RamfluxClient, device: &RootQualifiedDeviceRef) -> Result<(), SdkError> {
@@ -158,6 +173,42 @@ mod tests {
             &legacy_x3dh_private_checkpoint_name(device.device_id()),
             "old-private",
         )
+    }
+    fn leased_bundle(
+        client: &RamfluxClient,
+        device: &RootQualifiedDeviceRef,
+    ) -> Result<(String, [u8; 32], ramflux_crypto::PrekeyBundle), SdkError> {
+        let state = client.load_x3dh_private_state(device)?;
+        let consumed = state.one_time_prekeys[0].id.clone();
+        let consumed_seed = state.one_time_prekeys[0].seed;
+        let mut leased = state.bundle.clone();
+        let index = leased
+            .one_time_prekey_ids
+            .iter()
+            .position(|id| id == &consumed)
+            .ok_or_else(|| invalid("leased OPK missing"))?;
+        leased.one_time_prekey_id = Some(consumed.clone());
+        leased.one_time_prekey = leased.one_time_prekey_x25519_public.get(index).copied();
+        leased.one_time_prekey_signature = leased.one_time_prekey_signatures.get(index).cloned();
+        leased.one_time_prekey_ids.clear();
+        leased.one_time_prekey_x25519_public.clear();
+        leased.one_time_prekey_signatures.clear();
+        Ok((consumed, consumed_seed, leased))
+    }
+    fn assert_seed_absent_from_disk(
+        client: &RamfluxClient,
+        consumed_seed: [u8; 32],
+    ) -> Result<(), SdkError> {
+        let db_path = client.account_db()?.path.clone();
+        let wal_path = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+        let json_seed = serde_json::to_vec(&consumed_seed)?;
+        for disk_path in [&db_path, &wal_path] {
+            if let Ok(bytes) = std::fs::read(disk_path) {
+                assert!(!bytes.windows(consumed_seed.len()).any(|window| window == consumed_seed));
+                assert!(!bytes.windows(json_seed.len()).any(|window| window == json_seed));
+            }
+        }
+        Ok(())
     }
     #[test]
     fn legacy_private_keys_need_retained_signed_root_authority_and_preserve_their_keys()
@@ -206,11 +257,76 @@ mod tests {
 
     #[test]
     fn restart_does_not_resurrect_a_consumed_one_time_prekey() -> Result<(), SdkError> {
-        let (path, client) = account()?;
+        let (path, client) = account_named("receiver", "bob", "bob", 11, 12)?;
+        let (sender_path, sender) = account_named("sender", "alice", "alice", 21, 22)?;
         let device = client.owned_device_identity()?;
-        let mut state = client.load_x3dh_private_state(&device)?;
-        let consumed = state.one_time_prekeys.remove(0).id.clone();
-        client.persist_owned_private_prekey(&device, &state)?;
+        let (consumed, consumed_seed, leased) = leased_bundle(&client, &device)?;
+        let leased_for_probe = leased.clone();
+        let message = crate::GatewayDirectMessage {
+            conversation_id: "restart-erasure".into(),
+            message_id: "bootstrap".into(),
+            envelope_id: "bootstrap".into(),
+            source_principal_id: "alice".into(),
+            sender_id: "alice".into(),
+            recipient_device_id: Some("bob".into()),
+            recipient_principal_commitment: Some(device.root_commitment().into()),
+            target_delivery_id: "mailbox".into(),
+            encrypted_body: Vec::new(),
+            created_at: 1_000,
+            ttl: 3_600,
+        };
+        let (mut sending, header) =
+            sender.create_send_dm_session_from_bundle(&message, "bob", leased, "alice")?;
+        let header = header.ok_or_else(|| invalid("bootstrap header missing"))?;
+        let snapshot = serde_json::to_value(sending.snapshot())?;
+        let ratchet_seed: [u8; 32] = serde_json::from_value(snapshot["dhs_private"].clone())?;
+        let persisted_ratchet = X25519KeyPair::from_seed(ratchet_seed);
+        assert_eq!(persisted_ratchet.public, header.initiator_ratchet_public);
+        assert_ne!(persisted_ratchet.public, header.initiator_ephemeral_public);
+        let sender_device = sender.owned_device_identity()?;
+        let sender_state = sender.load_x3dh_private_state(&sender_device)?;
+        let sender_identity = X25519KeyPair::from_seed(sender_state.identity_seed);
+        let bundle_hash = crate::dm::prekey_bundle_hash(&leased_for_probe)?;
+        let probe = ramflux_crypto::x3dh_initiator(&ramflux_crypto::X3dhInitiatorInput {
+            initiator_identity: &sender_identity,
+            initiator_ephemeral: &persisted_ratchet,
+            initiator_device_id_hash: header.initiator_device_id_hash,
+            recipient_device_id_hash: header.recipient_device_id_hash,
+            recipient_bundle: &leased_for_probe,
+            associated_data: crate::dm::dm_associated_data("restart-erasure"),
+            prekey_bundle_hash: &bundle_hash,
+            initial_ratchet_public: header.initiator_ratchet_public,
+        })?;
+        assert_ne!(probe.bootstrap_transcript_hash, header.bootstrap_transcript_hash);
+        let ciphertext =
+            sending.encrypt(b"authenticated", crate::dm::dm_associated_data("restart-erasure"))?;
+        let mut receiving = client.create_recv_dm_session_with_aad(
+            &header,
+            crate::dm::dm_associated_data("restart-erasure"),
+        )?;
+        assert!(
+            client
+                .load_x3dh_private_state(&device)?
+                .one_time_prekeys
+                .iter()
+                .any(|key| key.id == consumed),
+            "authentication alone must not erase before the ratchet transaction commits"
+        );
+        assert_eq!(
+            receiving.decrypt(&ciphertext, crate::dm::dm_associated_data("restart-erasure"))?,
+            b"authenticated"
+        );
+        client.persist_dm_session("restart-erasure", "bootstrap", "recv", &receiving)?;
+        assert!(client.account_db()?.secure_delete_enabled()?);
+        assert!(
+            client
+                .load_x3dh_private_state(&device)?
+                .one_time_prekeys
+                .iter()
+                .all(|key| key.id != consumed),
+            "the regression must fail if authenticated consumption is disabled"
+        );
+        assert_seed_absent_from_disk(&client, consumed_seed)?;
         client.append_event("legacy-private-copy", "x3dh.prekey.private", b"secret")?;
         client.set_projection_checkpoint("x3dh_private:v2/legacy", "legacy-private-copy")?;
         let history = client.account_db()?.export_history_bundle("phone", "tablet")?;
@@ -231,14 +347,16 @@ mod tests {
         drop(client);
 
         let mut reopened = RamfluxClient::new();
-        reopened.create_identity_root("alice", [11; 32]);
-        reopened.create_device_branch("alice", "phone", 1, [12; 32]);
+        reopened.create_identity_root("bob", [11; 32]);
+        reopened.create_device_branch("bob", "bob", 1, [12; 32]);
         reopened.open_account_index(&path)?;
-        reopened.unlock_account("alice", b"private-prekey-test")?;
+        reopened.unlock_account("bob", b"private-prekey-test")?;
         let restored = reopened.load_x3dh_private_state(&reopened.owned_device_identity()?)?;
         assert!(restored.one_time_prekeys.iter().all(|key| key.id != consumed));
         drop(reopened);
         std::fs::remove_dir_all(path)?;
+        drop(sender);
+        std::fs::remove_dir_all(sender_path)?;
         Ok(())
     }
 }

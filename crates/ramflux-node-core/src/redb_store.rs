@@ -35,6 +35,8 @@ pub(crate) const ROUTER_DELETED_TARGET_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("router_deleted_target_v1");
 pub(crate) const ROUTER_ABUSE_REPORT_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("router_abuse_report_v1");
+pub(crate) const ROUTER_PREKEY_LEASE_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("router_prekey_lease_v1");
 pub(crate) const ROUTER_SESSION_CHECKPOINT_KEY: &str = "session_checkpoint";
 pub(crate) const ROUTER_INBOX_SLICE_KEY: &str = "opaque_device_inbox";
 pub(crate) const ROUTER_IDENTITY_REGISTRY_KEY: &str = "identity_registry";

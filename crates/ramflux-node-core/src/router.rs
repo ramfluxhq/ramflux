@@ -13,9 +13,9 @@ use crate::{
     IdentityRegistrationResponse, IdentityRegistry, InboxEntry, InboxFetchResponse,
     ItestMvp10OwnDeviceFanoutDelivery, ItestMvp10OwnDeviceFanoutRequest,
     ItestMvp10OwnDeviceFanoutResponse, NodeCoreError, NodeReplayGuardState, NodeServiceSigningKey,
-    OfflineQueuedDelivery, OnlineDelivery, OpaqueDeviceInbox, PrekeyPublishRequest, PrekeyResponse,
-    RegistrationPolicy, RouterSubmitOutcome, SessionDescriptor, SessionRegistry,
-    envelope_replay_tuple_key,
+    OfflineQueuedDelivery, OnlineDelivery, OpaqueDeviceInbox, PrekeyLeaseRequest, PrekeyLeaseState,
+    PrekeyPublishRequest, PrekeyResponse, RegistrationPolicy, RouterSubmitOutcome,
+    SessionDescriptor, SessionRegistry, envelope_replay_tuple_key,
 };
 use arc_swap::ArcSwap;
 use redb::{ReadableDatabase, TableDefinition};
@@ -595,6 +595,7 @@ impl RouterCore {
             .mvp1_identities
             .resolve_device_selector(&lookup)
             .ok_or_else(|| NodeCoreError::ItestHttp("prekey authority missing".into()))?;
+        let available = control.mvp1_identities.available_one_time_prekeys(&identity);
         Ok(PrekeyResponse {
             device_id: device_id.clone(),
             bundle: control.mvp1_identities.prekey_bundle(&identity).cloned(),
@@ -607,34 +608,35 @@ impl RouterCore {
                 .mvp1_identities
                 .target_delivery_id_for_device(&identity)
                 .map(str::to_owned),
-            one_time_prekey_exhausted: false,
-            prekey_exhaustion_warning: false,
+            one_time_prekey_exhausted: available == 0,
+            prekey_exhaustion_warning: available == 0,
+            available_one_time_prekeys: u32::try_from(available).unwrap_or(u32::MAX),
         })
+    }
+
+    /// Return the incremental OPK lease state for a published root-qualified device.
+    /// # Errors
+    /// Rejects an unknown or ambiguous device.
+    pub fn mvp1_prekey_lease_state(
+        &self,
+        root_commitment: &str,
+        device_id: &str,
+    ) -> Result<PrekeyLeaseState, NodeCoreError> {
+        let control = lock_unpoisoned(&self.control);
+        let lookup = IdentityRegistry::principal_device_lookup(root_commitment, device_id);
+        let identity = control
+            .mvp1_identities
+            .resolve_device_selector(&lookup)
+            .ok_or_else(|| NodeCoreError::ItestHttp("qualified device required".into()))?;
+        Ok(control.mvp1_identities.prekey_lease_state(&identity))
     }
 
     /// Fetch keys only with an authenticated root-qualified device selector.
     /// # Errors
     /// Rejects missing, ambiguous or unqualified root-bound device lookups.
     pub fn mvp1_prekey_checked(&self, lookup: &str) -> Result<PrekeyResponse, NodeCoreError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|value| i64::try_from(value.as_secs()).ok())
-            .ok_or_else(|| NodeCoreError::ItestHttp("system clock unavailable".into()))?;
-        self.mvp1_prekey_checked_from(lookup, "internal", now)
-    }
-
-    /// Fetches and consumes one OPK under the public source budget.
-    /// # Errors
-    /// Rejects missing devices and exhausted source request budgets.
-    pub fn mvp1_prekey_checked_from(
-        &self,
-        lookup: &str,
-        source: &str,
-        now: i64,
-    ) -> Result<PrekeyResponse, NodeCoreError> {
-        let mut control = lock_unpoisoned(&self.control);
-        let identities = &mut control.mvp1_identities;
+        let control = lock_unpoisoned(&self.control);
+        let identities = &control.mvp1_identities;
         let identity = identities
             .resolve_device_selector(lookup)
             .ok_or_else(|| NodeCoreError::ItestHttp("qualified device required".into()))?;
@@ -643,23 +645,90 @@ impl RouterCore {
             .ok_or_else(|| NodeCoreError::ItestHttp("device not found".into()))?
             .device_id
             .clone();
-        let principal_commitment =
-            identities.principal_commitment_for_device(&identity).unwrap_or_default().to_owned();
-        let target_delivery_id =
-            identities.target_delivery_id_for_device(&identity).map(str::to_owned);
-        let leased = identities.take_prekey_bundle(&identity, source, now)?;
-        let (bundle, one_time_prekey_exhausted, prekey_exhaustion_warning) = leased
-            .map_or((None, false, false), |(bundle, exhausted, warn)| {
-                (Some(bundle), exhausted, warn)
-            });
         Ok(PrekeyResponse {
             device_id,
-            bundle,
-            principal_commitment,
-            target_delivery_id,
-            one_time_prekey_exhausted,
-            prekey_exhaustion_warning,
+            bundle: identities.public_prekey_bundle(&identity),
+            principal_commitment: identities
+                .principal_commitment_for_device(&identity)
+                .unwrap_or_default()
+                .to_owned(),
+            target_delivery_id: identities
+                .target_delivery_id_for_device(&identity)
+                .map(str::to_owned),
+            one_time_prekey_exhausted: false,
+            prekey_exhaustion_warning: false,
+            available_one_time_prekeys: u32::try_from(
+                identities.available_one_time_prekeys(&identity),
+            )
+            .unwrap_or(u32::MAX),
         })
+    }
+
+    /// Returns the public SPK-only view for compatibility with source-aware callers.
+    /// # Errors
+    /// Rejects missing devices.
+    pub fn mvp1_prekey_checked_from(
+        &self,
+        lookup: &str,
+        _source: &str,
+        _now: i64,
+    ) -> Result<PrekeyResponse, NodeCoreError> {
+        self.mvp1_prekey_checked(lookup)
+    }
+
+    /// Lease one OPK for an authenticated gateway session and return the incremental durable
+    /// lease state which must be committed before the response is released.
+    /// # Errors
+    /// Rejects unknown fetchers, unqualified targets, and exhausted requester budgets.
+    pub fn mvp1_prekey_lease(
+        &self,
+        request: &PrekeyLeaseRequest,
+        now: i64,
+    ) -> Result<(PrekeyResponse, PrekeyLeaseState), NodeCoreError> {
+        let mut control = lock_unpoisoned(&self.control);
+        let identities = &mut control.mvp1_identities;
+        let fetcher = identities
+            .device_identity_for_root(&request.fetcher_root_commitment, &request.fetcher_device_id)
+            .filter(|identity| identities.device_is_usable(identity))
+            .ok_or_else(|| {
+                NodeCoreError::ItestHttp("authenticated prekey fetcher required".into())
+            })?;
+        let target = identities
+            .resolve_device_selector(&request.device_id)
+            .ok_or_else(|| NodeCoreError::ItestHttp("qualified device required".into()))?;
+        let device_id = identities
+            .device_record(&target)
+            .ok_or_else(|| NodeCoreError::ItestHttp("device not found".into()))?
+            .device_id
+            .clone();
+        let principal_commitment =
+            identities.principal_commitment_for_device(&target).unwrap_or_default().to_owned();
+        let target_delivery_id =
+            identities.target_delivery_id_for_device(&target).map(str::to_owned);
+        let pair = format!("{}\0{}", fetcher.storage_key(), target.storage_key());
+        let leased = identities.lease_prekey_bundle(
+            &target,
+            fetcher.root_commitment(),
+            &pair,
+            &request.source_prefix,
+            now,
+        )?;
+        let (bundle, exhausted, warning) =
+            leased.map_or((None, false, false), |value| (Some(value.0), value.1, value.2));
+        let available = identities.available_one_time_prekeys(&target);
+        let state = identities.prekey_lease_state(&target);
+        Ok((
+            PrekeyResponse {
+                device_id,
+                bundle,
+                principal_commitment,
+                target_delivery_id,
+                one_time_prekey_exhausted: exhausted,
+                prekey_exhaustion_warning: warning,
+                available_one_time_prekeys: u32::try_from(available).unwrap_or(u32::MAX),
+            },
+            state,
+        ))
     }
     /// Authenticate a root-qualified device selected at the wire boundary.
     /// # Errors

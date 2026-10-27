@@ -601,7 +601,9 @@ async fn fresh_sibling_bootstraps_its_first_surface_copy_without_a_preseeded_pai
             principal_commitment: identity.root_commitment().into(),
             device_id: identity.device_id().into(),
             target_delivery_id: Some("sibling".into()),
-            bundle: Some(sibling.client.load_x3dh_private_state(&identity)?.bundle),
+            bundle: Some(sibling.client.load_x3dh_private_state(&identity)?.bundle.clone()),
+            one_time_prekey_exhausted: false,
+            available_one_time_prekeys: 8,
         },
     );
     source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
@@ -679,7 +681,9 @@ fn fresh_sibling_gateway(
             principal_commitment: identity.root_commitment().into(),
             device_id: identity.device_id().into(),
             target_delivery_id: Some("sender".into()),
-            bundle: Some(sibling.load_x3dh_private_state(&identity)?.bundle),
+            bundle: Some(sibling.load_x3dh_private_state(&identity)?.bundle.clone()),
+            one_time_prekey_exhausted: false,
+            available_one_time_prekeys: 8,
         },
     );
     Ok(gateway)
