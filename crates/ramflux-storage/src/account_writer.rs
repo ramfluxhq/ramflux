@@ -44,18 +44,36 @@ impl crate::AccountIndex {
 pub(crate) struct AccountWriter {
     // The kernel releases the lease only when the last descriptor closes or the
     // process exits. Never unlink this inode or use file age to break ownership.
-    _file: File,
+    file: Option<File>,
+    path: PathBuf,
 }
 
 type Owners = BTreeMap<PathBuf, Weak<AccountWriter>>;
+static OWNERS: OnceLock<Mutex<Owners>> = OnceLock::new();
+
+fn owners() -> &'static Mutex<Owners> {
+    OWNERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+type DropHook = Arc<dyn Fn(&Path) + Send + Sync>;
+#[cfg(test)]
+static DROP_HOOK: OnceLock<Mutex<Option<DropHook>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn set_drop_hook(hook: Option<DropHook>) -> Result<(), StorageError> {
+    *DROP_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| std::io::Error::other("account writer drop hook poisoned"))? = hook;
+    Ok(())
+}
 
 impl AccountWriter {
     pub(crate) fn acquire(root: &Path, account: &str) -> Result<Arc<Self>, StorageError> {
-        static OWNERS: OnceLock<Mutex<Owners>> = OnceLock::new();
         let directory = root.join("accounts").join(account).canonicalize()?;
         let path = directory.join(".writer.lock");
-        let mut owners = OWNERS
-            .get_or_init(|| Mutex::new(BTreeMap::new()))
+        let mut owners = owners()
             .lock()
             .map_err(|_| std::io::Error::other("account writer registry poisoned"))?;
         owners.retain(|_, owner| owner.strong_count() != 0);
@@ -69,15 +87,42 @@ impl AccountWriter {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options.open(&path)?;
+        let file = options
+            .open(&path)
+            .map_err(|source| StorageError::AccountWriterLock { path: path.clone(), source })?;
         if let Err(error) = file.try_lock_exclusive() {
             if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
                 return Err(StorageError::AccountWriterBusy(account.to_owned()));
             }
-            return Err(error.into());
+            return Err(StorageError::AccountWriterLock { path, source: error });
         }
-        let owner = Arc::new(Self { _file: file });
+        let owner = Arc::new(Self { file: Some(file), path: path.clone() });
         owners.insert(path, Arc::downgrade(&owner));
         Ok(owner)
+    }
+}
+
+impl Drop for AccountWriter {
+    fn drop(&mut self) {
+        let Ok(mut owners) = owners().lock() else {
+            drop(self.file.take());
+            return;
+        };
+        owners.remove(&self.path);
+        #[cfg(test)]
+        {
+            let hook = DROP_HOOK
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .ok()
+                .and_then(|hook| hook.clone());
+            if let Some(hook) = hook {
+                hook(&self.path);
+            }
+        }
+        // Close the descriptor before releasing the registry mutex. An acquire
+        // can therefore observe either the live shared owner or a released
+        // kernel lock, never the stale interval between those two states.
+        drop(self.file.take());
     }
 }

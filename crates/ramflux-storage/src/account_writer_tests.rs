@@ -6,6 +6,7 @@
 use crate::{AccountDb, AccountDbKey, AccountIndex, StorageError};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -179,4 +180,59 @@ fn backup_snapshot_contains_database_not_writer_ownership() -> TestResult {
     assert_eq!(std::fs::metadata(destination.join("accounts/acct/.writer.lock"))?.len(), 0);
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+#[test]
+fn same_process_reacquire_waits_until_the_previous_descriptor_is_closed() -> TestResult {
+    let (root, writer) = crate::tests::test_db("same-process-writer-drop")?;
+    drop(writer);
+    let index = AccountIndex::open(&root)?;
+    let lease = index.acquire_account_writer("acct")?;
+    let expected = root.join("accounts/acct/.writer.lock").canonicalize()?;
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    crate::account_writer::set_drop_hook(Some(Arc::new(move |path| {
+        if path == expected {
+            let _ = entered_tx.send(());
+            if let Ok(receiver) = release_rx.lock() {
+                let _ = receiver.recv();
+            }
+        }
+    })))?;
+
+    let dropping = std::thread::spawn(move || drop(lease));
+    entered_rx.recv_timeout(Duration::from_secs(5))?;
+    let root_for_reopen = root.clone();
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let reopening = std::thread::spawn(move || {
+        let result = AccountIndex::open(&root_for_reopen)
+            .and_then(|index| index.acquire_account_writer("acct"));
+        let _ = result_tx.send(result);
+    });
+    assert!(
+        result_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "reacquire must wait while the old descriptor is still locked"
+    );
+    release_tx.send(())?;
+    dropping.join().map_err(|_| "drop thread panicked")?;
+    let reopened = result_rx.recv_timeout(Duration::from_secs(5))??;
+    reopening.join().map_err(|_| "reopen thread panicked")?;
+    crate::account_writer::set_drop_hook(None)?;
+    drop(reopened);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn writer_lock_filesystem_error_names_the_lock_path() {
+    let path = std::path::PathBuf::from("/data/accounts/acct/.writer.lock");
+    let error = StorageError::AccountWriterLock {
+        path: path.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::Unsupported, "locks unavailable"),
+    };
+    let message = error.to_string();
+    assert!(message.contains("account writer lock failed"));
+    assert!(message.contains(path.to_string_lossy().as_ref()));
+    assert!(message.contains("locks unavailable"));
 }

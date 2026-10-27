@@ -119,6 +119,9 @@ impl BackupJobs {
             SdkError::Storage(error) if error.is_insufficient_space() => {
                 BackupFailure::new(BackupFailureCode::InsufficientSpace)
             }
+            SdkError::Storage(ramflux_storage::StorageError::AccountWriterBusy(_)) => {
+                BackupFailure::account_busy()
+            }
             SdkError::Io(error) if error.kind() == std::io::ErrorKind::StorageFull => {
                 BackupFailure::new(BackupFailureCode::InsufficientSpace)
             }

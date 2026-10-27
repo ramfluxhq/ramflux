@@ -107,7 +107,13 @@ pub(super) fn recover_generations(
         let Some(_lease) = locks.try_acquire(id)? else { continue };
         let _writer = match index.acquire_account_writer(id) {
             Ok(writer) => writer,
-            Err(ramflux_storage::StorageError::AccountWriterBusy(_)) => continue,
+            Err(ramflux_storage::StorageError::AccountWriterBusy(_)) => {
+                tracing::info!(
+                    account_id = %id,
+                    "backup generation cleanup deferred: account owned by another process"
+                );
+                continue;
+            }
             Err(error) => return Err(error.into()),
         };
         let selected = match index.account(id) {

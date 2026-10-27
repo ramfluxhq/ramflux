@@ -26,7 +26,10 @@ use zeroize::Zeroizing;
 fn failure(code: BackupFailureCode) -> BackupFailure {
     BackupFailure::new(code)
 }
-fn storage_error(error: ramflux_storage::StorageError) -> BackupFailure {
+pub(super) fn storage_error(error: ramflux_storage::StorageError) -> BackupFailure {
+    if matches!(error, ramflux_storage::StorageError::AccountWriterBusy(_)) {
+        return BackupFailure::account_busy();
+    }
     let full = error.is_insufficient_space();
     drop(error);
     failure(if full { BackupFailureCode::InsufficientSpace } else { BackupFailureCode::Tampered })

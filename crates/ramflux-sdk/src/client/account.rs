@@ -78,6 +78,10 @@ impl RamfluxClient {
         let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
         let key_encryption_key = account_db_key_encryption_key(&vault_secret, secret);
         let account_index = self.account_index()?;
+        // The wrapped key and encrypted database are one writer-owned unit. In
+        // particular, a competing first unlock must not replace the wrapped key
+        // before discovering that another process owns the database.
+        let _writer = account_index.acquire_account_writer(local_account_id)?;
         let key = if let Some(wrapped) = account_index.load_wrapped_db_key(local_account_id)? {
             unwrap_with_vault_secret(&key_encryption_key, &wrapped)?
         } else {
@@ -245,6 +249,11 @@ pub(crate) fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const WRITER_CHILD: &str = "client::account::tests::account_writer_sdk_process_fixture";
+    const WRITER_ROOT_ENV: &str = "RAMFLUX_SDK_WRITER_TEST_ROOT";
 
     fn temp_root(test_name: &str) -> PathBuf {
         let nanos =
@@ -268,6 +277,74 @@ mod tests {
             &account_db_key_encryption_key(&vault_secret, secret),
             &wrapped,
         )?)
+    }
+
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn writer_child(root: &Path) -> Result<ChildGuard, Box<dyn std::error::Error>> {
+        Ok(ChildGuard(
+            Command::new(std::env::current_exe()?)
+                .args(["--exact", WRITER_CHILD, "--nocapture"])
+                .env(WRITER_ROOT_ENV, root)
+                .stdin(Stdio::null())
+                .spawn()?,
+        ))
+    }
+
+    fn wait_for_writer_child(root: &Path) -> Result<ChildGuard, Box<dyn std::error::Error>> {
+        let mut child = writer_child(root)?;
+        let ready = root.join("sdk-writer-ready");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !ready.exists() {
+            assert!(child.0.try_wait()?.is_none(), "writer child exited before readiness");
+            assert!(Instant::now() < deadline, "writer child startup timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(child)
+    }
+
+    #[test]
+    fn account_writer_sdk_process_fixture() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(root) = std::env::var_os(WRITER_ROOT_ENV) else {
+            return Ok(());
+        };
+        let index = AccountIndex::open(root)?;
+        let _lease = index.acquire_account_writer("acct")?;
+        std::fs::write(index.root().join("sdk-writer-ready"), [])?;
+        std::thread::sleep(Duration::from_secs(60));
+        Ok(())
+    }
+
+    #[test]
+    fn first_unlock_does_not_write_a_wrapped_key_before_process_ownership()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("first-unlock-process-race");
+        let index = AccountIndex::open(&root)?;
+        index.create_account("acct", "principal")?;
+        assert!(index.load_wrapped_db_key("acct")?.is_none());
+        let holder = wait_for_writer_child(&root)?;
+
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        assert!(matches!(
+            client.unlock_account("acct", b"losing-secret"),
+            Err(SdkError::Storage(StorageError::AccountWriterBusy(ref account))) if account == "acct"
+        ));
+        assert!(
+            index.load_wrapped_db_key("acct")?.is_none(),
+            "a refused first unlock must not publish its generated wrapped key"
+        );
+
+        drop(holder);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
