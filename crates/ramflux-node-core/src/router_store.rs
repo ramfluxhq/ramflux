@@ -34,6 +34,7 @@ mod custody_accounts;
 mod custody_history;
 mod expiry_index;
 mod identity_registry;
+mod migration_barrier;
 mod retention;
 pub use identity_registry::IdentityJournalDiscardReport;
 
@@ -61,6 +62,8 @@ pub struct RouterRedbStore {
     fail_next_registration_admission: std::sync::atomic::AtomicBool,
     custody_new_principals_per_day: u64,
     custody_new_principals_per_minute: u64,
+    #[cfg(test)]
+    pub(crate) fail_next_migration_commit: std::sync::atomic::AtomicBool,
 }
 
 struct RouterCommitWriter {
@@ -357,6 +360,10 @@ fn record_inbox_entry_until_in_txn(
 }
 
 impl RouterRedbStore {
+    pub(crate) fn migration_db(&self) -> &redb::Database {
+        &self.db
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
@@ -490,6 +497,8 @@ impl RouterRedbStore {
             fail_next_registration_admission: std::sync::atomic::AtomicBool::new(false),
             custody_new_principals_per_day,
             custody_new_principals_per_minute,
+            #[cfg(test)]
+            fail_next_migration_commit: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

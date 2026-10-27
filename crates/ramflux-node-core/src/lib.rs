@@ -19,7 +19,13 @@ mod franking;
 mod gateway_auth;
 mod gateway_frames;
 mod gateway_state;
+mod home_migration_store;
 mod home_node_migration;
+pub use home_migration_store::{
+    AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationBacklogCursor,
+    MigrationEndpoints, MigrationNode, MigrationOperation, MigrationPeer, MigrationRole,
+    PrepareMigration,
+};
 mod http_support;
 mod source_privacy;
 pub use source_privacy::{source_ip_hash, source_ip_hash_with_key};
