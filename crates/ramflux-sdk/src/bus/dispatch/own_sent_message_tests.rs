@@ -100,7 +100,16 @@ async fn sent_group_message_creates_an_outgoing_sibling_row_without_history_impo
         json!({"group_id":"own-group","conversation_id":"own-group-thread","message_id":"group-message",
             "sender_id":"device-sender","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"sent to group")}),
     );
-    super::super::group::dispatch_group_send_request(&request, &mut source).await?;
+    let sender = source.client.owned_device_identity()?;
+    let canonical = ramflux_protocol::group_message_id(
+        "own-group",
+        sender.root_commitment(),
+        sender.device_id(),
+        "group-message",
+    )?;
+    let result = super::super::group::dispatch_group_send_request(&request, &mut source).await?;
+    assert_eq!(result.response_body["message_id"], canonical);
+    assert_eq!(result.response_body["client_message_id"], "group-message");
     crate::bus::own_device_copy::flush(&mut source).await?;
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     let entry = GatewayInboxEntry { inbox_seq: 1, target_delivery_id: "sibling".into(), envelope };
@@ -120,7 +129,7 @@ async fn sent_group_message_creates_an_outgoing_sibling_row_without_history_impo
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["direction"], "outgoing");
     assert_eq!(rows[0]["body_utf8"], "sent to group");
-    assert_eq!(rows[0]["original_message_id"], "group-message");
+    assert_eq!(rows[0]["original_message_id"], canonical);
     assert_eq!(
         sibling
             .client

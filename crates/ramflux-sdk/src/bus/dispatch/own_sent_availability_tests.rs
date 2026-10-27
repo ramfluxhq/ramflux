@@ -117,16 +117,25 @@ async fn a_full_copy_queue_does_not_fail_the_real_dm_or_group_send() -> TestResu
         "group.send",
         json!({"group_id":"group","conversation_id":"group-thread","message_id":"group-primary","sender_id":"device-sender","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"group body")}),
     );
-    super::super::group::dispatch_group_send_request(&request, &mut f.source).await?;
+    let sender = f.source.client.owned_device_identity()?;
+    let canonical = ramflux_protocol::group_message_id(
+        "group",
+        sender.root_commitment(),
+        sender.device_id(),
+        "group-primary",
+    )?;
+    let result = super::super::group::dispatch_group_send_request(&request, &mut f.source).await?;
+    assert_eq!(result.response_body["message_id"], canonical);
+    assert_eq!(result.response_body["client_message_id"], "group-primary");
     assert_eq!(
-        f.source.client.account_db()?.message_content("group-primary")?,
+        f.source.client.account_db()?.message_content(&canonical)?,
         Some(b"group body".to_vec())
     );
     assert_eq!(
         f.source
             .client
             .account_db()?
-            .client_record("message", "group-primary")?
+            .client_record("message", &canonical)?
             .ok_or("group status")?["own_device_copy_state"],
         "failed"
     );
