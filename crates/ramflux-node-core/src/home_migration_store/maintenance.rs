@@ -82,6 +82,24 @@ pub(super) fn release_budget(
     }
     Ok(())
 }
+// Reserve the full unresolved allowance before sealing; failures cannot create extra in-doubt work.
+pub(super) fn sealed_peer_budget(
+    tx: &redb::WriteTransaction,
+    peer: &str,
+    add: bool,
+) -> Result<(), NodeCoreError> {
+    let key = format!("sealed-peer/{peer}");
+    let current = count(tx, &key)?;
+    if add && current >= 16 {
+        return Err(refusal(Refusal::CapacityRefused));
+    }
+    let next = if add {
+        current + 1
+    } else {
+        current.checked_sub(1).ok_or_else(|| storage("migration peer seal budget underflow"))?
+    };
+    set(tx, &key, next)
+}
 pub(super) fn require_no_live_window(
     tx: &redb::WriteTransaction,
     anchor: &str,

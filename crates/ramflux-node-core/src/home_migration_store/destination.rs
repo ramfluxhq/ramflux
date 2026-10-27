@@ -145,6 +145,7 @@ impl RouterRedbStore {
             )?;
         }
         maintenance::release_budget(&tx, &a.account_anchor, false)?;
+        maintenance::sealed_peer_budget(&tx, &a.old_node, false)?;
         op.live_budget = false;
         maintenance::remove_courier(&tx, &op)?;
         maintenance::index_expiry(&tx, &key, op.expires_at)?;
@@ -221,6 +222,7 @@ impl RouterRedbStore {
         write(&tx, OPS, &key, &op)?;
         maintenance::index_expiry(&tx, &key, op.expires_at)?;
         maintenance::release_budget(&tx, anchor, false)?;
+        maintenance::sealed_peer_budget(&tx, &op.prepare.body.old_node, false)?;
         commit_transition(self, tx)?;
         self.cache_migration_routes(&op.delivery_map, op.phase == Phase::Active, false)?;
         Ok(())
@@ -444,6 +446,7 @@ fn seal_in_transaction(
     op.expires_at = crypto::hard_deadline(a).map_err(auth_error)?;
     op.recovery_guard = true;
 
+    maintenance::sealed_peer_budget(&tx, &a.old_node, true)?;
     maintenance::unsealed_budget(&tx, &a.account_anchor, false)?;
 
     for entry in &op.delivery_map {

@@ -23,6 +23,7 @@ pub(crate) mod destination;
 pub use destination::{MigrationAdmission, PrepareMigration};
 pub use source::{AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationPeer};
 mod authority_evidence;
+mod courier;
 mod fence;
 mod maintenance;
 mod queries;
