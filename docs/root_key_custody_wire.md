@@ -385,6 +385,14 @@ superset verification. A fresh observer still cannot prove globally latest state
 Certificate/range replacement re-signs the same cumulative list/hash/count with a
 predecessor link; it cannot clear or shrink it. Backups preserve pins and denials.
 
+Revocation has priority over enrollment. Reserve 64 of the 1024 roster slots;
+refuse new enrollment at 960 entries, and warn operators at 80% of the roster,
+record-byte, compacted-count or compacted-byte cap. Revoking a known active
+device replaces its existing row with a tombstone and removes its branch
+certificate; it allocates no slot and does not grow the compacted list. Keep
+that path publishable even at capacity. Refuse enrollment and compaction that
+need unavailable capacity before refusing an in-place revocation.
+
 A candidate exceeding either cap is rejected with
 `revocation_capacity_requires_master_reattestation`; the account requires a fresh,
 user-started master re-attestation (a master-signed higher-range certificate and
@@ -443,7 +451,7 @@ Proof is signed by the certified branch, checked against current authority per
 request, and consumed atomically in the receiver's replay cache through expiry
 plus skew. A retry uses a new challenge and proof id. In **every mode**, the client
 exports 32 bytes from its own TLS 1.3 connection using label
-`"ramflux.identity.branch_proof.exporter.v3"` and the decoded 32-byte challenge
+`"EXPERIMENTAL-ramflux.identity.branch_proof.exporter.v3"` and the decoded 32-byte challenge
 nonce as context, then SHA-256 hashes those bytes into `transport_binding`.
 Use the [TLS 1.3 exporter](https://www.rfc-editor.org/rfc/rfc8446.html#section-7.5),
 including for [QUIC](https://www.rfc-editor.org/rfc/rfc9001.html#section-8.1);
@@ -659,7 +667,11 @@ Each ProxyKey has exactly the ReceiptKey fields plus `proxy_id: Id` and
 `audiences: Id[]` (sorted unique, at most 64). Publication under the node signature
 authorizes that node-operated proxy only for branch-proof receipts to those
 audiences. Proxy and relay key ids and key material are distinct. The proxy key
-is not authorized by its TLS certificate alone.
+is not authorized by its TLS certificate alone. A proxy key's signing lifetime
+`sign_until - not_before` is positive and at most 2592000 seconds (30 days).
+Keep proxy signing keys nonexportable or in an HSM where the provider supports
+that boundary; software custody must be identified explicitly, never advertised
+as hardware isolation. Rotation overlap does not extend the signing deadline.
 Node record budget is 512 KiB; at most 16 active/overlap descriptors across both
 key arrays. Its epoch and
 revocation pins persist monotonically; a node-identity-key replacement still
@@ -1027,3 +1039,33 @@ These are planned acceptance vectors, not executed implementation tests:
   and HPKE handover. Omitted/unavailable private control evidence blocks affected
   mutations; only an authenticated explicit current-primary replacement changes
   the floor. Public records contain no group summary.
+
+## Born-v3 deterministic implementation vector
+
+The complete canonical bytes, nested signatures, hashes and inputs are published
+in [custody_v3.json](../crates/ramflux-crypto/tests/fixtures/custody_v3.json).
+The independent [Python reference](../crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py)
+uses cryptography 50.0.2 and blake3 1.0.11, separately from the Rust implementation.
+These are public test keys and must never be used for real identities.
+
+| Input or result | Value |
+| --- | --- |
+| Entropy | 32 zero bytes |
+| BIP39 phrase | `abandon` repeated 23 times, then `art` |
+| HKDF salt / IKM / info / output | 32 zero bytes / decoded 32-byte entropy / bare `ramflux.identity.master.v1` / 32 bytes |
+| Derived Ed25519 master seed (hex) | `2f5adffabe16e98d436efc55baf33ef81bbe6618adb44915eb3ac24fa8a688c8` |
+| Master public key | `dpo72yjw_usfOz1CMtsiramWwlb9rLj72PwxphjlnJc` |
+| Account anchor | `CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI` |
+| Self-signing / branch / agreement seeds | 32 bytes each of `02` / `03` / `04` (hex) |
+| Master / branch certificate ids | 32 bytes each of `05` / `06` (hex), base64url encoded |
+| Principal / device / display name | `vector.example` / `primary` / `Vector Human` |
+| Kind / issued time / branch expiry | `human` / `1700000000` / `1702592000` |
+| Range / revision / encoded epoch | `1` / `1` / `4294967297` |
+| Master certificate envelope hash | `MObK_MiUX6AkEOVT6kYbxYkkCARnCuezi6hCJgV43nc` |
+| Branch certificate envelope hash | `L8pYOyKfiOUvT9J7qDWyakLgK4OWmYXnGVm9085fYo0` |
+
+Rust tests reconstruct this genesis and compare every canonical byte, section
+hash, nested signature and complete-envelope hash with the independent fixture.
+This vector covers native human genesis, master and branch certificates and the
+complete v3 device set; it does not claim coverage for deferred migration,
+delegation, pairing or recovery protocols.
