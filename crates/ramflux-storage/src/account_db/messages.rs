@@ -71,7 +71,12 @@ impl AccountDb {
         conversation_id: &str,
         message_id: &str,
         is_own: bool,
+        created_at: i64,
     ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO direct_message_projection(conversation_id,message_id,sender_id,encrypted_body,metadata_json,deleted,is_own,scrub_version,created_at) VALUES(?1,?2,'',x'',x'7b7d',1,?3,0,?4)",
+            params![conversation_id, message_id, i64::from(is_own), created_at],
+        )?;
         self.scrub_message_for_deletion(conversation_id, message_id, Some(is_own))?;
         self.direct_message_by_id(message_id)?
             .ok_or_else(|| StorageError::MessageNotFound(message_id.to_owned()))?;
@@ -96,6 +101,9 @@ impl AccountDb {
         &self,
         message: DirectMessageWrite<'_>,
     ) -> Result<(), StorageError> {
+        if self.message_is_deleted(message.message_id)? {
+            return Ok(());
+        }
         let metadata_json = serde_json::to_vec(message.metadata)?;
         let inserted = self.connection.execute(
             "INSERT OR IGNORE INTO direct_message_projection
@@ -114,6 +122,9 @@ impl AccountDb {
             let Some(existing) = self.direct_message_by_id(message.message_id)? else {
                 return Err(StorageError::MessageIdConflict(message.message_id.to_owned()));
             };
+            if existing.deleted {
+                return Ok(());
+            }
             if existing.conversation_id != message.conversation_id
                 || existing.sender_id != message.sender_id
                 || existing.encrypted_body != message.encrypted_body

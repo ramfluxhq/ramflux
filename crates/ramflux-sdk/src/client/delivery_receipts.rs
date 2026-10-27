@@ -55,6 +55,9 @@ impl RamfluxClient {
         message: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
+        if self.account_db()?.message_is_deleted(message)? {
+            return Ok(());
+        }
         let Some(local_branch) = self.device_branch.as_ref() else {
             return Ok(());
         };
