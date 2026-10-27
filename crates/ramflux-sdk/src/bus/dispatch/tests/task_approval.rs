@@ -33,6 +33,7 @@ fn a_remote_requester_approval_round_trip_is_accepted_by_mcp_before_the_agent_re
         &ramflux_protocol::canonical_json_bytes(&arguments)?,
     );
     agent.mcp_pending_approvals.insert("approval".into(),LocalMcpApprovalRecord {approval_id:"approval".into(),server_id:"shell".into(),tool_name:"run".into(),capability:McpCapability::RunShell,risk_level:RiskLevel::High,tool_scope:None,confirmation_mode:"remote_app".into(),expires_at:now_unix_timestamp()+300,status:"pending".into(),details:json!({"requested_grant_id":"grant","arguments":arguments,"arguments_hash":hash,"single_use":true,"full_delegation":false})});
+    persist_pending_approval(&agent)?;
     queue_requests(&mut agent)?;
     let jobs = agent.client.account_db()?.task_record_page::<Job>(
         "task/approval_out/",
@@ -52,7 +53,7 @@ fn a_remote_requester_approval_round_trip_is_accepted_by_mcp_before_the_agent_re
     )?;
     agent.client.accept_task_approval(&decisions[0].1.packet)?;
     apply_decisions(&mut agent)?;
-    apply_decisions(&mut agent)?;
+    assert_applied_approval_is_not_reloaded(&mut agent)?;
     let grant = agent.mcp_grants.get("grant").ok_or("MCP grant not accepted")?;
     assert!(grant.signing_body.task_binding.is_some());
     assert_eq!(grant.signed_by_device_id, "device-human");
@@ -111,6 +112,36 @@ fn a_remote_requester_approval_round_trip_is_accepted_by_mcp_before_the_agent_re
     drop(agent);
     drop(human);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn persist_pending_approval(
+    agent: &LocalBusAccountState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let approval = agent.mcp_pending_approvals.get("approval").ok_or("pending approval")?;
+    agent.client.account_db()?.persist_client_record(
+        "approval",
+        "approval",
+        &serde_json::to_value(approval)?,
+    )?;
+    Ok(())
+}
+
+fn assert_applied_approval_is_not_reloaded(
+    agent: &mut LocalBusAccountState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    apply_decisions(agent)?;
+    super::super::grant_mcp::hydrate_local_mcp_state(agent)?;
+    assert!(
+        !agent.mcp_pending_approvals.contains_key("approval"),
+        "an applied remote approval must not be resurrected by a durable reload"
+    );
+    let row = agent
+        .client
+        .account_db()?
+        .client_record("approval", "approval")?
+        .ok_or("approval directory row")?;
+    assert_eq!(row["status"], "approved");
     Ok(())
 }
 

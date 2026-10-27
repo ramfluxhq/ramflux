@@ -80,7 +80,12 @@ pub(super) fn apply_one(
     packet: &Packet,
 ) -> Result<bool, SdkError> {
     let id = packet.id()?;
-    if account.client.task_approval_receipt(&id)?.is_some() {
+    if let Some(receipt) = account.client.task_approval_receipt(&id)? {
+        finish_directory_approval(
+            account,
+            &packet.request().approval.approval_id,
+            receipt.approved,
+        )?;
         return Ok(false);
     }
     let original = account
@@ -146,9 +151,31 @@ pub(super) fn apply_one(
     }
     account.mcp_pending_approvals.remove(&approval.approval_id);
     account.client.retire_task_approval(&trusted, DeliveryState::Applied, None)?;
+    finish_directory_approval(account, &approval.approval_id, *approved)?;
     account.client.account_db()?.delete_task_state(&key("approval_applied", &id))?;
     account.client.account_db()?.append_journal(&format!("task-approval-applied:{id}"),if *approved {"mcp.approval.granted"}else{"mcp.approval.denied"},&json!({"grant_id":original.request().grant_body.grant_id,"task_id":original.request().binding.task_id}),now_unix_timestamp(),None)?;
     Ok(true)
+}
+
+fn finish_directory_approval(
+    account: &mut LocalBusAccountState,
+    approval_id: &str,
+    approved: bool,
+) -> Result<(), SdkError> {
+    let db = account.client.account_db()?;
+    if let Some(mut row) = db.client_record("approval", approval_id)? {
+        let status = if approved { "approved" } else { "denied" };
+        if row["status"].as_str() == Some(status) {
+            account.mcp_pending_approvals.remove(approval_id);
+            return Ok(());
+        }
+        row["status"] = json!(status);
+        row["event_type"] =
+            json!(if approved { "mcp.approval.granted" } else { "mcp.approval.denied" });
+        db.persist_client_record("approval", approval_id, &row)?;
+    }
+    account.mcp_pending_approvals.remove(approval_id);
+    Ok(())
 }
 fn accept_grant(account: &mut LocalBusAccountState, packet: &Packet) -> Result<(), SdkError> {
     let Payload::Decision { request, grant_signature, .. } = &packet.payload else {

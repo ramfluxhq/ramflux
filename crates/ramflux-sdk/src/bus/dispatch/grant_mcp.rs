@@ -1371,6 +1371,12 @@ fn mcp_verify_standing_approval_signature(
 pub(crate) fn hydrate_local_mcp_state(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
     account.mcp_registry = McpRegistry::new();
     account.mcp_pending_approvals.clear();
+    let terminal_task_approvals = account
+        .client
+        .task_approval_decision_rows()?
+        .into_iter()
+        .filter_map(|row| row["decision_id"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
     for manifest in account.client.account_db()?.load_mcp_tools::<McpToolManifest>()? {
         account.mcp_registry.install_tool(manifest);
     }
@@ -1379,7 +1385,12 @@ pub(crate) fn hydrate_local_mcp_state(account: &mut LocalBusAccountState) -> Res
         .account_db()?
         .list_actor_states::<serde_json::Value>("directory/approval/")?
     {
-        if value.get("status").and_then(serde_json::Value::as_str) == Some("pending") {
+        if value.get("status").and_then(serde_json::Value::as_str) == Some("pending")
+            && value
+                .get("approval_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|id| !terminal_task_approvals.contains(id))
+        {
             let approval: LocalMcpApprovalRecord = serde_json::from_value(value)?;
             account.mcp_pending_approvals.insert(approval.approval_id.clone(), approval);
         }
