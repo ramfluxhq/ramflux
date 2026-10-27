@@ -291,7 +291,7 @@ impl RouterCore {
         &self,
         anchor: &str,
         now: u64,
-        work: impl FnOnce(&VerifiedRecord) -> Result<T, NodeCoreError>,
+        work: impl FnOnce(&VerifiedRecord, &CustodyPublication) -> Result<T, NodeCoreError>,
     ) -> Result<T, NodeCoreError> {
         let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let registry = &control.mvp1_identities;
@@ -303,6 +303,6 @@ impl RouterCore {
         let verified = registry.verify_custody(publication, now)?;
         registry.custody.require_current(&verified).map_err(|e| crypto(&e))?;
         // Hold the same authority lock through the durable home transition.
-        work(&verified)
+        work(&verified, publication)
     }
 }

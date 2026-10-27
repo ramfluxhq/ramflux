@@ -3,9 +3,10 @@
 
 //! Live admission accounting, bounded recovery scans and terminal-state reclamation.
 use super::{
-    Action, BUDGETS, BUSINESS, CLOCK, EXPIRES, GUARDS, HEADS, HomeRecord, InboxRoute,
-    MigrationOperation, NodeCoreError, OPS, Phase, ReadableDatabase, ReadableTable, RecordEvidence,
-    Refusal, RouterRedbStore, TARGETS, business_key, clock, decode, read, refusal, storage, write,
+    Action, BACKLOG, BUDGETS, BUSINESS, CLOCK, COURIER, EXPIRES, FENCE_EXPIRES, FENCES, GUARDS,
+    HEADS, HomeRecord, InboxRoute, MigrationOperation, NodeCoreError, OPS, Phase, ReadableDatabase,
+    ReadableTable, RecordEvidence, Refusal, RouterRedbStore, TARGETS, business_key, clock, decode,
+    read, refusal, storage, write,
 };
 fn count(tx: &redb::WriteTransaction, key: &str) -> Result<u64, NodeCoreError> {
     Ok(tx.open_table(BUDGETS).map_err(storage)?.get(key).map_err(storage)?.map_or(0, |v| v.value()))
@@ -14,11 +15,27 @@ fn set(tx: &redb::WriteTransaction, key: &str, value: u64) -> Result<(), NodeCor
     tx.open_table(BUDGETS).map_err(storage)?.insert(key, value).map_err(storage)?;
     Ok(())
 }
-pub(super) fn unsealed_budget(tx: &redb::WriteTransaction, add: bool) -> Result<(), NodeCoreError> {
+pub(super) fn unsealed_budget(
+    tx: &redb::WriteTransaction,
+    anchor: &str,
+    add: bool,
+) -> Result<(), NodeCoreError> {
     let old = count(tx, "unsealed")?;
-    if add && old >= 1024 {
+    let root_key = format!("unsealed/{anchor}");
+    let root = count(tx, &root_key)?;
+    if add && (old >= 1024 || root >= 1) {
         return Err(refusal(Refusal::CapacityRefused));
     }
+    set(
+        tx,
+        &root_key,
+        if add {
+            root + 1
+        } else {
+            root.checked_sub(1)
+                .ok_or_else(|| storage("migration root unsealed budget underflow"))?
+        },
+    )?;
     set(
         tx,
         "unsealed",
@@ -42,7 +59,7 @@ pub(super) fn reserve_budget(
     set(tx, anchor, root + 1)?;
     set(tx, "live", global + 1)?;
     if unsealed {
-        unsealed_budget(tx, true)?;
+        unsealed_budget(tx, anchor, true)?;
     }
     Ok(())
 }
@@ -61,7 +78,7 @@ pub(super) fn release_budget(
         )?;
     }
     if unsealed {
-        unsealed_budget(tx, false)?;
+        unsealed_budget(tx, anchor, false)?;
     }
     Ok(())
 }
@@ -106,10 +123,10 @@ pub(super) fn index_expiry(
 impl RouterRedbStore {
     /// Terminal cleanup is bounded; permanent heads/proofs are never pruned.
     /// # Errors
-    /// Propagates all durable errors and refuses clock rollback.
+    /// Propagates durable errors; local time never moves below its persisted floor.
     pub fn cleanup_home_migrations(&self, now: u64) -> Result<usize, NodeCoreError> {
         let tx = self.migration_db().begin_write().map_err(storage)?;
-        clock(&tx, now)?;
+        let now = clock(&tx, now)?;
         let upper = format!("{now:020}/");
         let expired = tx
             .open_table(EXPIRES)
@@ -129,12 +146,37 @@ impl RouterRedbStore {
                 continue;
             };
             if now <= op.expires_at
-                || !matches!(op.phase, Phase::Prepared | Phase::Expired | Phase::Aborted)
+                || !matches!(
+                    op.phase,
+                    Phase::Prepared
+                        | Phase::Expired
+                        | Phase::Aborted
+                        | Phase::Active
+                        | Phase::Committed
+                )
             {
                 continue;
             }
-            if op.phase == Phase::Prepared {
-                release_budget(&tx, &op.prepare.body.account_anchor, true)?;
+            if op.phase == Phase::Committed && op.live_budget {
+                // A forwarding-window deadline never discards held drain obligations.
+                index_expiry(&tx, &key, now.saturating_add(60))?;
+                continue;
+            }
+            if op.live_budget {
+                release_budget(&tx, &op.prepare.body.account_anchor, op.phase == Phase::Prepared)?;
+            }
+            remove_courier(&tx, &op)?;
+            for target in &op.delivery_map {
+                let cursor_key = serde_json::to_string(&(
+                    &op.prepare.body.account_anchor,
+                    &op.prepare.body.migration_id,
+                    &target.target_delivery_id,
+                ))
+                .map_err(storage)?;
+                tx.open_table(BACKLOG)
+                    .map_err(storage)?
+                    .remove(cursor_key.as_str())
+                    .map_err(storage)?;
             }
             tx.open_table(OPS).map_err(storage)?.remove(key.as_str()).map_err(storage)?;
             for action in
@@ -154,6 +196,25 @@ impl RouterRedbStore {
             }
             removed += 1;
         }
+        let fences = tx
+            .open_table(FENCE_EXPIRES)
+            .map_err(storage)?
+            .range(..upper.as_str())
+            .map_err(storage)?
+            .take(128)
+            .map(|row| {
+                let (k, v) = row.map_err(storage)?;
+                Ok((k.value().to_owned(), decode::<String>(v.value())?))
+            })
+            .collect::<Result<Vec<_>, NodeCoreError>>()?;
+        for (index, key) in fences {
+            tx.open_table(FENCE_EXPIRES)
+                .map_err(storage)?
+                .remove(index.as_str())
+                .map_err(storage)?;
+            tx.open_table(FENCES).map_err(storage)?.remove(key.as_str()).map_err(storage)?;
+        }
+        super::authority_evidence::cleanup(&tx, now)?;
         tx.commit().map_err(storage)?;
         Ok(removed)
     }
@@ -185,5 +246,51 @@ impl RouterRedbStore {
             .map(|v| decode::<InboxRoute>(v.value()))
             .transpose()?
             .is_none_or(|route| route.active))
+    }
+}
+
+pub(super) fn remove_courier(
+    tx: &redb::WriteTransaction,
+    op: &MigrationOperation,
+) -> Result<(), NodeCoreError> {
+    let key = due_key(op.next_due, &op.prepare.body.account_anchor, &op.prepare.body.migration_id);
+    tx.open_table(COURIER).map_err(storage)?.remove(key.as_str()).map_err(storage)?;
+    Ok(())
+}
+impl RouterRedbStore {
+    /// Release a source reservation once every durable drain obligation is terminal.
+    /// # Errors
+    /// Rejects an unknown/noncommitted operation or outstanding delivery obligations.
+    pub fn finish_home_migration_backlog(
+        &self,
+        anchor: &str,
+        migration_id: &str,
+        now: u64,
+    ) -> Result<(), NodeCoreError> {
+        let tx = self.migration_db().begin_write().map_err(storage)?;
+        clock(&tx, now)?;
+        let key = super::op_key(anchor, migration_id, super::MigrationRole::Source)?;
+        let mut op: MigrationOperation =
+            read(&tx, OPS, &key)?.ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+        if op.phase != Phase::Committed {
+            return Err(refusal(Refusal::BaseMismatch));
+        }
+        for target in &op.delivery_map {
+            let cursor_key =
+                serde_json::to_string(&(anchor, migration_id, &target.target_delivery_id))
+                    .map_err(storage)?;
+            let cursor: super::MigrationBacklogCursor = read(&tx, BACKLOG, &cursor_key)?
+                .ok_or_else(|| storage("migration backlog cursor missing"))?;
+            if cursor.progress.remaining != 0 {
+                return Err(refusal(Refusal::MigrationInProgress));
+            }
+        }
+        if op.live_budget {
+            release_budget(&tx, anchor, false)?;
+            op.live_budget = false;
+            op.state_version += 1;
+            write(&tx, OPS, &key, &op)?;
+        }
+        super::commit_transition(self, tx)
     }
 }
