@@ -75,3 +75,100 @@ builds and two admitted migration-capable homes:
 
 Record both macOS/build versions and the observed prompt/cancel/retry results.
 This manual boundary is required before the demo and is not run by unit tests.
+
+## Durable client journal
+
+`HomeMigrationJournal` binds an existing encrypted account DB to its indexed
+account anchor and verified born-v3 human custody record. `migrate_home_node`
+now starts that durable intent rather than changing the in-memory federation
+simulation. It requires a previously verified source home; it does not bootstrap
+trust from a URL response. The target fingerprint uses
+`hash_hex(CLIENT_DISCOVERY_DOMAIN, node_public_key.as_bytes())`, independently
+supplied by the user, and the target client discovery signature is checked.
+
+The migration job and an immutable progress transition commit in the same
+account-writer transaction. Each transition writes the K0 outbox. Projection reads
+that immutable transition, so later phase changes cannot collapse earlier
+progress. The job carries bounded public signing/admission evidence, never primary
+seeds, recovery phrases, branch seeds, account passwords or provider credentials.
+There is one live operation per account; total jobs and unpublished transitions
+are bounded. A changed operation intent is an idempotency conflict. Retry time
+uses a nondecreasing persisted clock floor and bounded exponential backoff.
+
+The stored unsigned proposal precedes OS presence. An opaque, non-clonable
+approval plan can cross to a blocking worker without holding a writer transaction.
+The returned result is installed only if its revision, digest, authorization body,
+authority and pending phase still match. Cancelling during presence invalidates
+that result. `seal_sent` and the recovery guard commit before the signed
+Authorization is returned for transport. If the seal reply is lost, cancel retains
+the Authorization without requiring a seal receipt. A timeout retains the guard
+and reports `needs_attention`; it cannot select a home, activate B or resume A.
+
+Backups strip the private job tables and migration progress outbox/journal rows
+from the copied snapshot, without changing the live source DB. Imported replacement
+generations also strip this work. Merge skips incoming migration tables and keeps
+the live local journal. The public home-chain replay floor is a separate concern
+and must survive restore; exporting a timer is not a way to resume an old move.
+
+## Desktop bus contract
+
+These are the required bus methods and event shape. They describe the integration
+contract; the journal/provider implementation alone does not install a running
+network driver or these daemon dispatch methods.
+
+| Method | Request body |
+| --- | --- |
+| `account.home_node.migrate` | `{operation_id, target_discovery_url, expected_node_fingerprint}` |
+| `account.home_node.migration.status` | `{operation_id}` |
+| `account.home_node.migration.abort` | `{operation_id}` |
+| `account.home_node.migration.confirm` | `{operation_id, proposal_digest}` |
+
+An `operation_id` is the canonical unpadded base64url encoding of 32 random bytes
+and is the wire `migration_id`. It is immutable across restart and business
+retries. Confirmation uses the stored proposal digest, never an arbitrary digest
+supplied for generic primary signing. Desktop must show destination fingerprint,
+previous home hash and next home epoch before invoking confirmation.
+
+`home_migration.progress` has this complete metadata body:
+
+```json
+{
+  "operation_id": "<canonical base64url identifier>",
+  "seq": 1,
+  "phase": "intent",
+  "source": "source.example",
+  "target": null,
+  "home_epoch": 0,
+  "home_hash": "<verified home hash>",
+  "commit_deadline": null,
+  "forward_until": null,
+  "backlog": {
+    "scheduled": 0,
+    "forwarded": 0,
+    "receiver_acked": 0,
+    "expired": 0,
+    "rejected": 0,
+    "evidence_required": 0,
+    "remaining": 0
+  }
+}
+```
+
+`reason` is an optional typed refusal code. Unknown target/deadlines remain null.
+The body `seq` is the operation's durable revision; the K1 event frame `seq` is the
+global account-journal replay cursor. They must not be interchanged. Backlog
+forwarded, receiver_acked, expired, rejected and remaining are disjoint and sum to
+scheduled; evidence_required is a subset of remaining.
+
+The full phase vocabulary is `intent`, `prepare_sent`, `awaiting_custody_unlock`,
+`seal_sent`, `sealed`, `commit_pending`, `activate_sent`, `backlog_transferring`,
+`reconnecting`, `manifest_switch_pending`, `forwarding`, `complete`, `expired`,
+`aborted`, `refused` and `needs_attention`. A local error is not evidence for a
+terminal phase. Completion requires authenticated terminal evidence and an
+ordinary v3 reconnect, followed by an atomic, fsynced manifest switch. In
+particular, a provisional native DM channel does not establish that reconnect.
+
+The intended CLI spelling is `rf account migrate` with `migrate-home` as an
+alias, plus status/cancel operations. Every base64url identifier positional must
+accept a leading `-`. CLI/desktop must consume the same daemon operation; they
+must not create a separate migration engine or a new trust anchor.

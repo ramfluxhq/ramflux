@@ -47,6 +47,10 @@ impl PrimaryVault for MemoryPrimaryVault {
         self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.remove(reference);
         Ok(())
     }
+    fn home_authorization_preflight(&self) -> Result<(), SdkError> {
+        Ok(())
+    }
+
     fn sign_home_authorization(
         &self,
         request: super::HomeAuthorizationRequest<'_>,
