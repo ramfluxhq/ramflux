@@ -223,6 +223,22 @@ impl RouterRedbStore {
         source: IpAddr,
         now: u64,
     ) -> Result<(), NodeCoreError> {
+        self.prune_custody_history(now)?;
+        let tx = self.db.begin_write().map_err(error)?;
+        self.record_custody_account_in_tx(&tx, anchor, state, is_new, source, now)?;
+        tx.commit().map_err(error)?;
+        self.custody_publication_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    pub(crate) fn record_custody_account_in_tx(
+        &self,
+        tx: &redb::WriteTransaction,
+        anchor: &str,
+        state: &CustodyAccountState,
+        is_new: bool,
+        source: IpAddr,
+        now: u64,
+    ) -> Result<(), NodeCoreError> {
         let bytes = serde_json::to_vec(state).map_err(error)?;
         if bytes.len() > 16 * 1024 * 1024 {
             crate::custody_budget_log::refuse(
@@ -234,8 +250,6 @@ impl RouterRedbStore {
             );
             return Err(NodeCoreError::Capacity { resource: "custody account authority bytes" });
         }
-        self.prune_custody_history(now)?;
-        let tx = self.db.begin_write().map_err(error)?;
         {
             let mut accounts = tx.open_table(ACCOUNTS).map_err(error)?;
             if is_new {
@@ -275,7 +289,7 @@ impl RouterRedbStore {
                 let previous: CustodyAccountState =
                     serde_json::from_slice(previous.value()).map_err(error)?;
                 super::custody_history::retain(
-                    &tx,
+                    tx,
                     &previous.publication,
                     &state.publication,
                     now,
@@ -283,8 +297,6 @@ impl RouterRedbStore {
             }
             accounts.insert(anchor, bytes.as_slice()).map_err(error)?;
         }
-        tx.commit().map_err(error)?;
-        self.custody_publication_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
     /// Number of committed per-account custody updates in this store process.

@@ -45,6 +45,11 @@ impl CustodyService {
             return Err(CustodyRefusal::InvalidInput);
         };
         let Scope { peer, now, tick, origin, .. } = scope;
+        if matches!(action, CustodyProofAction::HomeMigration { .. })
+            && (binding_mode == BindingMode::NoChannelBinding || self.migration.is_none())
+        {
+            return Err(CustodyRefusal::BindingRefused);
+        }
         if !self.node.envelope().body.channel_binding_modes.contains(&binding_mode)
             || (binding_mode == BindingMode::NoChannelBinding && !self.allow_unbound)
         {
@@ -87,7 +92,8 @@ impl CustodyService {
             return Err(CustodyRefusal::BindingRefused);
         }
         let publication = match &attempt.action {
-            CustodyProofAction::Publish { publication } => CustodyPublication {
+            CustodyProofAction::Publish { publication }
+            | CustodyProofAction::HomeMigration { publication, .. } => CustodyPublication {
                 record: publication.record.clone(),
                 compacted_ids: publication.compacted_ids.clone(),
             },
@@ -97,9 +103,22 @@ impl CustodyService {
                 .ok_or(CustodyRefusal::AuthorityUnavailable)?,
         };
         let current = !matches!(attempt.action, CustodyProofAction::Publish { .. });
-        let authority = router
-            .verify_custody_possession_authority(&publication, now, current)
-            .map_err(invalid)?;
+        let authority = if matches!(attempt.action, CustodyProofAction::HomeMigration { .. }) {
+            if self.migration.is_none() || proof.body.binding_mode == BindingMode::NoChannelBinding
+            {
+                return Err(CustodyRefusal::BindingRefused);
+            }
+            if ramflux_protocol::canonical_json_bytes(&publication).map_err(invalid)?.len()
+                > 64 * 1024
+            {
+                return Err(CustodyRefusal::Capacity);
+            }
+            router.verify_migration_possession_authority(&publication, now).map_err(invalid)?
+        } else {
+            router
+                .verify_custody_possession_authority(&publication, now, current)
+                .map_err(invalid)?
+        };
         let historical = receipt
             .as_ref()
             .map(|receipt| {
@@ -219,7 +238,28 @@ impl CustodyService {
         let tick = tick + tick.elapsed();
         let proof = attempt.proof;
         match attempt.action {
-            CustodyProofAction::HomeMigration { .. } => Err(CustodyRefusal::Unsupported.into()),
+            CustodyProofAction::HomeMigration { control_hash, publication } => {
+                let session = CustodySession {
+                    session_id: String::new(),
+                    target_delivery_id: target(&proof.body.device_ref)?,
+                    device_ref: proof.body.device_ref.clone(),
+                    record_hash: proof.body.record_hash.clone(),
+                    proof_hash: object_hash(&proof).map_err(invalid)?,
+                    binding_mode: proof.body.binding_mode,
+                    expires_at: proof.body.expires_at.min(now.saturating_add(300)),
+                };
+                let session = self.leases().open_migration(
+                    session,
+                    holder,
+                    now,
+                    tick,
+                    crate::custody_sessions::MigrationGrant {
+                        control_hash,
+                        publication: *publication,
+                    },
+                )?;
+                Ok(CustodyServerFrame::SessionEstablished { session })
+            }
             CustodyProofAction::Publish { .. } => {
                 router
                     .publish_custody_record_from(publication, now, store, source)
@@ -273,16 +313,33 @@ impl CustodyService {
         let Scope { router, peer, now, tick, .. } = scope;
         let session =
             self.leases().session(session_id, &holder(peer, connection_id)?, now, tick)?;
-        let publication = router
-            .custody_record(&session.device_ref.account_anchor, now)
-            .map_err(invalid)?
-            .ok_or(CustodyRefusal::AuthorityUnavailable)?;
-        let authority =
-            router.verify_custody_possession_authority(&publication, now, true).map_err(invalid)?;
+        let grant = self.leases().migration_grant(session_id)?;
+        let publication = if let Some(grant) = &grant {
+            CustodyPublication {
+                record: grant.publication.record.clone(),
+                compacted_ids: grant.publication.compacted_ids.clone(),
+            }
+        } else {
+            router
+                .custody_record(&session.device_ref.account_anchor, now)
+                .map_err(invalid)?
+                .ok_or(CustodyRefusal::AuthorityUnavailable)?
+        };
+        let authority = if grant.is_some() {
+            router.verify_migration_possession_authority(&publication, now).map_err(invalid)?
+        } else {
+            router.verify_custody_possession_authority(&publication, now, true).map_err(invalid)?
+        };
         if object_hash(&publication.record).map_err(invalid)? != session.record_hash {
             return Err(CustodyRefusal::UpdateRequired);
         }
-        let cert = authority.authorize(&session.device_ref, "message", now).map_err(invalid)?;
+        let cert = authority
+            .authorize(
+                &session.device_ref,
+                if grant.is_some() { "register" } else { "message" },
+                now,
+            )
+            .map_err(invalid)?;
         let source =
             RootQualifiedDeviceRef::from_custody_record(&authority, &session.device_ref.device_id)
                 .map_err(invalid)?;
@@ -306,6 +363,32 @@ impl CustodyService {
         ramflux_protocol::ReplayGuard::new()
             .check_signed_request(&source, request, i64::try_from(now).map_err(invalid)?)
             .map_err(invalid)?;
+        if let Some(grant) = grant {
+            let CustodySessionAction::HomeMigration { request: migration } = action else {
+                return Err(CustodyRefusal::BindingRefused);
+            };
+            if migration.control.body.requester != session.device_ref
+                || ramflux_protocol::home_migration::message_hash(&migration.control)
+                    .map_err(invalid)?
+                    != grant.control_hash
+                || session.binding_mode == BindingMode::NoChannelBinding
+            {
+                return Err(CustodyRefusal::BindingRefused);
+            }
+            self.leases().request(session_id, &request.nonce)?;
+            self.leases().close(session_id);
+            return self
+                .migration
+                .as_ref()
+                .ok_or(CustodyRefusal::Unsupported)?
+                .execute(router, scope.store, *migration.clone(), now)
+                .map(|response| CustodyServerFrame::HomeMigration {
+                    response: Box::new(response),
+                });
+        }
+        if matches!(action, CustodySessionAction::HomeMigration { .. }) {
+            return Err(CustodyRefusal::BindingRefused);
+        }
         self.leases().request(session_id, &request.nonce)?;
         self.perform_action(scope, &session, &authority, &source, attempt.action)
     }

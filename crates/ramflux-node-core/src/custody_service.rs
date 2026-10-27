@@ -51,6 +51,7 @@ pub struct CustodyService {
     allow_unbound: bool,
     leases: Mutex<CustodyLeases>,
     admission: Mutex<()>,
+    migration: Option<crate::HomeMigrationService>,
 }
 pub(crate) struct ProofFailure {
     code: CustodyRefusal,
@@ -141,7 +142,23 @@ impl CustodyService {
             allow_unbound,
             leases: Mutex::new(CustodyLeases::with_issuance_settings(settings)),
             admission: Mutex::new(()),
+            migration: None,
         })
+    }
+    /// Attach migration only with the custody listener's independently verified node signer.
+    /// # Errors
+    /// Rejects a signer for a different node or key.
+    pub fn with_home_migration(
+        mut self,
+        service: crate::HomeMigrationService,
+    ) -> Result<Self, CustodyRefusal> {
+        if service.node.node_id() != self.audience
+            || service.node.public_key() != self.node.envelope().body.node_signing_public_key
+        {
+            return Err(CustodyRefusal::BindingRefused);
+        }
+        self.migration = Some(service);
+        Ok(self)
     }
     /// Compare a separately provisioned public listener certificate with signed metadata.
     #[must_use]

@@ -22,9 +22,9 @@ mod gateway_state;
 mod home_migration_store;
 mod home_node_migration;
 pub use home_migration_store::{
-    AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationBacklogCursor,
-    MigrationEndpoints, MigrationNode, MigrationOperation, MigrationPeer, MigrationRole,
-    PrepareMigration, SealedMigration,
+    AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationAdmission,
+    MigrationBacklogCursor, MigrationEndpoints, MigrationNode, MigrationOperation, MigrationPeer,
+    MigrationRole, PrepareMigration, SealedMigration,
 };
 #[cfg(test)]
 mod http_response_tests;
@@ -178,3 +178,5 @@ pub use custody_service::{CustodyService, CustodyTlsContext};
 
 mod custody_budget_log;
 pub use custody_budget_log::CustodyAdmissionRefusal;
+mod home_migration_service;
+pub use home_migration_service::{HomeMigrationMesh, HomeMigrationService};

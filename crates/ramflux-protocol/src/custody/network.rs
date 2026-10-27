@@ -28,7 +28,7 @@ pub enum CustodyProofAction {
     Publish { publication: Box<Publication> },
     Register { prekey_bundle: Value },
     OpenSession,
-    HomeMigration { control_hash: String },
+    HomeMigration { control_hash: String, publication: Box<Publication> },
 }
 impl CustodyProofAction {
     #[must_use]

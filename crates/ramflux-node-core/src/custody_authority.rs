@@ -358,3 +358,105 @@ fn log_conflict(alert: &ramflux_crypto::custody::CustodyConflictAlert) {
         "custody authority conflict requires operator review and a new master certificate"
     );
 }
+
+impl RouterCore {
+    /// Import only A-attested authority together with B's admission, never on a failed prepare.
+    /// The caller must verify the admitted A pin and attestation before entering this boundary.
+    /// # Errors
+    /// Rejects stale/forked/mixed-mode authority, ownership conflicts and failed reservations.
+    pub fn admit_home_migration(
+        &self,
+        store: &RouterRedbStore,
+        node: &crate::MigrationNode,
+        admission: crate::MigrationAdmission<'_>,
+        now: u64,
+    ) -> Result<
+        ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Offer>,
+        NodeCoreError,
+    > {
+        let crate::MigrationAdmission { publication, prepare: input, source } = admission;
+        let mut control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registry = &mut control.mvp1_identities;
+        let body = &publication.record.body;
+        let anchor = &body.account_anchor;
+        if registry.signed_device_sets.contains_key(anchor)
+            || registry.root_public_keys_by_commitment.contains_key(anchor)
+        {
+            return Err(reject("legacy-to-custody migration is not enabled"));
+        }
+        if store.home_migration_blocks_recovery(anchor)?
+            && let Some(old) = registry.custody.records.get(anchor)
+            && ramflux_protocol::custody::object_hash(&old.record.body.master_certificate)
+                .map_err(|e| reject(&e.to_string()))?
+                != ramflux_protocol::custody::object_hash(&body.master_certificate)
+                    .map_err(|e| reject(&e.to_string()))?
+        {
+            return Err(NodeCoreError::HomeMigration(
+                ramflux_protocol::home_migration::Refusal::MigrationInProgress,
+            ));
+        }
+        let verified = registry.verify_custody(publication, now)?;
+        registry.check_principal_root_ownership(
+            &body.principal_id,
+            &body.master_certificate.body.master_public_key,
+        )?;
+        let mut pins = registry.custody.pins_for(anchor);
+        let outcome = pins.observe(&verified).map_err(|e| crypto(&e))?;
+        if outcome == PinOutcome::Fenced {
+            let accepted = registry
+                .custody
+                .records
+                .get(anchor)
+                .cloned()
+                .ok_or_else(|| reject("fenced head unavailable"))?;
+            let state = CustodyAccountState { publication: accepted, pins };
+            store.record_custody_account(anchor, &state, false, source, now)?;
+            registry.apply_custody_account(anchor.clone(), state)?;
+            return Err(reject("custody authority equivocation fenced"));
+        }
+        let is_new = !registry.custody.records.contains_key(anchor);
+        if is_new && registry.custody.records.len() >= 65_536 {
+            return Err(NodeCoreError::Capacity { resource: "custody account count" });
+        }
+        let state = CustodyAccountState { publication: publication.clone(), pins };
+        let tx = store.migration_db().begin_write().map_err(|e| reject(&e.to_string()))?;
+        let offer = crate::home_migration_store::destination::prepare_in_transaction(
+            &tx, node, input, &verified, now,
+        )?;
+        if outcome != PinOutcome::Unchanged {
+            store.record_custody_account_in_tx(
+                &tx, anchor, &state, is_new, source, now,
+            )?;
+        }
+        crate::home_migration_store::commit_transition(store, tx)?;
+        if outcome != PinOutcome::Unchanged {
+            registry.apply_custody_account(anchor.clone(), state)?;
+        }
+        Ok(offer)
+    }
+}
+
+impl RouterCore {
+    pub(crate) fn verify_migration_possession_authority(
+        &self,
+        publication: &CustodyPublication,
+        now: u64,
+    ) -> Result<VerifiedRecord, NodeCoreError> {
+        let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registry = &control.mvp1_identities;
+        let verified = registry.verify_custody(publication, now)?;
+        if verified.envelope().body.principal_kind != ramflux_protocol::PrincipalKind::Human
+            || verified.envelope().body.master_certificate.body.custody_kind
+                != ramflux_protocol::custody::CustodyKind::LocalHuman
+        {
+            return Err(NodeCoreError::HomeMigration(
+                ramflux_protocol::home_migration::Refusal::CustodyApprovalRequired,
+            ));
+        }
+        let mut pins = registry.custody.pins_for(&publication.record.body.account_anchor);
+        if pins.observe(&verified).map_err(|e| crypto(&e))? == PinOutcome::Fenced {
+            return Err(reject("custody authority equivocation fenced"));
+        }
+        Ok(verified)
+    }
+}
