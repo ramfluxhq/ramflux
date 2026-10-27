@@ -868,7 +868,7 @@ fn apply_account_migration(
             actual: checksum,
         });
     }
-    connection.execute_batch("BEGIN IMMEDIATE;")?;
+    let transaction = connection.immediate_transaction()?;
     let result = (|| -> Result<(), StorageError> {
         connection.execute_batch(migration.sql)?;
         connection.execute(
@@ -885,16 +885,9 @@ fn apply_account_migration(
         )?;
         Ok(())
     })();
-    match result {
-        Ok(()) => {
-            connection.execute_batch("COMMIT;")?;
-            Ok(())
-        }
-        Err(error) => {
-            let _rollback_ignored = connection.execute_batch("ROLLBACK;");
-            Err(error)
-        }
-    }
+    result?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
