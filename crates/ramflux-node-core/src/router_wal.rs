@@ -649,7 +649,7 @@ impl RouterWalStore {
                 .submissions_by_target
                 .get(target)
                 .into_iter()
-                .flat_map(|sequences| sequences.values().flatten())
+                .flat_map(|sequences| sequences.values().filter_map(BTreeSet::first))
                 .map(|key| {
                     state.submissions_by_replay_key.get(key).cloned().ok_or_else(|| {
                         NodeCoreError::Redb("WAL target index lost submission".into())

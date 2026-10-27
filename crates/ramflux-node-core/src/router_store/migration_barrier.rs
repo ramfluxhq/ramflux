@@ -38,8 +38,7 @@ impl RouterRedbStore {
                 .map(|value| serde_json::from_slice(value.value()))
                 .transpose()
                 .map_err(storage)?;
-            let mut inbox = OpaqueDeviceInbox::new();
-            let mut entries = std::collections::BTreeMap::new();
+            let mut view = MailboxCutoverView::new(cursor, now);
             for row in rows
                 .range(
                     inbox_entry_storage_key(target, 0).as_str()
@@ -49,62 +48,80 @@ impl RouterRedbStore {
             {
                 let (_, value) = row.map_err(storage)?;
                 let (entry, until) = expiry_index::decode_entry(value.value())?;
-                entries.insert(entry.inbox_seq, (entry, until));
+                view.observe(&entry, until)?;
             }
-            let mut issued = 0;
             if let Some(wal) = &self.submission_wal {
-                let (high_water, records) = wal.migration_target_view(target)?;
-                issued = high_water;
+                let (issued, records) = wal.migration_target_view(target)?;
+                view.high_water = view.high_water.max(issued);
                 for record in records {
                     let mut until = record.retain_until();
                     let is_legacy = record.accepted_at.is_none();
                     if let Some(entry) = record.entry {
+                        let key = inbox_entry_storage_key(target, entry.inbox_seq);
+                        // redb owns the original deadline when the same coordinate is in both stores.
+                        if rows.get(key.as_str()).map_err(storage)?.is_some() {
+                            continue;
+                        }
                         if is_legacy {
                             until = legacy
                                 .as_ref()
                                 .ok_or_else(|| {
                                     storage("legacy WAL deadlines were not initialized at startup")
                                 })?
-                                .get(inbox_entry_storage_key(target, entry.inbox_seq).as_str())
+                                .get(key.as_str())
                                 .map_err(storage)?
                                 .ok_or_else(|| storage("legacy WAL deadline missing"))?
                                 .value();
                         }
-                        entries.entry(entry.inbox_seq).or_insert((entry, until));
+                        view.observe(&entry, until)?;
                     }
                 }
             }
-            // Record the issued floor even for expired/settled ciphertext; never reuse a sequence.
-            for (entry, until) in entries.into_values() {
-                issued = issued.max(entry.inbox_seq);
-                if until > now
-                    && !cursor.as_ref().is_some_and(|cursor| {
-                        cursor.acked_inbox_seqs.contains(&entry.inbox_seq)
-                            || entry.inbox_seq <= cursor.settled_inbox_seq
-                    })
-                {
-                    inbox.restore_pending_entry_until(entry, Some(until));
-                }
-            }
-            if let Some(cursor) = cursor {
-                inbox.restore_cursor_state(cursor);
-            }
-            inbox.observe_issued_seq(target, issued);
-            let count = u64::try_from(inbox.pending_entries().count()).map_err(storage)?;
             result.push(MigrationBacklogCursor {
                 account_anchor: anchor.into(),
                 migration_id: id.into(),
                 target_delivery_id: target.clone(),
-                high_water: inbox.issued_sequence(target),
+                high_water: view.high_water,
                 next_seq: 0,
                 progress: BacklogProgress {
-                    scheduled: count,
-                    remaining: count,
+                    scheduled: view.pending,
+                    remaining: view.pending,
                     ..BacklogProgress::default()
                 },
             });
         }
         Ok(result)
+    }
+}
+
+/// A counting projection, not a restored inbox: each queue row is visited once without sorting.
+struct MailboxCutoverView {
+    cursor: Option<CursorAckState>,
+    high_water: u64,
+    pending: u64,
+    now: i64,
+}
+impl MailboxCutoverView {
+    fn new(cursor: Option<CursorAckState>, now: i64) -> Self {
+        let high_water = cursor.as_ref().map_or(0, |cursor| {
+            cursor.issued_inbox_seq.max(cursor.inbox_seq).max(cursor.settled_inbox_seq)
+        });
+        Self { cursor, high_water, pending: 0, now }
+    }
+    fn observe(&mut self, entry: &crate::InboxEntry, until: i64) -> Result<(), NodeCoreError> {
+        self.high_water = self.high_water.max(entry.inbox_seq);
+        if until > self.now
+            && !self.cursor.as_ref().is_some_and(|cursor| {
+                entry.inbox_seq <= cursor.settled_inbox_seq
+                    || cursor.acked_inbox_seqs.contains(&entry.inbox_seq)
+            })
+        {
+            self.pending = self
+                .pending
+                .checked_add(1)
+                .ok_or_else(|| storage("migration queue count overflow"))?;
+        }
+        Ok(())
     }
 }
 
@@ -137,10 +154,13 @@ pub(super) fn upgrade_legacy_snapshot(tx: &redb::WriteTransaction) -> Result<(),
             }
             let mut table = tx.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(storage)?;
             for cursor in inbox.cursor_states() {
+                let mut cursor = cursor.clone();
+                cursor.issued_inbox_seq =
+                    cursor.issued_inbox_seq.max(inbox.issued_sequence(&cursor.target_delivery_id));
                 table
                     .insert(
                         cursor.target_delivery_id.as_str(),
-                        serde_json::to_vec(cursor).map_err(storage)?.as_slice(),
+                        serde_json::to_vec(&cursor).map_err(storage)?.as_slice(),
                     )
                     .map_err(storage)?;
             }
