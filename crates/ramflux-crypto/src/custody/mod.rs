@@ -42,3 +42,6 @@ mod network_tests;
 
 mod safety;
 pub use safety::{safety_fingerprint, safety_number};
+
+mod contact;
+pub use contact::verify_contact_consent;
