@@ -16,6 +16,7 @@ mod creator_conflicts;
 mod devices;
 mod federation;
 mod invitations;
+pub(crate) mod maintenance;
 mod message_ids;
 mod own_consent;
 mod requests;
