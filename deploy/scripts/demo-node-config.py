@@ -6,84 +6,269 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import stat
 import sys
 
 SERVICES = ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
-SNAPSHOT_FILES = (
+SNAPSHOT_ROOT_FILES = (
     "compose.yml", "compose.voice.yml", "compose.admin.yml", "runtime.env",
-    "owner.json", "demo-override.json", "deploy-tree.version",
+    "owner.json", "owner.token", "demo-override.json", "deploy-tree.version",
+    "identity.env", ".env",
+)
+SNAPSHOT_DIRECTORIES = ("config", "certs", "secrets")
+SNAPSHOT_REQUIRED = {
+    "compose.yml", "runtime.env", "owner.json", "demo-override.json",
+    *(f"config/{service}.toml" for service in SERVICES),
+}
+SNAPSHOT_PREVIOUS_RETENTION = 3
+MANUAL_RECOVERY = (
+    "manual recovery required: restore the complete demo data directory from the "
+    "operator backup, verify owner.json, then remove transaction.pending"
 )
 
 
-def atomic_bytes(path, content):
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_bytes(content)
-    temporary.chmod(0o600)
-    temporary.replace(path)
+class SnapshotError(Exception):
+    """A snapshot cannot be safely captured or restored."""
+
+
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def ensure_directory(path, mode=0o700):
+    missing = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    if current.is_symlink() or not current.is_dir():
+        raise SnapshotError(f"refusing unsafe snapshot directory: {current}")
+    for directory in reversed(missing):
+        directory.mkdir(mode=mode)
+        fsync_directory(directory.parent)
+        fsync_directory(directory)
+
+
+def atomic_bytes(path, content, mode=0o600):
+    ensure_directory(path.parent)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.chmod(mode)
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def atomic_json(path, value):
     atomic_bytes(path, (json.dumps(value, indent=2) + "\n").encode())
 
 
+def durable_unlink(path):
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    fsync_directory(path.parent)
+
+
 def safe_snapshot_path(state, reference):
     parts = reference.split("/")
     if len(parts) != 2 or any(not part or part in (".", "..") for part in parts):
-        sys.exit("invalid demo snapshot reference")
+        raise SnapshotError("invalid demo snapshot reference")
     root = state / "version-snapshots"
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise SnapshotError("refusing symlinked or non-directory version-snapshots path")
     target = root.joinpath(*parts)
     if target.parent.parent != root:
-        sys.exit("invalid demo snapshot reference")
+        raise SnapshotError("invalid demo snapshot reference")
+    if target.parent.is_symlink() or target.is_symlink():
+        raise SnapshotError("refusing symlinked demo snapshot path")
     return target
+
+
+def snapshot_source_files(state, owner_source=None):
+    sources = {}
+    for name in SNAPSHOT_ROOT_FILES:
+        source = owner_source if name == "owner.json" and owner_source else state / name
+        if source.is_symlink():
+            raise SnapshotError(f"refusing symlinked managed file: {name}")
+        if source.is_file():
+            sources[name] = source
+    for dirname in SNAPSHOT_DIRECTORIES:
+        root = state / dirname
+        if root.is_symlink():
+            raise SnapshotError(f"refusing symlinked managed directory: {dirname}")
+        if not root.exists():
+            continue
+        if not root.is_dir():
+            raise SnapshotError(f"refusing non-directory managed path: {dirname}")
+        for directory, dirnames, filenames in os.walk(root, followlinks=False):
+            base = Path(directory)
+            for entry in list(dirnames):
+                path = base / entry
+                if path.is_symlink():
+                    raise SnapshotError(
+                        f"refusing symlinked managed directory: {path.relative_to(state)}"
+                    )
+            for filename in filenames:
+                source = base / filename
+                relative = source.relative_to(state).as_posix()
+                if source.is_symlink() or not source.is_file():
+                    raise SnapshotError(f"refusing non-regular managed file: {relative}")
+                sources[relative] = source
+    return sources
+
+
+def validate_snapshot_name(name):
+    path = Path(name)
+    if path.is_absolute() or ".." in path.parts or "." in path.parts or not path.parts:
+        return False
+    return name in SNAPSHOT_ROOT_FILES or (
+        len(path.parts) >= 2 and path.parts[0] in SNAPSHOT_DIRECTORIES
+    )
+
+
+def read_snapshot_manifest(state, reference):
+    source = safe_snapshot_path(state, reference)
+    manifest_path = source / "manifest.json"
+    if manifest_path.is_symlink():
+        raise SnapshotError("refusing symlinked demo snapshot manifest")
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError, TypeError) as error:
+        raise SnapshotError(f"cannot read demo snapshot manifest: {error}") from error
+    files = manifest.get("files")
+    modes = manifest.get("modes", {})
+    if (not isinstance(files, list) or len(set(files)) != len(files)
+            or any(not isinstance(name, str) or not validate_snapshot_name(name) for name in files)
+            or not isinstance(modes, dict)
+            or any(name not in files or not isinstance(mode, int) or mode < 0 or mode > 0o777
+                   for name, mode in modes.items())):
+        raise SnapshotError("invalid demo snapshot manifest")
+    if not SNAPSHOT_REQUIRED.issubset(files):
+        raise SnapshotError("incomplete demo snapshot")
+    for name in files:
+        member = source / name
+        if member.is_symlink() or not member.is_file():
+            raise SnapshotError("incomplete or unsafe demo snapshot")
+    return source, files, modes
 
 
 def capture_snapshot(state, reference, owner_source=None):
     target = safe_snapshot_path(state, reference)
     if target.exists():
-        sys.exit("refusing to overwrite immutable demo snapshot")
-    required_sources = {
-        "compose.yml": state / "compose.yml",
-        "runtime.env": state / "runtime.env",
-        "owner.json": owner_source or state / "owner.json",
-        "demo-override.json": state / "demo-override.json",
-        "deploy-tree.version": state / "deploy-tree.version",
-    }
-    missing = [name for name, source in required_sources.items() if not source.is_file()]
+        raise SnapshotError("refusing to overwrite immutable demo snapshot")
+    sources = snapshot_source_files(state, owner_source)
+    missing = sorted(SNAPSHOT_REQUIRED - sources.keys())
     if missing:
-        sys.exit("cannot snapshot incomplete demo state: " + ", ".join(missing))
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        raise SnapshotError("cannot snapshot incomplete demo state: " + ", ".join(missing))
+    ensure_directory(target.parent)
     temporary = target.with_name(target.name + ".pending")
+    if temporary.exists() or temporary.is_symlink():
+        raise SnapshotError("refusing existing partial demo snapshot")
     temporary.mkdir(mode=0o700)
-    files = [name for name in SNAPSHOT_FILES
-             if (owner_source if name == "owner.json" and owner_source else state / name).is_file()]
-    for name in files:
-        source = owner_source if name == "owner.json" and owner_source else state / name
-        shutil.copyfile(source, temporary / name)
-        (temporary / name).chmod(0o400)
-    atomic_json(temporary / "manifest.json", {"files": files})
-    (temporary / "manifest.json").chmod(0o400)
-    temporary.chmod(0o700)
-    temporary.replace(target)
+    fsync_directory(temporary.parent)
+    modes = {}
+    for name, source in sorted(sources.items()):
+        modes[name] = stat.S_IMODE(source.stat().st_mode)
+        atomic_bytes(temporary / name, source.read_bytes(), mode=0o400)
+    atomic_bytes(
+        temporary / "manifest.json",
+        (json.dumps({"files": sorted(sources), "modes": modes}, indent=2) + "\n").encode(),
+        mode=0o400,
+    )
+    fsync_directory(temporary)
+    os.replace(temporary, target)
+    fsync_directory(target.parent)
 
 
 def restore_snapshot(state, reference):
-    source = safe_snapshot_path(state, reference)
-    try:
-        manifest = json.loads((source / "manifest.json").read_text())
-    except (OSError, ValueError, TypeError) as error:
-        sys.exit(f"cannot read demo snapshot manifest: {error}")
-    files = manifest.get("files")
-    if not isinstance(files, list) or any(name not in SNAPSHOT_FILES for name in files):
-        sys.exit("invalid demo snapshot manifest")
-    required = {"compose.yml", "runtime.env", "owner.json", "demo-override.json", "deploy-tree.version"}
-    if not required.issubset(files) or any(not (source / name).is_file() for name in files):
-        sys.exit("incomplete demo snapshot")
-    for name in SNAPSHOT_FILES:
-        destination = state / name
-        if name in files:
-            atomic_bytes(destination, (source / name).read_bytes())
-        elif destination.exists():
-            destination.unlink()
+    source, files, modes = read_snapshot_manifest(state, reference)
+    wanted = set(files)
+    current = snapshot_source_files(state)
+    for name in sorted(set(current) - wanted, reverse=True):
+        durable_unlink(state / name)
+    for name in files:
+        atomic_bytes(state / name, (source / name).read_bytes(), mode=modes.get(name, 0o600))
+    for pattern in (".runtime.env.pending.*", ".*.tmp"):
+        for temporary in state.glob(pattern):
+            if temporary.is_file() and not temporary.is_symlink():
+                durable_unlink(temporary)
+    for dirname in SNAPSHOT_DIRECTORIES:
+        root = state / dirname
+        if root.is_dir() and not root.is_symlink():
+            for directory, _, _ in os.walk(root, topdown=False, followlinks=False):
+                path = Path(directory)
+                if path != root:
+                    try:
+                        path.rmdir()
+                        fsync_directory(path.parent)
+                    except OSError:
+                        pass
+
+
+def snapshot_runtime_values(state, reference):
+    source, files, _ = read_snapshot_manifest(state, reference)
+    if "runtime.env" not in files:
+        raise SnapshotError("incomplete demo snapshot")
+    return dict(line.split("=", 1) for line in (source / "runtime.env").read_text().splitlines()
+                if "=" in line)
+
+
+def validate_snapshot_overlays(state, reference):
+    values = snapshot_runtime_values(state, reference)
+    voice_value = values.get("RAMFLUX_RELAY_VOICE_UDP_PORT", "")
+    target_voice_port = voice_value.rsplit(":", 1)[-1] if voice_value else ""
+    target_admin_port = values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT", "")
+    applied = {
+        "RAMFLUX_DEMO_VOICE_UDP_PORT": target_voice_port,
+        "DEMO_ADMIN_LOOPBACK_PORT": target_admin_port,
+    }
+    selected = {
+        "RAMFLUX_DEMO_VOICE_UDP_PORT": os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT", ""),
+        "DEMO_ADMIN_LOOPBACK_PORT": os.environ.get("DEMO_ADMIN_LOOPBACK_PORT", ""),
+    }
+    changed = [key for key in selected if selected[key] != applied[key]]
+    if changed:
+        sys.exit("rollback overlay selection differs from its snapshot: " + ", ".join(changed))
+
+
+def prune_snapshots(state, owner):
+    root = state / "version-snapshots"
+    if not root.exists():
+        return
+    if root.is_symlink() or not root.is_dir():
+        raise SnapshotError("refusing symlinked or non-directory version-snapshots path")
+    history = list(owner.get("snapshot_history", []))
+    current = owner.get("current_snapshot")
+    keep = set(history[-(SNAPSHOT_PREVIOUS_RETENTION + 1):])
+    if current:
+        keep.add(current)
+    for version in root.iterdir():
+        if version.is_symlink() or not version.is_dir():
+            raise SnapshotError("refusing unsafe entry in version-snapshots")
+        for snapshot in version.iterdir():
+            reference = f"{version.name}/{snapshot.name}"
+            if snapshot.is_symlink() or not snapshot.is_dir():
+                raise SnapshotError("refusing unsafe entry in version-snapshots")
+            if reference not in keep:
+                shutil.rmtree(snapshot)
+                fsync_directory(version)
+        try:
+            version.rmdir()
+            fsync_directory(root)
+        except OSError:
+            pass
 
 
 def deploy_tree_version(repo):
@@ -201,7 +386,7 @@ def prepare(repo, state, command):
     pending_marker = state / "owner.json.pending"
     transaction_marker = state / "transaction.pending"
     if transaction_marker.exists():
-        sys.exit("unfinished demo transaction detected; restore the last snapshot before retrying")
+        sys.exit("unfinished demo transaction detected; run demo-node.sh recover with the original env")
     if marker.exists():
         owner = json.loads(marker.read_text())
         if owner["directory"] != str(state):
@@ -211,6 +396,7 @@ def prepare(repo, state, command):
             changed = [key for key in settings if key != "DEMO_VERSION" and settings[key] != current[key]]
             if changed:
                 sys.exit("demo settings changed beyond DEMO_VERSION: restore every other original setting")
+        if command == "upgrade":
             validate_maintenance_overlays(state)
             validate_selected_overlay_values(state)
         elif owner["settings"] != settings:
@@ -252,6 +438,7 @@ def prepare(repo, state, command):
         snapshots = list(owner.get("snapshot_history", []))
         target_snapshot = snapshots[-2]
         target_owner = owner
+        validate_snapshot_overlays(state, target_snapshot)
     else:
         versions = list(owner.get("version_history", [])) or [settings["DEMO_VERSION"]]
         snapshots = list(owner.get("snapshot_history", []))
@@ -263,14 +450,12 @@ def prepare(repo, state, command):
         target_owner = {**owner, "settings": settings, "version_history": versions,
                         "snapshot_history": snapshots, "current_snapshot": target_snapshot}
 
+    if capture_legacy_snapshot:
+        capture_snapshot(state, previous_snapshot)
     atomic_json(pending_marker, target_owner)
     atomic_json(state / "transaction.pending", {
         "command": command, "previous_snapshot": previous_snapshot, "target_snapshot": target_snapshot,
     })
-    if capture_legacy_snapshot:
-        if not (state / "deploy-tree.version").exists():
-            atomic_bytes(state / "deploy-tree.version", b"legacy:unknown\n")
-        capture_snapshot(state, previous_snapshot)
     if command == "rollback":
         restore_snapshot(state, target_snapshot)
     else:
@@ -285,8 +470,9 @@ def commit(state, command):
         pending = state / "owner.json.pending"
         capture_snapshot(state, transaction["target_snapshot"], owner_source=pending)
         atomic_bytes(state / "owner.json", pending.read_bytes())
-    (state / "owner.json.pending").unlink(missing_ok=True)
-    (state / "transaction.pending").unlink()
+    prune_snapshots(state, json.loads((state / "owner.json").read_text()))
+    durable_unlink(state / "owner.json.pending")
+    durable_unlink(state / "transaction.pending")
 
 
 def recover(state):
@@ -295,14 +481,21 @@ def recover(state):
     if not previous:
         sys.exit("failed initial up has no previous snapshot to restore")
     restore_snapshot(state, previous)
-    (state / "owner.json.pending").unlink(missing_ok=True)
+    durable_unlink(state / "owner.json.pending")
     owner = json.loads((state / "owner.json").read_text())
     changed = [key for key, value in owner["settings"].items()
                if key != "DEMO_VERSION" and os.environ.get(key) != value]
     if changed:
         sys.exit("demo settings changed during recovery: restore every original setting")
-    validate_maintenance_overlays(state)
     print(owner["settings"]["DEMO_VERSION"])
+
+
+def set_node_id(state, node_id):
+    for config in sorted((state / "config").glob("*.toml")):
+        content = config.read_text().replace(
+            'node_id = "localhost"', f'node_id = "{node_id}"'
+        ).encode()
+        atomic_bytes(config, content, mode=0o644)
 
 
 def main():
@@ -310,28 +503,36 @@ def main():
         sys.exit("usage: demo-node-config.py REPO STATE ACTION [COMMAND]")
     repo, state = map(Path, sys.argv[1:3])
     action = sys.argv[3]
-    if action == "prepare":
-        prepare(repo, state, sys.argv[4])
-    elif action == "commit":
-        commit(state, sys.argv[4])
-    elif action == "recover":
-        recover(state)
-    elif action == "finish-recovery":
-        (state / "owner.json.pending").unlink(missing_ok=True)
-        (state / "transaction.pending").unlink()
-    elif action == "abort-initial":
-        transaction = json.loads((state / "transaction.pending").read_text())
-        if transaction.get("previous_snapshot") is not None:
-            sys.exit("refusing to abort a transaction with a previous snapshot")
-        pending = json.loads((state / "owner.json.pending").read_text())
-        pending.pop("current_snapshot", None)
-        pending["version_history"] = []
-        pending["snapshot_history"] = []
-        atomic_json(state / "owner.json", pending)
-        (state / "owner.json.pending").unlink()
-        (state / "transaction.pending").unlink()
-    else:
-        sys.exit("invalid demo configuration action")
+    try:
+        if action == "prepare":
+            prepare(repo, state, sys.argv[4])
+        elif action == "commit":
+            commit(state, sys.argv[4])
+        elif action == "recover":
+            recover(state)
+        elif action == "finish-recovery":
+            prune_snapshots(state, json.loads((state / "owner.json").read_text()))
+            durable_unlink(state / "owner.json.pending")
+            durable_unlink(state / "transaction.pending")
+        elif action == "abort-initial":
+            transaction = json.loads((state / "transaction.pending").read_text())
+            if transaction.get("previous_snapshot") is not None:
+                sys.exit("refusing to abort a transaction with a previous snapshot")
+            pending = json.loads((state / "owner.json.pending").read_text())
+            pending.pop("current_snapshot", None)
+            pending["version_history"] = []
+            pending["snapshot_history"] = []
+            atomic_json(state / "owner.json", pending)
+            durable_unlink(state / "owner.json.pending")
+            durable_unlink(state / "transaction.pending")
+        elif action == "set-node-id":
+            set_node_id(state, sys.argv[4])
+        else:
+            sys.exit("invalid demo configuration action")
+    except SnapshotError as error:
+        if action == "recover":
+            sys.exit(f"cannot recover last-good snapshot: {error}; {MANUAL_RECOVERY}")
+        sys.exit(str(error))
 
 
 if __name__ == "__main__":
