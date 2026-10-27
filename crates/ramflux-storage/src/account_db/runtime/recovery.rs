@@ -92,4 +92,17 @@ impl AccountDb {
         self.connection.execute_batch("DELETE FROM projection_checkpoint WHERE last_event_id IN (SELECT event_id FROM local_event_log WHERE event_type='dm.ratchet_session' AND event_id LIKE 'dm.session:%:own-device-sync:%'); UPDATE local_event_log SET event_body=x'7b7d',signature=x'',signature_status='retired' WHERE event_type='dm.ratchet_session' AND event_id LIKE 'dm.session:%:own-device-sync:%' AND signature_status!='retired';")?;
         Ok(())
     }
+
+    /// Retires legacy event-log copies of device-local X3DH private material.
+    ///
+    /// # Errors
+    /// Returns SQL errors while overwriting live or archived payloads.
+    pub fn retire_private_prekey_events(&self) -> Result<(), StorageError> {
+        self.connection.execute_batch("DELETE FROM projection_checkpoint WHERE projection_name LIKE 'x3dh_private:%' OR projection_name LIKE 'x3dh_private:v2/%'; UPDATE local_event_log SET event_body=x'7b7d',signature=x'',signature_status='retired' WHERE event_type='x3dh.prekey.private' AND signature_status!='retired';")?;
+        let archive_exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='backup_archived_local_event')", [], |row| row.get(0))?;
+        if archive_exists {
+            self.connection.execute("UPDATE backup_archived_local_event SET event_body=x'7b7d',signature=x'',signature_status='retired' WHERE event_type='x3dh.prekey.private' AND signature_status!='retired'", [])?;
+        }
+        Ok(())
+    }
 }

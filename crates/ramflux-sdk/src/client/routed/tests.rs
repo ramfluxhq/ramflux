@@ -6,6 +6,7 @@ struct Fixture {
     root: PathBuf,
     client: RamfluxClient,
     id: String,
+    leased_one_time_prekeys: std::sync::atomic::AtomicUsize,
 }
 impl Fixture {
     fn new(id: &str, seed: u8) -> Result<Self, SdkError> {
@@ -35,7 +36,12 @@ impl Fixture {
         client.create_account(id, id)?;
         client.unlock_account(id, b"routed-test")?;
         client.initialize_and_publish_prekey_bundle(principal, id, id, [device_seed; 32], None)?;
-        Ok(Self { root, client, id: id.to_owned() })
+        Ok(Self {
+            root,
+            client,
+            id: id.to_owned(),
+            leased_one_time_prekeys: std::sync::atomic::AtomicUsize::new(0),
+        })
     }
     fn reference(&self) -> Result<String, SdkError> {
         self.client.local_device_reference(&self.id)
@@ -77,6 +83,12 @@ fn fixture_peer_reference(client: &RamfluxClient, principal: &str) -> Result<Str
         .as_str()
         .ok_or_else(|| invalid("fixture peer root"))?;
     Ok(ramflux_protocol::qualified_device_id(root, principal)?)
+}
+fn copy_fixture_private_prekeys(source: &Fixture, target: &Fixture) -> Result<(), SdkError> {
+    let target_device = target.client.local_device_identity(&target.id)?;
+    let state =
+        source.client.load_x3dh_private_state(&source.client.local_device_identity(&source.id)?)?;
+    target.client.persist_owned_private_prekey(&target_device, &state)
 }
 // Fixture callers name the intended member explicitly; no directory name lookup grants authority.
 fn fixture_member(client: &RamfluxClient, group: &str, member: &Fixture) -> Result<(), SdkError> {
@@ -152,10 +164,17 @@ fn seal_as(
             .signing_key
             .verifying_key(),
     ));
-    let bundle = receiver
+    let state = receiver
         .client
-        .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
-        .bundle;
+        .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?;
+    let mut bundle = state.bundle;
+    let lease = receiver.leased_one_time_prekeys.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some(private) = state.one_time_prekeys.get(lease)
+        && let Some(index) = bundle.one_time_prekey_ids.iter().position(|id| id == &private.id)
+    {
+        bundle.one_time_prekey_id = Some(private.id.clone());
+        bundle.one_time_prekey = bundle.one_time_prekey_x25519_public.get(index).copied();
+    }
     let hash = prekey_bundle_hash(&bundle)?;
     let existing = sender.client.send_pair_session_from_url(
         &sender.client.local_device_identity(&sender.id)?,

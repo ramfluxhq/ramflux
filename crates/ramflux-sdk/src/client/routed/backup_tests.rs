@@ -158,7 +158,12 @@ async fn r2_key_only_recovery_then_full_merge_creates_a_unique_group_chain_accep
     let recovered_root = original.root.join("key-recovered");
     let client =
         crate::bus::dispatch::account::key_backup_restore::recover_alice(&recovered_root).await?;
-    let recovered = Fixture { root: recovered_root, client, id: "alice".into() };
+    let recovered = Fixture {
+        root: recovered_root,
+        client,
+        id: "alice".into(),
+        leased_one_time_prekeys: std::sync::atomic::AtomicUsize::new(0),
+    };
     let vault = FileVaultSecretSource::new(&recovered.root).vault_secret(&recovered.id)?;
     let kek = crate::client::account::account_db_key_encryption_key(&vault, b"routed-test");
     let key = ramflux_storage::unwrap_with_vault_secret(

@@ -8,6 +8,60 @@ use ramflux_crypto::*;
 use ramflux_node_core::*;
 use ramflux_protocol::{DeviceSetStatus, PrincipalKind, encode_base64url};
 use support::*;
+
+#[test]
+fn one_time_prekeys_are_leased_once_and_exhaustion_is_counted_across_restart() -> TestResult {
+    let f = Fixture::new()?;
+    let signed = X25519KeyPair::from_seed([15; 32]);
+    let one_time = vec![
+        ("opk-1".to_owned(), X25519KeyPair::from_seed([21; 32]).public),
+        ("opk-2".to_owned(), X25519KeyPair::from_seed([22; 32]).public),
+    ];
+    let bundle = create_rotating_prekey_bundle_with_lineage(
+        &f.device,
+        &f.device.signing_key,
+        &f.x,
+        &PrekeyBundleOptions {
+            signed_prekey_id: "signed:rotating:1",
+            signed_prekey: &signed,
+            signed_prekey_created_at: 1_000,
+            signed_prekey_expires_at: 605_800,
+            one_time_prekeys: &one_time,
+            prekey_bundle_counter: 1,
+        },
+    )?;
+    let mut substituted = bundle.clone();
+    substituted.one_time_prekey_id = Some("opk-1".to_owned());
+    substituted.one_time_prekey = Some([99; 32]);
+    assert!(verify_prekey_bundle(&f.device.signing_key.verifying_key(), &substituted).is_err());
+    let identity = RootQualifiedDeviceRef::for_owned_device(&f.root, &f.device)?;
+    let mut registry = IdentityRegistry::new();
+    registry.register_identity(&f.request)?;
+    registry.publish_prekey(PrekeyPublishRequest {
+        device_id: f.device.device_id.clone(),
+        bundle: bundle.clone(),
+    })?;
+
+    let first = registry.take_prekey_bundle(&identity, "source", 1_100)?.ok_or("first")?.0;
+    let second = registry.take_prekey_bundle(&identity, "source", 1_101)?.ok_or("second")?.0;
+    assert_ne!(first.one_time_prekey_id, second.one_time_prekey_id);
+    let exhausted = registry.take_prekey_bundle(&identity, "source", 1_102)?.ok_or("fallback")?;
+    assert!(exhausted.1);
+    assert!(exhausted.0.one_time_prekey_id.is_none());
+    assert_eq!(registry.prekey_exhaustion_fallbacks(), 1);
+
+    registry
+        .publish_prekey(PrekeyPublishRequest { device_id: f.device.device_id.clone(), bundle })?;
+    let mut restored: IdentityRegistry = serde_json::from_slice(&serde_json::to_vec(&registry)?)?;
+    let replay = restored.take_prekey_bundle(&identity, "source", 1_103)?.ok_or("replay")?;
+    assert!(replay.1, "idempotent publication replenished consumed OPKs");
+    assert_eq!(restored.prekey_exhaustion_fallbacks(), 2);
+    for _ in 4..120 {
+        let _ = restored.take_prekey_bundle(&identity, "source", 1_103)?;
+    }
+    assert!(restored.take_prekey_bundle(&identity, "source", 1_103).is_err());
+    Ok(())
+}
 #[test]
 fn substitution_diagnostic_is_rejected_without_poisoning_the_real_registration() -> TestResult {
     let mut f = Fixture::new()?;

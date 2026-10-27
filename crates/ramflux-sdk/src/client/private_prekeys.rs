@@ -5,7 +5,10 @@
 use super::identity_authority::invalid;
 use crate::{
     RamfluxClient, SdkError,
-    dm::{SdkX3dhPrivateState, legacy_x3dh_private_checkpoint_name, x3dh_private_checkpoint_name},
+    dm::{
+        SdkX3dhPrivateState, legacy_x3dh_private_checkpoint_name, x3dh_private_checkpoint_name,
+        x3dh_private_state_name,
+    },
 };
 use ramflux_crypto::{RootQualifiedDeviceRef, X25519KeyPair};
 impl RamfluxClient {
@@ -22,6 +25,13 @@ impl RamfluxClient {
     ) -> Result<Option<SdkX3dhPrivateState>, SdkError> {
         if *device != self.owned_device_identity()? {
             return Err(invalid("private prekeys require the owned device"));
+        }
+        if let Some(state) = self
+            .account_db()?
+            .load_actor_state::<SdkX3dhPrivateState>(&x3dh_private_state_name(device))?
+        {
+            self.verify_owned_private_prekey(device, &state)?;
+            return Ok(Some(state));
         }
         if let Some(event) = self.projection_checkpoint(&x3dh_private_checkpoint_name(device))? {
             let bytes =
@@ -90,8 +100,21 @@ impl RamfluxClient {
             || state.bundle.identity_key != X25519KeyPair::from_seed(state.identity_seed).public
             || state.bundle.signed_prekey
                 != X25519KeyPair::from_seed(state.signed_prekey_seed).public
+            || state.bundle.prekey_bundle_counter != state.bundle_counter
         {
             return Err(invalid("private prekey root or key mismatch"));
+        }
+        for private in &state.one_time_prekeys {
+            let Some(index) =
+                state.bundle.one_time_prekey_ids.iter().position(|id| id == &private.id)
+            else {
+                return Err(invalid("private one-time prekey id is not published"));
+            };
+            if state.bundle.one_time_prekey_x25519_public.get(index)
+                != Some(&X25519KeyPair::from_seed(private.seed).public)
+            {
+                return Err(invalid("private one-time prekey does not match publication"));
+            }
         }
         ramflux_crypto::verify_prekey_bundle(&branch.signing_key.verifying_key(), &state.bundle)?;
         Ok(())
@@ -102,15 +125,11 @@ impl RamfluxClient {
         state: &SdkX3dhPrivateState,
     ) -> Result<(), SdkError> {
         self.verify_owned_private_prekey(device, state)?;
-        let id = format!(
-            "x3dh.prekey.private:v2/{}",
-            ramflux_protocol::hash_base64url(
-                "ramflux.sdk.private_prekey.v2",
-                &ramflux_protocol::canonical_json_bytes(&(device.storage_key(), &state.bundle))?
-            )
-        );
-        self.append_event(&id, "x3dh.prekey.private", &serde_json::to_vec(state)?)?;
-        self.set_projection_checkpoint(&x3dh_private_checkpoint_name(device), &id)
+        let db = self.account_db()?;
+        db.persist_actor_state(&x3dh_private_state_name(device), state)?;
+        db.retire_private_prekey_events()?;
+        let _ = db.checkpoint_retired_secrets_if_committed()?;
+        Ok(())
     }
 }
 
@@ -181,6 +200,44 @@ mod tests {
             Some(own.root_commitment())
         );
         drop(client);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restart_does_not_resurrect_a_consumed_one_time_prekey() -> Result<(), SdkError> {
+        let (path, client) = account()?;
+        let device = client.owned_device_identity()?;
+        let mut state = client.load_x3dh_private_state(&device)?;
+        let consumed = state.one_time_prekeys.remove(0).id.clone();
+        client.persist_owned_private_prekey(&device, &state)?;
+        client.append_event("legacy-private-copy", "x3dh.prekey.private", b"secret")?;
+        client.set_projection_checkpoint("x3dh_private:v2/legacy", "legacy-private-copy")?;
+        let history = client.account_db()?.export_history_bundle("phone", "tablet")?;
+        assert!(
+            history
+                .encrypted_event_batch
+                .iter()
+                .all(|event| event.event_type != "x3dh.prekey.private")
+        );
+        assert!(
+            history
+                .projection_checkpoints
+                .iter()
+                .all(|checkpoint| !checkpoint.projection_name.starts_with("x3dh_private:"))
+        );
+        client.account_db()?.retire_private_prekey_events()?;
+        assert!(client.event_body("legacy-private-copy")?.is_none());
+        drop(client);
+
+        let mut reopened = RamfluxClient::new();
+        reopened.create_identity_root("alice", [11; 32]);
+        reopened.create_device_branch("alice", "phone", 1, [12; 32]);
+        reopened.open_account_index(&path)?;
+        reopened.unlock_account("alice", b"private-prekey-test")?;
+        let restored = reopened.load_x3dh_private_state(&reopened.owned_device_identity()?)?;
+        assert!(restored.one_time_prekeys.iter().all(|key| key.id != consumed));
+        drop(reopened);
         std::fs::remove_dir_all(path)?;
         Ok(())
     }

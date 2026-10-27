@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+use zeroize::Zeroize;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkDmEncryptedEnvelope {
@@ -316,7 +317,7 @@ pub struct SdkDmX3dhHeader {
     pub session_id: String,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkX3dhPrivateState {
     #[serde(default)]
     pub(crate) principal_commitment: Option<String>,
@@ -324,7 +325,42 @@ pub(crate) struct SdkX3dhPrivateState {
     pub(crate) identity_seed: [u8; 32],
     pub(crate) signed_prekey_id: String,
     pub(crate) signed_prekey_seed: [u8; 32],
+    #[serde(default)]
+    pub(crate) signed_prekey_created_at: i64,
+    #[serde(default)]
+    pub(crate) signed_prekey_expires_at: i64,
+    #[serde(default)]
+    pub(crate) previous_signed_prekeys: Vec<SdkRetiringSignedPrekey>,
+    #[serde(default)]
+    pub(crate) one_time_prekeys: Vec<SdkOneTimePrekeyPrivate>,
+    #[serde(default)]
+    pub(crate) bundle_counter: u64,
     pub(crate) bundle: ramflux_crypto::PrekeyBundle,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SdkRetiringSignedPrekey {
+    pub(crate) id: String,
+    pub(crate) seed: [u8; 32],
+    pub(crate) erase_after: i64,
+}
+
+impl Drop for SdkRetiringSignedPrekey {
+    fn drop(&mut self) {
+        self.seed.zeroize();
+    }
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SdkOneTimePrekeyPrivate {
+    pub(crate) id: String,
+    pub(crate) seed: [u8; 32],
+}
+
+impl Drop for SdkOneTimePrekeyPrivate {
+    fn drop(&mut self) {
+        self.seed.zeroize();
+    }
 }
 
 pub(crate) fn gateway_cursor_checkpoint_name(target_delivery_id: &str) -> String {
@@ -397,6 +433,9 @@ pub(crate) fn x3dh_private_checkpoint_name(
     device: &ramflux_crypto::RootQualifiedDeviceRef,
 ) -> String {
     format!("x3dh_private:v2/{}", device.storage_key())
+}
+pub(crate) fn x3dh_private_state_name(device: &ramflux_crypto::RootQualifiedDeviceRef) -> String {
+    format!("x3dh/private-state/v3/{}", device.storage_key())
 }
 pub(crate) fn legacy_x3dh_private_checkpoint_name(device_id: &str) -> String {
     format!("x3dh_private:{device_id}")

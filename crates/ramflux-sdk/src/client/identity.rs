@@ -5,6 +5,66 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+const SIGNED_PREKEY_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
+const SIGNED_PREKEY_GRACE_SECONDS: i64 = 2 * 24 * 60 * 60;
+const ONE_TIME_PREKEY_POOL_SIZE: usize = 8;
+const ONE_TIME_PREKEY_REPLENISH_BELOW: usize = 2;
+
+struct SignedPrekeyMaterial {
+    id: String,
+    seed: [u8; 32],
+    created_at: i64,
+    expires_at: i64,
+    previous: Vec<crate::dm::SdkRetiringSignedPrekey>,
+}
+
+fn select_signed_prekey(
+    existing: Option<&crate::dm::SdkX3dhPrivateState>,
+    device_id: &str,
+    now: i64,
+    force_rotate: bool,
+) -> Result<SignedPrekeyMaterial, SdkError> {
+    let mut previous =
+        existing.map(|state| state.previous_signed_prekeys.clone()).unwrap_or_default();
+    previous.retain(|key| key.erase_after > now);
+    let rotate = force_rotate
+        || existing.is_none_or(|state| {
+            state.signed_prekey_created_at == 0 || now >= state.signed_prekey_expires_at
+        });
+    if !rotate {
+        let state = existing
+            .ok_or_else(|| SdkError::LocalBus("missing current signed prekey state".to_owned()))?;
+        return Ok(SignedPrekeyMaterial {
+            id: state.signed_prekey_id.clone(),
+            seed: state.signed_prekey_seed,
+            created_at: state.signed_prekey_created_at,
+            expires_at: state.signed_prekey_expires_at,
+            previous,
+        });
+    }
+    if let Some(old) = existing.filter(|state| state.signed_prekey_created_at > 0) {
+        previous.push(crate::dm::SdkRetiringSignedPrekey {
+            id: old.signed_prekey_id.clone(),
+            seed: old.signed_prekey_seed,
+            erase_after: now.saturating_add(SIGNED_PREKEY_GRACE_SECONDS),
+        });
+        if previous.len() > 1 {
+            previous.remove(0);
+        }
+    }
+    let key = X25519KeyPair::random()?;
+    Ok(SignedPrekeyMaterial {
+        id: format!(
+            "{device_id}:signed:{}",
+            ramflux_protocol::hash_base64url("ramflux.sdk.x3dh.signed_prekey.id.v2", &key.public)
+        ),
+        seed: key.secret.to_bytes(),
+        created_at: now,
+        expires_at: now.saturating_add(SIGNED_PREKEY_LIFETIME_SECONDS),
+        previous,
+    })
+}
+
 impl RamfluxClient {
     pub fn create_identity_root(&mut self, principal_id: &str, seed: [u8; 32]) -> IdentityRoot {
         let root = ramflux_crypto::create_identity_root(principal_id, seed);
@@ -170,28 +230,81 @@ impl RamfluxClient {
         device_id: &str,
         device_seed: [u8; 32],
     ) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
+        self.create_and_store_prekey_bundle_at(device_id, device_seed, now_unix_timestamp())
+    }
+
+    fn create_and_store_prekey_bundle_at(
+        &self,
+        device_id: &str,
+        device_seed: [u8; 32],
+        now: i64,
+    ) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let identity_seed = x3dh_private_seed("ramflux.sdk.x3dh.identity.v1", &device_seed);
-        let signed_prekey_seed =
-            x3dh_private_seed("ramflux.sdk.x3dh.signed_prekey.v1", &device_seed);
-        let identity = X25519KeyPair::from_seed(identity_seed);
-        let signed_prekey = X25519KeyPair::from_seed(signed_prekey_seed);
-        let signed_prekey_id = format!("{device_id}:signed:1");
-        let bundle = ramflux_crypto::create_prekey_bundle(
-            branch,
-            &identity,
-            &signed_prekey_id,
-            &signed_prekey,
-            None,
-            None,
-        )?;
         let device = self.local_device_identity(device_id)?;
+        let existing = self.optional_owned_private_prekey(&device)?;
+        let branch_changed =
+            existing.as_ref().is_some_and(|state| state.bundle.device_epoch != branch.device_epoch);
+        if let Some(state) = existing.as_ref()
+            && !branch_changed
+            && state.signed_prekey_created_at > 0
+            && now < state.signed_prekey_expires_at
+            && state.one_time_prekeys.len() >= ONE_TIME_PREKEY_REPLENISH_BELOW
+            && state.previous_signed_prekeys.iter().all(|key| key.erase_after > now)
+        {
+            return Ok(state.bundle.clone());
+        }
+        let identity_seed = existing.as_ref().map_or_else(
+            || x3dh_private_seed("ramflux.sdk.x3dh.identity.v1", &device_seed),
+            |s| s.identity_seed,
+        );
+        let identity = X25519KeyPair::from_seed(identity_seed);
+        let signed = select_signed_prekey(existing.as_ref(), device_id, now, branch_changed)?;
+        let signed_prekey = X25519KeyPair::from_seed(signed.seed);
+        let mut one_time_prekeys =
+            existing.as_ref().map(|state| state.one_time_prekeys.clone()).unwrap_or_default();
+        while one_time_prekeys.len() < ONE_TIME_PREKEY_POOL_SIZE {
+            let key = X25519KeyPair::random()?;
+            one_time_prekeys.push(crate::dm::SdkOneTimePrekeyPrivate {
+                id: format!(
+                    "{device_id}:one-time:{}",
+                    ramflux_protocol::hash_base64url(
+                        "ramflux.sdk.x3dh.one_time_prekey.id.v1",
+                        &key.public
+                    )
+                ),
+                seed: key.secret.to_bytes(),
+            });
+        }
+        let public_one_time_prekeys = one_time_prekeys
+            .iter()
+            .map(|key| (key.id.clone(), X25519KeyPair::from_seed(key.seed).public))
+            .collect::<Vec<_>>();
+        let bundle_counter =
+            existing.as_ref().map_or(1, |state| state.bundle_counter.saturating_add(1));
+        let bundle = ramflux_crypto::create_rotating_prekey_bundle_with_lineage(
+            branch,
+            &branch.signing_key,
+            &identity,
+            &ramflux_crypto::PrekeyBundleOptions {
+                signed_prekey_id: &signed.id,
+                signed_prekey: &signed_prekey,
+                signed_prekey_created_at: signed.created_at,
+                signed_prekey_expires_at: signed.expires_at,
+                one_time_prekeys: &public_one_time_prekeys,
+                prekey_bundle_counter: bundle_counter,
+            },
+        )?;
         let state = SdkX3dhPrivateState {
             principal_commitment: Some(device.root_commitment().to_owned()),
             device_id: device_id.to_owned(),
             identity_seed,
-            signed_prekey_id,
-            signed_prekey_seed,
+            signed_prekey_id: signed.id,
+            signed_prekey_seed: signed.seed,
+            signed_prekey_created_at: signed.created_at,
+            signed_prekey_expires_at: signed.expires_at,
+            previous_signed_prekeys: signed.previous,
+            one_time_prekeys,
+            bundle_counter,
             bundle: bundle.clone(),
         };
         self.persist_owned_private_prekey(&device, &state)?;
@@ -274,5 +387,106 @@ impl RamfluxClient {
             registration_pow: None,
             source_ip_hash: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod forward_secrecy_tests {
+    use super::*;
+
+    fn client(label: &str) -> Result<(std::path::PathBuf, RamfluxClient), SdkError> {
+        let path = std::env::temp_dir().join(format!(
+            "rf-dm-fs-{label}-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        let mut client = RamfluxClient::new();
+        client.create_identity_root("alice", [11; 32]);
+        client.create_device_branch("alice", "phone", 1, [12; 32]);
+        client.open_account_index(&path)?;
+        client.create_account("alice", "alice")?;
+        client.unlock_account("alice", b"dm-fs-test")?;
+        Ok((path, client))
+    }
+
+    #[test]
+    fn signed_prekeys_are_csprng_generated_and_rotation_erases_after_grace() -> Result<(), SdkError>
+    {
+        let (first_path, first) = client("first")?;
+        let (second_path, second) = client("second")?;
+        let initial = first.create_and_store_prekey_bundle_at("phone", [12; 32], 1_000)?;
+        let independent = second.create_and_store_prekey_bundle_at("phone", [12; 32], 1_000)?;
+        assert_ne!(initial.signed_prekey, independent.signed_prekey);
+        assert_eq!(initial.one_time_prekey_ids.len(), ONE_TIME_PREKEY_POOL_SIZE);
+        assert_eq!(initial.signed_prekey_expires_at - initial.signed_prekey_created_at, 604_800);
+
+        let rotated = first.create_and_store_prekey_bundle_at(
+            "phone",
+            [12; 32],
+            initial.signed_prekey_expires_at,
+        )?;
+        assert_ne!(initial.signed_prekey_id, rotated.signed_prekey_id);
+        let device = first.owned_device_identity()?;
+        let grace_state = first.load_x3dh_private_state(&device)?;
+        assert_eq!(grace_state.previous_signed_prekeys.len(), 1);
+        assert_eq!(grace_state.previous_signed_prekeys[0].id, initial.signed_prekey_id);
+        let erase_after = grace_state.previous_signed_prekeys[0].erase_after;
+        first.create_and_store_prekey_bundle_at("phone", [12; 32], erase_after)?;
+        assert!(first.load_x3dh_private_state(&device)?.previous_signed_prekeys.is_empty());
+
+        drop((first, second));
+        std::fs::remove_dir_all(first_path)?;
+        std::fs::remove_dir_all(second_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_seed_derived_bundle_is_replaced_and_its_event_payload_is_retired()
+    -> Result<(), SdkError> {
+        let (path, client) = client("legacy")?;
+        let device = client.owned_device_identity()?;
+        let identity_seed = x3dh_private_seed("ramflux.sdk.x3dh.identity.v1", &[12; 32]);
+        let signed_seed = x3dh_private_seed("ramflux.sdk.x3dh.signed_prekey.v1", &[12; 32]);
+        let identity = X25519KeyPair::from_seed(identity_seed);
+        let signed = X25519KeyPair::from_seed(signed_seed);
+        let branch = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let legacy_bundle = ramflux_crypto::create_prekey_bundle(
+            branch,
+            &identity,
+            "phone:signed:1",
+            &signed,
+            None,
+            None,
+        )?;
+        let legacy = SdkX3dhPrivateState {
+            principal_commitment: Some(device.root_commitment().to_owned()),
+            device_id: "phone".to_owned(),
+            identity_seed,
+            signed_prekey_id: "phone:signed:1".to_owned(),
+            signed_prekey_seed: signed_seed,
+            signed_prekey_created_at: 0,
+            signed_prekey_expires_at: 0,
+            previous_signed_prekeys: Vec::new(),
+            one_time_prekeys: Vec::new(),
+            bundle_counter: 0,
+            bundle: legacy_bundle,
+        };
+        client.append_event("legacy-x3dh", "x3dh.prekey.private", &serde_json::to_vec(&legacy)?)?;
+        client.set_projection_checkpoint(
+            &legacy_x3dh_private_checkpoint_name("phone"),
+            "legacy-x3dh",
+        )?;
+
+        let migrated = client.create_and_store_prekey_bundle_at("phone", [12; 32], 1_000)?;
+        assert_ne!(migrated.signed_prekey, signed.public);
+        assert_eq!(migrated.prekey_bundle_counter, 1);
+        assert!(client.event_body("legacy-x3dh")?.is_none());
+        assert!(
+            client
+                .account_db()?
+                .actor_state_exists(&crate::dm::x3dh_private_state_name(&device))?
+        );
+        drop(client);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 }

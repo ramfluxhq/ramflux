@@ -84,7 +84,8 @@ pub use key_verification::{
     verify_kt_leaf_signature, verify_kt_tree_head,
 };
 pub use prekey::{
-    PrekeyBundle, X25519KeyPair, create_prekey_bundle, create_prekey_bundle_with_lineage,
+    PrekeyBundle, PrekeyBundleOptions, X25519KeyPair, create_prekey_bundle,
+    create_prekey_bundle_with_lineage, create_rotating_prekey_bundle_with_lineage,
     verify_prekey_bundle, verify_prekey_bundle_with_lineage,
 };
 pub use recovery::{

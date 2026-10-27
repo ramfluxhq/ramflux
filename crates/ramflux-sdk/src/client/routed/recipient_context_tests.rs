@@ -28,6 +28,7 @@ async fn a_second_account_device_accepts_the_peer_only_after_an_authenticated_co
     let primary = Fixture::owned("bob-primary", "bob", 51, 52)?;
     let staging = Fixture::owned("bob-sibling", "bob", 51, 53)?;
     let receiver = Fixture::owned("bob-sibling", "bob", 51, 53)?;
+    copy_fixture_private_prekeys(&staging, &receiver)?;
     let mut outgoing = message("first-peer-after-activation", "peer-thread");
     outgoing.sender_id = alice.id.clone();
     outgoing.recipient_device_id = Some(receiver.id.clone());

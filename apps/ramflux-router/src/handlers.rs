@@ -37,7 +37,7 @@ pub(crate) fn handle_itest_request(
     if crate::identity_authority::handle_itest_identity_authority(stream, &request, router)? {
         return Ok(());
     }
-    if handle_itest_device_lookup(stream, &request, router.state())? {
+    if handle_itest_device_lookup(stream, &request, router)? {
         return Ok(());
     }
     match (request.method.as_str(), request.path.as_str()) {
@@ -120,7 +120,8 @@ fn handle_itest_directory_request(
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            let response = handle_mvp1_prekey_fetch(path, router.state())?;
+            let response =
+                handle_mvp1_prekey_fetch(path, router, request.source_ip_hash.as_deref())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => {
@@ -513,7 +514,7 @@ fn handle_mesh_device_lookup(
     let state = router.state();
     let value = match (method, path) {
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            handle_mvp1_prekey_fetch(path, state).and_then(|r| Ok(serde_json::to_value(r)?))
+            handle_mvp1_prekey_fetch(path, router, None).and_then(|r| Ok(serde_json::to_value(r)?))
         }
         ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => {
             handle_mvp1_device_auth_key_fetch(path, state)
@@ -857,16 +858,16 @@ pub(crate) fn handle_mvp1_identity_register(
 fn handle_itest_device_lookup(
     stream: &mut TcpStream,
     request: &ramflux_node_core::NodeHttpRequest,
-    state: &ramflux_node_core::RouterCore,
+    router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<bool> {
     if request.method != "GET" {
         return Ok(false);
     }
     let result = if request.path.starts_with("/mvp1/prekey/") {
-        handle_mvp1_prekey_fetch(&request.path, state)
+        handle_mvp1_prekey_fetch(&request.path, router, request.source_ip_hash.as_deref())
             .and_then(|r| serde_json::to_value(r).map_err(anyhow::Error::from))
     } else if request.path.starts_with("/mvp1/device-auth-key/") {
-        handle_mvp1_device_auth_key_fetch(&request.path, state)
+        handle_mvp1_device_auth_key_fetch(&request.path, router.state())
             .and_then(|r| serde_json::to_value(r).map_err(anyhow::Error::from))
     } else {
         return Ok(false);
@@ -987,16 +988,27 @@ fn handle_mvp1_prekey_publish(
 
 fn handle_mvp1_prekey_fetch(
     path: &str,
-    state: &ramflux_node_core::RouterCore,
+    router: &crate::router_runtime::RouterHandle,
+    source: Option<&str>,
 ) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
     let device_id = path.trim_start_matches("/mvp1/prekey/");
-    let response = state.mvp1_prekey_checked(device_id)?;
+    let response = if let Some(source) = source {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        router.state().mvp1_prekey_checked_from(device_id, source, i64::try_from(now.as_secs())?)?
+    } else {
+        router.state().mvp1_prekey_checked(device_id)?
+    };
+    router.state().persist_identity_registry(router.store())?;
     tracing::info!(
         device_id = %response.device_id,
         has_bundle = response.bundle.is_some(),
         target_delivery_id = ?response.target_delivery_id,
+        one_time_prekey_exhausted = response.one_time_prekey_exhausted,
         "router mvp1 prekey fetch outcome"
     );
+    if response.prekey_exhaustion_warning {
+        tracing::warn!(device_id = %response.device_id, "one-time prekey pool exhausted; using signed-prekey-only bootstrap");
+    }
     Ok(response)
 }
 

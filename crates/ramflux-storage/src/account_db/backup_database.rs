@@ -73,6 +73,11 @@ impl BackupDatabase {
                 }
             }
         }
+        target.execute_batch("DELETE FROM runtime_actor_state WHERE state_kind LIKE 'x3dh/private-state/%'; DELETE FROM projection_checkpoint WHERE projection_name LIKE 'x3dh_private:%' OR projection_name LIKE 'x3dh_private:v2/%'; UPDATE local_event_log SET event_body=x'7b7d',signature=x'',signature_status='retired' WHERE event_type='x3dh.prekey.private';")?;
+        let archive_exists: bool = target.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='backup_archived_local_event')", [], |row| row.get(0))?;
+        if archive_exists {
+            target.execute("UPDATE backup_archived_local_event SET event_body=x'7b7d',signature=x'',signature_status='retired' WHERE event_type='x3dh.prekey.private'", [])?;
+        }
         target.execute(
             "UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1",
             params![key.fingerprint()],

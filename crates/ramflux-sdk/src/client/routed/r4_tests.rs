@@ -138,6 +138,16 @@ async fn group_message_before_membership_update_retries_then_delivers_without_ac
     );
     crate::bus::sync_driver::run(&mut account).await?;
     assert!(!writes.lock().map_err(|_| invalid("mutex"))?.iter().any(|v| v["frame_type"] == "ack"));
+    let header = decode(&entry.envelope)?.x3dh.ok_or_else(|| invalid("bootstrap header"))?;
+    let state =
+        account.client.load_x3dh_private_state(&account.client.local_device_identity("bob")?)?;
+    assert!(
+        header
+            .recipient_one_time_prekey_id
+            .as_ref()
+            .is_none_or(|id| { state.one_time_prekeys.iter().any(|private| &private.id == id) }),
+        "deferred bootstrap consumed its one-time prekey"
+    );
     fixture_member(&account.client, "ordered", &alice)?;
     account.client.import_group_sender_key_distribution(
         &alice.client.export_group_sender_key_distribution("ordered", "alice")?,

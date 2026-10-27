@@ -103,6 +103,16 @@ struct PrekeyBundleSigningBody<'a> {
     capability_scope: &'a [String],
 }
 
+/// Rotating signed-prekey and bounded one-time-prekey publication inputs.
+pub struct PrekeyBundleOptions<'a> {
+    pub signed_prekey_id: &'a str,
+    pub signed_prekey: &'a X25519KeyPair,
+    pub signed_prekey_created_at: i64,
+    pub signed_prekey_expires_at: i64,
+    pub one_time_prekeys: &'a [(String, [u8; 32])],
+    pub prekey_bundle_counter: u64,
+}
+
 /// # Errors
 /// Returns an error when the prekey bundle signing body cannot be canonicalized.
 pub fn create_prekey_bundle(
@@ -136,9 +146,42 @@ pub fn create_prekey_bundle_with_lineage(
     one_time_prekey_id: Option<String>,
     one_time_prekey: Option<[u8; 32]>,
 ) -> Result<PrekeyBundle, CryptoError> {
-    let one_time_prekey_ids = one_time_prekey_id.clone().into_iter().collect::<Vec<_>>();
+    let one_time_prekeys =
+        one_time_prekey_id.clone().zip(one_time_prekey).into_iter().collect::<Vec<_>>();
+    let mut bundle = create_rotating_prekey_bundle_with_lineage(
+        device_branch,
+        lineage_signing_key,
+        identity_key,
+        &PrekeyBundleOptions {
+            signed_prekey_id,
+            signed_prekey,
+            signed_prekey_created_at: 0,
+            signed_prekey_expires_at: 0,
+            one_time_prekeys: &one_time_prekeys,
+            prekey_bundle_counter: 0,
+        },
+    )?;
+    bundle.one_time_prekey_id = one_time_prekey_id;
+    bundle.one_time_prekey = one_time_prekey;
+    Ok(bundle)
+}
+
+/// Creates a signed bundle with rotation metadata and a bounded public OPK pool.
+///
+/// # Errors
+/// Returns an error when the canonical prekey bundle body cannot be signed.
+pub fn create_rotating_prekey_bundle_with_lineage(
+    device_branch: &DeviceBranch,
+    lineage_signing_key: &SigningKey,
+    identity_key: &X25519KeyPair,
+    options: &PrekeyBundleOptions<'_>,
+) -> Result<PrekeyBundle, CryptoError> {
+    let one_time_prekey_ids =
+        options.one_time_prekeys.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    let one_time_prekey_public =
+        options.one_time_prekeys.iter().map(|(_, key)| *key).collect::<Vec<_>>();
     let one_time_prekey_x25519_public =
-        one_time_prekey.iter().copied().map(encode_base64url).collect::<Vec<_>>();
+        one_time_prekey_public.iter().copied().map(encode_base64url).collect::<Vec<_>>();
     let body = PrekeyBundleSigningBody {
         schema: ramflux_protocol::domain::X3DH_PREKEY_BUNDLE,
         identity_commitment: &device_branch.principal_id,
@@ -149,13 +192,13 @@ pub fn create_prekey_bundle_with_lineage(
             device_branch.signing_key.verifying_key().to_bytes(),
         ),
         device_agreement_x25519_public: &encode_base64url(identity_key.public),
-        signed_prekey_id,
-        signed_prekey_x25519_public: &encode_base64url(signed_prekey.public),
-        signed_prekey_created_at: 0,
-        signed_prekey_expires_at: 0,
+        signed_prekey_id: options.signed_prekey_id,
+        signed_prekey_x25519_public: &encode_base64url(options.signed_prekey.public),
+        signed_prekey_created_at: options.signed_prekey_created_at,
+        signed_prekey_expires_at: options.signed_prekey_expires_at,
         one_time_prekey_ids: &one_time_prekey_ids,
         one_time_prekey_x25519_public: &one_time_prekey_x25519_public,
-        prekey_bundle_counter: 0,
+        prekey_bundle_counter: options.prekey_bundle_counter,
         capability_scope: &["dm.x3dh".to_owned()],
     };
     let canonical = ramflux_protocol::canonical_json_bytes(&body)?;
@@ -173,16 +216,16 @@ pub fn create_prekey_bundle_with_lineage(
         ),
         device_agreement_x25519_public: identity_key.public,
         identity_key: identity_key.public,
-        signed_prekey_id: signed_prekey_id.to_owned(),
-        signed_prekey_x25519_public: signed_prekey.public,
-        signed_prekey: signed_prekey.public,
-        signed_prekey_created_at: 0,
-        signed_prekey_expires_at: 0,
+        signed_prekey_id: options.signed_prekey_id.to_owned(),
+        signed_prekey_x25519_public: options.signed_prekey.public,
+        signed_prekey: options.signed_prekey.public,
+        signed_prekey_created_at: options.signed_prekey_created_at,
+        signed_prekey_expires_at: options.signed_prekey_expires_at,
         one_time_prekey_ids,
-        one_time_prekey_x25519_public: one_time_prekey.iter().copied().collect(),
-        one_time_prekey_id,
-        one_time_prekey,
-        prekey_bundle_counter: 0,
+        one_time_prekey_x25519_public: one_time_prekey_public,
+        one_time_prekey_id: None,
+        one_time_prekey: None,
+        prekey_bundle_counter: options.prekey_bundle_counter,
         capability_scope: vec!["dm.x3dh".to_owned()],
         signature_by_device_identity: signature_by_device_identity.clone(),
         signature_by_lineage,
@@ -206,6 +249,34 @@ pub fn verify_prekey_bundle_with_lineage(
     lineage_public_key: &VerifyingKey,
     bundle: &PrekeyBundle,
 ) -> Result<(), CryptoError> {
+    if bundle.identity_key != bundle.device_agreement_x25519_public
+        || bundle.signed_prekey != bundle.signed_prekey_x25519_public
+        || bundle.one_time_prekey_ids.len() != bundle.one_time_prekey_x25519_public.len()
+        || bundle.one_time_prekey_ids.len() > 32
+        || bundle.one_time_prekey_ids.iter().collect::<std::collections::BTreeSet<_>>().len()
+            != bundle.one_time_prekey_ids.len()
+        || ((bundle.signed_prekey_created_at == 0) != (bundle.signed_prekey_expires_at == 0))
+        || (bundle.signed_prekey_created_at > 0
+            && bundle.signed_prekey_expires_at <= bundle.signed_prekey_created_at)
+    {
+        return Err(CryptoError::IdentityAuthority("invalid prekey bundle"));
+    }
+    match (&bundle.one_time_prekey_id, bundle.one_time_prekey) {
+        (Some(id), Some(key)) if !bundle.one_time_prekey_ids.is_empty() => {
+            let selected = bundle
+                .one_time_prekey_ids
+                .iter()
+                .position(|candidate| candidate == id)
+                .and_then(|index| bundle.one_time_prekey_x25519_public.get(index));
+            if selected != Some(&key) {
+                return Err(CryptoError::IdentityAuthority(
+                    "selected one-time prekey is not signed",
+                ));
+            }
+        }
+        (Some(_), Some(_)) | (None, None) => {}
+        _ => return Err(CryptoError::IdentityAuthority("incomplete one-time prekey selection")),
+    }
     let one_time_prekey_x25519_public = if bundle.one_time_prekey_x25519_public.is_empty() {
         bundle.one_time_prekey.iter().copied().map(encode_base64url).collect::<Vec<_>>()
     } else {

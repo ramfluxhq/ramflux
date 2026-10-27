@@ -126,6 +126,11 @@ impl AccountDb {
                     }
                 }
             }
+            target.execute_batch("DELETE FROM runtime_actor_state WHERE state_kind LIKE 'x3dh/private-state/%'; DELETE FROM projection_checkpoint WHERE projection_name LIKE 'x3dh_private:%' OR projection_name LIKE 'x3dh_private:v2/%'; UPDATE local_event_log SET event_body=x'7b7d',signature=x'',signature_status='retired' WHERE event_type='x3dh.prekey.private';")?;
+            let archive_exists: bool = target.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='backup_archived_local_event')", [], |row| row.get(0))?;
+            if archive_exists {
+                target.execute("UPDATE backup_archived_local_event SET event_body=x'7b7d',signature=x'',signature_status='retired' WHERE event_type='x3dh.prekey.private'", [])?;
+            }
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
             // All domain tables, keys and object payloads were copied by SQLite itself.
             let counts=read_counts(&target)?;
@@ -164,7 +169,7 @@ pub(super) fn read_counts(db: &rusqlite::Connection) -> rusqlite::Result<BackupC
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AccountIndex, EncryptionMode};
+    use crate::{AccountIndex, EncryptionMode, EventStore, ProjectionStore};
 
     #[test]
     fn encrypted_snapshot_includes_uncheckpointed_wal_and_all_rows_without_decoding_blobs()
@@ -186,6 +191,12 @@ mod tests {
         }
         db.persist_actor_state("surface/state/fixture", &serde_json::json!({"surface_id":"s"}))?;
         db.persist_actor_state("task/view/fixture", &serde_json::json!({"task_id":"t"}))?;
+        db.persist_actor_state(
+            "x3dh/private-state/v3/device",
+            &serde_json::json!({"signed_prekey_seed": vec![7_u8; 32]}),
+        )?;
+        db.append_event("legacy-private-prekey", "x3dh.prekey.private", b"private seed")?;
+        db.set_projection_checkpoint("x3dh_private:v2/device", "legacy-private-prekey")?;
         let target = path.join("snapshot.db");
         let snapshot = db.write_backup_snapshot(&target)?;
         assert_ne!(snapshot.key, key);
@@ -220,6 +231,30 @@ mod tests {
                 |row| row.get::<_, u64>(0)
             )?,
             1100
+        );
+        assert_eq!(
+            raw.query_row(
+                "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'x3dh/private-state/%'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )?,
+            0
+        );
+        assert_eq!(
+            raw.query_row(
+                "SELECT CAST(event_body AS TEXT)||':'||signature_status FROM local_event_log WHERE event_id='legacy-private-prekey'",
+                [],
+                |row| row.get::<_, String>(0)
+            )?,
+            "{}:retired"
+        );
+        assert_eq!(
+            raw.query_row(
+                "SELECT count(*) FROM projection_checkpoint WHERE projection_name LIKE 'x3dh_private:%'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )?,
+            0
         );
         assert_eq!(
             raw.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?,
