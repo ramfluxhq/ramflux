@@ -41,6 +41,10 @@ if args[:2] == ["image", "inspect"]:
         sys.exit(1)
     print("[]")
     sys.exit(0)
+if args == ["info", "--format", "json"]:
+    mode = control.get("rootless_network_mode", "pasta")
+    print(json.dumps({"host": {"security": {"rootless": True}, "rootlessNetworkCmd": mode}}))
+    sys.exit(0)
 
 state = root / "data"
 deployed = root / "deployed"

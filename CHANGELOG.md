@@ -50,9 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The public federation HTTP listener applies configurable per-source concurrent
-  connection and token-bucket request limits. Its bounded source table expires
-  inactive entries and aggregates IPv6 addresses by `/64`; proxy forwarding
-  headers are not trusted by default.
+  connection, connection-open-rate, and request-rate limits, plus IPv4 `/24` and
+  IPv6 `/48` aggregate caps. Its bounded table evicts idle LRU entries; operators
+  can disable source limits for non-address-preserving proxies without weakening
+  the global cap. Proxy forwarding headers remain untrusted.
 
 - **BREAKING (operators):** Compose inputs use `RF_COMPOSE_*` names listed in
   `deploy/compose-inputs.json`. Migrate existing env files, explicitly provide all

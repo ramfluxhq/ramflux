@@ -250,6 +250,7 @@ else:
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
         environment = (self.state / "runtime.env").read_text()
         self.assertIn("RAMFLUX_FEDERATION_PUBLIC_PORT=0.0.0.0:59482", environment)
+        self.assertIn("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on", environment)
         self.assertNotIn("RAMFLUX_FEDERATION_ADMIN_PORT=", environment)
         for advertised in ("59443", "59447", "59482", "59478", "59453"):
             self.assertIn(advertised, environment)
@@ -479,6 +480,19 @@ else:
 
 class PodmanComposeDemoNodeTests(DemoNodeTests):
     PROVIDER = "podman"
+
+    def test_rootless_network_mode_controls_per_source_limits(self):
+        self.control.write_text('{"rootless_network_mode": "slirp4netns"}')
+        result = self.run_script("up")
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=off", runtime)
+        self.assertIn("does not preserve client source addresses", result.stderr)
+
+        self.run_script("down", "--purge")
+        self.control.write_text('{"rootless_network_mode": "pasta"}')
+        self.run_script("up")
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on", runtime)
 
 
 

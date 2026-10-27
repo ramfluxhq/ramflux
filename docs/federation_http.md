@@ -100,23 +100,36 @@ so a worker panic terminates the process rather than unwinding and releasing onl
 that slot. The existing request read timeout still applies. Public 500 responses
 contain only `internal server error`; causes are logged privately.
 
-The public listener also limits each source independently. Concurrent connections
-default to 8 per source. A token bucket defaults to 20 requests per second with a
-burst of 40; refused requests receive a generic 429. Source accounting is derived
-only from the accepted socket address. `X-Forwarded-For`, `Forwarded`, and similar
-HTTP headers are not trusted. A reverse proxy therefore appears as one source by
-default; configure limits for that topology or preserve the original address at a
-trusted transport boundary instead of enabling header trust on the public service.
+With `RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on` (the default), the public listener
+also limits each source independently. Concurrent connections default to 8 per
+source and 16 per IPv4 `/24` or IPv6 `/48`. A connection-open token bucket and a
+request token bucket both default to 20 per second with a burst of 40. Connection
+rate and slot refusals receive a generic 503; request-rate refusals receive a
+generic 429.
 
-IPv4 addresses have independent buckets. IPv6 addresses are aggregated by `/64`
-so spoofed privacy addresses cannot create one bucket each. The table defaults to
-4096 entries and inactive entries expire after 300 seconds. When all entries are
-recent or active, a new source receives a generic 503; active entries are never
-evicted. Configure the service with:
+Source accounting is derived only from the accepted socket address.
+`X-Forwarded-For`, `Forwarded`, and similar HTTP headers are not trusted. A reverse
+proxy therefore appears as one source unless it preserves addresses at a trusted
+transport boundary. Set `RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=off` when a trusted
+proxy or port forward cannot preserve them; the global connection and HTTP framing
+limits remain enforced. The service emits a one-time warning when more than 90%
+of a 100-connection observation window comes from one private or loopback address.
+
+IPv4 addresses have independent buckets and an additional `/24` connection cap.
+IPv6 addresses aggregate per `/64`, with an additional `/48` connection cap, so
+privacy addresses from one routed prefix cannot consume the global slots. The
+source table defaults to 4096 entries and inactive entries expire after 300
+seconds. At capacity, an O(1) LRU index evicts an idle entry, preferring a fully
+refilled bucket; active entries are never evicted. Capacity must be greater than
+the global connection cap or startup fails. Configure the service with:
 
 | Runtime setting | Default | Valid range |
 | --- | ---: | ---: |
+| `RAMFLUX_FEDERATION_PER_SOURCE_LIMITS` | `on` | `on`, `off` |
 | `RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS_PER_SOURCE` | 8 | 1..4096 |
+| `RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS_PER_PREFIX` | 16 | 1..4096 |
+| `RAMFLUX_FEDERATION_PUBLIC_CONNECTION_RATE_PER_SECOND` | 20 | 1..1000000 |
+| `RAMFLUX_FEDERATION_PUBLIC_CONNECTION_BURST` | 40 | 1..1000000 |
 | `RAMFLUX_FEDERATION_PUBLIC_REQUEST_RATE_PER_SECOND` | 20 | 1..1000000 |
 | `RAMFLUX_FEDERATION_PUBLIC_REQUEST_BURST` | 40 | 1..1000000 |
 | `RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY` | 4096 | 1..65536 |
@@ -124,6 +137,12 @@ evicted. Configure the service with:
 
 Compose uses the corresponding `RF_COMPOSE_` aliases. Invalid values fail service
 startup. The global connection cap remains an independent upper bound.
+
+Rootless Podman `pasta` preserves client source addresses, so `demo-node.sh` keeps
+per-source limits on. `rootlessport` and `slirp4netns` do not preserve them; the
+demo wrapper detects those modes, writes the switch as `off`, and prints a warning.
+Operators using another reverse proxy or container port implementation must verify
+the address observed by the federation container and select the switch explicitly.
 
 For host runs, set `RAMFLUX_FEDERATION_PUBLIC_ADDR` and
 `RAMFLUX_FEDERATION_ADMIN_ADDR` to distinct available addresses, for example
