@@ -130,11 +130,22 @@ pub fn create_device_branch(
     device_epoch: u64,
     seed: [u8; 32],
 ) -> DeviceBranch {
+    create_device_branch_from_seed(principal_id, device_id, device_epoch, &seed)
+}
+
+/// Build a device branch without transferring the caller's seed by value.
+#[must_use]
+pub fn create_device_branch_from_seed(
+    principal_id: &str,
+    device_id: &str,
+    device_epoch: u64,
+    seed: &[u8; 32],
+) -> DeviceBranch {
     DeviceBranch {
         principal_id: principal_id.to_owned(),
         device_id: device_id.to_owned(),
         device_epoch,
-        signing_key: SigningKey::from_bytes(&seed),
+        signing_key: SigningKey::from_bytes(seed),
     }
 }
 

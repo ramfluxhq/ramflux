@@ -109,7 +109,7 @@ async fn refresh_local_publication(
     })
     .await
     .map_err(|_| SdkError::CustodySetupInvalid)??;
-    if outcome == ramflux_crypto::custody::PinOutcome::Fenced {
+    if matches!(outcome, ramflux_crypto::custody::PinOutcome::Fenced(_)) {
         return Err(SdkError::InboundRejected("native current head is fenced".into()));
     }
     Ok(())

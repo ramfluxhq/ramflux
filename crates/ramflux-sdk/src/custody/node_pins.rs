@@ -187,7 +187,7 @@ impl NodePins {
         let path = self.root.join(format!("peer-{}.json", verified.envelope().body.account_anchor));
         let mut state: PeerPins =
             if path.try_exists()? { read(&path, 8 * 1024 * 1024)? } else { PeerPins::default() };
-        let outcome = state.pins.observe(verified)?;
+        let outcome = state.pins.observe_with_previous(verified, state.accepted.as_ref())?;
         if outcome == PinOutcome::Advanced {
             state.accepted = Some(verified.envelope().clone());
         }
@@ -202,7 +202,7 @@ impl NodePins {
         create(&temp, &bytes)?;
         fs::rename(temp, path)?;
         fs::File::open(&self.root)?.sync_all()?;
-        if outcome == PinOutcome::Fenced {
+        if matches!(outcome, PinOutcome::Fenced(_)) {
             return Err(invalid());
         }
         state.pins.require_current(verified)?;

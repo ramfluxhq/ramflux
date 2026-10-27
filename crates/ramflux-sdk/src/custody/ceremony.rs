@@ -259,13 +259,13 @@ impl CreationCeremony {
         let primary = SelfSigningKey::generate()?;
         let signing = random()?;
         let agreement = random()?;
-        let branch = ramflux_crypto::create_device_branch(
+        let branch = ramflux_crypto::create_device_branch_from_seed(
             &self.input.principal_id,
             &self.input.device_id,
             1,
-            *signing,
+            &signing,
         );
-        let agreement_key = ramflux_crypto::X25519KeyPair::from_seed(*agreement);
+        let agreement_key = ramflux_crypto::X25519KeyPair::from_seed_ref(&agreement);
         let human = self
             .input
             .custodian_account_id

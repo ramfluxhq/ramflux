@@ -3,7 +3,9 @@
 
 //! Born-v3 publication and durable mode fencing, separate from legacy enrollment.
 use crate::{IdentityRegistry, NodeCoreError, RouterCore, RouterRedbStore};
-use ramflux_crypto::custody::{AuthorityPins, PinOutcome, VerifiedRecord, verify_record};
+use ramflux_crypto::custody::{
+    AuthorityPins, CustodyConflictEvidence, PinOutcome, VerifiedRecord, verify_record,
+};
 use ramflux_protocol::custody::{DeviceSet, Envelope};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
@@ -36,6 +38,9 @@ impl CustodyRegistry {
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.records.is_empty() && self.principals.is_empty()
+    }
+    fn conflict_evidence(&self, anchor: &str, range: u64) -> Option<&CustodyConflictEvidence> {
+        self.account_pins.get(anchor).unwrap_or(&self.pins).conflict_evidence(anchor, range)
     }
 }
 /// Full signed authority plus the bounded cumulative membership evidence, when present.
@@ -111,7 +116,8 @@ impl IdentityRegistry {
         let master = &body.master_certificate.body.master_public_key;
         self.check_principal_root_ownership(&body.principal_id, master)?;
         let mut pins = self.custody.pins_for(anchor);
-        let outcome = pins.observe(&verified).map_err(|error| crypto(&error))?;
+        let previous = self.custody.records.get(anchor).map(|entry| &entry.record);
+        let outcome = pins.observe_with_previous(&verified, previous).map_err(|error| crypto(&error))?;
         let custody = Arc::make_mut(&mut self.custody);
         custody.account_pins.insert(anchor.clone(), pins);
         custody.principals.entry(body.principal_id.clone()).or_insert_with(|| master.clone());
@@ -120,6 +126,16 @@ impl IdentityRegistry {
                 tracing::warn!(account_anchor = %anchor, "custody authority reached eighty percent capacity; prioritize revocations");
             }
             custody.records.insert(anchor.clone(), publication.clone());
+        }
+        if let PinOutcome::Fenced(alert) = &outcome {
+            tracing::error!(
+                account_anchor = %alert.account_anchor,
+                range_index = alert.range_index,
+                conflict_kind = ?alert.kind,
+                accepted_record_hash = %alert.accepted_record_hash,
+                conflicting_record_hash = %alert.conflicting_record_hash,
+                "custody authority conflict requires operator review and a new master certificate"
+            );
         }
         Ok(outcome)
     }
@@ -135,6 +151,16 @@ impl RouterCore {
             .contains_key(anchor)
     }
 
+    /// Return the first complete authenticated conflict pair retained for a fenced range.
+    #[must_use]
+    pub fn custody_conflict_evidence(
+        &self,
+        anchor: &str,
+        range: u64,
+    ) -> Option<CustodyConflictEvidence> {
+        let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        control.mvp1_identities.custody.conflict_evidence(anchor, range).cloned()
+    }
     /// Verify and persist head/mode pins atomically, including valid equivocation fences.
     /// # Errors
     /// Rejects invalid/stale/migrated authority or durable write failures.
@@ -189,11 +215,12 @@ impl RouterCore {
             &body.master_certificate.body.master_public_key,
         )?;
         let mut pins = registry.custody.pins_for(anchor);
-        let outcome = pins.observe(&verified).map_err(|error| crypto(&error))?;
+        let previous = registry.custody.records.get(anchor).map(|entry| &entry.record);
+        let outcome = pins.observe_with_previous(&verified, previous).map_err(|error| crypto(&error))?;
         if outcome == PinOutcome::Unchanged {
             return Ok(publication.record.clone());
         }
-        let accepted = if outcome == PinOutcome::Fenced {
+        let accepted = if matches!(outcome, PinOutcome::Fenced(_)) {
             registry
                 .custody
                 .records
@@ -221,8 +248,8 @@ impl RouterCore {
         store.record_custody_account(anchor, &state, is_new, source, now)?;
         registry.apply_custody_account(anchor.clone(), state)?;
         // Native custody does not change the legacy delivery-key migration read snapshot.
-        if outcome == PinOutcome::Fenced {
-            return Err(reject("custody authority equivocation fenced"));
+        if let PinOutcome::Fenced(alert) = outcome {
+            return Err(NodeCoreError::CustodyConflict { alert: Box::new(alert) });
         }
         Ok(publication.record.clone())
     }

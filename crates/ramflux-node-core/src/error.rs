@@ -7,6 +7,8 @@ pub enum NodeCoreError {
     ForwardTimeout { phase: &'static str },
     #[error("home migration refused: {0:?}")]
     HomeMigration(ramflux_protocol::home_migration::Refusal),
+    #[error("custody authority conflict fenced: {alert:?}")]
+    CustodyConflict { alert: Box<ramflux_crypto::custody::CustodyConflictAlert> },
     #[error("source authority refused: {reason_code:?}")]
     SourceAuthorityRefused { reason_code: crate::EnvelopeAuthorityReason },
     #[error("capacity: {resource}")]

@@ -55,7 +55,7 @@ impl RamfluxClient {
                         .map(|entry| entry.device_id.clone())
                         .collect()
                 });
-            let outcome = state.pins.observe(&verified)?;
+            let outcome = state.pins.observe_with_previous(&verified, state.publication.as_ref().map(|p| &p.record))?;
             if outcome == PinOutcome::Advanced
                 || (outcome == PinOutcome::Unchanged && state.publication.is_none())
             {
@@ -63,14 +63,14 @@ impl RamfluxClient {
                 state.custodian.clone_from(&manifest.custodian_publication);
             }
             db.persist_actor_state(&state_key, &state)?;
-            if outcome != PinOutcome::Fenced {
+            if !matches!(outcome, PinOutcome::Fenced(_)) {
                 self.apply_custody_retirements(&verified, &previous_devices)?;
             }
 
             Ok(outcome)
         })?;
         self.finish_pair_retirement()?;
-        if outcome == PinOutcome::Fenced {
+        if matches!(outcome, PinOutcome::Fenced(_)) {
             return Err(invalid("custody authority equivocation fenced"));
         }
         self.current_custody_authority(expected, now)?

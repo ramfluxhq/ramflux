@@ -211,7 +211,7 @@ async fn custody_response(
     if frame.method == "account.create.confirm" {
         return super::creation_confirm::respond(frame, supervisor, ceremony, disconnected).await;
     }
-    super::custody_setup::respond(frame, &supervisor.config, ceremony)
+    super::custody_setup::respond(frame, &supervisor.config, ceremony).await
 }
 
 async fn configure_subscription(

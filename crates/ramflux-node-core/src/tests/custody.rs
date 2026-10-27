@@ -3,7 +3,7 @@
 
 //! Persistence and legacy compatibility for the local v3 registry foundation.
 use super::*;
-use ramflux_crypto::custody::{SelfSigningKey, verify_record};
+use ramflux_crypto::custody::{CustodyConflictKind, SelfSigningKey, verify_record};
 use ramflux_protocol::custody::{DeviceSet, Envelope};
 use zeroize::Zeroizing;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -62,13 +62,32 @@ fn custody_registry_durable_head_latch_and_conflict_fence_survive_restart() -> T
         let mut body = conflict.record.body;
         body.profile.display_name = "Conflict".into();
         conflict.record = primary.sign_record(body)?;
-        assert!(router.publish_custody_record(&conflict, now + 1, &store).is_err());
+        let Err(error) = router.publish_custody_record(&conflict, now + 1, &store) else {
+            return Err("conflicting head was accepted".into());
+        };
+        let NodeCoreError::CustodyConflict { alert } = error else {
+            return Err("conflict did not surface a typed alert".into());
+        };
+        assert_eq!(alert.kind, CustodyConflictKind::RecordHead);
+        let evidence = router
+            .custody_conflict_evidence(anchor, alert.range_index)
+            .ok_or("conflict evidence")?;
+        assert_eq!(evidence.alert, *alert);
+        assert_eq!(evidence.accepted, revoked.record);
+        assert_eq!(evidence.conflicting, conflict.record);
         assert!(router.custody_record(anchor, now + 1).is_err());
     }
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = store.load_router()?.ok_or("router")?;
-        assert!(router.custody_record(&publication.record.body.account_anchor, now + 1).is_err());
+        let anchor = &publication.record.body.account_anchor;
+        assert!(router.custody_record(anchor, now + 1).is_err());
+        let range =
+            ramflux_protocol::custody::decode_epoch(revoked.record.body.device_set_epoch)?.0;
+        let evidence =
+            router.custody_conflict_evidence(anchor, range).ok_or("restarted conflict evidence")?;
+        assert_eq!(evidence.alert.kind, CustodyConflictKind::RecordHead);
+        assert_eq!(evidence.accepted, revoked.record);
         let control = router.control.lock().map_err(|_| "registry lock")?;
         assert!(
             !control

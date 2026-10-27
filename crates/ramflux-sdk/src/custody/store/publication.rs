@@ -28,7 +28,7 @@ pub(crate) fn accept_publication(
     if verified.envelope().body.account_anchor != account.record().body.account_anchor {
         return Err(invalid());
     }
-    let outcome = account.stored.pins.observe(&verified)?;
+    let outcome = account.stored.pins.observe_with_previous(&verified, Some(&account.stored.record))?;
     if outcome == PinOutcome::Unchanged
         && account.stored.compacted_ids == authority.publication.compacted_ids
         && account.stored.custodian_publication.as_deref()
@@ -36,7 +36,7 @@ pub(crate) fn accept_publication(
     {
         return Ok(outcome);
     }
-    if outcome != PinOutcome::Fenced {
+    if !matches!(outcome, PinOutcome::Fenced(_)) {
         account.stored.record = authority.publication.record.clone();
         account.stored.compacted_ids.clone_from(&authority.publication.compacted_ids);
         account.stored.custodian_publication =

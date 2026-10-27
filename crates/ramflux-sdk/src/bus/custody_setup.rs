@@ -57,13 +57,13 @@ pub(super) fn now() -> Result<u64, SdkError> {
         .map(|t| t.as_secs())
         .map_err(|_| SdkError::CustodySetupInvalid)
 }
-pub(super) fn respond(
+pub(super) async fn respond(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
     validate_headers(request, ceremony)?;
-    let result = apply(request, config, ceremony);
+    let result = apply(request, config, ceremony).await;
     // Every failed request consumes the pending ceremony, without word-level feedback.
     let result = match result {
         Ok(body) => body,
@@ -134,17 +134,7 @@ pub(super) fn primary_provider(
     std::sync::Arc::new(NativePrimaryVault)
 }
 
-fn primary_vault(config: &LocalBusConfig) -> &dyn crate::custody::PrimaryVault {
-    static NATIVE: NativePrimaryVault = NativePrimaryVault;
-    #[cfg(any(test, feature = "itest-memory-vault"))]
-    if let Some(vault) = &config.custody_vault {
-        return vault.as_ref();
-    }
-    #[cfg(not(any(test, feature = "itest-memory-vault")))]
-    let _ = config;
-    &NATIVE
-}
-fn apply(
+async fn apply(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
@@ -190,7 +180,10 @@ fn apply(
                         .map(|profile| profile.node_id)
                 })
                 .transpose()?;
-            primary_vault(config).preflight()?;
+            let vault = primary_provider(config);
+            tokio::task::spawn_blocking(move || vault.preflight())
+                .await
+                .map_err(|_| SdkError::CustodyVaultUnavailable)??;
             let pending = CreationCeremony::begin_account(
                 &config.data_root,
                 display_name,
@@ -222,7 +215,10 @@ fn apply(
             if index.account(&input.local_account_id).is_ok() {
                 return Err(SdkError::CustodySetupInvalid);
             }
-            primary_vault(config).preflight()?;
+            let vault = primary_provider(config);
+            tokio::task::spawn_blocking(move || vault.preflight())
+                .await
+                .map_err(|_| SdkError::CustodyVaultUnavailable)??;
             let pending = CreationCeremony::begin(&config.data_root, input, now()?)?;
             let anchor = pending.account_anchor().into();
             let ceremony_id = pending.ceremony_id().into();
@@ -245,7 +241,7 @@ fn apply(
                     .hidden_challenge()?,
             })
         }
-        "account.custody.confirm" => confirm(request, config, ceremony),
+        "account.custody.confirm" => confirm(request, config, ceremony).await,
         "account.custody.cancel" | "account.create.cancel" => {
             empty(request)?;
             *ceremony = None;
@@ -254,7 +250,7 @@ fn apply(
         _ => Err(SdkError::CustodySetupInvalid),
     }
 }
-fn confirm(
+async fn confirm(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
@@ -292,11 +288,17 @@ fn confirm(
         };
         *target = Zeroizing::new(word);
     }
-    let account = if let Some(secret) = passphrase {
-        pending.confirm_with_passphrase(&words, primary_vault(config), now()?, secret.as_bytes())?
-    } else {
-        pending.confirm(&words, primary_vault(config), now()?)?
-    };
+    let vault = primary_provider(config);
+    let confirmed_at = now()?;
+    let account = tokio::task::spawn_blocking(move || {
+        if let Some(secret) = passphrase {
+            pending.confirm_with_passphrase(&words, vault.as_ref(), confirmed_at, secret.as_bytes())
+        } else {
+            pending.confirm(&words, vault.as_ref(), confirmed_at)
+        }
+    })
+    .await
+    .map_err(|_| SdkError::CustodyVaultUnavailable)??;
     Ok(ResultBody::NetworkingPending { account: account.summary() })
 }
 
@@ -350,8 +352,8 @@ mod tests {
         positions: [u8; 3],
     }
 
-    #[test]
-    fn ordinary_setup_reply_uses_normal_envelope_and_zeroizing_phrase() -> Result {
+    #[tokio::test]
+    async fn ordinary_setup_reply_uses_normal_envelope_and_zeroizing_phrase() -> Result {
         let root = crate::custody::tests::Root::new()?;
         let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
 
@@ -365,7 +367,7 @@ mod tests {
             "account.create",
             serde_json::json!({"display_name":"Ordinary Human","principal_kind":"human"}),
         );
-        let bytes = respond(&mut request, &config, &mut pending)?;
+        let bytes = respond(&mut request, &config, &mut pending).await?;
         let response: Frame<Pending> = serde_json::from_slice(&bytes)?;
         assert_eq!(response.bus_protocol, "ramflux.local_bus.v1");
         assert_eq!(response.kind, "response");
@@ -382,7 +384,7 @@ mod tests {
             "account.create.show_once",
             serde_json::json!({}),
         );
-        let shown = respond(&mut show, &config, &mut pending)?;
+        let shown = respond(&mut show, &config, &mut pending).await?;
         let phrase: Frame<Phrase> = serde_json::from_slice(&shown)?;
         assert_eq!(phrase.body.phrase.split_whitespace().count(), 24);
         drop(phrase);
@@ -395,7 +397,7 @@ mod tests {
             serde_json::json!({}),
         );
         let challenge: Frame<Challenge> =
-            serde_json::from_slice(&respond(&mut hide, &config, &mut pending)?)?;
+            serde_json::from_slice(&respond(&mut hide, &config, &mut pending).await?)?;
         let positions = challenge.body.positions;
         assert!(positions.iter().all(|position| (1..=24).contains(position)));
         assert_ne!(positions[0], positions[1]);
@@ -405,8 +407,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn unavailable_vault_refuses_create_begin_before_phrase_or_reservation() -> Result {
+    #[tokio::test]
+    async fn unavailable_vault_refuses_create_begin_before_phrase_or_reservation() -> Result {
         let root = crate::custody::tests::Root::new()?;
         let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
         let vault = crate::custody::tests::TestVault::default();
@@ -421,7 +423,7 @@ mod tests {
             serde_json::json!({"display_name":"Ordinary Human","principal_kind":"human"}),
         );
         assert!(matches!(
-            apply(&mut request, &config, &mut pending),
+            apply(&mut request, &config, &mut pending).await,
             Err(SdkError::CustodyVaultUnavailable)
         ));
         assert!(pending.is_none());
@@ -432,13 +434,13 @@ mod tests {
             "account.create.show_once",
             serde_json::json!({}),
         );
-        assert!(apply(&mut show, &config, &mut pending).is_err());
+        assert!(apply(&mut show, &config, &mut pending).await.is_err());
         assert!(!root.0.join("custody_accounts").exists());
         Ok(())
     }
 
-    #[test]
-    fn oversized_request_id_cancels_pending_setup_before_secret_output() -> Result {
+    #[tokio::test]
+    async fn oversized_request_id_cancels_pending_setup_before_secret_output() -> Result {
         let root = crate::custody::tests::Root::new()?;
         let config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
         let mut pending =
@@ -451,7 +453,7 @@ mod tests {
             serde_json::json!({}),
         );
         assert!(matches!(
-            respond(&mut request, &config, &mut pending),
+            respond(&mut request, &config, &mut pending).await,
             Err(SdkError::CustodySetupInvalid)
         ));
         assert!(pending.is_none());
