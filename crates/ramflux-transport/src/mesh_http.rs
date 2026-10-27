@@ -816,6 +816,68 @@ mod tests {
     }
 
     #[test]
+    fn bounded_migration_http_requires_the_independently_pinned_peer_ca()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("bounded_migration_http_peer_ca")?;
+        let a = issue_test_ca_and_service_cert(&root, "node-a")?;
+        let b = issue_test_ca_and_service_cert(&root, "node-b")?;
+        let c = issue_test_ca_and_service_cert(&root, "node-c")?;
+        for correct_pin in [true, false] {
+            let server = MeshTlsServer::bind("127.0.0.1:0", &b.tls)?;
+            let endpoint = server.local_addr()?.to_string();
+            let server_tls = b.tls.clone();
+            let client_ca = a.ca_pem.clone();
+            let peer = thread::spawn(move || -> Result<(), String> {
+                let accepted =
+                    server.accept_authenticated_with_pem_roots(&server_tls, &[client_ca]);
+                if !correct_pin {
+                    return if accepted.is_err() {
+                        Ok(())
+                    } else {
+                        Err("wrong pin handshake succeeded".into())
+                    };
+                }
+                let mut stream = accepted.map_err(|e| e.to_string())?.stream;
+                let _deadline =
+                    crate::mesh_request_deadline(&stream, Instant::now() + Duration::from_secs(5))
+                        .map_err(|e| e.to_string())?;
+                let request = crate::read_bounded_mesh_http_request(&mut stream, 1024)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("missing request")?;
+                if request.path != "/migration" {
+                    return Err("wrong request path".into());
+                }
+                write_mesh_json_response(
+                    &mut stream,
+                    "200 OK",
+                    &serde_json::json!({"accepted":true}),
+                )
+                .map_err(|e| e.to_string())
+            });
+            let roots = [if correct_pin { b.ca_pem.clone() } else { c.ca_pem.clone() }];
+            let tls = crate::BoundedHttpTls::new(&a.tls, "ramflux-federation", Some(&roots))?;
+            let result = crate::bounded_http_post(crate::BoundedHttpPost {
+                endpoint: &endpoint,
+                path: "/migration",
+                body: b"{}",
+                tls: Some(&tls),
+                deadline: Instant::now() + Duration::from_secs(5),
+                max_bytes: 1024,
+            });
+            if correct_pin {
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&result?)?["accepted"],
+                    true
+                );
+            } else {
+                assert!(result.is_err());
+            }
+            peer.join().map_err(|_| "peer panicked")??;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn federation_peer_mtls_uses_independent_pinned_ca_roots()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_cert_root("federation_peer_mtls_uses_independent_pinned_ca_roots")?;

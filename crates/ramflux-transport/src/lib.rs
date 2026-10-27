@@ -4,6 +4,9 @@
 //! Transport backends for `grpc_h2`, `quic_quinn`, and `https_json`.
 
 mod backend;
+mod bounded_http;
+mod bounded_http_dns;
+mod bounded_mesh_request;
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 mod compio_gateway;
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
@@ -12,6 +15,7 @@ mod error;
 mod loopback;
 mod mesh_http;
 mod mesh_quic;
+mod mesh_request_deadline;
 mod mesh_tls;
 mod perf_metrics;
 mod policy;
@@ -22,6 +26,8 @@ mod tls_config;
 mod types;
 
 pub use backend::{GrpcH2Backend, HttpsJsonBackend, QuicQuinnBackend};
+pub use bounded_http::{BoundedHttpPost, BoundedHttpTls, bounded_http_post};
+pub use bounded_mesh_request::read_bounded_mesh_http_request;
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 pub use compio_gateway::{
     CompioGatewayBidiStream, CompioGatewayQuicConnection, CompioGatewayQuicServer,
@@ -47,6 +53,7 @@ pub use mesh_quic::{
     mesh_quic_post_json_with_peer_ca_pems, mesh_quic_post_json_with_peer_ca_pems_async,
     mesh_quic_post_postcard_with_peer_ca_pems_async,
 };
+pub use mesh_request_deadline::{MeshRequestDeadline, mesh_request_deadline};
 pub use mesh_tls::{
     MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, extract_spiffe_uri_from_certificate,
 };
