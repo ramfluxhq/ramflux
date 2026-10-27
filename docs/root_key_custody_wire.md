@@ -104,7 +104,7 @@ one constant and spelling: `ramflux.identity.pairing_transcript.v1`.
 | `CUSTODY_TRANSFER_HPKE` | `ramflux.identity.transfer.hpke.v1` | schema: HPKE transfer envelope |
 | `CUSTODY_TRANSFER_PAYLOAD` | `ramflux.identity.transfer.payload.v1` | schema: handover payload |
 | `CUSTODY_TRANSFER_HPKE_SUITE` | `ramflux.identity.transfer.hpke_suite.v1` | suite tag: Auth/X25519/HKDF-SHA256/AES-256-GCM |
-| `CUSTODY_BRANCH_EXPORTER` | `ramflux.identity.branch_proof.exporter.v3` | TLS exporter label: client-facing connection in every mode |
+| `CUSTODY_BRANCH_EXPORTER` | `EXPERIMENTAL-ramflux.identity.branch_proof.exporter.v3` | TLS exporter label: client-facing connection in every mode |
 | `CUSTODY_REVOKED_LIST` | `ramflux.identity.revoked_devices.list.v1` | BLAKE3: sorted compacted revoked-id list |
 | `CUSTODY_TIME_PROBE` | `ramflux.identity.time_probe.v1` | schema: restricted time-recovery probe |
 

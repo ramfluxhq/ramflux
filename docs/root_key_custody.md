@@ -752,3 +752,65 @@ Revision 5 keeps the legacy public binding **pending owner confirmation**. Chann
 binding, bounded revocation deltas, pre-recovery time pins and inherited private
 group floors above are design requirements; their future vectors do not imply
 implemented or audited custody support.
+
+## Local born-v3 implementation boundary
+
+Experimental born-v3 creation is available only with the explicit default-off
+`LocalBusConfig.enable_born_v3_creation` option, exposed by
+`rf daemon start --enable-born-v3-creation`. Existing `account.create` requests,
+legacy manifests and legacy registration/session behavior keep their v1/v2 flow.
+This stage creates local authority only: its typed result is `NetworkingPending`.
+It does not attempt registration, publish to a node or open a session. Born-v3
+accounts receive a typed `NetworkingPending` error on the legacy gateway path;
+there is no root-proof fallback. V3 live registration is a separate implementation
+boundary, including channel-bound branch proofs and authenticated node/proxy keys.
+
+Trusted local frontends use the SDK's exclusive `CustodyBusClient` connection:
+
+1. `account.custody.begin` validates public setup intent and returns the anchor.
+2. `account.custody.show_once` returns one zeroizing display buffer. This uses the
+   dedicated `ramflux.local_bus.custody.v1` reply protocol, never an ordinary bus
+   response, event, actor command or idempotency/retry journal. The ordinary
+   `LocalBusClient` refuses these reserved methods.
+3. After hiding and erasing that display buffer, call
+   `account.custody.hidden_challenge`. Only then are three distinct word positions
+   chosen uniformly from 1–24.
+4. `account.custody.confirm` accepts one three-word attempt in challenge order.
+   A wrong answer cancels the entire ceremony without per-word feedback.
+   `account.custody.cancel`, disconnect, expiry or any setup error also destroys
+   pending phrase state. Ceremonies expire after five minutes of monotonic time.
+
+The trusted frontend must keep the display out of logs, shell history, ordinary
+bus diagnostics, analytics and crash reporting. It owns and erases the returned
+`Zeroizing<String>` and the confirmation-word buffers. There is no CLI phrase
+printing flow or user interface in this stage. Secret transport buffers and
+queued inbound setup values erase on drop, including cancellation. No phrase,
+entropy or master is stored in an account manifest, database, keychain or backup.
+
+The native primary provider currently supports macOS's protected OS credential
+keychain with synchronization explicitly disabled for reads and writes, and
+When-Unlocked/This-Device-Only access control on inserted credentials. It is
+software credential custody, not nonexportable hardware Ed25519 isolation.
+The host must run in a user context and carry provisioning-authorized keychain
+access entitlements; a plain unprovisioned CLI build is not sufficient. See
+[Apple's keychain implementation requirements](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains).
+The bus checks provider availability before generating or showing a phrase;
+a missing entitlement or unavailable vault returns `CustodyVaultUnavailable`.
+No signing or provisioning configuration is changed by enabling the creation option.
+Other platforms refuse primary creation until an appropriate provider is implemented;
+there is no plaintext file fallback. Primary self-signing authority and branch
+credentials occupy separate vault references, independent of data unlock secrets.
+Provider and local persistence failures never silently select a weaker vault.
+
+Public authority and the signed publication record are retained in
+`custody_accounts/<local_account_id>/authority.json`, together with the immutable
+born-v3 mode latch and authenticated head/certificate/revocation pins. Public
+reads do not unlock the primary signer. The account index arbitrates concurrent
+legacy/new creation. Failed writes or vault operations can leave an incomplete
+reservation; keep it blocked for reconciliation rather than retrying the id as a
+legacy account. An existing reservation continues to reject legacy sessions even
+when its public authority file is incomplete. Primary credentials and this
+reserved setup state are not exported through legacy account/data backup APIs.
+The local signed record is ready for a later publication implementation; its
+presence is not evidence of remote acceptance, account networking or live custody
+rollout. The proposed legacy public binding remains pending owner confirmation.
