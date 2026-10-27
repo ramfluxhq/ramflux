@@ -73,6 +73,22 @@ pub struct AccountDb {
     volatile_presence: RefCell<BTreeMap<String, ContactPresenceRecord>>,
 }
 
+impl Clone for AccountDb {
+    fn clone(&self) -> Self {
+        Self {
+            local_account_id: self.local_account_id.clone(),
+            path: self.path.clone(),
+            mode: self.mode,
+            current_key: self.current_key.clone(),
+            device_signer: self.device_signer.clone(),
+            clock: self.clock.clone(),
+            connection: self.connection.clone(),
+            volatile_typing: self.volatile_typing.clone(),
+            volatile_presence: self.volatile_presence.clone(),
+        }
+    }
+}
+
 impl AccountDb {
     pub fn open(
         index: &AccountIndex,

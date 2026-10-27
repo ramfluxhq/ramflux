@@ -44,15 +44,13 @@ pub(super) fn decide(
     crate::client::task::require_local_human(&manifest.client_mode, Some(kind))?;
     Ok(Some(local_bus_account(state, account_id)?.client.decide_task_approval(id, approved)?))
 }
-#[cfg(test)]
-async fn drive(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
-    let budget = super::task_transport::PreparationBudget::for_sync_cycle();
-    drive_with_budget(account, &budget).await
+pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    drive_at(account, now_unix_timestamp()).await
 }
 
-pub(crate) async fn drive_with_budget(
+pub(super) async fn drive_at(
     account: &mut LocalBusAccountState,
-    budget: &super::task_transport::PreparationBudget,
+    now: i64,
 ) -> Result<usize, SdkError> {
     if let Err(error) = apply_decisions(account) {
         tracing::warn!(%error,"task approval decision scan deferred");
@@ -63,7 +61,6 @@ pub(crate) async fn drive_with_budget(
     if let Err(error) = queue_requests(account) {
         tracing::warn!(%error,"task approval request admission deferred; decision courier continues");
     }
-    let now = now_unix_timestamp();
     let mut rows = account.client.account_db()?.task_record_page::<Value>(
         "task/approval_decision_out/",
         "task/approval_decision_out/",
@@ -76,9 +73,8 @@ pub(crate) async fn drive_with_budget(
     )?);
     rows.sort_by(|left, right| left.0.cmp(&right.0));
     super::task_transport::rotate_to_cursor(&mut rows, account.task_approval_cursor);
-    let approval_budget = budget.approval_share();
     let mut sent = 0;
-    let mut charged = 0;
+    let mut started = 0;
     for (storage, row) in rows {
         let Some(mut job) = crate::error_policy::task_scan(
             &storage,
@@ -93,27 +89,22 @@ pub(crate) async fn drive_with_budget(
         let Some(bytes) = crate::error_policy::task_scan(&storage, job.packet.bytes())? else {
             continue;
         };
-        if !approval_budget.can_start_item() {
+        if started >= 2 {
             break;
         }
+        started += 1;
         let request = job.packet.request();
         let result = super::task_approval_transport::send(
             account,
             &request.binding.conversation_id,
             job.packet.recipient(),
             &bytes,
-            &approval_budget,
         )
         .await;
         account.task_approval_cursor = account.task_approval_cursor.wrapping_add(1);
         if matches!(&result, Ok(super::task_transport::Preparation::Deferred)) {
-            if !approval_budget.can_start_item() {
-                break;
-            }
+            tokio::task::yield_now().await;
             continue;
-        }
-        if result.is_err() {
-            charged += 1;
         }
         if let Err(error) = &result {
             tracing::debug!(%error, job = %storage, "task approval transport attempt deferred");
@@ -131,12 +122,7 @@ pub(crate) async fn drive_with_budget(
         if matches!(&result, Ok(super::task_transport::Preparation::Ready(()))) {
             sent += 1;
         }
-        // Healthy decisions retain the established two-per-cycle throughput. Only a charged
-        // preparation failure consumes the failure share; the five-second approval sub-budget
-        // still reserves more than one full preparation ceiling for confirmations.
-        if charged >= 1 || sent >= 2 {
-            break;
-        }
+        tokio::task::yield_now().await;
     }
     Ok(sent)
 }

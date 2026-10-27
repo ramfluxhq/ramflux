@@ -42,6 +42,7 @@ pub use protocol::*;
 #[cfg(test)]
 mod runtime_tests;
 
+mod task_courier;
 mod task_delivery;
 
 #[cfg(test)]

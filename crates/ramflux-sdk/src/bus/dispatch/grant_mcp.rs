@@ -1369,6 +1369,8 @@ fn mcp_verify_standing_approval_signature(
 }
 
 pub(crate) fn hydrate_local_mcp_state(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+    account.mcp_registry = McpRegistry::new();
+    account.mcp_pending_approvals.clear();
     for manifest in account.client.account_db()?.load_mcp_tools::<McpToolManifest>()? {
         account.mcp_registry.install_tool(manifest);
     }

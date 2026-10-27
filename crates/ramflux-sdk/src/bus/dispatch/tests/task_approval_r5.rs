@@ -136,105 +136,54 @@ fn decide(human: &LocalBusAccountState, packet: &Packet, approved: bool) -> Case
         .ok_or_else(|| "decision missing".into())
 }
 
-#[tokio::test(start_paused = true)]
-async fn r9_cycle_budget_defers_but_item_timeout_charges_stored_decision_jobs() -> Case {
-    tokio::time::timeout(
-        Duration::from_secs(90),
-        Box::pin(async {
-            let (root, mut agent, mut human) = pair("courier-timeout-accounting-r9")?;
-            open_named(&human, &agent, "task-a", "grant-a")?;
-            open_named(&human, &agent, "task-b", "grant-b")?;
-            pending(&mut agent, "approval-a", "grant-a")?;
-            pending(&mut agent, "approval-b", "grant-b")?;
-            let request = request_job(&agent, "task-a")?;
-            let other_request = request_job(&agent, "task-b")?;
-            let decision = decide(&human, &request.packet, true)?;
-            let other_decision = decide(&human, &other_request.packet, true)?;
-            let id = decision.packet.id()?;
-            let other_id = other_decision.packet.id()?;
-            let storage = key("approval_decision_out", &id);
-            let other_storage = key("approval_decision_out", &other_id);
-            let mut thread = human
-                .client
-                .account_db()?
-                .client_record("conversation", "thread")?
-                .ok_or("conversation")?;
-            thread["test_preparation_delay_ms"] = json!(6_000);
-            human.client.account_db()?.persist_client_record("conversation", "thread", &thread)?;
-            let receipt_before =
-                human.client.task_approval_receipt(&id)?.ok_or("initial receipt")?;
+#[tokio::test]
+async fn r11_fake_transport_charges_timeouts_and_keeps_worker_capacity_free() -> Case {
+    let (root, mut agent, mut human) = pair("courier-outcomes-r11")?;
+    open_named(&human, &agent, "task-a", "grant-a")?;
+    pending(&mut agent, "approval-a", "grant-a")?;
+    let decision = decide(&human, &request_job(&agent, "task-a")?.packet, true)?;
+    let id = decision.packet.id()?;
+    let storage = key("approval_decision_out", &id);
+    let now = now_unix_timestamp();
+    let mut thread = human
+        .client
+        .account_db()?
+        .client_record("conversation", "thread")?
+        .ok_or("conversation")?;
 
-            let short_budget = crate::bus::dispatch::task_transport::PreparationBudget::new(
-                Duration::from_secs(3),
-            );
-            assert_eq!(drive_with_budget(&mut human, &short_budget).await?, 0);
-            let deferred: Job =
-                human.client.account_db()?.load_actor_state(&storage)?.ok_or("deferred job")?;
-            let other_deferred: Job = human
-                .client
-                .account_db()?
-                .load_actor_state(&other_storage)?
-                .ok_or("other deferred job")?;
-            assert_eq!(deferred.attempts, 0);
-            assert_eq!(deferred.next_at, 0);
-            assert_eq!(other_deferred.attempts, 0);
-            assert_eq!(other_deferred.next_at, 0);
-            let receipt_after =
-                human.client.task_approval_receipt(&id)?.ok_or("deferred receipt")?;
-            assert_eq!(receipt_after.delivery_state, receipt_before.delivery_state);
-            assert_eq!(receipt_after.reason_code, receipt_before.reason_code);
-            assert_eq!(receipt_after.revision, receipt_before.revision);
+    thread["test_preparation_outcome"] = json!("worker_capacity");
+    human.client.account_db()?.persist_client_record("conversation", "thread", &thread)?;
+    assert_eq!(drive_at(&mut human, now).await?, 0);
+    let deferred: Job =
+        human.client.account_db()?.load_actor_state(&storage)?.ok_or("capacity-deferred job")?;
+    assert_eq!((deferred.attempts, deferred.next_at), (0, 0));
+    assert_eq!(human.task_approval_cursor, 1);
 
-            for _ in 0..2 {
-                let budget =
-                    crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
-                assert_eq!(drive_with_budget(&mut human, &budget).await?, 0);
-            }
-            let first: Job = human
-                .client
-                .account_db()?
-                .load_actor_state(&storage)?
-                .ok_or("first charged job")?;
-            let second: Job = human
-                .client
-                .account_db()?
-                .load_actor_state(&other_storage)?
-                .ok_or("second charged job")?;
-            assert_eq!((first.attempts, second.attempts), (1, 1));
-            let mut parked = second;
-            parked.next_at = i64::MAX;
-            human.client.account_db()?.persist_actor_state(&other_storage, &parked)?;
-
-            for expected_attempts in 2..=8 {
-                let mut job: Job =
-                    human.client.account_db()?.load_actor_state(&storage)?.ok_or("retry job")?;
-                job.next_at = 0;
-                human.client.account_db()?.persist_actor_state(&storage, &job)?;
-                let budget =
-                    crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
-                assert_eq!(drive_with_budget(&mut human, &budget).await?, 0);
-                let retried: Job =
-                    human.client.account_db()?.load_actor_state(&storage)?.ok_or("charged job")?;
-                assert_eq!(retried.attempts, expected_attempts);
-                assert!(retried.next_at > now_unix_timestamp());
-            }
-            let receipt = human.client.task_approval_receipt(&id)?.ok_or("failure receipt")?;
-            assert_eq!(
-                receipt.delivery_state,
-                crate::client::task::approval_retention::DeliveryState::Failed
-            );
-            assert_eq!(
-                receipt.reason_code,
-                Some(crate::client::task::approval_retention::DeliveryReason::RetryExhausted)
-            );
-            drop(human);
-            drop(agent);
-            std::fs::remove_dir_all(root)?;
-            Ok::<_, Box<dyn std::error::Error>>(())
-        }),
-    )
-    .await
-    .map_err(|_| "stored decision timeout regression exceeded its outer timeout")??;
+    thread["test_preparation_outcome"] = json!("timeout");
+    human.client.account_db()?.persist_client_record("conversation", "thread", &thread)?;
+    for expected in 1..=8 {
+        let mut job: Job =
+            human.client.account_db()?.load_actor_state(&storage)?.ok_or("retry job")?;
+        job.next_at = 0;
+        human.client.account_db()?.persist_actor_state(&storage, &job)?;
+        assert_eq!(drive_at(&mut human, now).await?, 0);
+        let charged: Job =
+            human.client.account_db()?.load_actor_state(&storage)?.ok_or("charged job")?;
+        assert_eq!(charged.attempts, expected);
+        assert!(charged.next_at > now);
+    }
+    let receipt = human.client.task_approval_receipt(&id)?.ok_or("failure receipt")?;
+    assert_eq!(
+        receipt.delivery_state,
+        crate::client::task::approval_retention::DeliveryState::Failed
+    );
+    assert_eq!(
+        receipt.reason_code,
+        Some(crate::client::task::approval_retention::DeliveryReason::RetryExhausted)
+    );
+    drop(human);
+    drop(agent);
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -306,7 +255,7 @@ fn courier_starvation_fixture() -> Case<CourierStarvationFixture> {
         .account_db()?
         .client_record("conversation", "slow-thread")?
         .ok_or("slow conversation")?;
-    slow_thread["test_preparation_delay_ms"] = json!(6_000);
+    slow_thread["test_preparation_outcome"] = json!("timeout");
     human.client.account_db()?.persist_client_record(
         "conversation",
         "slow-thread",
@@ -317,7 +266,7 @@ fn courier_starvation_fixture() -> Case<CourierStarvationFixture> {
         .account_db()?
         .client_record("conversation", "healthy-thread")?
         .ok_or("healthy conversation")?;
-    healthy_thread["test_preparation_ready"] = json!(true);
+    healthy_thread["test_preparation_outcome"] = json!("ready");
     human.client.account_db()?.persist_client_record(
         "conversation",
         "healthy-thread",
@@ -361,10 +310,10 @@ async fn exercise_courier_starvation(
 ) -> Case {
     const STALLED_ACK: &str = "task/ack/000-stalled";
     const HEALTHY_ACK: &str = "task/ack/100-healthy";
+    let now = now_unix_timestamp();
     for _ in 0..4 {
-        let budget = crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
-        assert_eq!(drive_with_budget(human, &budget).await?, 0);
-        crate::bus::dispatch::task_transport::drain_confirmations(human, &budget).await?;
+        assert_eq!(drive_at(human, now).await?, 0);
+        crate::bus::dispatch::task_transport::drain_confirmations_at(human, now).await?;
     }
     let remaining = human
         .client
@@ -393,8 +342,7 @@ async fn exercise_courier_starvation(
             .ok_or("stalled acknowledgement")?;
         job.next_at = 0;
         human.client.account_db()?.persist_actor_state(STALLED_ACK, &job)?;
-        let budget = crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
-        crate::bus::dispatch::task_transport::drain_confirmations(human, &budget).await?;
+        crate::bus::dispatch::task_transport::drain_confirmations_at(human, now).await?;
         let charged = human
             .client
             .account_db()?
@@ -409,13 +357,12 @@ async fn exercise_courier_starvation(
         .ok_or("exhausted acknowledgement")?;
     exhausted.next_at = 0;
     human.client.account_db()?.persist_actor_state(STALLED_ACK, &exhausted)?;
-    let budget = crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
-    crate::bus::dispatch::task_transport::drain_confirmations(human, &budget).await?;
+    crate::bus::dispatch::task_transport::drain_confirmations_at(human, now).await?;
     assert!(!human.client.account_db()?.actor_state_exists(STALLED_ACK)?);
     Ok(())
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn r10_stalled_couriers_rotate_while_healthy_confirmations_finish() -> Case {
     tokio::time::timeout(
         Duration::from_secs(180),
@@ -430,6 +377,23 @@ async fn r10_stalled_couriers_rotate_while_healthy_confirmations_finish() -> Cas
     )
     .await
     .map_err(|_| "courier starvation regression exceeded its outer timeout")??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn r11_sync_cycle_only_signals_stalled_task_courier_work() -> Case {
+    let mut fixture = courier_starvation_fixture()?;
+    let (wake, mut signalled) = tokio::sync::mpsc::channel(1);
+    fixture.human.task_courier_wake = Some(wake);
+    let started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(2), crate::bus::sync_driver::run(&mut fixture.human))
+        .await
+        .map_err(|_| "sync cycle waited for stalled task couriers")??;
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(signalled.try_recv(), Ok(()));
+    drop(fixture.human);
+    drop(fixture.agent);
+    std::fs::remove_dir_all(fixture.root)?;
     Ok(())
 }
 

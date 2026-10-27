@@ -31,6 +31,7 @@ struct AccountRuntime {
     readers: ReaderSlot,
     events: mpsc::Sender<EventBatch>,
     shutdown: watch::Receiver<bool>,
+    courier: Option<super::task_courier::TaskCourier>,
 }
 
 pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
@@ -60,9 +61,17 @@ pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
             attended_accounts: BTreeSet::new(),
             subscribers: BTreeMap::new(),
         };
-        let mut account =
-            AccountRuntime { id: account_id, state, receiver, readers, events, shutdown };
+        let mut account = AccountRuntime {
+            id: account_id,
+            state,
+            receiver,
+            readers,
+            events,
+            shutdown,
+            courier: None,
+        };
         let result = Box::pin(account.serve(ready)).await;
+        account.stop_courier().await;
         let request = LocalBusFrame::request(
             "shutdown",
             Some(account.id.clone()),
@@ -77,6 +86,21 @@ pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
 }
 
 impl AccountRuntime {
+    fn start_courier(&mut self) -> Result<(), SdkError> {
+        if self.courier.is_none()
+            && let Some(account) = self.state.accounts.get_mut(&self.id)
+        {
+            self.courier = Some(super::task_courier::TaskCourier::start(account)?);
+        }
+        Ok(())
+    }
+
+    async fn stop_courier(&mut self) {
+        if let Some(courier) = self.courier.take() {
+            courier.stop(self.state.accounts.get_mut(&self.id)).await;
+        }
+    }
+
     fn initialize_readers(&mut self) -> Result<(), SdkError> {
         let missing = self.readers.lock().map_err(|_| stopped())?.is_none();
         if missing && let Some(account) = self.state.accounts.get_mut(&self.id) {
@@ -121,6 +145,7 @@ impl AccountRuntime {
 
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         self.initialize_readers()?;
+        self.start_courier()?;
         let _ = ready.send(());
         let restore = LocalBusFrame::request(
             "restore",
@@ -249,7 +274,13 @@ impl AccountRuntime {
         let locking = command.request.method == "account.lock";
         let lifecycle = locking || command.request.method == "account.passphrase.rotate";
         if lifecycle {
+            self.stop_courier().await;
             self.close_readers().await;
+        }
+        if let Some(account) = self.state.accounts.get_mut(&self.id)
+            && let Err(error) = super::dispatch::grant_mcp::hydrate_local_mcp_state(account)
+        {
+            tracing::warn!(%error, "task courier state refresh deferred");
         }
         let mut stopping = false;
         let mut cancelled = false;
@@ -280,6 +311,13 @@ impl AccountRuntime {
             Ok(()) => result,
             Err(error) => Err(error),
         };
+        let result = match self.start_courier() {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        };
+        if let Some(courier) = &self.courier {
+            courier.signal();
+        }
         let result = match self.publish(&command.request).await {
             Ok(()) => result,
             Err(error) => Err(error),
