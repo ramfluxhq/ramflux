@@ -13,13 +13,24 @@ use std::collections::BTreeMap;
 pub(crate) struct CustodyRegistry {
     pins: AuthorityPins,
     records: BTreeMap<String, CustodyPublication>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    account_pins: BTreeMap<String, AuthorityPins>,
 }
 impl CustodyRegistry {
+    fn pins_for(&self, anchor: &str) -> AuthorityPins {
+        self.account_pins.get(anchor).cloned().unwrap_or_else(|| self.pins.for_account(anchor))
+    }
+    fn require_current(&self, record: &VerifiedRecord) -> Result<(), ramflux_crypto::CryptoError> {
+        self.account_pins
+            .get(&record.envelope().body.account_anchor)
+            .unwrap_or(&self.pins)
+            .require_current(record)
+    }
     pub(crate) fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
     pub(crate) fn permits_legacy(&self, anchor: &str) -> bool {
-        self.pins.permits_legacy(anchor)
+        !self.account_pins.contains_key(anchor) && self.pins.permits_legacy(anchor)
     }
 }
 /// Full signed authority plus the bounded cumulative membership evidence, when present.
@@ -65,7 +76,7 @@ impl IdentityRegistry {
                 let verified =
                     verify_record(&custodian.record, now, custodian.compacted_ids.as_deref(), None)
                         .map_err(|error| crypto(&error))?;
-                self.custody.pins.require_current(&verified).map_err(|error| crypto(&error))?;
+                self.custody.require_current(&verified).map_err(|error| crypto(&error))?;
                 Some(verified)
             } else {
                 None
@@ -78,6 +89,7 @@ impl IdentityRegistry {
         )
         .map_err(|error| crypto(&error))
     }
+    #[cfg(test)]
     pub(crate) fn observe_custody(
         &mut self,
         publication: &CustodyPublication,
@@ -93,7 +105,9 @@ impl IdentityRegistry {
         let body = &publication.record.body;
         let master = &body.master_certificate.body.master_public_key;
         self.check_principal_root_ownership(&body.principal_id, master)?;
-        let outcome = self.custody.pins.observe(&verified).map_err(|error| crypto(&error))?;
+        let mut pins = self.custody.pins_for(anchor);
+        let outcome = pins.observe(&verified).map_err(|error| crypto(&error))?;
+        self.custody.account_pins.insert(anchor.clone(), pins);
         self.reserve_custody_principal(&body.principal_id, master);
         if outcome == PinOutcome::Advanced {
             if verified.capacity_pressure().any() {
@@ -105,6 +119,16 @@ impl IdentityRegistry {
     }
 }
 impl RouterCore {
+    pub(crate) fn custody_anchor_known(&self, anchor: &str) -> bool {
+        self.control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mvp1_identities
+            .custody
+            .records
+            .contains_key(anchor)
+    }
+
     /// Verify and persist head/mode pins atomically, including valid equivocation fences.
     /// # Errors
     /// Rejects invalid/stale/migrated authority or durable write failures.
@@ -114,12 +138,63 @@ impl RouterCore {
         now: u64,
         store: &RouterRedbStore,
     ) -> Result<Envelope<DeviceSet>, NodeCoreError> {
+        self.publish_custody_record_from(
+            publication,
+            now,
+            store,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        )
+    }
+    /// Publish with durable network-prefix and node-wide new-principal admission.
+    /// # Errors
+    /// Rejects bad authority, ownership conflicts, exhausted budgets and durable failures.
+    pub fn publish_custody_record_from(
+        &self,
+        publication: &CustodyPublication,
+        now: u64,
+        store: &RouterRedbStore,
+        source: std::net::IpAddr,
+    ) -> Result<Envelope<DeviceSet>, NodeCoreError> {
         let mut control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut candidate = control.mvp1_identities.clone();
-        let outcome = candidate.observe_custody(publication, now)?;
-        store.record_identity_registry(&candidate)?;
-        control.mvp1_identities = candidate;
-        self.refresh_migration_read_snapshot_from_control(&control);
+        let registry = &mut control.mvp1_identities;
+        let anchor = &publication.record.body.account_anchor;
+        if registry.signed_device_sets.contains_key(anchor)
+            || registry.root_public_keys_by_commitment.contains_key(anchor)
+        {
+            return Err(reject("legacy-to-custody migration is not enabled"));
+        }
+        let verified = registry.verify_custody(publication, now)?;
+        let body = &publication.record.body;
+        registry.check_principal_root_ownership(
+            &body.principal_id,
+            &body.master_certificate.body.master_public_key,
+        )?;
+        let mut pins = registry.custody.pins_for(anchor);
+        let outcome = pins.observe(&verified).map_err(|error| crypto(&error))?;
+        if outcome == PinOutcome::Unchanged {
+            return Ok(publication.record.clone());
+        }
+        let accepted = if outcome == PinOutcome::Fenced {
+            registry
+                .custody
+                .records
+                .get(anchor)
+                .cloned()
+                .ok_or_else(|| reject("fenced head unavailable"))?
+        } else {
+            publication.clone()
+        };
+        let state = CustodyAccountState { publication: accepted, pins };
+        let is_new = !registry.custody.records.contains_key(anchor);
+        if is_new && registry.custody.records.len() >= 65_536 {
+            return Err(crate::NodeCoreError::Capacity { resource: "custody account count" });
+        }
+        if verified.capacity_pressure().any() {
+            tracing::warn!(account_anchor=%anchor,"custody authority reached eighty percent capacity; prioritize revocations");
+        }
+        store.record_custody_account(anchor, &state, is_new, source, now)?;
+        registry.apply_custody_account(anchor.clone(), state)?;
+        // Native custody does not change the legacy delivery-key migration read snapshot.
         if outcome == PinOutcome::Fenced {
             return Err(reject("custody authority equivocation fenced"));
         }
@@ -139,7 +214,7 @@ impl RouterCore {
             return Ok(None);
         };
         let verified = registry.verify_custody(publication, now)?;
-        registry.custody.pins.require_current(&verified).map_err(|error| crypto(&error))?;
+        registry.custody.require_current(&verified).map_err(|error| crypto(&error))?;
         Ok(Some(publication.clone()))
     }
 }
@@ -155,8 +230,38 @@ impl RouterCore {
         let registry = &control.mvp1_identities;
         let verified = registry.verify_custody(publication, now)?;
         if require_current {
-            registry.custody.pins.require_current(&verified).map_err(|error| crypto(&error))?;
+            registry.custody.require_current(&verified).map_err(|error| crypto(&error))?;
         }
         Ok(verified)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CustodyAccountState {
+    pub publication: CustodyPublication,
+    pub pins: AuthorityPins,
+}
+impl IdentityRegistry {
+    pub(crate) fn apply_custody_account(
+        &mut self,
+        anchor: String,
+        state: CustodyAccountState,
+    ) -> Result<(), NodeCoreError> {
+        let body = &state.publication.record.body;
+        if anchor != body.account_anchor {
+            return Err(reject("custody durable account key mismatch"));
+        }
+        self.check_principal_root_ownership(
+            &body.principal_id,
+            &body.master_certificate.body.master_public_key,
+        )?;
+        self.reserve_custody_principal(
+            &body.principal_id,
+            &body.master_certificate.body.master_public_key,
+        );
+        self.custody.account_pins.insert(anchor.clone(), state.pins);
+        self.custody.records.insert(anchor, state.publication);
+        Ok(())
     }
 }

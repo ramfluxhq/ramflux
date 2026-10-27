@@ -4,6 +4,10 @@
 //! Rust core SDK facade and stable C-ABI boundary substrate.
 
 pub mod backup;
+#[cfg(all(feature = "itest-memory-vault", not(any(test, ramflux_itest))))]
+compile_error!(
+    "itest-memory-vault requires cfg(test) or an explicit RAMFLUX_ITEST_BUILD=1 fixture build"
+);
 #[cfg(all(feature = "itest-memory-vault", ramflux_production))]
 compile_error!("production builds must not enable itest-memory-vault");
 

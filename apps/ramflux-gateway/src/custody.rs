@@ -25,6 +25,8 @@ struct Proxy {
     connection: String,
     mode: BindingMode,
     session_ids: BTreeSet<String>,
+    router: Option<crate::RouterMeshClient>,
+    auth_deadline: tokio::time::Instant,
 }
 async fn rpc(
     context: &GatewayQuicContext,
@@ -37,6 +39,8 @@ impl Proxy {
         context: &GatewayQuicContext,
         bytes: &[u8],
     ) -> anyhow::Result<(Self, CustodyServerFrame)> {
+        let auth_deadline =
+            tokio::time::Instant::now() + ramflux_node_core::custody_auth_timeout()?;
         let open: CustodyClientFrame = decode(bytes, 4096)?;
         let CustodyClientFrame::CustodyOpen { binding_mode: mode } = open else {
             anyhow::bail!("expected custody preface")
@@ -98,6 +102,8 @@ impl Proxy {
                 connection: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
                 mode,
                 session_ids: BTreeSet::new(),
+                router: Some(context.router.clone()),
+                auth_deadline,
             },
             response,
         ))
@@ -108,6 +114,29 @@ impl Proxy {
         frame: CustodyClientFrame,
         observed: Option<&str>,
     ) -> anyhow::Result<CustodyServerFrame> {
+        let request = match self.prepare(frame, observed, context.remote_addr.ip()) {
+            Ok(request) => request,
+            Err(error) => {
+                if let Some(code) = error.downcast_ref::<CustodyRefusal>() {
+                    return Ok(CustodyServerFrame::Refused { code: code.clone() });
+                }
+                return Err(error);
+            }
+        };
+        let result = rpc(context, &request).await?;
+        if let CustodyServerFrame::SessionEstablished { session } = &result {
+            // A connection retains only its latest session; an old id cannot become a bearer.
+            self.session_ids.clear();
+            self.session_ids.insert(session.session_id.clone());
+        }
+        Ok(result)
+    }
+    fn prepare(
+        &self,
+        frame: CustodyClientFrame,
+        observed: Option<&str>,
+        source: std::net::IpAddr,
+    ) -> anyhow::Result<CustodyMeshRequest> {
         let request = match frame {
             CustodyClientFrame::NodeIdentity { record_hash } => {
                 CustodyMeshRequest::NodeIdentity { record_hash }
@@ -116,7 +145,7 @@ impl Proxy {
                 device_ref,
                 action,
                 binding_mode: self.mode,
-                client_source: context.remote_addr.ip().to_string(),
+                client_source: source.to_string(),
                 connection_id: self.connection.clone(),
             },
             CustodyClientFrame::Prove { action, proof } => {
@@ -126,9 +155,7 @@ impl Proxy {
                 let actual = observed
                     .ok_or_else(|| anyhow::anyhow!("client-facing exporter unavailable"))?;
                 if actual != proof.body.transport_binding {
-                    return Ok(CustodyServerFrame::Refused {
-                        code: CustodyRefusal::BindingRefused,
-                    });
+                    return Err(CustodyRefusal::BindingRefused.into());
                 }
                 let receipt = if self.mode == BindingMode::HomeRelayReceipt {
                     Some(Box::new(sign_proxy_acceptance(
@@ -153,9 +180,7 @@ impl Proxy {
             }
             CustodyClientFrame::Request { session_id, request, action } => {
                 if !self.session_ids.contains(&session_id) {
-                    return Ok(CustodyServerFrame::Refused {
-                        code: CustodyRefusal::SessionRequired,
-                    });
+                    return Err(CustodyRefusal::SessionRequired.into());
                 }
                 CustodyMeshRequest::Request {
                     connection_id: self.connection.clone(),
@@ -165,16 +190,10 @@ impl Proxy {
                 }
             }
             CustodyClientFrame::CustodyOpen { .. } => {
-                return Ok(CustodyServerFrame::Refused { code: CustodyRefusal::InvalidInput });
+                return Err(CustodyRefusal::InvalidInput.into());
             }
         };
-        let result = rpc(context, &request).await?;
-        if let CustodyServerFrame::SessionEstablished { session } = &result {
-            // A connection retains only its latest session; an old id cannot become a bearer.
-            self.session_ids.clear();
-            self.session_ids.insert(session.session_id.clone());
-        }
-        Ok(result)
+        Ok(request)
     }
 }
 fn nonce(frame: &CustodyClientFrame) -> anyhow::Result<Option<[u8; 32]>> {
@@ -182,20 +201,58 @@ fn nonce(frame: &CustodyClientFrame) -> anyhow::Result<Option<[u8; 32]>> {
     let bytes = ramflux_protocol::decode_base64url(&proof.body.challenge_nonce)?;
     Ok(Some(bytes.try_into().map_err(|_| anyhow::anyhow!("invalid challenge context"))?))
 }
-fn capacity() -> &'static tokio::sync::Semaphore {
-    static LIMIT: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    LIMIT.get_or_init(|| tokio::sync::Semaphore::new(32))
+fn capacity() -> &'static std::sync::Arc<ramflux_node_core::CustodyIngressLimiter> {
+    static LIMIT: std::sync::OnceLock<std::sync::Arc<ramflux_node_core::CustodyIngressLimiter>> =
+        std::sync::OnceLock::new();
+    LIMIT.get_or_init(|| ramflux_node_core::CustodyIngressLimiter::new(32))
+}
+impl Proxy {
+    fn deadline(&self) -> tokio::time::Instant {
+        if self.session_ids.is_empty() {
+            self.auth_deadline
+        } else {
+            tokio::time::Instant::now() + IO_TIMEOUT
+        }
+    }
+}
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        let Some(router) = self.router.clone() else { return };
+        let request = CustodyMeshRequest::Disconnect { connection_id: self.connection.clone() };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let result = crate::router_post_json_async::<_, CustodyServerFrame>(
+                    &router,
+                    CUSTODY_RPC_PATH,
+                    &request,
+                );
+                let _ = tokio::time::timeout(Duration::from_secs(2), result).await;
+            });
+        }
+    }
 }
 async fn tcp_inner(
     mut stream: GatewayTcpTlsStream,
     context: GatewayQuicContext,
     first: &[u8],
 ) -> anyhow::Result<()> {
-    let _capacity = capacity().try_acquire()?;
-    let (mut proxy, response) = Proxy::open(&context, first).await?;
-    write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?).await?;
+    let _capacity = capacity()
+        .acquire(context.remote_addr.ip(), None, std::time::Instant::now())
+        .ok_or_else(|| anyhow::anyhow!("custody source budget exhausted"))?;
+    let (mut proxy, response) = tokio::time::timeout(
+        ramflux_node_core::custody_auth_timeout()?,
+        Proxy::open(&context, first),
+    )
+    .await??;
+    tokio::time::timeout_at(
+        proxy.deadline(),
+        write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
+    )
+    .await??;
     for _ in 0..2048 {
-        let bytes = tokio::time::timeout(IO_TIMEOUT, read_custody_tcp_frame(&mut stream)).await??;
+        let deadline = proxy.deadline();
+        let bytes =
+            tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut stream)).await??;
         let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
         let observed = nonce(&frame)?
             .map(|nonce| {
@@ -203,8 +260,14 @@ async fn tcp_inner(
                     .map(|exporter| branch_exporter_hash(&exporter))
             })
             .transpose()?;
-        let response = proxy.frame(&context, frame, observed.as_deref()).await?;
-        write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?).await?;
+        let response =
+            tokio::time::timeout_at(deadline, proxy.frame(&context, frame, observed.as_deref()))
+                .await??;
+        tokio::time::timeout_at(
+            deadline,
+            write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
+        )
+        .await??;
     }
     Ok(())
 }
@@ -215,11 +278,22 @@ async fn quic_inner(
     context: GatewayQuicContext,
     first: &[u8],
 ) -> anyhow::Result<()> {
-    let _capacity = capacity().try_acquire()?;
-    let (mut proxy, response) = Proxy::open(&context, first).await?;
-    write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?).await?;
+    let _capacity = capacity()
+        .acquire(context.remote_addr.ip(), Some(connection.stable_id()), std::time::Instant::now())
+        .ok_or_else(|| anyhow::anyhow!("custody source or connection budget exhausted"))?;
+    let (mut proxy, response) = tokio::time::timeout(
+        ramflux_node_core::custody_auth_timeout()?,
+        Proxy::open(&context, first),
+    )
+    .await??;
+    tokio::time::timeout_at(
+        proxy.deadline(),
+        write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?),
+    )
+    .await??;
     for _ in 0..2048 {
-        let bytes = tokio::time::timeout(IO_TIMEOUT, read_custody_tcp_frame(&mut recv)).await??;
+        let deadline = proxy.deadline();
+        let bytes = tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut recv)).await??;
         let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
         let observed = nonce(&frame)?
             .map(|nonce| {
@@ -227,8 +301,14 @@ async fn quic_inner(
                     .map(|exporter| branch_exporter_hash(&exporter))
             })
             .transpose()?;
-        let response = proxy.frame(&context, frame, observed.as_deref()).await?;
-        write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?).await?;
+        let response =
+            tokio::time::timeout_at(deadline, proxy.frame(&context, frame, observed.as_deref()))
+                .await??;
+        tokio::time::timeout_at(
+            deadline,
+            write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?),
+        )
+        .await??;
     }
     Ok(())
 }
@@ -254,3 +334,7 @@ pub(crate) async fn quic(
     )
     .await?
 }
+
+#[cfg(test)]
+#[path = "custody_tests.rs"]
+mod tests;

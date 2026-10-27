@@ -40,3 +40,6 @@ compio = { version = "=0.19.1", optional = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rcgen = { workspace = true }

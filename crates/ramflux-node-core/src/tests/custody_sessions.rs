@@ -29,6 +29,7 @@ fn node() -> Result<(VerifiedNodeRecord, SigningKey)> {
             node_signing_public_key: ramflux_protocol::encode_base64url(
                 root.verifying_key().to_bytes(),
             ),
+            client_tls_certificate_sha256: None,
             epoch: 1,
             previous_record_hash: None,
             issued_at: NOW,
@@ -42,7 +43,7 @@ fn node() -> Result<(VerifiedNodeRecord, SigningKey)> {
                 overlap_until: NOW + 606_000,
                 status: ReceiptKeyStatus::Active,
                 proxy_id: "gateway".into(),
-                audiences: vec!["router".into()],
+                audiences: vec!["node".into()],
             }],
             revoked_proxy_key_ids: vec![],
             channel_binding_modes: vec![BindingMode::HomeRelayReceipt],
@@ -99,7 +100,7 @@ impl Driver {
                 device_ref: self.reference.clone(),
                 action,
                 binding_mode: BindingMode::HomeRelayReceipt,
-                client_source: "client".into(),
+                client_source: "192.0.2.1".into(),
                 connection_id: self.connection.clone(),
             },
             PEER,
@@ -125,6 +126,7 @@ impl Driver {
                 record_hash: object_hash(&self.publication.record)?,
                 proof_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
                 challenge_nonce: challenge.challenge_nonce.clone(),
+                action_hash: challenge.action_hash.clone(),
                 audience: challenge.audience.clone(),
                 binding_mode: challenge.binding_mode,
                 transport_binding: branch_exporter_hash(&[5; 32]),
@@ -191,8 +193,7 @@ fn custody_network_admits_only_signed_possession_and_consumes_challenge_once() -
     let router = RouterCore::new();
     store.save_router(&router)?;
     let driver = Driver::new("alice", 10)?;
-    let service =
-        crate::CustodyService::new(driver.node.clone(), "router".into(), false, &store, NOW)?;
+    let service = crate::CustodyService::new(driver.node.clone(), false, &store, NOW)?;
     let action = driver.publish();
     let challenge = driver.challenge(&service, &router, &store, action.clone())?;
     let proof = driver.proof(&challenge)?;
@@ -244,8 +245,7 @@ fn custody_network_admits_only_signed_possession_and_consumes_challenge_once() -
     let lost = driver.challenge(&service, &router, &store, CustodyProofAction::OpenSession)?;
     let lost_proof = driver.proof(&lost)?;
     drop(service);
-    let restarted =
-        crate::CustodyService::new(driver.node.clone(), "router".into(), false, &store, NOW)?;
+    let restarted = crate::CustodyService::new(driver.node.clone(), false, &store, NOW)?;
     assert!(matches!(
         driver.attempt(&restarted, &router, &store, CustodyProofAction::OpenSession, lost_proof)?,
         CustodyServerFrame::Refused { code: CustodyRefusal::ChallengeUnknown }
@@ -297,8 +297,7 @@ fn custody_session_requests_bind_connection_possession_nonce_and_current_head() 
     let router = RouterCore::new();
     store.save_router(&router)?;
     let driver = Driver::new("alice", 10)?;
-    let service =
-        crate::CustodyService::new(driver.node.clone(), "router".into(), false, &store, NOW)?;
+    let service = crate::CustodyService::new(driver.node.clone(), false, &store, NOW)?;
     driver.run(&service, &router, &store, driver.publish())?;
     driver.run(
         &service,
@@ -463,6 +462,72 @@ fn custody_node_key_signing_deadline_cannot_restart_after_overlap_history_is_rem
         )?;
         assert!(store.observe_custody_node(&recycled, later + 1).is_err());
     }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn custody_mesh_unauthenticated_ipv6_prefix_cannot_exhaust_other_sources() -> Result {
+    let path = temp_store_path("custody-unauthenticated-prefixes")?;
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let router = RouterCore::new();
+    store.save_router(&router)?;
+    let driver = Driver::new("prefix-test", 70)?;
+    let service = crate::CustodyService::new(driver.node.clone(), false, &store, NOW)?;
+    let mut issued = 0;
+    for address in 1_u8..=64 {
+        for _ in 0..64 {
+            let request = CustodyMeshRequest::Challenge {
+                device_ref: driver.reference.clone(),
+                action: driver.publish(),
+                binding_mode: BindingMode::HomeRelayReceipt,
+                client_source: format!("2001:db8:1:2::{address:x}"),
+                connection_id: ramflux_protocol::encode_base64url([address; 32]),
+            };
+            if matches!(
+                service.mesh(&router, &store, request, PEER, NOW),
+                CustodyServerFrame::Challenge { .. }
+            ) {
+                issued += 1;
+            }
+        }
+    }
+    assert!(issued <= 64);
+    driver.challenge(&service, &router, &store, driver.publish())?;
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn custody_publication_quota_refusal_does_not_occupy_successful_replay_cache() -> Result {
+    let path = temp_store_path("custody-publication-quota-admission")?;
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let router = RouterCore::new();
+    store.save_router(&router)?;
+    let first = Driver::new("quota-first", 150)?;
+    let service = crate::CustodyService::new(first.node.clone(), false, &store, NOW)?;
+    for n in 0_u8..8 {
+        let driver = Driver::new(&format!("quota-{n}"), 150 + n)?;
+        assert!(matches!(
+            driver.run(&service, &router, &store, driver.publish())?,
+            CustodyServerFrame::Published { .. }
+        ));
+    }
+    let refused = Driver::new("quota-refused", 170)?;
+    let action = refused.publish();
+    let challenge = refused.challenge(&service, &router, &store, action.clone())?;
+    let proof = refused.proof(&challenge)?;
+    assert!(matches!(
+        refused.attempt(&service, &router, &store, action.clone(), proof.clone())?,
+        CustodyServerFrame::Refused { code: CustodyRefusal::Capacity }
+    ));
+    assert!(matches!(
+        refused.attempt(&service, &router, &store, action, proof)?,
+        CustodyServerFrame::Refused { code: CustodyRefusal::ChallengeUnknown }
+    ));
+    assert!(router.custody_record(&refused.reference.account_anchor, NOW)?.is_none());
+    drop(store);
     std::fs::remove_file(path)?;
     Ok(())
 }

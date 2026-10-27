@@ -241,13 +241,7 @@ impl RouterHandle {
             now,
         )?;
         let allow = std::env::var("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING").as_deref() == Ok("1");
-        let service = ramflux_node_core::CustodyService::new(
-            node,
-            config.service_id.clone(),
-            allow,
-            self.store(),
-            now,
-        )?;
+        let service = ramflux_node_core::CustodyService::new(node, allow, self.store(), now)?;
         match self {
             Self::Tokio(runtime) => runtime
                 .custody
@@ -279,6 +273,16 @@ impl RouterHandle {
 }
 
 impl RouterHandle {
+    pub(crate) fn custody_public_certificate(&self, hash: &str) -> bool {
+        let Self::Tokio(runtime) = self;
+        runtime.custody.get().is_some_and(|service| service.accepts_public_certificate(hash))
+    }
+    pub(crate) fn custody_disconnected(&self, connection: &str) {
+        let Self::Tokio(runtime) = self;
+        if let Some(service) = runtime.custody.get() {
+            service.disconnect("direct-tls", connection);
+        }
+    }
     pub(crate) fn custody_tls(
         &self,
         frame: ramflux_protocol::custody::CustodyClientFrame,

@@ -22,6 +22,12 @@ pub(super) struct SessionRequest {
     pub action: CustodySessionAction,
     pub connection_id: String,
 }
+struct Possession<'a> {
+    publication: &'a CustodyPublication,
+    authority: &'a VerifiedRecord,
+    holder: String,
+    source: std::net::IpAddr,
+}
 impl CustodyService {
     pub(super) fn challenge(
         &self,
@@ -53,7 +59,7 @@ impl CustodyService {
                 device: device_ref,
                 action_hash: custody_action_hash(&action).map_err(invalid)?,
                 holder,
-                source: format!("{peer}/{client_source}"),
+                source: client_source,
                 audience: self.audience.clone(),
                 mode: binding_mode,
             },
@@ -133,35 +139,55 @@ impl CustodyService {
             now,
         )
         .map_err(|_| CustodyRefusal::BindingRefused)?;
+        let source = challenge.source.parse().map_err(invalid)?;
+        if matches!(attempt.action, CustodyProofAction::Publish { .. })
+            && !router.custody_anchor_known(&publication.record.body.account_anchor)
+            && let Err(error) = store.check_custody_new_principal_budget(source, now)
+        {
+            self.leases().reject(&proof.body.challenge_nonce);
+            return Err(if matches!(error, crate::NodeCoreError::Capacity { .. }) {
+                CustodyRefusal::Capacity
+            } else {
+                persistence(error)
+            });
+        }
+        // Refused new-principal budgets cannot fill successful-proof replay storage.
         // No durable write precedes possession and single-use admission.
         self.leases().consume(
             &proof.body.challenge_nonce,
             &proof.body.proof_id,
             std::time::Instant::now(),
         )?;
-        self.finish_proof(scope, attempt, &publication, &authority, holder)
+        self.finish_proof(
+            scope,
+            attempt,
+            Possession { publication: &publication, authority: &authority, holder, source },
+        )
     }
     fn finish_proof(
         &self,
         scope: Scope<'_>,
         attempt: ProofAttempt,
-        publication: &CustodyPublication,
-        authority: &VerifiedRecord,
-        holder: String,
+        possession: Possession<'_>,
     ) -> Result<CustodyServerFrame, CustodyRefusal> {
+        let Possession { publication, authority, holder, source } = possession;
         let Scope { router, store, now, tick, .. } = scope;
         let now = now.saturating_add(tick.elapsed().as_secs());
         let tick = std::time::Instant::now();
         let proof = attempt.proof;
         match attempt.action {
             CustodyProofAction::Publish { .. } => {
-                router.publish_custody_record(publication, now, store).map_err(|e| {
-                    if matches!(e, crate::NodeCoreError::PrincipalIdTaken) {
-                        CustodyRefusal::PrincipalIdTaken
-                    } else {
-                        persistence(e)
-                    }
-                })?;
+                router.publish_custody_record_from(publication, now, store, source).map_err(
+                    |e| {
+                        if matches!(e, crate::NodeCoreError::PrincipalIdTaken) {
+                            CustodyRefusal::PrincipalIdTaken
+                        } else if matches!(e, crate::NodeCoreError::Capacity { .. }) {
+                            CustodyRefusal::Capacity
+                        } else {
+                            persistence(e)
+                        }
+                    },
+                )?;
                 Ok(CustodyServerFrame::Published {
                     record_hash: object_hash(&publication.record).map_err(invalid)?,
                 })

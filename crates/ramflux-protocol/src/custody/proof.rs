@@ -24,6 +24,7 @@ pub struct BranchProofV3 {
     pub record_hash: String,
     pub proof_id: String,
     pub challenge_nonce: String,
+    pub action_hash: String,
     pub audience: String,
     pub binding_mode: BindingMode,
     pub transport_binding: String,
@@ -36,6 +37,7 @@ pub struct BranchProofV3 {
 #[serde(deny_unknown_fields)]
 pub struct BranchChallenge {
     pub challenge_nonce: String,
+    pub action_hash: String,
     pub audience: String,
     pub binding_mode: BindingMode,
     pub issued_at: u64,
