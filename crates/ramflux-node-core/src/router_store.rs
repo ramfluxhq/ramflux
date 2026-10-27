@@ -742,20 +742,22 @@ impl RouterRedbStore {
         entry: Option<&InboxEntry>,
         sender_root_commitment: Option<&str>,
     ) -> Result<(), NodeCoreError> {
-        let _submission = self.submission_permit_async(entry).await?;
+        let submission = self.submission_permit_async(entry).await?;
         let save_started = Instant::now();
         let replay_started = Instant::now();
         let local_delivery = local_delivery_classification(entry, sender_root_commitment);
         if let Some(wal) = &self.submission_wal {
             let _location = wal
-                .record_submission_classified_async(
+                .record_submission_classified_with_lease_async(
                     replay_key,
                     replay_expires_at,
                     entry,
                     local_delivery,
+                    submission,
                 )
                 .await?;
         } else {
+            let _submission = submission;
             self.commit_router_op(RouterCommitOp::Submission {
                 replay_key: replay_key.to_owned(),
                 replay_expires_at,
@@ -1749,4 +1751,16 @@ fn record_target_lifecycle_marker_in_txn(
 
 fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+impl RouterRedbStore {
+    pub(crate) fn pause_next_submission_ack(
+        &self,
+    ) -> Result<crate::router_wal::acknowledgement_test::Control, NodeCoreError> {
+        self.submission_wal
+            .as_ref()
+            .map(crate::router_wal::RouterWalStore::pause_next_ack)
+            .ok_or_else(|| NodeCoreError::Redb("submission WAL disabled".into()))
+    }
 }

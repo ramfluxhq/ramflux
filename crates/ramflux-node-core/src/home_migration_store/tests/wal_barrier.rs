@@ -4,6 +4,7 @@
 //! Cutover covers acknowledged WAL submissions and excludes subsequent old-home writes.
 use super::*;
 use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
+use std::{future::Future, task::Poll};
 pub(super) fn entry(target: &str) -> crate::InboxEntry {
     crate::InboxEntry {
         inbox_seq: 7,
@@ -122,4 +123,41 @@ fn actual_wal_append_racing_cutover_is_included_or_refused_before_ack() -> TestR
         }
     }
     Ok(())
+}
+#[test]
+fn cancelled_async_caller_keeps_queued_wal_lease_until_durable_index_and_ack() -> TestResult {
+    let s = Scenario::prepared()?;
+    let sealed = s.seal()?;
+    let queued = entry(&s.target);
+    let store = s.a.store()?;
+    let mut pause = store.pause_next_submission_ack()?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let mut append = Box::pin(store.record_submission_increment_async(
+            "cancelled",
+            i64::MAX / 2,
+            Some(&queued),
+        ));
+        std::future::poll_fn(|cx| -> Poll<TestResult> {
+            if let Poll::Ready(result) = append.as_mut().poll(cx) {
+                return Poll::Ready(Err(format!("append escaped pause: {result:?}").into()));
+            }
+            std::pin::Pin::new(&mut pause.entered).poll(cx).map(|result| result.map_err(Into::into))
+        })
+        .await?;
+        drop(append);
+        // The durable worker owns the lease even though its response receiver is gone.
+        assert!(s.commit(&sealed).is_err());
+        pause.release.send(())?;
+        pause.done.await?;
+        s.commit(&sealed)?;
+        let cursors = store.migration_backlog_barrier(
+            &s.anchor,
+            &s.authorization.body.migration_id,
+            &sealed.delivery_map,
+            NOW + 2,
+        )?;
+        assert_eq!(cursors.iter().map(|c| c.high_water).max(), Some(7));
+        Ok(())
+    })
 }
