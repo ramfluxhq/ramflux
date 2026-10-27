@@ -413,6 +413,23 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    fn rejected_migration_forward(
+        forward: ramflux_node_core::FederatedEnvelopeForwardRequest,
+    ) -> ramflux_node_core::FederatedEnvelopeForwardResponse {
+        ramflux_node_core::FederatedEnvelopeForwardResponse {
+            accepted: false,
+            source_node_id: forward.source_node_id,
+            target_node_id: forward.target_node_id,
+            delivery: ramflux_node_core::EnvelopeSubmitResponse {
+                outcome: "forward_in_progress".to_owned(),
+                target_delivery_id: forward.envelope.target_delivery_id,
+                inbox_seq: None,
+                cursor: None,
+                nack: None,
+            },
+        }
+    }
+
     #[test]
     fn slow_migrated_forward_does_not_block_local_engine_submits() -> anyhow::Result<()> {
         let runtime =
@@ -439,18 +456,7 @@ pub(crate) mod tests {
                     .map_err(|source| source.to_string())?;
                 entered_tx.send(()).map_err(|source| source.to_string())?;
                 release_rx.recv().map_err(|source| source.to_string())?;
-                let response = ramflux_node_core::FederatedEnvelopeForwardResponse {
-                    accepted: false,
-                    source_node_id: forward.source_node_id,
-                    target_node_id: forward.target_node_id,
-                    delivery: ramflux_node_core::EnvelopeSubmitResponse {
-                        outcome: "forward_in_progress".to_owned(),
-                        target_delivery_id: forward.envelope.target_delivery_id,
-                        inbox_seq: None,
-                        cursor: None,
-                        nack: None,
-                    },
-                };
+                let response = rejected_migration_forward(forward);
                 ramflux_node_core::write_itest_json_response(&mut stream, "200 OK", &response)
                     .map_err(|source| source.to_string())
             });
@@ -459,7 +465,7 @@ pub(crate) mod tests {
             let (handle, _path) = migrated_test_handle(&url, 1, Duration::from_secs(2), now)?;
             let handle = Arc::new(handle);
             let slow_handle = Arc::clone(&handle);
-            let slow = tokio::spawn(async move {
+            let mut slow = tokio::spawn(async move {
                 slow_handle
                     .submit_envelope_async_from(
                         current_envelope("env_runtime_slow_forward", "target_alice")?,
@@ -471,15 +477,18 @@ pub(crate) mod tests {
             tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(1)))
                 .await??;
 
-            let full = tokio::time::timeout(
-                Duration::from_millis(500),
-                handle.submit_envelope_async_from(
+            let full = tokio::select! {
+                result = handle.submit_envelope_async_from(
                     current_envelope("env_runtime_full_forward", "target_alice")?,
                     Instant::now(),
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
-                ),
-            )
-            .await??;
+                ) => result?,
+                result = &mut slow => {
+                    return Err(anyhow::anyhow!(
+                        "slow migrated forward completed before the saturated submit: {result:?}"
+                    ));
+                }
+            };
             assert_eq!(full.outcome, "forward_in_progress");
 
             let mut local_submits = tokio::task::JoinSet::new();
@@ -498,14 +507,22 @@ pub(crate) mod tests {
                         .await
                 });
             }
-            tokio::time::timeout(Duration::from_secs(1), async {
+            let local_results = async {
                 while let Some(result) = local_submits.join_next().await {
                     let response = result.map_err(|error| anyhow::anyhow!(error))??;
                     anyhow::ensure!(response.outcome == "offline_queued");
                 }
                 Ok::<(), anyhow::Error>(())
-            })
-            .await??;
+            };
+            tokio::pin!(local_results);
+            tokio::select! {
+                result = &mut local_results => result?,
+                result = &mut slow => {
+                    return Err(anyhow::anyhow!(
+                        "slow migrated forward completed before local submits: {result:?}"
+                    ));
+                }
+            }
             release_tx.send(())?;
             assert_eq!(slow.await??.outcome, "forward_in_progress");
             match server.join() {
