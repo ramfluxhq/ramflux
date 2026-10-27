@@ -989,3 +989,19 @@ hash, nested signature and complete-envelope hash with the independent fixture.
 This vector covers native human genesis, master and branch certificates and the
 complete v3 device set; it does not claim coverage for deferred pairing,
 delegation, pairing or recovery protocols.
+
+
+## Home-migration management permission
+
+| Operation | Required authority |
+| --- | --- |
+| Home-migration authorization | Primary self-signing key and exact current record; actor branch co-signature; OS-enforced user presence for the one authorization |
+
+The closed `ramflux.identity.home_authorization.v1` transcript binds destination
+node/key, predecessor hash, next home epoch, current custody hash and a bounded
+commit window. It is not a group Delegation and does not overload the fixed
+`delegate` scope. A data unlock or application confirmation alone cannot release
+the signing key. Server migration remains disabled until custody dispatch,
+mandatory pin checks and the native presence-gated client flow are integrated.
+Historical home evidence grants routing continuity only, never fresh enrollment,
+registration, recovery or branch authority. The v3 DeviceSet schema is unchanged.

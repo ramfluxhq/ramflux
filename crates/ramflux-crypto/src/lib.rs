@@ -23,6 +23,7 @@ pub use group_state::{
     validate_group_change_request, verify_group_change_request, verify_group_change_result,
     verify_group_state_actor, verify_group_state_snapshot, verify_group_transfer_acceptance,
 };
+pub mod home_migration;
 mod home_node_migration;
 mod identity;
 mod identity_binding;

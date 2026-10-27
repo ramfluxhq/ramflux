@@ -25,6 +25,7 @@ pub use group_state::*;
 mod fixtures;
 pub mod group_permissions;
 mod header;
+pub mod home_migration;
 mod home_node_migration;
 mod i_json;
 pub mod identity_keys;
