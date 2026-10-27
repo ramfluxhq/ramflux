@@ -90,7 +90,7 @@ impl HomeMigrationService {
                     &AttestRequest { control: request.control.clone(), payload: payload.clone() },
                 ),
                 ActionPayload::Prepare(prepare) => self.prepare_owner(&scope, &request, prepare),
-                _ => return Ok(None),
+                _ => return self.execute_operation(&scope, &request),
             }
             .map(Some)
         })();

@@ -37,7 +37,7 @@ impl HomeMigrationMesh for Mesh {
 fn service(b: &TestNode, a: TestNode) -> TestResult<HomeMigrationService> {
     let node = MigrationNode::new(
         b.node.record.clone(),
-        [9; 32],
+        b.node.key.to_bytes(),
         MigrationEndpoints {
             gateway_tcp_addr: b.node.gateway_tcp_addr.clone(),
             federation_endpoint: b.node.federation_endpoint.clone(),
@@ -192,3 +192,5 @@ fn owner_and_peer_jobs_share_one_node_ceiling_and_release_after_refusal() -> Tes
     assert!(b.node.acquire_migration_verification().is_ok());
     Ok(())
 }
+
+mod operations;

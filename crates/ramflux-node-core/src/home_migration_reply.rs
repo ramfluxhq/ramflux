@@ -34,6 +34,29 @@ impl MigrationReply {
             .transpose()
             .map_err(wire)?;
         let seal = operation.and_then(|o| o.seal.as_ref());
+        let terminal_phase = if self.commit_proof.is_some() {
+            Phase::Committed
+        } else if self.noncommit_fence.is_some() {
+            Phase::Expired
+        } else {
+            Phase::Prepared
+        };
+        let authorization_hash = operation
+            .and_then(|op| op.authorization.as_ref())
+            .map(message_hash)
+            .transpose()
+            .map_err(wire)?
+            .or_else(|| {
+                self.noncommit_fence.as_ref().map(|fence| fence.body.authorization_hash.clone())
+            })
+            .or_else(|| {
+                self.commit_proof.as_ref().map(|proof| proof.body.authorization_hash.clone())
+            });
+        let seal_hash = seal
+            .map(message_hash)
+            .transpose()
+            .map_err(wire)?
+            .or_else(|| self.commit_proof.as_ref().map(|proof| proof.body.seal_hash.clone()));
         let receipt = crypto::sign_node(
             Receipt {
                 version: 1,
@@ -43,14 +66,10 @@ impl MigrationReply {
                 node_id: node.node_id().into(),
                 request_hash: message_hash(control).map_err(wire)?,
                 request_nonce: c.nonce.clone(),
-                authorization_hash: operation
-                    .and_then(|o| o.authorization.as_ref())
-                    .map(message_hash)
-                    .transpose()
-                    .map_err(wire)?,
-                seal_hash: seal.map(message_hash).transpose().map_err(wire)?,
+                authorization_hash,
+                seal_hash,
                 home_record_hash: home,
-                phase: operation.map_or(Phase::Prepared, |o| o.phase),
+                phase: operation.map_or(terminal_phase, |o| o.phase),
                 state_version: operation.map_or(0, |o| o.state_version),
                 sealed_at: seal.and_then(|s| s.body.sealed_at),
                 commit_deadline: seal.and_then(|s| s.body.commit_deadline),
