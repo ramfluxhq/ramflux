@@ -702,6 +702,9 @@ impl RamfluxClient {
         metadata: Option<&MessageMetadata>,
     ) -> Result<(), SdkError> {
         self.account_db()?.write_transaction(|| {
+            if self.account_db()?.message_is_deleted(message_id)? {
+                return Ok(());
+            }
             self.account_db()?.store_message_content(conversation_id, message_id, plaintext)?;
             if self
                 .direct_messages(conversation_id)?

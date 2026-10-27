@@ -183,6 +183,7 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 metadata_json BLOB NOT NULL,
                 deleted INTEGER NOT NULL,
                 is_own INTEGER NOT NULL DEFAULT 0,
+                scrub_version INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_direct_message_conversation
@@ -943,7 +944,18 @@ fn ensure_message_legacy_columns(connection: &Connection) -> Result<(), StorageE
         "direct_message_projection",
         "is_own",
         "is_own INTEGER NOT NULL DEFAULT 0",
-    )
+    )?;
+    ensure_column(
+        connection,
+        "direct_message_projection",
+        "scrub_version",
+        "scrub_version INTEGER NOT NULL DEFAULT 0",
+    )?;
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_direct_message_scrub ON direct_message_projection(deleted,scrub_version)",
+        [],
+    )?;
+    Ok(())
 }
 
 fn ensure_contact_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
