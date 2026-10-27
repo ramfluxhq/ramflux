@@ -80,6 +80,7 @@ impl HomeMigrationJournal<'_> {
         let now = now.max(job.clock_floor);
         crypto::commit_bounds(&a.body, &offer.body, &seal.body, now)?;
         let evidence = wire::Evidence {
+            authority: Some(job.authority.clone()),
             authorization: Some(a.clone()),
             offer: Some(offer.clone()),
             seal_receipt: Some(seal.clone()),
@@ -160,6 +161,7 @@ impl HomeMigrationJournal<'_> {
             job.commit.clone().ok_or_else(|| refused(wire::Refusal::CommitOutcomeUnknown))?;
         let home = job.new_home.clone().ok_or_else(|| refused(wire::Refusal::EvidenceRequired))?;
         let evidence = wire::Evidence {
+            authority: Some(job.authority.clone()),
             commit_proof: Some(commit),
             home_record: Some(home.record),
             authorization: job.authorization.clone(),

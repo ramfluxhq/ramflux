@@ -71,6 +71,10 @@ impl Fixture {
             &keypair,
         )?;
         let evidence = wire::RecordEvidence {
+            authority: ramflux_protocol::custody::Publication {
+                record: account.record().clone(),
+                compacted_ids: None,
+            },
             record: wire::HomeRecord::Genesis { genesis: Box::new(genesis) },
             management_certificate_chain: vec![],
             actor_certificate: None,
@@ -84,6 +88,8 @@ impl Fixture {
                 node_key: &public,
                 home_epoch: 0,
                 home_hash: None,
+                cached_manager_range: 0,
+                cached_manager_certificate_hash: None,
             },
             NOW,
         )?;
@@ -261,9 +267,8 @@ fn home_migration_only_the_source_authorization_bound_fence_releases_a_lost_seal
         version: 1,
         migration_id: hash(1),
         authorization_hash: wire::message_hash(&authorization)?,
-        // This base schema still requires the field. Its value is irrelevant to an
-        // authorization-keyed fence when the client never received B's seal.
-        seal_hash: hash(42),
+        // Authorization alone is sufficient when B's reply was lost.
+        seal_hash: None,
         fenced_at: NOW,
     };
     let wrong_node =

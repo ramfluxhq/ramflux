@@ -87,11 +87,21 @@ impl HomeMigrationJournal<'_> {
         }
         ramflux_crypto::home_migration::verify_actor(&prepare, self.account.verified(), now)?;
         let p = &prepare.body;
+        let actor_certificate = self
+            .account
+            .record()
+            .body
+            .devices
+            .iter()
+            .find(|entry| entry.device_id == job.actor.device_id)
+            .and_then(|entry| entry.branch_certificate.as_ref())
+            .ok_or_else(|| refused(wire::Refusal::ActorRevoked))?;
         if p.version != 1
             || p.migration_id != job.intent.operation_id
             || p.account_anchor != job.anchor
             || p.actor != job.actor
             || p.authority_record_hash != job.authority_hash
+            || p.branch_certificate_hash != object_hash(actor_certificate)?
             || p.previous_home_hash
                 != job
                     .progress
