@@ -19,7 +19,13 @@ mod franking;
 mod gateway_auth;
 mod gateway_frames;
 mod gateway_state;
+mod home_migration_store;
 mod home_node_migration;
+pub use home_migration_store::{
+    AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationBacklogCursor,
+    MigrationEndpoints, MigrationNode, MigrationOperation, MigrationPeer, MigrationRole,
+    PrepareMigration,
+};
 #[cfg(test)]
 mod http_response_tests;
 mod http_support;
