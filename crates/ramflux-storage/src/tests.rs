@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn temp_root(test_name: &str) -> PathBuf {
+pub(crate) fn temp_root(test_name: &str) -> PathBuf {
     let nanos =
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
     std::env::temp_dir().join(format!("ramflux-storage-{test_name}-{}-{nanos}", std::process::id()))

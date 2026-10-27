@@ -376,8 +376,8 @@ impl RamfluxClient {
         Ok(SdkOwnDeviceHistoryBundle {
             authority_only: false,
             next_page: None,
-            schema: "ramflux.sdk.own_device_history_bundle.v2".to_owned(),
-            version: 2,
+            schema: "ramflux.sdk.own_device_history_bundle.v3".to_owned(),
+            version: 3,
             principal_commitment: principal_commitment.to_owned(),
             source_device_id: source_device_id.to_owned(),
             target_device_id: target_device_id.to_owned(),
@@ -743,6 +743,7 @@ impl RamfluxClient {
             (bundle.schema.as_str(), bundle.version),
             ("ramflux.sdk.own_device_history_bundle.v1", 1)
                 | ("ramflux.sdk.own_device_history_bundle.v2", 2)
+                | ("ramflux.sdk.own_device_history_bundle.v3", 3)
         ) || bundle.principal_commitment != envelope.principal_commitment
             || bundle.source_device_id != envelope.source_device_id
             || bundle.target_device_id != envelope.target_device_id

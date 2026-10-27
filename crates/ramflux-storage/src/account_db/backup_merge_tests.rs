@@ -146,6 +146,7 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     let source = AccountDb::open(&source_index, "account", &source_key)?;
     let local = AccountDb::open(&local_index, "account", &local_key)?;
     for db in [&source, &local] {
+        db.upsert_device_directory_entry("sender", "root", "verified-own-device", 1)?;
         for id in ["source-deleted", "local-deleted", "last"] {
             db.import_direct_message_projection(crate::DirectMessageWrite {
                 conversation_id: "thread",
@@ -182,6 +183,7 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     assert_eq!(merged.counts()?.conversations, 2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND deleted=1",[],|r|r.get::<_,u64>(0))?,2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND sender_id='' AND length(encrypted_body)=0 AND metadata_json=x'7b7d'",[],|r|r.get::<_,u64>(0))?,2);
+    assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND is_own=1",[],|r|r.get::<_,u64>(0))?,2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM runtime_message_content WHERE message_id IN ('source-deleted','local-deleted')",[],|r|r.get::<_,u64>(0))?,0);
     assert_eq!(
         merged.db.query_row(

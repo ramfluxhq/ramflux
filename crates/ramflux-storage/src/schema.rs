@@ -91,6 +91,9 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 ON local_event_log(actor_device_id, device_counter);
             CREATE INDEX IF NOT EXISTS idx_local_event_order
                 ON local_event_log(lamport_time, actor_device_id, event_id);
+            CREATE INDEX IF NOT EXISTS idx_local_event_gateway_envelope ON local_event_log(
+                CASE WHEN json_valid(CAST(event_body AS TEXT)) THEN json_extract(CAST(event_body AS TEXT),'$.envelope_id') END
+            ) WHERE event_type='gateway.deliver.opaque' AND signature_status!='scrubbed';
             CREATE TABLE IF NOT EXISTS event_causal_dependency (
                 event_id TEXT NOT NULL,
                 depends_on_event_id TEXT NOT NULL,
@@ -954,6 +957,11 @@ fn ensure_message_legacy_columns(connection: &Connection) -> Result<(), StorageE
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_direct_message_scrub ON direct_message_projection(deleted,scrub_version)",
         [],
+    )?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_local_event_gateway_envelope ON local_event_log(
+            CASE WHEN json_valid(CAST(event_body AS TEXT)) THEN json_extract(CAST(event_body AS TEXT),'$.envelope_id') END
+         ) WHERE event_type='gateway.deliver.opaque' AND signature_status!='scrubbed';",
     )?;
     Ok(())
 }

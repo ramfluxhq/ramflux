@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 pub(crate) fn row(message: &DirectMessageRecord) -> Result<Value, serde_json::Error> {
     if message.deleted {
         Ok(json!({
+            "message_id": message.message_id,
             "deleted": true,
             "created_at": message.created_at,
             "conversation_id": message.conversation_id,
@@ -53,6 +54,7 @@ mod tests {
             assert_eq!(
                 row(&record)?,
                 json!({
+                    "message_id": "identity-bearing-message-id",
                     "deleted": true,
                     "created_at": 42,
                     "conversation_id": "thread",
