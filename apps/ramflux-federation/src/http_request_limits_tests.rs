@@ -87,13 +87,7 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
         request_timeout: Duration::from_secs(2),
         ..crate::http_limits::defaults(true)
     };
-    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(
-        64,
-        1_000,
-        1_000,
-        64,
-        Duration::from_secs(30),
-    ));
+    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(64, 64, 128));
     let mut clients = Vec::new();
     let mut workers = Vec::new();
     for index in 0..64 {

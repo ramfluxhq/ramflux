@@ -46,6 +46,10 @@ if args[:2] == ["image", "inspect"]:
     item = control.get("image_metadata", {}).get(service, item)
     print(json.dumps([item]))
     sys.exit(0)
+if args == ["info", "--format", "json"]:
+    mode = control.get("rootless_network_mode", "pasta")
+    print(json.dumps({"host": {"security": {"rootless": True}, "rootlessNetworkCmd": mode}}))
+    sys.exit(0)
 
 state = root / "data"
 deployed = root / "deployed"
