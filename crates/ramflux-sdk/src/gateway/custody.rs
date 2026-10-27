@@ -41,6 +41,7 @@ pub(super) async fn prepare(
     config: &GatewaySessionConfig,
 ) -> Result<Option<Box<Prepared>>, SdkError> {
     let Some(custody) = &config.custody else { return Ok(None) };
+    refresh_local_publication(config, custody).await?;
     let network = CustodyNetworkConfig {
         account_root: custody.account_root.clone(),
         account_id: custody.account_id.clone(),
@@ -60,6 +61,56 @@ pub(super) async fn prepare(
         CustodyConnection::<SessionStream>::prepare(&network, Arc::clone(&custody.vault)).await?;
     Ok(Some(Box::new(Prepared { network, credentials })))
 }
+async fn refresh_local_publication(
+    config: &GatewaySessionConfig,
+    custody: &GatewayCustodyConfig,
+) -> Result<(), SdkError> {
+    let root = custody.account_root.clone();
+    let id = custody.account_id.clone();
+    let (anchor, state) = tokio::task::spawn_blocking(move || {
+        let account = crate::custody::load_account(&root, &id, crate::custody::network_now()?)?;
+        Ok::<_, SdkError>((account.record().body.account_anchor.clone(), account.state()))
+    })
+    .await
+    .map_err(|_| SdkError::CustodySetupInvalid)??;
+    // This is a public directory read over the configured TLS/QUIC peer. It does not
+    // enter either identity-proof mode and remains possible before initial registration.
+    let manifest = crate::prekey::sdk_gateway_get_json::<
+        Option<crate::prekey::SdkDeviceManifestResponse>,
+    >(config, &format!("/mvp1/device-manifest/{anchor}"))
+    .await?;
+    let Some(manifest) = manifest else {
+        return if state == crate::custody::CreationState::NetworkingPending {
+            Ok(())
+        } else {
+            Err(SdkError::InboundPending("native current head unavailable".into()))
+        };
+    };
+    if manifest.principal_commitment != anchor {
+        return Err(SdkError::CustodySetupInvalid);
+    }
+    let native = manifest.custody.ok_or(SdkError::CustodyModeDowngrade)?;
+    let root = custody.account_root.clone();
+    let id = custody.account_id.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::custody::accept_publication(
+            &root,
+            &id,
+            &ramflux_protocol::custody::CustodyAuthority {
+                publication: native.publication,
+                custodian_publication: native.custodian_publication,
+            },
+            crate::custody::network_now()?,
+        )
+    })
+    .await
+    .map_err(|_| SdkError::CustodySetupInvalid)??;
+    if outcome == ramflux_crypto::custody::PinOutcome::Fenced {
+        return Err(SdkError::InboundRejected("native current head is fenced".into()));
+    }
+    Ok(())
+}
+
 pub(super) async fn authenticate(
     prepared: Option<Box<Prepared>>,
     stream: SessionStream,
@@ -113,3 +164,7 @@ impl ramflux_transport::GatewaySessionFrameSource for NativeSessionStream {
         self.0.recv_custody_frame()
     }
 }
+
+#[cfg(test)]
+#[path = "custody_publication_tests.rs"]
+mod publication_tests;

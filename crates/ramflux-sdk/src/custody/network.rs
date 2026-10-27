@@ -8,10 +8,9 @@ use ramflux_crypto::custody::{branch_exporter_hash, sign_branch_proof_v3};
 use ramflux_protocol::custody::{
     BindingMode, BranchProofV3, CUSTODY_REQUEST_PATH, CustodyClientFrame, CustodyPeer,
     CustodyProofAction, CustodyRefusal, CustodyServerFrame, CustodySession, CustodySessionAction,
-    DeviceRef, MAX_CUSTODY_FRAME_BYTES, Publication, custody_session_action_hash, decode,
-    object_hash,
+    DeviceRef, MAX_CUSTODY_FRAME_BYTES, custody_session_action_hash, decode, object_hash,
 };
-use ramflux_transport::{GatewayTcpTlsStream, read_custody_tcp_frame, write_custody_tcp_frame};
+use ramflux_transport::GatewayTcpTlsStream;
 use std::{
     net::SocketAddr,
     path::PathBuf,
@@ -256,10 +255,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     fn registration_actions(&self) -> Result<[CustodyProofAction; 3], SdkError> {
         Ok([
             CustodyProofAction::Publish {
-                publication: Box::new(Publication {
-                    record: self.account.record().clone(),
-                    compacted_ids: None,
-                }),
+                publication: Box::new(self.account.publication()),
             },
             CustodyProofAction::Register {
                 prekey_bundle: serde_json::to_value(self.prekey_bundle()?)?,
@@ -364,7 +360,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             .try_into()
             .map_err(|_| invalid())?;
         // Mandatory even when an operator and the client explicitly choose no binding.
-        let material = ramflux_transport::custody_tcp_exporter(&self.stream, &nonce)?;
+        let material = self.stream.custody_exporter(&nonce)?;
         let certificate = self
             .account
             .record()

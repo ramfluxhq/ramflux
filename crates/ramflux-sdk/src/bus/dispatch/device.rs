@@ -17,7 +17,7 @@ pub(crate) async fn dispatch_device_bus_request(
         }
         "device.activate" => {
             let body: LocalBusDeviceActivateRequest = serde_json::from_value(request.body.clone())?;
-            dispatch_device_activate(request, state, body).await
+            Box::pin(dispatch_device_activate(request, state, body)).await
         }
         "device.revoke" => {
             let body: LocalBusDeviceRevokeRequest = serde_json::from_value(request.body.clone())?;

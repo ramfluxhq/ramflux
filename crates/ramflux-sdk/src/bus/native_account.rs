@@ -28,18 +28,20 @@ pub(super) async fn unlock(
     let anchor = native.record().body.account_anchor.clone();
     let device = native.local_device_id()?.to_owned();
     let owned = client.owned_device_identity()?;
-    let record = native.record().clone();
+    let publication = native.publication();
     let custodian_publication =
         native.custodian_publication(&root, crate::custody::network_now()?)?;
-    client.observe_custody_manifest(
-        &ramflux_protocol::custody::CustodyManifest {
-            publication: ramflux_protocol::custody::Publication { record, compacted_ids: None },
-            custodian_publication,
-            devices: Vec::new(),
-        },
-        &anchor,
-        crate::custody::network_now()?,
-    )?;
+    if !native.authority_blocked() {
+        client.observe_custody_manifest(
+            &ramflux_protocol::custody::CustodyManifest {
+                publication,
+                custodian_publication,
+                devices: Vec::new(),
+            },
+            &anchor,
+            crate::custody::network_now()?,
+        )?;
+    }
     let endpoint = GatewayQuicEndpointConfig {
         bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
         gateway_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -90,6 +92,7 @@ pub(super) fn status(
     Ok(serde_json::json!({
         "account_id":account_id,"local_account_id":account_id,"state":"unlocked","networking":native.state(),
         "display_name":native.record().body.profile.display_name,"principal_id":native.record().body.principal_id,
+        "authority_blocked":native.authority_blocked(),
         "principal_commitment":native.record().body.account_anchor,"device_id":account.gateway_config.device_id,
         "target_delivery_id":account.target_delivery_id,
         "node_id":account.client.account_db()?.load_actor_state::<String>("account/node-id")?,
@@ -140,7 +143,43 @@ pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Res
             )
             .await?;
     }
+    account.client.born_v3_account = Some(Box::new(crate::custody::load_account(
+        account.client.account_index()?.root(),
+        &account.client.account_db()?.local_account_id,
+        crate::custody::network_now()?,
+    )?));
     account.activation_pending = false;
+    Ok(())
+}
+
+pub(super) async fn refresh_public_authority(
+    account: &mut LocalBusAccountState,
+) -> Result<(), SdkError> {
+    let root = account.client.account_index()?.root();
+    let id = &account.client.account_db()?.local_account_id;
+    let native = crate::custody::load_account(root, id, crate::custody::network_now()?)?;
+    let anchor = native.record().body.account_anchor.clone();
+    if account.client.require_fresh_custody_head(&anchor, native.record()).is_err() {
+        let manifest = crate::prekey::sdk_gateway_get_json::<
+            Option<crate::prekey::SdkDeviceManifestResponse>,
+        >(
+            &account.gateway_config, &format!("/mvp1/device-manifest/{anchor}")
+        )
+        .await?;
+        if let Some(manifest) = manifest {
+            if manifest.principal_commitment != anchor || manifest.custody.is_none() {
+                return Err(SdkError::CustodyModeDowngrade);
+            }
+            account.client.persist_fetched_identity_directory(&manifest)?;
+        } else if native.state() == crate::custody::CreationState::Live {
+            return Err(SdkError::InboundPending("native current head unavailable".into()));
+        }
+    }
+    account.client.born_v3_account = Some(Box::new(crate::custody::load_account(
+        account.client.account_index()?.root(),
+        &account.client.account_db()?.local_account_id,
+        crate::custody::network_now()?,
+    )?));
     Ok(())
 }
 
