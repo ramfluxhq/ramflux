@@ -36,6 +36,7 @@ mod expiry_index;
 mod identity_registry;
 mod migration_barrier;
 mod retention;
+mod submission_barrier;
 pub use identity_registry::IdentityJournalDiscardReport;
 
 const ROUTER_COMMIT_BATCH_MAX_ENV: &str = "RAMFLUX_ROUTER_COMMIT_BATCH_MAX";
@@ -55,6 +56,7 @@ pub struct RouterRedbStore {
     path: PathBuf,
     commit_writer: Option<RouterCommitWriter>,
     submission_wal: Option<RouterWalStore>,
+    submission_gates: [Arc<tokio::sync::RwLock<()>>; submission_barrier::STRIPES],
     identity_registry_writes: std::sync::atomic::AtomicU64,
     custody_publication_writes: std::sync::atomic::AtomicU64,
     foreign_authority_writes: std::sync::atomic::AtomicU64,
@@ -490,6 +492,7 @@ impl RouterRedbStore {
             path: path.to_path_buf(),
             commit_writer,
             submission_wal,
+            submission_gates: std::array::from_fn(|_| Arc::new(tokio::sync::RwLock::new(()))),
             identity_registry_writes: std::sync::atomic::AtomicU64::new(0),
             custody_publication_writes: std::sync::atomic::AtomicU64::new(0),
             foreign_authority_writes: std::sync::atomic::AtomicU64::new(0),
@@ -688,6 +691,7 @@ impl RouterRedbStore {
         entry: Option<&InboxEntry>,
         sender_root_commitment: Option<&str>,
     ) -> Result<(), NodeCoreError> {
+        let _submission = self.submission_permit(entry)?;
         let save_started = Instant::now();
         let replay_started = Instant::now();
         let local_delivery = local_delivery_classification(entry, sender_root_commitment);
@@ -738,6 +742,7 @@ impl RouterRedbStore {
         entry: Option<&InboxEntry>,
         sender_root_commitment: Option<&str>,
     ) -> Result<(), NodeCoreError> {
+        let _submission = self.submission_permit_async(entry).await?;
         let save_started = Instant::now();
         let replay_started = Instant::now();
         let local_delivery = local_delivery_classification(entry, sender_root_commitment);
@@ -786,6 +791,7 @@ impl RouterRedbStore {
     /// # Errors
     /// Returns an error when the inbox entry cannot be durably recorded.
     pub fn record_inbox_entry(&self, entry: &InboxEntry) -> Result<(), NodeCoreError> {
+        let _submission = self.submission_permit(Some(entry))?;
         let save_started = Instant::now();
         let inbox_started = Instant::now();
         self.commit_router_op(RouterCommitOp::InboxEntry { entry: Box::new(entry.clone()) })?;
