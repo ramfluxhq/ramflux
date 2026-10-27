@@ -47,6 +47,10 @@ only while holding `AccountIndex::acquire_account_writer` for restore checks;
 quiesce it before copying or replacing it. Ordinary live writes use `AccountDb`.
 Do not copy/remove an active account directory.
 
+If advisory locking is unsupported or otherwise fails, account opening fails
+closed and reports both the writer-lock path and the filesystem error. Move the
+data root to a local filesystem with advisory-lock support before retrying.
+
 ## Managed transactions and source guard
 
 Live account writes use `immediate_transaction` (or `write_transaction` /
@@ -68,8 +72,10 @@ Run `python3 -B scripts/check-account-transactions.py` and
 `python3 -B scripts/test_account_transactions.py`. The CI **Rust checks** job runs
 both. The source guard scans all production Rust in the storage crate, where the
 managed connection type is crate-private. It rejects raw savepoint/transaction
-APIs, including inside `connection.call`, and raw SQL `BEGIN` / `SAVEPOINT`.
-Exceptions name exact functions: managed entrypoints/acquisition in `database.rs`,
+APIs, including associated-function and UFCS forms inside `connection.call`, and
+raw SQL transaction starts/terminators, including `concat!`-built statements.
+Exceptions name exact functions: managed entrypoints/acquisition, commit and
+rollback-on-drop in `database.rs`,
 `BackupDatabase::enqueue_restore_events` and `BackupDatabase::merge_backup` on
 private staging databases. Read-only backup snapshots need no raw-SQL exception.
 Other functions in those files remain checked. Test-only code is excluded; the

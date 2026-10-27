@@ -19,9 +19,28 @@ class TransactionGuardTests(unittest.TestCase):
         for method in ('savepoint', 'savepoint_with_name', 'transaction', 'transaction_with_behavior', 'unchecked_transaction'):
             self.check(f'fn write() {{ connection.call(|db| {{ db.\n {method} ()?; Ok(()) }}) }}')
 
+    def test_associated_function_and_ufcs_variants(self):
+        for call in (
+            'rusqlite::Transaction::new(db, TransactionBehavior::Deferred)',
+            'Transaction::new_unchecked(db, TransactionBehavior::Deferred)',
+            'rusqlite::Savepoint::new(db)',
+            'Savepoint::with_name(db, "nested")',
+            'rusqlite::Connection::savepoint(db)',
+            '<Connection>::transaction(db)',
+        ):
+            self.check(f'fn write() {{ {call}?; }}')
+
     def test_sql_normal_raw_multiline_and_comments(self):
-        for literal in ('"BEGIN"', '"begin immediate;"', 'r##"\n BEGIN DEFERRED;"##', '"SELECT 1; BEGIN;"', '"/* policy */ BEGIN;"', '"-- policy\nBEGIN;"', '"SAVEPOINT bypass"', '"\\nBEGIN"', '"-- policy\\nBEGIN;"', '"\\x42EGIN;"', '"\\u{42}EGIN;"'):
+        for literal in ('"BEGIN"', '"begin immediate;"', 'r##"\n BEGIN DEFERRED;"##', '"SELECT 1; BEGIN;"', '"/* policy */ BEGIN;"', '"-- policy\nBEGIN;"', '"SAVEPOINT bypass"', '"COMMIT"', '"END"', '"ROLLBACK"', '"RELEASE bypass"', '"\\nBEGIN"', '"-- policy\\nBEGIN;"', '"\\x42EGIN;"', '"\\u{42}EGIN;"'):
             self.check(f'fn write() {{ connection.execute_batch({literal})?; }}')
+
+    def test_concat_built_transaction_sql(self):
+        for expression in (
+            'concat!("BEG", "IN IMMEDIATE")',
+            'concat!("COM", "MIT")',
+            'concat!("E", "ND")',
+        ):
+            self.check(f'fn write() {{ connection.execute_batch({expression})?; }}')
 
     def test_comments_literals_and_triggers_are_not_method_calls(self):
         self.check('fn write() { /* db.savepoint()? */ // db.transaction()?\n let x = "db.savepoint()"; }', False)

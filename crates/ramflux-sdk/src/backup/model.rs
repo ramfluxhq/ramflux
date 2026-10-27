@@ -110,6 +110,7 @@ pub struct BackupAttachmentChecks {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupFailureCode {
+    AccountBusy,
     WrongPassphrase,
     RestoreSetupRequired,
     AuthorizationRejected,
@@ -131,6 +132,8 @@ pub enum BackupFailureCode {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BackupFailure {
     pub code: BackupFailureCode,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retryable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<Box<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -149,12 +152,22 @@ impl BackupFailure {
     pub const fn new(code: BackupFailureCode) -> Self {
         Self {
             code,
+            retryable: false,
             message: None,
             needed_bytes: None,
             available_bytes: None,
             unavailable_attachments: Vec::new(),
             unavailable_count: None,
             unavailable_next_cursor: None,
+        }
+    }
+
+    #[must_use]
+    pub fn account_busy() -> Self {
+        Self {
+            retryable: true,
+            message: Some("account in use by another process".into()),
+            ..Self::new(BackupFailureCode::AccountBusy)
         }
     }
 }

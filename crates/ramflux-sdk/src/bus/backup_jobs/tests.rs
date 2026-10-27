@@ -6,7 +6,73 @@ use crate::backup::{BackupJob, BackupJobState};
 use crate::bus::{actor::AccountInitializer, supervisor::Supervisor};
 use crate::prelude::*;
 use serde_json::json;
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+const WRITER_CHILD: &str = "client::account::tests::account_writer_sdk_process_fixture";
+const WRITER_ROOT_ENV: &str = "RAMFLUX_SDK_WRITER_TEST_ROOT";
+
+struct WriterChild(std::process::Child);
+
+impl Drop for WriterChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn held_writer(root: &Path) -> TestResult<WriterChild> {
+    let mut child = WriterChild(
+        std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", WRITER_CHILD, "--nocapture"])
+            .env(WRITER_ROOT_ENV, root)
+            .stdin(std::process::Stdio::null())
+            .spawn()?,
+    );
+    let ready = root.join("sdk-writer-ready");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !ready.exists() {
+        assert!(child.0.try_wait()?.is_none(), "writer child exited before readiness");
+        assert!(std::time::Instant::now() < deadline, "writer child startup timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(child)
+}
+
+fn busy_error(index: &AccountIndex) -> TestResult<ramflux_storage::StorageError> {
+    match index.acquire_account_writer("acct") {
+        Err(error @ ramflux_storage::StorageError::AccountWriterBusy(_)) => Ok(error),
+        Err(error) => Err(format!("unexpected writer error: {error}").into()),
+        Ok(_) => Err("child writer should retain account ownership".into()),
+    }
+}
+
+#[test]
+fn account_busy_is_retryable_and_typed_for_restore_check_and_install() -> TestResult {
+    let root = crate::bus::runtime_tests::root("backup-account-busy");
+    let index = AccountIndex::open(&root)?;
+    index.create_account("acct", "principal")?;
+    let holder = held_writer(&root)?;
+
+    let restore_check = super::workers::storage_error(busy_error(&index)?);
+    assert_eq!(restore_check.code, crate::backup::BackupFailureCode::AccountBusy);
+    assert!(restore_check.retryable);
+    assert_eq!(restore_check.message.as_deref(), Some("account in use by another process"));
+
+    let jobs = super::BackupJobs::new(&root, index.clone())?;
+    let job = jobs.start(crate::backup::BackupJobKind::Restore, "archive.rfb".into())?;
+    jobs.fail_install(&job.job_id, &SdkError::Storage(busy_error(&index)?));
+    let rows: Vec<BackupJob> = serde_json::from_value(jobs.jobs()?["jobs"].clone())?;
+    let failed = rows.into_iter().find(|row| row.job_id == job.job_id).ok_or("job")?;
+    let failure = failed.error.ok_or("failure")?;
+    assert_eq!(failure.code, crate::backup::BackupFailureCode::AccountBusy);
+    assert!(failure.retryable);
+    assert_eq!(failure.message.as_deref(), Some("account in use by another process"));
+    assert_eq!(serde_json::to_value(failure)?["code"], "account_busy");
+
+    drop(holder);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct Scale {
     messages: usize,

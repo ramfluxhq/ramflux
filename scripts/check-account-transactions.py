@@ -16,11 +16,14 @@ ALLOW = {
     ('database.rs', 'deferred_transaction'): 'managed deferred entrypoint',
     ('database.rs', 'immediate_transaction'): 'managed immediate entrypoint',
     ('database.rs', 'transaction'): 'sole managed transaction acquisition boundary',
+    ('database.rs', 'commit'): 'managed transaction completion boundary',
+    ('database.rs', 'drop'): 'managed transaction rollback boundary',
     ('account_db/backup_database.rs', 'enqueue_restore_events'): 'private restore staging database',
     ('account_db/backup_merge.rs', 'merge_backup'): 'private restore staging database',
 }
 METHOD = re.compile(r'\.\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\s*(?:::\s*<[^;{}]*>)?\s*\(')
-SQL = re.compile(r'(?:^|;)\s*(?:BEGIN|SAVEPOINT)\b', re.I)
+ASSOCIATED = re.compile(r'\b(?:Transaction|Savepoint)\s*::\s*(?:new(?:_unchecked)?|with_name)\b|(?:\bConnection\s*|<[^;{}>]*\bConnection[^;{}>]*>\s*)::\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\b')
+SQL = re.compile(r'(?:^|;)\s*(?:BEGIN|SAVEPOINT|COMMIT|END|ROLLBACK|RELEASE)\b', re.I)
 FUNCTION = re.compile(r'\bfn\s+(\w+)\s*(?:<[^{}]*>)?\s*\(')
 
 
@@ -88,6 +91,27 @@ def closing(masked, opening):
     return len(masked)
 
 
+def closing_pair(masked, opening, left='(', right=')'):
+    depth = 1
+    for i in range(opening + 1, len(masked)):
+        depth += (masked[i] == left) - (masked[i] == right)
+        if depth == 0:
+            return i + 1
+    return len(masked)
+
+
+def contains_transaction_sql(value):
+    # Trigger programs use BEGIN/END as grammar, not transaction boundaries.
+    without_triggers = re.sub(
+        r'\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b.*?\bEND\s*;?',
+        ' ',
+        value,
+        flags=re.I | re.S,
+    )
+    without_comments = re.sub(r'/\*.*?\*/|--[^\n]*', ' ', without_triggers, flags=re.S)
+    return bool(SQL.search(without_comments))
+
+
 def test_ranges(masked):
     if re.search(r'#!\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]', masked):
         return [(0, len(masked))]
@@ -110,11 +134,18 @@ def violations(source, path):
         if opening >= 0 and not (0 <= semicolon < opening):
             functions.append((match.start(), closing(masked, opening), match[1]))
     hits = [(match.start(), 'raw transaction/savepoint API') for match in METHOD.finditer(masked)]
+    hits.extend(
+        (match.start(), 'raw transaction/savepoint API') for match in ASSOCIATED.finditer(masked)
+    )
     for offset, value in strings:
-        # Strip SQL comments, including comments between the separator and BEGIN.
-        value = re.sub(r'/\*.*?\*/|--[^\n]*', ' ', value, flags=re.S)
-        if SQL.search(value):
+        if contains_transaction_sql(value):
             hits.append((offset, 'raw SQL transaction/savepoint'))
+    for match in re.finditer(r'\bconcat\s*!\s*\(', masked):
+        opening = masked.find('(', match.start())
+        end = closing_pair(masked, opening)
+        joined = ''.join(value for offset, value in strings if opening < offset < end)
+        if contains_transaction_sql(joined):
+            hits.append((match.start(), 'raw SQL transaction/savepoint'))
     found = []
     for offset, reason in hits:
         if any(start <= offset < end for start, end in tests):
