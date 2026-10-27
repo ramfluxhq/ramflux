@@ -397,6 +397,73 @@ async fn r11_sync_cycle_only_signals_stalled_task_courier_work() -> Case {
     Ok(())
 }
 
+#[tokio::test]
+async fn r12_thousand_ack_backlog_drains_at_the_existing_two_per_pass_rate() -> Case {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        Box::pin(async {
+            let (root, agent, mut human) = pair("courier-thousand-acks-r12")?;
+            open_named(&human, &agent, "ack-backlog", "grant-backlog")?;
+            let carrier = human
+                .client
+                .task_history("thread", "ack-backlog")?
+                .events
+                .last()
+                .ok_or("backlog carrier")?
+                .carrier
+                .clone();
+            for (key, _) in human
+                .client
+                .account_db()?
+                .task_record_page::<crate::client::task::control::AckJob>(
+                    "task/ack/",
+                    "task/ack/",
+                    16,
+                )?
+            {
+                human.client.account_db()?.delete_task_state(&key)?;
+            }
+            for (key, _) in human
+                .client
+                .account_db()?
+                .task_record_page::<crate::client::task::control::ForwardJob>(
+                    "task/forward/",
+                    "task/forward/",
+                    16,
+                )?
+            {
+                human.client.account_db()?.delete_task_state(&key)?;
+            }
+            let mut thread = human
+                .client
+                .account_db()?
+                .client_record("conversation", "thread")?
+                .ok_or("backlog conversation")?;
+            thread["test_preparation_outcome"] = json!("ready");
+            human.client.account_db()?.persist_client_record("conversation", "thread", &thread)?;
+            for index in 0..1_000 {
+                store_courier_ack(&human, &format!("task/ack/{index:04}"), &carrier)?;
+            }
+            let now = now_unix_timestamp();
+            let mut sent = 0;
+            for _ in 0..500 {
+                sent +=
+                    crate::bus::dispatch::task_transport::drain_confirmations_at(&mut human, now)
+                        .await?;
+            }
+            assert_eq!(sent, 1_000);
+            assert_eq!(human.client.account_db()?.task_state_usage("task/ack/")?.0, 0);
+            drop(human);
+            drop(agent);
+            std::fs::remove_dir_all(root)?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        }),
+    )
+    .await
+    .map_err(|_| "thousand-ack throughput regression exceeded its outer timeout")??;
+    Ok(())
+}
+
 #[test]
 fn r5_canonically_identical_decisions_apply_the_executors_original_request_and_do_not_wedge_other_grants()
 -> Case {

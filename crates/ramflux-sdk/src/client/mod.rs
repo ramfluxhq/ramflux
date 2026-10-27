@@ -100,26 +100,6 @@ impl RamfluxClient {
         Self::default()
     }
 
-    pub(crate) fn clone_for_task_courier(&self) -> Result<Self, SdkError> {
-        Ok(Self {
-            born_v3_account: self.born_v3_account.clone(),
-            voice_calls: BTreeMap::new(),
-            voice_transition: std::cell::RefCell::new(None),
-            node_relay_options: None,
-            profile_read_cache: std::cell::RefCell::new(None),
-            identity_root: self.identity_root.clone(),
-            reader_device_identity: self.reader_device_identity.clone(),
-            device_branch: self.device_branch.clone(),
-            account_index: self.account_index.clone(),
-            vault_secret_source: None,
-            vault_secret_source_is_custom: false,
-            active_account_db: Some(self.account_db()?.clone()),
-            object_store: ObjectStore::new(),
-            mcp_registry: self.mcp_registry.clone(),
-            federation_mesh: FederationMesh::new(),
-        })
-    }
-
     pub(crate) fn account_index(&self) -> Result<&AccountIndex, SdkError> {
         self.account_index.as_ref().ok_or(SdkError::AccountIndexNotOpen)
     }

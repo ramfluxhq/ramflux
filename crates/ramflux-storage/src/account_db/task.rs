@@ -183,6 +183,7 @@ impl AccountDb {
                 | "task/verified_roster/"
                 | "task/rate/"
                 | "task/ack_sent/"
+                | "task/ack_quarantine/"
                 | "task/import_skip/"
                 | "task/message/"
                 | "task/approval_applied/"

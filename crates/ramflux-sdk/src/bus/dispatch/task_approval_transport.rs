@@ -14,6 +14,9 @@ pub(super) async fn send(
     body: &[u8],
 ) -> Result<Preparation<()>, SdkError> {
     crate::client::task::check_delivery_size(body.len())?;
+    if let Some(reason) = &account.task_preparation_failure {
+        return Err(SdkError::InboundPending(reason.clone()));
+    }
     #[cfg(test)]
     {
         let thread = account

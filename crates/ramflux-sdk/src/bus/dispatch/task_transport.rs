@@ -29,6 +29,12 @@ pub(super) enum Preparation<T> {
     Deferred,
 }
 
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AckQuarantineReason {
+    UndecodableCarrier,
+}
+
 pub(super) async fn await_preparation<T>(
     future: impl Future<Output = Result<T, SdkError>>,
     deferred: &'static str,
@@ -397,9 +403,13 @@ async fn drain_acknowledgements(
                 account.client.account_db()?.write_transaction(|| {
                     account.client.account_db()?.persist_actor_state(
                         &quarantine,
-                        &json!({"reason":"undecodable_ack","quarantined_at":now}),
+                        &json!({"reason_code":AckQuarantineReason::UndecodableCarrier,"quarantined_at":now}),
                     )?;
                     account.client.account_db()?.delete_task_state(&key)?;
+                    account
+                        .client
+                        .account_db()?
+                        .prune_task_diagnostics("task/ack_quarantine/", 128)?;
                     Ok::<_, SdkError>(())
                 })?;
                 account.task_ack_cursor = account.task_ack_cursor.wrapping_add(1);
@@ -468,6 +478,9 @@ pub(super) async fn send_control(
     c: &Carrier,
     mode: Mode<'_>,
 ) -> Result<Preparation<()>, SdkError> {
+    if let Some(reason) = &account.task_preparation_failure {
+        return Err(SdkError::InboundPending(reason.clone()));
+    }
     let thread = account
         .client
         .account_db()?
@@ -553,7 +566,9 @@ async fn direct_targets_with_policy(
         .as_object()
         .map(|_| serde_json::from_value(thread["direct_route"]["federation"].clone()))
         .transpose()?;
-    let manifest = if let Some(route) = &federation {
+    let manifest = if let Some(prepared) = account.task_prepared_manifests.get(commitment) {
+        prepared.clone()
+    } else if let Some(route) = &federation {
         let url = route
             .recipient_prekey_url
             .as_deref()
@@ -586,7 +601,7 @@ async fn direct_targets_with_policy(
         .collect::<Result<_, SdkError>>()
 }
 
-async fn fetch_federated_manifest(
+pub(in crate::bus) async fn fetch_federated_manifest(
     url: &str,
     commitment: &str,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
@@ -617,6 +632,31 @@ async fn fetch_federated_manifest(
     })
     .await
     .map_err(|error| SdkError::LocalBus(format!("federated manifest worker failed: {error}")))?
+}
+
+pub(in crate::bus) async fn fetch_gateway_manifest(
+    gateway: &GatewaySessionConfig,
+    commitment: &str,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let base = gateway
+        .prekey_http_url
+        .clone()
+        .unwrap_or_else(|| format!("gateway://{}", gateway.gateway_addr));
+    let flight_key = format!("{}/mvp1/device-manifest/{commitment}", base.trim_end_matches('/'));
+    let guard = loop {
+        match reserve_manifest_flight(&flight_key)? {
+            ManifestReservation::Wait(flight) => {
+                let notified = flight.complete.notified();
+                if !flight.finished.load(Ordering::Acquire) {
+                    notified.await;
+                }
+            }
+            ManifestReservation::Start(guard) => break guard,
+        }
+    };
+    let result = crate::client::contact::fetch_verified_device_manifest(gateway, commitment).await;
+    drop(guard);
+    result
 }
 
 const MAX_MANIFEST_WORKERS: usize = 4;
@@ -687,9 +727,15 @@ pub(super) async fn own_targets(
 ) -> Result<Vec<Target>, SdkError> {
     let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let own = client
-        .cache_verified_device_manifest(gateway, &account.principal_commitment, "task_own")
-        .await?;
+    let own = if let Some(prepared) =
+        account.task_prepared_manifests.get(&account.principal_commitment)
+    {
+        prepared.clone()
+    } else {
+        client
+            .cache_verified_device_manifest(gateway, &account.principal_commitment, "task_own")
+            .await?
+    };
     if !own.devices.iter().any(|d| d.device_id == local.device_id) {
         return Err(invalid("task source device is not in the active manifest"));
     }

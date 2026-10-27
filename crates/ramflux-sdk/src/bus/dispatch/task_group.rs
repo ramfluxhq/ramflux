@@ -23,7 +23,11 @@ pub(super) async fn plan(
     let body: LocalBusGroupSendRequest = serde_json::from_value(
         json!({"group_id":group,"conversation_id":conversation,"message_id":message,"sender_id":local.device_id,"encrypted_body_base64":""}),
     )?;
-    let routes = super::super::group_delivery::resolve_current(account, &body).await?;
+    let routes = if account.task_prepared_manifests.is_empty() {
+        super::super::group_delivery::resolve_current(account, &body).await?
+    } else {
+        super::super::group_delivery::resolve(account, &body)?
+    };
     let mut targets = Vec::new();
     for route in routes {
         let commitment = route
@@ -39,16 +43,40 @@ pub(super) async fn plan(
             )?;
             continue;
         }
-        let verified = if let Some(federation) = &route.federation {
-            account.client.assert_manifest_active_device_from_url(
+        let verified = if let Some(prepared) = account.task_prepared_manifests.get(commitment) {
+            prepared
+                .devices
+                .iter()
+                .find(|device| device.device_id == route.member_id)
+                .cloned()
+                .ok_or_else(|| {
+                    invalid("task group member is not active in the verified manifest")
+                })?
+        } else if let Some(federation) = &route.federation {
+            let manifest = super::task_transport::fetch_federated_manifest(
                 federation
                     .recipient_prekey_url
                     .as_deref()
                     .ok_or_else(|| invalid("task group federated prekey URL missing"))?,
                 commitment,
-                &route.member_id,
-                "task_group",
-            )?
+            )
+            .await?;
+            account.client.persist_identity_directory(&manifest)?;
+            for device in &manifest.devices {
+                account.client.account_db()?.upsert_device_directory_entry(
+                    &device.device_id,
+                    &manifest.principal_commitment,
+                    "task_group",
+                    now_unix_timestamp(),
+                )?;
+            }
+            manifest
+                .devices
+                .into_iter()
+                .find(|device| device.device_id == route.member_id)
+                .ok_or_else(|| {
+                    invalid("task group member is not active in the verified manifest")
+                })?
         } else {
             account
                 .client

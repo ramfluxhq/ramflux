@@ -52,6 +52,11 @@ pub(super) async fn drive_at(
     account: &mut LocalBusAccountState,
     now: i64,
 ) -> Result<usize, SdkError> {
+    prepare_queue(account);
+    drive_queued_at(account, now).await
+}
+
+pub(in crate::bus) fn prepare_queue(account: &mut LocalBusAccountState) {
     if let Err(error) = apply_decisions(account) {
         tracing::warn!(%error,"task approval decision scan deferred");
     }
@@ -61,6 +66,9 @@ pub(super) async fn drive_at(
     if let Err(error) = queue_requests(account) {
         tracing::warn!(%error,"task approval request admission deferred; decision courier continues");
     }
+}
+
+async fn drive_queued_at(account: &mut LocalBusAccountState, now: i64) -> Result<usize, SdkError> {
     let mut rows = account.client.account_db()?.task_record_page::<Value>(
         "task/approval_decision_out/",
         "task/approval_decision_out/",

@@ -98,6 +98,8 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) task_forward_cursor: usize,
     pub(crate) task_forward_first: bool,
     pub(crate) task_courier_wake: Option<mpsc::Sender<()>>,
+    pub(crate) task_prepared_manifests: BTreeMap<String, SdkDeviceManifestResponse>,
+    pub(crate) task_preparation_failure: Option<String>,
     /// T25-A3 (OBJ-IPC-01): in-flight bounded UPLOAD spools, keyed by `operation_id`.
     pub(crate) object_put_spools: BTreeMap<String, ObjectPutSpoolSession>,
     /// T25-A4 (OBJ-IPC-01): in-flight bounded DOWNLOAD spools, keyed by `operation_id`.
@@ -113,37 +115,6 @@ struct PersistedGatewayResume {
 
 impl LocalBusAccountState {
     pub(crate) const GATEWAY_RESUME_CHECKPOINT: &'static str = "gateway_session_resume.v1";
-
-    pub(crate) fn clone_for_task_courier(&self) -> Result<Self, SdkError> {
-        Ok(Self {
-            activation_pending: false,
-            client: self.client.clone_for_task_courier()?,
-            engine: None,
-            relay_quic_pool: self.relay_quic_pool.clone(),
-            gateway_config: self.gateway_config.clone(),
-            principal_commitment: self.principal_commitment.clone(),
-            target_delivery_id: self.target_delivery_id.clone(),
-            pending_deliveries: Vec::new(),
-            acked_mailbox_positions: super::ack_cache::AckCache::new(),
-            calls: BTreeMap::new(),
-            call_lru: VecDeque::new(),
-            a2i_lru: VecDeque::new(),
-            bots: BTreeMap::new(),
-            pending_a2i: BTreeMap::new(),
-            mcp_registry: self.mcp_registry.clone(),
-            mcp_grants: self.mcp_grants.clone(),
-            mcp_standing_approvals: self.mcp_standing_approvals.clone(),
-            mcp_pending_approvals: self.mcp_pending_approvals.clone(),
-            mcp_audit_log: self.mcp_audit_log.clone(),
-            task_approval_cursor: 0,
-            task_ack_cursor: 0,
-            task_forward_cursor: 0,
-            task_forward_first: false,
-            task_courier_wake: None,
-            object_put_spools: BTreeMap::new(),
-            object_get_spools: BTreeMap::new(),
-        })
-    }
 
     pub(crate) fn signal_task_courier(&self) {
         if let Some(wake) = &self.task_courier_wake {
@@ -183,6 +154,8 @@ impl LocalBusAccountState {
             task_forward_cursor: 0,
             task_forward_first: false,
             task_courier_wake: None,
+            task_prepared_manifests: BTreeMap::new(),
+            task_preparation_failure: None,
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
         }
@@ -219,6 +192,8 @@ impl LocalBusAccountState {
             task_forward_cursor: 0,
             task_forward_first: false,
             task_courier_wake: None,
+            task_prepared_manifests: BTreeMap::new(),
+            task_preparation_failure: None,
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
         }

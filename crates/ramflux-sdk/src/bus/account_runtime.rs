@@ -86,19 +86,93 @@ pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
 }
 
 impl AccountRuntime {
-    fn start_courier(&mut self) -> Result<(), SdkError> {
+    fn start_courier(&mut self) {
         if self.courier.is_none()
             && let Some(account) = self.state.accounts.get_mut(&self.id)
         {
-            self.courier = Some(super::task_courier::TaskCourier::start(account)?);
+            let courier = super::task_courier::TaskCourier::start();
+            account.task_courier_wake = Some(courier.wake_sender());
+            self.courier = Some(courier);
         }
-        Ok(())
     }
 
     async fn stop_courier(&mut self) {
         if let Some(courier) = self.courier.take() {
-            courier.stop(self.state.accounts.get_mut(&self.id)).await;
+            if let Some(account) = self.state.accounts.get_mut(&self.id) {
+                account.task_courier_wake = None;
+            }
+            courier.stop().await;
         }
+    }
+
+    async fn apply_courier_outcome(
+        &mut self,
+        outcome: super::task_courier::Outcome,
+    ) -> Result<(), SdkError> {
+        match outcome {
+            super::task_courier::Outcome::Requested { job_id } => {
+                let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                    return Ok(());
+                };
+                super::dispatch::task_approval::prepare_queue(account);
+                let requests = super::task_courier::manifest_requests(account)?;
+                if let Some(courier) = &self.courier {
+                    courier.prepare(job_id, requests);
+                }
+            }
+            super::task_courier::Outcome::Prepared(prepared) => {
+                let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                    return Ok(());
+                };
+                tracing::trace!(job_id = prepared.job_id, "task preparation ready");
+                let live_requests = super::task_courier::manifest_requests(account)?;
+                if prepared.request_keys
+                    != super::task_courier::manifest_request_keys(&live_requests)
+                {
+                    tracing::debug!(job_id = prepared.job_id, "stale task preparation discarded");
+                    if let Some(courier) = &self.courier {
+                        courier.signal();
+                    }
+                    return Ok(());
+                }
+                account.task_prepared_manifests.clear();
+                for manifest in prepared.manifests {
+                    account.client.persist_identity_directory(&manifest)?;
+                    for device in &manifest.devices {
+                        account.client.account_db()?.upsert_device_directory_entry(
+                            &device.device_id,
+                            &manifest.principal_commitment,
+                            "task_courier",
+                            now_unix_timestamp(),
+                        )?;
+                    }
+                    account
+                        .task_prepared_manifests
+                        .insert(manifest.principal_commitment.clone(), manifest);
+                }
+                let pass = super::task_courier::run_pass(account).await;
+                account.task_prepared_manifests.clear();
+                let progressed = pass?;
+                if progressed > 0
+                    && let Some(courier) = &self.courier
+                {
+                    courier.signal();
+                }
+            }
+            super::task_courier::Outcome::Charged { job_id, reason } => {
+                tracing::debug!(job_id, reason, "task preparation charged");
+                if let Some(account) = self.state.accounts.get_mut(&self.id) {
+                    account.task_preparation_failure = Some(reason);
+                    let pass = super::task_courier::run_pass(account).await;
+                    account.task_preparation_failure = None;
+                    let _ = pass?;
+                }
+            }
+            super::task_courier::Outcome::Deferred { job_id, reason } => {
+                tracing::debug!(job_id, reason, "task preparation deferred without retry charge");
+            }
+        }
+        Ok(())
     }
 
     fn initialize_readers(&mut self) -> Result<(), SdkError> {
@@ -145,7 +219,7 @@ impl AccountRuntime {
 
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         self.initialize_readers()?;
-        self.start_courier()?;
+        self.start_courier();
         let _ = ready.send(());
         let restore = LocalBusFrame::request(
             "restore",
@@ -165,6 +239,22 @@ impl AccountRuntime {
             let command = tokio::select! {
                 _ = self.shutdown.changed() => break,
                 command = self.receiver.recv() => command,
+                outcome = async {
+                    match self.courier.as_mut() {
+                        Some(courier) => courier.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(outcome) = outcome {
+                        self.apply_courier_outcome(outcome).await?;
+                    } else {
+                        tracing::warn!(account_id = %self.id, "task preparation courier stopped; restarting");
+                        self.stop_courier().await;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        self.start_courier();
+                    }
+                    continue;
+                },
                 () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
                     let mut shutdown = self.shutdown.clone();
                     let active = tokio::select! {
@@ -277,11 +367,6 @@ impl AccountRuntime {
             self.stop_courier().await;
             self.close_readers().await;
         }
-        if let Some(account) = self.state.accounts.get_mut(&self.id)
-            && let Err(error) = super::dispatch::grant_mcp::hydrate_local_mcp_state(account)
-        {
-            tracing::warn!(%error, "task courier state refresh deferred");
-        }
         let mut stopping = false;
         let mut cancelled = false;
         let result = if lifecycle {
@@ -311,10 +396,7 @@ impl AccountRuntime {
             Ok(()) => result,
             Err(error) => Err(error),
         };
-        let result = match self.start_courier() {
-            Ok(()) => result,
-            Err(error) => Err(error),
-        };
+        self.start_courier();
         if let Some(courier) = &self.courier {
             courier.signal();
         }
