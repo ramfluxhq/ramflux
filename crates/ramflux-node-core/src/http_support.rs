@@ -393,7 +393,7 @@ pub fn write_http_response_with_deadline(
         match stream.write(remaining) {
             Ok(0) => return Err(NodeCoreError::ItestHttp("response write returned zero".into())),
             Ok(count) => remaining = &remaining[count..],
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => return Err(NodeCoreError::ItestHttp(error.to_string())),
         }
     }
@@ -420,7 +420,7 @@ pub fn finish_http_response(
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }
