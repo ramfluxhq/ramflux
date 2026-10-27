@@ -122,6 +122,8 @@ class RenderedComposeInputTests(unittest.TestCase):
                     files.insert(1, DEPLOY / "docker-compose.itest.cross-gateway.yml")
                 if path.name == "docker-compose.voice.yml":
                     inputs["RF_COMPOSE_RELAY_VOICE_PUBLIC_ENDPOINT"] = "voice.example:17449"
+                if path.name == "docker-compose.admin.yml":
+                    inputs["RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT"] = "59487"
                 unset = self.render(command, files, inputs)
                 empty = self.render(command, files, {**dict.fromkeys(MAPPING.values(), ""), **inputs})
                 self.assertEqual(unset, empty, "empty inputs must retain :- default semantics")

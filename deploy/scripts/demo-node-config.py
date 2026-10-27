@@ -51,14 +51,32 @@ override = {
     "networks": {"default": {"labels": label}},
 }
 (state / "demo-override.json").write_text(json.dumps(override, indent=2) + "\n")
-# Freeze the base compose with the project so later down uses exactly this deployment.
-compose = state / "compose.yml"
-if not compose.exists():
-    compose.write_text((repo / "deploy/docker-compose.yml").read_text())
+# Refresh shipped definitions only on up; maintenance uses the last frozen deployment.
+refreshed = []
+for filename, source, selected in (
+    ("compose.yml", "docker-compose.yml", True),
+    ("compose.voice.yml", "docker-compose.voice.yml", bool(voice_port)),
+    ("compose.admin.yml", "docker-compose.admin.yml", bool(os.environ.get("DEMO_ADMIN_LOOPBACK_PORT"))),
+):
+    frozen = state / filename
+    if command == "up" and (selected or frozen.exists()):
+        content = (repo / "deploy" / source).read_bytes()
+        if not frozen.exists() or frozen.read_bytes() != content:
+            existed = frozen.exists()
+            temporary = frozen.with_suffix(frozen.suffix + ".tmp")
+            temporary.write_bytes(content)
+            temporary.replace(frozen)
+            if existed:
+                refreshed.append(filename)
+    elif filename == "compose.yml" and not frozen.exists():
+        sys.exit("saved compose.yml missing; run up before maintenance")
+if refreshed:
+    print("demo configuration refreshed: " + ", ".join(refreshed))
 (state / "owner.token").write_text(owner["token"] + "\n")
 
-# Freeze the opt-in overlay alongside the base without changing legacy ownership settings.
-# Selection remains explicit in the operator env/CLI for every invocation.
-voice = state / "compose.voice.yml"
-if command == "up" and voice_port and not voice.exists():
-    voice.write_text((repo / "deploy/docker-compose.voice.yml").read_text())
+admin_port = os.environ.get("DEMO_ADMIN_LOOPBACK_PORT", "")
+if command != "up" and admin_port:
+    runtime = state / "runtime.env"
+    values = dict(line.split("=", 1) for line in runtime.read_text().splitlines() if "=" in line)
+    if not (state / "compose.admin.yml").is_file() or values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT") != admin_port:
+        sys.exit("admin loopback configuration was not applied by the last up; run up first")

@@ -109,6 +109,42 @@ else:
         self.assertEqual((self.state / "unrelated.txt").read_text(), "preserve")
         self.assertEqual(self.commands(), [])
 
+    def seed_pre_split_state(self):
+        self.run_script("up")
+        # Existing ownership, identity and volumes use the same pre-split schemas.
+        old = SCRIPT.parent / "tests/fixtures/demo-pre-split-compose.yml"
+        (self.state / "compose.yml").write_bytes(old.read_bytes())
+        (self.state / "compose.voice.yml").write_text("# previous shipped voice overlay\nservices: {}\n")
+        runtime = self.state / "runtime.env"
+        runtime.write_text(runtime.read_text().replace("RAMFLUX_FEDERATION_PUBLIC_PORT=", "RAMFLUX_FEDERATION_ADMIN_PORT="))
+
+    def test_up_refreshes_pre_split_frozen_compose_without_changing_identity_or_ownership(self):
+        self.seed_pre_split_state()
+        preserved = {name: (self.state / name).read_bytes() for name in ("owner.json", "identity.env", "owner.token", "certs/ca.pem")}
+        result = self.run_script("up")
+        self.assertIn("demo configuration refreshed: compose.yml, compose.voice.yml", result.stdout)
+        for name, value in preserved.items():
+            self.assertEqual((self.state / name).read_bytes(), value)
+        deploy = SCRIPT.parent.parent
+        self.assertEqual((self.state / "compose.yml").read_bytes(), (deploy / "docker-compose.yml").read_bytes())
+        self.assertEqual((self.state / "compose.voice.yml").read_bytes(), (deploy / "docker-compose.voice.yml").read_bytes())
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_FEDERATION_PUBLIC_PORT=0.0.0.0:59482", runtime)
+        self.assertNotIn("RAMFLUX_FEDERATION_ADMIN_PORT=", runtime)
+        self.assertFalse(any("down" in command or "rm" in command for command in self.commands()))
+
+    def test_admin_opt_in_uses_saved_overlay_and_refuses_conflicting_ports(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_ADMIN_LOOPBACK_PORT=59487\n")
+        self.run_script("up")
+        calls = [json.loads(line) for line in (self.root / "cli.jsonl").read_text().splitlines()]
+        up = next(call for call in calls if "up" in call["args"])
+        self.assertIn(str(self.state / "compose.admin.yml"), up["args"])
+        self.assertIn("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=59487", (self.state / "runtime.env").read_text())
+        with self.env_file.open("a") as output:
+            output.write("DEMO_ADMIN_LOOPBACK_PORT=59482\n")
+        self.assertIn("admin loopback port conflicts", self.run_script("up", success=False).stderr)
+
     def test_repeat_up_preserves_ca_and_named_volumes_until_explicit_purge(self):
         self.state.mkdir(mode=0o755)
         result = self.run_script("up")

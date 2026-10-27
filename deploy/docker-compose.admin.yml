@@ -1,0 +1,5 @@
+# Explicit operator access only: use an SSH tunnel to reach this host-loopback port.
+services:
+  ramflux-federation:
+    ports:
+      - "127.0.0.1:${RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT:?operator loopback port required}:18084"

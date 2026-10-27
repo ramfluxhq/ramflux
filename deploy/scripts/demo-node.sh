@@ -48,6 +48,8 @@ for seconds in "$DEMO_HEALTH_TIMEOUT_SECONDS" "$DEMO_HEALTH_POLL_SECONDS"; do
 done
 export DEMO_NODE_ID DEMO_GATEWAY_PORT DEMO_RELAY_PORT DEMO_HTTP_PORT DEMO_TURN_PORT
 export DEMO_MESH_PORT DEMO_BIND_ADDR DEMO_VERSION
+DEMO_ADMIN_LOOPBACK_PORT=${DEMO_ADMIN_LOOPBACK_PORT:-}
+export DEMO_ADMIN_LOOPBACK_PORT
 case "$DEMO_HOST" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'DEMO_HOST must be a DNS name or IPv4 address' ;; esac
 case "$DEMO_NODE_ID" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'invalid DEMO_NODE_ID' ;; esac
 case "$DEMO_PROJECT" in [a-z0-9]*) ;; *) fail 'invalid DEMO_PROJECT' ;; esac
@@ -58,6 +60,13 @@ for port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TUR
   case "$port" in ''|*[!0-9]*) fail 'ports must be integers' ;; esac
   [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || fail 'ports must be between 1024 and 65535'
 done
+if [ -n "$DEMO_ADMIN_LOOPBACK_PORT" ]; then
+  case "$DEMO_ADMIN_LOOPBACK_PORT" in 0*|*[!0-9]*) fail 'admin loopback port must be an integer' ;; esac
+  [ "$DEMO_ADMIN_LOOPBACK_PORT" -ge 1024 ] && [ "$DEMO_ADMIN_LOOPBACK_PORT" -le 65535 ] || fail 'admin loopback port must be 1024..65535'
+  for tcp_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TURN_PORT" "$DEMO_MESH_PORT"; do
+    [ "$DEMO_ADMIN_LOOPBACK_PORT" -ne "$tcp_port" ] || fail 'admin loopback port conflicts with another demo port'
+  done
+fi
 RAMFLUX_DEMO_VOICE_UDP_PORT=${voice_cli:-${RAMFLUX_DEMO_VOICE_UDP_PORT:-}}
 if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
   case "$RAMFLUX_DEMO_VOICE_UDP_PORT" in
@@ -165,6 +174,9 @@ check_resources() {
 compose() (
   cd "$state"
   set -- -f "$state/demo-override.json" "$@"
+  if [ -n "$DEMO_ADMIN_LOOPBACK_PORT" ]; then
+    set -- -f "$state/compose.admin.yml" "$@"
+  fi
   if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
     set -- -f "$state/compose.voice.yml" "$@"
   fi
@@ -319,6 +331,8 @@ RAMFLUX_GATEWAY_TCP_PORT=$DEMO_BIND_ADDR:$DEMO_GATEWAY_PORT
 RAMFLUX_GATEWAY_QUIC_PORT=$DEMO_BIND_ADDR:$DEMO_GATEWAY_PORT
 RAMFLUX_RELAY_CLIENT_QUIC_PORT=$DEMO_BIND_ADDR:$DEMO_RELAY_PORT
 RAMFLUX_FEDERATION_PUBLIC_PORT=$DEMO_BIND_ADDR:$DEMO_HTTP_PORT
+RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=$DEMO_ADMIN_LOOPBACK_PORT
+RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS=${RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS:-64}
 RAMFLUX_FEDERATION_MESH_PORT=127.0.0.1:$DEMO_MESH_PORT
 RAMFLUX_SIGNALING_TURN_UDP_PORT=$DEMO_BIND_ADDR:$DEMO_TURN_PORT
 RAMFLUX_SIGNALING_TURN_TCP_PORT=$DEMO_BIND_ADDR:$DEMO_TURN_PORT

@@ -38,8 +38,11 @@ pub(crate) fn serve_admin_http(
     addr: &str,
     context: FederationAdminHttpContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let listener = TcpListener::bind(addr)
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    let listener = TcpListener::bind(addr).map_err(|source| {
+        ramflux_node_core::NodeCoreError::ItestHttp(format!(
+            "federation admin HTTP bind failed at {addr}: {source}"
+        ))
+    })?;
     tracing::info!(addr, "federation production admin HTTP surface listening");
     thread::spawn(move || {
         for stream in listener.incoming() {

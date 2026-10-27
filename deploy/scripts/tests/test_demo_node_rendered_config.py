@@ -65,5 +65,33 @@ class DemoRenderedConfigTests(unittest.TestCase):
         print("All seven services rendered without unresolved substitutions; every relay value is explicit.")
 
 
+    def test_pre_split_upgrade_renders_public_only_and_private_router_forward(self):
+        import yaml
+        fixture = lifecycle.DemoNodeTests("test_requires_env_and_refuses_unowned_data")
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        fixture.seed_pre_split_state()
+        fixture.run_script("up")
+        forbidden = fixture.root / "forbidden-upgrade-runtime"
+        runtime = fixture.executable("upgrade-config-podman", '#!/bin/sh\nif [ "$1" = --version ]; then echo "podman version 5.4.2"; exit 0; fi\n' + f"touch {shlex.quote(str(forbidden))}\nexit 91\n")
+        result = subprocess.run(shlex.split(COMPOSE_CLI) + ["--podman-path", str(runtime),
+            "--env-file", str(fixture.state / "runtime.env"), "-p", "demo-test", "-f", str(fixture.state / "compose.yml"),
+            "-f", str(fixture.state / "demo-override.json"), "config"], cwd=fixture.state,
+            env={"PATH":os.environ["PATH"], "HOME":str(fixture.home)}, capture_output=True, text=True, check=True)
+        config = yaml.safe_load(result.stdout)
+        self.assertFalse(forbidden.exists())
+        ports = config["services"]["ramflux-federation"]["ports"]
+        def mapping(port):
+            if isinstance(port, dict):
+                return str(port.get("published")), str(port["target"])
+            parts = str(port).split("/")[0].split(":")
+            return parts[-2], parts[-1]
+        mappings = [mapping(port) for port in ports]
+        self.assertIn(("59482", "18082"), mappings)
+        self.assertFalse(any(target == "18084" or published == "18082" for published, target in mappings), ports)
+        self.assertEqual(config["services"]["ramflux-router"]["environment"]["RAMFLUX_ROUTER_FEDERATION_FORWARD_URL"],
+                         "http://ramflux-federation:18084/internal/home-node-migration/forward")
+
+
 if __name__ == "__main__":
     unittest.main()

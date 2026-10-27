@@ -284,3 +284,20 @@ trust and certificate file paths, fail startup rather than select another key.
 Malformed relay metadata budgets fail startup; absence (or an unresolved optional
 expression) selects the bounded default. Empty credential paths retain their
 existing explicitly-disabled semantics where supported.
+
+### Upgrading an existing demo and private admin access
+
+Run the new `demo-node.sh up ENV_FILE` against the existing owned state directory.
+`up` atomically refreshes changed shipped base/voice Compose copies and prints one
+refresh notice. Ownership, identity, certificates and named data volumes survive;
+operator ports still come from the env file. Maintenance commands use the saved
+copies and do not refresh them. No manual deletion of `compose.yml`, identity
+files or volumes is needed. Public discovery/prekeys remain on `DEMO_HTTP_PORT`
+(default 59482); neither admin 18084 nor an unintended default host 18082 is published.
+
+For temporary administration, set `DEMO_ADMIN_LOOPBACK_PORT=59487` in the operator
+env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
+`DEMO_BIND_ADDR`, and can be reached through an SSH tunnel. Unset it and run `up`
+to remove the mapping. Production installs can use `docker-compose.admin.yml`
+with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. See
+[listener configuration, bounds and SSH commands](../docs/federation_http.md).

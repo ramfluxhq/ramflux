@@ -155,11 +155,9 @@ fn public_discovery_and_router_client_reads_preserve_payloads() -> TestResult {
         std::thread::spawn(move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             // The mesh client can reuse a TLS connection across requests.
             let mut stream = server.accept()?;
-            for (method, path) in [
-                ("GET", "/mvp1/prekey/root"),
-                ("GET", "/mvp1/device-manifest/root"),
-                ("POST", "/mvp1/prekey/fetch"),
-            ] {
+            for (method, path) in
+                [("GET", "/mvp1/prekey/root"), ("GET", "/mvp1/device-manifest/root")]
+            {
                 let request = ramflux_transport::read_mesh_http_request(&mut stream)?
                     .ok_or("missing request")?;
                 assert_eq!((request.method.as_str(), request.path.as_str()), (method, path));
@@ -171,11 +169,7 @@ fn public_discovery_and_router_client_reads_preserve_payloads() -> TestResult {
             }
             Ok(())
         });
-    for (method, path) in [
-        ("GET", "/mvp1/prekey/root"),
-        ("GET", "/mvp1/device-manifest/root"),
-        ("POST", "/mvp1/prekey/fetch"),
-    ] {
+    for (method, path) in [("GET", "/mvp1/prekey/root"), ("GET", "/mvp1/device-manifest/root")] {
         let context = public.clone();
         let response = request(method, path, "{}", move |s| handle_public_request(s, &context))?;
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
@@ -321,4 +315,88 @@ fn forward_envelope() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         "envelope_id":"forward-test","source_principal_id":"alice","source_device_id":"first","target_delivery_id":"peer",
         "routing_set_id":null,"delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":crate::now_unix_seconds()?,"encrypted_payload":"opaque","payload_hash":"hash"}
     }))?)?)
+}
+
+#[test]
+fn public_failures_hide_internal_details_and_unsupported_post_is_not_proxied() -> TestResult {
+    let root = temp_cert_root("http-public-error")?;
+    let admin = context(&root)?;
+    let public = FederationPublicHttpContext {
+        router: admin.router.clone(),
+        discovery: admin.discovery.clone(),
+    };
+    let context = public.clone();
+    let response = request("GET", "/mvp1/prekey/root", "", move |stream| {
+        crate::public_http::handle_public_connection(stream, &context);
+        Ok(())
+    })?;
+    assert!(response.starts_with("HTTP/1.1 500"), "{response}");
+    assert_eq!(response.split_once("\r\n\r\n").ok_or("missing body")?.1, "internal server error");
+    let response = request("POST", "/mvp1/prekey/fetch", "{}", move |stream| {
+        handle_public_request(stream, &public)
+    })?;
+    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+    drop(admin);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn public_connection_limit_rejects_excess_and_releases_after_success_and_error() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let root = temp_cert_root("http-cap")?;
+    let admin = context(&root)?;
+    let public = FederationPublicHttpContext {
+        router: admin.router.clone(),
+        discovery: admin.discovery.clone(),
+    };
+    let active = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let mut first = TcpStream::connect(listener.local_addr()?)?;
+    let (stream, _) = listener.accept()?;
+    let worker =
+        crate::public_http::spawn_public_connection(stream, public.clone(), active.clone(), 1)
+            .ok_or("first connection rejected")?;
+    assert_eq!(active.load(Ordering::Acquire), 1);
+    let mut excess = TcpStream::connect(listener.local_addr()?)?;
+    excess.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    assert!(
+        crate::public_http::spawn_public_connection(stream, public.clone(), active.clone(), 1)
+            .is_none()
+    );
+    let mut response = String::new();
+    excess.read_to_string(&mut response)?;
+    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+    assert_eq!(active.load(Ordering::Acquire), 1);
+    first.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+    worker.join().map_err(|_| "worker panicked")?;
+    first.read_to_string(&mut String::new())?;
+    assert_eq!(active.load(Ordering::Acquire), 0);
+    let mut failed = TcpStream::connect(listener.local_addr()?)?;
+    let (stream, _) = listener.accept()?;
+    let worker = crate::public_http::spawn_public_connection(stream, public, active.clone(), 1)
+        .ok_or("slot not released")?;
+    failed.write_all(b"GET /mvp1/prekey/root HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+    worker.join().map_err(|_| "worker panicked")?;
+    failed.read_to_string(&mut String::new())?;
+    assert_eq!(active.load(Ordering::Acquire), 0);
+    drop(admin);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn occupied_admin_address_reports_listener_and_address() -> TestResult {
+    let root = temp_cert_root("admin-bind-error")?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?.to_string();
+    let error = crate::admin_http::serve_admin_http(&addr, context(&root)?)
+        .err()
+        .ok_or("occupied bind accepted")?
+        .to_string();
+    assert!(error.contains("federation admin HTTP bind failed"), "{error}");
+    assert!(error.contains(&addr), "{error}");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }

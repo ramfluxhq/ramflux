@@ -27,3 +27,8 @@ class FederationListenerTests(unittest.TestCase):
         override = yaml.safe_load((DEPLOY / 'docker-compose.itest.admin.yml').read_text())
         ports = override['services']['ramflux-federation']['ports']
         self.assertEqual(ports, ['127.0.0.1:${RAMFLUX_ITEST_FEDERATION_ADMIN_PORT:?test admin port required}:18084'])
+
+    def test_operator_admin_overlay_always_binds_host_loopback(self):
+        override = yaml.safe_load((DEPLOY / 'docker-compose.admin.yml').read_text())
+        self.assertEqual(override['services']['ramflux-federation']['ports'],
+            ['127.0.0.1:${RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT:?operator loopback port required}:18084'])
