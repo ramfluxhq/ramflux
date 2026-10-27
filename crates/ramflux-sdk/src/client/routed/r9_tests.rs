@@ -234,7 +234,8 @@ fn old_bootstrap(
     let bundle = receiver
         .client
         .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
-        .bundle;
+        .bundle
+        .clone();
     let own =
         sender.client.load_x3dh_private_state(&sender.client.local_device_identity(&sender.id)?)?;
     let identity = ramflux_crypto::X25519KeyPair::from_seed(own.identity_seed);
@@ -265,7 +266,7 @@ fn old_bootstrap(
         bundle.signed_prekey,
     )?;
     let header: SdkDmX3dhHeader = serde_json::from_value(
-        json!({"bootstrap_sequence":sequence,"bootstrap_envelope_id":id,"initiator_identity_public":identity.public,"initiator_ephemeral_public":ephemeral.public,"initiator_device_id_hash":dm_device_id_hash(&sender.id),"recipient_device_id_hash":dm_device_id_hash(&receiver.id),"recipient_device_id":receiver.id,"recipient_signed_prekey_id":bundle.signed_prekey_id,"recipient_one_time_prekey_id":bundle.one_time_prekey_id,"prekey_bundle_hash":hash,"bootstrap_transcript_hash":output.bootstrap_transcript_hash,"session_id":session.session_id}),
+        json!({"bootstrap_sequence":sequence,"bootstrap_envelope_id":id,"initiator_identity_public":identity.public,"initiator_ephemeral_public":ephemeral.public,"initiator_ratchet_public":ephemeral.public,"initiator_device_id_hash":dm_device_id_hash(&sender.id),"recipient_device_id_hash":dm_device_id_hash(&receiver.id),"recipient_device_id":receiver.id,"recipient_signed_prekey_id":bundle.signed_prekey_id,"recipient_one_time_prekey_id":bundle.one_time_prekey_id,"prekey_bundle_hash":hash,"bootstrap_transcript_hash":output.bootstrap_transcript_hash,"session_id":session.session_id}),
     )?;
     sender
         .client

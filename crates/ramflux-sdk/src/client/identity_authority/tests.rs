@@ -87,7 +87,8 @@ fn enroll(
         bundle: actor
             .client
             .load_x3dh_private_state(&actor.client.local_device_identity(&actor.id)?)?
-            .bundle,
+            .bundle
+            .clone(),
     })?;
     actor.client.accept_owned_record(&set)?;
     Ok(serde_json::from_value(serde_json::to_value(

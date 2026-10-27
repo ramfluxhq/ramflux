@@ -140,6 +140,8 @@ impl GatewaySessionFrameSource for RecordingGateway {
                             device_id,
                             bundle: None,
                             principal_commitment: String::new(),
+                            one_time_prekey_exhausted: false,
+                            available_one_time_prekeys: 0,
                         }
                     }),
                 },

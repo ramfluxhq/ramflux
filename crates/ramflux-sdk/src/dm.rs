@@ -307,6 +307,7 @@ pub struct SdkDmX3dhHeader {
     pub bootstrap_envelope_id: Option<String>,
     pub initiator_identity_public: [u8; 32],
     pub initiator_ephemeral_public: [u8; 32],
+    pub initiator_ratchet_public: [u8; 32],
     pub initiator_device_id_hash: [u8; 32],
     pub recipient_device_id_hash: [u8; 32],
     pub recipient_device_id: String,
@@ -336,6 +337,13 @@ pub(crate) struct SdkX3dhPrivateState {
     #[serde(default)]
     pub(crate) bundle_counter: u64,
     pub(crate) bundle: ramflux_crypto::PrekeyBundle,
+}
+
+impl Drop for SdkX3dhPrivateState {
+    fn drop(&mut self) {
+        self.identity_seed.zeroize();
+        self.signed_prekey_seed.zeroize();
+    }
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]

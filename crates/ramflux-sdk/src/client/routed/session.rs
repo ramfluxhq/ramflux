@@ -59,7 +59,9 @@ impl RamfluxClient {
                 self.promote_pair(local, remote, &session.session_id)?;
             }
             Ok(())
-        })
+        })?;
+        self.pending_opk_consumptions.borrow_mut().remove(&session.session_id);
+        self.finish_pair_retirement()
     }
     pub(super) fn confirm_pair(
         &self,

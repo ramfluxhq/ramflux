@@ -26,7 +26,8 @@ fn renewed_registration_at_two_hours_is_accepted_but_original_proof_replay_and_e
         bundle: owner
             .client
             .load_x3dh_private_state(&owner.client.owned_device_identity()?)?
-            .bundle,
+            .bundle
+            .clone(),
     })?;
     assert!(node.register_identity(&request).is_err(), "a still-live old proof remains a replay");
     let mut expired = request.clone();

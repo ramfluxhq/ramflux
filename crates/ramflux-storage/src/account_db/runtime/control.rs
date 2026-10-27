@@ -6,6 +6,7 @@
 use super::super::AccountDb;
 use crate::StorageError;
 use rusqlite::{OptionalExtension, params};
+use zeroize::Zeroizing;
 
 impl AccountDb {
     /// Tests actor-state presence without decoding a private snapshot.
@@ -27,15 +28,15 @@ impl AccountDb {
         state: &T,
     ) -> Result<(), StorageError> {
         if !super::super::message_footprint::actor_state_may_reference_message(kind) {
-            let bytes = serde_json::to_vec(state)?;
-            self.connection.execute("INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json WHERE state_json<>excluded.state_json", params![kind,&bytes])?;
+            let bytes = Zeroizing::new(serde_json::to_vec(state)?);
+            self.connection.execute("INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json WHERE state_json<>excluded.state_json", params![kind,bytes.as_slice()])?;
             return Ok(());
         }
         let value = serde_json::to_value(state)?;
-        let bytes = serde_json::to_vec(&value)?;
+        let bytes = Zeroizing::new(serde_json::to_vec(&value)?);
         let write = || {
             self.register_actor_message_footprint(kind, &value)?;
-            self.connection.execute("INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json WHERE state_json<>excluded.state_json", params![kind,&bytes])?;
+            self.connection.execute("INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json WHERE state_json<>excluded.state_json", params![kind,bytes.as_slice()])?;
             self.fence_actor_message_footprint(kind)
         };
         if self.connection.is_autocommit()? {
@@ -72,7 +73,10 @@ impl AccountDb {
         let mut statement = self.connection.prepare("SELECT state_json FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 ORDER BY state_kind")?;
         statement
             .query_map(params![prefix], |row| row.get::<_, Vec<u8>>(0))?
-            .map(|row| Ok(serde_json::from_slice(&row?)?))
+            .map(|row| {
+                let body = Zeroizing::new(row?);
+                Ok(serde_json::from_slice(&body)?)
+            })
             .collect()
     }
 
@@ -90,7 +94,11 @@ impl AccountDb {
                 |row| row.get(0),
             )
             .optional()?;
-        body.map(|body| serde_json::from_slice(&body).map_err(StorageError::from)).transpose()
+        body.map(|body| {
+            let body = Zeroizing::new(body);
+            serde_json::from_slice(&body).map_err(StorageError::from)
+        })
+        .transpose()
     }
 }
 

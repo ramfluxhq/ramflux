@@ -167,7 +167,7 @@ fn seal_as(
     let state = receiver
         .client
         .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?;
-    let mut bundle = state.bundle;
+    let mut bundle = state.bundle.clone();
     let lease = receiver.leased_one_time_prekeys.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(private) = state.one_time_prekeys.get(lease)
         && let Some(index) = bundle.one_time_prekey_ids.iter().position(|id| id == &private.id)
@@ -440,7 +440,8 @@ fn legacy_requires_exact_existing_device_pair_conversation_binding() -> Result<(
     let b = Fixture::new("bob", 131)?;
     review::trust(&b, &a)?;
     let mut message = message("legacy-envelope", "legacy-conversation");
-    let bundle = b.client.load_x3dh_private_state(&b.client.local_device_identity("bob")?)?.bundle;
+    let bundle =
+        b.client.load_x3dh_private_state(&b.client.local_device_identity("bob")?)?.bundle.clone();
     let (mut sending, header) =
         a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
     let ciphertext = sending.encrypt(b"legacy body", dm_associated_data("legacy-conversation"))?;
