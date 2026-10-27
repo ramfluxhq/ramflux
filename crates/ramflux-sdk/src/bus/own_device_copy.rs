@@ -30,10 +30,10 @@ struct Work {
     next_at: i64,
 }
 pub(crate) fn copy_id(client: &RamfluxClient, id: &str) -> Result<String, SdkError> {
-    let source = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let source = client.read_device_identity()?.ok_or(SdkError::IdentityRootMissing)?;
     crate::client::own_device_copy::copy_id(
         &client.surface_local_root_commitment()?,
-        &source.device_id,
+        source.device_id(),
         id,
     )
 }

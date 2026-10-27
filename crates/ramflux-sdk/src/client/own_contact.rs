@@ -6,6 +6,8 @@ use crate::bus::protocol::{LocalBusBackupContactSkip, LocalBusBackupContactSkipR
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+mod native_tests;
 mod tombstone;
 const PREFIX: &[u8] = b"ramflux.own_contact.v1\n";
 #[derive(Serialize, Deserialize)]
@@ -135,14 +137,7 @@ impl RamfluxClient {
         manifest: &SdkDeviceManifestResponse,
         link: &str,
     ) -> Result<(), SdkError> {
-        let own = self.owned_device_identity()?;
-        if self.observed_device_set(own.root_commitment())?.is_none_or(|r| {
-            r.devices
-                .iter()
-                .filter(|d| d.status == ramflux_protocol::DeviceSetStatus::Active)
-                .count()
-                < 2
-        }) {
+        if self.own_contact_roster()?.is_none_or(|(_, active, _)| active < 2) {
             return Ok(());
         }
         let link = self.account_db()?.friend_link(link)?;
@@ -151,11 +146,12 @@ impl RamfluxClient {
         self.stage_own_contact_body(&body)
     }
     fn stage_own_contact_body(&self, body: &[u8]) -> Result<(), SdkError> {
-        let own = self.owned_device_identity()?;
-        let set = self.observed_device_set(own.root_commitment())?;
+        let Some((_, _, authority_tag)) = self.own_contact_roster()? else {
+            return Ok(());
+        };
         let id = ramflux_protocol::hash_base64url(
-            "ramflux.sdk.own_contact.copy.v2",
-            &ramflux_protocol::canonical_json_bytes(&(body, set))?,
+            "ramflux.sdk.own_contact.copy.v3",
+            &ramflux_protocol::canonical_json_bytes(&(body, authority_tag))?,
         );
         crate::bus::own_device_copy::stage(
             self,
@@ -168,6 +164,47 @@ impl RamfluxClient {
             },
             None,
         )
+    }
+    fn own_contact_roster(&self) -> Result<Option<(u64, usize, String)>, SdkError> {
+        let own = self.read_device_identity()?.ok_or(SdkError::IdentityRootMissing)?;
+        if let Some(record) =
+            self.current_custody_authority(own.root_commitment(), crate::custody::network_now()?)?
+        {
+            let body = &record.envelope().body;
+            let active = body
+                .devices
+                .iter()
+                .filter(|device| {
+                    device.status == ramflux_protocol::DeviceSetStatus::Active
+                        && !record.revoked_ids().contains(&device.device_id)
+                        && device.branch_certificate.as_ref().is_some_and(|certificate| {
+                            certificate.body.capabilities.iter().any(|scope| scope == "message")
+                        })
+                })
+                .count();
+            return Ok(Some((
+                body.device_set_epoch,
+                active,
+                ramflux_protocol::custody::object_hash(record.envelope())?,
+            )));
+        }
+        self.observed_device_set(own.root_commitment())?
+            .map(|set| {
+                let active = set
+                    .devices
+                    .iter()
+                    .filter(|device| device.status == ramflux_protocol::DeviceSetStatus::Active)
+                    .count();
+                Ok((
+                    set.device_set_epoch,
+                    active,
+                    ramflux_protocol::hash_base64url(
+                        "ramflux.sdk.own_contact.roster.v1",
+                        &ramflux_protocol::canonical_json_bytes(&set)?,
+                    ),
+                ))
+            })
+            .transpose()
     }
     pub(super) fn own_history_contacts(&self) -> Result<Vec<String>, SdkError> {
         let own = self.owned_device_identity()?;
@@ -216,24 +253,17 @@ impl RamfluxClient {
     }
     fn stage_contact_backfill_batch_at(&self, now: i64) -> Result<usize, SdkError> {
         let own = self.owned_device_identity()?;
-        let Some(set) = self.observed_device_set(own.root_commitment())? else {
+        let Some((epoch, active, _)) = self.own_contact_roster()? else {
             return Ok(0);
         };
-        if set
-            .devices
-            .iter()
-            .filter(|d| d.status == ramflux_protocol::DeviceSetStatus::Active)
-            .count()
-            < 2
-        {
+        if active < 2 {
             return Ok(0);
         }
         let db = self.account_db()?;
         let mut progress =
             db.load_actor_state::<Backfill>("own-contact/backfill")?.unwrap_or_default();
-        if progress.epoch != set.device_set_epoch || progress.schema_version != 1 {
-            progress =
-                Backfill { schema_version: 1, epoch: set.device_set_epoch, ..Backfill::default() };
+        if progress.epoch != epoch || progress.schema_version != 1 {
+            progress = Backfill { schema_version: 1, epoch, ..Backfill::default() };
         }
         if progress.complete {
             return Ok(0);
@@ -393,7 +423,9 @@ impl RamfluxClient {
         }) {
             return Ok(OwnContactReceiveOutcome::AlreadyPresent);
         }
-        self.persist_identity_directory(&contact.manifest)?;
+        if !self.directory_snapshot_is_obsolete(&contact.manifest)? {
+            self.persist_identity_directory(&contact.manifest)?;
+        }
         if link_by_id.as_ref().is_some_and(|link| link.state == "accepted") {
             return Ok(OwnContactReceiveOutcome::AlreadyPresent);
         }

@@ -3,6 +3,9 @@
 
 //! Root-authenticated device authority, monotonic observation and local root publication.
 mod custody_directory;
+mod custody_lifecycle;
+#[cfg(test)]
+mod custody_lifecycle_tests;
 pub(crate) use custody_directory::native_fingerprint as native_authority_fingerprint;
 mod device_identity;
 pub(crate) mod device_namespace;
