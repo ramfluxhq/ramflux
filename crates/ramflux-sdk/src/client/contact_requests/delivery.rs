@@ -463,8 +463,8 @@ async fn deliver(
     let peer =
         crate::client::contact::fetch_verified_device_manifest(&engine.config, &intent.peer_root)
             .await?;
-    client.persist_identity_directory(&own_manifest)?;
-    client.persist_identity_directory(&peer)?;
+    client.persist_fetched_identity_directory(&own_manifest)?;
+    client.persist_fetched_identity_directory(&peer)?;
     let bytes = if own_manifest.custody.is_some() {
         super::native_delivery::approve(client, &engine.config, intent, &own_manifest).await?
     } else {

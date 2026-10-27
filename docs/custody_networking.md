@@ -279,6 +279,23 @@ Unaccepted requester retirement removes full directory payloads and device-pair
 state while preserving native rollback and mode pins. Accepted relationships
 retain the normal verified directory authority.
 
+## Current-head freshness in the ordinary SDK
+
+Positive cached device authorization requires a verified current head fetched at
+most 300 seconds ago, in addition to current pins, branch scope, keys and lease.
+The freshness clock is monotonic and belongs to the live client process. It binds
+the account anchor and exact head hash; accepting a different head invalidates an
+older observation. The cache holds at most 512 roots and evicts the oldest
+observation when full. Eviction, restart and expiry require another successful
+current-directory fetch; refresh failure supplies no stale fallback.
+
+Public JSON observation, own-device history and backup snapshots retain signed
+public evidence and rollback/denial floors without refreshing this clock. A
+restored timestamp cannot manufacture a new network observation. An ordinary
+native account session refreshes its own directory when the current-head clock
+is missing or expired. Read-only account data remains separate from this
+permission to use a device for a new operation.
+
 ## Integration fixture and production boundary
 
 Production Linux primary-vault support is separate work; unsupported production

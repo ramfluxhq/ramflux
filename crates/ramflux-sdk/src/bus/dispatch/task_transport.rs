@@ -439,7 +439,7 @@ pub(super) async fn direct_targets(
             .ok_or_else(|| invalid("task federated peer prekey URL missing"))?;
         let manifest =
             crate::client::contact::fetch_verified_device_manifest_from_url(url, commitment)?;
-        client.persist_identity_directory(&manifest)?;
+        client.persist_fetched_identity_directory(&manifest)?;
         manifest
     } else {
         client.cache_verified_device_manifest(gateway, commitment, "task_peer").await?

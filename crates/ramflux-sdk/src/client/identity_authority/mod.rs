@@ -3,6 +3,8 @@
 
 //! Root-authenticated device authority, monotonic observation and local root publication.
 mod custody_directory;
+mod custody_freshness;
+pub(crate) use custody_freshness::NativeHeadFreshness;
 mod custody_lifecycle;
 #[cfg(test)]
 mod custody_lifecycle_tests;
