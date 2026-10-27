@@ -32,6 +32,22 @@ impl Schedule {
 }
 
 pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    run_with_receive_clock(account, now_unix_timestamp).await
+}
+
+// Exercise the complete driver with a stable receive clock for retry-boundary assertions.
+#[cfg(test)]
+pub(crate) async fn run_at(
+    account: &mut LocalBusAccountState,
+    now: i64,
+) -> Result<usize, SdkError> {
+    run_with_receive_clock(account, || now).await
+}
+
+async fn run_with_receive_clock(
+    account: &mut LocalBusAccountState,
+    receive_now: impl FnOnce() -> i64,
+) -> Result<usize, SdkError> {
     account.client.account_db()?.expire_backup_pairs(now_unix_timestamp())?;
     if let Err(error) = account.client.account_db().and_then(|db| {
         db.retain_delivery_receipts(now_unix_timestamp(), 128).map_err(SdkError::from)
@@ -41,7 +57,7 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
     account.client.finish_pair_retirement()?;
     super::dispatch::call::expire_due(account)?;
     let mut engine = account.take_live_engine().await?;
-    let result = receive(account, &mut engine).await;
+    let result = receive(account, &mut engine, receive_now()).await;
     account.put_engine(engine);
     let (received, replies) = result?;
     for reply in replies {
@@ -154,8 +170,8 @@ pub(crate) fn project_committed_message(
 async fn receive(
     account: &mut LocalBusAccountState,
     engine: &mut GatewaySessionEngine,
+    now: i64,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
-    let now = now_unix_timestamp();
     account.client.prune_surface_resync_state()?;
     account.client.account_db()?.expire_inbox_holds(now)?;
     redrive_if_state_changed(&account.client)?;

@@ -672,20 +672,24 @@ async fn transient_sender_lookup_retries_with_backoff_while_later_messages_progr
         engine,
         "bob".to_owned(),
     );
-    crate::bus::sync_driver::run(&mut account).await?;
+    // Admission and observations share a clock even if later work is descheduled.
+    let now = now_unix_timestamp();
+    crate::bus::sync_driver::run_at(&mut account, now).await?;
     assert_eq!(account.client.direct_messages("thread")?.len(), 1);
     assert_eq!(account.client.gateway_receive_cursor("bob")?, 2);
     let db = account.client.account_db()?;
-    let now = now_unix_timestamp();
     assert_eq!(db.due_inbox_retries(now)?.len(), 0);
+    assert_eq!(db.due_inbox_retries(now + 1)?.len(), 0);
+    assert_eq!(db.due_inbox_retries(now + 2)?.len(), 1);
     assert_eq!(db.due_inbox_retries(now + 3)?.len(), 1);
     assert!(!db.journal_after(0, 100)?.iter().any(|event| event.topic == "message.undeliverable"));
     let key = account.client.inbox_admission_key(&pending)?;
-    db.defer_inbox_entry(&key, &serde_json::to_vec(&pending)?, now + 3)?;
+    assert_eq!(db.defer_inbox_entry(&key, &serde_json::to_vec(&pending)?, now + 3)?, 2);
     let (engine, _) = Inbox::engine(account.gateway_config.clone(), vec![pending])?;
     account.engine = Some(engine);
-    crate::bus::sync_driver::run(&mut account).await?;
+    crate::bus::sync_driver::run_at(&mut account, now + 3).await?;
     assert_eq!(account.client.account_db()?.due_inbox_retries(now + 6)?.len(), 0);
+    assert_eq!(account.client.account_db()?.due_inbox_retries(now + 7)?.len(), 1);
     assert_eq!(account.client.account_db()?.due_inbox_retries(now + 8)?.len(), 1);
 
     Ok(())
