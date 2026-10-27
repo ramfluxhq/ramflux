@@ -9,7 +9,11 @@ use ramflux_protocol::home_migration::{
 use std::sync::Arc;
 struct UnavailablePeers;
 impl crate::HomeMigrationMesh for UnavailablePeers {
-    fn peer_key(&self, _node: &str) -> std::result::Result<String, NodeCoreError> {
+    fn peer_key(
+        &self,
+        _node: &str,
+        _deadline: std::time::Instant,
+    ) -> std::result::Result<String, NodeCoreError> {
         Err(NodeCoreError::HomeMigration(
             ramflux_protocol::home_migration::Refusal::PeeringUnavailable,
         ))

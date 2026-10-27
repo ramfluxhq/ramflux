@@ -167,6 +167,8 @@ pub use custody_service::{CustodyService, CustodyTlsContext};
 mod home_migration_admission;
 mod home_migration_budget;
 mod home_migration_courier;
+mod home_migration_discovery;
+mod home_migration_network;
 mod home_migration_operations;
 mod home_migration_peer;
 mod home_migration_peer_dispatch;
@@ -175,6 +177,11 @@ mod home_migration_read_budget;
 mod home_migration_reads;
 mod home_migration_reply;
 mod home_migration_resolve;
+pub use home_migration_discovery::HOME_MIGRATION_CAPABILITY;
+pub use home_migration_network::{
+    LocalMigrationAction, LocalMigrationReply, LocalMigrationRequest, MIGRATION_LOCAL_PATH,
+    MIGRATION_PEER_PATH, MigrationPeerRequest, migration_hop_budget, migration_hop_deadline,
+};
 pub use home_migration_peer::{MigrationPeerCall, MigrationPeerReply};
 mod home_migration_service;
 pub use home_migration_service::{HomeMigrationMesh, HomeMigrationService};

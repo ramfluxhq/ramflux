@@ -11,13 +11,14 @@ struct NativeMesh {
     calls: Mutex<Vec<bool>>,
 }
 impl HomeMigrationMesh for NativeMesh {
-    fn peer_key(&self, node: &str) -> Result<String, NodeCoreError> {
+    fn peer_key(&self, node: &str, _deadline: std::time::Instant) -> Result<String, NodeCoreError> {
         if node == "A" { Ok(public(8)) } else { Err(refusal(Refusal::PeeringUnavailable)) }
     }
     fn exchange(
         &self,
         _: &str,
         call: &MigrationPeerCall,
+        _deadline: std::time::Instant,
     ) -> Result<MigrationPeerReply, NodeCoreError> {
         self.calls
             .lock()

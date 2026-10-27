@@ -16,13 +16,14 @@ struct Mesh {
     source: Mutex<TestNode>,
 }
 impl HomeMigrationMesh for Mesh {
-    fn peer_key(&self, peer: &str) -> Result<String, NodeCoreError> {
+    fn peer_key(&self, peer: &str, _deadline: std::time::Instant) -> Result<String, NodeCoreError> {
         if peer == "A" { Ok(public(8)) } else { Err(refusal(Refusal::PeeringUnavailable)) }
     }
     fn exchange(
         &self,
         _: &str,
         call: &MigrationPeerCall,
+        _deadline: std::time::Instant,
     ) -> Result<MigrationPeerReply, NodeCoreError> {
         let source = self.source.lock().map_err(storage)?;
         source.core.handle_migration_peer(

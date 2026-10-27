@@ -656,3 +656,5 @@ mod retry_history;
 mod control_admission;
 
 mod reads;
+
+mod discovery;

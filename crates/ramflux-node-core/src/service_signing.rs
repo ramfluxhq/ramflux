@@ -25,6 +25,18 @@ pub struct NodeFrankingTagInput<'a> {
 }
 
 impl NodeServiceSigningKey {
+    /// Construct migration authority without exposing the service's node signing seed.
+    /// # Errors
+    /// Rejects a mismatched signed node record or invalid endpoint configuration.
+    pub fn home_migration_node(
+        &self,
+        record: ramflux_protocol::custody::Envelope<ramflux_protocol::custody::NodeIdentityRecord>,
+        endpoints: crate::MigrationEndpoints,
+        now: u64,
+    ) -> Result<crate::MigrationNode, NodeCoreError> {
+        crate::MigrationNode::new(record, self.seed, endpoints, now)
+    }
+
     #[must_use]
     pub fn from_seed(seed: [u8; 32]) -> Self {
         let public_key_bytes = ramflux_crypto::public_key_bytes_from_seed(seed);
