@@ -2,12 +2,19 @@
 // Copyright (c) 2026 Span Brain
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+const ROUTER_FORWARD_CONCURRENCY_ENV: &str = "RAMFLUX_ROUTER_FORWARD_CONCURRENCY";
+const ROUTER_FORWARD_CONCURRENCY_DEFAULT: usize = 32;
+const ROUTER_FORWARD_TIMEOUT_SECONDS_ENV: &str = "RAMFLUX_ROUTER_FORWARD_TIMEOUT_SECONDS";
+const ROUTER_FORWARD_TIMEOUT_SECONDS_DEFAULT: u64 = 20;
 
 pub(crate) struct TokioRouterRuntime {
     state: Arc<ramflux_node_core::RouterCore>,
     store: Arc<ramflux_node_core::RouterRedbStore>,
     home_node_forward: Option<LocalFederationForwardClient>,
+    forward_semaphore: Arc<tokio::sync::Semaphore>,
+    forward_timeout: Duration,
 }
 
 impl TokioRouterRuntime {
@@ -16,7 +23,37 @@ impl TokioRouterRuntime {
         store: Arc<ramflux_node_core::RouterRedbStore>,
         home_node_forward: Option<LocalFederationForwardClient>,
     ) -> Self {
-        Self { state, store, home_node_forward }
+        let concurrency =
+            ramflux_node_core::environment::parsed::<usize>(ROUTER_FORWARD_CONCURRENCY_ENV)
+                .filter(|value| (1..=1_024).contains(value))
+                .unwrap_or(ROUTER_FORWARD_CONCURRENCY_DEFAULT);
+        let timeout_seconds =
+            ramflux_node_core::environment::parsed::<u64>(ROUTER_FORWARD_TIMEOUT_SECONDS_ENV)
+                .filter(|value| (1..=300).contains(value))
+                .unwrap_or(ROUTER_FORWARD_TIMEOUT_SECONDS_DEFAULT);
+        Self::new_with_forward_limits(
+            state,
+            store,
+            home_node_forward,
+            concurrency,
+            Duration::from_secs(timeout_seconds),
+        )
+    }
+
+    fn new_with_forward_limits(
+        state: Arc<ramflux_node_core::RouterCore>,
+        store: Arc<ramflux_node_core::RouterRedbStore>,
+        home_node_forward: Option<LocalFederationForwardClient>,
+        concurrency: usize,
+        forward_timeout: Duration,
+    ) -> Self {
+        Self {
+            state,
+            store,
+            home_node_forward,
+            forward_semaphore: Arc::new(tokio::sync::Semaphore::new(concurrency.max(1))),
+            forward_timeout,
+        }
     }
 }
 
@@ -99,7 +136,11 @@ impl RouterHandle {
                 crate::router_engine::submit_envelope_async(
                     &runtime.state,
                     runtime.store.as_ref(),
-                    runtime.home_node_forward.as_ref(),
+                    crate::router_engine::AsyncForwardContext {
+                        client: runtime.home_node_forward.as_ref(),
+                        semaphore: &runtime.forward_semaphore,
+                        timeout: runtime.forward_timeout,
+                    },
                     envelope,
                     total_started,
                     origin,
@@ -182,7 +223,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use ramflux_protocol::{DeliveryClass, Ext, Priority, SignatureAlg, SignedFields};
 
@@ -245,52 +286,56 @@ pub(crate) mod tests {
     fn durable_local_delivery_rejects_old_home_retry_and_confirms_new_home_retry()
     -> anyhow::Result<()> {
         let envelope = current_envelope("env_runtime_durable_replay", "target_runtime_replay")?;
-        let (state, store, _path) = test_router("durable_local_replay")?;
-        let source = state.authenticated_envelope_source_durable(&envelope, store.as_ref())?;
-        let first = crate::router_engine::submit_envelope(
-            state.as_ref(),
-            store.as_ref(),
-            None,
-            envelope.clone(),
-            Instant::now(),
-            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
-        )?;
-        assert_eq!(first.outcome, "offline_queued");
-        assert!(store.has_local_delivery_envelope(
-            source.root_commitment(),
-            &envelope.envelope_id,
-            &envelope.target_delivery_id,
-            envelope.created_at + 1,
-        )?);
+        let path = temp_store_path("durable_local_replay")?;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let source_root = {
+            let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
+            let state = Arc::new(ramflux_node_core::RouterCore::new());
+            register_test_device(&state, "alice", "alice_phone", "target_alice", 1)?;
+            store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+            let source = state.authenticated_envelope_source_durable(&envelope, store.as_ref())?;
+            let source_root = source.root_commitment().to_owned();
+            let handle = RouterHandle::tokio(state, Arc::clone(&store), None);
+            let first = runtime.block_on(handle.submit_envelope_async_from(
+                envelope.clone(),
+                Instant::now(),
+                ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+            ))?;
+            assert_eq!(first.outcome, "offline_queued");
+            assert!(store.has_local_delivery_envelope(
+                &source_root,
+                &envelope.envelope_id,
+                &envelope.target_delivery_id,
+                envelope.created_at + 1,
+            )?);
+            source_root
+        };
 
-        let restored = Arc::new(store.load_router()?.ok_or_else(|| {
-            anyhow::anyhow!("router store did not restore the committed delivery")
-        })?);
-        let old_home_retry = crate::router_engine::submit_envelope(
-            restored.as_ref(),
-            store.as_ref(),
-            None,
+        let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
+        let restored =
+            Arc::new(store.load_router()?.ok_or_else(|| {
+                anyhow::anyhow!("router WAL did not restore the committed delivery")
+            })?);
+        let handle = RouterHandle::tokio(restored, Arc::clone(&store), None);
+        let old_home_retry = runtime.block_on(handle.submit_envelope_async_from(
             envelope.clone(),
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Gateway,
-        )?;
+        ))?;
         assert!(old_home_retry.outcome.starts_with("rejected_security:"));
 
-        let new_home_retry = crate::router_engine::submit_envelope(
-            restored.as_ref(),
-            store.as_ref(),
-            None,
+        let new_home_retry = runtime.block_on(handle.submit_envelope_async_from(
             envelope.clone(),
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Federation,
-        )?;
+        ))?;
         assert_eq!(new_home_retry.outcome, "duplicate_federated_forward");
         assert_eq!(new_home_retry.inbox_seq, None);
-        assert_eq!(restored.resume(&envelope.target_delivery_id, 0, 10).len(), 1);
+        assert_eq!(handle.state().resume(&envelope.target_delivery_id, 0, 10).len(), 1);
         let expires_at = envelope.created_at + i64::from(envelope.ttl);
         store.sweep_delivery_retention(expires_at, false)?;
         assert!(!store.has_local_delivery_envelope(
-            source.root_commitment(),
+            &source_root,
             &envelope.envelope_id,
             &envelope.target_delivery_id,
             expires_at,
@@ -369,6 +414,251 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn slow_migrated_forward_does_not_block_local_engine_submits() -> anyhow::Result<()> {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let url =
+                format!("http://{}/internal/home-node-migration/forward", listener.local_addr()?);
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let server = thread::spawn(move || -> Result<(), String> {
+                let (mut stream, _) = listener.accept().map_err(|source| source.to_string())?;
+                let request = ramflux_node_core::read_itest_http_request(&mut stream)
+                    .map_err(|source| source.to_string())?
+                    .ok_or_else(|| "missing slow forward request".to_owned())?;
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).map_err(|source| source.to_string())?;
+                let forward: ramflux_node_core::FederatedEnvelopeForwardRequest =
+                    serde_json::from_value(
+                        body.get("forward")
+                            .cloned()
+                            .ok_or_else(|| "missing slow forward body".to_owned())?,
+                    )
+                    .map_err(|source| source.to_string())?;
+                entered_tx.send(()).map_err(|source| source.to_string())?;
+                release_rx.recv().map_err(|source| source.to_string())?;
+                let response = ramflux_node_core::FederatedEnvelopeForwardResponse {
+                    accepted: false,
+                    source_node_id: forward.source_node_id,
+                    target_node_id: forward.target_node_id,
+                    delivery: ramflux_node_core::EnvelopeSubmitResponse {
+                        outcome: "forward_in_progress".to_owned(),
+                        target_delivery_id: forward.envelope.target_delivery_id,
+                        inbox_seq: None,
+                        cursor: None,
+                        nack: None,
+                    },
+                };
+                ramflux_node_core::write_itest_json_response(&mut stream, "200 OK", &response)
+                    .map_err(|source| source.to_string())
+            });
+            let now =
+                i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX - 3_600);
+            let (handle, _path) = migrated_test_handle(&url, 1, Duration::from_secs(2), now)?;
+            let handle = Arc::new(handle);
+            let slow_handle = Arc::clone(&handle);
+            let slow = tokio::spawn(async move {
+                slow_handle
+                    .submit_envelope_async_from(
+                        current_envelope("env_runtime_slow_forward", "target_alice")?,
+                        Instant::now(),
+                        ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+                    )
+                    .await
+            });
+            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(1)))
+                .await??;
+
+            let full = tokio::time::timeout(
+                Duration::from_millis(500),
+                handle.submit_envelope_async_from(
+                    current_envelope("env_runtime_full_forward", "target_alice")?,
+                    Instant::now(),
+                    ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+                ),
+            )
+            .await??;
+            assert_eq!(full.outcome, "forward_in_progress");
+
+            let mut local_submits = tokio::task::JoinSet::new();
+            for index in 0..32 {
+                let local_handle = Arc::clone(&handle);
+                local_submits.spawn(async move {
+                    local_handle
+                        .submit_envelope_async_from(
+                            current_envelope(
+                                &format!("env_runtime_local_under_load_{index}"),
+                                &format!("target_runtime_local_{index}"),
+                            )?,
+                            Instant::now(),
+                            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+                        )
+                        .await
+                });
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while let Some(result) = local_submits.join_next().await {
+                    let response = result.map_err(|error| anyhow::anyhow!(error))??;
+                    anyhow::ensure!(response.outcome == "offline_queued");
+                }
+                Ok::<(), anyhow::Error>(())
+            })
+            .await??;
+            release_tx.send(())?;
+            assert_eq!(slow.await??.outcome, "forward_in_progress");
+            match server.join() {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+                Err(_) => Err(anyhow::anyhow!("slow federation server panicked")),
+            }
+        })
+    }
+
+    #[test]
+    fn migrated_retry_uses_real_engine_and_federation_store() -> anyhow::Result<()> {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let url =
+                format!("http://{}/internal/home-node-migration/forward", listener.local_addr()?);
+            let now =
+                i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX - 3_600);
+            let new_path = temp_store_path("real_forward_new_home")?;
+            let new_store = Arc::new(ramflux_node_core::RouterRedbStore::open(&new_path)?);
+            let new_state = Arc::new(ramflux_node_core::RouterCore::new());
+            register_test_device_at(&new_state, "alice", "alice_phone", "target_alice", 1, now)?;
+            new_store.record_identity_registry(&new_state.mvp1_identities_snapshot())?;
+            let new_handle = Arc::new(RouterHandle::tokio(new_state, new_store, None));
+            let server_handle = Arc::clone(&new_handle);
+            let (delivery_tx, delivery_rx) = mpsc::channel();
+            let federation_path = temp_store_path("real_forward_federation")?;
+            let federation_store = ramflux_node_core::FederationRedbStore::open(&federation_path)?;
+            let server = thread::spawn(move || {
+                run_real_forward_responder(
+                    &listener,
+                    &server_handle,
+                    &federation_store,
+                    &delivery_tx,
+                )
+            });
+            let (old_handle, _old_path) =
+                migrated_test_handle(&url, 2, Duration::from_secs(2), now)?;
+            let envelope = current_envelope("env_runtime_real_forward", "target_alice")?;
+            let first = old_handle
+                .submit_envelope_async_from(
+                    envelope.clone(),
+                    Instant::now(),
+                    ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+                )
+                .await?;
+            let first_delivery = match delivery_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(outcome) => outcome,
+                Err(channel_error) => {
+                    return match server.join() {
+                        Ok(Ok(())) => Err(anyhow::anyhow!(channel_error)),
+                        Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+                        Err(_) => Err(anyhow::anyhow!("real federation server panicked")),
+                    };
+                }
+            };
+            assert_eq!(
+                first.outcome, "forwarded_home_node_migrated",
+                "new-home delivery outcome: {first_delivery}"
+            );
+            let retry = old_handle
+                .submit_envelope_async_from(
+                    envelope,
+                    Instant::now(),
+                    ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+                )
+                .await?;
+            let retry_delivery = delivery_rx.recv_timeout(Duration::from_secs(1))?;
+            assert_eq!(
+                retry.outcome, "forwarded_home_node_migrated",
+                "new-home retry outcome: {retry_delivery}"
+            );
+            assert_eq!(new_handle.state().resume("target_alice", 0, 10).len(), 1);
+            match server.join() {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+                Err(_) => Err(anyhow::anyhow!("real federation server panicked")),
+            }
+        })
+    }
+
+    fn run_real_forward_responder(
+        listener: &TcpListener,
+        router: &RouterHandle,
+        federation_store: &ramflux_node_core::FederationRedbStore,
+        delivery_tx: &mpsc::Sender<String>,
+    ) -> Result<(), String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|source| source.to_string())?;
+        for _attempt in 0..2 {
+            let (mut stream, _) = listener.accept().map_err(|source| source.to_string())?;
+            let request = ramflux_node_core::read_itest_http_request(&mut stream)
+                .map_err(|source| source.to_string())?
+                .ok_or_else(|| "missing real forward request".to_owned())?;
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).map_err(|source| source.to_string())?;
+            let forward: ramflux_node_core::FederatedEnvelopeForwardRequest =
+                serde_json::from_value(
+                    body.get("forward")
+                        .cloned()
+                        .ok_or_else(|| "missing real forward body".to_owned())?,
+                )
+                .map_err(|source| source.to_string())?;
+            let (_, source) = ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(
+                &forward.envelope,
+            )
+            .map_err(|source| source.to_string())?;
+            let delivered = federation_store
+                .deliver_inbound_forward_once_with_lease(
+                    &source,
+                    &forward,
+                    ramflux_node_core::now_unix_seconds(),
+                    2,
+                    || {
+                        runtime
+                            .block_on(router.submit_envelope_async_from(
+                                forward.envelope.clone(),
+                                Instant::now(),
+                                ramflux_node_core::RouterEnvelopeOrigin::Federation,
+                            ))
+                            .map_err(|source| {
+                                ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
+                            })
+                    },
+                )
+                .map_err(|source| source.to_string())?;
+            let delivery = delivered.unwrap_or_else(|| ramflux_node_core::EnvelopeSubmitResponse {
+                outcome: "duplicate_federated_forward".to_owned(),
+                target_delivery_id: forward.envelope.target_delivery_id.clone(),
+                inbox_seq: None,
+                cursor: None,
+                nack: None,
+            });
+            let response = ramflux_node_core::FederatedEnvelopeForwardResponse {
+                accepted: matches!(delivery.outcome.as_str(), "online" | "offline_queued"),
+                source_node_id: forward.source_node_id,
+                target_node_id: forward.target_node_id,
+                delivery,
+            };
+            delivery_tx
+                .send(response.delivery.outcome.clone())
+                .map_err(|source| source.to_string())?;
+            ramflux_node_core::write_itest_json_response(&mut stream, "200 OK", &response)
+                .map_err(|source| source.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn local_federation_forward_client_posts_source_node_and_admin_token() -> anyhow::Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let url = format!("http://{}/internal/home-node-migration/forward", listener.local_addr()?);
@@ -436,6 +726,34 @@ pub(crate) mod tests {
     fn test_handle(name: &str) -> anyhow::Result<(RouterHandle, PathBuf)> {
         let (state, store, path) = test_router(name)?;
         Ok((RouterHandle::tokio(state, store, None), path))
+    }
+
+    fn migrated_test_handle(
+        url: &str,
+        concurrency: usize,
+        forward_timeout: Duration,
+        now: i64,
+    ) -> anyhow::Result<(RouterHandle, PathBuf)> {
+        let path = temp_store_path("migrated_runtime")?;
+        let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
+        let state = Arc::new(ramflux_node_core::RouterCore::new());
+        let request =
+            register_test_device_at(&state, "alice", "alice_phone", "target_alice", 1, now)?;
+        install_test_migration(&state, &request, "node-new.example")?;
+        store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+        let client = LocalFederationForwardClient {
+            url: url.to_owned(),
+            admin_token: Some("local-token".to_owned()),
+            source_node_id: "node-old.example".to_owned(),
+        };
+        let runtime = TokioRouterRuntime::new_with_forward_limits(
+            state,
+            store,
+            Some(client),
+            concurrency,
+            forward_timeout,
+        );
+        Ok((RouterHandle::Tokio(Arc::new(runtime)), path))
     }
 
     pub(crate) fn test_router(
@@ -582,6 +900,25 @@ pub(crate) mod tests {
         target_delivery_id: &str,
         nonce: u64,
     ) -> anyhow::Result<()> {
+        let _request = register_test_device_at(
+            state,
+            principal_id,
+            device_id,
+            target_delivery_id,
+            nonce,
+            1_760_000_010 + i64::try_from(nonce)?,
+        )?;
+        Ok(())
+    }
+
+    fn register_test_device_at(
+        state: &ramflux_node_core::RouterCore,
+        principal_id: &str,
+        device_id: &str,
+        target_delivery_id: &str,
+        _nonce: u64,
+        now: i64,
+    ) -> anyhow::Result<ramflux_node_core::IdentityRegisterRequest> {
         let root_seed = ramflux_crypto::blake3_256(
             "ramflux.test.registration_root.v1",
             principal_id.as_bytes(),
@@ -602,8 +939,8 @@ pub(crate) mod tests {
             ramflux_crypto::BranchAuthorization {
                 audience: ramflux_node_core::IDENTITY_BIND_AUDIENCE,
                 capability_scope: vec![ramflux_node_core::IDENTITY_BIND_CAPABILITY.into()],
-                issued_at: 1_760_000_000 + i64::try_from(nonce)?,
-                expires_at: 1_760_003_600 + i64::try_from(nonce)?,
+                issued_at: now.saturating_sub(10),
+                expires_at: now.saturating_add(3_600),
                 principal_kind: ramflux_protocol::PrincipalKind::Human,
                 agreement_identity_public_key: agreement.public,
             },
@@ -651,11 +988,85 @@ pub(crate) mod tests {
             gateway_id: "ramflux-gateway".to_owned(),
             session_id: format!("session_{device_id}"),
             push_alias_hash: Some(format!("push_{device_id}")),
-            now: 1_760_000_010 + i64::try_from(nonce)?,
+            now,
             registration_pow: None,
             source_ip_hash: Some("source_ip_hash".to_owned()),
         };
         state.mvp1_register_identity(&request)?;
+        Ok(request)
+    }
+
+    fn install_test_migration(
+        state: &ramflux_node_core::RouterCore,
+        request: &ramflux_node_core::IdentityRegisterRequest,
+        new_home_node: &str,
+    ) -> anyhow::Result<()> {
+        let route_signer = ramflux_node_core::NodeServiceSigningKey::from_seed([0x73; 32]);
+        let new_home_node_key_hash = ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::FEDERATION_HANDSHAKE,
+            route_signer.public_key_base64url().as_bytes(),
+        );
+        let expires_at = request.now.saturating_add(3_600);
+        let route_commitment = ramflux_node_core::HomeNodeRouteRecordCommitment {
+            schema: ramflux_node_core::HOME_NODE_ROUTE_RECORD_DOMAIN.to_owned(),
+            domain: ramflux_node_core::HOME_NODE_ROUTE_RECORD_DOMAIN.to_owned(),
+            new_home_node: new_home_node.to_owned(),
+            new_home_node_key_hash: new_home_node_key_hash.clone(),
+            node_public_key: route_signer.public_key_base64url().to_owned(),
+            node_endpoint: "new-home.example:7443".to_owned(),
+            expires_at,
+        };
+        let route_record_hash = ramflux_node_core::home_node_route_record_hash(&route_commitment)?;
+        let device = ramflux_crypto::create_device_branch(
+            &request.proof.principal_id,
+            &request.proof.device_id,
+            request.proof.device_epoch,
+            ramflux_crypto::blake3_256(
+                "ramflux.test.runtime.device.v1",
+                format!("{}/{}", request.proof.principal_id, request.proof.device_id).as_bytes(),
+            ),
+        );
+        let proof = ramflux_crypto::sign_home_node_migration_proof(
+            ramflux_protocol::HomeNodeMigrationProof {
+                schema: ramflux_protocol::domain::HOME_NODE_MIGRATION_PROOF.to_owned(),
+                domain: ramflux_protocol::domain::HOME_NODE_MIGRATION_PROOF.to_owned(),
+                signed: signed_fields(),
+                proof_id: "runtime_migration".to_owned(),
+                identity_commitment: request.proof.principal_id.clone(),
+                lineage_head: "runtime_lineage_head".to_owned(),
+                actor_device_id: request.proof.device_id.clone(),
+                actor_device_epoch: request.proof.device_epoch,
+                old_home_node: "node-old.example".to_owned(),
+                new_home_node: new_home_node.to_owned(),
+                new_home_node_key_hash: new_home_node_key_hash.clone(),
+                route_record_hash: route_record_hash.clone(),
+                effective_at: request.now,
+                expires_at,
+                issued_at: request.now.saturating_sub(1),
+                nonce: ramflux_protocol::encode_base64url("runtime-migration-nonce"),
+                branch_proof_hash: ramflux_crypto::branch_proof_document_hash(&request.proof)?,
+                previous_home_node_binding_hash: None,
+                old_home_node_handoff_signature: None,
+            },
+            &device,
+        )?;
+        let migration = state.apply_home_node_migration(&proof, &request.proof, request.now)?;
+        let mut update = ramflux_node_core::HomeNodeRouteUpdateProof {
+            schema: ramflux_node_core::HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN.to_owned(),
+            domain: ramflux_node_core::HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN.to_owned(),
+            signed: signed_fields(),
+            identity_commitment: request.proof.principal_id.clone(),
+            new_home_node: new_home_node.to_owned(),
+            new_home_node_key_hash,
+            node_public_key: route_signer.public_key_base64url().to_owned(),
+            node_endpoint: "new-home.example:7443".to_owned(),
+            route_record_hash,
+            migration_proof_hash: migration.migration_proof_hash,
+            issued_at: request.now,
+            expires_at,
+        };
+        route_signer.sign_home_node_route_update_proof(&mut update)?;
+        state.apply_home_node_route_update_proof(&update, request.now)?;
         Ok(())
     }
 

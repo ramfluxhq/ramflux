@@ -188,6 +188,7 @@ async fn shared_group_member_add_keeps_federation_hints_and_forwards_state_to_cu
     );
     for envelope in delivered {
         let entry = GatewayInboxEntry {
+            forwarded: false,
             inbox_seq: 1,
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,

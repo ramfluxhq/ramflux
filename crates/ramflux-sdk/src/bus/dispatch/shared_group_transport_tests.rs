@@ -104,6 +104,7 @@ async fn shared_group_routed_fanout_resumes_one_round_and_one_failed_device_does
             ramflux_transport::RelayQuicPoolConfig::functional_default()?,
         );
         let entry = GatewayInboxEntry {
+            forwarded: false,
             inbox_seq: 1,
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,
@@ -313,6 +314,7 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
         source.client.owned_device_identity()?.root_commitment(),
     )?;
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: envelope.target_delivery_id.clone(),
         envelope,

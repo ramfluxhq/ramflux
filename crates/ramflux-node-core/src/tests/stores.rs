@@ -404,7 +404,26 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
             })
         })
         .collect::<Vec<_>>();
-    store.record_fanout_increment(&replay_key, replay_expires_at, &entries)?;
+    let source = router.authenticated_envelope_source(&request.envelope)?;
+    store.record_fanout_increment(
+        &replay_key,
+        replay_expires_at,
+        source.root_commitment(),
+        &entries,
+    )?;
+    let delivered = entries.first().ok_or("fanout did not create an inbox entry")?;
+    assert!(store.has_local_delivery_envelope(
+        source.root_commitment(),
+        &delivered.envelope.envelope_id,
+        &delivered.target_delivery_id,
+        replay_expires_at - 1,
+    )?);
+    assert!(!store.has_local_delivery_envelope(
+        "different-sender-root",
+        &delivered.envelope.envelope_id,
+        &delivered.target_delivery_id,
+        replay_expires_at - 1,
+    )?);
     drop(store);
 
     let reopened = RouterRedbStore::open(&path)?;

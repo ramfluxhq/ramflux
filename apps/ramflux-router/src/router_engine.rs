@@ -3,6 +3,13 @@
 
 use std::time::Instant;
 
+#[derive(Clone, Copy)]
+pub(crate) struct AsyncForwardContext<'a> {
+    pub(crate) client: Option<&'a crate::router_runtime::LocalFederationForwardClient>,
+    pub(crate) semaphore: &'a std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) timeout: std::time::Duration,
+}
+
 pub(crate) fn submit_envelope(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
@@ -97,7 +104,7 @@ pub(crate) fn submit_envelope(
 pub(crate) async fn submit_envelope_async(
     state: &std::sync::Arc<ramflux_node_core::RouterCore>,
     store: &ramflux_node_core::RouterRedbStore,
-    home_node_forward: Option<&crate::router_runtime::LocalFederationForwardClient>,
+    forward: AsyncForwardContext<'_>,
     mut envelope: ramflux_protocol::Envelope,
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
@@ -142,23 +149,17 @@ pub(crate) async fn submit_envelope_async(
     })? {
         return Ok(response);
     }
-    let outcome = match home_node_forward {
-        Some(client) => {
-            let state = std::sync::Arc::clone(state);
-            let client = client.clone();
-            tokio::task::spawn_blocking(move || {
-                state.submit_envelope_with_home_node_forward_at(
-                    &source,
-                    envelope,
-                    now_unix_seconds,
-                    origin,
-                    |plan| client.forward(plan),
-                )
-            })
-            .await
-            .map_err(|error| anyhow::anyhow!("federation forward worker failed: {error}"))?
-        }
-        None => state.submit_envelope_at(&source, envelope, now_unix_seconds),
+    let outcome = if forward.client.is_some() {
+        let preparation = state.prepare_envelope_with_home_node_forward_at(
+            &source,
+            envelope,
+            now_unix_seconds,
+            origin,
+            forward.timeout.as_secs().max(1),
+        );
+        complete_async_forward(state, forward, preparation).await?
+    } else {
+        state.submit_envelope_at(&source, envelope, now_unix_seconds)
     };
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
     let save_started = Instant::now();
@@ -193,6 +194,64 @@ pub(crate) async fn submit_envelope_async(
     ramflux_node_core::record_router_submit_response_us(elapsed_us(response_started));
     ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));
     Ok(response)
+}
+
+async fn complete_async_forward(
+    state: &ramflux_node_core::RouterCore,
+    forward: AsyncForwardContext<'_>,
+    preparation: ramflux_node_core::RouterForwardPreparation,
+) -> anyhow::Result<ramflux_node_core::RouterSubmitOutcome> {
+    Ok(match preparation {
+        ramflux_node_core::RouterForwardPreparation::Complete(outcome) => *outcome,
+        ramflux_node_core::RouterForwardPreparation::Forward(reservation) => {
+            let target_delivery_id = reservation.target_delivery_id().to_owned();
+            match std::sync::Arc::clone(forward.semaphore).try_acquire_owned() {
+                Ok(permit) => {
+                    let Some(plan) = reservation.plan().cloned() else {
+                        drop(reservation);
+                        return Err(anyhow::anyhow!(
+                            "forward reservation did not contain a forward plan"
+                        ));
+                    };
+                    let Some(client) = forward.client.cloned() else {
+                        drop(reservation);
+                        return Err(anyhow::anyhow!(
+                            "forward reservation did not contain a forward client"
+                        ));
+                    };
+                    let worker = tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        client.forward(&plan)
+                    });
+                    match tokio::time::timeout(forward.timeout, worker).await {
+                        Ok(Ok(response)) => state.complete_home_node_forward(reservation, response),
+                        Ok(Err(error)) => {
+                            tracing::warn!(%error, "federation forward worker stopped before completion");
+                            drop(reservation);
+                            ramflux_node_core::RouterSubmitOutcome::ForwardInProgress {
+                                target_delivery_id,
+                            }
+                        }
+                        Err(_elapsed) => {
+                            tracing::warn!(
+                                timeout_ms =
+                                    u64::try_from(forward.timeout.as_millis()).unwrap_or(u64::MAX),
+                                "federation forward exceeded its total wall-clock bound"
+                            );
+                            drop(reservation);
+                            ramflux_node_core::RouterSubmitOutcome::ForwardInProgress {
+                                target_delivery_id,
+                            }
+                        }
+                    }
+                }
+                Err(_full) => {
+                    drop(reservation);
+                    ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id }
+                }
+            }
+        }
+    })
 }
 
 #[cfg(feature = "itest-http")]
@@ -268,12 +327,11 @@ pub(crate) fn own_device_fanout(
         .created_at
         .checked_add(i64::from(request.envelope.ttl))
         .ok_or_else(|| anyhow::anyhow!("fan-out envelope ttl overflows replay expiry"))?;
+    let source = state.authenticated_envelope_source_durable(&request.envelope, store)?;
     store.record_fanout_increment(
-        &ramflux_node_core::envelope_replay_tuple_key(
-            &state.authenticated_envelope_source_durable(&request.envelope, store)?,
-            &request.envelope,
-        ),
+        &ramflux_node_core::envelope_replay_tuple_key(&source, &request.envelope),
         replay_expires_at,
+        source.root_commitment(),
         &entries,
     )?;
     Ok(response)

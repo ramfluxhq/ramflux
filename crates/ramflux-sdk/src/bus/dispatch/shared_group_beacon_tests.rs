@@ -95,7 +95,7 @@ async fn shared_group_device_beacon_refreshes_existing_peer_roster_without_full_
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
-    let entry = GatewayInboxEntry { inbox_seq: 1, target_delivery_id: "sender".into(), envelope };
+    let entry = beacon_entry(envelope);
     peer.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await?;
     let view = peer.client.group_state("group")?;
     assert_eq!(view.group_epoch, 2);
@@ -110,6 +110,15 @@ async fn shared_group_device_beacon_refreshes_existing_peer_roster_without_full_
     drop((peer, creator, peers, sibling));
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+fn beacon_entry(envelope: ramflux_protocol::Envelope) -> GatewayInboxEntry {
+    GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: "sender".into(),
+        envelope,
+    }
 }
 
 async fn updated_directory(

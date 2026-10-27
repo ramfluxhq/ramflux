@@ -134,6 +134,7 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
         .enumerate()
     {
         let entry = GatewayInboxEntry {
+            forwarded: false,
             inbox_seq: u64::try_from(index + 1)?,
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,

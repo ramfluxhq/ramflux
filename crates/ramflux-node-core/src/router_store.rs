@@ -82,6 +82,7 @@ enum RouterCommitOp {
     Fanout {
         replay_key: String,
         replay_expires_at: i64,
+        sender_root_commitment: String,
         entries: Vec<InboxEntry>,
     },
 }
@@ -226,11 +227,21 @@ fn router_apply_commit_op(
             record_replay_tuple_in_txn(write_txn, replay_key, *replay_expires_at)
         }
         RouterCommitOp::InboxEntry { entry } => record_inbox_entry_in_txn(write_txn, entry),
-        RouterCommitOp::Fanout { replay_key, replay_expires_at, entries } => {
+        RouterCommitOp::Fanout {
+            replay_key,
+            replay_expires_at,
+            sender_root_commitment,
+            entries,
+        } => {
             record_replay_tuple_in_txn(write_txn, replay_key, *replay_expires_at)?;
             for entry in entries {
                 record_inbox_entry_in_txn(write_txn, entry)?;
-                record_local_delivery_envelope_in_txn(write_txn, entry, *replay_expires_at, None)?;
+                record_local_delivery_envelope_in_txn(
+                    write_txn,
+                    entry,
+                    *replay_expires_at,
+                    Some(sender_root_commitment),
+                )?;
             }
             Ok(())
         }
@@ -264,6 +275,13 @@ fn record_local_delivery_envelope_in_txn(
 }
 
 fn local_delivery_storage_key(sender_root_commitment: &str, envelope_id: &str) -> String {
+    format!("s:{}:{}{}", sender_root_commitment.len(), sender_root_commitment, envelope_id)
+}
+
+fn legacy_scoped_local_delivery_storage_key(
+    sender_root_commitment: &str,
+    envelope_id: &str,
+) -> String {
     format!("{}:{}{}", sender_root_commitment.len(), sender_root_commitment, envelope_id)
 }
 
@@ -765,7 +783,9 @@ impl RouterRedbStore {
             .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let storage_key = local_delivery_storage_key(sender_root_commitment, envelope_id);
-        for key in [storage_key.as_str(), envelope_id] {
+        let legacy_scoped_key =
+            legacy_scoped_local_delivery_storage_key(sender_root_commitment, envelope_id);
+        for key in [storage_key.as_str(), legacy_scoped_key.as_str()] {
             if let Some(value) =
                 table.get(key).map_err(|source| NodeCoreError::Redb(source.to_string()))?
             {
@@ -777,14 +797,12 @@ impl RouterRedbStore {
             }
         }
         Ok(self.submission_wal.as_ref().is_some_and(|wal| {
-            wal.submissions(now).iter().any(|record| {
-                record.local_delivery.as_ref().is_some_and(|delivery| {
-                    delivery.sender_root_commitment == sender_root_commitment
-                        && delivery.envelope_id == envelope_id
-                        && delivery.target_delivery_id == target_delivery_id
-                        && record.replay_expires_at > now
-                })
-            })
+            wal.has_local_delivery_envelope(
+                sender_root_commitment,
+                envelope_id,
+                target_delivery_id,
+                now,
+            )
         }))
     }
 
@@ -1006,6 +1024,7 @@ impl RouterRedbStore {
         &self,
         replay_key: &str,
         replay_expires_at: i64,
+        sender_root_commitment: &str,
         entries: &[InboxEntry],
     ) -> Result<(), NodeCoreError> {
         let save_started = Instant::now();
@@ -1013,6 +1032,7 @@ impl RouterRedbStore {
         self.commit_router_op(RouterCommitOp::Fanout {
             replay_key: replay_key.to_owned(),
             replay_expires_at,
+            sender_root_commitment: sender_root_commitment.to_owned(),
             entries: entries.to_vec(),
         })?;
         crate::record_router_save_replay_guard_us(elapsed_us(replay_started));

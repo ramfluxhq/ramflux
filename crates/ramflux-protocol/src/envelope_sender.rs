@@ -11,6 +11,9 @@ pub fn envelope_sender_signed_bytes(envelope: &Envelope) -> Result<Vec<u8>, Prot
     // Forwarders attach existing root-signed device-set evidence. Its independent signatures
     // authenticate the same root and branch; this never removes the sender's signed root claim.
     sender.ext.ext.remove("source_device_authority");
+    // The old home adds this hop marker after sender signing. The signed federation request
+    // authenticates it in transit, while the original sender signature remains verifiable.
+    sender.ext.ext.remove("home_node_migration_forward_count");
     if let Some(receipt) =
         sender.ext.ext.get_mut("franking").and_then(serde_json::Value::as_object_mut)
     {

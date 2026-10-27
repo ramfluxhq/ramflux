@@ -58,11 +58,7 @@ async fn check_request_round_trip(step_clock: bool) -> TestResult {
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
-    let incoming = GatewayInboxEntry {
-        inbox_seq: 1,
-        target_delivery_id: request.target_delivery_id.clone(),
-        envelope: request,
-    };
+    let incoming = request_entry(1, request);
     let mut receiver = GatewaySessionEngine::with_test_transport(
         config.clone(),
         Box::new(super::fixture::RecordingGateway::new(Arc::default())),
@@ -88,11 +84,7 @@ async fn check_request_round_trip(step_clock: bool) -> TestResult {
     assert_eq!(sent, 1, "a newly committed result is immediately eligible for delivery");
     assert_eq!(current.view().name.as_deref(), Some("Requested name"));
     let result = replies.lock().map_err(|_| "reply lock")?[0].clone();
-    let incoming = GatewayInboxEntry {
-        inbox_seq: 1,
-        target_delivery_id: result.target_delivery_id.clone(),
-        envelope: result,
-    };
+    let incoming = request_entry(1, result);
     let mut receiver = GatewaySessionEngine::with_test_transport(
         admin_config,
         Box::new(super::fixture::RecordingGateway::new(Arc::default())),
@@ -210,11 +202,10 @@ async fn reject_demoted_federated_add(
             )
             .await?,
     )?;
-    let incoming = GatewayInboxEntry {
-        inbox_seq: 2,
-        target_delivery_id: message.target_delivery_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
-    };
+    let incoming = request_entry(
+        2,
+        crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
+    );
     let mut receiver = GatewaySessionEngine::with_test_transport(
         config.clone(),
         Box::new(super::fixture::RecordingGateway::new(Arc::default())),
@@ -236,6 +227,15 @@ async fn reject_demoted_federated_add(
         before.view()
     );
     Ok(())
+}
+
+fn request_entry(inbox_seq: u64, envelope: ramflux_protocol::Envelope) -> GatewayInboxEntry {
+    GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq,
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        envelope,
+    }
 }
 
 fn assert_result_did_not_replace_snapshot(client: &RamfluxClient) -> TestResult {

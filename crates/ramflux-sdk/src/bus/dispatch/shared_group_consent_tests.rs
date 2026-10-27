@@ -128,6 +128,7 @@ async fn seal(
         serde_json::to_vec(&contact.seal_routed_as(engine, &message, body, route).await?)?;
     let envelope = crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?;
     Ok(GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         target_delivery_id: "sender".into(),
         envelope,

@@ -3,7 +3,7 @@
 
 use crate::{InboxEntry, NodeCoreError};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -304,10 +304,19 @@ impl RouterWalSubmissionRecord {
 #[derive(Clone, Debug, Default)]
 struct RouterWalState {
     submissions_by_replay_key: BTreeMap<String, RouterWalSubmissionRecord>,
+    local_delivery_by_sender_envelope:
+        HashMap<String, HashMap<String, RouterWalLocalDeliveryIndex>>,
     /// Highest sequence ever logged per mailbox, including records that later expired.
     issued_by_target: BTreeMap<String, u64>,
     replay_due: BTreeSet<(i64, String)>,
     entry_due: BTreeSet<(i64, String)>,
+}
+
+#[derive(Clone, Debug)]
+struct RouterWalLocalDeliveryIndex {
+    replay_key: String,
+    target_delivery_id: String,
+    replay_expires_at: i64,
 }
 
 impl RouterWalState {
@@ -333,15 +342,11 @@ impl RouterWalState {
                     local_delivery,
                     location,
                 };
-                self.index(&record);
-                if let Some(previous) = self.submissions_by_replay_key.insert(replay_key, record) {
+                if let Some(previous) = self.submissions_by_replay_key.remove(&replay_key) {
                     self.unindex(&previous);
-                    if let Some(current) =
-                        self.submissions_by_replay_key.get(&previous.replay_key).cloned()
-                    {
-                        self.index(&current);
-                    }
                 }
+                self.index(&record);
+                self.submissions_by_replay_key.insert(replay_key, record);
             }
         }
     }
@@ -351,12 +356,43 @@ impl RouterWalState {
         if record.entry.is_some() {
             self.entry_due.insert((record.retain_until(), record.replay_key.clone()));
         }
+        if let Some(delivery) = &record.local_delivery {
+            self.local_delivery_by_sender_envelope
+                .entry(delivery.sender_root_commitment.clone())
+                .or_default()
+                .insert(
+                    delivery.envelope_id.clone(),
+                    RouterWalLocalDeliveryIndex {
+                        replay_key: record.replay_key.clone(),
+                        target_delivery_id: delivery.target_delivery_id.clone(),
+                        replay_expires_at: record.replay_expires_at,
+                    },
+                );
+        }
     }
 
     fn unindex(&mut self, record: &RouterWalSubmissionRecord) {
         self.replay_due.remove(&(record.replay_expires_at, record.replay_key.clone()));
         if record.entry.is_some() {
             self.entry_due.remove(&(record.retain_until(), record.replay_key.clone()));
+        }
+        if let Some(delivery) = &record.local_delivery {
+            let remove_sender = if let Some(by_envelope) =
+                self.local_delivery_by_sender_envelope.get_mut(&delivery.sender_root_commitment)
+            {
+                if by_envelope
+                    .get(&delivery.envelope_id)
+                    .is_some_and(|indexed| indexed.replay_key == record.replay_key)
+                {
+                    by_envelope.remove(&delivery.envelope_id);
+                }
+                by_envelope.is_empty()
+            } else {
+                false
+            };
+            if remove_sender {
+                self.local_delivery_by_sender_envelope.remove(&delivery.sender_root_commitment);
+            }
         }
     }
 
@@ -369,9 +405,7 @@ impl RouterWalState {
             }
             self.replay_due.pop_first();
             if let Some(record) = self.submissions_by_replay_key.remove(&key) {
-                if record.entry.is_some() {
-                    self.entry_due.remove(&(record.retain_until(), key));
-                }
+                self.unindex(&record);
                 removed += 1;
             }
         }
@@ -387,6 +421,22 @@ impl RouterWalState {
             }
         }
         removed
+    }
+
+    fn has_local_delivery_envelope(
+        &self,
+        sender_root_commitment: &str,
+        envelope_id: &str,
+        target_delivery_id: &str,
+        now: i64,
+    ) -> bool {
+        self.local_delivery_by_sender_envelope
+            .get(sender_root_commitment)
+            .and_then(|by_envelope| by_envelope.get(envelope_id))
+            .is_some_and(|delivery| {
+                delivery.target_delivery_id == target_delivery_id
+                    && delivery.replay_expires_at > now
+            })
     }
 
     fn due_count(&self, now: i64) -> usize {
@@ -560,6 +610,24 @@ impl RouterWalStore {
                     .collect()
             },
         )
+    }
+
+    #[must_use]
+    pub fn has_local_delivery_envelope(
+        &self,
+        sender_root_commitment: &str,
+        envelope_id: &str,
+        target_delivery_id: &str,
+        now: i64,
+    ) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state.has_local_delivery_envelope(
+                sender_root_commitment,
+                envelope_id,
+                target_delivery_id,
+                now,
+            )
+        })
     }
 
     #[must_use]
@@ -1342,6 +1410,54 @@ mod tests {
     use super::*;
     use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
     use std::sync::Barrier;
+
+    #[test]
+    fn local_delivery_index_is_keyed_rebuilt_and_pruned_without_submission_scan() {
+        let mut state = RouterWalState::default();
+        for index in 0..10_000_u64 {
+            state.apply(
+                RouterWalPayload::Submission {
+                    replay_key: format!("unrelated-replay-{index}"),
+                    replay_expires_at: 200,
+                    entry: None,
+                    accepted_at: Some(100),
+                    local_delivery: None,
+                },
+                RouterWalRecordLocation { segment_id: 0, offset: index, len: 1 },
+            );
+        }
+        state.apply(
+            RouterWalPayload::Submission {
+                replay_key: "indexed-replay".to_owned(),
+                replay_expires_at: 200,
+                entry: None,
+                accepted_at: Some(100),
+                local_delivery: Some(RouterWalLocalDelivery {
+                    sender_root_commitment: "sender-root".to_owned(),
+                    envelope_id: "indexed-envelope".to_owned(),
+                    target_delivery_id: "indexed-target".to_owned(),
+                }),
+            },
+            RouterWalRecordLocation { segment_id: 0, offset: 10_001, len: 1 },
+        );
+
+        assert_eq!(state.submissions_by_replay_key.len(), 10_001);
+        assert_eq!(state.local_delivery_by_sender_envelope.len(), 1);
+        assert!(state.has_local_delivery_envelope(
+            "sender-root",
+            "indexed-envelope",
+            "indexed-target",
+            199,
+        ));
+        assert!(!state.has_local_delivery_envelope(
+            "other-root",
+            "indexed-envelope",
+            "indexed-target",
+            199,
+        ));
+        assert_eq!(state.prune(201), 10_001);
+        assert!(state.local_delivery_by_sender_envelope.is_empty());
+    }
 
     #[test]
     fn router_wal_recovers_submission_and_truncates_bad_tail()

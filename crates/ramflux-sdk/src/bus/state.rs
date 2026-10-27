@@ -277,6 +277,7 @@ impl LocalBusAccountState {
                 .client
                 .gateway_cursor(&target_delivery_id)?
                 .max(self.client.gateway_receive_cursor(&target_delivery_id)?);
+            let mut restored_resume_checkpoint = false;
             let connected = if let Some(engine) = self.engine.as_mut() {
                 gateway_session_timeout(
                     "gateway ensure live",
@@ -286,15 +287,7 @@ impl LocalBusAccountState {
             } else {
                 let mut config = self.gateway_config.clone();
                 config.last_seen_inbox_seq = last_seen_inbox_seq;
-                if let Some(checkpoint) =
-                    self.client.projection_checkpoint(Self::GATEWAY_RESUME_CHECKPOINT)?
-                {
-                    let persisted: PersistedGatewayResume = serde_json::from_str(&checkpoint)?;
-                    config.previous_session_id = persisted.previous_session_id;
-                    config.resume_token = persisted.resume_token;
-                    config.last_seen_inbox_seq =
-                        config.last_seen_inbox_seq.max(persisted.last_seen_inbox_seq);
-                }
+                restored_resume_checkpoint = self.restore_gateway_resume_checkpoint(&mut config)?;
                 if config.device_branch.is_none()
                     && let Some(branch) = self.client.device_branch.as_ref()
                     && branch.principal_id == config.principal_id
@@ -313,6 +306,9 @@ impl LocalBusAccountState {
                 Ok(())
             };
             connected?;
+            if restored_resume_checkpoint {
+                self.client.set_projection_checkpoint(Self::GATEWAY_RESUME_CHECKPOINT, "")?;
+            }
             self.persist_push_route_seq();
             if self.gateway_config.push_route_clear_pending {
                 self.forget_confirmed_push_clear();
@@ -331,6 +327,25 @@ impl LocalBusAccountState {
     pub(crate) async fn take_live_engine(&mut self) -> Result<GatewaySessionEngine, SdkError> {
         self.ensure_gateway_live().await?;
         self.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)
+    }
+
+    fn restore_gateway_resume_checkpoint(
+        &self,
+        config: &mut GatewaySessionConfig,
+    ) -> Result<bool, SdkError> {
+        let Some(checkpoint) =
+            self.client.projection_checkpoint(Self::GATEWAY_RESUME_CHECKPOINT)?
+        else {
+            return Ok(false);
+        };
+        if checkpoint.is_empty() {
+            return Ok(false);
+        }
+        let persisted: PersistedGatewayResume = serde_json::from_str(&checkpoint)?;
+        config.previous_session_id = persisted.previous_session_id;
+        config.resume_token = persisted.resume_token;
+        config.last_seen_inbox_seq = config.last_seen_inbox_seq.max(persisted.last_seen_inbox_seq);
+        Ok(true)
     }
 
     pub(crate) fn put_engine(&mut self, engine: GatewaySessionEngine) {

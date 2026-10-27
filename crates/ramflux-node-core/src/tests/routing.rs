@@ -871,6 +871,77 @@ fn blocked_federation_forward_does_not_hold_submission_shard_lock()
     assert!(matches!(holder_outcome, RouterSubmitOutcome::RejectedHomeNodeMigrated(_)));
     holder.join().map_err(|_| "holder panicked")?;
     other.join().map_err(|_| "unrelated submit panicked")?;
+
+    assert_forwarding_reservation_cleanup(
+        &router,
+        &source,
+        &request.target_delivery_id,
+        submit_now,
+    )?;
+    Ok(())
+}
+
+fn assert_forwarding_reservation_cleanup(
+    router: &RouterCore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    target_delivery_id: &str,
+    submit_now: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut dropped =
+        envelope("env_forward_drop_guard", target_delivery_id, DeliveryClass::OpaqueEvent);
+    dropped.created_at = submit_now;
+    let RouterForwardPreparation::Forward(dropped_reservation) = router
+        .prepare_envelope_with_home_node_forward_at(
+            source,
+            dropped.clone(),
+            submit_now,
+            RouterEnvelopeOrigin::Gateway,
+            1,
+        )
+    else {
+        return Err("expected dropped forward reservation".into());
+    };
+    drop(dropped_reservation);
+    let RouterForwardPreparation::Forward(retry_after_drop) = router
+        .prepare_envelope_with_home_node_forward_at(
+            source,
+            dropped,
+            submit_now,
+            RouterEnvelopeOrigin::Gateway,
+            1,
+        )
+    else {
+        return Err("drop guard did not release forward reservation".into());
+    };
+    drop(retry_after_drop);
+
+    let mut expired =
+        envelope("env_forward_expired_reservation", target_delivery_id, DeliveryClass::OpaqueEvent);
+    expired.created_at = submit_now;
+    let RouterForwardPreparation::Forward(lost_reservation) = router
+        .prepare_envelope_with_home_node_forward_at(
+            source,
+            expired.clone(),
+            submit_now,
+            RouterEnvelopeOrigin::Gateway,
+            1,
+        )
+    else {
+        return Err("expected forward reservation to expire".into());
+    };
+    std::mem::forget(lost_reservation);
+    let RouterForwardPreparation::Forward(reclaimed) = router
+        .prepare_envelope_with_home_node_forward_at(
+            source,
+            expired,
+            submit_now + 1,
+            RouterEnvelopeOrigin::Gateway,
+            1,
+        )
+    else {
+        return Err("expired forward reservation was not reclaimed".into());
+    };
+    drop(reclaimed);
     Ok(())
 }
 
