@@ -2508,6 +2508,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "compio",
+ "ed25519-dalek",
  "quinn",
  "ramflux-crypto",
  "ramflux-node-core",
@@ -2520,6 +2521,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -2529,6 +2531,7 @@ dependencies = [
  "aes-gcm",
  "arc-swap",
  "crc32fast",
+ "ed25519-dalek",
  "hmac",
  "postcard",
  "ramflux-crypto",
@@ -2655,6 +2658,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
 ]

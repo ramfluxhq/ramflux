@@ -55,7 +55,7 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          cargo build --locked --release --target "${{ matrix.target }}" --workspace
+          RAMFLUX_PRODUCTION_BUILD=1 cargo build --locked --release --target "${{ matrix.target }}" --workspace
 
       - name: Package
         shell: bash

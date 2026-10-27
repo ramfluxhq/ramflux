@@ -263,7 +263,7 @@ async fn run_gateway_tcp_tls(
                 remote_addr,
             };
             let stream = ramflux_transport::GatewayTcpTlsStream::Server(tls_stream);
-            if let Err(error) = handle_gateway_tcp_tls_stream(stream, context).await {
+            if let Err(error) = Box::pin(handle_gateway_tcp_tls_stream(stream, context)).await {
                 tracing::warn!(%error, %remote_addr, "gateway TCP-TLS stream failed");
             }
         });

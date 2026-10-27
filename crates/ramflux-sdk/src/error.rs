@@ -7,7 +7,9 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
-    #[error("born-v3 networking is pending implementation; legacy proofs are forbidden")]
+    #[error("custody networking refused: {0}")]
+    CustodyNetwork(#[from] ramflux_protocol::custody::CustodyRefusal),
+    #[error("born-v3 network registration is pending; legacy proofs are forbidden")]
     NetworkingPending,
     #[error("born-v3 cannot accept legacy authority")]
     CustodyModeDowngrade,

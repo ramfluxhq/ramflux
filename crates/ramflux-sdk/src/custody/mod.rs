@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Local-only born-v3 setup. Live registration is intentionally unavailable.
+//! Born-v3 setup and explicit channel-bound networking; legacy authentication stays separate.
 mod bus;
 mod ceremony;
 pub use bus::{ConfirmedAccount, CustodyBusClient};
@@ -10,7 +10,7 @@ mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
 pub use store::{BornAccount, CreationState, load_account};
 pub(crate) use store::{account_exists, list_accounts};
-pub use vault::{NativePrimaryVault, PrimaryVault};
+pub use vault::{BranchCredentials, NativePrimaryVault, PrimaryVault};
 
 use crate::SdkError;
 fn invalid() -> SdkError {
@@ -53,11 +53,15 @@ impl crate::RamfluxClient {
         self.identity_root = None;
         self.device_branch = None;
         self.born_v3_account = Some(Box::new(account));
-        Ok(CreationState::NetworkingPending)
+        Ok(self.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?.state())
     }
     pub(crate) fn require_legacy_networking(&self) -> Result<(), SdkError> {
-        if self.born_v3_account.is_some() {
-            return Err(SdkError::NetworkingPending);
+        if let Some(account) = &self.born_v3_account {
+            return Err(if account.state() == CreationState::NetworkingPending {
+                SdkError::NetworkingPending
+            } else {
+                SdkError::CustodyModeDowngrade
+            });
         }
         Ok(())
     }
@@ -65,3 +69,20 @@ impl crate::RamfluxClient {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(any(test, feature = "itest-memory-vault"))]
+mod memory_vault;
+#[cfg(feature = "itest-memory-vault")]
+pub use memory_vault::MemoryPrimaryVault;
+
+mod network;
+mod node_pins;
+pub use network::{CustodyConnection, CustodyNetworkConfig};
+
+mod dm;
+pub use dm::CustodyDm;
+
+#[cfg(test)]
+mod network_tests;
+
+mod discovery;

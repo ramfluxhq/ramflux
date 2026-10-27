@@ -12,6 +12,8 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 default = []
+# Integration fixture only; production provenance forbids this feature.
+itest-memory-vault = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
 c-abi = []

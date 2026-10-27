@@ -8,7 +8,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-RUN cargo build --locked --release --bin "${BIN}"
+RUN RAMFLUX_PRODUCTION_BUILD=1 cargo build --locked --release --bin "${BIN}"
 
 FROM debian:trixie-slim AS source-runtime
 

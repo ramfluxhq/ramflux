@@ -29,6 +29,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod custody;
 mod expiry_index;
 mod retention;
 
