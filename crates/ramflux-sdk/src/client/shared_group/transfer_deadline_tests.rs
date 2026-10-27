@@ -254,3 +254,29 @@ fn r8_restored_or_merged_transfer_backups_never_freeze_group_changes() -> Result
     }
     f.close()
 }
+
+#[test]
+fn a_poisoned_deadline_item_does_not_block_healthy_lease_release() -> Result<(), SdkError> {
+    for prefix in [PENDING, LEASE, SEND_PREFIX] {
+        let f = Fixture::new("poisoned-transfer-deadline")?;
+        f.laptop.reserve_group_transfer(&f.probe, &f.base)?;
+        let id = format!("{prefix}!poison");
+        let poison = serde_json::json!({"invalid":"retryable deadline item"});
+        f.laptop.account_db()?.persist_actor_state(&id, &poison)?;
+        for _ in 0..2 {
+            f.laptop.advance_group_transfer_deadlines(f.probe.expires_at + 301)?;
+            f.laptop.check_group_transfer_lease("group", None)?;
+            assert_eq!(
+                f.laptop.account_db()?.load_actor_state::<serde_json::Value>(&id)?,
+                Some(poison.clone())
+            );
+        }
+        f.laptop.shared_group_change(
+            "group",
+            "target-laptop",
+            GroupStateChange::SetName { name: "healthy after poisoned deadline".into() },
+        )?;
+        f.close()?;
+    }
+    Ok(())
+}
