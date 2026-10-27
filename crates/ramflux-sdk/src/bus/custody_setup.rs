@@ -74,6 +74,10 @@ pub(super) async fn respond(
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+    if request.request_id.len() > crate::custody::SETUP_REQUEST_ID_BYTES {
+        *ceremony = None;
+        return Err(SdkError::CustodySetupInvalid);
+    }
     let result = apply(request, config, ceremony).await;
     // Every failed request consumes the pending ceremony, without word-level feedback.
     let result = match result {
@@ -83,16 +87,17 @@ pub(super) async fn respond(
             ResultBody::Error { code: super::io::local_bus_error_code(&error) }
         }
     };
-    let mut bytes = Zeroizing::new(Vec::with_capacity(4096));
+    let mut bytes = crate::custody::SecretBuffer::new(crate::custody::SETUP_FRAME_BYTES);
     serde_json::to_writer(
-        &mut *bytes,
+        &mut bytes,
         &Reply {
             protocol: "ramflux.local_bus.custody.v1",
             request_id: &request.request_id,
             result,
         },
-    )?;
-    Ok(bytes)
+    )
+    .map_err(|_| SdkError::CustodySetupInvalid)?;
+    Ok(bytes.finish())
 }
 fn empty(request: &LocalBusFrame) -> Result<(), SdkError> {
     if request.body.as_object().is_none_or(|map| !map.is_empty()) {

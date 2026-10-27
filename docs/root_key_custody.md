@@ -166,6 +166,16 @@ wrapped capsule or backup. A new phrase derives a new master: there is no
 same-identity "rotate forgotten phrase" operation. Copies of the same user-held
 phrase are the same authority, not revocable recovery credentials.
 
+The stage-1 Rust implementation preallocates its normalization, phrase-display
+and setup-frame buffers so secret-bearing writes cannot reallocate. Owned buffers
+use zeroizing wrappers. Residual library-boundary copies remain: BIP39
+`to_entropy_array` returns an entropy array by value before it enters a zeroizing
+wrapper; X25519 `StaticSecret::from(*seed)` copies its input seed; HKDF 0.12 retains
+an internal PRK that it does not zeroize on drop; and serde_json may allocate a
+non-zeroizing deserializer scratch buffer for escaped confirmation words. These
+copies are bounded and short-lived but are not claimed to be synchronously scrubbed.
+Setup replies serialize directly into one fixed zeroizing output buffer.
+
 Release builds use `panic = "abort"`, so a panic does not unwind and cannot run
 zeroizing destructors. Keep every phrase, entropy and seed buffer scoped to the
 shortest possible ceremony step, disable core dumps and secret-bearing crash
@@ -219,6 +229,10 @@ range and raises the takeover alert until a higher range is certified. Accept
 **any** higher range, not only the next integer. Recovery chooses the maximum
 observed range plus one, querying all available trusted checkpoints, and retries
 higher on conflict. A primary cannot spend revisions outside its certified range.
+Clearing a same-range fence requires an explicit user-started recovery ceremony
+with the recovery phrase that certifies a higher range; no primary-only, network,
+operator-file-edit or automatic startup action clears it. If the phrase is lost,
+the fenced identity cannot resume management and the user must create a new identity.
 Migration starts at v3 range 1, independently of legacy epochs: v3 ranks above
 all legacy records regardless of their numeric epoch. Exhaustion is a typed
 refusal, never wraparound. No globally latest range can be proved against
@@ -783,8 +797,10 @@ Trusted local frontends use the SDK's exclusive `CustodyBusClient` connection:
    chosen uniformly from 1–24.
 4. `account.custody.confirm` accepts one three-word attempt in challenge order.
    A wrong answer cancels the entire ceremony without per-word feedback.
-   `account.custody.cancel`, disconnect, expiry or any setup error also destroys
-   pending phrase state. Ceremonies expire after five minutes of monotonic time.
+   `account.custody.cancel`, a disconnect before confirmation starts, expiry or any
+   setup error also destroys pending phrase state. Once accepted confirmation has
+   started its blocking vault/persistence job, a client disconnect does not cancel
+   the durable commit. Ceremonies expire after five minutes of monotonic time.
 
 The trusted frontend must keep the display out of logs, shell history, ordinary
 bus diagnostics, analytics and crash reporting. It owns and erases the returned
@@ -792,6 +808,8 @@ bus diagnostics, analytics and crash reporting. It owns and erases the returned
 printing flow or user interface in this stage. Secret transport buffers and
 queued inbound setup values erase on drop, including cancellation. No phrase,
 entropy or master is stored in an account manifest, database, keychain or backup.
+Setup request identifiers are limited to 128 bytes before any secret-bearing body
+is processed, and the complete secret frame is limited to 4096 bytes.
 
 The native primary provider currently supports macOS's protected OS credential
 keychain with synchronization explicitly disabled for reads and writes, and
@@ -812,11 +830,16 @@ Public authority and the signed publication record are retained in
 `custody_accounts/<local_account_id>/authority.json`, together with the immutable
 born-v3 mode latch and authenticated head/certificate/revocation pins. Public
 reads do not unlock the primary signer. The account index arbitrates concurrent
-legacy/new creation. Failed writes or vault operations can leave an incomplete
-reservation; keep it blocked for reconciliation rather than retrying the id as a
-legacy account. An existing reservation continues to reject legacy sessions even
-when its public authority file is incomplete. Primary credentials and this
-reserved setup state are not exported through legacy account/data backup APIs.
+legacy/new creation. Custody uses an insert-only index reservation and rechecks
+the legacy manifest immediately before public authority persistence; it never
+replaces a row won by concurrent legacy creation. A startup marker with neither
+an index reservation nor public authority is an interrupted pre-reservation step
+and is removed with a typed operator-visible reason so the id can be retried.
+Failed writes or vault operations after reservation keep the id blocked for
+reconciliation rather than retrying it as a legacy account. An existing reservation
+continues to reject legacy sessions even when its public authority file is incomplete.
+Primary credentials and this reserved setup state are not exported through legacy
+account/data backup APIs.
 The local signed record is ready for a later publication implementation; its
 presence is not evidence of remote acceptance, account networking or live custody
 rollout. The proposed legacy public binding remains pending owner confirmation.

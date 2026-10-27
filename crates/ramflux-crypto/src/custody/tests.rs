@@ -261,6 +261,41 @@ fn durable_mode_head_conflict_and_revocation_pins_survive_reload() -> Result {
 }
 
 #[test]
+fn legacy_pin_evidence_must_match_the_pinned_hash_and_conflict_range() -> Result {
+    let (_, primary, record) = fixture()?;
+    let now = record.body.issued_at;
+    let verified = verify_record(&record, now, None, None)?;
+    let mut pins = AuthorityPins::default();
+    pins.observe(&verified)?;
+    let accepted = primary.revoke_device(&verified, "primary", now + 1)?;
+    let accepted_verified = verify_record(&accepted, now + 1, None, None)?;
+    pins.observe(&accepted_verified)?;
+
+    let mut stored = serde_json::to_value(&pins)?;
+    let account =
+        stored["accounts"].get_mut(&record.body.account_anchor).ok_or("stored account")?;
+    account.as_object_mut().ok_or("stored account object")?.remove("current_record");
+    account.as_object_mut().ok_or("stored account object")?.remove("range_records");
+    let mut legacy: AuthorityPins = serde_json::from_value(stored)?;
+
+    let mut conflict = accepted.body.clone();
+    conflict.profile.display_name = "Conflicting name".into();
+    let conflict = primary.sign_record(conflict)?;
+    let conflict = verify_record(&conflict, now + 1, None, None)?;
+    assert!(legacy.observe_with_previous(&conflict, Some(&record)).is_err());
+    assert!(legacy.conflict_evidence(&record.body.account_anchor, 1).is_none());
+    let PinOutcome::Fenced(_) =
+        legacy.observe_with_previous(&conflict, Some(accepted_verified.envelope()))?
+    else {
+        return Err("same-range accepted evidence did not fence".into());
+    };
+    let evidence = legacy.conflict_evidence(&record.body.account_anchor, 1).ok_or("evidence")?;
+    assert_eq!(&evidence.accepted, accepted_verified.envelope());
+    assert_eq!(&evidence.conflicting, conflict.envelope());
+    Ok(())
+}
+
+#[test]
 fn full_roster_and_reserved_enrollment_space_do_not_block_in_place_revocation() -> Result {
     let (_, primary, mut record) = fixture()?;
     let mut tombstone = record.body.devices[0].clone();
