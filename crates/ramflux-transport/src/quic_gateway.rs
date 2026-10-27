@@ -131,10 +131,16 @@ impl QuicGatewayClient {
         endpoint.set_default_client_config(quic_gateway_client_config(ca_cert)?);
         let connecting =
             endpoint.connect(peer_addr, server_name).map_err(crate::quic_errors::connect)?;
-        let connection = tokio::time::timeout(timeout, connecting)
-            .await
-            .map_err(|error| TransportError::Quic(format!("{error}; phase=handshake peer={peer_addr} server_name={server_name}; detail={error:?}")))?
-            .map_err(|error| handshake_error(&error, peer_addr, server_name))?;
+        // Keep the handshake future bounded when embedded in larger SDK operations.
+        let connection = match Box::pin(tokio::time::timeout(timeout, connecting)).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => return Err(handshake_error(&error, peer_addr, server_name)),
+            Err(error) => {
+                return Err(TransportError::Quic(format!(
+                    "{error}; phase=handshake peer={peer_addr} server_name={server_name}; detail={error:?}"
+                )));
+            }
+        };
         Ok(Self { _endpoint: endpoint, connection, timeout })
     }
 
@@ -163,7 +169,7 @@ impl QuicGatewayClient {
         let connecting = endpoint
             .connect(peer_addr, server_name)
             .map_err(|error| QuicConnectPhase::Setup(error.to_string()))?;
-        match tokio::time::timeout(handshake_timeout, connecting).await {
+        match Box::pin(tokio::time::timeout(handshake_timeout, connecting)).await {
             Err(_elapsed) => Err(QuicConnectPhase::HandshakeTimeout),
             Ok(Err(error)) => match handshake_error(&error, peer_addr, server_name) {
                 TransportError::Tls(message) => Err(QuicConnectPhase::HandshakeSecurity(message)),
