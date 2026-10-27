@@ -33,7 +33,13 @@ impl HomeMigrationService {
             let reply = if status_only && item_now <= deadline.saturating_add(SKEW_SECONDS) {
                 None
             } else {
-                self.exchange_courier(&op, status_only, item_now).ok()
+                self.exchange_courier(
+                    &op,
+                    status_only,
+                    item_now,
+                    std::time::Instant::now() + std::time::Duration::from_secs(10),
+                )
+                .ok()
             };
             let observed = now.saturating_add(tick_started.elapsed().as_secs());
             let applied = match reply {
@@ -64,6 +70,7 @@ impl HomeMigrationService {
         op: &MigrationOperation,
         status_only: bool,
         now: u64,
+        network_deadline: std::time::Instant,
     ) -> Result<MigrationPeerReply, NodeCoreError> {
         let deadline = op
             .seal
@@ -74,7 +81,7 @@ impl HomeMigrationService {
             return Err(NodeCoreError::HomeMigration(Refusal::CommitExpired));
         }
         let (source, pinned) = op.base.record.home();
-        if self.mesh.peer_key(source)? != pinned {
+        if self.mesh.peer_key(source, network_deadline)? != pinned {
             return Err(NodeCoreError::HomeMigration(Refusal::PinMismatch));
         }
         let request = if status_only {
@@ -87,6 +94,6 @@ impl HomeMigrationService {
         } else {
             self.node.peer_commit_call(op.sealed_evidence()?, now)?
         };
-        self.mesh.exchange(source, &request)
+        self.mesh.exchange(source, &request, network_deadline)
     }
 }

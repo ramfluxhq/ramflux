@@ -25,8 +25,24 @@ impl RouterCore {
         call: &MigrationPeerCall,
         now: u64,
     ) -> Result<MigrationPeerReply, NodeCoreError> {
+        let _verification = match node.acquire_migration_verification() {
+            Ok(permit) => permit,
+            Err(NodeCoreError::HomeMigration(reason)) => {
+                return Ok(MigrationPeerReply::Refused(reason));
+            }
+            Err(error) => return Err(error),
+        };
+        self.dispatch_migration_peer(store, node, peer, call, now)
+    }
+    pub(crate) fn dispatch_migration_peer(
+        &self,
+        store: &RouterRedbStore,
+        node: &MigrationNode,
+        peer: MigrationPeer<'_>,
+        call: &MigrationPeerCall,
+        now: u64,
+    ) -> Result<MigrationPeerReply, NodeCoreError> {
         let result = (|| {
-            let _verification = node.acquire_migration_verification()?;
             call.verify(peer, node.node_id(), now)?;
             node.charge_migration_read(&format!("peer/{}", peer.node_id), now)?;
             match call {

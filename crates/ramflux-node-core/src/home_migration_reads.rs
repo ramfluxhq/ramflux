@@ -29,12 +29,8 @@ impl HomeMigrationService {
                     &request.control.body.requester.account_anchor,
                     scope.now,
                 )?;
-                let result = self.latest_migration_home(
-                    scope.store,
-                    payload,
-                    &request.control.body.migration_id,
-                    scope.now,
-                )?;
+                let result =
+                    self.latest_migration_home(scope, payload, &request.control.body.migration_id)?;
                 MigrationReply { resolve_result: Some(result), ..MigrationReply::default() }
                     .sign(&self.node, &request.control, None, scope.now)
                     .map(Some)
@@ -121,7 +117,7 @@ impl HomeMigrationService {
             });
         }
         let latest = self.latest_migration_home(
-            scope.store,
+            scope,
             &ResolvePayload {
                 target_anchor: anchor.clone(),
                 after_home_hash: None,
@@ -129,17 +125,16 @@ impl HomeMigrationService {
                 old_node_hint: None,
             },
             &request.control.body.migration_id,
-            scope.now,
         )?;
         let (current, pin) = latest.home.record.home();
-        if self.mesh.peer_key(current)? != pin {
+        if self.mesh.peer_key(current, scope.deadline)? != pin {
             return Err(failure(Refusal::PinMismatch));
         }
         let query = self.node.peer_read_call(current, request.control.clone(), scope.now)?;
         let MigrationPeerCall::AuthorizeRead { authentication, .. } = &query else {
             return Err(failure(Refusal::EvidenceRequired));
         };
-        let proof = match self.mesh.exchange(current, &query)? {
+        let proof = match self.mesh.exchange(current, &query, scope.deadline)? {
             MigrationPeerReply::Authorized(proof) => proof,
             MigrationPeerReply::Refused(reason) => return Err(failure(reason)),
             _ => return Err(failure(Refusal::EvidenceRequired)),

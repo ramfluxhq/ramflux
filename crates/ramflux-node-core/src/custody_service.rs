@@ -160,6 +160,42 @@ impl CustodyService {
         self.migration = Some(service);
         Ok(self)
     }
+    /// Dispatch only the local federation service's authenticated peer envelope.
+    /// The peer key is reloaded from local admission policy, never accepted from request JSON.
+    /// # Errors
+    /// Returns local storage/transport failures while preserving expected protocol refusals.
+    pub fn home_migration_peer(
+        &self,
+        router: &crate::RouterCore,
+        store: &crate::RouterRedbStore,
+        request: &crate::MigrationPeerRequest,
+        now: u64,
+    ) -> Result<crate::MigrationPeerReply, crate::NodeCoreError> {
+        let received = std::time::Instant::now();
+        let result = (|| {
+            let service = self.migration.as_ref().ok_or(crate::NodeCoreError::HomeMigration(
+                ramflux_protocol::home_migration::Refusal::PeeringUnavailable,
+            ))?;
+            let deadline = crate::migration_hop_deadline(request.budget_ms, received)?;
+            let _permit = service.node.acquire_migration_verification()?;
+            let peer = request.call.claimed_peer();
+            let key = service.mesh.peer_key(peer, deadline)?;
+            crate::migration_hop_budget(deadline)?;
+            router.dispatch_migration_peer(
+                store,
+                &service.node,
+                crate::MigrationPeer { node_id: peer, node_key: &key },
+                &request.call,
+                now.saturating_add(received.elapsed().as_secs()),
+            )
+        })();
+        match result {
+            Err(crate::NodeCoreError::HomeMigration(reason)) => {
+                Ok(crate::MigrationPeerReply::Refused(reason))
+            }
+            other => other,
+        }
+    }
     /// Compare a separately provisioned public listener certificate with signed metadata.
     #[must_use]
     pub fn accepts_public_certificate(&self, hash: &str) -> bool {

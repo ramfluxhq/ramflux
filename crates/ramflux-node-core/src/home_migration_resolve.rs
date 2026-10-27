@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Read-only successor resolution preserves the caller's ancestry floor without importing live state.
-use crate::{HomeMigrationService, MigrationPeerReply, NodeCoreError, RouterRedbStore};
+use crate::{HomeMigrationService, MigrationPeerReply, NodeCoreError};
 use ramflux_crypto::home_migration as crypto;
 use ramflux_protocol::home_migration::{
     HomeRecord, MAX_CHAIN_RECORDS, MAX_RESOLVE_BYTES, Refusal, ResolvePayload, ResolveResult,
@@ -17,11 +17,12 @@ fn wire(error: impl std::fmt::Display) -> NodeCoreError {
 impl HomeMigrationService {
     pub(crate) fn latest_migration_home(
         &self,
-        store: &RouterRedbStore,
+        scope: &super::home_migration_service::MigrationExecution<'_>,
         payload: &ResolvePayload,
         id: &str,
-        now: u64,
     ) -> Result<ResolveResult, NodeCoreError> {
+        let store = scope.store;
+        let now = scope.now;
         if payload.limit == 0 || payload.limit > MAX_CHAIN_RECORDS as u64 {
             return Err(failure(Refusal::HomeCheckpointRequired));
         }
@@ -44,7 +45,7 @@ impl HomeMigrationService {
         if peer == self.node.node_id() {
             return Err(failure(Refusal::HomeGenesisRequired));
         }
-        let pin = self.mesh.peer_key(peer)?;
+        let pin = self.mesh.peer_key(peer, scope.deadline)?;
         if known.as_ref().is_some_and(|k| k.record.home().1 != pin) {
             return Err(failure(Refusal::PinMismatch));
         }
@@ -59,7 +60,7 @@ impl HomeMigrationService {
             old_node_hint: None,
         };
         let call = self.node.peer_resolve_call(peer, remote, id, now)?;
-        let suffix = match self.mesh.exchange(peer, &call)? {
+        let suffix = match self.mesh.exchange(peer, &call, scope.deadline)? {
             MigrationPeerReply::Resolved(result) => *result,
             MigrationPeerReply::Refused(reason) => return Err(failure(reason)),
             _ => return Err(failure(Refusal::EvidenceRequired)),

@@ -82,7 +82,7 @@ impl HomeMigrationService {
         // The client cannot replace B's stored seal with another transport receipt.
         // Every failed exchange leaves the seal/courier durable for restart recovery.
         if op.phase != ramflux_protocol::home_migration::Phase::Active {
-            let reply = self.exchange_courier(&op, false, scope.now)?;
+            let reply = self.exchange_courier(&op, false, scope.now, scope.deadline)?;
             match reply {
                 MigrationPeerReply::Committed(record) => scope.store.activate_home_migration(
                     &self.node,

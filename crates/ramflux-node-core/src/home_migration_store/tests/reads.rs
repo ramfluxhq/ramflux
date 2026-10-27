@@ -15,7 +15,7 @@ use ramflux_protocol::{
 use std::{collections::BTreeMap, sync::Arc};
 struct Mesh(BTreeMap<String, Arc<TestNode>>);
 impl HomeMigrationMesh for Mesh {
-    fn peer_key(&self, peer: &str) -> Result<String, NodeCoreError> {
+    fn peer_key(&self, peer: &str, _deadline: std::time::Instant) -> Result<String, NodeCoreError> {
         self.0
             .get(peer)
             .map(|n| n.node.public_key().to_owned())
@@ -25,9 +25,10 @@ impl HomeMigrationMesh for Mesh {
         &self,
         peer: &str,
         call: &MigrationPeerCall,
+        deadline: std::time::Instant,
     ) -> Result<MigrationPeerReply, NodeCoreError> {
         let node = self.0.get(peer).ok_or_else(|| refusal(Refusal::PeeringUnavailable))?;
-        let key = self.peer_key(call.claimed_peer())?;
+        let key = self.peer_key(call.claimed_peer(), deadline)?;
         let now = match call {
             MigrationPeerCall::Attest { authentication, .. }
             | MigrationPeerCall::AuthorizeRead { authentication, .. }

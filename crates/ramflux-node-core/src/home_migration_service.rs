@@ -11,7 +11,7 @@ pub trait HomeMigrationMesh: Send + Sync {
     /// Obtain an independently admitted peer's node signing key.
     /// # Errors
     /// Rejects unknown, removed or unavailable peers.
-    fn peer_key(&self, node: &str) -> Result<String, NodeCoreError>;
+    fn peer_key(&self, node: &str, _deadline: std::time::Instant) -> Result<String, NodeCoreError>;
     /// Exchange a typed request over the admitted peer's pinned-CA mesh channel.
     /// # Errors
     /// Returns a retryable peer failure without inferring commit or noncommit.
@@ -19,6 +19,7 @@ pub trait HomeMigrationMesh: Send + Sync {
         &self,
         _node: &str,
         _request: &crate::MigrationPeerCall,
+        _deadline: std::time::Instant,
     ) -> Result<crate::MigrationPeerReply, NodeCoreError> {
         Err(NodeCoreError::HomeMigration(
             ramflux_protocol::home_migration::Refusal::PeeringUnavailable,
@@ -36,6 +37,7 @@ pub(crate) struct MigrationExecution<'a> {
     pub caller: &'a MigrationCaller,
     pub authority: &'a ramflux_crypto::custody::VerifiedRecord,
     pub now: u64,
+    pub deadline: std::time::Instant,
 }
 pub struct HomeMigrationService {
     pub(crate) node: Arc<MigrationNode>,
@@ -59,6 +61,7 @@ impl HomeMigrationService {
             custody::CustodyRefusal,
             home_migration::{Action, ActionPayload, AttestRequest, Refusal},
         };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let result = (|| {
             let _verification = self.node.acquire_migration_verification()?;
             let now = store.migration_clock_floor(now)?;
@@ -81,8 +84,14 @@ impl HomeMigrationService {
             };
             ramflux_crypto::home_migration::verify_actor(&request.control, &authority, now)
                 .map_err(|_| NodeCoreError::HomeMigration(Refusal::AuthorityUpdateRequired))?;
-            let scope =
-                MigrationExecution { router, store, caller: &caller, authority: &authority, now };
+            let scope = MigrationExecution {
+                router,
+                store,
+                caller: &caller,
+                authority: &authority,
+                now,
+                deadline,
+            };
             match &request.payload {
                 ActionPayload::Attest(payload) => self.attest_owner(
                     &scope,

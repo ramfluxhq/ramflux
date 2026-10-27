@@ -34,7 +34,7 @@ impl HomeMigrationService {
         }
         let home = if source == self.node.node_id() {
             // A direct preflight cannot substitute for B obtaining its own authenticated mesh view.
-            self.mesh.peer_key(&owner.payload.destination_node)?;
+            self.mesh.peer_key(&owner.payload.destination_node, scope.deadline)?;
             router.attest_home_migration(
                 store,
                 &self.node,
@@ -45,10 +45,10 @@ impl HomeMigrationService {
             if owner.payload.destination_node != self.node.node_id() {
                 return Err(failure(Refusal::PinMismatch));
             }
-            let pin = self.mesh.peer_key(source)?;
+            let pin = self.mesh.peer_key(source, scope.deadline)?;
             let call = self.node.peer_attest_call(owner.clone(), now)?;
             let started = std::time::Instant::now();
-            let home = match self.mesh.exchange(source, &call)? {
+            let home = match self.mesh.exchange(source, &call, scope.deadline)? {
                 MigrationPeerReply::Attested(home) => *home,
                 MigrationPeerReply::Refused(reason) => return Err(failure(reason)),
                 _ => return Err(failure(Refusal::EvidenceRequired)),
@@ -77,6 +77,7 @@ impl HomeMigrationService {
             caller,
             authority,
             now,
+            ..
         } = *scope;
         let p = &prepare.body;
         if let Some(existing) = store.migration_operation(
@@ -114,7 +115,7 @@ impl HomeMigrationService {
         {
             return Err(failure(Refusal::AuthorityUpdateRequired));
         }
-        let pin = self.mesh.peer_key(&p.old_node)?;
+        let pin = self.mesh.peer_key(&p.old_node, scope.deadline)?;
         if cached.home.record.home() != (p.old_node.as_str(), pin.as_str()) {
             return Err(failure(Refusal::PinMismatch));
         }
@@ -124,10 +125,15 @@ impl HomeMigrationService {
             now,
         )
         .map_err(|_| failure(Refusal::EvidenceRequired))?;
+        let prepared_node = self.node.for_client_discovery(
+            request.evidence.client_record.as_ref(),
+            &p.discovery_hash,
+            now,
+        )?;
         self.preflight.lock().map_err(wire)?.charge(&p.account_anchor, now)?;
         let offer = router.admit_home_migration(
             store,
-            &self.node,
+            &prepared_node,
             MigrationAdmission {
                 publication: &caller.publication,
                 prepare: PrepareMigration {
