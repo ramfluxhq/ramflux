@@ -5,6 +5,7 @@
 use crate::public_http::{
     FederationPublicHttpContext, handle_public_connection_with_limits, spawn_public_connection,
 };
+use crate::public_source_limits::{PublicSourceLimitConfig, PublicSourceLimits};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
@@ -86,6 +87,13 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
         request_timeout: Duration::from_secs(2),
         ..crate::http_limits::defaults(true)
     };
+    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(
+        64,
+        1_000,
+        1_000,
+        64,
+        Duration::from_secs(30),
+    ));
     let mut clients = Vec::new();
     let mut workers = Vec::new();
     for index in 0..64 {
@@ -98,8 +106,15 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
         }
         let (stream, _) = listener.accept()?;
         workers.push(
-            spawn_public_connection(stream, context.clone(), active.clone(), 64, limits)
-                .ok_or("unexpected connection refusal")?,
+            spawn_public_connection(
+                stream,
+                context.clone(),
+                active.clone(),
+                64,
+                limits,
+                &source_limits,
+            )
+            .ok_or("unexpected connection refusal")?,
         );
         clients.push(client);
     }
@@ -132,8 +147,9 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
     let mut normal = TcpStream::connect(listener.local_addr()?)?;
     normal.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    let worker = spawn_public_connection(stream, context, active.clone(), 64, limits)
-        .ok_or("normal request refused after deadline")?;
+    let worker =
+        spawn_public_connection(stream, context, active.clone(), 64, limits, &source_limits)
+            .ok_or("normal request refused after deadline")?;
     normal.write_all(b"GET /healthz HTTP/1.1\r\n\r\n")?;
     let mut response = String::new();
     normal.read_to_string(&mut response)?;

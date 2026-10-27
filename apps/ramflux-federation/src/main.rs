@@ -19,6 +19,7 @@ mod itest_http;
 mod key_migration;
 mod mesh;
 mod public_http;
+mod public_source_limits;
 mod state;
 #[cfg(test)]
 mod test_certificates;
