@@ -64,6 +64,7 @@ pub fn load_config(
     path: impl AsRef<Path>,
     expected_service_id: &str,
 ) -> Result<NodeServiceConfig, NodeCoreError> {
+    crate::environment::validate_service_environment().map_err(NodeCoreError::Unauthorized)?;
     let path = path.as_ref();
     let contents = fs::read_to_string(path)
         .map_err(|source| NodeCoreError::ConfigRead { path: path.to_path_buf(), source })?;

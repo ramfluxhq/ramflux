@@ -7,7 +7,7 @@ use super::{NodeCoreError, ObjectRelayTombstone, env};
 
 /// Single env override for the relay resident metadata budget (RELAY-MEM-01-A1). The value is the
 /// maximum number of bytes the in-memory chunk-meta + tombstone index (including in-flight
-/// reservations) may charge. Absent or malformed environment input uses the bounded
+/// reservations) may charge. Absent or unexpanded optional input uses the bounded
 /// [`RELAY_METADATA_MAX_BYTES_DEFAULT`]; an explicit `0` remains a startup failure.
 pub const RELAY_METADATA_MAX_BYTES_ENV: &str = "RAMFLUX_RELAY_METADATA_MAX_BYTES";
 /// Default resident metadata budget: 64 MiB. Only the metadata index is resident; chunk ciphertext
@@ -29,21 +29,20 @@ pub(super) fn relay_default_max_bytes() -> u64 {
 /// Resolve an optional environment override without accepting an unexpanded expression.
 ///
 /// # Errors
-/// Returns an error for an explicit zero budget. Unparseable overrides warn and use 64 MiB.
+/// Returns an error for malformed or zero budgets; unresolved optional input selects 64 MiB.
 pub fn relay_metadata_max_bytes_from_env() -> Result<u64, NodeCoreError> {
-    configured_metadata_budget(env::var(RELAY_METADATA_MAX_BYTES_ENV).ok().as_deref())
+    match env::var(RELAY_METADATA_MAX_BYTES_ENV) {
+        Ok(value) => configured_metadata_budget(Some(&value)),
+        Err(std::env::VarError::NotPresent) => configured_metadata_budget(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(NodeCoreError::ItestHttp(format!(
+            "{RELAY_METADATA_MAX_BYTES_ENV} must be a positive integer"
+        ))),
+    }
 }
 
 fn configured_metadata_budget(raw: Option<&str>) -> Result<u64, NodeCoreError> {
     let raw = env::configured_value(RELAY_METADATA_MAX_BYTES_ENV, raw).map(str::trim);
-    match raw {
-        Some(value) if value.parse::<u64>().is_ok() => parse_relay_metadata_max_bytes(Some(value)),
-        Some(_) => {
-            env::warn_invalid(RELAY_METADATA_MAX_BYTES_ENV);
-            parse_relay_metadata_max_bytes(None)
-        }
-        None => parse_relay_metadata_max_bytes(None),
-    }
+    parse_relay_metadata_max_bytes(raw)
 }
 
 /// Pure resident-budget resolver: `None` (unset) yields the 64 MiB default; a positive integer
@@ -57,7 +56,7 @@ pub fn parse_relay_metadata_max_bytes(raw: Option<&str>) -> Result<u64, NodeCore
         Some(value) => {
             value.trim().parse::<u64>().ok().filter(|parsed| *parsed > 0).ok_or_else(|| {
                 NodeCoreError::ItestHttp(format!(
-                    "{RELAY_METADATA_MAX_BYTES_ENV} must be a positive integer, got {value:?}"
+                    "{RELAY_METADATA_MAX_BYTES_ENV} must be a positive integer"
                 ))
             })
         }
@@ -207,23 +206,20 @@ impl RelayStoreOpError {
 mod environment_tests {
     use super::*;
     #[test]
-    fn malformed_optional_budget_uses_the_bounded_default_but_an_explicit_zero_still_fails()
+    fn malformed_budget_is_fatal_while_unexpanded_optional_budget_uses_default()
     -> Result<(), NodeCoreError> {
-        for value in [
-            None,
-            Some(""),
-            Some("invalid"),
-            Some("18446744073709551616"),
-            Some("${RAMFLUX_RELAY_METADATA_MAX_BYTES:-0}"),
-        ] {
+        for value in [None, Some("${RAMFLUX_RELAY_METADATA_MAX_BYTES:-0}")] {
             assert_eq!(configured_metadata_budget(value)?, RELAY_METADATA_MAX_BYTES_DEFAULT);
         }
         assert_eq!(configured_metadata_budget(Some(" 1048576 "))?, 1_048_576);
-        assert!(configured_metadata_budget(Some("0")).is_err());
-        assert!(
-            parse_relay_metadata_max_bytes(Some("invalid")).is_err(),
-            "the strict programmatic validator is unchanged"
-        );
+        for value in ["", "invalid", "18446744073709551616", "0"] {
+            let error = configured_metadata_budget(Some(value));
+            assert!(error.is_err());
+            assert_eq!(
+                error.err().map(|error| error.to_string()),
+                parse_relay_metadata_max_bytes(Some(value)).err().map(|error| error.to_string())
+            );
+        }
         Ok(())
     }
 }

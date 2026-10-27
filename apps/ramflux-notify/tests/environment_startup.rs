@@ -56,7 +56,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn an_unexpanded_optional_provider_path_warns_without_stopping_notify()
+fn an_unexpanded_optional_credential_path_fails_closed_without_its_value()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new()?;
     let literal = "${RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE:-}";
@@ -66,7 +66,7 @@ fn an_unexpanded_optional_provider_path_warns_without_stopping_notify()
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "{logs}");
+    assert!(!output.status.success(), "{logs}");
     assert!(logs.contains("RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE"), "{logs}");
     assert!(!logs.contains(literal), "configuration values must stay redacted");
     Ok(())
@@ -103,5 +103,39 @@ fn an_unexpanded_required_route_secret_still_fails_closed_without_logging_its_va
     assert!(!output.status.success(), "a required encryption secret cannot be disabled");
     assert!(logs.contains("RAMFLUX_NOTIFY_ROUTE_KEY_FILE"), "{logs}");
     assert!(!logs.contains(literal), "configuration values must stay redacted");
+    Ok(())
+}
+
+#[test]
+fn an_unexpanded_privacy_key_cannot_silently_select_an_ephemeral_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let literal = "/private/${DO_NOT_LOG}/privacy.key";
+    let output = fixture.command(None).env("RAMFLUX_NODE_PRIVACY_KEY_FILE", literal).output()?;
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success());
+    assert!(logs.contains("RAMFLUX_NODE_PRIVACY_KEY_FILE"), "{logs}");
+    assert!(!logs.contains(literal));
+    Ok(())
+}
+
+#[test]
+fn an_unexpanded_optional_runtime_uses_its_default_with_a_key_only_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let literal = "${DO_NOT_LOG:-current}";
+    let output = fixture.command(None).env("RAMFLUX_NOTIFY_RUNTIME", literal).output()?;
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{logs}");
+    assert!(logs.contains("RAMFLUX_NOTIFY_RUNTIME"), "{logs}");
+    assert!(!logs.contains(literal));
     Ok(())
 }
