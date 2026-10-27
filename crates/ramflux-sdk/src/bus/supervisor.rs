@@ -114,6 +114,11 @@ impl Supervisor {
             }
         }
         for path in paths {
+            if let Some(id) = path.file_stem().and_then(std::ffi::OsStr::to_str)
+                && crate::custody::account_exists(&self.config.data_root, id)?
+            {
+                continue;
+            }
             let manifest = match read_local_bus_account_manifest(&path) {
                 Ok(manifest) => manifest,
                 Err(error) => {
@@ -169,6 +174,9 @@ impl Supervisor {
         if request.method == "account.backup.import" {
             request.account_id = Some(super::lifecycle::import_account_id(&request).await?);
         }
+        if let Some(body) = super::custody_setup::guard_account(&self.config.data_root, &request)? {
+            return Ok(reply(body));
+        }
         let receipt =
             super::lifecycle::reserve(self.index.clone(), self.config.data_root.clone(), &request)
                 .await?;
@@ -204,6 +212,9 @@ impl Supervisor {
     ) -> Result<ActorResponse, SdkError> {
         self.start_event_router();
         self.ensure_request_allowed(&request)?;
+        if let Some(body) = super::custody_setup::guard_account(&self.config.data_root, &request)? {
+            return Ok(reply(body));
+        }
         if crate::backup::BACKUP_JOB_METHODS.contains(&request.method.as_str()) {
             return self.backup_request(request, connection).await;
         }
@@ -305,9 +316,14 @@ impl Supervisor {
         let (active,known) = tokio::task::spawn_blocking(move || -> Result<_,SdkError> {
             let mut known=Vec::new();
             for id in index.known_account_ids()? {
+                if crate::custody::account_exists(&root,&id)? { continue; }
                 let path=local_bus_account_manifest_path(&root,&id);
                 let manifest=super::daemon::account_manifest_available(&path).then(||read_local_bus_account_manifest(&path)).transpose()?;
                 known.push(serde_json::json!({"id":id,"label":manifest.as_ref().and_then(|m|m.label.as_ref()),"kind":manifest.as_ref().and_then(|m|m.kind.as_ref()),"principal_id":manifest.as_ref().map(|m|&m.principal_id)}));
+            }
+            for mut account in crate::custody::list_accounts(&root,super::custody_setup::now()?)? {
+                account["id"]=account["local_account_id"].clone();
+                known.push(account);
             }
             Ok((index.active_account()?,known))
         })
@@ -323,6 +339,9 @@ impl Supervisor {
         let active = active.filter(|id| accounts.contains(id));
         let mut known = known;
         for row in &mut known {
+            if row["custody_v3_observed"].as_bool() == Some(true) {
+                continue;
+            }
             row["state"] = serde_json::json!(if row
                 .get("id")
                 .and_then(serde_json::Value::as_str)

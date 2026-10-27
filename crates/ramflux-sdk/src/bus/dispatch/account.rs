@@ -118,6 +118,9 @@ pub(crate) async fn local_bus_account_create(
     state: &mut LocalBusDaemonState,
     mut body: LocalBusAccountCreateRequest,
 ) -> Result<LocalBusAccountCreateResponse, SdkError> {
+    if crate::custody::account_exists(&state.config.data_root, &body.local_account_id)? {
+        return Err(SdkError::NetworkingPending);
+    }
     if let Some(label) = &body.label {
         crate::bus::metadata::validate_label(label)
             .map_err(|message| SdkError::LocalBus(message.to_owned()))?;
@@ -540,6 +543,51 @@ fn decrypt_account_backup_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custody_option_off_keeps_byte_identical_legacy_creation_manifest() -> Result<(), SdkError> {
+        let root = std::env::temp_dir().join(format!(
+            "rf-off-custody-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        let config = LocalBusConfig::new(root.join("bus.sock"), &root);
+        assert!(!config.enable_born_v3_creation);
+        let legacy = backup_manifest();
+        let mut body = LocalBusAccountCreateRequest {
+            label: None,
+            kind: None,
+            node_id: None,
+            local_account_id: legacy.local_account_id.clone(),
+            principal_id: legacy.principal_id.clone(),
+            principal_commitment: String::new(),
+            device_id: legacy.device_id.clone(),
+            target_delivery_id: legacy.target_delivery_id.clone(),
+            account_secret: legacy.account_secret.clone(),
+            root_seed: legacy.root_seed,
+            device_seed: legacy.device_seed,
+            client_mode: legacy.client_mode.clone(),
+            gateway: legacy.gateway.clone(),
+        };
+        let request = LocalBusFrame::request(
+            "legacy",
+            None,
+            "account",
+            "account.create",
+            serde_json::to_value(&body)?,
+        );
+        assert!(crate::bus::custody_setup::guard_account(&root, &request)?.is_none());
+        let mut client = RamfluxClient::new();
+        initialize_created_account(&mut client, &mut body)?;
+        let manifest = LocalBusPersistedAccount::from_create_request(&body);
+        let bytes = serde_json::to_string_pretty(&manifest)?;
+        // Frozen from the pre-custody manifest layout; public nonproduction test credentials.
+        let old = include_str!("tests/fixtures/legacy_created_account_manifest.json").trim_end();
+        assert_eq!(bytes, old);
+        assert!(client.born_v3_account.is_none());
+        assert!(GatewaySessionConfig::auto(body.gateway).with_account_identity(&client).is_ok());
+        assert!(!root.exists());
+        Ok(())
+    }
 
     fn backup_manifest() -> LocalBusPersistedAccount {
         LocalBusPersistedAccount {

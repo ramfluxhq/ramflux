@@ -72,6 +72,9 @@ impl RamfluxClient {
         local_account_id: &str,
         secret: &[u8],
     ) -> Result<(), SdkError> {
+        if crate::custody::account_exists(self.account_index()?.root(), local_account_id)? {
+            return Err(SdkError::NetworkingPending);
+        }
         let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
         let key_encryption_key = account_db_key_encryption_key(&vault_secret, secret);
         let account_index = self.account_index()?;

@@ -228,6 +228,9 @@ impl LocalBusClient {
         &self,
         mut protected: SecretFrame,
     ) -> Result<LocalBusFrame, SdkError> {
+        if super::custody_setup::handles(&protected.0.method) {
+            return Err(SdkError::CustodySetupInvalid);
+        }
         let deadline = super::requests::deadline(&protected.0);
         let encoded = encode_owned_body(&mut protected.0);
         let deadline = deadline?;

@@ -9,6 +9,7 @@ mod backup_jobs;
 pub mod client;
 mod connection;
 mod control_state;
+mod custody_setup;
 pub mod daemon;
 mod delivery_receipts;
 pub mod dispatch;
@@ -50,3 +51,6 @@ mod contact_backpressure;
 
 #[cfg(test)]
 pub(crate) use readers::test_account_reader_request;
+
+#[cfg(test)]
+mod custody_setup_tests;

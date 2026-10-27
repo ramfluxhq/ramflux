@@ -9,6 +9,7 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
     match command.action {
         DaemonAction::Start(start) => {
             let mut config = LocalBusConfig::new(socket, start.data_root);
+            config.enable_born_v3_creation = start.enable_born_v3_creation;
             if let Some(path) = start.builtin_nodes {
                 config.builtin_nodes = serde_json::from_slice(&std::fs::read(path)?)?;
             }

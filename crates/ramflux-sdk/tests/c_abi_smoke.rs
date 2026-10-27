@@ -20,10 +20,16 @@ fn c_abi_smoke_runs_real_sdk_storage_and_event_queue() -> Result<(), Box<dyn std
     setup_client.create_account("acct_cabi", "principal_cabi")?;
     drop(setup_client);
 
+    // Keep the child build separate from the parent Cargo job and honor external build roots.
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || manifest_dir.join("target"),
+        |root| std::path::PathBuf::from(root).join("cabi-smoke"),
+    );
     let build_status = Command::new(env!("CARGO"))
         .current_dir(&manifest_dir)
         .args(["build", "--features", "c-abi", "--lib", "--target-dir"])
-        .arg(manifest_dir.join("target"))
+        .arg(&target_dir)
+        .env("CARGO_TARGET_DIR", &target_dir)
         .status()?;
     if !build_status.success() {
         return Err("cargo build --features c-abi --lib failed".into());
@@ -33,8 +39,8 @@ fn c_abi_smoke_runs_real_sdk_storage_and_event_queue() -> Result<(), Box<dyn std
     let c_binary = temp_root.join("c_abi_smoke");
     std::fs::write(&c_source, C_SMOKE_SOURCE)?;
 
-    let include_dir = manifest_dir.join("target/include");
-    let lib_dir = manifest_dir.join("target/debug");
+    let include_dir = target_dir.join("include");
+    let lib_dir = target_dir.join("debug");
     let mut compile = Command::new("cc");
     compile
         .arg(&c_source)

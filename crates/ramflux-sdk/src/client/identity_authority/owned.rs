@@ -40,6 +40,7 @@ impl RamfluxClient {
         issued: i64,
         expires: i64,
     ) -> Result<BranchProofDocument, SdkError> {
+        self.require_legacy_networking()?;
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let agreement = if let Some(stored) =
