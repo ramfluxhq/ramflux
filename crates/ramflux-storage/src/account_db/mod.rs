@@ -49,6 +49,8 @@ pub mod recovery;
 pub mod runtime;
 pub mod surface;
 mod task;
+#[cfg(test)]
+mod transaction_tests;
 mod voice;
 
 pub struct AccountDb {

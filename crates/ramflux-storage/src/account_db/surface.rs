@@ -13,26 +13,10 @@ impl AccountDb {
     where
         E: From<StorageError>,
     {
-        self.connection
-            .execute_batch("SAVEPOINT surface_projection")
-            .map_err(StorageError::from)?;
-        match write() {
-            Ok(value) => {
-                if let Err(error) = self.connection.execute_batch("RELEASE surface_projection") {
-                    let _ = self.connection.execute_batch(
-                        "ROLLBACK TO surface_projection; RELEASE surface_projection",
-                    );
-                    return Err(StorageError::from(error).into());
-                }
-                Ok(value)
-            }
-            Err(error) => {
-                self.connection
-                    .execute_batch("ROLLBACK TO surface_projection; RELEASE surface_projection")
-                    .map_err(StorageError::from)?;
-                Err(error)
-            }
-        }
+        let transaction = self.connection.immediate_transaction().map_err(StorageError::from)?;
+        let value = write()?;
+        transaction.commit().map_err(StorageError::from)?;
+        Ok(value)
     }
     /// Replaces an authenticated surface carrier with its validated text fallback.
     /// # Errors

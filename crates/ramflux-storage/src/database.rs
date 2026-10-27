@@ -21,8 +21,15 @@ pub(crate) struct Connection {
 struct Worker {
     id: u64,
     path: PathBuf,
+    transaction_mode: Mutex<Option<TransactionMode>>,
     sender: Option<SyncSender<Job>>,
     handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransactionMode {
+    Deferred,
+    Immediate,
 }
 
 static NEXT_CONNECTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -76,6 +83,7 @@ impl Connection {
             inner: std::sync::Arc::new(Worker {
                 id: connection_id,
                 path,
+                transaction_mode: Mutex::new(None),
                 sender: Some(sender),
                 handle: Some(worker),
             }),
@@ -163,6 +171,15 @@ impl Connection {
         static NEXT_TRANSACTION_ID: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
         let nested = !self.call(|db| Ok(db.is_autocommit()))?;
+        let outer_mode = *self.inner.transaction_mode.lock().map_err(|_| Error::InvalidQuery)?;
+        debug_assert_eq!(
+            nested,
+            outer_mode.is_some(),
+            "transactions on a managed connection must use the transaction wrapper"
+        );
+        if nested && immediate && outer_mode != Some(TransactionMode::Immediate) {
+            return Err(Error::InvalidQuery);
+        }
         let savepoint = nested.then(|| {
             format!(
                 "runtime_nested_{}",
@@ -174,6 +191,8 @@ impl Connection {
         } else {
             let transaction_id =
                 NEXT_TRANSACTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mode =
+                if immediate { TransactionMode::Immediate } else { TransactionMode::Deferred };
             let begin = if immediate { "BEGIN IMMEDIATE" } else { "BEGIN DEFERRED" };
             if let Err(error) = self.execute_batch(begin) {
                 if immediate {
@@ -191,6 +210,11 @@ impl Connection {
                 }
                 return Err(error);
             }
+            let mut transaction_mode =
+                self.inner.transaction_mode.lock().map_err(|_| Error::InvalidQuery)?;
+            debug_assert!(transaction_mode.is_none());
+            *transaction_mode = Some(mode);
+            drop(transaction_mode);
             let writer = immediate.then(|| {
                 if let Ok(mut writers) = active_writers().lock() {
                     writers.insert(
@@ -214,9 +238,16 @@ impl Connection {
                 committed: false,
                 savepoint,
                 _writer: writer,
+                _mode: Some(TransactionModeRegistration { connection: self }),
             });
         }
-        Ok(Transaction { connection: self, committed: false, savepoint, _writer: None })
+        Ok(Transaction {
+            connection: self,
+            committed: false,
+            savepoint,
+            _writer: None,
+            _mode: None,
+        })
     }
 }
 
@@ -314,6 +345,7 @@ pub(crate) struct Transaction<'a> {
     committed: bool,
     savepoint: Option<String>,
     _writer: Option<WriterRegistration>,
+    _mode: Option<TransactionModeRegistration<'a>>,
 }
 impl Transaction<'_> {
     pub(crate) fn commit(mut self) -> Result<()> {
@@ -333,6 +365,18 @@ struct WriterRegistration {
     started: std::time::Instant,
 }
 
+struct TransactionModeRegistration<'a> {
+    connection: &'a Connection,
+}
+
+impl Drop for TransactionModeRegistration<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut mode) = self.connection.inner.transaction_mode.lock() {
+            *mode = None;
+        }
+    }
+}
+
 impl Drop for WriterRegistration {
     fn drop(&mut self) {
         if let Ok(mut writers) = active_writers().lock()
@@ -343,12 +387,23 @@ impl Drop for WriterRegistration {
         {
             writers.remove(&self.path);
         }
-        tracing::debug!(
-            connection_id = self.owner.connection_id,
-            transaction_id = self.owner.transaction_id,
-            elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "database writer transaction released"
-        );
+        let elapsed = self.started.elapsed();
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        if elapsed > std::time::Duration::from_secs(1) {
+            tracing::warn!(
+                connection_id = self.owner.connection_id,
+                transaction_id = self.owner.transaction_id,
+                elapsed_ms,
+                "database writer transaction held longer than one second"
+            );
+        } else {
+            tracing::debug!(
+                connection_id = self.owner.connection_id,
+                transaction_id = self.owner.transaction_id,
+                elapsed_ms,
+                "database writer transaction released"
+            );
+        }
     }
 }
 impl Drop for Transaction<'_> {
@@ -398,6 +453,14 @@ mod tests {
         }
         let count: i64 = db.query_row("SELECT count(*) FROM state", [], |row| row.get(0))?;
         assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn immediate_transaction_rejects_a_deferred_outer_transaction() -> rusqlite::Result<()> {
+        let db = Connection::open(":memory:")?;
+        let _outer = db.deferred_transaction()?;
+        assert!(matches!(db.immediate_transaction(), Err(rusqlite::Error::InvalidQuery)));
         Ok(())
     }
 }
