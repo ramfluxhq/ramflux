@@ -161,3 +161,32 @@ fn cancelled_async_caller_keeps_queued_wal_lease_until_durable_index_and_ack() -
         Ok(())
     })
 }
+#[test]
+fn acknowledged_wal_rows_keep_the_issued_sequence_floor_without_drain_work() -> TestResult {
+    let s = Scenario::prepared()?;
+    let sealed = s.seal()?;
+    let queued = entry(&s.target);
+    let store = s.a.store()?;
+    store.record_submission_increment("acked-before-cutover", i64::MAX / 2, Some(&queued))?;
+    store.record_ack_increment(
+        &crate::CursorAckState {
+            target_delivery_id: s.target.clone(),
+            inbox_seq: 7,
+            issued_inbox_seq: 7,
+            settled_inbox_seq: 7,
+            last_acknowledged_inbox_seq: Some(7),
+            ..crate::CursorAckState::default()
+        },
+        &queued.envelope.envelope_id,
+    )?;
+    s.commit(&sealed)?;
+    let cursors = store.migration_backlog_barrier(
+        &s.anchor,
+        &s.authorization.body.migration_id,
+        &sealed.delivery_map,
+        NOW + 2,
+    )?;
+    assert_eq!(cursors.iter().map(|c| c.high_water).max(), Some(7));
+    assert_eq!(cursors.iter().map(|c| c.progress.remaining).sum::<u64>(), 0);
+    Ok(())
+}
