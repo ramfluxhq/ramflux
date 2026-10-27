@@ -32,7 +32,7 @@ pub use branch_proof::{
     sign_proxy_acceptance, verify_branch_proof_v3,
 };
 pub use node_identity::{
-    VerifiedNodeRecord, sign_node_identity_record, verify_node_identity_record,
+    NodeKeyBinding, VerifiedNodeRecord, sign_node_identity_record, verify_node_identity_record,
 };
 
 #[cfg(test)]
