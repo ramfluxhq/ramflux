@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add experimental born-v3 publication, registration and channel-bound sessions, with durable node pins, one-use challenges and explicit SDK DM operations. Creation remains disabled by default; integration-only memory custody is excluded from production artifacts.
+
+
 ### Added
 
 - Default-off local born-v3 identity setup with a generated recovery phrase,
