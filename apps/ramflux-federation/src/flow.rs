@@ -439,21 +439,37 @@ pub(crate) fn handle_s8_receive_envelope(
     }
     let now = now_unix_seconds()?;
     verify_inbound_federated_forward(request, state, now, observability)?;
+    handle_verified_s8_receive_envelope(request, store, now, total_started, observability, || {
+        router_post_json(router, "/mvp0/envelope", &request.envelope)
+    })
+}
+
+fn handle_verified_s8_receive_envelope<F>(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    store: &ramflux_node_core::FederationRedbStore,
+    now: u64,
+    total_started: std::time::Instant,
+    observability: Option<&FederationMeshObservability>,
+    deliver: F,
+) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError>
+where
+    F: FnOnce() -> Result<
+        ramflux_node_core::EnvelopeSubmitResponse,
+        ramflux_node_core::NodeCoreError,
+    >,
+{
     let (_, source) =
         ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
     tracing::info!(
         source_node_id = request.source_node_id,
         target_node_id = request.target_node_id,
-        local_router_endpoint_len = router.endpoint.len(),
         path = "/mvp0/envelope",
         envelope_id = request.envelope.envelope_id,
         target_delivery_id = request.envelope.target_delivery_id,
         "accepted federated envelope proof and delivering to local router"
     );
     let step_started = std::time::Instant::now();
-    let delivery = store.deliver_inbound_forward_once(&source, request, now, || {
-        router_post_json(router, "/mvp0/envelope", &request.envelope)
-    })?;
+    let delivery = store.deliver_inbound_forward_once(&source, request, now, deliver)?;
     let Some(delivery) = delivery else {
         tracing::info!(
             source_node_id = %request.source_node_id,
@@ -566,6 +582,61 @@ pub(crate) fn ensure_receive_target_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inbound_handler_request()
+    -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
+        let mut request = retained_forward()?;
+        let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+        let agreement = ramflux_crypto::X25519KeyPair::from_seed([0x92; 32]);
+        let (signing_key_commitment, agreement_key_commitment) =
+            ramflux_crypto::device_key_commitments(
+                &ramflux_crypto::fixture_public_key_base64url(),
+                &ramflux_protocol::encode_base64url(agreement.public),
+            )?;
+        let signed_device_set = ramflux_crypto::sign_device_set(
+            &root,
+            ramflux_crypto::DeviceSetSigningInput {
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                device_set_epoch: 1,
+                devices: vec![ramflux_protocol::SignedDeviceSetEntry {
+                    device_id: "first".to_owned(),
+                    device_epoch: 1,
+                    signing_key_commitment,
+                    agreement_key_commitment,
+                    status: ramflux_protocol::DeviceSetStatus::Active,
+                    revoked_at: None,
+                }],
+            },
+        )?;
+        let authority = ramflux_node_core::DeviceAuthKeyResponse {
+            root_public_key: Some(ramflux_protocol::encode_base64url(
+                root.signing_key.verifying_key().to_bytes(),
+            )),
+            signed_device_set: Some(signed_device_set),
+            principal_id: "alice".to_owned(),
+            device_id: "first".to_owned(),
+            device_epoch: 1,
+            branch_public_key: ramflux_crypto::fixture_public_key_base64url(),
+            target_delivery_id: "peer".to_owned(),
+            revoked: false,
+        };
+        let source = authority.authenticated_device_identity()?;
+        request.envelope.source_principal_id = "alice".to_owned();
+        request.envelope.source_device_id = "first".to_owned();
+        request.envelope.ext.ext.remove("source_device_authority");
+        request.envelope.ext.ext.insert(
+            "source_root_commitment".to_owned(),
+            serde_json::json!(source.root_commitment()),
+        );
+        request.envelope.signed.signature =
+            ramflux_crypto::sign_protocol_object(&request.envelope)?;
+        request
+            .envelope
+            .ext
+            .ext
+            .insert("source_device_authority".to_owned(), serde_json::to_value(authority)?);
+        Ok(request)
+    }
 
     fn retained_forward()
     -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
@@ -708,5 +779,111 @@ mod tests {
         let rejected = ensure_receive_target_node(&request, "node_b.example");
 
         assert!(matches!(rejected, Err(ramflux_node_core::NodeCoreError::ItestHttp(_))));
+    }
+
+    #[test]
+    fn federation_handler_never_reports_concurrent_pending_retry_as_delivered()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "rf-forward-handler-{}",
+            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+        ));
+        let store = Arc::new(ramflux_node_core::FederationRedbStore::open(&path)?);
+        let router = Arc::new(ramflux_node_core::RouterCore::new());
+        let request = Arc::new(inbound_handler_request()?);
+        let (_, source) =
+            ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
+        let now = 1_760_000_010;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder_store = Arc::clone(&store);
+        let holder_router = Arc::clone(&router);
+        let holder_request = Arc::clone(&request);
+        let holder_source = source.clone();
+        let holder = std::thread::spawn(move || {
+            handle_verified_s8_receive_envelope(
+                &holder_request,
+                &holder_store,
+                now,
+                std::time::Instant::now(),
+                None,
+                || {
+                    entered_tx.send(()).map_err(|error| {
+                        ramflux_node_core::NodeCoreError::ItestHttp(error.to_string())
+                    })?;
+                    release_rx.recv().map_err(|error| {
+                        ramflux_node_core::NodeCoreError::ItestHttp(error.to_string())
+                    })?;
+                    match holder_router.submit_envelope_at(
+                        &holder_source,
+                        holder_request.envelope.clone(),
+                        i64::try_from(now).unwrap_or(i64::MAX),
+                    ) {
+                        ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => {
+                            Ok(ramflux_node_core::EnvelopeSubmitResponse {
+                                outcome: "offline_queued".to_owned(),
+                                target_delivery_id: queued.entry.target_delivery_id,
+                                inbox_seq: Some(queued.entry.inbox_seq),
+                                cursor: None,
+                                nack: None,
+                            })
+                        }
+                        outcome => Err(ramflux_node_core::NodeCoreError::ItestHttp(format!(
+                            "unexpected router outcome: {outcome:?}"
+                        ))),
+                    }
+                },
+            )
+        });
+        entered_rx.recv()?;
+
+        let retries = (0..2)
+            .map(|_| {
+                let retry_store = Arc::clone(&store);
+                let retry_request = Arc::clone(&request);
+                std::thread::spawn(move || {
+                    handle_verified_s8_receive_envelope(
+                        &retry_request,
+                        &retry_store,
+                        now + 1,
+                        std::time::Instant::now(),
+                        None,
+                        || {
+                            Err(ramflux_node_core::NodeCoreError::ItestHttp(
+                                "pending retry reached router".to_owned(),
+                            ))
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for retry in retries {
+            let pending = retry.join().map_err(|_| "retry panicked")??;
+            assert!(!pending.accepted);
+            assert_eq!(pending.delivery.outcome, "forward_in_progress");
+        }
+
+        release_tx.send(())?;
+        let committed = holder.join().map_err(|_| "holder panicked")??;
+        assert!(committed.accepted);
+        assert_eq!(committed.delivery.outcome, "offline_queued");
+        let duplicate = handle_verified_s8_receive_envelope(
+            &request,
+            &store,
+            now + 2,
+            std::time::Instant::now(),
+            None,
+            || {
+                Err(ramflux_node_core::NodeCoreError::ItestHttp(
+                    "committed retry reached router".to_owned(),
+                ))
+            },
+        )?;
+        assert!(!duplicate.accepted);
+        assert_eq!(duplicate.delivery.outcome, "duplicate_federated_forward");
+        assert_eq!(router.resume("peer", 0, 10).len(), 1);
+        drop(store);
+        std::fs::remove_file(path)?;
+        Ok(())
     }
 }

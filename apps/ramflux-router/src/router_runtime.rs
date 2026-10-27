@@ -242,6 +242,60 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn durable_local_delivery_rejects_old_home_retry_and_confirms_new_home_retry()
+    -> anyhow::Result<()> {
+        let envelope = current_envelope("env_runtime_durable_replay", "target_runtime_replay")?;
+        let (state, store, _path) = test_router("durable_local_replay")?;
+        let first = crate::router_engine::submit_envelope(
+            state.as_ref(),
+            store.as_ref(),
+            None,
+            envelope.clone(),
+            Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+        )?;
+        assert_eq!(first.outcome, "offline_queued");
+        assert!(store.has_local_delivery_envelope(
+            &envelope.envelope_id,
+            &envelope.target_delivery_id,
+            envelope.created_at + 1,
+        )?);
+
+        let restored = Arc::new(store.load_router()?.ok_or_else(|| {
+            anyhow::anyhow!("router store did not restore the committed delivery")
+        })?);
+        let old_home_retry = crate::router_engine::submit_envelope(
+            restored.as_ref(),
+            store.as_ref(),
+            None,
+            envelope.clone(),
+            Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+        )?;
+        assert!(old_home_retry.outcome.starts_with("rejected_security:"));
+
+        let new_home_retry = crate::router_engine::submit_envelope(
+            restored.as_ref(),
+            store.as_ref(),
+            None,
+            envelope.clone(),
+            Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Federation,
+        )?;
+        assert_eq!(new_home_retry.outcome, "duplicate_federated_forward");
+        assert_eq!(new_home_retry.inbox_seq, None);
+        assert_eq!(restored.resume(&envelope.target_delivery_id, 0, 10).len(), 1);
+        let expires_at = envelope.created_at + i64::from(envelope.ttl);
+        store.sweep_delivery_retention(expires_at, false)?;
+        assert!(!store.has_local_delivery_envelope(
+            &envelope.envelope_id,
+            &envelope.target_delivery_id,
+            expires_at,
+        )?);
+        Ok(())
+    }
+
+    #[test]
     fn tokio_handle_matches_bound_ack_and_nack_oracle() -> anyhow::Result<()> {
         let envelope = current_envelope("env_runtime_ack", "target_runtime_ack")?;
 

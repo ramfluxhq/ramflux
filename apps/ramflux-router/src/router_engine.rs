@@ -40,6 +40,16 @@ pub(crate) fn submit_envelope(
     ramflux_node_core::record_router_submit_lock_wait_us(0);
     let dispatch_started = Instant::now();
     let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    if let Some(response) = persistent_local_replay_response(
+        store,
+        origin,
+        &envelope.envelope_id,
+        &envelope.target_delivery_id,
+        &replay_key,
+        now_unix_seconds,
+    )? {
+        return Ok(response);
+    }
     let outcome = match home_node_forward {
         Some(client) => state.submit_envelope_with_home_node_forward_at(
             &source,
@@ -118,6 +128,16 @@ pub(crate) async fn submit_envelope_async(
     ramflux_node_core::record_router_submit_lock_wait_us(0);
     let dispatch_started = Instant::now();
     let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    if let Some(response) = persistent_local_replay_response(
+        store,
+        origin,
+        &envelope.envelope_id,
+        &envelope.target_delivery_id,
+        &replay_key,
+        now_unix_seconds,
+    )? {
+        return Ok(response);
+    }
     let outcome = match home_node_forward {
         Some(client) => state.submit_envelope_with_home_node_forward_at(
             &source,
@@ -249,6 +269,35 @@ pub(crate) fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+fn persistent_local_replay_response(
+    store: &ramflux_node_core::RouterRedbStore,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+    envelope_id: &str,
+    target_delivery_id: &str,
+    replay_key: &str,
+    now_unix_seconds: i64,
+) -> anyhow::Result<Option<ramflux_node_core::EnvelopeSubmitResponse>> {
+    if !store.has_local_delivery_envelope(envelope_id, target_delivery_id, now_unix_seconds)? {
+        return Ok(None);
+    }
+    let outcome = match origin {
+        ramflux_node_core::RouterEnvelopeOrigin::Federation => {
+            "duplicate_federated_forward".to_owned()
+        }
+        ramflux_node_core::RouterEnvelopeOrigin::Gateway => format!(
+            "rejected_security:{}",
+            ramflux_node_core::NodeCoreError::ReplayGuard(format!("replay: {replay_key}"))
+        ),
+    };
+    Ok(Some(ramflux_node_core::EnvelopeSubmitResponse {
+        outcome,
+        target_delivery_id: target_delivery_id.to_owned(),
+        inbox_seq: None,
+        cursor: None,
+        nack: None,
+    }))
+}
+
 pub(crate) fn persistent_entry_from_outcome(
     outcome: &ramflux_node_core::RouterSubmitOutcome,
 ) -> Option<ramflux_node_core::InboxEntry> {
@@ -262,6 +311,7 @@ pub(crate) fn persistent_entry_from_outcome(
         }
         ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => Some(queued.entry.clone()),
         ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(_)
+        | ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedDeactivated { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedDeleted { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
@@ -272,7 +322,8 @@ pub(crate) fn persistent_entry_from_outcome(
 fn should_persist_submission(outcome: &ramflux_node_core::RouterSubmitOutcome) -> bool {
     match outcome {
         ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. }
-        | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_) => false,
+        | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
+        | ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. } => false,
         ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(delivery) => {
             !delivery.replayed
         }
@@ -313,6 +364,15 @@ pub(crate) fn submit_response_from_outcome(
                 target_delivery_id: delivery.target_delivery_id,
                 inbox_seq: delivery.delivery.inbox_seq,
                 cursor: delivery.delivery.cursor,
+                nack: None,
+            }
+        }
+        ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id } => {
+            ramflux_node_core::EnvelopeSubmitResponse {
+                outcome: "forward_in_progress".to_owned(),
+                target_delivery_id,
+                inbox_seq: None,
+                cursor: None,
                 nack: None,
             }
         }

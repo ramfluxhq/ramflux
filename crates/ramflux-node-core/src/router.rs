@@ -51,6 +51,7 @@ pub enum RouterEnvelopeOrigin {
 pub struct RouterCore {
     pub(crate) target_shards: Vec<Mutex<RouterTargetShard>>,
     envelope_target_index_shards: Vec<Mutex<BTreeMap<String, String>>>,
+    submission_lock_shards: Vec<Mutex<()>>,
     pub(crate) control: Mutex<RouterControlState>,
     migration_read_snapshot: ArcSwap<RouterMigrationReadSnapshot>,
     pub(crate) replay_guard_shards: Vec<Mutex<NodeReplayGuardState>>,
@@ -792,6 +793,9 @@ impl RouterCore {
             RouterSubmitOutcome::ForwardedHomeNodeMigrated(_) => {
                 ("forwarded_home_node_migrated".to_owned(), None, None)
             }
+            RouterSubmitOutcome::ForwardInProgress { .. } => {
+                ("forward_in_progress".to_owned(), None, None)
+            }
             RouterSubmitOutcome::RejectedHomeNodeMigrated(_) => {
                 ("rejected_home_node_migrated".to_owned(), None, None)
             }
@@ -869,6 +873,9 @@ impl RouterCore {
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
+        let _submission = lock_unpoisoned(
+            &self.submission_lock_shards[envelope_target_index_shard_index(&envelope.envelope_id)],
+        );
         if let Err(error) = self.check_envelope_replay_once(source, &envelope, now_unix_seconds) {
             return RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
@@ -890,6 +897,9 @@ impl RouterCore {
             &HomeNodeMigrationForwardPlan,
         ) -> Result<FederatedEnvelopeForwardResponse, NodeCoreError>,
     {
+        let _submission = lock_unpoisoned(
+            &self.submission_lock_shards[envelope_target_index_shard_index(&envelope.envelope_id)],
+        );
         let accepted_once =
             match self.accept_envelope_replay_once(source, &envelope, now_unix_seconds) {
                 Ok(accepted_once) => accepted_once,
@@ -958,23 +968,27 @@ impl RouterCore {
             &envelope.target_delivery_id,
             now_unix_seconds,
         ) {
-            let forwarded = self
-                .home_node_migration_forward_plan(&envelope, &migration, now_unix_seconds)
-                .and_then(|plan| {
-                    let response = forward(&plan).ok()?;
-                    federation_forward_succeeded(&response).then_some((plan, response))
-                });
-            if let Some((plan, response)) = forwarded {
-                return RouterSubmitOutcome::ForwardedHomeNodeMigrated(Box::new(
-                    HomeNodeMigrationForwardDelivery {
+            if let Some(plan) =
+                self.home_node_migration_forward_plan(&envelope, &migration, now_unix_seconds)
+                && let Ok(response) = forward(&plan)
+            {
+                if federation_forward_succeeded(&response) {
+                    return RouterSubmitOutcome::ForwardedHomeNodeMigrated(Box::new(
+                        HomeNodeMigrationForwardDelivery {
+                            target_delivery_id: envelope.target_delivery_id,
+                            proof_hash: migration.migration_proof_hash,
+                            new_home_node_hint: migration.new_home_node,
+                            route: plan.route,
+                            delivery: response.delivery,
+                            replayed,
+                        },
+                    ));
+                }
+                if response.delivery.outcome == "forward_in_progress" {
+                    return RouterSubmitOutcome::ForwardInProgress {
                         target_delivery_id: envelope.target_delivery_id,
-                        proof_hash: migration.migration_proof_hash,
-                        new_home_node_hint: migration.new_home_node,
-                        route: plan.route,
-                        delivery: response.delivery,
-                        replayed,
-                    },
-                ));
+                    };
+                }
             }
             return RouterSubmitOutcome::RejectedHomeNodeMigrated(home_node_migrated_delivery(
                 &envelope,
@@ -1155,6 +1169,9 @@ impl RouterCore {
         let envelope_target_index_shards = (0..ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT)
             .map(|_index| Mutex::new(BTreeMap::new()))
             .collect::<Vec<_>>();
+        let submission_lock_shards = (0..ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT)
+            .map(|_index| Mutex::new(()))
+            .collect::<Vec<_>>();
         let replay_guard_shards = (0..ROUTER_REPLAY_GUARD_SHARD_COUNT)
             .map(|_index| Mutex::new(NodeReplayGuardState::new()))
             .collect::<Vec<_>>();
@@ -1175,6 +1192,7 @@ impl RouterCore {
         let router = Self {
             target_shards,
             envelope_target_index_shards,
+            submission_lock_shards,
             control: Mutex::new(control),
             migration_read_snapshot: ArcSwap::from_pointee(migration_read_snapshot),
             replay_guard_shards,

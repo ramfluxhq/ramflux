@@ -187,6 +187,122 @@ fn inbound_forward_seen_record_survives_only_a_real_router_commit()
 }
 
 #[test]
+fn concurrent_inbound_forward_retry_is_pending_until_the_holder_commits()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("concurrent_inbound_forward_retry_is_pending")?;
+    let store = std::sync::Arc::new(FederationRedbStore::open(&path)?);
+    let mut forward = federation_forward_request("env_inbound_pending", "target_inbound_pending");
+    forward.envelope = forwarded_source_envelope(forward.envelope)?;
+    let (_, source) = DeviceAuthKeyResponse::forwarded_envelope_source(&forward.envelope)?;
+    let now = 1_760_000_010;
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder_store = std::sync::Arc::clone(&store);
+    let holder_forward = forward.clone();
+    let holder_source = source.clone();
+    let holder = std::thread::spawn(move || {
+        holder_store.deliver_inbound_forward_once(&holder_source, &holder_forward, now, || {
+            entered_tx.send(()).map_err(|error| {
+                NodeCoreError::ItestHttp(format!("holder signal failed: {error}"))
+            })?;
+            release_rx.recv().map_err(|error| {
+                NodeCoreError::ItestHttp(format!("holder release failed: {error}"))
+            })?;
+            Ok(EnvelopeSubmitResponse {
+                outcome: "offline_queued".into(),
+                target_delivery_id: holder_forward.envelope.target_delivery_id.clone(),
+                inbox_seq: Some(1),
+                cursor: None,
+                nack: None,
+            })
+        })
+    });
+    entered_rx.recv()?;
+
+    let retry = store
+        .deliver_inbound_forward_once(&source, &forward, now + 1, || {
+            Err(NodeCoreError::ItestHttp("pending retry reached router".into()))
+        })?
+        .ok_or("pending retry was reported as committed")?;
+    assert_eq!(retry.outcome, "forward_in_progress");
+    assert_eq!(retry.inbox_seq, None);
+
+    release_tx.send(())?;
+    let committed = holder.join().map_err(|_| "holder panicked")??;
+    assert_eq!(committed.ok_or("holder was deduplicated")?.outcome, "offline_queued");
+    assert!(
+        store
+            .deliver_inbound_forward_once(&source, &forward, now + 2, || {
+                Err(NodeCoreError::ItestHttp("committed retry reached router".into()))
+            })?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn expired_inbound_forward_lease_is_reclaimed_after_lost_holder()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("expired_inbound_forward_lease_is_reclaimed")?;
+    let store = FederationRedbStore::open(&path)?;
+    let mut forward = federation_forward_request("env_inbound_expired", "target_inbound_expired");
+    forward.envelope = forwarded_source_envelope(forward.envelope)?;
+    let (_, source) = DeviceAuthKeyResponse::forwarded_envelope_source(&forward.envelope)?;
+    let now = 1_760_000_010;
+
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _result = store.deliver_inbound_forward_once(&source, &forward, now, || {
+            std::panic::resume_unwind(Box::new("simulated lost holder"))
+        });
+    }));
+    assert!(crashed.is_err());
+    let pending = store
+        .deliver_inbound_forward_once(&source, &forward, now + 1, || {
+            Err(NodeCoreError::ItestHttp("live lease reached router".into()))
+        })?
+        .ok_or("live lease was reported as committed")?;
+    assert_eq!(pending.outcome, "forward_in_progress");
+
+    let reclaimed = store
+        .deliver_inbound_forward_once(&source, &forward, now + 20, || {
+            Ok(EnvelopeSubmitResponse {
+                outcome: "offline_queued".into(),
+                target_delivery_id: forward.envelope.target_delivery_id.clone(),
+                inbox_seq: Some(1),
+                cursor: None,
+                nack: None,
+            })
+        })?
+        .ok_or("expired lease was not reclaimed")?;
+    assert_eq!(reclaimed.outcome, "offline_queued");
+    assert!(
+        store
+            .deliver_inbound_forward_once(&source, &forward, now + 21, || {
+                Err(NodeCoreError::ItestHttp("committed retry reached router".into()))
+            })?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_inbound_seen_record_without_state_is_committed() -> Result<(), Box<dyn std::error::Error>>
+{
+    let record: FederationInboundForwardSeenRecord = serde_json::from_value(serde_json::json!({
+        "seen_key": "legacy",
+        "source_node_id": "node-a",
+        "target_node_id": "node-b",
+        "source_device_id": "device-a",
+        "envelope_id": "envelope-a",
+        "target_delivery_id": "target-b",
+        "seen_at": 10,
+        "expires_at": 20
+    }))?;
+    assert_eq!(record.state, FederationInboundForwardSeenState::Committed);
+    Ok(())
+}
+
+#[test]
 fn federation_discovery_verifies_well_known_and_rejects_pin_hijack()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut state = FederationTrustState::new();

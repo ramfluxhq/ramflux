@@ -5,12 +5,17 @@
 //!
 //! Mailbox rows store the server-assigned retention deadline next to the entry. Index keys
 //! start with the zero-padded deadline, so a sweep is a prefix range scan up to `now`.
-use super::{InboxEntry, NodeCoreError, ROUTER_INBOX_ENTRY_TABLE, ROUTER_REPLAY_TUPLE_TABLE};
+use super::{
+    InboxEntry, LocalDeliveryEnvelopeRecord, NodeCoreError, ROUTER_INBOX_ENTRY_TABLE,
+    ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE, ROUTER_REPLAY_TUPLE_TABLE,
+};
 use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 const INBOX_EXPIRY: TableDefinition<&str, &[u8]> = TableDefinition::new("router_inbox_expiry_v1");
 const REPLAY_EXPIRY: TableDefinition<&str, &[u8]> = TableDefinition::new("router_replay_expiry_v1");
+const LOCAL_DELIVERY_EXPIRY: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("router_local_delivery_expiry_v1");
 const FORMAT: TableDefinition<&str, u8> = TableDefinition::new("router_expiry_index_format_v1");
 /// Deadlines computed once for WAL records written before acceptance times were logged.
 const LEGACY_WAL_DEADLINES: TableDefinition<&str, i64> =
@@ -107,8 +112,20 @@ pub(super) fn index_replay_row(
     Ok(())
 }
 
+pub(super) fn index_local_delivery_row(
+    txn: &redb::WriteTransaction,
+    envelope_id: &str,
+    expires_at: i64,
+) -> Result<(), NodeCoreError> {
+    txn.open_table(LOCAL_DELIVERY_EXPIRY)
+        .map_err(db_error)?
+        .insert(index_key(expires_at, envelope_id).as_str(), [].as_slice())
+        .map_err(db_error)?;
+    Ok(())
+}
+
 /// Index format 2 stores a fixed deadline in every mailbox row.
-const FORMAT_VERSION: u8 = 2;
+const FORMAT_VERSION: u8 = 3;
 
 /// One-time migration for databases written before the indexes or stored deadlines existed.
 /// Rows without a deadline get `min(created_at, now) + 7 d` (capped by the envelope expiry)
@@ -145,6 +162,18 @@ pub(super) fn upgrade(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError>
             .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
         replay_index.push(index_key(expires_at, key.value()));
     }
+    let mut local_delivery_index = Vec::new();
+    for row in txn
+        .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
+        .map_err(db_error)?
+        .iter()
+        .map_err(db_error)?
+    {
+        let (key, value) = row.map_err(db_error)?;
+        let record: LocalDeliveryEnvelopeRecord = serde_json::from_slice(value.value())
+            .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
+        local_delivery_index.push(index_key(record.expires_at, key.value()));
+    }
     let mut rows = txn.open_table(ROUTER_INBOX_ENTRY_TABLE).map_err(db_error)?;
     for (key, bytes) in rewrites {
         rows.insert(key.as_str(), bytes.as_slice()).map_err(db_error)?;
@@ -157,6 +186,10 @@ pub(super) fn upgrade(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError>
     }
     let mut table = txn.open_table(REPLAY_EXPIRY).map_err(db_error)?;
     for key in replay_index {
+        table.insert(key.as_str(), [].as_slice()).map_err(db_error)?;
+    }
+    let mut table = txn.open_table(LOCAL_DELIVERY_EXPIRY).map_err(db_error)?;
+    for key in local_delivery_index {
         table.insert(key.as_str(), [].as_slice()).map_err(db_error)?;
     }
     format.insert("version", FORMAT_VERSION).map_err(db_error)?;
@@ -205,6 +238,18 @@ pub(super) fn rebuild(
     inbox_rows: impl Iterator<Item = (String, i64)>,
     replay_rows: &[(String, i64)],
 ) -> Result<(), NodeCoreError> {
+    let local_delivery_rows = txn
+        .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
+        .map_err(db_error)?
+        .iter()
+        .map_err(db_error)?
+        .map(|row| {
+            let (key, value) = row.map_err(db_error)?;
+            let record: LocalDeliveryEnvelopeRecord = serde_json::from_slice(value.value())
+                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
+            Ok((key.value().to_owned(), record.expires_at))
+        })
+        .collect::<Result<Vec<_>, NodeCoreError>>()?;
     clear(txn)?;
     for (row_key, deadline) in inbox_rows {
         index_inbox_row(txn, &row_key, deadline)?;
@@ -212,11 +257,14 @@ pub(super) fn rebuild(
     for (replay_key, expires_at) in replay_rows {
         index_replay_row(txn, replay_key, *expires_at)?;
     }
+    for (envelope_id, expires_at) in local_delivery_rows {
+        index_local_delivery_row(txn, &envelope_id, expires_at)?;
+    }
     Ok(())
 }
 
 fn clear(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError> {
-    for definition in [INBOX_EXPIRY, REPLAY_EXPIRY] {
+    for definition in [INBOX_EXPIRY, REPLAY_EXPIRY, LOCAL_DELIVERY_EXPIRY] {
         let mut table = txn.open_table(definition).map_err(db_error)?;
         let keys = table
             .iter()
@@ -304,6 +352,33 @@ pub(super) fn sweep(
         }
         if !dry_run {
             txn.open_table(REPLAY_EXPIRY)
+                .map_err(db_error)?
+                .remove(key.as_str())
+                .map_err(db_error)?;
+        }
+    }
+    let local_delivery_end = deadline_prefix(now.saturating_add(1));
+    for key in due_keys(txn, LOCAL_DELIVERY_EXPIRY, &local_delivery_end)? {
+        let envelope_id = row_key_of(&key);
+        let due = txn
+            .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
+            .map_err(db_error)?
+            .get(envelope_id)
+            .map_err(db_error)?
+            .map(|value| {
+                serde_json::from_slice::<LocalDeliveryEnvelopeRecord>(value.value())
+                    .map(|record| record.expires_at <= now)
+            })
+            .transpose()
+            .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
+        if due == Some(true) && !dry_run {
+            txn.open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
+                .map_err(db_error)?
+                .remove(envelope_id)
+                .map_err(db_error)?;
+        }
+        if !dry_run {
+            txn.open_table(LOCAL_DELIVERY_EXPIRY)
                 .map_err(db_error)?
                 .remove(key.as_str())
                 .map_err(db_error)?;

@@ -783,20 +783,38 @@ fn assert_forwarded_retry_is_idempotent(
     envelope: ramflux_protocol::Envelope,
     now: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let retry = router.submit_envelope_with_home_node_forward_at(source, envelope, now, |plan| {
-        Ok(FederatedEnvelopeForwardResponse {
-            accepted: false,
-            source_node_id: "node_old.example".into(),
-            target_node_id: plan.route.home_node.clone(),
-            delivery: EnvelopeSubmitResponse {
-                outcome: "duplicate_federated_forward".into(),
-                target_delivery_id: plan.envelope.target_delivery_id.clone(),
-                inbox_seq: None,
-                cursor: None,
-                nack: None,
-            },
-        })
-    });
+    let in_progress =
+        router.submit_envelope_with_home_node_forward_at(source, envelope.clone(), now, |plan| {
+            Ok(FederatedEnvelopeForwardResponse {
+                accepted: false,
+                source_node_id: "node_old.example".into(),
+                target_node_id: plan.route.home_node.clone(),
+                delivery: EnvelopeSubmitResponse {
+                    outcome: "forward_in_progress".into(),
+                    target_delivery_id: plan.envelope.target_delivery_id.clone(),
+                    inbox_seq: None,
+                    cursor: None,
+                    nack: None,
+                },
+            })
+        });
+    assert!(matches!(in_progress, RouterSubmitOutcome::ForwardInProgress { .. }));
+
+    let retry =
+        router.submit_envelope_with_home_node_forward_at(source, envelope, now + 1, |plan| {
+            Ok(FederatedEnvelopeForwardResponse {
+                accepted: false,
+                source_node_id: "node_old.example".into(),
+                target_node_id: plan.route.home_node.clone(),
+                delivery: EnvelopeSubmitResponse {
+                    outcome: "duplicate_federated_forward".into(),
+                    target_delivery_id: plan.envelope.target_delivery_id.clone(),
+                    inbox_seq: None,
+                    cursor: None,
+                    nack: None,
+                },
+            })
+        });
     let RouterSubmitOutcome::ForwardedHomeNodeMigrated(retry) = retry else {
         return Err(format!("expected idempotent migrated retry, got {retry:?}").into());
     };

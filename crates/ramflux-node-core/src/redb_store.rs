@@ -21,6 +21,8 @@ pub(crate) const ROUTER_CURSOR_STATE_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("router_cursor_state_v1");
 pub(crate) const ROUTER_REPLAY_TUPLE_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("router_replay_tuple_v1");
+pub(crate) const ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("router_local_delivery_envelope_v1");
 pub(crate) const ROUTER_SESSION_ENTRY_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("router_session_entry_v1");
 pub(crate) const ROUTER_LIFECYCLE_RECORD_TABLE: TableDefinition<&str, &[u8]> =

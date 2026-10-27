@@ -20,6 +20,8 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const INBOUND_FORWARD_ATTEMPT_LEASE_SECONDS: u64 = 20;
+
 mod dead_letters;
 mod retention;
 pub use dead_letters::FederationOutboundDeadLetter;
@@ -49,6 +51,25 @@ pub struct FederationInboundForwardSeenRecord {
     pub target_delivery_id: String,
     pub seen_at: u64,
     pub expires_at: u64,
+    #[serde(default)]
+    pub state: FederationInboundForwardSeenState,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FederationInboundForwardSeenState {
+    Pending {
+        attempt_id: String,
+        lease_until: u64,
+    },
+    #[default]
+    Committed,
+}
+
+enum InboundForwardAdmission {
+    Acquired { attempt_id: String },
+    Pending,
+    Committed,
 }
 
 impl FederationRedbStore {
@@ -402,6 +423,21 @@ impl FederationRedbStore {
         request: &crate::FederatedEnvelopeForwardRequest,
         now: u64,
     ) -> Result<bool, NodeCoreError> {
+        let InboundForwardAdmission::Acquired { attempt_id } =
+            self.begin_inbound_forward(source, request, now)?
+        else {
+            return Ok(false);
+        };
+        self.finish_inbound_forward_attempt(source, request, &attempt_id, true)?;
+        Ok(true)
+    }
+
+    fn begin_inbound_forward(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        request: &crate::FederatedEnvelopeForwardRequest,
+        now: u64,
+    ) -> Result<InboundForwardAdmission, NodeCoreError> {
         let expires_at = inbound_forward_expires_at(request)?;
         if expires_at <= now {
             return Err(NodeCoreError::TtlExpired {
@@ -432,7 +468,7 @@ impl FederationRedbStore {
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
 
-        let accepted = {
+        let admission = {
             let mut table = write_txn
                 .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
@@ -441,42 +477,56 @@ impl FederationRedbStore {
                     .remove(key.as_str())
                     .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
             }
-            if table
+            let existing = table
                 .get(seen_key.as_str())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?
-                .is_some()
-            {
-                false
-            } else {
-                let record = FederationInboundForwardSeenRecord {
-                    seen_key: seen_key.clone(),
-                    source_node_id: request.source_node_id.clone(),
-                    target_node_id: request.target_node_id.clone(),
-                    source_device_id: request.envelope.source_device_id.clone(),
-                    envelope_id: request.envelope.envelope_id.clone(),
-                    target_delivery_id: request.envelope.target_delivery_id.clone(),
-                    seen_at: now,
-                    expires_at,
-                };
-                let bytes = serialize_inbound_forward_seen_record(&record)?;
-                table
-                    .insert(seen_key.as_str(), bytes.as_slice())
-                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-                true
+                .map(|value| deserialize_inbound_forward_seen_record(value.value()))
+                .transpose()?;
+            match existing.map(|record| record.state) {
+                Some(FederationInboundForwardSeenState::Committed) => {
+                    InboundForwardAdmission::Committed
+                }
+                Some(FederationInboundForwardSeenState::Pending { lease_until, .. })
+                    if lease_until > now =>
+                {
+                    InboundForwardAdmission::Pending
+                }
+                None | Some(FederationInboundForwardSeenState::Pending { .. }) => {
+                    let attempt_id = inbound_forward_attempt_id(now);
+                    let lease_until =
+                        now.saturating_add(INBOUND_FORWARD_ATTEMPT_LEASE_SECONDS).min(expires_at);
+                    let record = FederationInboundForwardSeenRecord {
+                        seen_key: seen_key.clone(),
+                        source_node_id: request.source_node_id.clone(),
+                        target_node_id: request.target_node_id.clone(),
+                        source_device_id: request.envelope.source_device_id.clone(),
+                        envelope_id: request.envelope.envelope_id.clone(),
+                        target_delivery_id: request.envelope.target_delivery_id.clone(),
+                        seen_at: now,
+                        expires_at,
+                        state: FederationInboundForwardSeenState::Pending {
+                            attempt_id: attempt_id.clone(),
+                            lease_until,
+                        },
+                    };
+                    let bytes = serialize_inbound_forward_seen_record(&record)?;
+                    table
+                        .insert(seen_key.as_str(), bytes.as_slice())
+                        .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                    InboundForwardAdmission::Acquired { attempt_id }
+                }
             }
         };
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(accepted)
+        Ok(admission)
     }
 
-    /// Removes a provisional inbound replay record after local delivery did not commit.
-    ///
-    /// # Errors
-    /// Returns an error when the replay projection cannot be updated.
-    pub fn release_inbound_forward(
+    fn finish_inbound_forward_attempt(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         request: &crate::FederatedEnvelopeForwardRequest,
+        attempt_id: &str,
+        committed: bool,
     ) -> Result<(), NodeCoreError> {
         let seen_key = federated_forward_replay_key(source, request);
         let write_txn =
@@ -485,9 +535,32 @@ impl FederationRedbStore {
             let mut table = write_txn
                 .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            table
-                .remove(seen_key.as_str())
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let existing = table
+                .get(seen_key.as_str())
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?
+                .map(|value| deserialize_inbound_forward_seen_record(value.value()))
+                .transpose()?;
+            if let Some(mut record) = existing
+                && matches!(
+                    &record.state,
+                    FederationInboundForwardSeenState::Pending {
+                        attempt_id: current,
+                        ..
+                    } if current == attempt_id
+                )
+            {
+                if committed {
+                    record.state = FederationInboundForwardSeenState::Committed;
+                    let bytes = serialize_inbound_forward_seen_record(&record)?;
+                    table
+                        .insert(seen_key.as_str(), bytes.as_slice())
+                        .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                } else {
+                    table
+                        .remove(seen_key.as_str())
+                        .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                }
+            }
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))
     }
@@ -508,19 +581,25 @@ impl FederationRedbStore {
     where
         F: FnOnce() -> Result<crate::EnvelopeSubmitResponse, NodeCoreError>,
     {
-        if !self.accept_inbound_forward_once(source, request, now)? {
-            return Ok(None);
-        }
+        let attempt_id = match self.begin_inbound_forward(source, request, now)? {
+            InboundForwardAdmission::Committed => return Ok(None),
+            InboundForwardAdmission::Pending => {
+                return Ok(Some(inbound_forward_in_progress_response(request)));
+            }
+            InboundForwardAdmission::Acquired { attempt_id } => attempt_id,
+        };
         let delivery = match deliver() {
             Ok(delivery) => delivery,
             Err(error) => {
-                self.release_inbound_forward(source, request)?;
+                self.finish_inbound_forward_attempt(source, request, &attempt_id, false)?;
                 return Err(error);
             }
         };
-        if !matches!(delivery.outcome.as_str(), "online" | "offline_queued") {
-            self.release_inbound_forward(source, request)?;
-        }
+        let committed = matches!(
+            delivery.outcome.as_str(),
+            "online" | "offline_queued" | "duplicate_federated_forward"
+        );
+        self.finish_inbound_forward_attempt(source, request, &attempt_id, committed)?;
         Ok(Some(delivery))
     }
 
@@ -539,6 +618,26 @@ impl FederationRedbStore {
             }
         }
         Ok(expired)
+    }
+}
+
+fn inbound_forward_attempt_id(now: u64) -> String {
+    static NEXT_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let sequence = NEXT_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos =
+        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
+    format!("{now:020}-{}-{nanos:032}-{sequence:020}", std::process::id())
+}
+
+fn inbound_forward_in_progress_response(
+    request: &crate::FederatedEnvelopeForwardRequest,
+) -> crate::EnvelopeSubmitResponse {
+    crate::EnvelopeSubmitResponse {
+        outcome: "forward_in_progress".to_owned(),
+        target_delivery_id: request.envelope.target_delivery_id.clone(),
+        inbox_seq: None,
+        cursor: None,
+        nack: None,
     }
 }
 

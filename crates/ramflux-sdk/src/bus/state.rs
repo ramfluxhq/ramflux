@@ -329,6 +329,11 @@ impl LocalBusAccountState {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_pooled_engine(&self) -> bool {
+        self.engine.is_some()
+    }
+
     /// Saves the engine's push route control sequence when it advanced, so the next
     /// sequence after a restart is `max(saved + 1, now_ms)`.
     pub(crate) fn persist_push_route_seq(&mut self) {
