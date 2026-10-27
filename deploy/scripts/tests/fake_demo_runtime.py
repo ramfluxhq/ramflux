@@ -69,6 +69,9 @@ if normalized and normalized[0] == "compose":
         if control.get("up_exit"):
             sys.exit(control["up_exit"])
         deployed.touch()
+        if control.get("corrupt_env_after_up"):
+            with (state / "runtime.env").open("a") as output:
+                output.write("RF_COMPOSE_FEDERATION_ADMIN_TOKEN=DO_NOT_LOG\n")
     elif "down" in normalized:
         deployed.unlink(missing_ok=True)
     elif "ps" in normalized and "-q" in normalized:

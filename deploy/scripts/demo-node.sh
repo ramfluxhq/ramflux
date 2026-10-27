@@ -295,7 +295,7 @@ compose() (
     set -- -f "$state/compose.voice.yml" "$@"
   fi
   set -- --env-file "$state/runtime.env" -p "$DEMO_PROJECT" -f "$state/compose.yml" "$@"
-  clean_env python3 "$script_dir/compose-preflight.py" --env-file "$state/runtime.env"
+  clean_env python3 "$script_dir/compose-preflight.py" --env-file "$state/runtime.env" || exit 1
   case "$compose_provider" in
     docker-v2|docker-wrapper) clean_env docker compose "$@" ;;
     podman-compose) clean_env podman-compose "$@" ;;

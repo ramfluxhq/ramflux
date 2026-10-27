@@ -302,15 +302,18 @@ Use the same user's default engine context for every operation.
 Before **every** Compose invocation (including config, logs and down), run:
 
 ```sh
-python3 deploy/scripts/compose-preflight.py --env-file /path/to/operator.env
+python3 deploy/scripts/compose-preflight.py --env-file /path/to/operator.env -f deploy/docker-compose.yml
 # Use exactly the same env files, in the same order, and the same process environment:
 docker compose --env-file /path/to/operator.env -f deploy/docker-compose.yml config
 ```
 
-With no explicit env file, preflight reads `.env` in the current directory. Repeated
-`--env-file` arguments apply in order; process environment wins. Run both commands
-from the same directory. If Compose's project directory has another implicit env
-file, pass it explicitly to both commands; do not rely on implicit project lookup.
+With no explicit env file, preflight resolves the project directory from
+`--project-directory`, the first `-f`/`--file` argument, `COMPOSE_FILE`, or Compose's
+normal upward file discovery, then reads that directory's `.env`. It also honors
+comma-separated `COMPOSE_ENV_FILES`, `COMPOSE_PATH_SEPARATOR`, and
+`COMPOSE_DISABLE_ENV_FILE`; unsupported remote Compose-file paths fail closed.
+Repeated `--env-file` arguments apply in order and process environment wins. Pass
+the same `-f`, `--project-directory`, and env-file selection to both commands.
 Use the same explicit files for Podman Compose. The demo wrapper and itest harness
 invoke preflight automatically; existing frozen demo projects must be regenerated
 through their normal `up` workflow before maintenance commands can pass migration.
