@@ -15,14 +15,38 @@ settings = {key: os.environ[key] for key in (
     "DEMO_BIND_ADDR", "DEMO_VERSION",
 )}
 marker = state / "owner.json"
+pending_marker = state / "owner.json.pending"
 if marker.exists():
     owner = json.loads(marker.read_text())
-    if owner["settings"] != settings or owner["directory"] != str(state):
+    if owner["directory"] != str(state):
         sys.exit("demo settings changed: restore the original env file or use a fresh data directory/project")
+    if command in ("upgrade", "rollback"):
+        current = owner["settings"]
+        changed = [key for key in settings if key != "DEMO_VERSION" and settings[key] != current[key]]
+        if changed:
+            sys.exit("demo settings changed beyond DEMO_VERSION: restore every other original setting")
+        history = list(owner.get("version_history", []))
+        if command == "upgrade":
+            if settings["DEMO_VERSION"] == current["DEMO_VERSION"]:
+                sys.exit("upgrade requires a changed DEMO_VERSION")
+            history.append(current["DEMO_VERSION"])
+        else:
+            if not history:
+                sys.exit("no previous demo version is available for rollback")
+            settings["DEMO_VERSION"] = history.pop()
+        owner = {**owner, "settings": settings, "version_history": history}
+        temporary = pending_marker.with_suffix(".tmp")
+        temporary.write_text(json.dumps(owner, indent=2) + "\n")
+        temporary.replace(pending_marker)
+    elif owner["settings"] != settings:
+        sys.exit("demo settings changed: use upgrade for DEMO_VERSION only, or restore the original env file")
 else:
+    if command != "up":
+        sys.exit("upgrade and rollback require an existing owned demo data directory")
     if any(state.iterdir()):
         sys.exit("refusing to adopt a nonempty, unowned data directory")
-    owner = {"settings": settings, "directory": str(state), "token": secrets.token_hex(16)}
+    owner = {"settings": settings, "version_history": [], "directory": str(state),
+             "token": secrets.token_hex(16)}
     marker.write_text(json.dumps(owner, indent=2) + "\n")
 
 # Maintenance commands must use voice settings already written by up, not a new opt-in.
@@ -59,7 +83,7 @@ for filename, source, selected in (
     ("compose.admin.yml", "docker-compose.admin.yml", bool(os.environ.get("DEMO_ADMIN_LOOPBACK_PORT"))),
 ):
     frozen = state / filename
-    if command == "up" and (selected or frozen.exists()):
+    if command in ("up", "upgrade", "rollback") and (selected or frozen.exists()):
         content = (repo / "deploy" / source).read_bytes()
         if not frozen.exists() or frozen.read_bytes() != content:
             existed = frozen.exists()

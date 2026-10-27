@@ -331,14 +331,29 @@ Malformed relay metadata budgets fail startup; absence (or an unresolved optiona
 expression) selects the bounded default. Empty credential paths retain their
 existing explicitly-disabled semantics where supported.
 
-### Upgrading an existing demo and private admin access
+### Upgrading or rolling back an existing demo and private admin access
 
-Run the new `demo-node.sh up ENV_FILE` against the existing owned state directory.
-`up` atomically refreshes changed shipped base/voice Compose copies and prints one
-refresh notice. Ownership, identity, certificates and named data volumes survive;
-operator ports still come from the env file. Maintenance commands use the saved
-copies and do not refresh them. No manual deletion of `compose.yml`, identity
-files or volumes is needed. Public discovery/prekeys remain on `DEMO_HTTP_PORT`
+Change only `DEMO_VERSION` in the operator env, then run the explicit upgrade path:
+
+```sh
+deploy/scripts/demo-node.sh upgrade /absolute/path/to/demo.env
+```
+
+The command builds all seven images, or with `DEMO_PREBUILT_IMAGES=1` first verifies
+that all seven versioned images are loaded and uses `--no-build`. It records the old
+version in private `owner.json`, refreshes changed frozen Compose definitions, retains
+the node identity, CA, seeds, volumes, ports and all other ownership settings, and
+prints the exact rollback command. A plain `up` still refuses a version change, and
+`upgrade` refuses every setting change other than `DEMO_VERSION`.
+
+Run the printed `demo-node.sh rollback ENV_FILE` command while retaining the current
+env file. Rollback selects the last version from `owner.json`, verifies that all seven
+old images remain available, recreates the services with `--no-build`, and leaves all
+identity and data material intact. After it succeeds, restore `DEMO_VERSION` in the
+operator env to the version printed by rollback; later maintenance commands fail
+closed while the env and recorded version differ. Keep previously deployed images
+until the upgrade has been accepted. Maintenance commands use the saved Compose
+copies and do not refresh them. Public discovery/prekeys remain on `DEMO_HTTP_PORT`
 (default 59482); neither admin 18084 nor an unintended default host 18082 is published.
 
 For temporary administration, set `DEMO_ADMIN_LOOPBACK_PORT=59487` in the operator
@@ -348,12 +363,7 @@ to remove the mapping. Production installs can use `docker-compose.admin.yml`
 with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. See
 [listener configuration, bounds and SSH commands](../docs/federation_http.md).
 
-Before upgrading, save the private state's frozen definitions for rollback:
-`cp -p STATE/compose.yml STATE/compose.yml.pre-split` and likewise save runtime.env
-and compose.voice.yml when present, keeping the state directory private. To roll
-back, stop the new project without `--purge`, restore the old checkout/images,
-restore **compose.yml** (and the saved voice copy) from those backups, then run the
-old `up` with the original operator env. Restoring compose.yml is mandatory:
-otherwise the old script mixes a new definition with old port inputs and can
-publish default host 18082 while breaking 59482. Never remove identity or volumes.
-The new script validates the public connection limit before state or engine changes.
+For upgrades from tooling older than this explicit version workflow, first save the
+private state's frozen definitions and `owner.json`, and retain the original checkout
+and images. Never remove identity or volumes. The script validates the public
+connection limit before state or engine changes.

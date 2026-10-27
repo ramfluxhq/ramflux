@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
-usage() { fail 'usage: demo-node.sh {up|down|status|logs} ENV_FILE [--purge|--remote] [--voice-udp-port PORT]'; }
+usage() { fail 'usage: demo-node.sh {up|upgrade|rollback|down|status|logs} ENV_FILE [--purge|--remote] [--voice-udp-port PORT]'; }
 [ "$#" -ge 2 ] || usage
 command=$1
 env_file=$2
@@ -20,7 +20,7 @@ while [ "$#" -gt 0 ]; do
     *) usage ;;
   esac
 done
-case "$command:$flag" in up:|down:|down:--purge|status:|status:--remote|logs:) ;; *) usage ;; esac
+case "$command:$flag" in up:|upgrade:|rollback:|down:|down:--purge|status:|status:--remote|logs:) ;; *) usage ;; esac
 case "$env_file" in /*) ;; *) env_file="$PWD/$env_file" ;; esac
 [ -f "$env_file" ] || fail 'an existing operator env file is required'
 # The operator file is trusted shell configuration, never downloaded or committed.
@@ -94,18 +94,26 @@ fi
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 # Canonicalize before checking ownership or allowing recursive deletion.
-[ "$command" != up ] || mkdir -p "$DEMO_DATA_DIR"
+case "$command" in up) mkdir -p "$DEMO_DATA_DIR" ;; esac
 [ -d "$DEMO_DATA_DIR" ] || fail 'demo data directory does not exist'
 state=$(CDPATH='' cd -- "$DEMO_DATA_DIR" && pwd -P)
 [ "$state" != / ] && [ "$state" != "$HOME" ] && [ "$state" != "$repo" ] || fail 'unsafe data directory'
 mkdir "$state.lock" 2>/dev/null || fail 'demo operation already running (check adjacent .lock directory)'
-trap 'rmdir "$state.lock"' EXIT
+cleanup() {
+  rm -f -- "$state/owner.json.pending"
+  rmdir "$state.lock"
+}
+trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 if [ "$command" = up ]; then
   python3 "$script_dir/demo-node-config.py" "$repo" "$state" "$command"
 else
   [ -f "$state/owner.json" ] || fail 'data directory is not owned by this demo tooling'
   python3 "$script_dir/demo-node-config.py" "$repo" "$state" "$command"
+fi
+if [ "$command" = upgrade ] || [ "$command" = rollback ]; then
+  DEMO_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["settings"]["DEMO_VERSION"])' "$state/owner.json.pending")
+  export DEMO_VERSION
 fi
 owner=$(cat "$state/owner.token")
 # Even a matching project name is insufficient: every existing resource must carry our owner token.
@@ -295,7 +303,7 @@ wait_for_services() {
 }
 check_resources
 case "$command" in
-  up)
+  up|upgrade|rollback)
     chmod 700 "$state"
     RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/bootstrap-ca.sh"
     RAMFLUX_DEPLOY_DIR="$state" RAMFLUX_NODE_ID="$DEMO_NODE_ID" sh "$script_dir/issue-certs.sh"
@@ -379,7 +387,7 @@ RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450
 ENV
     fi
     python3 "$script_dir/compose-env.py" "$state/runtime.env"
-    if [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
+    if [ "$command" = rollback ] || [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
       check_prebuilt_images
       compose up -d --no-build
     else
@@ -387,7 +395,15 @@ ENV
       compose up -d --build
     fi
     wait_for_services
+    if [ "$command" = upgrade ] || [ "$command" = rollback ]; then
+      mv "$state/owner.json.pending" "$state/owner.json"
+    fi
     printf 'demo URL: %s\n' "$origin"
+    if [ "$command" = upgrade ]; then
+      printf 'rollback command: %s rollback %s\n' "$0" "$env_file"
+    elif [ "$command" = rollback ]; then
+      printf 'rolled back demo images to version %s\n' "$DEMO_VERSION"
+    fi
     ;;
   status)
     compose ps
