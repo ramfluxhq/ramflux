@@ -59,12 +59,20 @@ impl HomeMigrationService {
         }
         Ok(count)
     }
-    fn exchange_courier(
+    pub(crate) fn exchange_courier(
         &self,
         op: &MigrationOperation,
         status_only: bool,
         now: u64,
     ) -> Result<MigrationPeerReply, NodeCoreError> {
+        let deadline = op
+            .seal
+            .as_ref()
+            .and_then(|seal| seal.body.commit_deadline)
+            .ok_or(NodeCoreError::HomeMigration(Refusal::EvidenceRequired))?;
+        if !status_only && now > deadline {
+            return Err(NodeCoreError::HomeMigration(Refusal::CommitExpired));
+        }
         let (source, pinned) = op.base.record.home();
         if self.mesh.peer_key(source)? != pinned {
             return Err(NodeCoreError::HomeMigration(Refusal::PinMismatch));

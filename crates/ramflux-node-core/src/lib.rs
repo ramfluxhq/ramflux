@@ -167,6 +167,7 @@ pub use custody_service::{CustodyService, CustodyTlsContext};
 mod home_migration_admission;
 mod home_migration_budget;
 mod home_migration_courier;
+mod home_migration_operations;
 mod home_migration_peer;
 mod home_migration_peer_dispatch;
 mod home_migration_preflight;
