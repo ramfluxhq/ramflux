@@ -41,7 +41,7 @@ enum Mode {
 }
 
 fn mode() -> Mode {
-    match std::env::var(DROP_AFTER_COMMIT_ENV).ok().as_deref() {
+    match ramflux_node_core::environment::var(DROP_AFTER_COMMIT_ENV).ok().as_deref() {
         Some("put") => Mode::Put,
         Some("ack") => Mode::Ack,
         Some("tombstone") => Mode::Tombstone,
@@ -95,7 +95,8 @@ fn plan(mode: Mode, route: &str, response_status: u16, already_claimed: bool) ->
 /// the new process (same mode, its in-process claim reset) finds the marker already present and
 /// returns `Write` for the retry, so it never holds twice.
 fn hold_marker_exists() -> bool {
-    std::env::var_os(HOLD_MARKER_ENV).is_some_and(|path| std::path::Path::new(&path).exists())
+    ramflux_node_core::environment::var_os(HOLD_MARKER_ENV)
+        .is_some_and(|path| std::path::Path::new(&path).exists())
 }
 
 /// Two-layer one-shot claim for `put-restart-hold`. The persistent marker guards the
@@ -181,7 +182,7 @@ fn capture(
     request_seq: u64,
     action: &str,
 ) -> Result<(), ()> {
-    let Some(path) = std::env::var_os(CAPTURE_FILE_ENV) else {
+    let Some(path) = ramflux_node_core::environment::var_os(CAPTURE_FILE_ENV) else {
         return Ok(());
     };
     let line = capture_line(request, response_status, connection_id, request_seq, action);
@@ -214,7 +215,7 @@ fn capture_to(path: &std::path::Path, line: &serde_json::Value) -> Result<(), ()
 /// [`hold_marker_exists`]). `Err(())` when the marker env is unset or the file cannot be written,
 /// so the caller fails the connection rather than parking without a recorded barrier.
 pub(super) fn write_hold_marker() -> Result<(), ()> {
-    let path = std::env::var_os(HOLD_MARKER_ENV).ok_or(())?;
+    let path = ramflux_node_core::environment::var_os(HOLD_MARKER_ENV).ok_or(())?;
     write_marker_to(std::path::Path::new(&path))
 }
 

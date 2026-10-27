@@ -61,7 +61,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         }
         tracing::info!(service, node_id = config.node_id, "retention store initialized");
         #[cfg(feature = "itest-http")]
-        if std::env::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
+        if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
             return serve_itest_http(&store, &config);
         }
     }
@@ -75,7 +75,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
 
 fn retention_async_ingress_enabled() -> bool {
     retention_async_ingress_enabled_from_value(
-        std::env::var(RETENTION_ASYNC_INGRESS_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(RETENTION_ASYNC_INGRESS_ENV).ok().as_deref(),
     )
 }
 
@@ -92,7 +92,7 @@ fn retention_async_ingress_enabled_from_value(value: Option<&str>) -> bool {
 
 fn retention_async_listen_addr() -> Option<String> {
     retention_async_listen_addr_from_value(
-        std::env::var(RETENTION_ASYNC_LISTEN_ADDR_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(RETENTION_ASYNC_LISTEN_ADDR_ENV).ok().as_deref(),
     )
 }
 
@@ -104,7 +104,8 @@ fn retention_async_listen_addr_from_value(value: Option<&str>) -> Option<String>
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.starts_with("${") {
+    if trimmed.parse::<std::net::SocketAddr>().is_err() {
+        ramflux_node_core::environment::warn_invalid(RETENTION_ASYNC_LISTEN_ADDR_ENV);
         return Some(DEFAULT_RETENTION_ASYNC_LISTEN_ADDR.to_owned());
     }
     Some(trimmed.to_owned())
@@ -116,7 +117,7 @@ fn spawn_retention_async_mesh_quic_listener(
     store: Arc<ramflux_node_core::RetentionRedbStore>,
     config: Arc<ramflux_node_core::NodeServiceConfig>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let runtime = std::env::var(RETENTION_ASYNC_INGRESS_RUNTIME_ENV)
+    let runtime = ramflux_node_core::environment::var(RETENTION_ASYNC_INGRESS_RUNTIME_ENV)
         .ok()
         .unwrap_or_else(|| "tokio".to_owned());
     if !runtime.trim().starts_with("${") && !matches!(runtime.trim(), "" | "tokio" | "quinn") {
@@ -285,7 +286,7 @@ fn serve_itest_http(
     store: &ramflux_node_core::RetentionRedbStore,
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let addr = std::env::var("RAMFLUX_ITEST_RETENTION_HTTP_ADDR")
+    let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_RETENTION_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18087".to_owned());
     let listener = TcpListener::bind(&addr)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
@@ -366,11 +367,12 @@ fn start_gc_scheduler(
     store: Arc<ramflux_node_core::RetentionRedbStore>,
     config: ramflux_node_core::NodeServiceConfig,
 ) {
-    let interval = std::env::var("RAMFLUX_RETENTION_GC_SWEEP_INTERVAL_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(86_400)
-        .max(86_400);
+    let interval =
+        ramflux_node_core::environment::var("RAMFLUX_RETENTION_GC_SWEEP_INTERVAL_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(86_400)
+            .max(86_400);
     thread::spawn(move || {
         let mesh_client = ramflux_transport::MeshHttpClient::new();
         loop {
@@ -387,8 +389,9 @@ fn run_gc_sweep_once(
     config: &ramflux_node_core::NodeServiceConfig,
     mesh_client: &ramflux_transport::MeshHttpClient,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let router_async_endpoint = std::env::var(ROUTER_ASYNC_ENDPOINT_ENV).ok();
-    let federation_mesh_endpoint = std::env::var(FEDERATION_MESH_ENDPOINT_ENV).ok();
+    let router_async_endpoint = ramflux_node_core::environment::var(ROUTER_ASYNC_ENDPOINT_ENV).ok();
+    let federation_mesh_endpoint =
+        ramflux_node_core::environment::var(FEDERATION_MESH_ENDPOINT_ENV).ok();
     run_gc_sweep_once_with_async_endpoints(
         store,
         config,
@@ -822,6 +825,10 @@ mod tests {
             Some("127.0.0.1:17446")
         );
         assert!(retention_async_listen_addr_from_value(Some("")).is_none());
+        assert_eq!(
+            retention_async_listen_addr_from_value(Some("not-an-address")).as_deref(),
+            Some(DEFAULT_RETENTION_ASYNC_LISTEN_ADDR)
+        );
     }
 
     #[test]

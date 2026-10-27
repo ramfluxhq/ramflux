@@ -26,7 +26,7 @@ const DEFAULT_ROUTER_ASYNC_LISTEN_ADDR: &str = "0.0.0.0:17444";
 pub(crate) fn serve_itest_http(
     router: &Arc<crate::router_runtime::RouterHandle>,
 ) -> anyhow::Result<()> {
-    let addr = std::env::var("RAMFLUX_ITEST_ROUTER_HTTP_ADDR")
+    let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_ROUTER_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18080".to_owned());
     let listener = TcpListener::bind(&addr)?;
     let worker_count = router_ingress_worker_count();
@@ -53,7 +53,7 @@ pub(crate) fn serve_itest_http(
 
 #[cfg(feature = "itest-http")]
 fn router_ingress_worker_count() -> usize {
-    std::env::var("RAMFLUX_ROUTER_INGRESS_THREADS")
+    ramflux_node_core::environment::var("RAMFLUX_ROUTER_INGRESS_THREADS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
@@ -122,7 +122,9 @@ pub(crate) fn serve_router_mesh_mtls(
 }
 
 fn router_async_ingress_enabled() -> bool {
-    router_async_ingress_enabled_from_value(std::env::var(ROUTER_ASYNC_INGRESS_ENV).ok().as_deref())
+    router_async_ingress_enabled_from_value(
+        ramflux_node_core::environment::var(ROUTER_ASYNC_INGRESS_ENV).ok().as_deref(),
+    )
 }
 
 fn router_async_ingress_enabled_from_value(value: Option<&str>) -> bool {
@@ -139,7 +141,7 @@ fn router_async_ingress_enabled_from_value(value: Option<&str>) -> bool {
 fn router_async_listen_addr(config: &ramflux_node_core::NodeServiceConfig) -> Option<String> {
     router_async_listen_addr_from_value(
         config,
-        std::env::var(ROUTER_ASYNC_LISTEN_ADDR_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(ROUTER_ASYNC_LISTEN_ADDR_ENV).ok().as_deref(),
     )
 }
 
@@ -166,6 +168,10 @@ fn router_async_listen_addr_from_value(
             .get("router-async-listen")
             .cloned()
             .or_else(|| Some(DEFAULT_ROUTER_ASYNC_LISTEN_ADDR.to_owned()));
+    }
+    if trimmed.parse::<std::net::SocketAddr>().is_err() {
+        ramflux_node_core::environment::warn_invalid(ROUTER_ASYNC_LISTEN_ADDR_ENV);
+        return router_async_listen_addr_from_value(config, None);
     }
     Some(trimmed.to_owned())
 }
@@ -224,7 +230,7 @@ fn spawn_router_async_mesh_quic_listener(
     peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
     match router_async_ingress_runtime_from_value(
-        std::env::var(ROUTER_ASYNC_INGRESS_RUNTIME_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(ROUTER_ASYNC_INGRESS_RUNTIME_ENV).ok().as_deref(),
     ) {
         RouterAsyncIngressRuntime::Compio => {
             spawn_router_async_compio_mesh_quic_thread(listen_addr, tls, router, peer_auth)
@@ -655,19 +661,22 @@ impl RouterSubmitBridge {
 
 fn router_async_worker_threads() -> usize {
     positive_usize_from_value(
-        std::env::var(ROUTER_ASYNC_WORKER_THREADS_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(ROUTER_ASYNC_WORKER_THREADS_ENV).ok().as_deref(),
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
     )
 }
 
 fn router_async_ingress_socket_count() -> usize {
-    positive_usize_from_value(std::env::var(ROUTER_ASYNC_INGRESS_SOCKETS_ENV).ok().as_deref(), 1)
+    positive_usize_from_value(
+        ramflux_node_core::environment::var(ROUTER_ASYNC_INGRESS_SOCKETS_ENV).ok().as_deref(),
+        1,
+    )
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
 fn router_async_compio_ingress_socket_count() -> usize {
     positive_usize_from_value(
-        std::env::var(ROUTER_ASYNC_INGRESS_SOCKETS_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(ROUTER_ASYNC_INGRESS_SOCKETS_ENV).ok().as_deref(),
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
     )
 }

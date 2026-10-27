@@ -362,7 +362,8 @@ fn apply_quic_transport_limits(
     default_stream_limit: u32,
 ) {
     let stream_limit = positive_u32_from_value(
-        std::env::var(env.max_concurrent_bidi_streams).ok().as_deref(),
+        env.max_concurrent_bidi_streams,
+        ramflux_core::environment::var(env.max_concurrent_bidi_streams).ok().as_deref(),
         default_stream_limit,
     );
     let receive_window = quic_varint_env(env.receive_window, QUIC_RECEIVE_WINDOW_DEFAULT);
@@ -377,12 +378,11 @@ fn apply_quic_transport_limits(
 }
 
 fn quic_varint_env(name: &str, default: u64) -> VarInt {
-    quic_varint_from_value(std::env::var(name).ok().as_deref(), default)
+    quic_varint_from_value(name, ramflux_core::environment::var(name).ok().as_deref(), default)
 }
 
-fn quic_varint_from_value(value: Option<&str>, default: u64) -> VarInt {
-    let value = value
-        .and_then(|value| value.parse::<u64>().ok())
+fn quic_varint_from_value(name: &str, value: Option<&str>, default: u64) -> VarInt {
+    let value = ramflux_core::environment::parse_value::<u64>(name, value)
         .filter(|value| *value > 0)
         .unwrap_or(default)
         .min(VarInt::MAX.into_inner());
@@ -390,15 +390,13 @@ fn quic_varint_from_value(value: Option<&str>, default: u64) -> VarInt {
 }
 
 fn positive_u64_env(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    ramflux_core::environment::parsed::<u64>(name).filter(|value| *value > 0).unwrap_or(default)
 }
 
-fn positive_u32_from_value(value: Option<&str>, default: u32) -> u32 {
-    value.and_then(|value| value.parse::<u32>().ok()).filter(|value| *value > 0).unwrap_or(default)
+fn positive_u32_from_value(name: &str, value: Option<&str>, default: u32) -> u32 {
+    ramflux_core::environment::parse_value::<u32>(name, value)
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 /// # Errors
@@ -476,11 +474,15 @@ mod tests {
 
     #[test]
     fn gateway_quic_stream_limit_parse_positive_env_value() {
-        assert_eq!(positive_u32_from_value(Some("8192"), 4096), 8192);
-        assert_eq!(positive_u32_from_value(Some("0"), 4096), 4096);
-        assert_eq!(positive_u32_from_value(Some("bad"), 4096), 4096);
+        assert_eq!(positive_u32_from_value("QUIC_STREAM_LIMIT", Some("8192"), 4096), 8192);
+        assert_eq!(positive_u32_from_value("QUIC_STREAM_LIMIT", Some("0"), 4096), 4096);
+        assert_eq!(positive_u32_from_value("QUIC_STREAM_LIMIT", Some("bad"), 4096), 4096);
         assert_eq!(
-            positive_u32_from_value(None, GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT),
+            positive_u32_from_value(
+                "QUIC_STREAM_LIMIT",
+                None,
+                GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT
+            ),
             4096
         );
     }
@@ -491,15 +493,17 @@ mod tests {
         assert_eq!(QUIC_SEND_WINDOW_DEFAULT, 16 * 1024 * 1024);
         assert_eq!(QUIC_STREAM_RECEIVE_WINDOW_DEFAULT, 1024 * 1024);
         assert_eq!(
-            quic_varint_from_value(None, QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),
+            quic_varint_from_value("QUIC_WINDOW", None, QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),
             16 * 1024 * 1024
         );
         assert_eq!(
-            quic_varint_from_value(Some("0"), QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),
+            quic_varint_from_value("QUIC_WINDOW", Some("0"), QUIC_RECEIVE_WINDOW_DEFAULT)
+                .into_inner(),
             16 * 1024 * 1024
         );
         assert_eq!(
-            quic_varint_from_value(Some("8388608"), QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),
+            quic_varint_from_value("QUIC_WINDOW", Some("8388608"), QUIC_RECEIVE_WINDOW_DEFAULT)
+                .into_inner(),
             8 * 1024 * 1024
         );
     }

@@ -66,12 +66,13 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             key_migration::export(&state, &path)?;
             return Ok(());
         }
-        let secret_path = std::env::var_os("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE")
-            .ok_or_else(|| {
-                ramflux_node_core::NodeCoreError::Unauthorized(
-                    "mounted federation secret required".into(),
-                )
-            })?;
+        let secret_path =
+            ramflux_node_core::environment::var_os("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE")
+                .ok_or_else(|| {
+                    ramflux_node_core::NodeCoreError::Unauthorized(
+                        "mounted federation secret required".into(),
+                    )
+                })?;
         ramflux_node_core::NodeSecret::require_external_path(
             std::path::Path::new(&secret_path),
             std::path::Path::new(&redb_path),
@@ -102,7 +103,8 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             &mesh_observability,
             &discovery,
         )?;
-        if let Ok(admin_addr) = std::env::var("RAMFLUX_FEDERATION_ADMIN_ADDR") {
+        if let Ok(admin_addr) = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_ADMIN_ADDR")
+        {
             serve_admin_http(
                 &admin_addr,
                 FederationAdminHttpContext {
@@ -111,12 +113,15 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
                     router: Arc::clone(&router),
                     discovery: discovery.clone(),
                     mesh_observability: Arc::clone(&mesh_observability),
-                    admin_token: std::env::var("RAMFLUX_FEDERATION_ADMIN_TOKEN").ok(),
+                    admin_token: ramflux_node_core::environment::var(
+                        "RAMFLUX_FEDERATION_ADMIN_TOKEN",
+                    )
+                    .ok(),
                 },
             )?;
         }
         #[cfg(feature = "itest-http")]
-        if std::env::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
+        if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
             return serve_itest_http(&store, &state, &router, &discovery, &mesh_observability);
         }
         if std::env::args().any(|arg| arg == "--once") {

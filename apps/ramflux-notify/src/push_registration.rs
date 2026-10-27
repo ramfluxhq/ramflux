@@ -49,7 +49,7 @@ pub(crate) fn configure(
         Ok(verdicts)
     });
     #[cfg(feature = "itest-http")]
-    if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
+    if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
         store.allow_itest_unbound_push_routes();
     }
     for credential in credentials()? {
@@ -59,8 +59,9 @@ pub(crate) fn configure(
 }
 fn credentials() -> Result<Vec<ramflux_node_core::ProviderCredential>, NodeCoreError> {
     // An empty value means "not configured", so compose files can pass the variable through.
-    let Some(path) = std::env::var_os("RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE")
-        .filter(|path| !path.is_empty())
+    let Some(path) =
+        ramflux_node_core::environment::var_os("RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE")
+            .filter(|path| !path.is_empty())
     else {
         return Ok(Vec::new());
     };
@@ -190,7 +191,8 @@ fn webpush_endpoint(
     {
         return Err(rejected());
     }
-    let allowed = std::env::var("RAMFLUX_NOTIFY_WEBPUSH_ORIGINS").unwrap_or_default();
+    let allowed =
+        ramflux_node_core::environment::var("RAMFLUX_NOTIFY_WEBPUSH_ORIGINS").unwrap_or_default();
     if !allowed.split(',').any(|origin| origin == format!("https://{authority}")) {
         return Err(rejected());
     }

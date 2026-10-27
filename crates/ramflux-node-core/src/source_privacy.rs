@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 static MOUNTED_KEY: OnceLock<NodeSecret> = OnceLock::new();
 
 pub(crate) fn configure_node_privacy() -> Result<(), NodeCoreError> {
-    if let Some(path) = std::env::var_os("RAMFLUX_NODE_PRIVACY_KEY_FILE") {
+    if let Some(path) = crate::environment::var_os("RAMFLUX_NODE_PRIVACY_KEY_FILE") {
         let key = NodeSecret::from_file(path)?;
         MOUNTED_KEY.set(key).map_err(|_| {
             NodeCoreError::Unauthorized("node privacy key already initialized".into())

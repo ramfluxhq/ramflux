@@ -90,7 +90,7 @@ impl RelayRedbStore {
     #[cfg(feature = "itest-redb-cache-probe")]
     fn create_database(path: &Path) -> Result<redb::Database, NodeCoreError> {
         let cache_bytes = Self::resolve_probe_cache_bytes(
-            std::env::var("RAMFLUX_RELAY_REDB_CACHE_BYTES").ok().as_deref(),
+            crate::environment::var("RAMFLUX_RELAY_REDB_CACHE_BYTES").ok().as_deref(),
         )?;
         let mut builder = redb::Database::builder();
         builder.set_cache_size(cache_bytes);

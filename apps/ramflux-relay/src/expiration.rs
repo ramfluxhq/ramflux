@@ -12,7 +12,7 @@ pub(crate) fn start_expire_scheduler(
     store: Arc<ramflux_node_core::RelayRedbStore>,
     state: Arc<Mutex<ramflux_node_core::RelayCacheState>>,
 ) {
-    let interval = std::env::var("RAMFLUX_RELAY_GC_SWEEP_INTERVAL_SECONDS")
+    let interval = ramflux_node_core::environment::var("RAMFLUX_RELAY_GC_SWEEP_INTERVAL_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(60)

@@ -56,7 +56,9 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         // configured and load/verify against the pinned offline root, or the health check fails
         // (non-zero) — a relay that cannot authorize object requests must never report healthy.
         #[cfg(not(feature = "itest-provider-single-key"))]
-        if service == "ramflux-relay" && std::env::var_os(RELAY_CLIENT_QUIC_ADDR_ENV).is_some() {
+        if service == "ramflux-relay"
+            && ramflux_node_core::environment::var_os(RELAY_CLIENT_QUIC_ADDR_ENV).is_some()
+        {
             require_keyring_provider_ready()?;
         }
         println!("{service}:healthy");
@@ -144,7 +146,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         let once = std::env::args().any(|arg| arg == "--once");
         #[cfg(not(feature = "itest-provider-single-key"))]
         let client_object_quic_enabled =
-            std::env::var_os(RELAY_CLIENT_QUIC_ADDR_ENV).is_some() && !once;
+            ramflux_node_core::environment::var_os(RELAY_CLIENT_QUIC_ADDR_ENV).is_some() && !once;
         #[cfg(not(feature = "itest-provider-single-key"))]
         let mut initial_keyring_envelope: Option<
             ramflux_node_core::ProviderSignedTrustSnapshot,
@@ -231,7 +233,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
                 trust_snapshot_refresh_interval(),
             );
         }
-        if std::env::var_os(RELAY_CLIENT_QUIC_ADDR_ENV).is_some() && !once {
+        if ramflux_node_core::environment::var_os(RELAY_CLIENT_QUIC_ADDR_ENV).is_some() && !once {
             serve_relay_client_quic(
                 &config,
                 Arc::clone(&store),
@@ -276,7 +278,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         serve_media_relay_udp(service_key.clone())?;
         tracing::info!(service, node_id = config.node_id, "relay cache initialized");
         #[cfg(feature = "itest-http")]
-        if std::env::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
+        if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
             return serve_itest_http(&store, &state, &config);
         }
     }

@@ -225,7 +225,8 @@ pub(crate) static RELAY_CLIENT_ACK_FAILED_FIRST: std::sync::atomic::AtomicBool =
 pub(crate) fn relay_client_quic_ack_fail_once() -> bool {
     relay_client_quic_ack_fail_once_with(
         &RELAY_CLIENT_ACK_FAILED_FIRST,
-        std::env::var("RAMFLUX_RELAY_ITEST_FAIL_FIRST_V3_ACK").as_deref() == Ok("1"),
+        ramflux_node_core::environment::var("RAMFLUX_RELAY_ITEST_FAIL_FIRST_V3_ACK").as_deref()
+            == Ok("1"),
     )
 }
 

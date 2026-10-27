@@ -6,6 +6,7 @@
 mod authority_refusal;
 mod config;
 pub use authority_refusal::*;
+pub use ramflux_core::environment;
 mod error;
 mod federation_crypto;
 mod federation_delivery;

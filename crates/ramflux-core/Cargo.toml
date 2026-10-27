@@ -9,6 +9,7 @@ repository = "https://github.com/ramflux/ramflux-core"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
+tracing = { workspace = true }
 
 [lints.rust]
 warnings = "deny"

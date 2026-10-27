@@ -61,7 +61,7 @@ pub(crate) fn notify_http_client(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<NotifyHttpClient> {
     Ok(NotifyHttpClient {
-        endpoint: std::env::var("RAMFLUX_NOTIFY_HTTP_URL")
+        endpoint: ramflux_node_core::environment::var("RAMFLUX_NOTIFY_HTTP_URL")
             .unwrap_or_else(|_| "http://ramflux-notify:18083".to_owned()),
         signer: ramflux_node_core::require_node_service_signing_key(config)?,
         mesh: notify_mesh_client(config)?,
@@ -73,7 +73,7 @@ fn notify_mesh_client(
 ) -> anyhow::Result<Option<NotifyMeshClient>> {
     notify_mesh_client_from_endpoint_value(
         config,
-        std::env::var(NOTIFY_MESH_ENDPOINT_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(NOTIFY_MESH_ENDPOINT_ENV).ok().as_deref(),
     )
 }
 
@@ -99,7 +99,7 @@ fn notify_mesh_client_from_endpoint_value(
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().and_then(|value| {
+    ramflux_node_core::environment::var(name).ok().and_then(|value| {
         let trimmed = value.trim();
         // podman-compose does not expand ${VAR:-default}, so an unset compose var can
         // arrive as the literal "${VAR:-...}". Treat that as absent instead of a real
@@ -113,7 +113,7 @@ fn non_empty_env(name: &str) -> Option<String> {
 }
 
 fn env_default_endpoint(name: &str, default: &str) -> Option<String> {
-    match std::env::var(name) {
+    match ramflux_node_core::environment::var(name) {
         Ok(value) => endpoint_from_env_value(Some(&value), default),
         Err(std::env::VarError::NotPresent) => endpoint_from_env_value(None, default),
         Err(std::env::VarError::NotUnicode(_)) => None,

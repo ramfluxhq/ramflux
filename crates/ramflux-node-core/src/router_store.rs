@@ -1328,28 +1328,20 @@ fn serialize_value<T: Serialize>(value: &T) -> Result<Vec<u8>, NodeCoreError> {
 }
 
 fn router_usize_env(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    crate::environment::parsed::<usize>(name).filter(|value| *value > 0).unwrap_or(default)
 }
 
 fn router_u64_env(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    crate::environment::parsed::<u64>(name).filter(|value| *value > 0).unwrap_or(default)
 }
 
 fn router_group_commit_enabled() -> bool {
-    std::env::var(ROUTER_GROUP_COMMIT_ENV)
+    crate::environment::var(ROUTER_GROUP_COMMIT_ENV)
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 fn router_wal_enabled() -> bool {
-    std::env::var(ROUTER_WAL_ENABLED_ENV).map_or(true, |value| {
+    crate::environment::var(ROUTER_WAL_ENABLED_ENV).map_or(true, |value| {
         let trimmed = value.trim();
         !(trimmed == "0"
             || trimmed.eq_ignore_ascii_case("false")
@@ -1359,7 +1351,7 @@ fn router_wal_enabled() -> bool {
 }
 
 fn router_wal_root_for_redb_path(redb_path: &Path) -> PathBuf {
-    if let Ok(path) = std::env::var(ROUTER_WAL_DIR_ENV)
+    if let Ok(path) = crate::environment::var(ROUTER_WAL_DIR_ENV)
         && !path.trim().is_empty()
     {
         return PathBuf::from(path);

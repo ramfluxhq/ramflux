@@ -41,7 +41,7 @@ pub(crate) fn load_receipts<'de, D: Deserializer<'de>>(
 
 /// Per-source admission is configurable for large shared NATs; invalid settings fail closed.
 pub(crate) fn registration_source_limit() -> Result<usize, crate::NodeCoreError> {
-    let value = match std::env::var("RAMFLUX_REGISTRATION_SOURCE_RECEIPT_LIMIT") {
+    let value = match crate::environment::var("RAMFLUX_REGISTRATION_SOURCE_RECEIPT_LIMIT") {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => {

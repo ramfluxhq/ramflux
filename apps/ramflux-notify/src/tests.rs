@@ -135,6 +135,10 @@ fn notify_mesh_listen_addr_defaults_and_guards_compose_literal() {
         Some("127.0.0.1:18085")
     );
     assert!(notify_mesh_listen_addr_from_value(Some("")).is_none());
+    assert_eq!(
+        notify_mesh_listen_addr_from_value(Some("not-an-address")).as_deref(),
+        Some(DEFAULT_NOTIFY_MESH_LISTEN_ADDR)
+    );
 }
 
 #[test]
@@ -535,9 +539,7 @@ fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 }
 
 fn bench_usize_env(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
+    ramflux_node_core::environment::parsed::<usize>(name)
         .filter(|value| *value > 0)
         .unwrap_or(default)
 }

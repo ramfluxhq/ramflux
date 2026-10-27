@@ -228,7 +228,9 @@ impl GatewaySessionHub {
 }
 
 pub(crate) fn gateway_instance_id_from_env() -> String {
-    gateway_instance_id_from_value(std::env::var(GATEWAY_ID_ENV).ok().as_deref())
+    gateway_instance_id_from_value(
+        ramflux_node_core::environment::var(GATEWAY_ID_ENV).ok().as_deref(),
+    )
 }
 
 pub(crate) fn gateway_peer_directory_from_env(
@@ -295,7 +297,7 @@ fn default_gateway_peer_server_name(endpoint: &str) -> String {
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().and_then(|value| {
+    ramflux_node_core::environment::var(name).ok().and_then(|value| {
         let trimmed = value.trim();
         // Treat an unexpanded compose/shell variable (podman-compose leaves ${VAR:-default}
         // literal when the var is unset) as absent rather than a real value.

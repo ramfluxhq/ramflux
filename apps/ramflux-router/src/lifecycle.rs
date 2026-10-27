@@ -113,7 +113,7 @@ pub(crate) fn handle_home_node_route_update_apply(
 }
 
 fn require_router_admin_token(supplied: &str) -> anyhow::Result<()> {
-    let configured = std::env::var("RAMFLUX_ROUTER_ADMIN_TOKEN")
+    let configured = ramflux_node_core::environment::var("RAMFLUX_ROUTER_ADMIN_TOKEN")
         .map_err(|_| anyhow::anyhow!("router admin token is not configured"))?;
     if configured.trim().is_empty() || !constant_time_eq(supplied.as_bytes(), configured.as_bytes())
     {

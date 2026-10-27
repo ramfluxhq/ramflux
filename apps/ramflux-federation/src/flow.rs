@@ -200,7 +200,9 @@ fn send_signed_forward_to_peer(
         "forwarding federated envelope to peer federation endpoint"
     );
     let peer_ca_pems = std::slice::from_ref(&peer.peer_ca_cert_pem);
-    let force_tcp = std::env::var("RAMFLUX_FEDERATION_FORCE_TCP_MESH").as_deref() == Ok("1");
+    let force_tcp = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_FORCE_TCP_MESH")
+        .as_deref()
+        == Ok("1");
     let response: ramflux_node_core::FederatedEnvelopeForwardResponse = if force_tcp {
         send_signed_forward_to_peer_over_tcp(router, peer, peer_ca_pems, signed_request)?
     } else {
@@ -214,7 +216,10 @@ fn send_signed_forward_to_peer(
         ) {
             Ok(response) => response,
             Err(quic_error) => {
-                if std::env::var("RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK").as_deref() == Ok("1") {
+                if ramflux_node_core::environment::var("RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK")
+                    .as_deref()
+                    == Ok("1")
+                {
                     return Err(ramflux_node_core::NodeCoreError::ItestHttp(
                         quic_error.to_string(),
                     ));
@@ -386,7 +391,7 @@ fn outbound_spool_retry_batch() -> usize {
 }
 
 fn env_u64(name: &str, default_value: u64) -> u64 {
-    std::env::var(name).ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(default_value)
+    ramflux_node_core::environment::parsed::<u64>(name).unwrap_or(default_value)
 }
 
 fn send_signed_forward_to_peer_over_tcp(

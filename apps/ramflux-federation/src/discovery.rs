@@ -11,9 +11,9 @@ pub(crate) fn federation_discovery_surface(
 ) -> FederationDiscoverySurface {
     let node_ca_cert_pem = std::fs::read_to_string(&config.mesh.ca_cert).unwrap_or_default();
     FederationDiscoverySurface {
-        node_id: std::env::var("RAMFLUX_FEDERATION_NODE_ID")
+        node_id: ramflux_node_core::environment::var("RAMFLUX_FEDERATION_NODE_ID")
             .unwrap_or_else(|_| config.node_id.clone()),
-        public_endpoint: std::env::var("RAMFLUX_FEDERATION_PUBLIC_ENDPOINT")
+        public_endpoint: ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ENDPOINT")
             .unwrap_or_else(|_| config.mesh.listen_addr.clone()),
         node_public_key: ramflux_crypto::public_key_base64url_from_seed(node_signing_seed),
         node_ca_cert_pem,

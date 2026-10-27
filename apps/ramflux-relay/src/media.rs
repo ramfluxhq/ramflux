@@ -10,7 +10,7 @@ use std::time::Duration;
 
 #[cfg(feature = "itest-media-udp")]
 pub(crate) fn serve_media_relay_udp(service_key: Vec<u8>) -> anyhow::Result<()> {
-    let addr = std::env::var("RAMFLUX_ITEST_RELAY_MEDIA_UDP_ADDR")
+    let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_RELAY_MEDIA_UDP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:19000".to_owned());
     let state = Arc::new(Mutex::new(ramflux_node_core::SignalingState::new()));
     thread::Builder::new().name("ramflux-relay-media-udp-itest".to_owned()).spawn(move || {
@@ -119,7 +119,8 @@ pub(crate) async fn handle_media_relay_packet(
     };
     let target: std::net::SocketAddr = target.parse()?;
     let allow_private_targets =
-        std::env::var("RAMFLUX_RELAY_ALLOW_PRIVATE_TARGETS").as_deref() == Ok("1");
+        ramflux_node_core::environment::var("RAMFLUX_RELAY_ALLOW_PRIVATE_TARGETS").as_deref()
+            == Ok("1");
     if !allow_private_targets && !ramflux_node_core::relay_socket_target_allowed(target, &[]) {
         tracing::warn!(
             %target,

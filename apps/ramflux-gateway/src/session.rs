@@ -518,7 +518,11 @@ fn refresh_session_activity(
 
 /// Configured resume window; session retention uses the same value.
 pub(crate) fn gateway_resume_window_seconds() -> u64 {
-    resume_window_from(std::env::var("RAMFLUX_GATEWAY_RESUME_WINDOW_SECONDS").ok().as_deref())
+    resume_window_from(
+        ramflux_node_core::environment::var("RAMFLUX_GATEWAY_RESUME_WINDOW_SECONDS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 pub(crate) fn resume_window_from(value: Option<&str>) -> u64 {
@@ -878,14 +882,14 @@ pub(crate) fn bind_v3_requester_to_session(
 
 fn load_gateway_v3_issuer_material()
 -> anyhow::Result<([u8; 32], ramflux_node_core::GatewayIssuerCertificate)> {
-    let encoded_seed = std::env::var(GATEWAY_V3_ISSUER_SEED_ENV)
+    let encoded_seed = ramflux_node_core::environment::var(GATEWAY_V3_ISSUER_SEED_ENV)
         .map_err(|_| anyhow::anyhow!("{GATEWAY_V3_ISSUER_SEED_ENV} is required"))?;
     let seed_bytes = ramflux_protocol::decode_base64url(&encoded_seed)
         .map_err(|error| anyhow::anyhow!("invalid {GATEWAY_V3_ISSUER_SEED_ENV}: {error}"))?;
     let seed: [u8; 32] = seed_bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("{GATEWAY_V3_ISSUER_SEED_ENV} must decode to 32 bytes"))?;
-    let cert_file = std::env::var(GATEWAY_V3_ISSUER_CERT_FILE_ENV)
+    let cert_file = ramflux_node_core::environment::var(GATEWAY_V3_ISSUER_CERT_FILE_ENV)
         .map_err(|_| anyhow::anyhow!("{GATEWAY_V3_ISSUER_CERT_FILE_ENV} is required"))?;
     let cert: ramflux_node_core::GatewayIssuerCertificate =
         serde_json::from_slice(&std::fs::read(cert_file)?)?;
@@ -1558,7 +1562,8 @@ pub(crate) async fn write_gateway_frame(
 
 #[cfg(feature = "itest-http")]
 async fn delay_itest_gateway_frame() {
-    if let Ok(delay_ms) = std::env::var("RAMFLUX_ITEST_GATEWAY_FRAME_DELAY_MS")
+    if let Ok(delay_ms) =
+        ramflux_node_core::environment::var("RAMFLUX_ITEST_GATEWAY_FRAME_DELAY_MS")
         && let Ok(delay_ms) = delay_ms.parse::<u64>()
         && delay_ms > 0
     {
@@ -1568,7 +1573,7 @@ async fn delay_itest_gateway_frame() {
 
 #[cfg(feature = "itest-http")]
 fn capture_itest_gateway_json(kind: &str, value: &serde_json::Value) {
-    let Ok(path) = std::env::var("RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON") else {
+    let Ok(path) = ramflux_node_core::environment::var("RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON") else {
         return;
     };
     let record = serde_json::json!({

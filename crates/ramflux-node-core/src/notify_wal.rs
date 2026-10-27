@@ -1245,19 +1245,11 @@ fn sync_notify_wal_directory(root: &Path) -> Result<(), NodeCoreError> {
 }
 
 fn notify_wal_usize_env(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    crate::environment::parsed::<usize>(name).filter(|value| *value > 0).unwrap_or(default)
 }
 
 fn notify_wal_u64_env(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    crate::environment::parsed::<u64>(name).filter(|value| *value > 0).unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -1392,7 +1384,7 @@ mod tests {
     #[test]
     #[ignore = "set RAMFLUX_NOTIFY_BENCH=1 to run the notify WAL throughput bench"]
     fn notify_wal_throughput_bench() -> Result<(), Box<dyn std::error::Error>> {
-        if std::env::var("RAMFLUX_NOTIFY_BENCH").as_deref() != Ok("1") {
+        if crate::environment::var("RAMFLUX_NOTIFY_BENCH").as_deref() != Ok("1") {
             eprintln!("WAL_BENCH skipped set RAMFLUX_NOTIFY_BENCH=1 to run");
             return Ok(());
         }
@@ -1502,6 +1494,6 @@ mod tests {
     }
 
     fn notify_wal_bench_env_usize(name: &str, default: usize) -> usize {
-        std::env::var(name).ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(default)
+        crate::environment::parsed::<usize>(name).unwrap_or(default)
     }
 }

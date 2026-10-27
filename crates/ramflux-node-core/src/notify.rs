@@ -2146,7 +2146,7 @@ fn default_fcm_oauth_scope() -> String {
 }
 
 fn notify_wal_enabled() -> bool {
-    std::env::var(NOTIFY_WAL_ENABLED_ENV).map_or(true, |value| {
+    crate::environment::var(NOTIFY_WAL_ENABLED_ENV).map_or(true, |value| {
         let trimmed = value.trim();
         !(trimmed == "0"
             || trimmed.eq_ignore_ascii_case("false")
@@ -2156,7 +2156,7 @@ fn notify_wal_enabled() -> bool {
 }
 
 fn notify_wal_root_for_redb_path(redb_path: &Path) -> PathBuf {
-    if let Ok(path) = std::env::var(NOTIFY_WAL_DIR_ENV)
+    if let Ok(path) = crate::environment::var(NOTIFY_WAL_DIR_ENV)
         && !path.trim().is_empty()
     {
         return PathBuf::from(path);
@@ -2235,17 +2235,9 @@ fn notify_raw_wake_shard_from_queue_id(queue_id: &str) -> Option<usize> {
 }
 
 fn notify_usize_env(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    crate::environment::parsed::<usize>(name).filter(|value| *value > 0).unwrap_or(default)
 }
 
 fn notify_u64_env(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    crate::environment::parsed::<u64>(name).filter(|value| *value > 0).unwrap_or(default)
 }

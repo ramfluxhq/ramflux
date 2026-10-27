@@ -120,7 +120,7 @@ fn source_key(source: IpAddr) -> String {
 }
 fn configured() -> Result<Limiter, String> {
     fn value(name: &str, default: u32, max: u32) -> Result<u32, String> {
-        let value = std::env::var(name)
+        let value = ramflux_node_core::environment::var(name)
             .map_or(Ok(default), |v| v.parse::<u32>().map_err(|_| format!("invalid {name}")))?;
         if value == 0 || value > max {
             return Err(format!("{name} out of range"));

@@ -88,7 +88,8 @@ pub struct MeshHttpPerfSnapshot {
 
 #[must_use]
 pub fn mesh_perf_enabled() -> bool {
-    *PERF_ENABLED.get_or_init(|| std::env::var("RAMFLUX_ITEST_PERF").as_deref() == Ok("1"))
+    *PERF_ENABLED
+        .get_or_init(|| ramflux_core::environment::var("RAMFLUX_ITEST_PERF").as_deref() == Ok("1"))
 }
 
 pub(crate) fn record_mesh_client_request() {

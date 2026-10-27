@@ -59,7 +59,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         retention::start(Arc::clone(&router));
         serve_router_mesh_from_env(&config, &router)?;
         #[cfg(feature = "itest-http")]
-        if std::env::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
+        if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
             return serve_itest_http(&router);
         }
         if std::env::args().any(|arg| arg == "--once") {
@@ -87,7 +87,7 @@ fn run_mesh_health_smoke(service: &'static str) -> anyhow::Result<()> {
 fn run_mesh_health_smoke_with_config(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<()> {
-    let endpoint = std::env::var("RAMFLUX_ROUTER_MESH_HEALTH_ENDPOINT")
+    let endpoint = ramflux_node_core::environment::var("RAMFLUX_ROUTER_MESH_HEALTH_ENDPOINT")
         .ok()
         .or_else(|| config.mesh.endpoints.get("router").cloned())
         .unwrap_or_else(|| config.mesh.listen_addr.clone());
@@ -98,7 +98,7 @@ fn run_mesh_health_smoke_client(
     config: &ramflux_node_core::NodeServiceConfig,
     endpoint: &str,
 ) -> anyhow::Result<()> {
-    let server_name = std::env::var("RAMFLUX_ROUTER_MESH_HEALTH_SERVER_NAME")
+    let server_name = ramflux_node_core::environment::var("RAMFLUX_ROUTER_MESH_HEALTH_SERVER_NAME")
         .unwrap_or_else(|_| "ramflux-router".to_owned());
     let tls = serve::mesh_tls_config(config);
     let client = ramflux_transport::MeshHttpClient::new();
@@ -150,7 +150,7 @@ fn local_federation_forward_client_from_env(
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().and_then(|value| {
+    ramflux_node_core::environment::var(name).ok().and_then(|value| {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     })

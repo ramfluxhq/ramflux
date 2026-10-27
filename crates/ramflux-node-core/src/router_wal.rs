@@ -1240,31 +1240,21 @@ fn write_router_wal_record_to_file(file: &File, encoded: &[u8]) -> Result<(), No
 }
 
 fn router_wal_usize_env(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    crate::environment::parsed::<usize>(name).filter(|value| *value > 0).unwrap_or(default)
 }
 
 fn router_wal_u64_env(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    crate::environment::parsed::<u64>(name).filter(|value| *value > 0).unwrap_or(default)
 }
 
 fn router_wal_pipeline_enabled() -> bool {
-    std::env::var(ROUTER_WAL_PIPELINE_ENV).is_ok_and(|value| {
+    crate::environment::var(ROUTER_WAL_PIPELINE_ENV).is_ok_and(|value| {
         value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
     })
 }
 
 fn router_wal_shard_count() -> usize {
-    std::env::var(ROUTER_WAL_SHARDS_ENV)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
+    crate::environment::parsed::<usize>(ROUTER_WAL_SHARDS_ENV)
         .filter(|value| *value > 0)
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(8, usize::from))
         .max(1)
@@ -1491,7 +1481,7 @@ mod tests {
     #[test]
     #[ignore = "set RAMFLUX_ROUTER_WAL_BENCH=1 to run the router WAL throughput bench"]
     fn router_wal_throughput_bench() -> Result<(), Box<dyn std::error::Error>> {
-        if std::env::var("RAMFLUX_ROUTER_WAL_BENCH").as_deref() != Ok("1") {
+        if crate::environment::var("RAMFLUX_ROUTER_WAL_BENCH").as_deref() != Ok("1") {
             eprintln!("ROUTER_WAL_BENCH skipped set RAMFLUX_ROUTER_WAL_BENCH=1 to run");
             return Ok(());
         }
@@ -1551,7 +1541,7 @@ mod tests {
     #[test]
     #[ignore = "set RAMFLUX_ROUTER_WAL_BENCH=1 to run the async router WAL throughput bench"]
     fn router_wal_async_throughput_bench() -> Result<(), Box<dyn std::error::Error>> {
-        if std::env::var("RAMFLUX_ROUTER_WAL_BENCH").as_deref() != Ok("1") {
+        if crate::environment::var("RAMFLUX_ROUTER_WAL_BENCH").as_deref() != Ok("1") {
             eprintln!("ROUTER_WAL_ASYNC_BENCH skipped set RAMFLUX_ROUTER_WAL_BENCH=1 to run");
             return Ok(());
         }
@@ -1710,6 +1700,6 @@ mod tests {
     }
 
     fn router_wal_bench_env_usize(name: &str, default: usize) -> usize {
-        std::env::var(name).ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(default)
+        crate::environment::parsed::<usize>(name).unwrap_or(default)
     }
 }

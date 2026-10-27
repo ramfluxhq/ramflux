@@ -32,7 +32,7 @@ pub(super) fn open(
     serde_json::from_slice(&key.open(&context(device), bytes)?).map_err(error)
 }
 pub(super) fn configured_key() -> Result<NodeSecret, NodeCoreError> {
-    if let Some(path) = std::env::var_os("RAMFLUX_NOTIFY_ROUTE_KEY_FILE") {
+    if let Some(path) = crate::environment::var_os("RAMFLUX_NOTIFY_ROUTE_KEY_FILE") {
         NodeSecret::from_file(path)
     } else {
         Ok(NodeSecret::process_key().clone())

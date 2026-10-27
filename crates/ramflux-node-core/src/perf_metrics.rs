@@ -129,7 +129,8 @@ pub struct NodePerfSnapshot {
 
 #[must_use]
 pub fn node_perf_enabled() -> bool {
-    *PERF_ENABLED.get_or_init(|| std::env::var("RAMFLUX_ITEST_PERF").as_deref() == Ok("1"))
+    *PERF_ENABLED
+        .get_or_init(|| crate::environment::var("RAMFLUX_ITEST_PERF").as_deref() == Ok("1"))
 }
 
 pub fn record_gateway_submit_received() {

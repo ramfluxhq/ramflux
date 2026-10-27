@@ -42,6 +42,7 @@ thiserror = "2.0"
 tokio = { workspace = true, features = ["rt", "sync"] }
 toml = { workspace = true }
 zeroize = { workspace = true }
+ramflux-core = { workspace = true }
 
 [lints]
 workspace = true

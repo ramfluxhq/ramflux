@@ -40,7 +40,7 @@ pub fn maybe_start() {
         return;
     }
     install_signal_handlers();
-    let file = std::env::var(FILE_ENV)
+    let file = ramflux_node_core::environment::var(FILE_ENV)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())

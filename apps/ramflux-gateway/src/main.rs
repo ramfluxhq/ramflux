@@ -83,7 +83,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             Arc::clone(&store),
         )?;
         #[cfg(feature = "itest-http")]
-        if std::env::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
+        if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
             return serve_itest_http(&router, &store, &state);
         }
         if std::env::args().any(|arg| arg == "--once") {

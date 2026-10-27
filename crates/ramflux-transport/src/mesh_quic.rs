@@ -1142,10 +1142,14 @@ async fn mesh_quic_connect_and_insert(
 }
 
 fn mesh_quic_client_pool_size() -> usize {
-    std::env::var(ROUTER_ASYNC_POOL_SIZE_ENV)
-        .or_else(|_| std::env::var(MESH_QUIC_CLIENT_POOL_SIZE_ENV))
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
+    let (name, value) = match ramflux_core::environment::var(ROUTER_ASYNC_POOL_SIZE_ENV) {
+        Ok(value) => (ROUTER_ASYNC_POOL_SIZE_ENV, Some(value)),
+        Err(_) => (
+            MESH_QUIC_CLIENT_POOL_SIZE_ENV,
+            ramflux_core::environment::var(MESH_QUIC_CLIENT_POOL_SIZE_ENV).ok(),
+        ),
+    };
+    ramflux_core::environment::parse_value::<usize>(name, value.as_deref())
         .filter(|value| *value > 0)
         .unwrap_or(MESH_QUIC_CLIENT_POOL_SIZE_DEFAULT)
 }
@@ -1162,10 +1166,10 @@ fn mesh_quic_connect_breaker_cooldown() -> Duration {
 }
 
 fn duration_from_millis_env(name: &str, default: Duration) -> Duration {
-    duration_from_millis_value(std::env::var(name).ok().as_deref(), default)
+    duration_from_millis_value(name, ramflux_core::environment::var(name).ok().as_deref(), default)
 }
 
-fn duration_from_millis_value(value: Option<&str>, default: Duration) -> Duration {
+fn duration_from_millis_value(name: &str, value: Option<&str>, default: Duration) -> Duration {
     let Some(value) = value else {
         return default;
     };
@@ -1173,9 +1177,9 @@ fn duration_from_millis_value(value: Option<&str>, default: Duration) -> Duratio
     if trimmed.is_empty() || trimmed.starts_with("${") {
         return default;
     }
-    match trimmed.parse::<u64>() {
-        Ok(millis) if millis > 0 => Duration::from_millis(millis),
-        Ok(_) | Err(_) => default,
+    match ramflux_core::environment::parse_value::<u64>(name, Some(trimmed)) {
+        Some(millis) if millis > 0 => Duration::from_millis(millis),
+        Some(_) | None => default,
     }
 }
 
@@ -1436,26 +1440,39 @@ mod tests {
     #[test]
     fn mesh_quic_connect_timeout_defaults_to_fail_fast_and_accepts_env_override() {
         assert_eq!(
-            duration_from_millis_value(None, MESH_QUIC_CONNECT_TIMEOUT_DEFAULT),
+            duration_from_millis_value("QUIC_TIMEOUT", None, MESH_QUIC_CONNECT_TIMEOUT_DEFAULT),
             Duration::from_secs(3)
         );
         assert_eq!(
-            duration_from_millis_value(Some("2500"), MESH_QUIC_CONNECT_TIMEOUT_DEFAULT),
+            duration_from_millis_value(
+                "QUIC_TIMEOUT",
+                Some("2500"),
+                MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
+            ),
             Duration::from_millis(2500)
         );
         assert_eq!(
             duration_from_millis_value(
+                "QUIC_TIMEOUT",
                 Some("${RAMFLUX_MESH_QUIC_CONNECT_TIMEOUT_MS:-3000}"),
                 MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
             ),
             MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
         );
         assert_eq!(
-            duration_from_millis_value(Some("not-a-duration"), MESH_QUIC_CONNECT_TIMEOUT_DEFAULT),
+            duration_from_millis_value(
+                "QUIC_TIMEOUT",
+                Some("not-a-duration"),
+                MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
+            ),
             MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
         );
         assert_eq!(
-            duration_from_millis_value(Some("0"), MESH_QUIC_CONNECT_TIMEOUT_DEFAULT),
+            duration_from_millis_value(
+                "QUIC_TIMEOUT",
+                Some("0"),
+                MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
+            ),
             MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
         );
     }
@@ -1463,22 +1480,35 @@ mod tests {
     #[test]
     fn mesh_quic_breaker_cooldown_defaults_to_five_seconds_and_accepts_env_override() {
         assert_eq!(
-            duration_from_millis_value(None, MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT),
+            duration_from_millis_value(
+                "QUIC_TIMEOUT",
+                None,
+                MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT
+            ),
             Duration::from_secs(5)
         );
         assert_eq!(
-            duration_from_millis_value(Some("7500"), MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT),
+            duration_from_millis_value(
+                "QUIC_TIMEOUT",
+                Some("7500"),
+                MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT
+            ),
             Duration::from_millis(7500)
         );
         assert_eq!(
             duration_from_millis_value(
+                "QUIC_TIMEOUT",
                 Some("${RAMFLUX_MESH_QUIC_CONNECT_BREAKER_COOLDOWN_MS:-5000}"),
                 MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT
             ),
             MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT
         );
         assert_eq!(
-            duration_from_millis_value(Some("bad"), MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT),
+            duration_from_millis_value(
+                "QUIC_TIMEOUT",
+                Some("bad"),
+                MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT
+            ),
             MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT
         );
     }

@@ -71,7 +71,7 @@ pub(crate) fn serve_gateway_quic(
             context.clone(),
         )?;
     }
-    match std::env::var(GATEWAY_QUIC_RUNTIME_ENV).as_deref() {
+    match ramflux_node_core::environment::var(GATEWAY_QUIC_RUNTIME_ENV).as_deref() {
         Ok("compio") => {
             #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
             {
@@ -140,7 +140,7 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
 fn gateway_quic_worker_threads() -> usize {
     let default = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     gateway_quic_worker_threads_from_value(
-        std::env::var(GATEWAY_QUIC_WORKER_THREADS_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(GATEWAY_QUIC_WORKER_THREADS_ENV).ok().as_deref(),
         default,
     )
 }
@@ -183,7 +183,7 @@ fn spawn_gateway_tcp_tls_thread(
 pub(crate) fn gateway_quic_listen_addr(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<String> {
-    if let Ok(addr) = std::env::var("RAMFLUX_ITEST_GATEWAY_QUIC_ADDR") {
+    if let Ok(addr) = ramflux_node_core::environment::var("RAMFLUX_ITEST_GATEWAY_QUIC_ADDR") {
         return Ok(addr);
     }
     Ok(config
@@ -197,7 +197,7 @@ pub(crate) fn gateway_quic_listen_addr(
 pub(crate) fn gateway_tcp_listen_addr(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<String> {
-    if let Ok(addr) = std::env::var("RAMFLUX_ITEST_GATEWAY_TCP_ADDR") {
+    if let Ok(addr) = ramflux_node_core::environment::var("RAMFLUX_ITEST_GATEWAY_TCP_ADDR") {
         return Ok(addr);
     }
     Ok(config
@@ -277,7 +277,7 @@ async fn run_gateway_tcp_tls(
 fn gateway_relay_service_key(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<Vec<u8>> {
-    let Some(secret_ref) = std::env::var("RAMFLUX_RELAY_SERVICE_KEY_REF")
+    let Some(secret_ref) = ramflux_node_core::environment::var("RAMFLUX_RELAY_SERVICE_KEY_REF")
         .ok()
         .or_else(|| config.relay.as_ref().and_then(|relay| relay.service_key_ref.clone()))
     else {
@@ -291,7 +291,7 @@ fn read_gateway_secret_ref(secret_ref: &str) -> anyhow::Result<Vec<u8>> {
     let value = if let Some(literal) = secret_ref.strip_prefix("literal:") {
         literal.to_owned()
     } else if let Some(name) = secret_ref.strip_prefix("env:") {
-        std::env::var(name)?
+        ramflux_node_core::environment::var(name)?
     } else if let Some(path) = secret_ref.strip_prefix("file:") {
         std::fs::read_to_string(path)?
     } else {
@@ -304,7 +304,7 @@ fn gateway_forward_listen_addr(
     config: &ramflux_node_core::NodeServiceConfig,
     peers: &GatewayPeerDirectory,
 ) -> Option<String> {
-    std::env::var("RAMFLUX_GATEWAY_FORWARD_LISTEN_ADDR")
+    ramflux_node_core::environment::var("RAMFLUX_GATEWAY_FORWARD_LISTEN_ADDR")
         .ok()
         .and_then(|value| {
             let trimmed = value.trim();

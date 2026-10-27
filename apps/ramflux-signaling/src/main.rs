@@ -53,7 +53,7 @@ fn serve_itest_turn_udp(
     state: Arc<Mutex<ramflux_node_core::SignalingState>>,
     service_key: Option<Vec<u8>>,
 ) -> anyhow::Result<()> {
-    let addr = std::env::var("RAMFLUX_ITEST_SIGNALING_TURN_UDP_ADDR")
+    let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_SIGNALING_TURN_UDP_ADDR")
         .ok()
         .or_else(|| signaling.map(|config| config.turn_udp_addr.clone()))
         .unwrap_or_else(|| "0.0.0.0:3478".to_owned());
@@ -175,7 +175,7 @@ fn read_signaling_secret_ref(secret_ref: &str) -> anyhow::Result<Vec<u8>> {
     let value = if let Some(literal) = secret_ref.strip_prefix("literal:") {
         literal.to_owned()
     } else if let Some(name) = secret_ref.strip_prefix("env:") {
-        std::env::var(name)?
+        ramflux_node_core::environment::var(name)?
     } else if let Some(path) = secret_ref.strip_prefix("file:") {
         std::fs::read_to_string(path)?
     } else {

@@ -79,7 +79,7 @@ impl NodeSecret {
     /// # Errors
     /// Rejects an unset or invalid mounted secret.
     pub fn required_env(name: &str) -> Result<Self, NodeCoreError> {
-        Self::from_file(std::env::var_os(name).ok_or_else(invalid)?)
+        Self::from_file(crate::environment::var_os(name).ok_or_else(invalid)?)
     }
     /// An in-process default is intentionally ephemeral; persistent services must mount a key.
     /// # Errors

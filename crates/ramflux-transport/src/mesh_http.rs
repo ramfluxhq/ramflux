@@ -228,7 +228,7 @@ impl MeshHttpClient {
 }
 
 fn configured_max_idle_per_peer() -> usize {
-    std::env::var("RAMFLUX_MESH_HTTP_MAX_IDLE_PER_PEER")
+    ramflux_core::environment::var("RAMFLUX_MESH_HTTP_MAX_IDLE_PER_PEER")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)

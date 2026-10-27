@@ -43,11 +43,13 @@ fn load_signed_trust_snapshot_from_file(
 /// missing/invalid — it never returns a default snapshot.
 fn federation_trust_snapshot_envelope()
 -> Result<serde_json::Value, ramflux_node_core::NodeCoreError> {
-    let path = std::env::var(FEDERATION_TRUST_SNAPSHOT_FILE_ENV).map_err(|_error| {
-        ramflux_node_core::NodeCoreError::ItestJson(format!(
-            "{FEDERATION_TRUST_SNAPSHOT_FILE_ENV} is not set"
-        ))
-    })?;
+    let path = ramflux_node_core::environment::var(FEDERATION_TRUST_SNAPSHOT_FILE_ENV).map_err(
+        |_error| {
+            ramflux_node_core::NodeCoreError::ItestJson(format!(
+                "{FEDERATION_TRUST_SNAPSHOT_FILE_ENV} is not set"
+            ))
+        },
+    )?;
     load_signed_trust_snapshot_from_file(std::path::Path::new(&path))
 }
 
@@ -86,7 +88,9 @@ pub(crate) fn serve_federation_mesh_mtls(
         }
     });
     #[cfg(feature = "itest-http")]
-    if std::env::var("RAMFLUX_FEDERATION_DISABLE_QUIC_LISTENER").as_deref() == Ok("1") {
+    if ramflux_node_core::environment::var("RAMFLUX_FEDERATION_DISABLE_QUIC_LISTENER").as_deref()
+        == Ok("1")
+    {
         observability.mark_quic_listener_disabled();
         tracing::warn!("federation mesh QUIC listener disabled by itest affordance");
         return Ok(());
@@ -94,8 +98,13 @@ pub(crate) fn serve_federation_mesh_mtls(
     let quic_context = context;
     let quic_tls = mesh_tls_config(config);
     let quic_addr = config.mesh.listen_addr.clone();
-    match std::env::var(FEDERATION_MESH_RUNTIME_ENV).as_deref() {
-        Ok("compio") => {
+    match ramflux_node_core::environment::choice(
+        FEDERATION_MESH_RUNTIME_ENV,
+        ramflux_node_core::environment::var(FEDERATION_MESH_RUNTIME_ENV).ok().as_deref(),
+        &["compio", "tokio", "quinn"],
+        "tokio",
+    ) {
+        "compio" => {
             #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
             {
                 thread::spawn(move || {
@@ -114,18 +123,13 @@ pub(crate) fn serve_federation_mesh_mtls(
                 ));
             }
         }
-        Ok("tokio" | "quinn") | Err(_) => {
+        _ => {
             thread::spawn(move || {
                 if let Err(error) = serve_mesh_quic(&quic_addr, &quic_context, &quic_tls) {
                     quic_context.observability.mark_quic_listener_error(&error.to_string());
                     tracing::error!(%error, "federation mesh QUIC listener stopped");
                 }
             });
-        }
-        Ok(other) => {
-            return Err(ramflux_node_core::NodeCoreError::ItestHttp(format!(
-                "unsupported federation mesh runtime {other}"
-            )));
         }
     }
     Ok(())

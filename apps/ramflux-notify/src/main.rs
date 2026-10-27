@@ -56,7 +56,8 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             std::fs::create_dir_all(parent)
                 .map_err(|error| ramflux_node_core::NodeCoreError::Redb(error.to_string()))?;
         }
-        let secret_path = std::env::var_os("RAMFLUX_NOTIFY_ROUTE_KEY_FILE").ok_or_else(|| {
+        let secret_path = ramflux_node_core::environment::var_os("RAMFLUX_NOTIFY_ROUTE_KEY_FILE")
+            .ok_or_else(|| {
             ramflux_node_core::NodeCoreError::Unauthorized("mounted notify secret required".into())
         })?;
         ramflux_node_core::NodeSecret::require_external_path(
@@ -102,7 +103,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             serve_notify_mesh_quic(&listen_addr, &ingress, &notify_mesh_tls_config(&config))?;
         }
         #[cfg(feature = "itest-http")]
-        if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
+        if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
             return serve_itest_http(&ingress);
         }
         std::thread::park();
@@ -174,7 +175,7 @@ impl NotifyWakeAuth {
 }
 
 fn notify_require_wake_auth() -> bool {
-    std::env::var("RAMFLUX_NOTIFY_REQUIRE_WAKE_AUTH")
+    ramflux_node_core::environment::var("RAMFLUX_NOTIFY_REQUIRE_WAKE_AUTH")
         .map_or(true, |value| value != "0" && !value.eq_ignore_ascii_case("false"))
 }
 
@@ -367,7 +368,7 @@ fn serve_itest_http(
     if notify_async_ingress_enabled() {
         return serve_itest_http_async(ingress);
     }
-    let addr = std::env::var("RAMFLUX_ITEST_NOTIFY_HTTP_ADDR")
+    let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_NOTIFY_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18083".to_owned());
     let listener = TcpListener::bind(&addr)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
@@ -591,7 +592,7 @@ fn notify_mesh_transport_error(
 fn serve_itest_http_async(
     ingress: &Arc<NotifyIngressState>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let addr = std::env::var("RAMFLUX_ITEST_NOTIFY_HTTP_ADDR")
+    let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_NOTIFY_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18083".to_owned());
     let worker_count = notify_async_ingress_worker_count();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1447,7 +1448,7 @@ enum NotifyMeshIngressRuntime {
 
 fn notify_mesh_ingress_runtime() -> NotifyMeshIngressRuntime {
     notify_mesh_ingress_runtime_from_value(
-        std::env::var(NOTIFY_MESH_INGRESS_RUNTIME_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(NOTIFY_MESH_INGRESS_RUNTIME_ENV).ok().as_deref(),
     )
 }
 
@@ -1480,17 +1481,19 @@ impl NotifyRuntime {
         store: &Arc<ramflux_node_core::NotifyRedbStore>,
         store_gate: &Arc<Mutex<()>>,
     ) -> Result<Self, ramflux_node_core::NodeCoreError> {
-        match std::env::var(NOTIFY_RUNTIME_ENV).as_deref() {
-            Ok("compio") => notify_compio_runtime_from_store(store, store_gate),
-            Ok("tokio-concurrent") => Ok(Self::TokioConcurrent(ConcurrentNotifyRuntime::new(
+        match ramflux_node_core::environment::choice(
+            NOTIFY_RUNTIME_ENV,
+            ramflux_node_core::environment::var(NOTIFY_RUNTIME_ENV).ok().as_deref(),
+            &["current", "tokio", "compio", "tokio-concurrent"],
+            "current",
+        ) {
+            "compio" => notify_compio_runtime_from_store(store, store_gate),
+            "tokio-concurrent" => Ok(Self::TokioConcurrent(ConcurrentNotifyRuntime::new(
                 store,
                 store_gate,
                 "tokio-concurrent",
             )?)),
-            Ok("current" | "tokio") | Err(_) => Ok(Self::Current),
-            Ok(other) => Err(ramflux_node_core::NodeCoreError::ItestHttp(format!(
-                "unsupported notify runtime {other}"
-            ))),
+            _ => Ok(Self::Current),
         }
     }
 
@@ -2011,9 +2014,7 @@ fn notify_fanout_worker_loop(
 }
 
 fn notify_runtime_usize_env(name: &str, default: impl FnOnce() -> usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
+    ramflux_node_core::environment::parsed::<usize>(name)
         .filter(|value| *value > 0)
         .unwrap_or_else(default)
 }
@@ -2105,11 +2106,11 @@ fn notify_async_accept_enabled() -> bool {
 
 #[cfg(feature = "itest-http")]
 fn notify_wal_raw_enqueue_enabled() -> bool {
-    std::env::var(NOTIFY_WAL_RAW_ENQUEUE_ENV).as_deref() == Ok("1")
+    ramflux_node_core::environment::var(NOTIFY_WAL_RAW_ENQUEUE_ENV).as_deref() == Ok("1")
 }
 
 fn notify_default_enabled_env(name: &str) -> bool {
-    notify_default_enabled_from_value(std::env::var(name).ok().as_deref())
+    notify_default_enabled_from_value(ramflux_node_core::environment::var(name).ok().as_deref())
 }
 
 fn notify_default_enabled_from_value(value: Option<&str>) -> bool {
@@ -2124,7 +2125,9 @@ fn notify_default_enabled_from_value(value: Option<&str>) -> bool {
 }
 
 fn notify_mesh_ingress_enabled() -> bool {
-    notify_mesh_ingress_enabled_from_value(std::env::var(NOTIFY_MESH_INGRESS_ENV).ok().as_deref())
+    notify_mesh_ingress_enabled_from_value(
+        ramflux_node_core::environment::var(NOTIFY_MESH_INGRESS_ENV).ok().as_deref(),
+    )
 }
 
 fn notify_mesh_ingress_enabled_from_value(value: Option<&str>) -> bool {
@@ -2132,7 +2135,9 @@ fn notify_mesh_ingress_enabled_from_value(value: Option<&str>) -> bool {
 }
 
 fn notify_mesh_listen_addr() -> Option<String> {
-    notify_mesh_listen_addr_from_value(std::env::var(NOTIFY_MESH_LISTEN_ADDR_ENV).ok().as_deref())
+    notify_mesh_listen_addr_from_value(
+        ramflux_node_core::environment::var(NOTIFY_MESH_LISTEN_ADDR_ENV).ok().as_deref(),
+    )
 }
 
 fn notify_mesh_listen_addr_from_value(value: Option<&str>) -> Option<String> {
@@ -2143,7 +2148,8 @@ fn notify_mesh_listen_addr_from_value(value: Option<&str>) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.starts_with("${") {
+    if trimmed.parse::<std::net::SocketAddr>().is_err() {
+        ramflux_node_core::environment::warn_invalid(NOTIFY_MESH_LISTEN_ADDR_ENV);
         return Some(DEFAULT_NOTIFY_MESH_LISTEN_ADDR.to_owned());
     }
     Some(trimmed.to_owned())
@@ -3166,7 +3172,7 @@ fn read_secret_ref(secret_ref: &str) -> Result<String, ramflux_node_core::NodeCo
         return Ok(literal.to_owned());
     }
     if let Some(name) = secret_ref.strip_prefix("env:") {
-        return std::env::var(name)
+        return ramflux_node_core::environment::var(name)
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()));
     }
     if let Some(path) = secret_ref.strip_prefix("file:") {

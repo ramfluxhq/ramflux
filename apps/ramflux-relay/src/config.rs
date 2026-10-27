@@ -15,7 +15,7 @@ pub(crate) const RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_ENV: &str =
 pub(crate) fn relay_service_key(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<Vec<u8>> {
-    let Some(secret_ref) = std::env::var("RAMFLUX_RELAY_SERVICE_KEY_REF")
+    let Some(secret_ref) = ramflux_node_core::environment::var("RAMFLUX_RELAY_SERVICE_KEY_REF")
         .ok()
         .or_else(|| config.relay.as_ref().and_then(|relay| relay.service_key_ref.clone()))
     else {
@@ -25,7 +25,7 @@ pub(crate) fn relay_service_key(
 }
 
 pub(crate) fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().and_then(|value| {
+    ramflux_node_core::environment::var(name).ok().and_then(|value| {
         let trimmed = value.trim();
         if trimmed.starts_with("${") {
             return None;
@@ -56,7 +56,9 @@ pub(crate) fn parse_client_quic_addr(value: Option<&str>) -> anyhow::Result<std:
 }
 
 pub(crate) fn relay_client_quic_addr() -> anyhow::Result<std::net::SocketAddr> {
-    parse_client_quic_addr(std::env::var(RELAY_CLIENT_QUIC_ADDR_ENV).ok().as_deref())
+    parse_client_quic_addr(
+        ramflux_node_core::environment::var(RELAY_CLIENT_QUIC_ADDR_ENV).ok().as_deref(),
+    )
 }
 
 /// Builds the server-auth QUIC config for the client-facing surface, failing closed if the relay
@@ -76,7 +78,7 @@ pub(crate) fn read_relay_secret_ref(secret_ref: &str) -> anyhow::Result<Vec<u8>>
     let value = if let Some(literal) = secret_ref.strip_prefix("literal:") {
         literal.to_owned()
     } else if let Some(name) = secret_ref.strip_prefix("env:") {
-        std::env::var(name)?
+        ramflux_node_core::environment::var(name)?
     } else if let Some(path) = secret_ref.strip_prefix("file:") {
         std::fs::read_to_string(path)?
     } else {

@@ -36,7 +36,7 @@ fn router_async_mesh_client(
 ) -> Result<Option<RouterAsyncMeshClient>, ramflux_node_core::NodeCoreError> {
     router_async_mesh_client_from_endpoint_value(
         config,
-        std::env::var(ROUTER_ASYNC_ENDPOINT_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(ROUTER_ASYNC_ENDPOINT_ENV).ok().as_deref(),
     )
 }
 
@@ -164,7 +164,7 @@ fn endpoint_from_env_value(value: Option<&str>, default: &str) -> Option<String>
 }
 
 pub(crate) fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().and_then(|value| {
+    ramflux_node_core::environment::var(name).ok().and_then(|value| {
         let trimmed = value.trim();
         if trimmed.starts_with("${") {
             return None;

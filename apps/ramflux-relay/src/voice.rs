@@ -13,7 +13,9 @@ pub(crate) fn start(config: &NodeServiceConfig) -> anyhow::Result<()> {
         "RAMFLUX_RELAY_VOICE_CONTROL_ADDR",
         "RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT",
     ];
-    let values = variables.map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()));
+    let values = variables.map(|name| {
+        ramflux_node_core::environment::var(name).ok().filter(|v| !v.trim().is_empty())
+    });
     if values.iter().all(Option::is_none) {
         return Ok(());
     }
@@ -26,7 +28,9 @@ pub(crate) fn start(config: &NodeServiceConfig) -> anyhow::Result<()> {
         ramflux_transport::MeshTlsServer::bind(&control, &crate::config::mesh_tls_config(config))?;
     let state = Arc::new(Mutex::new(VoiceRelayState::default()));
     let udp_state = Arc::clone(&state);
-    let allow_private = std::env::var("RAMFLUX_RELAY_ALLOW_PRIVATE_TARGETS").as_deref() == Ok("1");
+    let allow_private = ramflux_node_core::environment::var("RAMFLUX_RELAY_ALLOW_PRIVATE_TARGETS")
+        .as_deref()
+        == Ok("1");
     std::thread::Builder::new().name("voice-udp".into()).spawn(move || {
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_io()

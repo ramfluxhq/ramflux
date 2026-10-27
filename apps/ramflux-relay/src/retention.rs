@@ -92,7 +92,7 @@ pub(crate) fn retention_async_mesh_client(
 ) -> anyhow::Result<Option<RetentionAsyncMeshClient>> {
     retention_async_mesh_client_from_endpoint_value(
         config,
-        std::env::var(RETENTION_ASYNC_ENDPOINT_ENV).ok().as_deref(),
+        ramflux_node_core::environment::var(RETENTION_ASYNC_ENDPOINT_ENV).ok().as_deref(),
     )
 }
 

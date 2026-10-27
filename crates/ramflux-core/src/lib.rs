@@ -5,6 +5,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod environment;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;

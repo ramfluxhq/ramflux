@@ -16,7 +16,7 @@ pub(crate) fn serve_itest_http(
     store: &Arc<ramflux_node_core::GatewayRedbStore>,
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
 ) -> anyhow::Result<()> {
-    let addr = std::env::var("RAMFLUX_ITEST_GATEWAY_HTTP_ADDR")
+    let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_GATEWAY_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18081".to_owned());
     let listener = TcpListener::bind(&addr)?;
     tracing::info!(addr, "gateway itest HTTP surface listening");

@@ -75,8 +75,8 @@ pub fn load_config(
 }
 
 fn apply_env_overrides(config: &mut NodeServiceConfig) {
-    apply_node_id_override(config, std::env::var("RAMFLUX_NODE_ID").ok().as_deref());
-    if let Ok(seed) = std::env::var(NODE_SERVICE_SIGNING_SEED_ENV)
+    apply_node_id_override(config, crate::environment::var("RAMFLUX_NODE_ID").ok().as_deref());
+    if let Ok(seed) = crate::environment::var(NODE_SERVICE_SIGNING_SEED_ENV)
         && !seed.trim().is_empty()
     {
         config.node_service_signing_seed_b64url = Some(RedactedString::new(seed));
@@ -111,7 +111,10 @@ pub fn load_config_from_args(
 
 #[must_use]
 pub fn effective_redb_path(config: &NodeServiceConfig) -> PathBuf {
-    effective_redb_path_with_state_root(config, std::env::var("RAMFLUX_NODE_STATE_DIR").ok())
+    effective_redb_path_with_state_root(
+        config,
+        crate::environment::var("RAMFLUX_NODE_STATE_DIR").ok(),
+    )
 }
 
 #[must_use]

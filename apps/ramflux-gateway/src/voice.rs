@@ -49,7 +49,7 @@ async fn issue(
         &recipient,
         ramflux_node_core::now_unix_seconds(),
     )?;
-    let endpoint = std::env::var("RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT")
+    let endpoint = ramflux_node_core::environment::var("RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT")
         .map_err(|_| anyhow::anyhow!("voice relay is not configured"))?;
     let tls = context.peers.tls().clone();
     let body = request.body.clone();

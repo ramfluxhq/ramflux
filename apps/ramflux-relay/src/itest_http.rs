@@ -38,7 +38,7 @@ pub(crate) fn serve_itest_http(
     state: &Arc<Mutex<ramflux_node_core::RelayCacheState>>,
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<()> {
-    let addr = std::env::var("RAMFLUX_ITEST_RELAY_HTTP_ADDR")
+    let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_RELAY_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18084".to_owned());
     let listener = TcpListener::bind(&addr)?;
     let worker_count = relay_ingress_worker_count();
@@ -74,7 +74,7 @@ pub(crate) fn serve_itest_http(
 
 #[cfg(feature = "itest-http")]
 pub(crate) fn relay_ingress_worker_count() -> usize {
-    std::env::var("RAMFLUX_RELAY_INGRESS_THREADS")
+    ramflux_node_core::environment::var("RAMFLUX_RELAY_INGRESS_THREADS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
@@ -174,7 +174,8 @@ pub(crate) fn capture_itest_relay_json(
     body: &[u8],
     response: &RelayResponseValue,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let Ok(capture_path) = std::env::var("RAMFLUX_RELAY_ITEST_CAPTURE_JSON") else {
+    let Ok(capture_path) = ramflux_node_core::environment::var("RAMFLUX_RELAY_ITEST_CAPTURE_JSON")
+    else {
         return Ok(());
     };
     if !path.starts_with("/relay/v1/object/") {
