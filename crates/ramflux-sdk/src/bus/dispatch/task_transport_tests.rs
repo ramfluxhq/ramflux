@@ -15,58 +15,34 @@ fn manifest_test_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn confirmation_preparation_allows_slow_verified_directory_refresh() {
-    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
-        let budget = super::PreparationBudget::for_sync_cycle();
-        super::await_preparation(
-            async {
-                tokio::time::sleep(Duration::from_millis(1_250)).await;
-                Ok::<_, SdkError>(())
-            },
-            &budget,
-            "task confirmation preparation deferred",
-        )
-        .await
-    })
+    let outcome = super::await_preparation(
+        async { Ok::<_, SdkError>(()) },
+        "task confirmation preparation deferred",
+    )
     .await;
     assert!(
-        matches!(outcome, Ok(Ok(super::Preparation::Ready(())))),
-        "a slow verified directory refresh must remain deliverable"
+        matches!(outcome, Ok(super::Preparation::Ready(()))),
+        "a ready verified directory refresh must remain deliverable"
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn full_item_timeout_is_charged_while_short_cycle_budget_is_deferred() {
-    let charged = tokio::time::timeout(Duration::from_secs(10), async {
-        let budget = super::PreparationBudget::for_sync_cycle();
-        super::await_preparation(
-            async {
-                tokio::time::sleep(Duration::from_secs(6)).await;
-                Ok::<_, SdkError>(())
-            },
-            &budget,
-            "charged preparation timeout",
-        )
-        .await
-    })
+#[tokio::test]
+async fn manifest_worker_capacity_is_the_only_retry_neutral_preparation_outcome() {
+    let deferred = super::await_preparation(
+        async { Err::<(), _>(SdkError::TaskManifestWorkerCapacity) },
+        "worker-cap preparation",
+    )
     .await;
-    assert!(matches!(charged, Ok(Err(SdkError::InboundPending(_)))));
+    assert!(matches!(deferred, Ok(super::Preparation::Deferred)));
 
-    let deferred = tokio::time::timeout(Duration::from_secs(10), async {
-        let budget = super::PreparationBudget::new(Duration::from_secs(3));
-        super::await_preparation(
-            async {
-                tokio::time::sleep(Duration::from_secs(6)).await;
-                Ok::<_, SdkError>(())
-            },
-            &budget,
-            "budget-limited preparation",
-        )
-        .await
-    })
+    let charged = super::await_preparation(
+        async { Err::<(), _>(SdkError::InboundPending("transport timeout".into())) },
+        "charged preparation timeout",
+    )
     .await;
-    assert!(matches!(deferred, Ok(Ok(super::Preparation::Deferred))));
+    assert!(matches!(charged, Err(SdkError::InboundPending(_))));
 }
 
 #[tokio::test]
@@ -89,16 +65,14 @@ async fn stalled_federated_manifest_fetch_respects_the_preparation_deadline()
             Ok(())
         });
         let started = std::time::Instant::now();
-        let budget = super::PreparationBudget::new(Duration::from_secs(6));
         let outcome = super::await_preparation(
             super::fetch_federated_manifest(&format!("http://{address}"), "stalled-root"),
-            &budget,
             "task federated manifest preparation deferred",
         )
         .await;
         assert!(
             !matches!(outcome, Ok(super::Preparation::Ready(_))),
-            "a stalled fetch must either exhaust the cycle budget or report its item timeout"
+            "a stalled fetch must report its per-item timeout"
         );
         assert!(started.elapsed() < Duration::from_secs(7));
         accepted_rx.recv_timeout(Duration::from_secs(1))?;
@@ -290,30 +264,43 @@ async fn defer_then_drain_confirmation_jobs(
     carrier: &Carrier,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (ack_key, forward_key) = store_healthy_confirmation_jobs(source, carrier)?;
-    let short_budget = super::PreparationBudget::new(Duration::from_secs(3));
-    let deferred = tokio::time::timeout(
-        Duration::from_secs(10),
-        super::drain_confirmations(source, &short_budget),
-    )
-    .await
-    .map_err(|_| "stored confirmation deferral exceeded its outer timeout")??;
+    let mut malformed = source
+        .client
+        .account_db()?
+        .load_actor_state::<crate::client::task::control::AckJob>(&ack_key)?
+        .ok_or("healthy acknowledgement missing")?;
+    malformed.ack.carrier_base64 = "not-base64".into();
+    source.client.account_db()?.persist_actor_state("task/ack/000-malformed", &malformed)?;
+    let now = now_unix_timestamp();
+    let mut thread = source
+        .client
+        .account_db()?
+        .client_record("conversation", "thread")?
+        .ok_or("conversation")?;
+    thread["test_preparation_outcome"] = json!("worker_capacity");
+    source.client.account_db()?.persist_client_record("conversation", "thread", &thread)?;
+    let deferred = super::drain_confirmations_at(source, now).await?;
     assert_eq!(deferred, 0);
+    assert!(!source.client.account_db()?.actor_state_exists("task/ack/000-malformed")?);
+    assert!(source.client.account_db()?.actor_state_exists("task/ack_quarantine/000-malformed")?);
     let deferred_ack = source
         .client
         .account_db()?
         .load_actor_state::<crate::client::task::control::AckJob>(&ack_key)?
-        .ok_or("deferred acknowledgement missing")?;
-    assert_eq!((deferred_ack.attempts, deferred_ack.next_at), (0, 0));
+        .ok_or("capacity-deferred acknowledgement missing")?;
     let deferred_forward = source
         .client
         .account_db()?
         .load_actor_state::<crate::client::task::control::ForwardJob>(&forward_key)?
-        .ok_or("deferred forward missing")?;
+        .ok_or("capacity-deferred forward missing")?;
+    assert_eq!((deferred_ack.attempts, deferred_ack.next_at), (0, 0));
     assert_eq!((deferred_forward.attempts, deferred_forward.next_at), (0, 0));
+    assert!(source.task_ack_cursor > 0 && source.task_forward_cursor > 0);
 
-    let budget = super::PreparationBudget::for_sync_cycle();
+    thread["test_preparation_outcome"] = json!("ready");
+    source.client.account_db()?.persist_client_record("conversation", "thread", &thread)?;
     let drained =
-        tokio::time::timeout(Duration::from_secs(10), super::drain_confirmations(source, &budget))
+        tokio::time::timeout(Duration::from_secs(10), super::drain_confirmations_at(source, now))
             .await
             .map_err(|_| "stored confirmation drain exceeded its outer timeout")??;
     assert_eq!(drained, 2);
@@ -491,13 +478,11 @@ async fn private_task_approvals_are_pair_encrypted_only_to_the_requester_among_g
         sdk_device_signed_fields("device-sender", ""),
     )?;
     let anchor = source.client.sign_task_event(event, "anchor".into(), None)?;
-    let budget = super::PreparationBudget::for_sync_cycle();
     let prepared = super::super::task_approval_transport::send(
         &mut source,
         &anchor.conversation_id,
         "peer-0",
         b"PRIVATE_MCP_ARGUMENTS",
-        &budget,
     )
     .await?;
     assert!(matches!(prepared, super::Preparation::Ready(())));

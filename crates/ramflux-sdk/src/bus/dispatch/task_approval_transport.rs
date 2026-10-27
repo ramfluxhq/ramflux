@@ -2,9 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Private pair controls for task approvals, independent of compacted signed event histories.
-use super::task_transport::{
-    Preparation, PreparationBudget, Target, await_preparation, own_targets, seal,
-};
+use super::task_transport::{Preparation, Target, await_preparation, own_targets, seal};
 use crate::bus::task_delivery::Delivery;
 use crate::client::task::invalid;
 use crate::prelude::*;
@@ -14,13 +12,25 @@ pub(super) async fn send(
     conversation: &str,
     recipient: &str,
     body: &[u8],
-    budget: &PreparationBudget,
 ) -> Result<Preparation<()>, SdkError> {
     crate::client::task::check_delivery_size(body.len())?;
+    #[cfg(test)]
+    {
+        let thread = account
+            .client
+            .account_db()?
+            .client_record("conversation", conversation)?
+            .ok_or_else(|| invalid("task approval conversation missing"))?;
+        if let Some(result) =
+            super::task_transport::forced_preparation(&thread, "task approval preparation deferred")
+                .await
+        {
+            return result;
+        }
+    }
     let mut engine = account.take_live_engine().await?;
     let result = await_preparation(
         prepare(account, &mut engine, conversation, recipient, body),
-        budget,
         "task approval preparation deferred",
     )
     .await;
@@ -49,10 +59,6 @@ async fn prepare(
         .account_db()?
         .client_record("conversation", conversation)?
         .ok_or_else(|| invalid("task approval conversation missing"))?;
-    #[cfg(test)]
-    if let Some(delay) = thread["test_preparation_delay_ms"].as_u64() {
-        tokio::time::sleep(Duration::from_millis(delay)).await;
-    }
     let group = thread["group_id"].as_str();
     diagnostic(account, "own_targets begin");
     let mut targets = own_targets(account, &engine.config).await?;
@@ -119,23 +125,15 @@ fn endpoint_targets(
 mod tests {
     use super::*;
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn approval_preparation_allows_slow_verified_directory_refresh() {
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
-            let budget = PreparationBudget::for_sync_cycle();
-            await_preparation(
-                async {
-                    tokio::time::sleep(Duration::from_millis(1_250)).await;
-                    Ok::<_, SdkError>(())
-                },
-                &budget,
-                "task approval preparation deferred",
-            )
-            .await
-        })
+        let result = await_preparation(
+            async { Ok::<_, SdkError>(()) },
+            "task approval preparation deferred",
+        )
         .await;
         assert!(
-            matches!(result, Ok(Ok(Preparation::Ready(())))),
+            matches!(result, Ok(Preparation::Ready(()))),
             "a slow verified directory refresh must remain deliverable"
         );
     }

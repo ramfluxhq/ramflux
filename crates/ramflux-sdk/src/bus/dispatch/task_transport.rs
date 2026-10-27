@@ -12,43 +12,9 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-// Preparation refreshes verified own and peer directories before sealing. Keep
-// task couriers bounded while allowing normal latency on CPU-constrained hosts.
+// Preparation refreshes verified own and peer directories before sealing. Each
+// started courier item gets the same charged ceiling, independently of sync.
 const TASK_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
-const TASK_COURIER_PREPARATION_BUDGET: Duration = Duration::from_secs(12);
-const TASK_APPROVAL_PREPARATION_BUDGET: Duration = Duration::from_secs(6);
-
-pub(crate) struct PreparationBudget {
-    started: tokio::time::Instant,
-    deadline: tokio::time::Instant,
-}
-
-impl PreparationBudget {
-    pub(crate) fn for_sync_cycle() -> Self {
-        Self::new(TASK_COURIER_PREPARATION_BUDGET)
-    }
-
-    pub(super) fn new(duration: Duration) -> Self {
-        let started = tokio::time::Instant::now();
-        Self { started, deadline: started + duration }
-    }
-
-    pub(super) fn approval_share(&self) -> Self {
-        Self {
-            started: self.started,
-            deadline: self.deadline.min(self.started + TASK_APPROVAL_PREPARATION_BUDGET),
-        }
-    }
-
-    pub(super) fn can_start_item(&self) -> bool {
-        let remaining = self.deadline.saturating_duration_since(tokio::time::Instant::now());
-        remaining >= TASK_PREPARATION_TIMEOUT
-    }
-
-    fn next_timeout(&self) -> Option<Duration> {
-        self.can_start_item().then_some(TASK_PREPARATION_TIMEOUT)
-    }
-}
 
 pub(super) fn rotate_to_cursor<T>(rows: &mut [(String, T)], cursor: usize) {
     if !rows.is_empty() {
@@ -65,13 +31,9 @@ pub(super) enum Preparation<T> {
 
 pub(super) async fn await_preparation<T>(
     future: impl Future<Output = Result<T, SdkError>>,
-    budget: &PreparationBudget,
     deferred: &'static str,
 ) -> Result<Preparation<T>, SdkError> {
-    let Some(timeout) = budget.next_timeout() else {
-        return Ok(Preparation::Deferred);
-    };
-    match tokio::time::timeout(timeout, future).await {
+    match tokio::time::timeout(TASK_PREPARATION_TIMEOUT, future).await {
         Ok(Ok(value)) => Ok(Preparation::Ready(value)),
         Ok(Err(SdkError::TaskManifestWorkerCapacity)) => {
             tracing::debug!(deferred, "task courier preparation deferred without retry charge");
@@ -79,6 +41,25 @@ pub(super) async fn await_preparation<T>(
         }
         Ok(Err(error)) => Err(error),
         Err(_) => Err(SdkError::InboundPending(deferred.to_owned())),
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn forced_preparation(
+    thread: &Value,
+    deferred: &'static str,
+) -> Option<Result<Preparation<()>, SdkError>> {
+    match thread["test_preparation_outcome"].as_str()? {
+        "ready" => Some(Ok(Preparation::Ready(()))),
+        "timeout" => Some(Err(SdkError::InboundPending(deferred.to_owned()))),
+        "worker_capacity" => Some(
+            await_preparation(
+                async { Err::<(), _>(SdkError::TaskManifestWorkerCapacity) },
+                deferred,
+            )
+            .await,
+        ),
+        _ => None,
     }
 }
 
@@ -154,16 +135,6 @@ pub(super) enum Mode<'a> {
     Own,
 }
 
-#[cfg(test)]
-async fn test_preparation_override(
-    thread: &Value,
-) -> Option<Result<Vec<SealedDelivery>, SdkError>> {
-    if let Some(delay) = thread["test_preparation_delay_ms"].as_u64() {
-        tokio::time::sleep(Duration::from_millis(delay)).await;
-    }
-    (thread["test_preparation_ready"] == true).then(|| Ok(Vec::new()))
-}
-
 pub(super) async fn prepare(
     account: &LocalBusAccountState,
     engine: &mut GatewaySessionEngine,
@@ -171,10 +142,6 @@ pub(super) async fn prepare(
     thread: &Value,
     mode: Mode<'_>,
 ) -> Result<Vec<SealedDelivery>, SdkError> {
-    #[cfg(test)]
-    if let Some(result) = test_preparation_override(thread).await {
-        return result;
-    }
     let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let mut own_targets = own_targets(account, &engine.config).await?;
@@ -387,27 +354,32 @@ pub(super) async fn seal(
 /// Confirmation and same-root forwarding are bounded independently of inbound processing.
 pub(crate) async fn drain_confirmations(
     account: &mut LocalBusAccountState,
-    budget: &PreparationBudget,
+) -> Result<usize, SdkError> {
+    drain_confirmations_at(account, now_unix_timestamp()).await
+}
+
+pub(super) async fn drain_confirmations_at(
+    account: &mut LocalBusAccountState,
+    now: i64,
 ) -> Result<usize, SdkError> {
     let forward_first = account.task_forward_first;
     account.task_forward_first = !forward_first;
     if forward_first {
-        let forwards = drain_forwards(account, budget).await?;
-        let acknowledgements = drain_acknowledgements(account, budget).await?;
+        let forwards = drain_forwards(account, now).await?;
+        let acknowledgements = drain_acknowledgements(account, now).await?;
         Ok(forwards + acknowledgements)
     } else {
-        let acknowledgements = drain_acknowledgements(account, budget).await?;
-        let forwards = drain_forwards(account, budget).await?;
+        let acknowledgements = drain_acknowledgements(account, now).await?;
+        let forwards = drain_forwards(account, now).await?;
         Ok(acknowledgements + forwards)
     }
 }
 
 async fn drain_acknowledgements(
     account: &mut LocalBusAccountState,
-    budget: &PreparationBudget,
+    now: i64,
 ) -> Result<usize, SdkError> {
     use crate::client::task::control::AckJob;
-    let now = now_unix_timestamp();
     let mut sent = 0;
     let mut jobs =
         account.client.account_db()?.task_record_page::<AckJob>("task/ack/", "task/ack/", 65)?;
@@ -418,15 +390,28 @@ async fn drain_acknowledgements(
             account.client.account_db()?.delete_task_state(&key)?;
             continue;
         }
-        if !budget.can_start_item() {
-            break;
-        }
-        let c = job.ack.original()?;
-        let result = send_control(account, &c, Mode::Ack(&job.ack), budget).await;
+        let c = match job.ack.original() {
+            Ok(carrier) => carrier,
+            Err(error) => {
+                let quarantine = key.replacen("task/ack/", "task/ack_quarantine/", 1);
+                account.client.account_db()?.write_transaction(|| {
+                    account.client.account_db()?.persist_actor_state(
+                        &quarantine,
+                        &json!({"reason":"undecodable_ack","quarantined_at":now}),
+                    )?;
+                    account.client.account_db()?.delete_task_state(&key)?;
+                    Ok::<_, SdkError>(())
+                })?;
+                account.task_ack_cursor = account.task_ack_cursor.wrapping_add(1);
+                tracing::warn!(%error, job = %key, "undecodable task acknowledgement quarantined");
+                tokio::task::yield_now().await;
+                continue;
+            }
+        };
+        let result = send_control(account, &c, Mode::Ack(&job.ack)).await;
         account.task_ack_cursor = account.task_ack_cursor.wrapping_add(1);
         if matches!(&result, Ok(Preparation::Ready(()))) {
-            let original = job.ack.original()?;
-            let hash = crate::client::task::certificate::carrier_hash(&original)?;
+            let hash = crate::client::task::certificate::carrier_hash(&c)?;
             account.client.account_db()?.persist_actor_state(
                 &crate::client::task::key("ack_sent", &hash),
                 &json!({"start":now}),
@@ -434,25 +419,18 @@ async fn drain_acknowledgements(
             account.client.account_db()?.prune_task_diagnostics("task/ack_sent/", 1024)?;
             account.client.account_db()?.delete_task_state(&key)?;
             sent += 1;
-        } else if matches!(&result, Ok(Preparation::Deferred)) {
-            if !budget.can_start_item() {
-                break;
-            }
-        } else {
+        } else if !matches!(&result, Ok(Preparation::Deferred)) {
             job.attempts += 1;
             job.next_at = now.saturating_add(2_i64.pow(job.attempts.min(6)));
             account.client.account_db()?.persist_actor_state(&key, &job)?;
         }
+        tokio::task::yield_now().await;
     }
     Ok(sent)
 }
 
-async fn drain_forwards(
-    account: &mut LocalBusAccountState,
-    budget: &PreparationBudget,
-) -> Result<usize, SdkError> {
+async fn drain_forwards(account: &mut LocalBusAccountState, now: i64) -> Result<usize, SdkError> {
     use crate::client::task::control::ForwardJob;
-    let now = now_unix_timestamp();
     let mut sent = 0;
     let mut jobs = account.client.account_db()?.task_record_page::<ForwardJob>(
         "task/forward/",
@@ -466,21 +444,14 @@ async fn drain_forwards(
             account.client.account_db()?.delete_task_state(&key)?;
             continue;
         }
-        if !budget.can_start_item() {
-            break;
-        }
         let history = account.client.task_history(&job.conversation_id, &job.task_id)?;
         if let Some(last) = history.events.last() {
-            let result = send_control(account, &last.carrier, Mode::Own, budget).await;
+            let result = send_control(account, &last.carrier, Mode::Own).await;
             account.task_forward_cursor = account.task_forward_cursor.wrapping_add(1);
             if matches!(&result, Ok(Preparation::Ready(()))) {
                 account.client.account_db()?.delete_task_state(&key)?;
                 sent += 1;
-            } else if matches!(&result, Ok(Preparation::Deferred)) {
-                if !budget.can_start_item() {
-                    break;
-                }
-            } else {
+            } else if !matches!(&result, Ok(Preparation::Deferred)) {
                 job.attempts += 1;
                 job.next_at = now.saturating_add(2_i64.pow(job.attempts.min(6)));
                 account.client.account_db()?.persist_actor_state(&key, &job)?;
@@ -488,6 +459,7 @@ async fn drain_forwards(
         } else {
             account.client.account_db()?.delete_task_state(&key)?;
         }
+        tokio::task::yield_now().await;
     }
     Ok(sent)
 }
@@ -495,17 +467,21 @@ pub(super) async fn send_control(
     account: &mut LocalBusAccountState,
     c: &Carrier,
     mode: Mode<'_>,
-    budget: &PreparationBudget,
 ) -> Result<Preparation<()>, SdkError> {
     let thread = account
         .client
         .account_db()?
         .client_record("conversation", &c.conversation_id)?
         .ok_or_else(|| invalid("task conversation missing"))?;
+    #[cfg(test)]
+    if let Some(result) =
+        forced_preparation(&thread, "task confirmation preparation deferred").await
+    {
+        return result;
+    }
     let mut engine = account.take_live_engine().await?;
     let result = await_preparation(
         prepare(account, &mut engine, c, &thread, mode),
-        budget,
         "task confirmation preparation deferred",
     )
     .await;
@@ -628,6 +604,9 @@ async fn fetch_federated_manifest(
             ManifestReservation::Start(guard) => break guard,
         }
     };
+    // The platform resolver may keep this blocking worker alive after the
+    // five-second caller deadline. Its flight guard remains owned by the
+    // worker, and the global cap bounds those lingering DNS calls to four.
     tokio::task::spawn_blocking(move || {
         let _guard = guard;
         crate::client::contact::fetch_verified_device_manifest_from_url_bounded(
