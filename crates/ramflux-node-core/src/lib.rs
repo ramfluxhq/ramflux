@@ -22,9 +22,9 @@ mod gateway_state;
 mod home_migration_store;
 mod home_node_migration;
 pub use home_migration_store::{
-    AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationBacklogCursor,
-    MigrationEndpoints, MigrationNode, MigrationOperation, MigrationPeer, MigrationRole,
-    PrepareMigration, SealedMigration,
+    AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationAdmission,
+    MigrationBacklogCursor, MigrationEndpoints, MigrationNode, MigrationOperation, MigrationPeer,
+    MigrationRole, PrepareMigration, SealedMigration,
 };
 mod http_support;
 mod source_privacy;
@@ -163,3 +163,6 @@ mod custody_sessions;
 mod custody_delivery;
 mod custody_service;
 pub use custody_service::{CustodyService, CustodyTlsContext};
+
+mod home_migration_service;
+pub use home_migration_service::{HomeMigrationMesh, HomeMigrationService};

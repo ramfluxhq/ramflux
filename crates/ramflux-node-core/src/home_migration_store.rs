@@ -19,12 +19,13 @@ use ramflux_protocol::{
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-mod destination;
-pub use destination::PrepareMigration;
+pub(crate) mod destination;
+pub use destination::{MigrationAdmission, PrepareMigration};
 pub use source::{AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationPeer};
 mod authority_evidence;
 mod fence;
 mod maintenance;
+mod queries;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -333,7 +334,7 @@ impl RouterRedbStore {
     }
 }
 
-fn commit_transition(
+pub(crate) fn commit_transition(
     store: &RouterRedbStore,
     tx: redb::WriteTransaction,
 ) -> Result<(), NodeCoreError> {

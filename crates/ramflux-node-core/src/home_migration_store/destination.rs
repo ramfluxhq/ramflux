@@ -21,6 +21,11 @@ pub struct PrepareMigration<'a> {
     pub base: &'a VerifiedHome,
     pub delivery_map: &'a [DeliveryMapEntry],
 }
+pub struct MigrationAdmission<'a> {
+    pub publication: &'a crate::CustodyPublication,
+    pub prepare: PrepareMigration<'a>,
+    pub source: std::net::IpAddr,
+}
 impl RouterCore {
     /// Reserve against A's independently authenticated home and current local authority.
     /// # Errors
@@ -34,92 +39,8 @@ impl RouterCore {
     ) -> Result<Signed<Offer>, NodeCoreError> {
         let p = &input.prepare.body;
         self.with_migration_authority(&p.account_anchor, now, |authority, _publication| {
-            let (expected_map, map_hash) = verify_preparation(node, input, authority, now)?;
             let tx = store.migration_db().begin_write().map_err(storage)?;
-            let now = clock(&tx, now)?;
-            let key = op_key(&p.account_anchor, &p.migration_id, MigrationRole::Destination)?;
-            if let Some(existing) = read::<MigrationOperation>(&tx, OPS, &key)? {
-                if message_hash(&existing.prepare).map_err(storage)?
-                    != message_hash(input.prepare).map_err(storage)?
-                {
-                    return Err(refusal(Refusal::IdempotencyConflict));
-                }
-                return Ok(existing.offer);
-            }
-            if let Some(floor) = read::<RecordEvidence>(&tx, HEADS, &p.account_anchor)?
-                && !input
-                    .base
-                    .extends(floor.record.epoch(), &record_hash(&floor.record).map_err(storage)?)
-            {
-                return Err(refusal(Refusal::EvidenceRequired));
-            }
-            maintenance::reserve_budget(&tx, &p.account_anchor, true)?;
-            let offer = crypto::sign_node(
-                Offer {
-                    version: 1,
-                    migration_id: p.migration_id.clone(),
-                    account_anchor: p.account_anchor.clone(),
-                    prepare_hash: message_hash(input.prepare).map_err(storage)?,
-                    authority_record_hash: p.authority_record_hash.clone(),
-                    previous_home_hash: p.previous_home_hash.clone(),
-                    next_home_epoch: p
-                        .previous_home_epoch
-                        .checked_add(1)
-                        .filter(|v| *v <= ramflux_protocol::MAX_SAFE_JSON_INTEGER)
-                        .ok_or_else(|| refusal(Refusal::HomeCheckpointRequired))?,
-                    old_node: p.old_node.clone(),
-                    destination_node: p.destination_node.clone(),
-                    destination_key: p.destination_key.clone(),
-                    discovery_hash: node.discovery_hash.clone(),
-                    server_record_hash: node.server_record_hash.clone(),
-                    gateway_tcp_addr: node.gateway_tcp_addr.clone(),
-                    federation_endpoint: node.federation_endpoint.clone(),
-                    delivery_map_hash: map_hash,
-                    admission_id: ramflux_protocol::encode_base64url(
-                        ramflux_crypto::random_32().map_err(auth_error)?,
-                    ),
-                    nonce: p.nonce.clone(),
-                    issued_at: now,
-                    accept_until: now
-                        .checked_add(MAX_SEAL_DELAY)
-                        .ok_or_else(|| refusal(Refusal::CommitExpired))?,
-                    max_commit_delay: MAX_COMMIT_DELAY,
-                    forward_seconds: FORWARD_SECONDS,
-                },
-                node.node_id(),
-                &node.key,
-            )
-            .map_err(auth_error)?;
-            let op = MigrationOperation {
-                role: MigrationRole::Destination,
-                phase: Phase::Prepared,
-                prepare: input.prepare.clone(),
-                offer: offer.clone(),
-                authorization: None,
-                seal: None,
-                proof: None,
-                fence: None,
-                base: input.base.evidence().clone(),
-                attestation: input.attestation.clone(),
-                delivery_map: expected_map,
-                state_version: 1,
-                next_due: now,
-                expires_at: offer.body.accept_until + SKEW_SECONDS,
-                recovery_guard: false,
-                live_budget: true,
-            };
-            write(&tx, OPS, &key, &op)?;
-            maintenance::index_expiry(&tx, &key, op.expires_at)?;
-            write(
-                &tx,
-                BUSINESS,
-                &business_key(&p.account_anchor, &p.migration_id, Action::Prepare)?,
-                &BusinessOutcome {
-                    payload_hash: message_hash(input.prepare).map_err(storage)?,
-                    operation_key: key,
-                    expires_at: op.expires_at,
-                },
-            )?;
+            let offer = prepare_in_transaction(&tx, node, input, authority, now)?;
             commit_transition(store, tx)?;
             Ok(offer)
         })
@@ -325,6 +246,100 @@ impl RouterRedbStore {
         commit_transition(self, tx)?;
         Ok(())
     }
+}
+
+pub(crate) fn prepare_in_transaction(
+    tx: &redb::WriteTransaction,
+    node: &MigrationNode,
+    input: PrepareMigration<'_>,
+    authority: &VerifiedRecord,
+    now: u64,
+) -> Result<Signed<Offer>, NodeCoreError> {
+    let p = &input.prepare.body;
+    let (expected_map, map_hash) = verify_preparation(node, input, authority, now)?;
+    let now = clock(tx, now)?;
+    let key = op_key(&p.account_anchor, &p.migration_id, MigrationRole::Destination)?;
+    if let Some(existing) = read::<MigrationOperation>(tx, OPS, &key)? {
+        if message_hash(&existing.prepare).map_err(storage)?
+            != message_hash(input.prepare).map_err(storage)?
+        {
+            return Err(refusal(Refusal::IdempotencyConflict));
+        }
+        return Ok(existing.offer);
+    }
+    if let Some(floor) = read::<RecordEvidence>(tx, HEADS, &p.account_anchor)?
+        && !input.base.extends(floor.record.epoch(), &record_hash(&floor.record).map_err(storage)?)
+    {
+        return Err(refusal(Refusal::EvidenceRequired));
+    }
+    maintenance::reserve_budget(tx, &p.account_anchor, true)?;
+    let offer = crypto::sign_node(
+        Offer {
+            version: 1,
+            migration_id: p.migration_id.clone(),
+            account_anchor: p.account_anchor.clone(),
+            prepare_hash: message_hash(input.prepare).map_err(storage)?,
+            authority_record_hash: p.authority_record_hash.clone(),
+            previous_home_hash: p.previous_home_hash.clone(),
+            next_home_epoch: p
+                .previous_home_epoch
+                .checked_add(1)
+                .filter(|v| *v <= ramflux_protocol::MAX_SAFE_JSON_INTEGER)
+                .ok_or_else(|| refusal(Refusal::HomeCheckpointRequired))?,
+            old_node: p.old_node.clone(),
+            destination_node: p.destination_node.clone(),
+            destination_key: p.destination_key.clone(),
+            discovery_hash: node.discovery_hash.clone(),
+            server_record_hash: node.server_record_hash.clone(),
+            gateway_tcp_addr: node.gateway_tcp_addr.clone(),
+            federation_endpoint: node.federation_endpoint.clone(),
+            delivery_map_hash: map_hash,
+            admission_id: ramflux_protocol::encode_base64url(
+                ramflux_crypto::random_32().map_err(auth_error)?,
+            ),
+            nonce: p.nonce.clone(),
+            issued_at: now,
+            accept_until: now
+                .checked_add(MAX_SEAL_DELAY)
+                .ok_or_else(|| refusal(Refusal::CommitExpired))?,
+            max_commit_delay: MAX_COMMIT_DELAY,
+            forward_seconds: FORWARD_SECONDS,
+        },
+        node.node_id(),
+        &node.key,
+    )
+    .map_err(auth_error)?;
+    let op = MigrationOperation {
+        role: MigrationRole::Destination,
+        phase: Phase::Prepared,
+        prepare: input.prepare.clone(),
+        offer: offer.clone(),
+        authorization: None,
+        seal: None,
+        proof: None,
+        fence: None,
+        base: input.base.evidence().clone(),
+        attestation: input.attestation.clone(),
+        delivery_map: expected_map,
+        state_version: 1,
+        next_due: now,
+        expires_at: offer.body.accept_until + SKEW_SECONDS,
+        recovery_guard: false,
+        live_budget: true,
+    };
+    write(tx, OPS, &key, &op)?;
+    maintenance::index_expiry(tx, &key, op.expires_at)?;
+    write(
+        tx,
+        BUSINESS,
+        &business_key(&p.account_anchor, &p.migration_id, Action::Prepare)?,
+        &BusinessOutcome {
+            payload_hash: message_hash(input.prepare).map_err(storage)?,
+            operation_key: key,
+            expires_at: op.expires_at,
+        },
+    )?;
+    Ok(offer)
 }
 
 fn verify_preparation(

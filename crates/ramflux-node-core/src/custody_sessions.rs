@@ -47,11 +47,17 @@ pub(crate) struct ChallengeLease {
     outstanding: bool,
 }
 #[derive(Clone)]
+pub(crate) struct MigrationGrant {
+    pub control_hash: String,
+    pub publication: ramflux_protocol::custody::Publication,
+}
+#[derive(Clone)]
 pub(crate) struct SessionLease {
     pub session: CustodySession,
     holder: String,
     deadline: Instant,
     nonces: BTreeSet<String>,
+    migration: Option<MigrationGrant>,
 }
 #[derive(Default)]
 pub(crate) struct CustodyLeases {
@@ -217,10 +223,43 @@ impl CustodyLeases {
     }
     pub fn open(
         &mut self,
+        session: CustodySession,
+        holder: String,
+        now: u64,
+        tick: Instant,
+    ) -> Result<CustodySession, CustodyRefusal> {
+        self.open_scoped(session, holder, now, tick, None)
+    }
+    pub fn open_migration(
+        &mut self,
+        session: CustodySession,
+        holder: String,
+        now: u64,
+        tick: Instant,
+        grant: MigrationGrant,
+    ) -> Result<CustodySession, CustodyRefusal> {
+        if !ramflux_protocol::decode_base64url(&grant.control_hash).is_ok_and(|bytes| {
+            bytes.len() == 32 && ramflux_protocol::encode_base64url(bytes) == grant.control_hash
+        }) {
+            return Err(CustodyRefusal::InvalidInput);
+        }
+        if self.sessions.values().filter(|s| s.migration.is_some()).count() >= 64
+            || ramflux_protocol::canonical_json_bytes(&grant.publication)
+                .map_err(|_| CustodyRefusal::InvalidInput)?
+                .len()
+                > 64 * 1024
+        {
+            return Err(CustodyRefusal::Capacity);
+        }
+        self.open_scoped(session, holder, now, tick, Some(grant))
+    }
+    fn open_scoped(
+        &mut self,
         mut session: CustodySession,
         holder: String,
         now: u64,
         tick: Instant,
+        migration: Option<MigrationGrant>,
     ) -> Result<CustodySession, CustodyRefusal> {
         self.prune(tick);
         self.sessions.retain(|_, lease| lease.holder != holder);
@@ -239,9 +278,13 @@ impl CustodyLeases {
                 holder,
                 deadline: tick + Duration::from_secs(seconds),
                 nonces: BTreeSet::new(),
+                migration,
             },
         );
         Ok(session)
+    }
+    pub fn migration_grant(&self, id: &str) -> Result<Option<MigrationGrant>, CustodyRefusal> {
+        self.sessions.get(id).map(|s| s.migration.clone()).ok_or(CustodyRefusal::SessionRequired)
     }
     pub fn session(
         &mut self,

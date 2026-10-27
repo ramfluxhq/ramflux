@@ -92,11 +92,24 @@ impl RouterRedbStore {
         source: IpAddr,
         now: u64,
     ) -> Result<(), NodeCoreError> {
+        let tx = self.db.begin_write().map_err(error)?;
+        Self::record_custody_account_in_tx(&tx, anchor, state, is_new, source, now)?;
+        tx.commit().map_err(error)?;
+        self.custody_publication_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    pub(crate) fn record_custody_account_in_tx(
+        tx: &redb::WriteTransaction,
+        anchor: &str,
+        state: &CustodyAccountState,
+        is_new: bool,
+        source: IpAddr,
+        now: u64,
+    ) -> Result<(), NodeCoreError> {
         let bytes = serde_json::to_vec(state).map_err(error)?;
         if bytes.len() > 16 * 1024 * 1024 {
             return Err(NodeCoreError::Capacity { resource: "custody account authority bytes" });
         }
-        let tx = self.db.begin_write().map_err(error)?;
         {
             let mut accounts = tx.open_table(ACCOUNTS).map_err(error)?;
             if is_new {
@@ -142,8 +155,6 @@ impl RouterRedbStore {
             }
             accounts.insert(anchor, bytes.as_slice()).map_err(error)?;
         }
-        tx.commit().map_err(error)?;
-        self.custody_publication_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
     /// Number of committed per-account custody updates in this store process.
