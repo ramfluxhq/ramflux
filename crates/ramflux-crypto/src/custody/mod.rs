@@ -24,3 +24,16 @@ fn random_secret() -> Result<zeroize::Zeroizing<[u8; 32]>, crate::CryptoError> {
         .map_err(|error| crate::CryptoError::RandomUnavailable(error.to_string()))?;
     Ok(bytes)
 }
+
+mod branch_proof;
+mod node_identity;
+pub use branch_proof::{
+    MAX_BRANCH_PROOF_BYTES, ProofChannel, branch_exporter_hash, sign_branch_proof_v3,
+    sign_proxy_acceptance, verify_branch_proof_v3,
+};
+pub use node_identity::{
+    VerifiedNodeRecord, sign_node_identity_record, verify_node_identity_record,
+};
+
+#[cfg(test)]
+mod network_tests;

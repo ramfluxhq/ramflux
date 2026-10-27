@@ -2,8 +2,14 @@
 // Copyright (c) 2026 Span Brain
 
 //! Born-v3 custody wire primitives. These do not reinterpret legacy flat records.
+mod network;
+mod node;
+pub use network::*;
+mod proof;
 mod types;
 use crate::{MAX_SAFE_JSON_INTEGER, ProtocolError, canonical_json_bytes, domain, encode_base64url};
+pub use node::*;
+pub use proof::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use types::*;
