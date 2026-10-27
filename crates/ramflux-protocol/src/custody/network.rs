@@ -20,19 +20,48 @@ pub struct Publication {
     pub record: Envelope<DeviceSet>,
     pub compacted_ids: Option<Vec<String>>,
 }
+/// A one-use proof grants either authenticated reading or account management.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationPurpose {
+    Read,
+    Manage,
+}
+impl MigrationPurpose {
+    #[must_use]
+    pub const fn capability(self) -> &'static str {
+        match self {
+            Self::Read => "message",
+            Self::Manage => "register",
+        }
+    }
+    #[must_use]
+    pub const fn allows(self, action: crate::home_migration::Action) -> bool {
+        match self {
+            Self::Read => matches!(
+                action,
+                crate::home_migration::Action::Status
+                    | crate::home_migration::Action::Resolve
+                    | crate::home_migration::Action::Fence
+            ),
+            Self::Manage => true,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodyProofAction {
     Publish { publication: Box<Publication> },
     Register { prekey_bundle: Value },
     OpenSession,
-    HomeMigration { control_hash: String, publication: Box<Publication> },
+    HomeMigration { control_hash: String, publication: Box<Publication>, purpose: MigrationPurpose },
 }
 impl CustodyProofAction {
     #[must_use]
     pub const fn capability(&self) -> &'static str {
         match self {
-            Self::Publish { .. } | Self::Register { .. } | Self::HomeMigration { .. } => "register",
+            Self::Publish { .. } | Self::Register { .. } => "register",
+            Self::HomeMigration { purpose, .. } => purpose.capability(),
             Self::OpenSession => "message",
         }
     }

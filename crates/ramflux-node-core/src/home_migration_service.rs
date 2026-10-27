@@ -14,6 +14,7 @@ pub trait HomeMigrationMesh: Send + Sync {
     fn peer_key(&self, node: &str) -> Result<String, NodeCoreError>;
 }
 pub(crate) struct MigrationCaller {
+    pub purpose: ramflux_protocol::custody::MigrationPurpose,
     pub publication: crate::CustodyPublication,
     pub source: std::net::IpAddr,
 }
@@ -35,7 +36,7 @@ impl HomeMigrationService {
         _now: u64,
     ) -> Result<Response, ramflux_protocol::custody::CustodyRefusal> {
         let _ = &self.mesh;
-        drop((caller.publication, caller.source));
+        drop((caller.publication, caller.source, caller.purpose));
         Err(ramflux_protocol::custody::CustodyRefusal::Unsupported)
     }
 }
