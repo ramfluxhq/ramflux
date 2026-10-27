@@ -178,12 +178,25 @@ pub fn verify_node<T: Message>(
     }
     Ok(())
 }
+fn actor_capability<T: Message>(body: &Value) -> &'static str {
+    if T::DOMAIN == ramflux_protocol::domain::HOME_CONTROL
+        && matches!(
+            body.get("action").and_then(Value::as_str),
+            Some("status" | "resolve" | "fence")
+        )
+    {
+        "message"
+    } else {
+        "register"
+    }
+}
 fn actor_signer(
     reference: &ramflux_protocol::custody::DeviceRef,
     authority: &VerifiedRecord,
     now: u64,
+    capability: &str,
 ) -> Result<Signer, CryptoError> {
-    let branch = authority.authorize(reference, "register", now)?;
+    let branch = authority.authorize(reference, capability, now)?;
     if now < branch.not_before || now > branch.expires_at {
         return Err(reject("migration actor lease expired"));
     }
@@ -231,7 +244,7 @@ pub(crate) fn authorization_signers(
                 public_key: cert.body.self_signing_public_key.clone(),
             },
         },
-        actor_signer(&body.actor, authority, now)?,
+        actor_signer(&body.actor, authority, now, "register")?,
     ])
 }
 /// Verify management and actor authority against the receiving node's current verified record.
@@ -269,7 +282,7 @@ pub fn sign_actor<T: Message>(
             .ok_or_else(|| reject("migration actor absent"))?,
     )
     .map_err(ramflux_protocol::ProtocolError::from)?;
-    let signer = actor_signer(&reference, authority, now)?;
+    let signer = actor_signer(&reference, authority, now, actor_capability::<T>(&value))?;
     if branch.device_id != reference.device_id
         || branch.device_epoch != reference.device_epoch
         || branch.principal_id != authority.envelope().body.principal_id
@@ -297,7 +310,7 @@ pub fn verify_actor<T: Message>(
             .ok_or_else(|| reject("migration actor absent"))?,
     )
     .map_err(ramflux_protocol::ProtocolError::from)?;
-    if message.signers != [actor_signer(&reference, authority, now)?]
+    if message.signers != [actor_signer(&reference, authority, now, actor_capability::<T>(&value))?]
         || value.get("authority_record_hash").and_then(Value::as_str)
             != Some(object_hash(authority.envelope())?.as_str())
     {

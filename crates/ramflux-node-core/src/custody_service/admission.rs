@@ -192,7 +192,17 @@ impl CustodyService {
             {
                 return Err(CustodyRefusal::Capacity);
             }
-            router.verify_migration_possession_authority(publication, now).map_err(invalid)
+            if matches!(
+                action,
+                CustodyProofAction::HomeMigration {
+                    purpose: ramflux_protocol::custody::MigrationPurpose::Read,
+                    ..
+                }
+            ) {
+                router.verify_custody_possession_authority(publication, now, false).map_err(invalid)
+            } else {
+                router.verify_migration_possession_authority(publication, now).map_err(invalid)
+            }
         } else {
             router.verify_custody_possession_authority(publication, now, current).map_err(invalid)
         }
@@ -251,7 +261,7 @@ impl CustodyService {
         let tick = tick + tick.elapsed();
         let proof = attempt.proof;
         match attempt.action {
-            CustodyProofAction::HomeMigration { control_hash, publication } => {
+            CustodyProofAction::HomeMigration { control_hash, publication, purpose } => {
                 let session = CustodySession {
                     session_id: String::new(),
                     target_delivery_id: target(&proof.body.device_ref)?,
@@ -268,6 +278,7 @@ impl CustodyService {
                     tick,
                     crate::custody_sessions::MigrationGrant {
                         control_hash,
+                        purpose,
                         source,
                         publication: *publication,
                     },
@@ -340,18 +351,19 @@ impl CustodyService {
                 .map_err(invalid)?
                 .ok_or(CustodyRefusal::AuthorityUnavailable)?
         };
-        let authority = if grant.is_some() {
-            router.verify_migration_possession_authority(&publication, now).map_err(invalid)?
-        } else {
-            router.verify_custody_possession_authority(&publication, now, true).map_err(invalid)?
-        };
+        let authority = authority_for_request(
+            router,
+            &publication,
+            grant.as_ref().map(|grant| grant.purpose),
+            now,
+        )?;
         if object_hash(&publication.record).map_err(invalid)? != session.record_hash {
             return Err(CustodyRefusal::UpdateRequired);
         }
         let cert = authority
             .authorize(
                 &session.device_ref,
-                if grant.is_some() { "register" } else { "message" },
+                grant.as_ref().map_or("message", |grant| grant.purpose.capability()),
                 now,
             )
             .map_err(invalid)?;
@@ -382,7 +394,8 @@ impl CustodyService {
             let CustodySessionAction::HomeMigration { request: migration } = action else {
                 return Err(CustodyRefusal::BindingRefused);
             };
-            if migration.control.body.requester != session.device_ref
+            if !grant.purpose.allows(migration.control.body.action)
+                || migration.control.body.requester != session.device_ref
                 || migration.control.body.authority_record_hash != session.record_hash
                 || ramflux_protocol::home_migration::message_hash(&migration.control)
                     .map_err(invalid)?
@@ -406,6 +419,7 @@ impl CustodyService {
                     *migration.clone(),
                     crate::home_migration_service::MigrationCaller {
                         publication,
+                        purpose: grant.purpose,
                         source: grant.source,
                     },
                     now,
@@ -558,3 +572,19 @@ mod tests;
 
 #[cfg(test)]
 mod population_tests;
+fn authority_for_request(
+    router: &crate::RouterCore,
+    publication: &CustodyPublication,
+    purpose: Option<ramflux_protocol::custody::MigrationPurpose>,
+    now: u64,
+) -> Result<VerifiedRecord, CustodyRefusal> {
+    match purpose {
+        Some(ramflux_protocol::custody::MigrationPurpose::Manage) => {
+            router.verify_migration_possession_authority(publication, now).map_err(invalid)
+        }
+        Some(ramflux_protocol::custody::MigrationPurpose::Read) => {
+            router.verify_custody_possession_authority(publication, now, false).map_err(invalid)
+        }
+        None => router.verify_custody_possession_authority(publication, now, true).map_err(invalid),
+    }
+}

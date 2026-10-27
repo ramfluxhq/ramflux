@@ -51,6 +51,7 @@ pub(crate) struct ChallengeLease {
 }
 #[derive(Clone)]
 pub(crate) struct MigrationGrant {
+    pub purpose: ramflux_protocol::custody::MigrationPurpose,
     pub source: std::net::IpAddr,
     pub control_hash: String,
     pub publication: ramflux_protocol::custody::Publication,

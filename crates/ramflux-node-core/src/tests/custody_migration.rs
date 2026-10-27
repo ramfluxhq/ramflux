@@ -74,7 +74,18 @@ fn grant(
     store: &RouterRedbStore,
     request: &Request,
 ) -> Result<CustodySession> {
+    grant_with_purpose(driver, service, router, store, request, MigrationPurpose::Manage)
+}
+fn grant_with_purpose(
+    driver: &Driver,
+    service: &crate::CustodyService,
+    router: &RouterCore,
+    store: &RouterRedbStore,
+    request: &Request,
+    purpose: MigrationPurpose,
+) -> Result<CustodySession> {
     let action = CustodyProofAction::HomeMigration {
+        purpose,
         control_hash: ramflux_protocol::home_migration::message_hash(&request.control)?,
         publication: Box::new(Publication {
             record: driver.publication.record.clone(),
@@ -173,6 +184,80 @@ fn migration_possession_grant_cannot_lookup_peers_or_read_a_normal_inbox() -> Re
             CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused }
         );
     }
+    assert_eq!(store.custody_publication_write_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn message_only_branch_can_obtain_a_one_use_read_grant_without_management_authority() -> Result {
+    let store = RouterRedbStore::open(temp_store_path("migration-read-capability")?)?;
+    let router = RouterCore::new();
+    let mut driver = Driver::new("alice", 10)?;
+    let primary = SelfSigningKey::from_vault_seed(&zeroize::Zeroizing::new([11; 32]));
+    let mut body = driver.publication.record.body.clone();
+    let mut certificate = body.devices[0].branch_certificate.take().ok_or("branch")?.body;
+    certificate.capabilities = vec!["message".into()];
+    body.devices[0].branch_certificate = Some(primary.certify_branch(certificate)?);
+    driver.publication.record = primary.sign_record(body)?;
+    let service = service(&driver, &store)?;
+    let control = request(&driver, false)?;
+    let authority = verify_record(&driver.publication.record, NOW, None, None)?;
+    ramflux_crypto::home_migration::verify_actor(&control.control, &authority, NOW)?;
+    let mut write = control.control.body.clone();
+    write.action = Action::Abort;
+    assert!(
+        ramflux_crypto::home_migration::sign_actor(write, &driver.branch, &authority, NOW).is_err()
+    );
+    let session =
+        grant_with_purpose(&driver, &service, &router, &store, &control, MigrationPurpose::Read)?;
+    let response = send(
+        &driver,
+        &service,
+        &router,
+        &store,
+        &session,
+        CustodySessionAction::HomeMigration { request: Box::new(control) },
+    )?;
+    assert_ne!(response, CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused });
+    assert_eq!(store.custody_publication_write_count(), 0);
+    Ok(())
+}
+#[test]
+fn read_grant_cannot_execute_a_management_control_even_for_a_privileged_branch() -> Result {
+    let store = RouterRedbStore::open(temp_store_path("migration-read-isolation")?)?;
+    let router = RouterCore::new();
+    let driver = Driver::new("alice", 10)?;
+    let service = service(&driver, &store)?;
+    let authority = verify_record(&driver.publication.record, NOW, None, None)?;
+    let mut control = request(&driver, false)?.control.body;
+    control.action = Action::Attest;
+    control.audience_node = "old".into();
+    let payload = ramflux_protocol::home_migration::AttestPayload {
+        account_anchor: driver.reference.account_anchor.clone(),
+        destination_node: "node".into(),
+        nonce: control.nonce.clone(),
+    };
+    control.payload_hash = ramflux_protocol::custody::framed_hash(
+        ramflux_protocol::domain::HOME_ATTEST_REQUEST,
+        &payload,
+    )?;
+    let control =
+        ramflux_crypto::home_migration::sign_actor(control, &driver.branch, &authority, NOW)?;
+    let request =
+        Request { control, payload: ActionPayload::Attest(payload), evidence: Evidence::default() };
+    let session =
+        grant_with_purpose(&driver, &service, &router, &store, &request, MigrationPurpose::Read)?;
+    assert_eq!(
+        send(
+            &driver,
+            &service,
+            &router,
+            &store,
+            &session,
+            CustodySessionAction::HomeMigration { request: Box::new(request) }
+        )?,
+        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused }
+    );
     assert_eq!(store.custody_publication_write_count(), 0);
     Ok(())
 }
