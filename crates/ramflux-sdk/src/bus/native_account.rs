@@ -114,7 +114,7 @@ pub(super) async fn unlock_request(
     unlock(state, id, Zeroizing::new(passphrase.to_owned())).await
 }
 
-pub(super) fn finish_connection(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
     if let Some(engine) = &account.engine {
         account.gateway_config = engine.config.clone();
         engine.target_delivery_id().clone_into(&mut account.target_delivery_id);
@@ -124,6 +124,22 @@ pub(super) fn finish_connection(account: &mut LocalBusAccountState) -> Result<()
         &account.client.account_db()?.local_account_id,
         crate::custody::network_now()?,
     )?));
+    let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    if account
+        .client
+        .require_fresh_custody_head(&native.record().body.account_anchor, native.record())
+        .is_err()
+    {
+        let anchor = native.record().body.account_anchor.clone();
+        account
+            .client
+            .cache_verified_device_manifest(
+                &account.gateway_config,
+                &anchor,
+                "native_session_current_head",
+            )
+            .await?;
+    }
     account.activation_pending = false;
     Ok(())
 }

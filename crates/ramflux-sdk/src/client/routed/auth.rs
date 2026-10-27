@@ -55,7 +55,7 @@ impl RamfluxClient {
                 return Err(invalid("X3DH initiator differs from verified device identity"));
             }
             // Both the signature chain and the accepted root relationship precede persistence.
-            self.persist_identity_directory(&manifest)?;
+            self.persist_fetched_identity_directory(&manifest)?;
             self.account_db()?.upsert_device_directory_entry(
                 remote,
                 &commitment,

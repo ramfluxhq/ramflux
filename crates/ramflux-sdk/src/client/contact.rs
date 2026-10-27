@@ -156,7 +156,7 @@ impl RamfluxClient {
             .await?
             .ok_or_else(|| SdkError::InboundRejected("device manifest unavailable".into()))?;
         super::identity_authority::verify_manifest_authority(&manifest, principal_commitment)?;
-        self.persist_identity_directory(&manifest)?;
+        self.persist_fetched_identity_directory(&manifest)?;
         let verified_at = now_unix_timestamp();
         for device in &manifest.devices {
             self.account_db()?.upsert_device_directory_entry(
@@ -335,7 +335,7 @@ impl RamfluxClient {
             .ok_or_else(|| SdkError::LocalBus("federated direct messages require an explicit root or root-qualified device address".into()))?;
         let device_id = qualified.as_ref().map_or(device_id, |(_, raw)| raw.as_str());
         let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
-        self.persist_identity_directory(&manifest)?;
+        self.persist_fetched_identity_directory(&manifest)?;
         let verified_at = now_unix_timestamp();
         for device in &manifest.devices {
             self.account_db()?.upsert_device_directory_entry(
@@ -381,7 +381,7 @@ impl RamfluxClient {
         source: &str,
     ) -> Result<SdkDeviceManifestEntry, SdkError> {
         let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
-        self.persist_identity_directory(&manifest)?;
+        self.persist_fetched_identity_directory(&manifest)?;
         let verified_at = now_unix_timestamp();
         for device in &manifest.devices {
             self.account_db()?.upsert_device_directory_entry(

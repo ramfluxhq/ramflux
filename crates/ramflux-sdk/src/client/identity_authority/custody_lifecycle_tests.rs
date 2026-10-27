@@ -34,8 +34,8 @@ async fn native_revocation_retires_real_pairs_before_bad_prekeys_and_preserves_o
     let local = Fixture::new("native-retirement-local").await?;
     let target = Fixture::new("native-retirement-peer").await?;
     let other = Fixture::new("native-retirement-other").await?;
-    local.client.persist_identity_directory(&target.manifest)?;
-    local.client.persist_identity_directory(&other.manifest)?;
+    local.client.persist_fetched_identity_directory(&target.manifest)?;
+    local.client.persist_fetched_identity_directory(&other.manifest)?;
     local.client.establish_friend_link(
         "native-retirement-link",
         &local.manifest.principal_commitment,
@@ -108,7 +108,7 @@ async fn native_revocation_retires_real_pairs_before_bad_prekeys_and_preserves_o
 async fn native_local_revocation_erases_pairs_when_peer_payload_is_unavailable() -> TestResult {
     let local = Fixture::new("native-local-denial").await?;
     let peer = Fixture::new("native-unavailable-peer").await?;
-    local.client.persist_identity_directory(&peer.manifest)?;
+    local.client.persist_fetched_identity_directory(&peer.manifest)?;
     let private = pair(&local, &peer)?;
     local.client.retire_custody_directory_payload(&peer.manifest.principal_commitment)?;
     let mut native = local.manifest.custody.as_ref().ok_or("native")?.clone();
@@ -145,7 +145,7 @@ async fn native_message_scope_withdrawal_erases_pairs_without_permanent_device_r
 -> TestResult {
     let local = Fixture::new("native-scope-local").await?;
     let peer = Fixture::new("native-scope-peer").await?;
-    local.client.persist_identity_directory(&peer.manifest)?;
+    local.client.persist_fetched_identity_directory(&peer.manifest)?;
     let private = pair(&local, &peer)?;
     let identity = peer.client.owned_device_identity()?;
     let mut native = peer.manifest.custody.as_ref().ok_or("native")?.clone();

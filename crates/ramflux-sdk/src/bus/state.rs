@@ -318,7 +318,7 @@ impl LocalBusAccountState {
             };
             connected?;
             if native {
-                super::native_account::finish_connection(self)?;
+                super::native_account::finish_connection(self).await?;
             }
             self.persist_push_route_seq();
             if self.gateway_config.push_route_clear_pending {

@@ -205,7 +205,7 @@ impl RamfluxClient {
             };
         validate(&carrier, manifest, &historical, now)?;
         self.remember_contact_request_cache(manifest)?;
-        self.persist_identity_directory(manifest)?;
+        self.persist_fetched_identity_directory(manifest)?;
         self.cache_contact_consent_authority(&historical, consent.body.expires_at, now)?;
         Ok(())
     }

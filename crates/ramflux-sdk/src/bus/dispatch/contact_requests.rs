@@ -63,7 +63,7 @@ pub(super) async fn dispatch(
         )
         .await;
         account.put_engine(engine);
-        account.client.persist_identity_directory(&manifest?)?;
+        account.client.persist_fetched_identity_directory(&manifest?)?;
     }
     account.client.decide_inbound_contact(&record, decision)?;
     let mut response = json!({"request_id":record.request_id,"root_commitment":record.contact_identity_commitment,"state":decision,"principal_id":record.principal_id,"direction":"inbound"});

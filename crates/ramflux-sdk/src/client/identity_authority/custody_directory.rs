@@ -268,6 +268,7 @@ impl RamfluxClient {
         else {
             return Ok(false);
         };
+        self.require_fresh_custody_head(identity.root_commitment(), verified.envelope())?;
         let row = self
             .account_db()?
             .client_record("device", identity.storage_key())?

@@ -31,7 +31,7 @@ impl RamfluxClient {
     ) -> Result<Preview, SdkError> {
         let result: Result<(), Rollback> = self.account_db()?.write_transaction(|| {
             self.remember_contact_request_cache(manifest)?;
-            self.persist_root_verified_directory(manifest)?;
+            self.persist_fetched_identity_directory(manifest)?;
             let receipt = self.authenticated_committed_key(entry)?;
             if self.account_db()?.actor_state_exists(&receipt)? {
                 return Err(Rollback::Ready(None));

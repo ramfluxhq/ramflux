@@ -45,7 +45,7 @@ impl Fixture {
                 prekey_bundle: serde_json::to_value(bundle)?,
             }],
         })?;
-        client.persist_identity_directory(&manifest)?;
+        client.persist_fetched_identity_directory(&manifest)?;
         let endpoint = GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse()?,
             gateway_addr: "127.0.0.1:1".parse()?,
