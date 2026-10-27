@@ -62,6 +62,22 @@ impl AccountDb {
         self.insert_direct_message_projection(message)
     }
 
+    /// Applies an imported tombstone without reintroducing sender identity or content.
+    ///
+    /// # Errors
+    /// Returns an error when the message is absent or its stored fields cannot be scrubbed.
+    pub fn import_deleted_message_projection(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        is_own: bool,
+    ) -> Result<(), StorageError> {
+        self.scrub_message_for_deletion(conversation_id, message_id, Some(is_own))?;
+        self.direct_message_by_id(message_id)?
+            .ok_or_else(|| StorageError::MessageNotFound(message_id.to_owned()))?;
+        Ok(())
+    }
+
     /// Bind the first physical envelope to a pending logical message without replacing an earlier body.
     /// # Errors
     /// Returns storage errors while preserving the original logical message scope.
@@ -144,7 +160,7 @@ impl AccountDb {
         conversation_id: &str,
     ) -> Result<Vec<DirectMessageRecord>, StorageError> {
         let mut statement = self.connection.prepare(
-            "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, created_at
+            "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, is_own, created_at
                FROM direct_message_projection
               WHERE conversation_id = ?1
               ORDER BY created_at ASC, message_id ASC",
@@ -164,15 +180,18 @@ impl AccountDb {
                     )
                 })?,
                 deleted: row.get::<_, i64>(5)? != 0,
-                created_at: row.get(6)?,
+                is_own: row.get::<_, i64>(6)? != 0,
+                created_at: row.get(7)?,
                 receipts: Vec::new(),
             })
         })?;
         let mut messages = Vec::new();
         for row in rows {
             let mut message = row?;
-            message.receipts =
-                self.message_receipts(&message.conversation_id, &message.message_id)?;
+            if !message.deleted {
+                message.receipts =
+                    self.message_receipts(&message.conversation_id, &message.message_id)?;
+            }
             messages.push(message);
         }
         Ok(messages)
@@ -182,7 +201,7 @@ impl AccountDb {
     /// Returns an error when storage lookup fails.
     pub fn all_direct_messages(&self) -> Result<Vec<DirectMessageRecord>, StorageError> {
         let mut statement = self.connection.prepare(
-            "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, created_at
+            "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, is_own, created_at
                FROM direct_message_projection
               ORDER BY created_at ASC, message_id ASC",
         )?;
@@ -201,7 +220,8 @@ impl AccountDb {
                     )
                 })?,
                 deleted: row.get::<_, i64>(5)? != 0,
-                created_at: row.get(6)?,
+                is_own: row.get::<_, i64>(6)? != 0,
+                created_at: row.get(7)?,
                 receipts: Vec::new(),
             })
         })?;
@@ -217,7 +237,7 @@ impl AccountDb {
         let mut message = self
             .connection
             .query_row(
-                "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, created_at
+                "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, is_own, created_at
                    FROM direct_message_projection
                   WHERE message_id = ?1",
                 params![message_id],
@@ -236,13 +256,14 @@ impl AccountDb {
                             )
                         })?,
                         deleted: row.get::<_, i64>(5)? != 0,
-                        created_at: row.get(6)?,
+                        is_own: row.get::<_, i64>(6)? != 0,
+                        created_at: row.get(7)?,
                         receipts: Vec::new(),
                     })
                 },
             )
             .optional()?;
-        if let Some(message) = message.as_mut() {
+        if let Some(message) = message.as_mut().filter(|message| !message.deleted) {
             message.receipts =
                 self.message_receipts(&message.conversation_id, &message.message_id)?;
         }
@@ -339,28 +360,26 @@ impl AccountDb {
         delete_scope: &str,
         tombstone_id: &str,
     ) -> Result<MessageTombstoneRecord, StorageError> {
-        let changed = self.connection.execute(
-            "UPDATE direct_message_projection
-                SET deleted = 1, encrypted_body = x''
-              WHERE conversation_id = ?1 AND message_id = ?2 AND deleted = 0",
-            params![conversation_id, message_id],
-        )?;
-        if changed == 0 {
-            return Err(StorageError::MessageNotFound(message_id.to_owned()));
-        }
-        self.connection.execute(
-            "INSERT OR REPLACE INTO message_tombstone_projection
-                (tombstone_id, conversation_id, message_id, delete_scope, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![tombstone_id, conversation_id, message_id, delete_scope, self.now_unix()],
-        )?;
-        self.remove_message_origin(conversation_id, message_id)?;
-        Ok(MessageTombstoneRecord {
-            tombstone_id: tombstone_id.to_owned(),
-            conversation_id: conversation_id.to_owned(),
-            message_id: message_id.to_owned(),
-            delete_scope: delete_scope.to_owned(),
-        })
+        let tombstone = self.write_transaction(|| {
+            let changed = self.scrub_message_for_deletion(conversation_id, message_id, None)?;
+            if !changed {
+                return Err(StorageError::MessageNotFound(message_id.to_owned()));
+            }
+            self.connection.execute(
+                "INSERT OR REPLACE INTO message_tombstone_projection
+                    (tombstone_id, conversation_id, message_id, delete_scope, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![tombstone_id, conversation_id, message_id, delete_scope, self.now_unix()],
+            )?;
+            Ok(MessageTombstoneRecord {
+                tombstone_id: tombstone_id.to_owned(),
+                conversation_id: conversation_id.to_owned(),
+                message_id: message_id.to_owned(),
+                delete_scope: delete_scope.to_owned(),
+            })
+        })?;
+        self.checkpoint_retired_secrets_if_committed()?;
+        Ok(tombstone)
     }
 
     /// # Errors

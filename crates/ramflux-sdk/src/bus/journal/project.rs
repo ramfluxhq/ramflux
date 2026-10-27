@@ -24,11 +24,7 @@ pub(crate) fn project(
                 let mut row = db.client_message_metadata(message)?.unwrap_or_else(
                     || json!({"id":message,"conversation_id":conversation,"removed":true}),
                 );
-                let origin = client.message_origin(conversation, message)?.unwrap_or(Value::Null);
-                for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"]
-                {
-                    row[field] = origin[field].clone();
-                }
+                enrich_message_origin(client, conversation, message, &mut row)?;
                 let route = client.routed_message_metadata(message)?;
                 let topic = if entry.change_kind == "insert" && route.is_some() {
                     if route.as_ref().is_some_and(|route| {
@@ -110,6 +106,22 @@ pub(crate) fn project(
         ));
     }
     Ok(events)
+}
+
+fn enrich_message_origin(
+    client: &RamfluxClient,
+    conversation: &str,
+    message: &str,
+    row: &mut Value,
+) -> Result<(), SdkError> {
+    if row.get("deleted").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    let origin = client.message_origin(conversation, message)?.unwrap_or(Value::Null);
+    for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"] {
+        row[field] = origin[field].clone();
+    }
+    Ok(())
 }
 
 fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Result<(), SdkError> {
