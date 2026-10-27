@@ -72,10 +72,24 @@ pub async fn write_custody_tcp_frame<W: AsyncWrite + Unpin + ?Sized>(
 pub async fn read_custody_tcp_frame<R: AsyncRead + Unpin + ?Sized>(
     stream: &mut R,
 ) -> Result<Vec<u8>, TransportError> {
+    read_bounded_frame(stream, ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES).await
+}
+/// Read the small native-only open preface before allocating an operation frame.
+/// # Errors
+/// Rejects prefices above 4096 bytes and transport failures.
+pub async fn read_custody_open_frame<R: AsyncRead + Unpin + ?Sized>(
+    stream: &mut R,
+) -> Result<Vec<u8>, TransportError> {
+    read_bounded_frame(stream, 4096).await
+}
+async fn read_bounded_frame<R: AsyncRead + Unpin + ?Sized>(
+    stream: &mut R,
+    limit: usize,
+) -> Result<Vec<u8>, TransportError> {
     let mut count = [0; 4];
     stream.read_exact(&mut count).await?;
     let len = u32::from_be_bytes(count) as usize;
-    if len > ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES {
+    if len > limit {
         return Err(TransportError::FrameTooLarge { len });
     }
     let mut body = vec![0; len];

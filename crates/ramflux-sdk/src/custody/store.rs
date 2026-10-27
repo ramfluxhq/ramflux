@@ -18,6 +18,7 @@ use zeroize::Zeroizing;
 #[serde(rename_all = "snake_case")]
 pub enum CreationState {
     NetworkingPending,
+    Live,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,9 +67,10 @@ impl BornAccount {
         Ok(())
     }
     /// # Errors
-    /// Networking is unavailable until the born-v3 registration profile is implemented.
+    /// Rejects accounts that have not completed native registration. Live is durable
+    /// registration status; only a fresh `CustodyConnection` grants an active session.
     pub fn require_networking(&self) -> Result<(), SdkError> {
-        Err(SdkError::NetworkingPending)
+        if self.state() == CreationState::Live { Ok(()) } else { Err(SdkError::NetworkingPending) }
     }
     #[must_use]
     pub fn summary(&self) -> serde_json::Value {
@@ -240,4 +242,75 @@ pub(super) fn persist(
     write_public(&dir.join("authority.json"), &ramflux_protocol::canonical_json_bytes(&stored)?)?;
     fs::File::open(&dir)?.sync_all()?;
     Ok(BornAccount { stored, verified })
+}
+
+impl BornAccount {
+    pub(super) fn credentials(
+        &self,
+        vault: &dyn PrimaryVault,
+        device_id: &str,
+        now: u64,
+    ) -> Result<(ramflux_protocol::custody::DeviceRef, super::BranchCredentials), SdkError> {
+        let entry = self
+            .record()
+            .body
+            .devices
+            .iter()
+            .find(|d| d.device_id == device_id)
+            .ok_or_else(invalid)?;
+        let reference = ramflux_protocol::custody::DeviceRef {
+            account_anchor: self.record().body.account_anchor.clone(),
+            device_id: device_id.into(),
+            device_epoch: entry.device_epoch,
+        };
+        let cert = self.verified.authorize(&reference, "register", now)?;
+        let credentials = vault.load_branch(
+            &self.stored.branch_vault_ref,
+            &self.record().body.principal_id,
+            &reference,
+        )?;
+        if ramflux_protocol::encode_base64url(
+            credentials.signing.signing_key.verifying_key().to_bytes(),
+        ) != cert.branch_signing_public_key
+            || ramflux_protocol::encode_base64url(credentials.agreement.public)
+                != cert.agreement_identity_public_key
+        {
+            return Err(invalid());
+        }
+        Ok((reference, credentials))
+    }
+    pub(super) fn mark_live(&mut self, root: &Path) -> Result<(), SdkError> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = directory(root, self.local_account_id())?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join(".authority.lock"))?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid())?
+            .as_secs();
+        let mut current = load_account(root, self.local_account_id(), now)?;
+        if current.record() != self.record() {
+            return Err(invalid());
+        }
+        current.stored.state = CreationState::Live;
+        let bytes = ramflux_protocol::canonical_json_bytes(&current.stored)?;
+        if bytes.len() > 600_000 {
+            return Err(invalid());
+        }
+        let temp = dir.join(format!(
+            ".authority-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        write_public(&temp, &bytes)?;
+        fs::rename(temp, dir.join("authority.json"))?;
+        fs::File::open(&dir)?.sync_all()?;
+        self.stored.state = CreationState::Live;
+        Ok(())
+    }
 }

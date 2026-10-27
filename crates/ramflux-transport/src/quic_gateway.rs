@@ -555,6 +555,12 @@ impl GatewaySessionFrameSink for WriteHalf<GatewayTcpTlsStream> {
     }
 }
 
+impl GatewaySessionFrameSource for GatewayTcpTlsStream {
+    fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(async move { read_tcp_raw_frame(self).await })
+    }
+}
+
 impl GatewaySessionFrameSource for ReadHalf<GatewayTcpTlsStream> {
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move { read_tcp_raw_frame(self).await })

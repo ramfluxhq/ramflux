@@ -821,7 +821,6 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
             RamfluxErrorCode::UnsupportedVersion
         }
         SdkError::CustodyCreationDisabled => RamfluxErrorCode::CapabilityRejected,
-        SdkError::CustodyConfirmationFailed => RamfluxErrorCode::AuthFailed,
         SdkError::CustodyRandomUnavailable => RamfluxErrorCode::CryptoFailed,
         SdkError::Crypto(_) | SdkError::SignatureVerificationFailed(_) => {
             RamfluxErrorCode::CryptoFailed
@@ -830,9 +829,10 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::Storage(_)
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
-        SdkError::IdentityRootMissing | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => {
-            RamfluxErrorCode::AuthFailed
-        }
+        SdkError::CustodyConfirmationFailed
+        | SdkError::CustodyNetwork(_)
+        | SdkError::IdentityRootMissing
+        | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => RamfluxErrorCode::AuthFailed,
         SdkError::Transport(error) => match crate::error_policy::transport_code(error) {
             "Unavailable" => RamfluxErrorCode::TransportUnavailable,
             "Unauthenticated" | "TransportSecurity" => RamfluxErrorCode::AuthFailed,

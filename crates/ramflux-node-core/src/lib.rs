@@ -147,3 +147,9 @@ mod principal_directory;
 pub use principal_directory::PrincipalLookupRequest;
 mod device_namespace;
 mod device_source;
+
+mod custody_sessions;
+
+mod custody_delivery;
+mod custody_service;
+pub use custody_service::{CustodyService, CustodyTlsContext};

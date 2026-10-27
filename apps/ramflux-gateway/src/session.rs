@@ -41,8 +41,16 @@ pub(crate) async fn handle_gateway_quic_connection(
                     hub: Arc::clone(&listener.hub),
                     remote_addr: connection.remote_address(),
                 };
+                let custody_connection = connection.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = handle_gateway_quic_stream(send, recv, context).await {
+                    if let Err(error) = handle_gateway_quic_stream_with_connection(
+                        send,
+                        recv,
+                        context,
+                        custody_connection,
+                    )
+                    .await
+                    {
                         tracing::warn!(%error, "gateway QUIC stream failed");
                     }
                 });
@@ -59,13 +67,17 @@ pub(crate) async fn handle_gateway_quic_connection(
     }
 }
 
-pub(crate) async fn handle_gateway_quic_stream(
+async fn handle_gateway_quic_stream_with_connection(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     context: GatewayQuicContext,
+    connection: quinn::Connection,
 ) -> anyhow::Result<()> {
     let read_started = Instant::now();
     let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut recv).await?;
+    if crate::custody::is_open(&bytes) {
+        return Box::pin(crate::custody::quic(send, recv, connection, context, &bytes)).await;
+    }
     let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
     ramflux_node_core::record_gateway_quic_request_read_us(elapsed_us(read_started));
     if let crate::ingress::Ingress::Rejected(response) = first {
@@ -97,11 +109,14 @@ pub(crate) async fn handle_gateway_session_stream(
 }
 
 pub(crate) async fn handle_gateway_tcp_tls_stream(
-    stream: ramflux_transport::GatewayTcpTlsStream,
+    mut stream: ramflux_transport::GatewayTcpTlsStream,
     context: GatewayQuicContext,
 ) -> anyhow::Result<()> {
-    let (mut recv, send) = tokio::io::split(stream);
-    let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut recv).await?;
+    let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut stream).await?;
+    if crate::custody::is_open(&bytes) {
+        return Box::pin(crate::custody::tcp(stream, context, &bytes)).await;
+    }
+    let (recv, send) = tokio::io::split(stream);
     let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
     if let crate::ingress::Ingress::Rejected(response) = first {
         let mut send = Box::new(send);

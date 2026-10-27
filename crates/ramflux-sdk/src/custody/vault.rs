@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 /// Implementations must be non-synchronizing, primary-local and independent of data unlock.
 /// No bus method exposes these credentials; public authority reads do not load them.
-pub trait PrimaryVault {
+pub trait PrimaryVault: Send + Sync {
     /// Check provider availability before asking a user to save recovery material.
     /// # Errors
     /// Fails closed when the provider is unsupported, locked or lacks host entitlements.
@@ -19,6 +19,17 @@ pub trait PrimaryVault {
     /// # Errors
     /// Rejects unavailable or corrupt primary credentials. No portable export API exists.
     fn load_primary(&self, reference: &str) -> Result<SelfSigningKey, SdkError>;
+    /// Load only the branch credential for network possession; never loads master authority.
+    /// # Errors
+    /// Rejects unsupported providers and missing/corrupt branch entries.
+    fn load_branch(
+        &self,
+        _reference: &str,
+        _principal: &str,
+        _device: &ramflux_protocol::custody::DeviceRef,
+    ) -> Result<BranchCredentials, SdkError> {
+        Err(SdkError::CustodyVaultUnavailable)
+    }
     /// Store branch credentials separately from primary authority.
     /// # Errors
     /// Fails closed on provider failure or an existing entry.
@@ -76,6 +87,29 @@ mod native {
     }
 }
 impl PrimaryVault for NativePrimaryVault {
+    fn load_branch(
+        &self,
+        reference: &str,
+        principal: &str,
+        device: &ramflux_protocol::custody::DeviceRef,
+    ) -> Result<BranchCredentials, SdkError> {
+        #[cfg(target_os = "macos")]
+        {
+            let bytes = native::get(reference)?;
+            let mut seeds = Zeroizing::new([0; 64]);
+            if bytes.len() != 64 {
+                return Err(SdkError::CustodyVaultUnavailable);
+            }
+            seeds.copy_from_slice(&bytes);
+            BranchCredentials::from_vault_seeds(principal, device, &seeds)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (reference, principal, device);
+            Err(SdkError::CustodyVaultUnavailable)
+        }
+    }
+
     fn preflight(&self) -> Result<(), SdkError> {
         #[cfg(target_os = "macos")]
         {
@@ -124,5 +158,40 @@ impl PrimaryVault for NativePrimaryVault {
             let _ = (reference, seeds);
             Err(SdkError::CustodyVaultUnavailable)
         }
+    }
+}
+
+/// Branch credentials do not expose a portable export API.
+#[derive(Debug)]
+pub struct BranchCredentials {
+    pub(crate) signing: ramflux_crypto::DeviceBranch,
+    pub(crate) agreement: ramflux_crypto::X25519KeyPair,
+}
+impl BranchCredentials {
+    /// Provider boundary for a branch-only entry, separate from primary credentials.
+    /// # Errors
+    /// Rejects invalid device names and zero epochs.
+    pub fn from_vault_seeds(
+        principal: &str,
+        device: &ramflux_protocol::custody::DeviceRef,
+        seeds: &Zeroizing<[u8; 64]>,
+    ) -> Result<Self, SdkError> {
+        ramflux_protocol::validate_device_name(&device.device_id)?;
+        if device.device_epoch == 0 {
+            return Err(SdkError::CustodySetupInvalid);
+        }
+        let mut signing = Zeroizing::new([0; 32]);
+        let mut agreement = Zeroizing::new([0; 32]);
+        signing.copy_from_slice(&seeds[..32]);
+        agreement.copy_from_slice(&seeds[32..]);
+        Ok(Self {
+            signing: ramflux_crypto::create_device_branch(
+                principal,
+                &device.device_id,
+                device.device_epoch,
+                *signing,
+            ),
+            agreement: ramflux_crypto::X25519KeyPair::from_seed(*agreement),
+        })
     }
 }

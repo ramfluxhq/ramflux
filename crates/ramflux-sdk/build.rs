@@ -2,6 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(ramflux_production)");
+    println!("cargo:rerun-if-env-changed=RAMFLUX_PRODUCTION_BUILD");
+    if std::env::var("RAMFLUX_PRODUCTION_BUILD").as_deref() == Ok("1") {
+        println!("cargo:rustc-cfg=ramflux_production");
+    }
+
     println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
     println!("cargo:rerun-if-changed=src/c_abi");
     println!("cargo:rerun-if-changed=cbindgen.toml");

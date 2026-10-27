@@ -20,6 +20,8 @@ itest-local-mint = []
 
 [dependencies]
 anyhow = { workspace = true }
+ed25519-dalek = { workspace = true }
+zeroize = { workspace = true }
 quinn = { workspace = true }
 ramflux-crypto = { workspace = true }
 ramflux-node-core = { workspace = true }

@@ -143,3 +143,20 @@ impl RouterCore {
         Ok(Some(publication.clone()))
     }
 }
+
+impl RouterCore {
+    pub(crate) fn verify_custody_possession_authority(
+        &self,
+        publication: &CustodyPublication,
+        now: u64,
+        require_current: bool,
+    ) -> Result<VerifiedRecord, NodeCoreError> {
+        let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registry = &control.mvp1_identities;
+        let verified = registry.verify_custody(publication, now)?;
+        if require_current {
+            registry.custody.pins.require_current(&verified).map_err(|error| crypto(&error))?;
+        }
+        Ok(verified)
+    }
+}
