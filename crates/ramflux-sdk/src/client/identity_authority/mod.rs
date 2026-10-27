@@ -88,10 +88,12 @@ impl RamfluxClient {
         value: serde_json::Value,
         expected: &str,
     ) -> Result<(), SdkError> {
-        if self
+        let owned_native = self
             .born_v3_account
             .as_ref()
-            .is_some_and(|account| account.record().body.account_anchor == expected)
+            .is_some_and(|account| account.record().body.account_anchor == expected);
+        let cached_native = self.account_db().is_ok() && self.custody_mode_observed(expected)?;
+        if (owned_native || cached_native)
             && value.get("custody").is_none_or(serde_json::Value::is_null)
             && value.get("publication").is_none()
         {

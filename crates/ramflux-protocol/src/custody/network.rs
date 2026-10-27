@@ -13,6 +13,8 @@ use serde_json::Value;
 pub const MAX_CUSTODY_FRAME_BYTES: usize = 5 * 1024 * 1024;
 pub const CUSTODY_RPC_PATH: &str = "/v3/custody/rpc";
 pub const CUSTODY_REQUEST_PATH: &str = "/v3/custody/session";
+/// Exact public historical authority lookup, scoped to delayed contact consent.
+pub const CUSTODY_HISTORY_PATH_PREFIX: &str = "/mvp1/custody-history/";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

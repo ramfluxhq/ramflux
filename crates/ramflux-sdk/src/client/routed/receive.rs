@@ -97,6 +97,44 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    async fn apply_contact_request_entry(
+        &self,
+        config: &crate::GatewaySessionConfig,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Delivery, SdkError> {
+        let manifest = self.contact_request_candidate(config, entry).await?;
+        if manifest.custody.is_some()
+            && let Some((route, body)) =
+                self.preview_native_contact_request(entry, &manifest, &config.device_id)?
+        {
+            self.prepare_native_contact_control(config, entry, &route, &body, Some(&manifest))
+                .await?;
+        }
+        self.commit_contact_request_bootstrap(entry, &manifest, &config.device_id)
+    }
+
+    async fn open_authorized_routed_entry(
+        &self,
+        engine: &mut GatewaySessionEngine,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Opened, SdkError> {
+        let mut opened = self.open_routed_with_recovery(engine, entry).await?;
+        self.prepare_native_contact_control(
+            &engine.config,
+            entry,
+            &opened.routing,
+            &opened.body,
+            None,
+        )
+        .await?;
+        self.contact_route_gate(entry, &opened.routing, &opened.body)?;
+        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+            opened.routing.message_id = self.projection_id(entry, &opened.routing)?;
+        }
+        self.confirm_routed_context(&opened.routing, entry)?;
+        Ok(opened)
+    }
+
     pub(crate) async fn apply_routed_entry(
         &mut self,
         engine: &mut GatewaySessionEngine,
@@ -105,12 +143,7 @@ impl RamfluxClient {
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
         if decode(&entry.envelope)?.schema == crate::client::contact_requests::ENVELOPE_SCHEMA {
-            let manifest = self.contact_request_candidate(&engine.config, entry).await?;
-            return self.commit_contact_request_bootstrap(
-                entry,
-                &manifest,
-                &engine.config.device_id,
-            );
+            return self.apply_contact_request_entry(&engine.config, entry).await;
         }
         self.ensure_inbound_device(&engine.config, entry).await?;
         self.upgrade_replay_identity(&self.authenticated_device_identity(entry)?)?;
@@ -122,12 +155,7 @@ impl RamfluxClient {
             let plaintext = self.routed_committed_content(&receipt.routing, &receipt.entry)?;
             return Ok(Delivery::committed(receipt, plaintext));
         }
-        let mut opened = self.open_routed_with_recovery(engine, entry).await?;
-        self.contact_route_gate(entry, &opened.routing, &opened.body)?;
-        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
-            opened.routing.message_id = self.projection_id(entry, &opened.routing)?;
-        }
-        self.confirm_routed_context(&opened.routing, entry)?;
+        let mut opened = self.open_authorized_routed_entry(engine, entry).await?;
         let (body, refs) = if opened.routing.attachments {
             let (body, refs) = decode_dm_attachment_body(&opened.body)?;
             (zeroize::Zeroizing::new(body), refs)
@@ -362,7 +390,7 @@ impl RamfluxClient {
         Ok(membership)
     }
 
-    fn commit_contact_request_bootstrap(
+    pub(super) fn commit_contact_request_bootstrap(
         &self,
         entry: &GatewayInboxEntry,
         manifest: &crate::prekey::SdkDeviceManifestResponse,

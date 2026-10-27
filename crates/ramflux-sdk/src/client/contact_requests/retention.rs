@@ -38,6 +38,21 @@ impl RamfluxClient {
         {
             return Ok(());
         }
+        if let Some(native) = &manifest.custody {
+            let verified = ramflux_crypto::custody::verify_publication(
+                &ramflux_protocol::custody::CustodyAuthority {
+                    publication: native.publication.clone(),
+                    custodian_publication: native.custodian_publication.clone(),
+                },
+                crate::custody::network_now()?,
+            )?;
+            if verified.envelope().body.account_anchor != *root {
+                return Err(invalid("requester native root mismatch"));
+            }
+            self.retain_native_request_floor(verified.envelope())?;
+            db.persist_actor_state(&key, &json!({"principal_id":manifest.principal_id}))?;
+            return Ok(());
+        }
         let record = manifest
             .signed_device_set
             .as_ref()
@@ -47,6 +62,33 @@ impl RamfluxClient {
         db.persist_actor_state(&key, &json!({"principal_id":manifest.principal_id}))?;
         Ok(())
     }
+    fn retain_native_request_floor(
+        &self,
+        record: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
+    ) -> Result<(), SdkError> {
+        let now = now_unix_timestamp();
+        let hash = ramflux_protocol::custody::object_hash(record)?;
+        if let Some((epoch, old)) =
+            self.account_db()?.contact_request_authority_floor(&record.body.account_anchor, now)?
+            && (record.body.device_set_epoch < epoch
+                || (record.body.device_set_epoch == epoch && hash != old))
+        {
+            return Err(invalid("native requester authority is stale or conflicting"));
+        }
+        if !self.account_db()?.retain_contact_request_authority_floor(
+            &record.body.account_anchor,
+            record.body.device_set_epoch,
+            &hash,
+            now.saturating_add(2 * TTL),
+            now,
+        )? {
+            return Err(SdkError::ContactRequestCapacity(
+                "native requester cache capacity exhausted".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn retain_request_floor(
         &self,
         record: &ramflux_protocol::SignedDeviceSetRecord,
@@ -83,6 +125,36 @@ impl RamfluxClient {
         }
         if self.friend_link_peer_is_accepted(root)? || db.contact_verification(root)?.is_some() {
             return self.promote_contact_request_cache(root);
+        }
+        if let Some(native) =
+            self.current_custody_authority(root, crate::custody::network_now()?)?
+        {
+            let record = native.envelope();
+            for entry in &record.body.devices {
+                if db
+                    .pinned_group_root_metadata(&record.body.principal_id, &entry.device_id)?
+                    .iter()
+                    .any(|known| known == root)
+                {
+                    return self.promote_contact_request_cache(root);
+                }
+            }
+            self.retain_native_request_floor(record)?;
+            for entry in &record.body.devices {
+                let device = ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
+                    &native,
+                    &entry.device_id,
+                )?;
+                self.remove_device_pair(&device, "contact_request_closed")?;
+            }
+            db.purge_contact_request_identity_metadata(
+                root,
+                &record.body.principal_id,
+                &row.link_id,
+            )?;
+            self.retire_custody_directory_payload(root)?;
+            db.remove_actor_state(&key)?;
+            return Ok(());
         }
         let Some(set) = self.observed_device_set(root)? else {
             db.remove_actor_state(&key)?;
@@ -187,3 +259,6 @@ impl RamfluxClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod native_tests;
