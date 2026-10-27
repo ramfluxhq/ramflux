@@ -607,6 +607,8 @@ impl RouterCore {
                 .mvp1_identities
                 .target_delivery_id_for_device(&identity)
                 .map(str::to_owned),
+            one_time_prekey_exhausted: false,
+            prekey_exhaustion_warning: false,
         })
     }
 
@@ -614,24 +616,49 @@ impl RouterCore {
     /// # Errors
     /// Rejects missing, ambiguous or unqualified root-bound device lookups.
     pub fn mvp1_prekey_checked(&self, lookup: &str) -> Result<PrekeyResponse, NodeCoreError> {
-        let control = lock_unpoisoned(&self.control);
-        let identities = &control.mvp1_identities;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|value| i64::try_from(value.as_secs()).ok())
+            .ok_or_else(|| NodeCoreError::ItestHttp("system clock unavailable".into()))?;
+        self.mvp1_prekey_checked_from(lookup, "internal", now)
+    }
+
+    /// Fetches and consumes one OPK under the public source budget.
+    /// # Errors
+    /// Rejects missing devices and exhausted source request budgets.
+    pub fn mvp1_prekey_checked_from(
+        &self,
+        lookup: &str,
+        source: &str,
+        now: i64,
+    ) -> Result<PrekeyResponse, NodeCoreError> {
+        let mut control = lock_unpoisoned(&self.control);
+        let identities = &mut control.mvp1_identities;
         let identity = identities
             .resolve_device_selector(lookup)
             .ok_or_else(|| NodeCoreError::ItestHttp("qualified device required".into()))?;
-        let record = identities
+        let device_id = identities
             .device_record(&identity)
-            .ok_or_else(|| NodeCoreError::ItestHttp("device not found".into()))?;
+            .ok_or_else(|| NodeCoreError::ItestHttp("device not found".into()))?
+            .device_id
+            .clone();
+        let principal_commitment =
+            identities.principal_commitment_for_device(&identity).unwrap_or_default().to_owned();
+        let target_delivery_id =
+            identities.target_delivery_id_for_device(&identity).map(str::to_owned);
+        let leased = identities.take_prekey_bundle(&identity, source, now)?;
+        let (bundle, one_time_prekey_exhausted, prekey_exhaustion_warning) = leased
+            .map_or((None, false, false), |(bundle, exhausted, warn)| {
+                (Some(bundle), exhausted, warn)
+            });
         Ok(PrekeyResponse {
-            device_id: record.device_id.clone(),
-            bundle: identities.prekey_bundle(&identity).cloned(),
-            principal_commitment: identities
-                .principal_commitment_for_device(&identity)
-                .unwrap_or_default()
-                .into(),
-            target_delivery_id: identities
-                .target_delivery_id_for_device(&identity)
-                .map(str::to_owned),
+            device_id,
+            bundle,
+            principal_commitment,
+            target_delivery_id,
+            one_time_prekey_exhausted,
+            prekey_exhaustion_warning,
         })
     }
     /// Authenticate a root-qualified device selected at the wire boundary.

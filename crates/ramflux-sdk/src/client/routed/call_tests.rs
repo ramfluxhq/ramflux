@@ -310,8 +310,8 @@ async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_mes
     )?)?;
     let aad = associated_data(&packet.envelope.envelope_id, "alice", "bob", &bundle)?;
     assert!(restored.decrypt_with_franking_keys(&envelope.ciphertext, &aad).is_err());
-    // Consumed ratchet keys are gone, but retained static X3DH private prekeys can reconstruct
-    // a bootstrap packet. This is why even encrypted call controls must not remain in receipts.
+    // The first authenticated receive consumed and erased its OPK. A captured bootstrap packet
+    // cannot be reconstructed from the retained identity, signed-prekey, or ratchet state.
     let header = envelope.x3dh.as_ref().ok_or_else(|| invalid("bootstrap"))?;
     let bootstrap_aad = associated_data(
         header.bootstrap_envelope_id.as_deref().unwrap_or(&packet.envelope.envelope_id),
@@ -319,9 +319,12 @@ async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_mes
         "bob",
         &bundle,
     )?;
-    let mut reconstructed = bob.client.create_recv_dm_session_with_aad(header, &bootstrap_aad)?;
-    let recovered = reconstructed.decrypt_with_franking_keys(&envelope.ciphertext, &aad)?;
-    assert_ne!(recovered.plaintext.len(), 0);
+    let reconstruction = bob
+        .client
+        .create_recv_dm_session_with_aad(header, &bootstrap_aad)
+        .err()
+        .ok_or_else(|| invalid("consumed OPK reconstructed bootstrap"))?;
+    assert!(reconstruction.to_string().contains("one-time prekey already consumed"));
 
     let receipt = bob
         .client

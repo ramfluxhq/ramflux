@@ -46,6 +46,7 @@ impl RamfluxClient {
             let record_key = format!("dm-pair/session/{}", session.session_id);
             let new = !db.actor_state_exists(&record_key)?;
             db.persist_actor_state(&record_key, &record)?;
+            self.consume_pending_one_time_prekey(&session.session_id)?;
             let key = RamfluxClient::pair_key(local, remote)?;
             let current = db.load_actor_state::<String>(&key)?;
             let local_origin = db

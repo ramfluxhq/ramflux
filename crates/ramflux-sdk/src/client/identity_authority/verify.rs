@@ -230,6 +230,11 @@ impl crate::RamfluxClient {
             &ramflux_crypto::verifying_key_from_base64url(key)?,
             bundle,
         )?;
+        if bundle.signed_prekey_expires_at > 0
+            && bundle.signed_prekey_expires_at <= crate::time::now_unix_timestamp()
+        {
+            return Err(invalid("recipient signed prekey expired"));
+        }
         Ok(())
     }
 }

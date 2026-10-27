@@ -90,6 +90,7 @@ impl AccountDb {
                     lamport_time, created_at, event_body, signature
                FROM local_event_log
               WHERE signature_status != 'retired'
+                AND event_type != 'x3dh.prekey.private'
               ORDER BY lamport_time ASC, event_id ASC",
         )?;
         let rows = statement.query_map([], |row| {
@@ -129,6 +130,8 @@ impl AccountDb {
             "SELECT projection_name, last_event_id
                FROM projection_checkpoint
               WHERE last_event_id IS NOT NULL
+                AND projection_name NOT LIKE 'x3dh_private:%'
+                AND projection_name NOT LIKE 'x3dh_private:v2/%'
               ORDER BY projection_name ASC",
         )?;
         let rows = statement.query_map([], |row| {

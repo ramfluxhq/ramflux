@@ -161,14 +161,33 @@ impl RamfluxClient {
     ) -> Result<ramflux_crypto::DmSession, SdkError> {
         let own_state = self
             .load_x3dh_private_state(&self.local_device_identity(&header.recipient_device_id)?)?;
-        if own_state.signed_prekey_id != header.recipient_signed_prekey_id {
-            return Err(SdkError::LocalBus(format!(
-                "signed prekey id mismatch for {}",
-                header.recipient_device_id
-            )));
-        }
         let identity = X25519KeyPair::from_seed(own_state.identity_seed);
-        let signed_prekey = X25519KeyPair::from_seed(own_state.signed_prekey_seed);
+        let signed_prekey_seed = if own_state.signed_prekey_id == header.recipient_signed_prekey_id
+        {
+            own_state.signed_prekey_seed
+        } else {
+            own_state
+                .previous_signed_prekeys
+                .iter()
+                .find(|key| key.id == header.recipient_signed_prekey_id)
+                .map(|key| key.seed)
+                .ok_or_else(|| {
+                    SdkError::LocalBus(format!(
+                        "signed prekey id mismatch for {}",
+                        header.recipient_device_id
+                    ))
+                })?
+        };
+        let signed_prekey = X25519KeyPair::from_seed(signed_prekey_seed);
+        let one_time_prekey = if let Some(id) = header.recipient_one_time_prekey_id.as_deref() {
+            let private =
+                own_state.one_time_prekeys.iter().find(|key| key.id == id).ok_or_else(|| {
+                    SdkError::LocalBus("one-time prekey already consumed".to_owned())
+                })?;
+            Some(X25519KeyPair::from_seed(private.seed))
+        } else {
+            None
+        };
         let bootstrap_aad = super::routed::bootstrap_sequence::bootstrap_aad(
             aad,
             header.bootstrap_sequence,
@@ -177,7 +196,7 @@ impl RamfluxClient {
         let output = ramflux_crypto::x3dh_recipient(&X3dhRecipientInput {
             recipient_identity: &identity,
             recipient_signed_prekey: &signed_prekey,
-            recipient_one_time_prekey: None,
+            recipient_one_time_prekey: one_time_prekey.as_ref(),
             initiator_identity_public: header.initiator_identity_public,
             initiator_ephemeral_public: header.initiator_ephemeral_public,
             initiator_device_id_hash: header.initiator_device_id_hash,
@@ -191,14 +210,20 @@ impl RamfluxClient {
         if output.bootstrap_transcript_hash != header.bootstrap_transcript_hash {
             return Err(SdkError::LocalBus("X3DH bootstrap transcript hash mismatch".to_owned()));
         }
-        ramflux_crypto::DmSession::recipient_with_local_ratchet(
+        let session = ramflux_crypto::DmSession::recipient_with_local_ratchet(
             output.root_seed,
             header.recipient_device_id_hash,
             header.initiator_device_id_hash,
             output.bootstrap_transcript_hash,
             &signed_prekey,
-        )
-        .map_err(SdkError::from)
+        )?;
+        if let Some(id) = header.recipient_one_time_prekey_id.as_ref() {
+            self.account_db()?.persist_actor_state(
+                &format!("x3dh/pending-consumption/{}", session.session_id),
+                &(header.recipient_device_id.clone(), id.clone()),
+            )?;
+        }
+        Ok(session)
     }
 
     pub(crate) fn persist_dm_session(
@@ -213,7 +238,31 @@ impl RamfluxClient {
             envelope_id,
             direction,
             &session.snapshot(),
-        )
+        )?;
+        if direction == "recv" {
+            self.consume_pending_one_time_prekey(&session.session_id)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn consume_pending_one_time_prekey(&self, session_id: &str) -> Result<(), SdkError> {
+        let key = format!("x3dh/pending-consumption/{session_id}");
+        let Some((device_id, prekey_id)) =
+            self.account_db()?.load_actor_state::<(String, String)>(&key)?
+        else {
+            return Ok(());
+        };
+        let device = self.local_device_identity(&device_id)?;
+        let mut state = self.load_x3dh_private_state(&device)?;
+        let index = state
+            .one_time_prekeys
+            .iter()
+            .position(|prekey| prekey.id == prekey_id)
+            .ok_or_else(|| SdkError::LocalBus("one-time prekey already consumed".to_owned()))?;
+        state.one_time_prekeys.remove(index);
+        self.persist_owned_private_prekey(&device, &state)?;
+        self.account_db()?.remove_actor_state(&key)?;
+        Ok(())
     }
 
     pub(crate) fn persist_dm_session_snapshot(

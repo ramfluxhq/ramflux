@@ -25,6 +25,7 @@ async fn first_use_discovery(lazy_group: bool, mismatched_pin: bool) -> TestResu
     let sender = Fixture::new("alice", 91)?;
     let staging = Fixture::new("bob", 101)?;
     let receiver = Fixture::new("bob", 101)?;
+    copy_fixture_private_prekeys(&staging, &receiver)?;
     let entry = seal(&sender, &staging, message("first-root-hint", "new-thread"), b"hello")?;
     let mut malformed = entry.clone();
     let mut wrapper = decode(&malformed.envelope)?;
