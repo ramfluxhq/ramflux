@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provenance from a signed card locally, including after auto-accept. Existing
   card and verified pins never downgrade; conflicting cards still fail.
 
+- Contacts can be blocked again after an unblock, including within one second and
+  after a sibling restriction arrives. Consent and object-revocation journal IDs
+  identify each decision while preserving immutable event replay and old rows.
+
 ### Security
 
 - Only local contact unblock restores local request consent; peer unblock controls

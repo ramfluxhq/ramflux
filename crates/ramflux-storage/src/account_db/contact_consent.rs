@@ -6,6 +6,22 @@ use super::AccountDb;
 use crate::{ContactLinkDecision, StorageError};
 use rusqlite::{OptionalExtension, params};
 impl AccountDb {
+    /// Reads the durable logical stamp of the latest consent decision for a link.
+    /// Legacy removal-only links may have no consent decision row.
+    ///
+    /// # Errors
+    /// Returns an error when the stored decision cannot be read.
+    pub fn friend_link_consent_stamp(&self, link_id: &str) -> Result<Option<i64>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT decided_at FROM contact_link_decision WHERE link_id=?1",
+                params![link_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub(super) fn persist_contact_consent(
         &self,
         root: &str,

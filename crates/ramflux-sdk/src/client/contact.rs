@@ -432,9 +432,22 @@ impl RamfluxClient {
         link_id: &str,
         scope: &str,
     ) -> Result<FriendLinkRecord, SdkError> {
+        self.remove_friend_link_at(link_id, scope, now_unix_timestamp())
+    }
+
+    fn remove_friend_link_at(
+        &self,
+        link_id: &str,
+        scope: &str,
+        removed_at: i64,
+    ) -> Result<FriendLinkRecord, SdkError> {
         let link = self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
-            let removed_at = now_unix_timestamp();
             let link = self.account_db()?.remove_friend_link(link_id, scope, removed_at)?;
+            // Removal has no row in contact_link_decision; retain its own immutable journal token.
+            self.account_db()?.persist_actor_state(
+                &format!("contact/removal-event/{link_id}"),
+                &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+            )?;
             self.remove_principal_pairs(&link.requester_id)?;
             self.remove_principal_pairs(&link.target_id)?;
             self.append_contact_control_event("friend.removed", &link)?;
@@ -448,8 +461,15 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when no account DB is unlocked or the friend link cannot be updated.
     pub fn block_friend_link(&self, link_id: &str) -> Result<FriendLinkRecord, SdkError> {
+        self.block_friend_link_at(link_id, now_unix_timestamp())
+    }
+
+    fn block_friend_link_at(
+        &self,
+        link_id: &str,
+        blocked_at: i64,
+    ) -> Result<FriendLinkRecord, SdkError> {
         let link = self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
-            let blocked_at = now_unix_timestamp();
             let link = self.account_db()?.block_friend_link(link_id, blocked_at)?;
             self.remove_principal_pairs(&link.requester_id)?;
             self.remove_principal_pairs(&link.target_id)?;
@@ -479,9 +499,17 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when no account DB is unlocked or the friend link cannot be updated.
     pub fn unblock_friend_link(&self, link_id: &str) -> Result<FriendLinkRecord, SdkError> {
+        self.unblock_friend_link_at(link_id, now_unix_timestamp())
+    }
+
+    fn unblock_friend_link_at(
+        &self,
+        link_id: &str,
+        unblocked_at: i64,
+    ) -> Result<FriendLinkRecord, SdkError> {
         let db = self.account_db()?;
         db.write_transaction(|| -> Result<_, SdkError> {
-            let link = db.unblock_friend_link(link_id, now_unix_timestamp())?;
+            let link = db.unblock_friend_link(link_id, unblocked_at)?;
             self.append_contact_control_event("friend.unblocked", &link)?;
             Ok(link)
         })
@@ -515,9 +543,12 @@ impl RamfluxClient {
     /// Returns an error when no account DB is unlocked, the link is not a pending
     /// inbound request, or the friend link cannot be updated.
     pub fn reject_friend_link(&self, link_id: &str) -> Result<FriendLinkRecord, SdkError> {
-        let link = self.account_db()?.reject_friend_link(link_id, now_unix_timestamp())?;
-        self.append_contact_control_event("friend.rejected", &link)?;
-        Ok(link)
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            let link = db.reject_friend_link(link_id, now_unix_timestamp())?;
+            self.append_contact_control_event("friend.rejected", &link)?;
+            Ok(link)
+        })
     }
 
     /// # Errors
@@ -592,7 +623,6 @@ impl RamfluxClient {
         event_type: &str,
         link: &FriendLinkRecord,
     ) -> Result<(), SdkError> {
-        let event_id = format!("{event_type}:{}", link.link_id);
         let body = serde_json::to_vec(&serde_json::json!({
             "type": event_type,
             "link_id": link.link_id,
@@ -602,8 +632,47 @@ impl RamfluxClient {
             "blocked": link.blocked,
             "capability_revoked_at": link.capability_revoked_at,
         }))?;
+        let event_id = self.contact_decision_event_id(event_type, &link.link_id, &body)?;
         self.append_event(&event_id, event_type, &body)?;
         self.set_projection_checkpoint("friend.control", &event_id)
+    }
+
+    // Called in the link writer phase: each block/lift/decline advances this persisted stamp.
+    // Removal has a separate persisted token so repeated scope changes in one consent epoch
+    // remain distinct, without changing backup consent ordering or its existing state enum.
+    // Re-appending an unchanged decision yields the same ID, including after reopening the DB.
+    fn contact_decision_event_id(
+        &self,
+        event_type: &str,
+        link_id: &str,
+        body: &[u8],
+    ) -> Result<String, SdkError> {
+        let stamp = self.account_db()?.friend_link_consent_stamp(link_id)?.unwrap_or(0);
+        let account = self.account_index()?.account(&self.account_db()?.local_account_id)?;
+        let actor = self.device_branch.as_ref().map(|branch| {
+            (
+                &branch.principal_id,
+                &branch.device_id,
+                branch.device_epoch.to_string(),
+                ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes()),
+            )
+        });
+        let removal_nonce: Option<String> =
+            self.account_db()?.load_actor_state(&format!("contact/removal-event/{link_id}"))?;
+        let digest = ramflux_protocol::hash_base64url(
+            "ramflux.contact.decision_event.v1",
+            &ramflux_protocol::canonical_json_bytes(&(
+                event_type,
+                link_id,
+                &account.principal_commitment,
+                actor,
+                stamp.to_string(),
+                removal_nonce,
+                body,
+            ))?,
+        );
+        // A separate namespace cannot collide with legacy IDs containing peer-chosen link text.
+        Ok(format!("contact.decision.v1:{digest}"))
     }
 
     fn cascade_object_share_revocations(
@@ -639,8 +708,6 @@ impl RamfluxClient {
         reason: &str,
         effective_at: i64,
     ) -> Result<(), SdkError> {
-        let event_id =
-            format!("object.revoke_access:{link_id}:{recipient_principal_id}:{object_id}:{reason}");
         let body = serde_json::to_vec(&serde_json::json!({
             "type": "object.revoke_access",
             "object_id": object_id,
@@ -649,6 +716,7 @@ impl RamfluxClient {
             "reason": reason,
             "effective_at": effective_at,
         }))?;
+        let event_id = self.contact_decision_event_id("object.revoke_access", link_id, &body)?;
         self.append_event(&event_id, "object.revoke_access", &body)?;
         self.set_projection_checkpoint("object.revoke_access", &event_id)
     }
@@ -1300,7 +1368,7 @@ mod tests {
         Ok(())
     }
 
-    fn unlocked_client(test_name: &str) -> Result<(RamfluxClient, PathBuf), SdkError> {
+    pub(super) fn unlocked_client(test_name: &str) -> Result<(RamfluxClient, PathBuf), SdkError> {
         let nanos = now_unix_timestamp();
         let root = std::env::temp_dir()
             .join(format!("ramflux-sdk-contact-{test_name}-{}-{nanos}", std::process::id()));
@@ -1428,9 +1496,11 @@ mod tests {
             1
         );
 
-        let event_id = "object.revoke_access:link_bob:principal_bob:object_shared:friend_removed";
+        let event_id = client
+            .projection_checkpoint("object.revoke_access")?
+            .ok_or_else(|| SdkError::LocalBus("missing revoke checkpoint".into()))?;
         let event = client
-            .event_body(event_id)?
+            .event_body(&event_id)?
             .ok_or_else(|| SdkError::LocalBus("missing revoke event".to_owned()))?;
         let body: serde_json::Value = serde_json::from_slice(&event)?;
         assert_eq!(body["type"], "object.revoke_access");
@@ -1439,10 +1509,7 @@ mod tests {
         assert_eq!(body["link_id"], "link_bob");
         assert_eq!(body["reason"], "friend_removed");
         assert!(body["effective_at"].as_i64().is_some());
-        assert_eq!(
-            client.projection_checkpoint("object.revoke_access")?,
-            Some(event_id.to_owned())
-        );
+        assert_eq!(client.projection_checkpoint("object.revoke_access")?, Some(event_id.clone()));
 
         let _ = std::fs::remove_dir_all(root);
         Ok(())
@@ -1467,8 +1534,11 @@ mod tests {
             .object_share_grant("object_shared", "principal_bob")?
             .ok_or_else(|| SdkError::LocalBus("missing revoked grant".to_owned()))?;
         assert!(revoked.revoked_at.is_some());
+        let event_id = client
+            .projection_checkpoint("object.revoke_access")?
+            .ok_or_else(|| SdkError::LocalBus("missing blocked revoke checkpoint".into()))?;
         let event = client
-            .event_body("object.revoke_access:link_bob:principal_bob:object_shared:blocked")?
+            .event_body(&event_id)?
             .ok_or_else(|| SdkError::LocalBus("missing blocked revoke event".to_owned()))?;
         let body: serde_json::Value = serde_json::from_slice(&event)?;
         assert_eq!(body["reason"], "blocked");
@@ -1771,3 +1841,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "contact_event_id_tests.rs"]
+mod event_id_tests;
