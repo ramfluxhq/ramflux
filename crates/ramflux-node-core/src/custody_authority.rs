@@ -169,6 +169,19 @@ impl RouterCore {
         {
             return Err(reject("legacy-to-custody migration is not enabled"));
         }
+        if store.home_migration_blocks_recovery(anchor)?
+            && let Some(old) = registry.custody.records.get(anchor)
+            && ramflux_protocol::custody::object_hash(&old.record.body.master_certificate)
+                .map_err(|e| reject(&e.to_string()))?
+                != ramflux_protocol::custody::object_hash(
+                    &publication.record.body.master_certificate,
+                )
+                .map_err(|e| reject(&e.to_string()))?
+        {
+            return Err(NodeCoreError::HomeMigration(
+                ramflux_protocol::home_migration::Refusal::MigrationInProgress,
+            ));
+        }
         let verified = registry.verify_custody(publication, now)?;
         let body = &publication.record.body;
         registry.check_principal_root_ownership(
@@ -270,5 +283,26 @@ impl IdentityRegistry {
         custody.account_pins.insert(anchor.clone(), state.pins);
         custody.records.insert(anchor, state.publication);
         Ok(())
+    }
+}
+
+impl RouterCore {
+    pub(crate) fn with_migration_authority<T>(
+        &self,
+        anchor: &str,
+        now: u64,
+        work: impl FnOnce(&VerifiedRecord) -> Result<T, NodeCoreError>,
+    ) -> Result<T, NodeCoreError> {
+        let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registry = &control.mvp1_identities;
+        let publication = registry
+            .custody
+            .records
+            .get(anchor)
+            .ok_or_else(|| reject("migration local authority unavailable"))?;
+        let verified = registry.verify_custody(publication, now)?;
+        registry.custody.require_current(&verified).map_err(|e| crypto(&e))?;
+        // Hold the same authority lock through the durable home transition.
+        work(&verified)
     }
 }
