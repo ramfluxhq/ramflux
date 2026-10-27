@@ -20,7 +20,7 @@ impl RouterRedbStore {
         )?;
         let mut result = Vec::with_capacity(map.len());
         for target in map {
-            let mut high_water = 0;
+            let mut high_water = inbox.issued_sequence(&target.target_delivery_id);
             let mut count = 0_u64;
             for (entry, until) in inbox.pending_entries_with_deadline() {
                 if entry.target_delivery_id == target.target_delivery_id
