@@ -98,8 +98,32 @@ receive a generic 503 without spawning another worker on either listener. Slots 
 success, request failure or normal worker return. Production uses `panic = "abort"`,
 so a worker panic terminates the process rather than unwinding and releasing only
 that slot. The existing request read timeout still applies. Public 500 responses
-contain only `internal server error`; causes are logged privately. Per-source-IP
-rate limiting is separate follow-up work.
+contain only `internal server error`; causes are logged privately.
+
+The public listener also limits each source independently. Concurrent connections
+default to 8 per source. A token bucket defaults to 20 requests per second with a
+burst of 40; refused requests receive a generic 429. Source accounting is derived
+only from the accepted socket address. `X-Forwarded-For`, `Forwarded`, and similar
+HTTP headers are not trusted. A reverse proxy therefore appears as one source by
+default; configure limits for that topology or preserve the original address at a
+trusted transport boundary instead of enabling header trust on the public service.
+
+IPv4 addresses have independent buckets. IPv6 addresses are aggregated by `/64`
+so spoofed privacy addresses cannot create one bucket each. The table defaults to
+4096 entries and inactive entries expire after 300 seconds. When all entries are
+recent or active, a new source receives a generic 503; active entries are never
+evicted. Configure the service with:
+
+| Runtime setting | Default | Valid range |
+| --- | ---: | ---: |
+| `RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS_PER_SOURCE` | 8 | 1..4096 |
+| `RAMFLUX_FEDERATION_PUBLIC_REQUEST_RATE_PER_SECOND` | 20 | 1..1000000 |
+| `RAMFLUX_FEDERATION_PUBLIC_REQUEST_BURST` | 40 | 1..1000000 |
+| `RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY` | 4096 | 1..65536 |
+| `RAMFLUX_FEDERATION_PUBLIC_SOURCE_IDLE_SECONDS` | 300 | 1..86400 |
+
+Compose uses the corresponding `RF_COMPOSE_` aliases. Invalid values fail service
+startup. The global connection cap remains an independent upper bound.
 
 For host runs, set `RAMFLUX_FEDERATION_PUBLIC_ADDR` and
 `RAMFLUX_FEDERATION_ADMIN_ADDR` to distinct available addresses, for example
@@ -152,7 +176,6 @@ body cap is 1 MiB. Parsing rejection is fail-closed and never shares admin route
 
 Over-cap 503 is best-effort: unread queued bytes can make the kernel close with a
 reset instead. Either result refuses the excess connection without a worker.
-Per-IP rate limiting remains follow-up work.
 
 ## Response delivery and bounded shutdown
 
