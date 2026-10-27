@@ -51,7 +51,13 @@ fn structure(value: &Value) -> Result<(), CryptoError> {
                     {
                         binary(text, 32)?;
                     } else if text.is_empty()
-                        || text.len() > 2048
+                        || text.len()
+                            > if matches!(name.as_str(), "gateway_tcp_addr" | "federation_endpoint")
+                            {
+                                2048
+                            } else {
+                                256
+                            }
                         || text.chars().any(char::is_control)
                     {
                         return Err(reject("migration identifier invalid"));

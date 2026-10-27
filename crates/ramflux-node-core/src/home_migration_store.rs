@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 mod destination;
 pub use destination::PrepareMigration;
 pub use source::{AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationPeer};
+mod authority_evidence;
+mod fence;
 mod maintenance;
 mod source;
 #[cfg(test)]
@@ -30,6 +32,9 @@ mod tests;
 const HEADS: TableDefinition<&str, &[u8]> = TableDefinition::new("home_head_v1");
 const RECORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("home_records_v1");
 const PROOFS: TableDefinition<&str, &[u8]> = TableDefinition::new("migration_commit_index_v1");
+const FENCES: TableDefinition<&str, &[u8]> = TableDefinition::new("migration_auth_fences_v1");
+const FENCE_EXPIRES: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("migration_auth_fence_expiry_v1");
 const OPS: TableDefinition<&str, &[u8]> = TableDefinition::new("migration_ops_v1");
 const BUSINESS: TableDefinition<&str, &[u8]> = TableDefinition::new("migration_business_keys_v1");
 const COURIER: TableDefinition<&str, &[u8]> = TableDefinition::new("migration_courier_due_v1");
@@ -58,6 +63,7 @@ pub struct MigrationOperation {
     pub next_due: u64,
     pub expires_at: u64,
     pub recovery_guard: bool,
+    pub live_budget: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -143,7 +149,8 @@ impl SealedMigration {
             state_version: 1,
             next_due: now,
             expires_at: crypto::hard_deadline(&self.authorization.body).map_err(auth_error)?,
-            recovery_guard: true,
+            recovery_guard: false,
+            live_budget: true,
         })
     }
 }
@@ -256,17 +263,15 @@ fn save_head(tx: &redb::WriteTransaction, evidence: &RecordEvidence) -> Result<(
     write(tx, RECORDS, &hash, evidence)?;
     write(tx, HEADS, evidence.record.account_anchor(), evidence)
 }
-fn clock(tx: &redb::WriteTransaction, now: u64) -> Result<(), NodeCoreError> {
+fn clock(tx: &redb::WriteTransaction, now: u64) -> Result<u64, NodeCoreError> {
     if now > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
         return Err(refusal(Refusal::CommitExpired));
     }
     let mut table = tx.open_table(CLOCK).map_err(storage)?;
     let old = table.get("floor").map_err(storage)?.map_or(0, |v| v.value());
-    if now < old {
-        return Err(refusal(Refusal::CommitExpired));
-    }
+    let now = now.max(old);
     table.insert("floor", now).map_err(storage)?;
-    Ok(())
+    Ok(now)
 }
 fn map_for(authority: &VerifiedRecord) -> Result<Vec<DeliveryMapEntry>, NodeCoreError> {
     authority
@@ -338,4 +343,9 @@ fn commit_transition(
     }
     let _ = store;
     tx.commit().map_err(storage)
+}
+
+fn authorization_key(auth: &Signed<Authorization>) -> Result<String, NodeCoreError> {
+    serde_json::to_string(&(&auth.body.account_anchor, message_hash(auth).map_err(storage)?))
+        .map_err(storage)
 }

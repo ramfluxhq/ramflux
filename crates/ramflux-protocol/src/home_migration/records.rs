@@ -4,7 +4,7 @@
 //! Home history carries the evidence of each individual transition.
 use super::{Authorization, CommitProof, Genesis, Signed};
 use crate::custody::{
-    BranchCertificate, DeviceRef, Envelope, MasterCertificate, NodeIdentityRecord,
+    BranchCertificate, DeviceRef, Envelope, MasterCertificate, NodeIdentityRecord, Publication,
 };
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +41,7 @@ impl HomeRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordEvidence {
+    pub authority: Publication,
     pub record: HomeRecord,
     pub management_certificate_chain: Vec<Envelope<MasterCertificate>>,
     pub actor_certificate: Option<Envelope<BranchCertificate>>,
