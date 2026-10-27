@@ -104,6 +104,13 @@ wait during that reservation. The 60-second bound still limits issuing a transfe
 no valid issue can use the later release deadline. An unrelated changed head does
 not release a live reservation.
 
+Bounded reservation time favors liveness over guaranteed convergence under
+unbounded delivery delay: a sibling may release on time and write before a validly
+committed transfer reaches it. Two intervening epochs, or a removal at the
+transfer's epoch, can make that delayed transfer stale for the sibling and its
+followers and leave a group fork. The issue deadline does not bound delivery time;
+clock skew can make this release overlap the issuer's last valid issue instant.
+
 On the first courier tick after the issue deadline plus five minutes, an issuer
 without a committed transfer stages a durable signed cancellation. Siblings also
 release an expired reservation without requiring the issuer to return. A revoked

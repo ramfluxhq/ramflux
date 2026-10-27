@@ -158,42 +158,61 @@ impl RamfluxClient {
         Ok(pending)
     }
     /// Advance abandoned proposals without needing another user transfer request.
+    /// Item failures remain retryable and must not block unrelated groups.
     pub(crate) fn advance_group_transfer_deadlines(&self, now: i64) -> Result<(), SdkError> {
         let db = self.account_db()?;
         for id in db.actor_state_key_page(PENDING, 128)? {
-            if let Some(pending) = db.load_actor_state::<Pending>(&id)?
-                && pending.probe.expires_at.saturating_add(TRANSFER_SKEW_SECONDS) < now
-            {
-                if let Some(state) = db.shared_group_state(&pending.probe.base.group_id)?
-                    && state.snapshot().transfers.iter().any(|transfer| {
-                        transfer.acceptance.nonce == pending.probe.id
-                            && transfer.previous_hash == pending.probe.base.state_hash
-                    })
-                {
-                    self.finish_group_transfer_head_change(&state)?;
-                } else {
-                    self.cancel_group_transfer(&pending.probe)?;
-                }
+            if let Err(error) = db.write_transaction(|| self.advance_pending_deadline(&id, now)) {
+                tracing::warn!(%error, item = %id, "group transfer pending deadline deferred");
             }
         }
         for id in db.actor_state_key_page(LEASE, 4096)? {
-            let bytes = ramflux_protocol::decode_base64url(
-                id.strip_prefix(LEASE).ok_or_else(|| super::invalid("transfer lease key"))?,
-            )
-            .map_err(|_| super::invalid("transfer lease key encoding"))?;
-            let group =
-                String::from_utf8(bytes).map_err(|_| super::invalid("transfer lease group"))?;
-            self.release_group_transfer_lease_at(&group, now)?;
+            if let Err(error) = db.write_transaction(|| self.advance_lease_deadline(&id, now)) {
+                tracing::warn!(%error, item = %id, "group transfer lease deadline deferred");
+            }
         }
         // Visit each delivery once; do not re-scan the complete queue for each group.
         for id in db.actor_state_key_page(SEND_PREFIX, 512)? {
-            let Some(mut row) = db.load_actor_state::<TransferDelivery>(&id)? else { continue };
-            if matches!(&row.control.body, TransferBody::Head{reply} if reply.cancelled) {
-                if self.release_cancel_targets(&mut row)? {
-                    db.remove_actor_state(&id)?;
-                } else {
-                    db.persist_actor_state(&id, &row)?;
-                }
+            if let Err(error) = db.write_transaction(|| self.advance_cancel_delivery(&id)) {
+                tracing::warn!(%error, item = %id, "group transfer cancellation deadline deferred");
+            }
+        }
+        Ok(())
+    }
+    fn advance_pending_deadline(&self, id: &str, now: i64) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        if let Some(pending) = db.load_actor_state::<Pending>(id)?
+            && pending.probe.expires_at.saturating_add(TRANSFER_SKEW_SECONDS) < now
+        {
+            if let Some(state) = db.shared_group_state(&pending.probe.base.group_id)?
+                && state.snapshot().transfers.iter().any(|transfer| {
+                    transfer.acceptance.nonce == pending.probe.id
+                        && transfer.previous_hash == pending.probe.base.state_hash
+                })
+            {
+                self.finish_group_transfer_head_change(&state)?;
+            } else {
+                self.cancel_group_transfer(&pending.probe)?;
+            }
+        }
+        Ok(())
+    }
+    fn advance_lease_deadline(&self, id: &str, now: i64) -> Result<(), SdkError> {
+        let bytes = ramflux_protocol::decode_base64url(
+            id.strip_prefix(LEASE).ok_or_else(|| super::invalid("transfer lease key"))?,
+        )
+        .map_err(|_| super::invalid("transfer lease key encoding"))?;
+        let group = String::from_utf8(bytes).map_err(|_| super::invalid("transfer lease group"))?;
+        self.release_group_transfer_lease_at(&group, now)
+    }
+    fn advance_cancel_delivery(&self, id: &str) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let Some(mut row) = db.load_actor_state::<TransferDelivery>(id)? else { return Ok(()) };
+        if matches!(&row.control.body, TransferBody::Head{reply} if reply.cancelled) {
+            if self.release_cancel_targets(&mut row)? {
+                db.remove_actor_state(id)?;
+            } else {
+                db.persist_actor_state(id, &row)?;
             }
         }
         Ok(())

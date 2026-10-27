@@ -32,7 +32,9 @@ pub(in crate::bus) async fn flush_with_clock(
 ) -> Result<usize, SdkError> {
     let now = clock();
     let client = &account.client;
-    client.advance_group_transfer_deadlines(now)?;
+    if let Err(error) = client.advance_group_transfer_deadlines(now) {
+        tracing::warn!(%error, "group transfer deadline scan deferred");
+    }
     client.account_db()?.retain_expiring_actor_states("group-beacon/", now, 4096)?;
     client.account_db()?.retain_expiring_actor_states(TRANSFER_SEND_PREFIX, now, 512)?;
     client.account_db()?.retain_expiring_actor_states("group-courier/sealed/", now, 4096)?;
@@ -261,21 +263,33 @@ fn pending_packets(
         ));
     }
     for id in client.account_db()?.actor_state_key_page(TRANSFER_SEND_PREFIX, 512)? {
-        if let Some(mut record) = client.account_db()?.load_actor_state::<TransferDelivery>(&id)?
-            && record.next_at <= now
-            && record.expires_at > now
-            && record.control.targets().iter().any(|target| {
-                !record.delivered.contains(&(target.root.clone(), target.device.clone()))
-            })
-        {
+        // A failed deadline delivery can appear here again in the same tick.
+        let item = (|| -> Result<_, SdkError> {
+            let Some(mut record) =
+                client.account_db()?.load_actor_state::<TransferDelivery>(&id)?
+            else {
+                return Ok(None);
+            };
+            if record.next_at > now
+                || record.expires_at <= now
+                || !record.control.targets().iter().any(|target| {
+                    !record.delivered.contains(&(target.root.clone(), target.device.clone()))
+                })
+            {
+                return Ok(None);
+            }
             client.refresh_group_transfer_cancellation(&mut record)?;
             client.account_db()?.persist_actor_state(&id, &record)?;
-            pending.push((
-                id,
-                GroupControlPacket::new(GroupControlBody::Transfer {
-                    control: Box::new(record.control),
-                }),
-            ));
+            Ok(Some(GroupControlPacket::new(GroupControlBody::Transfer {
+                control: Box::new(record.control),
+            })))
+        })();
+        match item {
+            Ok(Some(packet)) => pending.push((id, packet)),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, item = %id, "group transfer courier item deferred");
+            }
         }
     }
     Ok(pending)

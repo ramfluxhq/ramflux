@@ -9,13 +9,20 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[tokio::test]
 async fn shared_group_signed_request_and_result_round_trip_without_admin_state_authority()
 -> TestResult {
-    Box::pin(check_request_round_trip(false)).await
+    Box::pin(check_request_round_trip(false, None)).await
 }
 #[tokio::test]
 async fn r5_group_result_created_after_the_flush_start_is_sent_in_the_same_round() -> TestResult {
-    Box::pin(check_request_round_trip(true)).await
+    Box::pin(check_request_round_trip(true, None)).await
 }
-async fn check_request_round_trip(step_clock: bool) -> TestResult {
+#[tokio::test]
+async fn a_poisoned_deadline_does_not_stop_encrypted_group_requests_or_results() -> TestResult {
+    for prefix in ["pending", "lease", "send"] {
+        Box::pin(check_request_round_trip(false, Some(prefix))).await?;
+    }
+    Ok(())
+}
+async fn check_request_round_trip(step_clock: bool, poisoned_deadline: Option<&str>) -> TestResult {
     let root = runtime_tests::root("group-request-wire");
     let mut owner = runtime_tests::account(
         &root.join("owner"),
@@ -48,6 +55,9 @@ async fn check_request_round_trip(step_clock: bool) -> TestResult {
         Some("wire-request"),
     )?;
     assert_eq!(admin.client.group_state("group")?.group_epoch, 2);
+    if let Some(prefix) = poisoned_deadline {
+        poison_deadlines(&[&owner.client, &admin.client], prefix)?;
+    }
     let outgoing = Arc::new(Mutex::new(Vec::new()));
     admin.put_engine(GatewaySessionEngine::with_test_transport(
         admin_config.clone(),
@@ -58,12 +68,7 @@ async fn check_request_round_trip(step_clock: bool) -> TestResult {
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
-    let incoming = request_entry(1, request);
-    let mut receiver = GatewaySessionEngine::with_test_transport(
-        config.clone(),
-        Box::new(super::fixture::RecordingGateway::new(Arc::default())),
-    );
-    owner.client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
+    Box::pin(receive_control(&mut owner, config.clone(), request, &pool)).await?;
     assert_eq!(
         owner.client.group_state("group")?.group_epoch,
         2,
@@ -84,12 +89,10 @@ async fn check_request_round_trip(step_clock: bool) -> TestResult {
     assert_eq!(sent, 1, "a newly committed result is immediately eligible for delivery");
     assert_eq!(current.view().name.as_deref(), Some("Requested name"));
     let result = replies.lock().map_err(|_| "reply lock")?[0].clone();
-    let incoming = request_entry(1, result);
-    let mut receiver = GatewaySessionEngine::with_test_transport(
-        admin_config,
-        Box::new(super::fixture::RecordingGateway::new(Arc::default())),
-    );
-    admin.client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
+    Box::pin(receive_control(&mut admin, admin_config, result, &pool)).await?;
+    if let Some(prefix) = poisoned_deadline {
+        assert_poisoned_deadlines(&[&owner.client, &admin.client], prefix)?;
+    }
     assert_result_did_not_replace_snapshot(&admin.client)?;
     admin.client.accept_shared_group_state(&current, "device-peer-one")?;
     assert_eq!(admin.client.group_state("group")?.group_epoch, 3);
@@ -105,6 +108,40 @@ async fn check_request_round_trip(step_clock: bool) -> TestResult {
     directory.abort();
     drop((owner, admin, peers));
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+async fn receive_control(
+    account: &mut LocalBusAccountState,
+    config: GatewaySessionConfig,
+    envelope: ramflux_protocol::Envelope,
+    pool: &ramflux_transport::RelayQuicPool,
+) -> TestResult {
+    let incoming = request_entry(1, envelope);
+    let mut receiver = GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(super::fixture::RecordingGateway::new(Arc::default())),
+    );
+    account.client.apply_routed_entry(&mut receiver, pool, &incoming, false).await?;
+    Ok(())
+}
+
+fn poison_deadlines(clients: &[&RamfluxClient], prefix: &str) -> TestResult {
+    for client in clients {
+        client.account_db()?.persist_actor_state(
+            &format!("group-transfer/{prefix}/!poison"),
+            &serde_json::json!({"invalid":true,"expires_at":now_unix_timestamp() + 3600}),
+        )?;
+    }
+    Ok(())
+}
+fn assert_poisoned_deadlines(clients: &[&RamfluxClient], prefix: &str) -> TestResult {
+    for client in clients {
+        assert!(
+            client.account_db()?.actor_state_exists(&format!("group-transfer/{prefix}/!poison"))?,
+            "failed item stays retryable"
+        );
+    }
     Ok(())
 }
 
