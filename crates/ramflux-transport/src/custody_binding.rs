@@ -97,6 +97,66 @@ async fn read_bounded_frame<R: AsyncRead + Unpin + ?Sized>(
     Ok(body)
 }
 
+/// SHA-256 of the first certificate's DER bytes for a separately provisioned public listener.
+/// # Errors
+/// Rejects missing, oversized or malformed certificate files.
+fn certificate_file(
+    path: &std::path::Path,
+) -> Result<rustls::pki_types::CertificateDer<'static>, TransportError> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(TransportError::Tls("certificate file too large".into()));
+    }
+    let cert = rustls_pemfile::certs(&mut std::io::Cursor::new(bytes))
+        .next()
+        .transpose()?
+        .ok_or_else(|| TransportError::Tls("public listener certificate missing".into()))?;
+    Ok(cert)
+}
+/// Hash the public listener leaf certificate DER, as committed by node metadata.
+/// # Errors
+/// Rejects missing, oversized or malformed certificate files.
+pub fn custody_certificate_file_hash(path: &std::path::Path) -> Result<String, TransportError> {
+    Ok(certificate_hash(certificate_file(path)?.as_ref()))
+}
+/// Compare public listener and mesh credentials without reading either private key.
+/// # Errors
+/// Rejects absent or malformed leaf certificates.
+pub fn custody_certificate_public_key_hash(
+    path: &std::path::Path,
+) -> Result<String, TransportError> {
+    use x509_parser::prelude::FromDer;
+    let der = certificate_file(path)?;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(der.as_ref())
+        .map_err(|_| TransportError::Tls("invalid custody public certificate".into()))?;
+    Ok(certificate_hash(cert.public_key().raw))
+}
+fn certificate_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    ramflux_protocol::encode_base64url(Sha256::digest(bytes))
+}
+/// Authenticate the actual peer's leaf certificate against signed receiving-node metadata.
+/// # Errors
+/// Rejects absent peer certificates and a different public listener certificate.
+pub fn verify_custody_peer_certificate(
+    stream: &GatewayTcpTlsStream,
+    expected: &str,
+) -> Result<(), TransportError> {
+    let certificate = stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .ok_or_else(|| TransportError::Tls("custody peer certificate absent".into()))?;
+    if certificate_hash(certificate.as_ref()) != expected {
+        return Err(TransportError::Tls("custody public certificate pin mismatch".into()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +220,17 @@ mod tests {
             )
             .await?;
             let mut stream = stream.into_tls_stream();
+            verify_custody_peer_certificate(
+                &stream,
+                &custody_certificate_file_hash(&tls.service_cert)?,
+            )?;
+            assert!(
+                verify_custody_peer_certificate(
+                    &stream,
+                    &ramflux_protocol::encode_base64url([55; 32])
+                )
+                .is_err()
+            );
             let material = custody_tcp_exporter(&stream, &[5; 32])?;
             assert_ne!(material, custody_tcp_exporter(&stream, &[6; 32])?);
             clients.push(material);

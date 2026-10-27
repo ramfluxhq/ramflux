@@ -57,7 +57,7 @@ jobs:
         run: cargo fmt --check --all
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: RAMFLUX_ITEST_BUILD=1 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Cargo machete
         # Unused-dependency detection is advisory: cargo-machete has known false
@@ -70,7 +70,7 @@ jobs:
         run: cargo test --workspace
 
       - name: Born-v3 memory vault regression tests
-        run: cargo test -p ramflux-sdk --features itest-memory-vault custody
+        run: RAMFLUX_ITEST_BUILD=1 cargo test -p ramflux-sdk --features itest-memory-vault custody
 
       - name: Gateway local-mint regression tests
         run: cargo test -p ramflux-gateway --features itest-local-mint

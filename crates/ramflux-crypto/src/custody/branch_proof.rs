@@ -68,6 +68,7 @@ fn structure(body: &BranchProofV3) -> Result<(), CryptoError> {
         &body.record_hash,
         &body.proof_id,
         &body.challenge_nonce,
+        &body.action_hash,
         &body.transport_binding,
     ] {
         bytes(value, 32)?;
@@ -123,11 +124,21 @@ pub fn verify_branch_proof_v3(
     }
     let body = &proof.body;
     structure(body)?;
+    let recipient = match channel {
+        ProofChannel::DirectExporter { receiving_node, .. }
+        | ProofChannel::NoChannelBinding { receiving_node, .. } => receiving_node,
+        ProofChannel::HomeRelayReceipt { current_node, .. } => current_node,
+    };
+    if body.audience != recipient.envelope().body.node_id {
+        return Err(reject("branch proof audience differs from receiving node"));
+    }
     lifetime(body.issued_at, body.expires_at, now)?;
     lifetime(challenge.issued_at, challenge.expires_at, now)?;
     bytes(&challenge.challenge_nonce, 32)?;
+    bytes(&challenge.action_hash, 32)?;
     id(&challenge.audience)?;
-    if body.challenge_nonce != challenge.challenge_nonce
+    if body.action_hash != challenge.action_hash
+        || body.challenge_nonce != challenge.challenge_nonce
         || body.audience != challenge.audience
         || body.binding_mode != challenge.binding_mode
         || body.expires_at > challenge.expires_at

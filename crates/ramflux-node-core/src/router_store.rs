@@ -30,6 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod custody;
+mod custody_accounts;
 mod expiry_index;
 mod retention;
 
@@ -49,6 +50,7 @@ pub struct RouterRedbStore {
     commit_writer: Option<RouterCommitWriter>,
     submission_wal: Option<RouterWalStore>,
     identity_registry_writes: std::sync::atomic::AtomicU64,
+    custody_publication_writes: std::sync::atomic::AtomicU64,
     foreign_authority_writes: std::sync::atomic::AtomicU64,
 }
 
@@ -355,6 +357,7 @@ impl RouterRedbStore {
             commit_writer,
             submission_wal,
             identity_registry_writes: std::sync::atomic::AtomicU64::new(0),
+            custody_publication_writes: std::sync::atomic::AtomicU64::new(0),
             foreign_authority_writes: std::sync::atomic::AtomicU64::new(0),
         })
     }
@@ -1024,6 +1027,7 @@ impl RouterRedbStore {
         let mut mvp1_identities: IdentityRegistry =
             load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
                 .unwrap_or_default();
+        self.load_custody_accounts(&mut mvp1_identities)?;
         if mvp1_identities.migrate_legacy_registration_receipts(now) {
             self.record_identity_registry(&mvp1_identities)?;
         }

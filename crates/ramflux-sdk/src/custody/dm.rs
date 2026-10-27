@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Native root-addressed DM bootstrap using the existing X3DH and committing ratchet.
+//! Temporary opt-in DM bootstrap, without forward secrecy; ordinary E2EE replaces it.
 use super::network::{CustodyConnection, fields, now};
 use crate::SdkError;
 use ramflux_crypto::{
@@ -24,12 +24,23 @@ struct Packet {
     bundle_hash: [u8; 32],
     ciphertext: DmCiphertext,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InboxDelivery {
+    inbox_seq: u64,
+    target_delivery_id: String,
+    envelope: ramflux_protocol::Envelope,
+}
+
 /// Authenticated decrypted delivery. Plaintext is erased when the value drops.
 pub struct CustodyDm {
     pub inbox_seq: u64,
     pub envelope_id: String,
     pub source: DeviceRef,
     pub plaintext: Zeroizing<Vec<u8>>,
+    recipient: DeviceRef,
+    replay_key: String,
+    expires_at: u64,
 }
 fn invalid() -> SdkError {
     SdkError::CustodySetupInvalid
@@ -52,6 +63,14 @@ fn bundle_hash(bundle: &ramflux_crypto::PrekeyBundle) -> Result<[u8; 32], SdkErr
 fn payload_hash(bytes: &[u8]) -> String {
     ramflux_crypto::blake3_256_base64url("ramflux.identity.custody_dm_payload.v1", bytes)
 }
+fn message_expiry(created_at: i64, ttl: u32, current: u64) -> Result<u64, SdkError> {
+    let created = u64::try_from(created_at).map_err(|_| invalid())?;
+    let expires_at = created.checked_add(u64::from(ttl)).ok_or_else(invalid)?;
+    if ttl == 0 || ttl > 86_400 || created > current.saturating_add(300) || current > expires_at {
+        return Err(invalid());
+    }
+    Ok(expires_at)
+}
 impl CustodyConnection {
     /// Send a DM under authenticated root-qualified source/target authority.
     /// Every envelope uses a fresh ephemeral/bootstrap and a single-message ratchet;
@@ -63,6 +82,7 @@ impl CustodyConnection {
         target: &DeviceRef,
         plaintext: &[u8],
     ) -> Result<String, SdkError> {
+        self.require_experimental_dm()?;
         if plaintext.len() > 256 * 1024 {
             return Err(invalid());
         }
@@ -144,6 +164,7 @@ impl CustodyConnection {
     /// # Errors
     /// Rejects spoofed source/target/bootstrap, signature or commitment failures; no synthetic ack.
     pub async fn receive_dm(&mut self, after_seq: u64) -> Result<Vec<CustodyDm>, SdkError> {
+        self.require_experimental_dm()?;
         let CustodyServerFrame::Inbox { entries } =
             self.request(CustodySessionAction::Inbox { after_seq, limit: 100 }).await?
         else {
@@ -153,20 +174,14 @@ impl CustodyConnection {
         let bundle = self.prekey_bundle()?;
         let own_bundle_hash = bundle_hash(&bundle)?;
         for entry in entries {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Entry {
-                inbox_seq: u64,
-                target_delivery_id: String,
-                envelope: ramflux_protocol::Envelope,
-            }
-            let entry: Entry = serde_json::from_value(entry)?;
+            let entry: InboxDelivery = serde_json::from_value(entry)?;
             let envelope = entry.envelope;
             let expected_target = ramflux_protocol::qualified_device_id(
                 &self.device.account_anchor,
                 &self.device.device_id,
             )?;
-            if entry.inbox_seq <= after_seq
+            if envelope.envelope_id.len() > 256
+                || entry.inbox_seq <= after_seq
                 || entry.target_delivery_id != expected_target
                 || envelope.target_delivery_id != expected_target
             {
@@ -211,12 +226,33 @@ impl CustodyConnection {
                 &envelope.signed.signature,
                 &cert.branch_signing_public_key,
             )?;
+            let current = now()?;
+            let expires_at = message_expiry(envelope.created_at, envelope.ttl, current)?;
+            let replay_key = ramflux_protocol::hash_base64url(
+                "ramflux.identity.custody_dm_receipt.v1",
+                &ramflux_protocol::canonical_json_bytes(&(
+                    &self.device,
+                    &packet.source,
+                    &envelope.envelope_id,
+                ))?,
+            );
+            let pins = self.pins.clone();
+            let lookup_key = replay_key.clone();
+            if tokio::task::spawn_blocking(move || pins.dm_was_acknowledged(&lookup_key, current))
+                .await
+                .map_err(|_| invalid())??
+            {
+                continue;
+            }
             let plaintext = self.decrypt_packet(&packet, &bundle, &own_bundle_hash)?;
             messages.push(CustodyDm {
                 inbox_seq: entry.inbox_seq,
                 envelope_id: envelope.envelope_id,
                 source: packet.source,
                 plaintext,
+                recipient: self.device.clone(),
+                replay_key,
+                expires_at,
             });
         }
         Ok(messages)
@@ -263,6 +299,19 @@ impl CustodyConnection {
     /// # Errors
     /// Rejects wrong mailbox/sequence, stale authority, invalid signature or durable ACK failure.
     pub async fn ack_dm(&mut self, message: &CustodyDm) -> Result<(), SdkError> {
+        self.require_experimental_dm()?;
+        if message.recipient != self.device {
+            return Err(invalid());
+        }
+        // The caller has accepted this delivery. Persist before the remote ACK so an
+        // uncertain network result cannot reopen it to presentation after reconnect.
+        let pins = self.pins.clone();
+        let key = message.replay_key.clone();
+        let expiry = message.expires_at;
+        let current = now()?;
+        tokio::task::spawn_blocking(move || pins.remember_dm_acknowledgement(key, expiry, current))
+            .await
+            .map_err(|_| invalid())??;
         let mut ack = ramflux_protocol::Ack {
             schema: ramflux_protocol::domain::ACK.into(),
             version: 1,
@@ -284,5 +333,20 @@ impl CustodyConnection {
             CustodyServerFrame::Acked { inbox_seq } if inbox_seq == message.inbox_seq => Ok(()),
             _ => Err(invalid()),
         }
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    #[test]
+    fn custody_dm_signed_ttl_cannot_be_extended_by_redelivery() -> Result<(), SdkError> {
+        assert_eq!(message_expiry(100, 300, 400)?, 400);
+        assert!(message_expiry(100, 300, 401).is_err());
+        assert!(message_expiry(-1, 300, 100).is_err());
+        assert!(message_expiry(401, 300, 100).is_err());
+        assert!(message_expiry(100, 0, 100).is_err());
+        assert!(message_expiry(100, 86_401, 100).is_err());
+        Ok(())
     }
 }

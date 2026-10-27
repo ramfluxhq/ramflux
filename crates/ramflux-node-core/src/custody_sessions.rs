@@ -12,6 +12,8 @@ use std::{
 };
 
 const GLOBAL_LIMIT: usize = 4096;
+// More than eleven 1024/minute issuance windows covering the 600-second replay horizon.
+const REPLAY_LIMIT: usize = 12_288;
 const SOURCE_LIMIT: usize = 64;
 const REQUEST_LIMIT: usize = 256;
 const CHALLENGE_SECONDS: u64 = 300;
@@ -36,10 +38,13 @@ pub(crate) struct ChallengeLease {
     pub device: DeviceRef,
     pub action_hash: String,
     pub holder: String,
-    source: String,
+    pub source: String,
     deadline: Instant,
     retain_until: Instant,
     consumed: bool,
+    issued: Instant,
+    prefixes: Vec<String>,
+    outstanding: bool,
 }
 #[derive(Clone)]
 pub(crate) struct SessionLease {
@@ -53,10 +58,24 @@ pub(crate) struct CustodyLeases {
     challenges: BTreeMap<String, ChallengeLease>,
     proofs: BTreeMap<String, Instant>,
     sessions: BTreeMap<String, SessionLease>,
+    sources: crate::custody_ingress::CustodySourceBudget,
+    pending_count: usize,
+    by_holder: BTreeMap<String, BTreeSet<String>>,
+    by_prefix: BTreeMap<String, BTreeSet<(Instant, String)>>,
 }
 impl CustodyLeases {
     fn prune(&mut self, tick: Instant) {
-        self.challenges.retain(|_, c| c.retain_until >= tick);
+        let expired: Vec<_> = self
+            .challenges
+            .iter()
+            .filter(|(_, c)| c.outstanding && c.deadline < tick)
+            .map(|(nonce, _)| nonce.clone())
+            .collect();
+        for nonce in expired {
+            self.untrack(&nonce);
+        }
+        self.challenges
+            .retain(|_, c| if c.consumed { c.retain_until >= tick } else { c.deadline >= tick });
         self.proofs.retain(|_, until| *until >= tick);
         self.sessions.retain(|_, s| s.deadline >= tick);
     }
@@ -78,20 +97,48 @@ impl CustodyLeases {
             return Err(CustodyRefusal::InvalidInput);
         }
         self.prune(tick);
+        let source_ip: std::net::IpAddr =
+            source.parse().map_err(|_| CustodyRefusal::InvalidInput)?;
+        let prefixes = crate::custody_source_prefixes(source_ip);
         if holder.len() > 512
-            || source.len() > 256
-            || self.challenges.len() >= GLOBAL_LIMIT
-            || self.challenges.values().filter(|c| c.source == source).count() >= SOURCE_LIMIT
+            || self.by_holder.get(&holder).is_some_and(|entries| entries.len() >= 4)
+            || prefixes.iter().any(|key| {
+                self.by_prefix.get(key).is_some_and(|entries| entries.len() >= SOURCE_LIMIT)
+            })
+            || !self.sources.admit(source_ip, tick)
         {
             return Err(CustodyRefusal::Capacity);
         }
+        if self.pending_count >= GLOBAL_LIMIT {
+            let oldest = self
+                .by_prefix
+                .values()
+                .max_by_key(|entries| entries.len())
+                .and_then(|entries| entries.first())
+                .map(|(_, nonce)| nonce.clone());
+            if let Some(nonce) = oldest {
+                self.untrack(&nonce);
+                self.challenges.remove(&nonce);
+            } else {
+                return Err(CustodyRefusal::Capacity);
+            }
+        }
         let challenge = BranchChallenge {
             challenge_nonce: random()?,
+            action_hash: action_hash.clone(),
             audience,
             binding_mode: mode,
             issued_at: now,
             expires_at: now.checked_add(CHALLENGE_SECONDS).ok_or(CustodyRefusal::InvalidInput)?,
         };
+        self.pending_count += 1;
+        self.by_holder.entry(holder.clone()).or_default().insert(challenge.challenge_nonce.clone());
+        for prefix in &prefixes {
+            self.by_prefix
+                .entry(prefix.clone())
+                .or_default()
+                .insert((tick, challenge.challenge_nonce.clone()));
+        }
         self.challenges.insert(
             challenge.challenge_nonce.clone(),
             ChallengeLease {
@@ -103,9 +150,34 @@ impl CustodyLeases {
                 deadline: tick + Duration::from_secs(CHALLENGE_SECONDS),
                 retain_until: tick + Duration::from_secs(RETAIN_SECONDS),
                 consumed: false,
+                issued: tick,
+                prefixes,
+                outstanding: true,
             },
         );
         Ok(challenge)
+    }
+    fn untrack(&mut self, nonce: &str) {
+        let Some(lease) = self.challenges.get_mut(nonce) else { return };
+        if !lease.outstanding {
+            return;
+        }
+        lease.outstanding = false;
+        self.pending_count = self.pending_count.saturating_sub(1);
+        if let Some(entries) = self.by_holder.get_mut(&lease.holder) {
+            entries.remove(nonce);
+            if entries.is_empty() {
+                self.by_holder.remove(&lease.holder);
+            }
+        }
+        for prefix in &lease.prefixes {
+            if let Some(entries) = self.by_prefix.get_mut(prefix) {
+                entries.remove(&(lease.issued, nonce.into()));
+                if entries.is_empty() {
+                    self.by_prefix.remove(prefix);
+                }
+            }
+        }
     }
     pub fn challenge(&self, nonce: &str, tick: Instant) -> Result<ChallengeLease, CustodyRefusal> {
         let c = self.challenges.get(nonce).ok_or(CustodyRefusal::ChallengeUnknown)?;
@@ -124,15 +196,20 @@ impl CustodyLeases {
         proof_id: &str,
         tick: Instant,
     ) -> Result<(), CustodyRefusal> {
+        let expired = self.challenges.get(nonce).is_some_and(|c| !c.consumed && c.deadline < tick);
         self.prune(tick);
+        if expired {
+            return Err(CustodyRefusal::ChallengeExpired);
+        }
         let c = self.challenge(nonce, tick)?;
         if self.proofs.contains_key(proof_id) {
             return Err(CustodyRefusal::Replay);
         }
-        if self.proofs.len() >= GLOBAL_LIMIT {
+        if self.proofs.len() >= REPLAY_LIMIT {
             return Err(CustodyRefusal::Capacity);
         }
         self.proofs.insert(proof_id.into(), c.retain_until);
+        self.untrack(nonce);
         if let Some(c) = self.challenges.get_mut(nonce) {
             c.consumed = true;
         }
@@ -146,6 +223,7 @@ impl CustodyLeases {
         tick: Instant,
     ) -> Result<CustodySession, CustodyRefusal> {
         self.prune(tick);
+        self.sessions.retain(|_, lease| lease.holder != holder);
         if self.sessions.len() >= GLOBAL_LIMIT {
             return Err(CustodyRefusal::Capacity);
         }
@@ -198,6 +276,24 @@ impl CustodyLeases {
         lease.nonces.insert(nonce.into());
         Ok(())
     }
+    pub fn reject(&mut self, nonce: &str) {
+        if self.challenges.get(nonce).is_some_and(|lease| !lease.consumed) {
+            self.untrack(nonce);
+            self.challenges.remove(nonce);
+        }
+    }
+    pub fn disconnect(&mut self, holder: &str) {
+        let nonces: Vec<_> = self
+            .by_holder
+            .get(holder)
+            .map(|entries| entries.iter().cloned().collect())
+            .unwrap_or_default();
+        for nonce in nonces {
+            self.untrack(&nonce);
+            self.challenges.remove(&nonce);
+        }
+        self.sessions.retain(|_, s| s.holder != holder);
+    }
     pub fn close(&mut self, id: &str) {
         self.sessions.remove(id);
     }
@@ -217,7 +313,7 @@ mod tests {
                 },
                 action_hash: "action".into(),
                 holder: "connection".into(),
-                source: "source".into(),
+                source: "192.0.2.1".into(),
                 audience: "router".into(),
                 mode: BindingMode::HomeRelayReceipt,
             },
@@ -254,16 +350,90 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn bounded_source_budget_never_evicts_an_unexpired_challenge() -> Result {
+    fn connection_budget_limits_outstanding_challenges_and_releases_on_disconnect() -> Result {
         let tick = Instant::now();
         let mut pool = CustodyLeases::default();
         let first = issue(&mut pool, tick)?;
-        for _ in 1..SOURCE_LIMIT {
+        for _ in 1..4 {
             issue(&mut pool, tick)?;
         }
         assert!(issue(&mut pool, tick).is_err());
         assert!(pool.challenge(&first.challenge_nonce, tick).is_ok());
+        pool.consume(&first.challenge_nonce, "proof", tick)?;
+        pool.disconnect("connection");
+        assert_eq!(
+            pool.challenge(&first.challenge_nonce, tick).err(),
+            Some(CustodyRefusal::Replay)
+        );
+        assert_eq!(pool.challenges.len(), 1);
+        assert!(issue(&mut pool, tick).is_ok());
         assert!(issue(&mut pool, tick + Duration::from_secs(601)).is_ok());
+        Ok(())
+    }
+    fn intent(source: String, holder: String) -> ChallengeIntent {
+        ChallengeIntent {
+            device: DeviceRef {
+                account_anchor: ramflux_protocol::encode_base64url([1; 32]),
+                device_id: "phone".into(),
+                device_epoch: 1,
+            },
+            action_hash: ramflux_protocol::encode_base64url([2; 32]),
+            holder,
+            source,
+            audience: "node".into(),
+            mode: BindingMode::HomeRelayReceipt,
+        }
+    }
+    #[test]
+    fn sixty_four_ipv6_addresses_cannot_lock_out_another_prefix() {
+        let tick = Instant::now();
+        let mut pool = CustodyLeases::default();
+        let mut issued = 0;
+        for address in 1..=64 {
+            for request in 0..64 {
+                let source =
+                    std::net::Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, address).to_string();
+                if pool
+                    .issue(intent(source, format!("attacker-{address}-{request}")), 100, tick)
+                    .is_ok()
+                {
+                    issued += 1;
+                }
+            }
+        }
+        assert!(issued <= SOURCE_LIMIT);
+        assert!(pool.issue(intent("203.0.113.1".into(), "honest".into()), 100, tick).is_ok());
+    }
+    #[test]
+    fn full_pool_evicts_unconsumed_work_but_retains_replay_markers() -> Result {
+        let tick = Instant::now();
+        let mut pool = CustodyLeases::default();
+        let first = pool.issue(intent("192.0.2.1".into(), "consumed".into()), 100, tick)?;
+        pool.consume(&first.challenge_nonce, "proof-id", tick)?;
+        for n in 1..=GLOBAL_LIMIT {
+            let source =
+                std::net::Ipv4Addr::from(0x0a00_0001_u32 + (u32::try_from(n)? << 8)).to_string();
+            pool.issue(
+                intent(source, format!("connection-{n}")),
+                100,
+                tick + Duration::from_secs((n as u64 / 1000) * 61),
+            )?;
+        }
+        assert_eq!(pool.pending_count, GLOBAL_LIMIT);
+        assert_eq!(pool.challenges.len(), GLOBAL_LIMIT + 1);
+        let honest = pool.issue(
+            intent("203.0.113.1".into(), "honest".into()),
+            100,
+            tick + Duration::from_secs(244),
+        )?;
+        assert_eq!(pool.pending_count, GLOBAL_LIMIT);
+        assert_eq!(pool.challenges.len(), GLOBAL_LIMIT + 1);
+        assert!(pool.challenge(&honest.challenge_nonce, tick + Duration::from_secs(244)).is_ok());
+        assert_eq!(
+            pool.challenge(&first.challenge_nonce, tick).err(),
+            Some(CustodyRefusal::Replay)
+        );
+        assert!(pool.proofs.contains_key("proof-id"));
         Ok(())
     }
 }

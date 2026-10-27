@@ -442,10 +442,15 @@ needs the primary; session proof renewal during a valid lease does not.
 | `device_ref` | `Ref` |
 | `certificate_hash`, `record_hash` | `Hash`, exact supplied verified certificate/head |
 | `proof_id`, `challenge_nonce` | Fresh `B32`, one-use challenge issued by the receiving verifier |
-| `audience` | `Id`, exact recipient service identity, never a wildcard |
+| `action_hash` | `B32`, the exact publication/register/session operation hash returned in the authenticated challenge; the client compares it with its intended operation before signing |
+| `audience` | `Id`, exact receiving node id, independently pinned by the client; never a shared service name or wildcard |
 | `binding_mode` | `"direct_exporter"`, `"home_relay_receipt"` or explicit `"no_channel_binding"`; challenge and node record must allow the exact mode |
 | `transport_binding` | `B32`, SHA-256 of the client-facing TLS exporter in every mode; never null |
 | `issued_at`, `expires_at` | `Time`, `0 < expires_at - issued_at <= 300` |
+
+The challenge carries `challenge_nonce`, `action_hash`, `audience`, `binding_mode`,
+`issued_at` and `expires_at`. Its operation hash is included verbatim in the signed
+proof; server-side operation state alone is insufficient, including unbound mode.
 
 Proof is signed by the certified branch, checked against current authority per
 request, and consumed atomically in the receiver's replay cache through expiry
@@ -655,7 +660,7 @@ that current services already publish this profile. The current deployment has a
 pinned node/federation identity key (see [server data](server-data.md)).
 `Envelope<NodeIdentityRecord>` uses `CUSTODY_NODE_RECORD`, signed by that existing
 pinned node identity key, with exactly `schema`, `version: 1`, `node_id: Id`,
-`node_signing_public_key: Key`, `epoch: U53` (positive),
+`node_signing_public_key: Key`, `client_tls_certificate_sha256: B32|null` (the separate direct public TLS leaf DER SHA-256 pin; null if no direct listener), `epoch: U53` (positive),
 `previous_record_hash: Hash|null`, `issued_at: Time`, `receipt_keys: ReceiptKey[]`,
 `revoked_receipt_key_ids: B32[]`, `proxy_keys: ProxyKey[]`,
 `revoked_proxy_key_ids: B32[]` (both revocation arrays sorted and cumulative), and

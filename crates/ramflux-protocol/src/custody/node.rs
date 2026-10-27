@@ -41,6 +41,7 @@ pub struct NodeIdentityRecord {
     pub version: u32,
     pub node_id: String,
     pub node_signing_public_key: String,
+    pub client_tls_certificate_sha256: Option<String>,
     pub epoch: u64,
     pub previous_record_hash: Option<String>,
     pub issued_at: u64,

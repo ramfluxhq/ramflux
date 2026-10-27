@@ -35,6 +35,19 @@ pub enum PinOutcome {
     Fenced,
 }
 impl AuthorityPins {
+    /// Copy one account's retained floor/evidence for an incremental durable update.
+    #[must_use]
+    pub fn for_account(&self, anchor: &str) -> Self {
+        Self {
+            accounts: self
+                .accounts
+                .get(anchor)
+                .map(|pin| (anchor.into(), pin.clone()))
+                .into_iter()
+                .collect(),
+        }
+    }
+
     /// Once observed, a born-v3 anchor can never authorize a legacy record.
     #[must_use]
     pub fn permits_legacy(&self, anchor: &str) -> bool {

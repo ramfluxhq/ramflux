@@ -120,6 +120,7 @@ mod tests {
 
 mod custody_binding;
 pub use custody_binding::{
-    custody_quic_exporter, custody_tcp_exporter, read_custody_open_frame, read_custody_tcp_frame,
-    write_custody_tcp_frame,
+    custody_certificate_file_hash, custody_certificate_public_key_hash, custody_quic_exporter,
+    custody_tcp_exporter, read_custody_open_frame, read_custody_tcp_frame,
+    verify_custody_peer_certificate, write_custody_tcp_frame,
 };
