@@ -1,197 +1,262 @@
 #!/usr/bin/env python3
-"""Preflight rejects unsafe migrations without disclosing configuration values."""
+"""Preflight validates the provider's config-only render without leaking values."""
 import importlib.util
+import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'compose-preflight.py'
-spec = importlib.util.spec_from_file_location('preflight', SCRIPT)
+SCRIPT = Path(__file__).resolve().parents[1] / "compose-preflight.py"
+spec = importlib.util.spec_from_file_location("preflight", SCRIPT)
 preflight = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(preflight)
 
 
-class PreflightTests(unittest.TestCase):
+class PreflightUnitTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def run_check(self, contents, process=None, more_files=(), implicit=False):
-        path = self.root / '.env'
-        path.write_text(contents)
-        files = [] if implicit else ['--env-file', str(path)]
-        for index, contents in enumerate(more_files):
-            extra = self.root / f'{index}.env'
-            extra.write_text(contents)
-            files.extend(['--env-file', str(extra)])
-        return subprocess.run([sys.executable, str(SCRIPT), *files], cwd=self.root,
-                              env={'PATH': os.environ['PATH'], **(process or {})},
-                              text=True, capture_output=True, timeout=10)
+    def test_legacy_names_are_best_effort_and_values_are_never_reported(self):
+        env_file = self.root / "operator.env"
+        env_file.write_text("RAMFLUX_NODE_ID=DO_NOT_LOG\n")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            invalid = preflight.validate_legacy_inputs(["--env-file", str(env_file)])
+        self.assertEqual(invalid, {"RAMFLUX_NODE_ID", "RF_COMPOSE_NODE_ID"})
+        self.assertNotIn("DO_NOT_LOG", ",".join(invalid))
 
-    def test_old_names_only_and_mismatches_refuse_every_mapped_key_without_values(self):
-        for old, new in preflight.MAPPING.items():
-            for text in [f'{old}=DO_NOT_LOG', f'{old}=DO_NOT_LOG\n{new}=DIFFERENT_SECRET']:
-                with self.subTest(key=old):
-                    result = self.run_check(text)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(old, result.stderr)
-                    self.assertIn(new, result.stderr)
-                    self.assertNotIn('DO_NOT_LOG', result.stderr)
-                    self.assertNotIn('DIFFERENT_SECRET', result.stderr)
-
-    def test_migrated_and_equal_dual_names_accept_export_quotes_comments_and_precedence(self):
-        old, new = 'RAMFLUX_FEDERATION_ADMIN_TOKEN', 'RF_COMPOSE_FEDERATION_ADMIN_TOKEN'
-        result = self.run_check(f'export {old}="secret#value" # comment\n{new}=secret#value')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        # Process values override env files, later files override earlier files.
-        result = self.run_check(f'{old}=first\n{new}=first',
-                                {old: 'last', new: 'last'}, [f'{new}=second'])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotEqual(self.run_check(f'{old}=first\n{new}=first',
-                                           more_files=[f'{new}=second']).returncode, 0)
+    def test_equal_legacy_and_new_names_are_accepted_with_process_precedence(self):
+        env_file = self.root / "operator.env"
+        env_file.write_text("RAMFLUX_NODE_ID=file\nRF_COMPOSE_NODE_ID=file\n")
+        process = {"RAMFLUX_NODE_ID": "process", "RF_COMPOSE_NODE_ID": "process"}
+        with mock.patch.dict(os.environ, process, clear=True):
+            invalid = preflight.validate_legacy_inputs(["--env-file", str(env_file)])
+        self.assertEqual(invalid, set())
 
     def test_implicit_dotenv_and_process_legacy_names_are_checked(self):
-        self.assertNotEqual(self.run_check('RAMFLUX_NODE_ID=private-name', implicit=True).returncode, 0)
-        result = self.run_check('', {'RAMFLUX_NODE_ID': 'private-name'})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('private-name', result.stderr)
+        (self.root / ".env").write_text("RAMFLUX_NODE_ID=DO_NOT_LOG\n")
+        with mock.patch.object(preflight.Path, "cwd", return_value=self.root), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIn("RAMFLUX_NODE_ID", preflight.validate_legacy_inputs([]))
+        with mock.patch.dict(os.environ, {"RAMFLUX_NODE_ID": "DO_NOT_LOG"}, clear=True):
+            self.assertIn("RAMFLUX_NODE_ID", preflight.validate_legacy_inputs(["--env-file", str(self.root / ".env")]))
 
-    def test_implicit_dotenv_comes_from_compose_project_directory(self):
-        project = self.root / 'project'
+    def test_project_directory_selects_legacy_dotenv_candidate(self):
+        project = self.root / "project"
         project.mkdir()
-        compose = project / 'compose.yaml'
-        compose.write_text('services: {}\n')
-        (project / '.env').write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), '-f', str(compose)],
-            cwd=self.root, env={'PATH': os.environ['PATH']}, text=True,
-            capture_output=True, timeout=10)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
-        self.assertNotIn('DO_NOT_LOG', result.stderr)
-
-    def test_project_directory_overrides_first_compose_file_for_dotenv(self):
-        compose_dir = self.root / 'compose'
-        project = self.root / 'project'
-        compose_dir.mkdir()
-        project.mkdir()
-        compose = compose_dir / 'compose.yaml'
-        compose.write_text('services: {}\n')
-        (compose_dir / '.env').write_text('SAFE=value\n')
-        (project / '.env').write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), '-f', str(compose),
-             '--project-directory', str(project)],
-            cwd=self.root, env={'PATH': os.environ['PATH']}, text=True,
-            capture_output=True, timeout=10)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
-        self.assertNotIn('DO_NOT_LOG', result.stderr)
+        (project / ".env").write_text("RAMFLUX_NODE_ID=DO_NOT_LOG\n")
+        with mock.patch.object(preflight.Path, "cwd", return_value=self.root), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            invalid = preflight.validate_legacy_inputs(["--project-directory", str(project)])
+        self.assertIn("RAMFLUX_NODE_ID", invalid)
 
     def test_compose_env_files_are_checked_in_order_and_missing_files_fail_closed(self):
-        first = self.root / 'first.env'
-        second = self.root / 'second.env'
-        first.write_text('RAMFLUX_NODE_ID=first\nRF_COMPOSE_NODE_ID=first\n')
-        second.write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
-        environment = {
-            'PATH': os.environ['PATH'],
-            'COMPOSE_ENV_FILES': 'first.env,second.env',
-        }
-        result = subprocess.run([sys.executable, str(SCRIPT)], cwd=self.root,
-                                env=environment, text=True, capture_output=True, timeout=10)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
-        self.assertNotIn('DO_NOT_LOG', result.stderr)
-        environment['COMPOSE_ENV_FILES'] = 'missing.env'
-        result = subprocess.run([sys.executable, str(SCRIPT)], cwd=self.root,
-                                env=environment, text=True, capture_output=True, timeout=10)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('ENV_FILE', result.stderr)
+        first = self.root / "first.env"
+        second = self.root / "second.env"
+        first.write_text("RAMFLUX_NODE_ID=first\nRF_COMPOSE_NODE_ID=first\n")
+        second.write_text("RAMFLUX_NODE_ID=second\n")
+        process = {"COMPOSE_ENV_FILES": f"{first},{second}"}
+        with mock.patch.object(preflight.Path, "cwd", return_value=self.root), \
+                mock.patch.dict(os.environ, process, clear=True):
+            invalid = preflight.validate_legacy_inputs([])
+        self.assertIn("RAMFLUX_NODE_ID", invalid)
+        with mock.patch.object(preflight.Path, "cwd", return_value=self.root), \
+                mock.patch.dict(os.environ, {"COMPOSE_ENV_FILES": "missing.env"}, clear=True):
+            with self.assertRaises(preflight.InputError):
+                preflight.validate_legacy_inputs([])
 
     def test_explicit_env_file_takes_precedence_over_compose_env_files(self):
-        explicit = self.root / 'explicit.env'
-        explicit.write_text('SAFE=value\n')
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), '--env-file', str(explicit)], cwd=self.root,
-            env={'PATH': os.environ['PATH'], 'COMPOSE_ENV_FILES': 'missing.env'},
-            text=True, capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        explicit = self.root / "explicit.env"
+        explicit.write_text("RAMFLUX_NODE_ID=same\nRF_COMPOSE_NODE_ID=same\n")
+        with mock.patch.dict(os.environ, {"COMPOSE_ENV_FILES": "missing.env"}, clear=True):
+            invalid = preflight.validate_legacy_inputs(["--env-file", str(explicit)])
+        self.assertEqual(invalid, set())
 
-    def test_compose_file_from_environment_selects_project_dotenv(self):
-        project = self.root / 'project'
-        project.mkdir()
-        (project / 'compose.yaml').write_text('services: {}\n')
-        (project / '.env').write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT)], cwd=self.root,
-            env={'PATH': os.environ['PATH'], 'COMPOSE_FILE': 'project/compose.yaml'},
-            text=True, capture_output=True, timeout=10)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
-        self.assertNotIn('DO_NOT_LOG', result.stderr)
+    def test_dotenv_quotes_multiline_escapes_and_interpolation_remain_supported(self):
+        env_file = self.root / "operator.env"
+        env_file.write_text(
+            "RF_COMPOSE_NODE_ID=${HOST_NAME:-fallback}\n"
+            "MULTILINE=\"first\\nsecond\"\n"
+            "LITERAL='${DO_NOT_EXPAND}'\n"
+        )
+        values = preflight.read_env(env_file, {}, {"HOST_NAME": "example.test"})
+        self.assertEqual(values["RF_COMPOSE_NODE_ID"], "example.test")
+        self.assertEqual(values["MULTILINE"], "first\nsecond")
+        self.assertEqual(values["LITERAL"], "${DO_NOT_EXPAND}")
 
-    def test_dotenv_compose_file_loads_new_project_dotenv_at_lower_precedence(self):
-        project = self.root / 'project'
-        project.mkdir()
-        (self.root / 'compose.yaml').write_text('services: {}\n')
-        (self.root / '.env').write_text(
-            'COMPOSE_FILE=project/compose.yaml\nRAMFLUX_NODE_ID=primary\n')
-        (project / '.env').write_text(
-            'RAMFLUX_NODE_ID=secondary\nRF_COMPOSE_NODE_ID=secondary\n')
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT)], cwd=self.root,
-            env={'PATH': os.environ['PATH']}, text=True, capture_output=True, timeout=10)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
+    def test_provider_render_uses_same_arguments_and_only_config(self):
+        rendered = subprocess.CompletedProcess([], 0, '{"services": {}}', "")
+        with mock.patch.object(preflight.subprocess, "run", return_value=rendered) as run:
+            output = preflight.render_config(
+                "docker", ["--env-file", "operator.env", "-p", "project", "-f", "compose.yml"]
+            )
+        self.assertEqual(output, rendered.stdout)
+        self.assertEqual(
+            run.call_args.args[0],
+            ["docker", "compose", "--env-file", "operator.env", "-p", "project", "-f",
+             "compose.yml", "config", "--format", "json"],
+        )
 
-    def test_disable_default_env_file_uses_only_process_environment(self):
-        (self.root / '.env').write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT)], cwd=self.root,
-            env={'PATH': os.environ['PATH'], 'COMPOSE_DISABLE_ENV_FILE': 'true'},
-            text=True, capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_docker_json_scans_public_unresolved_and_empty_security_values(self):
+        rendered = json.dumps({"services": {"one": {"environment": {
+            "RAMFLUX_FEDERATION_ADMIN_TOKEN": "  ramflux-local-admin-token  ",
+            "RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL": "",
+            "RAMFLUX_PRIVATE_PATH": "/run/${UNRESOLVED}/key",
+            "RAMFLUX_HARMLESS": "ready",
+        }}}})
+        invalid = preflight.validate_rendered(preflight.docker_environments(rendered))
+        self.assertEqual(invalid, {
+            "RAMFLUX_FEDERATION_ADMIN_TOKEN",
+            "RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL",
+            "RAMFLUX_PRIVATE_PATH",
+        })
 
-    def test_public_default_secret_is_refused_even_with_new_or_equal_names(self):
-        for text in ['RF_COMPOSE_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token',
-                     "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=' ramflux-local-admin-token '",
-                     'RAMFLUX_ROUTER_ADMIN_TOKEN=ramflux-local-admin-token\n'
-                     'RF_COMPOSE_ROUTER_ADMIN_TOKEN=ramflux-local-admin-token']:
-            result = self.run_check(text)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertNotIn('ramflux-local-admin-token', result.stderr)
+    def test_podman_yaml_scans_mapping_and_list_environments_without_yaml_dependency(self):
+        rendered = """services:
+  one:
+    environment:
+      RAMFLUX_FEDERATION_ADMIN_TOKEN: ' ramflux-local-admin-token '
+      RAMFLUX_GATEWAY_V3_ISSUER_SEED:
+  two:
+    environment:
+      - RAMFLUX_PRIVATE_PATH=/run/${UNRESOLVED}/key
+      - RAMFLUX_HARMLESS=ready
+"""
+        invalid = preflight.validate_rendered(preflight.podman_environments(rendered))
+        self.assertEqual(invalid, {
+            "RAMFLUX_FEDERATION_ADMIN_TOKEN",
+            "RAMFLUX_GATEWAY_V3_ISSUER_SEED",
+            "RAMFLUX_PRIVATE_PATH",
+        })
 
-    def test_quoted_control_escapes_cannot_hide_the_public_default_token(self):
-        for escape in ('f', 'v', 'n', 'r', 't'):
-            text = 'RF_COMPOSE_FEDERATION_ADMIN_TOKEN="' + chr(92) + escape
-            text += 'ramflux-local-admin-token' + chr(92) + escape + '"'
-            with self.subTest(escape=escape):
-                result = self.run_check(text)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn('RF_COMPOSE_FEDERATION_ADMIN_TOKEN', result.stderr)
-                self.assertNotIn('ramflux-local-admin-token', result.stderr)
+    def test_podman_yaml_allows_services_without_environment(self):
+        self.assertEqual(preflight.podman_environments("services:\n  probe:\n    image: scratch\n"), [])
 
-    def test_interpolation_uses_process_then_previous_files_and_quoted_literals_remain_literal(self):
-        values = preflight.read_env(self._file("export RF_COMPOSE_NODE_ID=${HOST_NAME:-fallback}\n"),
-                                    {}, {'HOST_NAME': 'example.test'})
-        self.assertEqual(values['RF_COMPOSE_NODE_ID'], 'example.test')
-        result = self.run_check("RF_COMPOSE_NODE_ID='${DO_NOT_LOG}'")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('DO_NOT_LOG', result.stderr)
+    def test_render_failure_reports_only_a_stable_key(self):
+        failed = subprocess.CompletedProcess([], 1, "DO_NOT_LOG", "DO_NOT_LOG")
+        with mock.patch.object(preflight.subprocess, "run", return_value=failed):
+            with self.assertRaises(preflight.InputError) as error:
+                preflight.render_config("podman-compose", [])
+        self.assertEqual(str(error.exception), "CONFIG_RENDER")
 
-    def _file(self, contents):
-        path = self.root / 'parse.env'
-        path.write_text(contents)
+
+class ProviderBypassTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="ramflux-compose-preflight-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+
+    def compose_file(self, directory):
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "compose.yaml"
+        path.write_text("""services:
+  probe:
+    image: scratch
+    environment:
+      RAMFLUX_FEDERATION_ADMIN_TOKEN: ${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:-safe-token}
+""")
         return path
 
-    def test_bad_dotenv_and_unreadable_files_do_not_echo_their_contents(self):
-        result = self.run_check('DO_NOT_LOG malformed secret')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('DO_NOT_LOG', result.stderr)
-        with self.assertRaises(preflight.InputError) as error:
-            preflight.read_env(self.root / 'absent', {}, {})
-        self.assertEqual(str(error.exception), 'ENV_FILE')
+    def test_ci_has_at_least_one_config_provider(self):
+        available = (os.environ.get("COMPOSE_TEST_DOCKER_COMPOSE")
+                     or os.environ.get("DEMO_TEST_PODMAN_COMPOSE")
+                     or shutil.which("podman-compose"))
+        if not os.environ.get("CI") and not available:
+            self.skipTest("config provider availability is required in CI")
+        self.assertTrue(available, "CI must exercise at least one Compose config provider")
+
+    def provider_environment(self, provider):
+        environment = {"HOME": str(self.root), "PATH": str(self.bin) + os.pathsep + os.environ["PATH"]}
+        if provider == "docker":
+            command = os.environ.get("COMPOSE_TEST_DOCKER_COMPOSE")
+            if not command:
+                self.skipTest("set COMPOSE_TEST_DOCKER_COMPOSE for Docker Compose config tests")
+            parts = shlex.split(command)
+            wrapper = self.bin / "docker"
+            wrapper.write_text("#!/bin/sh\n[ \"$1\" = compose ] || exit 64\nshift\nexec "
+                               + " ".join(shlex.quote(part) for part in parts) + " \"$@\"\n")
+            wrapper.chmod(0o700)
+        else:
+            command = os.environ.get("DEMO_TEST_PODMAN_COMPOSE") or shutil.which("podman-compose")
+            if not command:
+                self.skipTest("podman-compose is unavailable")
+            parts = shlex.split(command)
+            wrapper = self.bin / "podman-compose"
+            wrapper.write_text("#!/bin/sh\nexec "
+                               + " ".join(shlex.quote(part) for part in parts) + " \"$@\"\n")
+            wrapper.chmod(0o700)
+        return environment
+
+    def run_preflight(self, provider, cwd, arguments=(), environment=None, stdin=None):
+        process = self.provider_environment(provider)
+        process.update(environment or {})
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--provider", provider, *arguments],
+            cwd=cwd,
+            env=process,
+            input=stdin,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("RAMFLUX_FEDERATION_ADMIN_TOKEN", result.stderr)
+        self.assertNotIn(preflight.PUBLIC_SECRET, result.stderr)
+
+    def test_docker_process_compose_file_cannot_hide_cwd_dotenv(self):
+        self.compose_file(self.root / "project")
+        (self.root / ".env").write_text(
+            "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token\n")
+        (self.root / "project" / ".env").write_text(
+            "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=safe-token\n")
+        self.run_preflight("docker", self.root,
+                           environment={"COMPOSE_FILE": "project/compose.yaml"})
+
+    def test_docker_upward_discovery_cannot_hide_subdirectory_dotenv(self):
+        self.compose_file(self.root)
+        (self.root / ".env").write_text("RF_COMPOSE_FEDERATION_ADMIN_TOKEN=safe-token\n")
+        subdirectory = self.root / "sub"
+        subdirectory.mkdir()
+        (subdirectory / ".env").write_text(
+            "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token\n")
+        self.run_preflight("docker", subdirectory)
+
+    def test_docker_stdin_file_cannot_hide_project_dotenv(self):
+        compose = self.compose_file(self.root / "project")
+        (self.root / ".env").write_text("RF_COMPOSE_FEDERATION_ADMIN_TOKEN=safe-token\n")
+        (compose.parent / ".env").write_text(
+            "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token\n")
+        self.run_preflight("docker", self.root,
+                           arguments=("-f", "-", "-f", str(compose)), stdin="services: {}\n")
+
+    def test_podman_file_elsewhere_cannot_hide_cwd_dotenv(self):
+        compose = self.compose_file(self.root / "project")
+        (compose.parent / ".env").write_text("RF_COMPOSE_FEDERATION_ADMIN_TOKEN=safe-token\n")
+        (self.root / ".env").write_text(
+            "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token\n")
+        self.run_preflight("podman-compose", self.root, arguments=("-f", str(compose)))
+
+    def test_podman_disable_and_project_directory_cannot_hide_project_dotenv(self):
+        self.compose_file(self.root / "project")
+        (self.root / "project" / ".env").write_text(
+            "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token\n")
+        empty = self.root / "empty"
+        empty.mkdir()
+        self.run_preflight(
+            "podman-compose",
+            empty,
+            environment={"COMPOSE_DISABLE_ENV_FILE": "1", "COMPOSE_PROJECT_DIR": str(self.root / "project")},
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

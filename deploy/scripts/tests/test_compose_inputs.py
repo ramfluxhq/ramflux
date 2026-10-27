@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from test_demo_node_rendered_config import unresolved_paths
 
@@ -158,12 +159,15 @@ class RenderedComposeInputTests(unittest.TestCase):
             + "RAMFLUX_FEDERATION_TRUST_ENDPOINT=federation.example:7443\n"
             + "RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY=fixture-root\n"
             + "RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID=node.example\n")
+        spec = importlib.util.spec_from_file_location(
+            "compose_preflight", DEPLOY / "scripts/compose-preflight.py")
+        preflight = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(preflight)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            invalid = preflight.validate_legacy_inputs(["--env-file", str(env_file)])
+        self.assertTrue(set(MAPPING).issubset(invalid))
+        self.assertNotIn("DO_NOT_LOG", ",".join(invalid))
         env = {"PATH": os.environ["PATH"], "HOME": str(self.root)}
-        checked = subprocess.run([__import__('sys').executable,
-            str(DEPLOY / "scripts/compose-preflight.py"), "--env-file", str(env_file)],
-            env=env, capture_output=True, text=True, timeout=10)
-        self.assertNotEqual(checked.returncode, 0)
-        self.assertNotIn("DO_NOT_LOG", checked.stderr)
         rendered = subprocess.run(shlex.split(provider) + ["--env-file", str(env_file),
             "-f", str(DEPLOY / "docker-compose.yml"), "config"], env=env,
             capture_output=True, text=True, timeout=30)

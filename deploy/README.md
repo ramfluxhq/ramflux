@@ -302,26 +302,29 @@ Use the same user's default engine context for every operation.
 Before **every** Compose invocation (including config, logs and down), run:
 
 ```sh
-python3 deploy/scripts/compose-preflight.py --env-file /path/to/operator.env -f deploy/docker-compose.yml
-# Use exactly the same env files, in the same order, and the same process environment:
+python3 deploy/scripts/compose-preflight.py --provider docker \
+  --env-file /path/to/operator.env -f deploy/docker-compose.yml
+# Use exactly the same provider arguments and process environment:
 docker compose --env-file /path/to/operator.env -f deploy/docker-compose.yml config
 ```
 
-With no explicit env file, preflight resolves the project directory from
-`--project-directory`, the first `-f`/`--file` argument, `COMPOSE_FILE`, or Compose's
-normal upward file discovery, then reads that directory's `.env`. It also honors
-comma-separated `COMPOSE_ENV_FILES`, `COMPOSE_PATH_SEPARATOR`, and
-`COMPOSE_DISABLE_ENV_FILE`; unsupported remote Compose-file paths fail closed.
-Repeated `--env-file` arguments apply in order and process environment wins. Pass
-the same `-f`, `--project-directory`, and env-file selection to both commands.
-Use the same explicit files for Podman Compose. The demo wrapper and itest harness
-invoke preflight automatically; existing frozen demo projects must be regenerated
-through their normal `up` workflow before maintenance commands can pass migration.
+Select `docker`, `podman`, or `podman-compose` to match the command that will run.
+Preflight invokes that provider with the same Compose options and a config-only
+operation, then scans the rendered service environments. The provider therefore
+owns `.env`, `COMPOSE_ENV_FILES`, `COMPOSE_DISABLE_ENV_FILE`, project-directory,
+stdin-file, and precedence semantics. A render failure is a refusal. The preflight
+never starts containers and reports setting names rather than values. Explicit env
+files and `./.env` are also inspected for legacy-name migration as a best-effort
+check; that input-level check does not claim to reproduce provider resolution. The
+demo wrapper and itest harness invoke preflight automatically; existing frozen demo
+projects must be regenerated through their normal `up` workflow before maintenance
+commands can pass migration.
 
 Rename the outer inputs according to `deploy/compose-inputs.json` (service
 variables **inside containers** retain `RAMFLUX_*`). Legacy names without an equal
-new name, conflicting pairs, unresolved expressions and public default admin
-secrets are refused with key names only. Equal dual names support generated env
+new name and conflicting pairs are refused best-effort at the input boundary.
+Rendered unresolved expressions, empty required security inputs, and public default
+admin secrets are authoritatively refused with key names only. Equal dual names support generated env
 files consumed by other tools. Remove stale exported legacy names too. Production
 Compose now requires explicit federation/router admin tokens, signing and issuer
 material, trust/cache paths, node identity, and all advertised client endpoints;
@@ -337,6 +340,8 @@ trust and certificate file paths, fail startup rather than select another key.
 Malformed relay metadata budgets fail startup; absence (or an unresolved optional
 expression) selects the bounded default. Empty credential paths retain their
 existing explicitly-disabled semantics where supported.
+All services also refuse the known public admin-token value during startup,
+including when launched outside Compose.
 
 ### Upgrading an existing demo and private admin access
 
