@@ -82,3 +82,6 @@ impl PrimaryVault for MemoryPrimaryVault {
         BranchCredentials::from_vault_seeds(principal, device, &self.get(reference)?)
     }
 }
+
+#[cfg(test)]
+mod tests;
