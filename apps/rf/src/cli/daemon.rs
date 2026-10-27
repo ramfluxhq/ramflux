@@ -22,6 +22,9 @@ pub(crate) enum DaemonAction {
 
 #[derive(Args)]
 pub(crate) struct DaemonStart {
+    /// Enable experimental local born-v3 creation; networking remains pending.
+    #[arg(long)]
+    pub(crate) enable_born_v3_creation: bool,
     /// JSON array of client-supplied built-in profiles with factory public-key pins.
     #[arg(long)]
     pub(crate) builtin_nodes: Option<PathBuf>,

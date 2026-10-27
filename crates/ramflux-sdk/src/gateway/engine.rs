@@ -130,6 +130,9 @@ impl GatewaySessionEngine {
     /// Returns an error when the QUIC session cannot connect, authenticate, or receive
     /// `session_established`.
     pub async fn connect(config: GatewaySessionConfig) -> Result<Self, SdkError> {
+        if config.custody_networking_pending {
+            return Err(SdkError::NetworkingPending);
+        }
         let mut engine =
             gateway_session_timeout("gateway session connect", Self::connect_inner(config)).await?;
         // Outside the connect timeout and write-only: push registration never fails a connect.

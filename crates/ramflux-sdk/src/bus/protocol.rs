@@ -7,6 +7,11 @@ use crate::prelude::*;
 
 #[derive(Clone)]
 pub struct LocalBusConfig {
+    /// Explicit experimental opt-in. Created accounts remain `NetworkingPending`.
+    pub enable_born_v3_creation: bool,
+    #[cfg(test)]
+    pub(crate) custody_vault:
+        Option<std::sync::Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
@@ -1050,6 +1055,9 @@ impl LocalBusConfig {
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
         Self {
+            enable_born_v3_creation: false,
+            #[cfg(test)]
+            custody_vault: None,
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),

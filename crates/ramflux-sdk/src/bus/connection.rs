@@ -83,12 +83,13 @@ pub(super) async fn handle(
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, writer) = stream.into_split();
     let (incoming, mut frames) = mpsc::channel(64);
     let (disconnect, mut disconnected) = watch::channel(false);
     let reader_task = tokio::task::spawn_local(async move {
         loop {
-            let frame = read_local_bus_frame(&mut reader).await;
+            let frame =
+                read_local_bus_frame(&mut reader).await.map(super::custody_setup::Incoming::new);
             let failed = frame.is_err();
             if incoming.try_send(frame).is_err() || failed {
                 break;
@@ -96,28 +97,27 @@ pub(super) async fn handle(
         }
         let _ = disconnect.send(true);
     });
-    let (outbound, mut receiver) = mpsc::channel::<LocalBusFrame>(64);
-    let writer_supervisor = Rc::clone(&supervisor);
-    let writer_task = tokio::task::spawn_local(async move {
-        let _lifetime = WriterStopped { supervisor: Rc::clone(&writer_supervisor), connection: id };
-        while let Some(frame) = receiver.recv().await {
-            write_local_bus_frame(&mut writer, &frame).await?;
-            if frame.method == "daemon.stop" {
-                writer_supervisor.finish_stop_response(id, &frame.request_id);
-            }
-        }
-        Ok::<(), SdkError>(())
-    });
+    let (outbound, receiver) = mpsc::channel::<LocalBusFrame>(64);
+    let (secrets, secret_receiver) = mpsc::channel::<zeroize::Zeroizing<Vec<u8>>>(1);
+    let writer_task = tokio::task::spawn_local(write_responses(
+        writer,
+        receiver,
+        secret_receiver,
+        Rc::clone(&supervisor),
+        id,
+    ));
     let _cleanup =
         ConnectionTasks { reader: reader_task.abort_handle(), writer: writer_task.abort_handle() };
     let mut connection = LocalBusConnectionState::new(id, outbound.clone());
     let mut requests = JoinSet::new();
     let mut inflight = BTreeSet::new();
+    let mut ceremony: Option<crate::custody::CreationCeremony> = None;
     let result = loop {
         tokio::select! {
             _ = disconnected.changed() => break Ok(()),
+            () = tokio::time::sleep_until(ceremony.as_ref().map_or_else(|| tokio::time::Instant::now()+std::time::Duration::from_secs(3600), |c| c.deadline().into())), if ceremony.is_some() => { ceremony=None; },
             frame = frames.recv(), if requests.len() < 64 => {
-                let request = match frame {
+                let mut incoming = match frame {
                     None => break Ok(()),
                     Some(frame) => match frame {
                     Ok(request) => request,
@@ -125,6 +125,12 @@ pub(super) async fn handle(
                     Err(error) => break Err(error),
                     },
                 };
+                if super::custody_setup::handles(&incoming.frame()?.method) {
+                    let bytes = super::custody_setup::respond(incoming.frame()?, &supervisor.config, &mut ceremony)?;
+                    tokio::time::timeout(Duration::from_secs(10),secrets.send(bytes)).await.map_err(|_|closed())?.map_err(|_|closed())?;
+                    continue;
+                }
+                let request = incoming.take()?;
                 if let Err(error) = super::requests::deadline(&request) {
                     outbound.send(local_bus_error(&request,&error)).await.map_err(|_| closed())?;
                     continue;
@@ -218,4 +224,32 @@ impl Drop for WriterStopped {
     fn drop(&mut self) {
         self.supervisor.finish_stop_connection(self.connection);
     }
+}
+
+async fn write_responses(
+    mut writer: tokio::net::unix::OwnedWriteHalf,
+    mut receiver: mpsc::Receiver<LocalBusFrame>,
+    mut secret_receiver: mpsc::Receiver<zeroize::Zeroizing<Vec<u8>>>,
+    supervisor: Rc<Supervisor>,
+    id: u64,
+) -> Result<(), SdkError> {
+    let _lifetime = WriterStopped { supervisor: Rc::clone(&supervisor), connection: id };
+    loop {
+        let frame = tokio::select! {
+            bytes = secret_receiver.recv() => {
+                let Some(bytes) = bytes else { break; };
+                tokio::time::timeout(Duration::from_secs(10),super::io::write_encoded_local_bus_frame(&mut writer,&bytes)).await.map_err(|_|closed())??;
+                continue;
+            }
+            frame = receiver.recv() => frame,
+        };
+        let Some(frame) = frame else {
+            break;
+        };
+        write_local_bus_frame(&mut writer, &frame).await?;
+        if frame.method == "daemon.stop" {
+            supervisor.finish_stop_response(id, &frame.request_id);
+        }
+    }
+    Ok(())
 }

@@ -80,6 +80,13 @@ impl RamfluxClient {
         value: serde_json::Value,
         expected: &str,
     ) -> Result<(), SdkError> {
+        if self
+            .born_v3_account
+            .as_ref()
+            .is_some_and(|account| account.record().body.account_anchor == expected)
+        {
+            return Err(SdkError::CustodyModeDowngrade);
+        }
         let manifest = serde_json::from_value(value)?;
         verify::verify_manifest_authority(&manifest, expected)?;
         self.persist_identity_directory(&manifest)

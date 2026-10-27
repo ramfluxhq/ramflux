@@ -131,6 +131,13 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         return code;
     }
     match error {
+        SdkError::NetworkingPending => "NetworkingPending",
+        SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
+        SdkError::CustodyCreationDisabled => "CustodyCreationDisabled",
+        SdkError::CustodySetupInvalid => "CustodySetupInvalid",
+        SdkError::CustodyConfirmationFailed => "CustodyConfirmationFailed",
+        SdkError::CustodyVaultUnavailable => "CustodyVaultUnavailable",
+        SdkError::CustodyRandomUnavailable => "CustodyRandomUnavailable",
         SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
         SdkError::Storage(StorageError::Protocol(
@@ -283,7 +290,7 @@ where
     if len > MAX_LOCAL_BUS_FRAME_BYTES {
         return Err(SdkError::LocalBus(format!("local bus frame too large: {len}")));
     }
-    let mut body = vec![0_u8; len];
+    let mut body = zeroize::Zeroizing::new(vec![0_u8; len]);
     reader.read_exact(&mut body).await?;
     Ok(serde_json::from_slice(&body)?)
 }

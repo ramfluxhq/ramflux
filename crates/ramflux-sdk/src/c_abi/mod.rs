@@ -817,6 +817,12 @@ fn clear_optional_out_error(out_error_json: *mut *mut RamfluxBuffer) {
 fn map_sdk_error(error: &SdkError) -> CAbiError {
     let message = error.to_string();
     let code = match error {
+        SdkError::NetworkingPending | SdkError::CustodyModeDowngrade => {
+            RamfluxErrorCode::UnsupportedVersion
+        }
+        SdkError::CustodyCreationDisabled => RamfluxErrorCode::CapabilityRejected,
+        SdkError::CustodyConfirmationFailed => RamfluxErrorCode::AuthFailed,
+        SdkError::CustodyRandomUnavailable => RamfluxErrorCode::CryptoFailed,
         SdkError::Crypto(_) | SdkError::SignatureVerificationFailed(_) => {
             RamfluxErrorCode::CryptoFailed
         }
@@ -844,14 +850,16 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
             RamfluxErrorCode::InvalidCanonicalJson
         }
         SdkError::Io(_) => RamfluxErrorCode::Internal,
-        SdkError::Sync(_)
+        SdkError::CustodyVaultUnavailable
+        | SdkError::Sync(_)
         | SdkError::CapabilityDenied(_)
         | SdkError::GrantInvalidated
         | SdkError::RemoteAppApprovalRequired
         | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
         SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
         | SdkError::ContactRequestCapacity(_) => RamfluxErrorCode::RateLimited,
-        SdkError::SurfaceRefused { .. }
+        SdkError::CustodySetupInvalid
+        | SdkError::SurfaceRefused { .. }
         | SdkError::TaskRefused { .. }
         | SdkError::TaskDeliveryTooLarge { .. }
         | SdkError::SurfaceDeliveryTooLarge { .. }

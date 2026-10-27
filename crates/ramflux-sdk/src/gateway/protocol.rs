@@ -64,6 +64,7 @@ impl GatewaySessionTransportKind {
 
 #[derive(Clone, Debug)]
 pub struct GatewaySessionConfig {
+    pub(crate) custody_networking_pending: bool,
     pub transport_kind: GatewaySessionTransportKind,
     pub bind_addr: SocketAddr,
     pub gateway_addr: SocketAddr,
@@ -167,6 +168,7 @@ impl GatewaySessionConfig {
     fn from_parts(parts: GatewaySessionConfigParts) -> Self {
         let now = now_unix_timestamp();
         Self {
+            custody_networking_pending: false,
             transport_kind: parts.transport_kind,
             bind_addr: parts.bind_addr,
             gateway_addr: parts.gateway_addr,
@@ -214,10 +216,21 @@ impl GatewaySessionConfig {
         self,
         client: &crate::RamfluxClient,
     ) -> Result<Self, crate::SdkError> {
+        client.require_legacy_networking()?;
         self.with_owned_device(
             client.identity_root.as_ref().ok_or(crate::SdkError::IdentityRootMissing)?,
             client.device_branch.as_ref().ok_or(crate::SdkError::IdentityRootMissing)?.clone(),
         )
+    }
+
+    /// Select born-v3 authority without permitting any transport attempt or legacy proof.
+    #[must_use]
+    pub fn with_born_v3_account(mut self, account: &crate::custody::BornAccount) -> Self {
+        self.custody_networking_pending = true;
+        self.principal_id.clone_from(&account.record().body.principal_id);
+        self.device_branch = None;
+        self.source_identity = None;
+        self
     }
 
     /// Bind gateway attribution to a device under the account's owned root.
@@ -228,6 +241,9 @@ impl GatewaySessionConfig {
         root: &ramflux_crypto::IdentityRoot,
         branch: ramflux_crypto::DeviceBranch,
     ) -> Result<Self, crate::SdkError> {
+        if self.custody_networking_pending {
+            return Err(crate::SdkError::NetworkingPending);
+        }
         let source_identity =
             ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(root, &branch)?;
         let mut config = self.with_device_branch(branch);

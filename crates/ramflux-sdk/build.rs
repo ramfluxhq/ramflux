@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
     println!("cargo:rerun-if-changed=src/c_abi");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
@@ -16,7 +17,11 @@ fn main() {
             return;
         }
     };
-    let target_dir = std::path::Path::new(&manifest_dir).join("target/include");
+    let target_root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || std::path::Path::new(&manifest_dir).join("target"),
+        std::path::PathBuf::from,
+    );
+    let target_dir = target_root.join("include");
     if let Err(error) = std::fs::create_dir_all(&target_dir) {
         println!("cargo:warning=failed to create cbindgen output dir: {error}");
         return;

@@ -7,6 +7,20 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("born-v3 networking is pending implementation; legacy proofs are forbidden")]
+    NetworkingPending,
+    #[error("born-v3 cannot accept legacy authority")]
+    CustodyModeDowngrade,
+    #[error("born-v3 creation is disabled")]
+    CustodyCreationDisabled,
+    #[error("invalid or expired custody setup")]
+    CustodySetupInvalid,
+    #[error("recovery confirmation failed; setup cancelled")]
+    CustodyConfirmationFailed,
+    #[error("non-synchronizing primary vault unavailable; no file fallback")]
+    CustodyVaultUnavailable,
+    #[error("custody randomness unavailable")]
+    CustodyRandomUnavailable,
     #[error("account not open: {0}")]
     AccountNotOpen(String),
     #[error("{code}: {message}")]

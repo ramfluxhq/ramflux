@@ -8,6 +8,7 @@ mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;
 mod client;
+pub mod custody;
 mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};
 mod constants;
