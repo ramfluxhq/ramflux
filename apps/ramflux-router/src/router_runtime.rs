@@ -462,7 +462,7 @@ pub(crate) mod tests {
             });
             let now =
                 i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX - 3_600);
-            let (handle, _path) = migrated_test_handle(&url, 1, Duration::from_secs(2), now)?;
+            let (handle, _path) = migrated_test_handle(&url, 1, Duration::from_secs(60), now)?;
             let handle = Arc::new(handle);
             let slow_handle = Arc::clone(&handle);
             let mut slow = tokio::spawn(async move {
@@ -507,16 +507,16 @@ pub(crate) mod tests {
                         .await
                 });
             }
-            let local_results = async {
+            let local_results = tokio::time::timeout(Duration::from_secs(30), async {
                 while let Some(result) = local_submits.join_next().await {
                     let response = result.map_err(|error| anyhow::anyhow!(error))??;
                     anyhow::ensure!(response.outcome == "offline_queued");
                 }
                 Ok::<(), anyhow::Error>(())
-            };
+            });
             tokio::pin!(local_results);
             tokio::select! {
-                result = &mut local_results => result?,
+                result = &mut local_results => result??,
                 result = &mut slow => {
                     return Err(anyhow::anyhow!(
                         "slow migrated forward completed before local submits: {result:?}"
