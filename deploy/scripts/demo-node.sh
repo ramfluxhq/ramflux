@@ -286,31 +286,35 @@ check_resources() {
   done
 }
 compose() (
+  operation=$1
   cd "$state"
   case "$compose_provider" in
     docker-v2|docker-wrapper) preflight_provider=docker ;;
     podman-compose) preflight_provider=podman-compose ;;
     podman-wrapper) preflight_provider=podman ;;
   esac
+  set -- --env-file "$state/runtime.env" -p "$DEMO_PROJECT" -f "$state/compose.yml"
   if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
-    clean_env python3 "$script_dir/compose-preflight.py" \
-      --provider "$preflight_provider" --env-file "$state/runtime.env" \
-      -p "$DEMO_PROJECT" -f "$state/compose.yml" -f "$state/compose.voice.yml" \
-      -f "$state/demo-override.json" || exit 1
-  else
-    clean_env python3 "$script_dir/compose-preflight.py" \
-      --provider "$preflight_provider" --env-file "$state/runtime.env" \
-      -p "$DEMO_PROJECT" -f "$state/compose.yml" \
-      -f "$state/demo-override.json" || exit 1
+    set -- "$@" -f "$state/compose.voice.yml"
   fi
-  set -- -f "$state/demo-override.json" "$@"
   if [ -n "$DEMO_ADMIN_LOOPBACK_PORT" ]; then
-    set -- -f "$state/compose.admin.yml" "$@"
+    set -- "$@" -f "$state/compose.admin.yml"
   fi
-  if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
-    set -- -f "$state/compose.voice.yml" "$@"
-  fi
-  set -- --env-file "$state/runtime.env" -p "$DEMO_PROJECT" -f "$state/compose.yml" "$@"
+  set -- "$@" -f "$state/demo-override.json"
+  clean_env python3 "$script_dir/compose-preflight.py" \
+    --provider "$preflight_provider" "$@" || exit 1
+  case "$operation" in
+    up-build) set -- "$@" up -d --build ;;
+    up-no-build) set -- "$@" up -d --no-build ;;
+    health-ps|status) set -- "$@" ps ;;
+    health-logs) set -- "$@" logs --tail 50 ;;
+    logs) set -- "$@" logs --tail 200 ;;
+    down)
+      set -- "$@" down
+      if [ "$flag" = --purge ]; then set -- "$@" --volumes; fi
+      ;;
+    *) fail 'unsupported Compose operation' ;;
+  esac
   case "$compose_provider" in
     docker-v2|docker-wrapper) clean_env docker compose "$@" ;;
     podman-compose) clean_env podman-compose "$@" ;;
@@ -391,8 +395,8 @@ wait_for_services() {
     fi
     if [ "$health_result" -eq 2 ] || [ "$(date +%s)" -ge "$health_deadline" ]; then
       printf 'demo health wait failed: %s\n' "$health_problem" >&2
-      compose ps >&2 || true
-      compose logs --tail 50 >&2 || true
+      compose health-ps >&2 || true
+      compose health-logs >&2 || true
       return 1
     fi
     printf 'waiting for demo health: %s\n' "$health_problem"
@@ -501,16 +505,16 @@ ENV
     python3 "$script_dir/compose-env.py" "$state/runtime.env"
     if [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
       check_prebuilt_images
-      compose up -d --no-build
+      compose up-no-build
     else
       sh "$script_dir/build-prod-images.sh"
-      compose up -d --build
+      compose up-build
     fi
     wait_for_services
     printf 'demo URL: %s\n' "$origin"
     ;;
   status)
-    compose ps
+    compose status
     # Compose ps alone exits zero even when services are stopped.
     health_verbose=1
     if inspect_services; then :; else fail "$health_problem"; fi
@@ -518,10 +522,10 @@ ENV
     . "$state/identity.env"
     "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
     ;;
-  logs) compose logs --tail 200 ;;
+  logs) compose logs ;;
   down)
     if [ "$flag" = --purge ]; then
-      compose down --volumes
+      compose down
       rm -rf -- "$state"
     else
       compose down
