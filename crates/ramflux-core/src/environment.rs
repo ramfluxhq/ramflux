@@ -35,10 +35,11 @@ pub const OPTIONAL_EXPRESSION_KEYS: &[&str] = &[
 /// # Errors
 /// Returns only the setting name for an unresolved value outside the optional allowlist.
 pub fn validate_input(name: &str, value: &std::ffi::OsStr) -> Result<(), String> {
-    if value.as_encoded_bytes().windows(2).any(|pair| pair == b"${")
-        && !OPTIONAL_EXPRESSION_KEYS.contains(&name)
-    {
-        return Err(format!("unexpanded environment setting: {name}"));
+    if value.as_encoded_bytes().windows(2).any(|pair| pair == b"${") {
+        if !OPTIONAL_EXPRESSION_KEYS.contains(&name) {
+            return Err(format!("unexpanded environment setting: {name}"));
+        }
+        warn_invalid(name);
     }
     Ok(())
 }
