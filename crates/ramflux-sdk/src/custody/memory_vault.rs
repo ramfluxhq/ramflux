@@ -89,3 +89,6 @@ impl PrimaryVault for MemoryPrimaryVault {
         entries.get(reference).cloned().ok_or(SdkError::CustodyVaultUnavailable)
     }
 }
+
+#[cfg(test)]
+mod tests;
