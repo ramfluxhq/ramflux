@@ -40,7 +40,7 @@ impl AccountWriter {
         }
         let file = options.open(&path)?;
         if let Err(error) = file.try_lock_exclusive() {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
+            if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
                 return Err(StorageError::AccountWriterBusy(account.to_owned()));
             }
             return Err(error.into());

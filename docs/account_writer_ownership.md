@@ -21,7 +21,8 @@ has finished closing the database.
 This is a kernel descriptor lease, with event-based expiry rather than a clock
 TTL: ownership expires on the final writer descriptor closing or process exit,
 including abnormal termination. A live but hung owner retains ownership; stop or
-terminate that process, wait for it to exit, then retry opening the account.
+terminate that process (`kill -TERM <owner-pid>` on Unix, or the service
+supervisor's stop command), wait for it to exit, then retry opening the account.
 Elapsed time, a PID file and a file's modification time never authorize takeover.
 There is no heartbeat or stored expiry to restore. Startup never deletes or
 recreates an existing lock file to recover ownership. Deleting the inode while an
