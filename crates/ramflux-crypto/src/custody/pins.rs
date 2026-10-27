@@ -145,7 +145,7 @@ impl AuthorityPins {
     pub fn conflict_evidence(&self, anchor: &str, range: u64) -> Option<&CustodyConflictEvidence> {
         self.accounts.get(anchor)?.conflicts.get(&range)
     }
-    /// Number of accepted-record copies or conflict pairs discarded by retention bounds.
+    /// Number of full conflict pairs discarded to enforce evidence retention bounds.
     #[must_use]
     pub fn pruned_evidence(&self, anchor: &str) -> u64 {
         self.accounts.get(anchor).map_or(0, |pin| pin.pruned_evidence)
@@ -283,7 +283,6 @@ fn same_range_record<'a>(
 fn prune_evidence(pin: &mut AccountPin, retained_conflict: Option<u64>) -> Result<(), CryptoError> {
     // current_record already retains the accepted head for same-range conflict pairing.
     // Superseded accepted copies must never displace evidence of a fenced range.
-    pin.pruned_evidence = pin.pruned_evidence.saturating_add(pin.range_records.len() as u64);
     pin.range_records.clear();
     let mut bytes = ramflux_protocol::canonical_json_bytes(&pin.conflicts)?.len();
     while pin.conflicts.len() > MAX_CONFLICT_RANGES || bytes + 5 > MAX_CONFLICT_EVIDENCE_BYTES {
