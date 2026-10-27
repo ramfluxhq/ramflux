@@ -189,6 +189,70 @@ else:
         self.assertNotIn("RAMFLUX_FEDERATION_ADMIN_PORT=", runtime)
         self.assertFalse(any("down" in command or "rm" in command for command in self.commands()))
 
+    def test_explicit_upgrade_and_rollback_preserve_identity_and_frozen_settings(self):
+        self.run_script("up")
+        identity = {name: (self.state / name).read_bytes() for name in (
+            "identity.env", "owner.token", "certs/ca.pem",
+        )}
+        original_owner = json.loads((self.state / "owner.json").read_text())
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+
+        refused = self.run_script("up", success=False)
+        self.assertIn("use upgrade for DEMO_VERSION only", refused.stderr)
+        self.assertEqual(json.loads((self.state / "owner.json").read_text()), original_owner)
+
+        upgraded = self.run_script("upgrade")
+        self.assertIn("rollback command:", upgraded.stdout)
+        owner = json.loads((self.state / "owner.json").read_text())
+        self.assertEqual(owner["settings"]["DEMO_VERSION"], "demo-v2")
+        self.assertEqual(owner["version_history"], ["demo-test"])
+        self.assertIn("RAMFLUX_VERSION=demo-v2", (self.state / "runtime.env").read_text())
+        for name, value in identity.items():
+            self.assertEqual((self.state / name).read_bytes(), value)
+
+        with self.env_file.open("a") as output:
+            output.write("DEMO_HOST=changed.example.org\n")
+        refused = self.run_script("upgrade", success=False)
+        self.assertIn("changed beyond DEMO_VERSION", refused.stderr)
+        self.env_file.write_text(self.env_file.read_text().replace(
+            "DEMO_HOST=changed.example.org\n", ""))
+
+        rolled_back = self.run_script("rollback")
+        self.assertIn("rolled back demo images to version demo-test", rolled_back.stdout)
+        owner = json.loads((self.state / "owner.json").read_text())
+        self.assertEqual(owner["settings"]["DEMO_VERSION"], "demo-test")
+        self.assertEqual(owner["version_history"], [])
+        self.assertIn("RAMFLUX_VERSION=demo-test", (self.state / "runtime.env").read_text())
+        self.assertIn("--no-build", self.compose_commands()[-1])
+        for name, value in identity.items():
+            self.assertEqual((self.state / name).read_bytes(), value)
+        self.assertIn("use upgrade for DEMO_VERSION only",
+                      self.run_script("status", success=False).stderr)
+        self.env_file.write_text(self.env_file.read_text().replace(
+            "DEMO_VERSION=demo-v2\n", "DEMO_VERSION=demo-test\n"))
+        self.run_script("status")
+
+    def test_prebuilt_upgrade_requires_all_seven_versioned_images(self):
+        self.run_script("up")
+        owner = (self.state / "owner.json").read_bytes()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\nDEMO_PREBUILT_IMAGES=1\n")
+        missing = "ghcr.io/ramfluxhq/ramflux-retention:demo-v2"
+        self.control.write_text(json.dumps({"missing_images": [missing]}))
+        self.journal.write_text("")
+        result = self.run_script("upgrade", success=False)
+        self.assertIn(missing, result.stderr)
+        self.assertEqual((self.state / "owner.json").read_bytes(), owner)
+        self.assertFalse(any("up" in args for args in self.compose_commands()))
+
+        self.control.write_text("{}")
+        result = self.run_script("upgrade")
+        self.assertIn("rollback command:", result.stdout)
+        inspect_images = [args[2] for args in self.commands() if args[:2] == ["image", "inspect"]]
+        self.assertEqual(len(inspect_images), 14)
+        self.assertIn("--no-build", self.compose_commands()[-1])
+
     def test_admin_opt_in_uses_saved_overlay_and_refuses_conflicting_ports(self):
         with self.env_file.open("a") as output:
             output.write("DEMO_ADMIN_LOOPBACK_PORT=59487\n")
