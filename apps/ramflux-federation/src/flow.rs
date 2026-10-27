@@ -369,6 +369,7 @@ fn spooled_forward_response(
         source_node_id: signed_request.source_node_id.clone(),
         target_node_id: signed_request.target_node_id.clone(),
         delivery: ramflux_node_core::EnvelopeSubmitResponse {
+            migration_refusal: None,
             outcome: "federation_spooled_offline_peer".to_owned(),
             target_delivery_id: signed_request.envelope.target_delivery_id.clone(),
             inbox_seq: None,
@@ -583,6 +584,7 @@ fn duplicate_forward_response(
         source_node_id: request.source_node_id.clone(),
         target_node_id: request.target_node_id.clone(),
         delivery: ramflux_node_core::EnvelopeSubmitResponse {
+            migration_refusal: None,
             outcome: "duplicate_federated_forward".to_owned(),
             target_delivery_id: request.envelope.target_delivery_id.clone(),
             inbox_seq: None,
@@ -906,6 +908,7 @@ mod tests {
                     ) {
                         ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => {
                             Ok(ramflux_node_core::EnvelopeSubmitResponse {
+                                migration_refusal: None,
                                 outcome: "offline_queued".to_owned(),
                                 target_delivery_id: queued.entry.target_delivery_id,
                                 inbox_seq: Some(queued.entry.inbox_seq),

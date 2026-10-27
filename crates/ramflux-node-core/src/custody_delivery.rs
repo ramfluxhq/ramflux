@@ -41,6 +41,19 @@ pub(crate) fn submit(
         &cert.branch_signing_public_key,
     )
     .map_err(invalid)?;
+    let lease = match store.acquire_submission(&envelope.target_delivery_id) {
+        Ok(lease) => lease,
+        Err(crate::NodeCoreError::HomeMigration(reason)) => {
+            let response = router
+                .migration_submission_refusal(store, &envelope, reason, now)
+                .map_err(|_| CustodyRefusal::PersistenceUnavailable)?;
+            return Err(CustodyRefusal::HomeMigration {
+                reason,
+                nack: response.nack.map(Box::new),
+            });
+        }
+        Err(_) => return Err(CustodyRefusal::PersistenceUnavailable),
+    };
     if store
         .custody_prekey(&envelope.target_delivery_id)
         .map_err(|_| CustodyRefusal::PersistenceUnavailable)?
@@ -67,7 +80,9 @@ pub(crate) fn submit(
         RouterSubmitOutcome::OfflineQueued(queued) => (queued.entry, "offline_queued"),
         _ => return Err(CustodyRefusal::InvalidInput),
     };
-    if let Err(error) = store.record_submission_increment(&replay, expiry, Some(&entry)) {
+    if let Err(error) =
+        store.record_leased_submission(&replay, expiry, Some(&entry), None, Some(lease))
+    {
         tracing::error!(%error,"custody inbox persistence failed after acceptance; terminating to avoid a state fork");
         std::process::abort();
     }

@@ -145,14 +145,31 @@ impl RouterCore {
         let auth = &sealed.authorization;
         let seal = &sealed.seal;
         let a = &auth.body;
+        let now = store.migration_clock_floor(now)?;
+        // Permanent outcomes survive custody-record pruning and bypass all mailbox work.
+        if let Some(record) = store.committed_migration_authorization(auth)? {
+            return Ok(record);
+        }
+        // Reject forged, expired and stale requests before waiting on any mailbox or scanning.
+        self.with_migration_authority(&a.account_anchor, now, |authority, _publication| {
+            validate_commit_request(store, node, sealed, peer, authority, now)
+        })?;
+        let _submissions = store.migration_submission_barrier(&sealed.delivery_map)?;
+        // A competing commit/cancel/recovery may have won while this writer waited.
+        if let Some(record) = store.committed_migration_authorization(auth)? {
+            return Ok(record);
+        }
+        self.with_migration_authority(&a.account_anchor, now, |authority, _publication| {
+            validate_commit_request(store, node, sealed, peer, authority, now)
+        })?;
+        // No custody control lock or redb writer is held while collecting the account view.
+        let cursors = store.migration_backlog_barrier(
+            &a.account_anchor,
+            &a.migration_id,
+            &sealed.delivery_map,
+            now,
+        )?;
         self.with_migration_authority(&a.account_anchor, now, |authority, publication| {
-            let _submissions = store.migration_submission_barrier(&sealed.delivery_map)?;
-            let cursors = store.migration_backlog_barrier(
-                &a.account_anchor,
-                &a.migration_id,
-                &sealed.delivery_map,
-                now,
-            )?;
             let tx = store.migration_db().begin_write().map_err(storage)?;
             let now = clock(&tx, now)?;
             let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Source)?;
@@ -221,6 +238,7 @@ impl RouterCore {
                 SourceCommit { sealed, base: current, evidence: &evidence, cursors: &cursors, now },
             )?;
             commit_transition(store, tx)?;
+            store.cache_migration_routes(&sealed.delivery_map, false, true)?;
             Ok(evidence)
         })
     }
@@ -233,25 +251,9 @@ impl RouterCore {
         node: &MigrationNode,
         input: CommitMigration<'_>,
         now: u64,
-        cancel: bool,
+        cancel: Option<&Signed<ramflux_protocol::home_migration::Control>>,
     ) -> Result<FenceOutcome, NodeCoreError> {
-        self.with_migration_authority(
-            &input.sealed.authorization.body.account_anchor,
-            now,
-            |authority, _publication| {
-                verify_sealed(node, input.sealed, input.peer, authority, false)?;
-                super::fence::fence_authorization(
-                    store,
-                    node,
-                    super::fence::FenceDecision {
-                        authorization: &input.sealed.authorization,
-                        cancel,
-                        authority,
-                    },
-                    now,
-                )
-            },
-        )
+        self.fence_home_authorization(store, node, &input.sealed.authorization, now, cancel)
     }
 }
 
@@ -470,5 +472,46 @@ fn persist_source_commit(
             expires_at: source.expires_at,
         },
     )?;
+    Ok(())
+}
+
+impl RouterRedbStore {
+    /// Look up an immutable authorization outcome without requiring a live custody account.
+    pub(crate) fn committed_migration_authorization(
+        &self,
+        auth: &Signed<super::Authorization>,
+    ) -> Result<Option<RecordEvidence>, NodeCoreError> {
+        match self.terminal_migration_authorization(auth)? {
+            Some(FenceOutcome::Committed(record)) => Ok(Some(*record)),
+            Some(FenceOutcome::Fenced(_)) => Err(refusal(Refusal::CommitExpired)),
+            None => Ok(None),
+        }
+    }
+}
+
+fn validate_commit_request(
+    store: &RouterRedbStore,
+    node: &MigrationNode,
+    sealed: &super::SealedMigration,
+    peer: MigrationPeer<'_>,
+    authority: &VerifiedRecord,
+    now: u64,
+) -> Result<(), NodeCoreError> {
+    let auth = &sealed.authorization;
+    let a = &auth.body;
+    let seal = &sealed.seal;
+    crypto::verify_authorization(auth, authority, now).map_err(auth_error)?;
+    verify_sealed(node, sealed, peer, authority, true)?;
+    crypto::commit_bounds(a, &sealed.offer.body, &seal.body, now)
+        .map_err(|_| refusal(Refusal::CommitExpired))?;
+    let current = store
+        .migration_home(&a.account_anchor)?
+        .ok_or_else(|| refusal(Refusal::HomeGenesisRequired))?;
+    if record_hash(&current.record).map_err(storage)? != a.previous_home_hash
+        || current.record.epoch().checked_add(1) != Some(a.next_home_epoch)
+        || current.record.home() != (node.node_id(), node.public_key())
+    {
+        return Err(refusal(Refusal::BaseMismatch));
+    }
     Ok(())
 }

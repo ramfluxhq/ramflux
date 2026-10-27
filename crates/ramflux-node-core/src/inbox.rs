@@ -114,6 +114,8 @@ impl CursorAckState {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EnvelopeSubmitResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_refusal: Option<ramflux_protocol::home_migration::Refusal>,
     pub outcome: String,
     pub target_delivery_id: String,
     pub inbox_seq: Option<u64>,

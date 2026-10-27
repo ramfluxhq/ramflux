@@ -230,22 +230,62 @@ impl RouterRedbStore {
         };
         Ok(table.get(anchor).map_err(storage)?.is_some())
     }
+    pub(crate) fn load_inactive_migration_targets(
+        db: &redb::Database,
+    ) -> Result<std::collections::BTreeMap<String, Refusal>, NodeCoreError> {
+        let tx = db.begin_read().map_err(storage)?;
+        let table = match tx.open_table(TARGETS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Ok(std::collections::BTreeMap::default());
+            }
+            Err(error) => return Err(storage(error)),
+        };
+        let mut inactive = std::collections::BTreeMap::new();
+        for row in table.iter().map_err(storage)? {
+            let (target, value) = row.map_err(storage)?;
+            let route = decode::<InboxRoute>(value.value())?;
+            if !route.active {
+                let migrated = match tx.open_table(HEADS) {
+                    Ok(table) => table.get(route.anchor.as_str()).map_err(storage)?
+                        .map(|value| decode::<RecordEvidence>(value.value())).transpose()?
+                        .is_some_and(|head| matches!(&head.record, HomeRecord::Committed { authorization, .. }
+                            if head.record.epoch() == route.epoch && authorization.body.migration_id == route.migration_id)),
+                    Err(redb::TableError::TableDoesNotExist(_)) => false,
+                    Err(error) => return Err(storage(error)),
+                };
+                inactive.insert(
+                    target.value().to_owned(),
+                    if migrated { Refusal::HomeMigrated } else { Refusal::DormantInbox },
+                );
+            }
+        }
+        Ok(inactive)
+    }
+    pub(crate) fn cache_migration_routes(
+        &self,
+        map: &[super::DeliveryMapEntry],
+        active: bool,
+        migrated: bool,
+    ) -> Result<(), NodeCoreError> {
+        let mut targets = self.inactive_migration_targets.write().map_err(storage)?;
+        for entry in map {
+            if active {
+                targets.remove(&entry.target_delivery_id);
+            } else {
+                targets.insert(
+                    entry.target_delivery_id.clone(),
+                    if migrated { Refusal::HomeMigrated } else { Refusal::DormantInbox },
+                );
+            }
+        }
+        Ok(())
+    }
     /// Dormant mapped routes cannot return delivery ACKs before proof activation.
     /// # Errors
     /// Propagates durable read/decode failures.
     pub fn home_migration_target_active(&self, target: &str) -> Result<bool, NodeCoreError> {
-        let tx = self.migration_db().begin_read().map_err(storage)?;
-        let table = match tx.open_table(TARGETS) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(true),
-            Err(e) => return Err(storage(e)),
-        };
-        Ok(table
-            .get(target)
-            .map_err(storage)?
-            .map(|v| decode::<InboxRoute>(v.value()))
-            .transpose()?
-            .is_none_or(|route| route.active))
+        Ok(!self.inactive_migration_targets.read().map_err(storage)?.contains_key(target))
     }
 }
 

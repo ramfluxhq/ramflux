@@ -422,17 +422,7 @@ fn three_missed_moves_with_primary_replacement_verify_and_destination_replay_fai
         NOW + 2 * FORWARD_SECONDS + 2,
     )?;
     let result = ResolveResult { home: third, predecessors: vec![genesis, first, second] };
-    let anchor = &authority.envelope().body.account_anchor;
-    let pin = public(8);
-    let trust = HomeTrust {
-        account_anchor: anchor,
-        node_id: "A",
-        node_key: &pin,
-        home_epoch: 0,
-        home_hash: None,
-        cached_manager_range: 0,
-        cached_manager_certificate_hash: None,
-    };
+    let trust = result.predecessors[0].clone();
     let verified = verify_home_chain(&result, &trust, NOW + 2 * FORWARD_SECONDS + 2)?;
     assert_eq!(verified.epoch(), 3);
     assert_eq!(verified.home(), ("D", public(11).as_str()));

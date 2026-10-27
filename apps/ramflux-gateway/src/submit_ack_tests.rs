@@ -221,6 +221,7 @@ async fn serve_connection(
                         .write_postcard_response(
                             200,
                             &EnvelopeSubmitResponse {
+                                migration_refusal: None,
                                 outcome: outcome.into(),
                                 target_delivery_id: envelope.target_delivery_id,
                                 inbox_seq: Some(9),
@@ -253,6 +254,7 @@ async fn serve_connection(
                     .write_postcard_response(
                         200,
                         &EnvelopeSubmitResponse {
+                            migration_refusal: None,
                             outcome: "online".into(),
                             target_delivery_id: entry.target_delivery_id,
                             inbox_seq: Some(entry.inbox_seq),
@@ -299,6 +301,7 @@ fn submit_confirmation_requires_an_accepted_outcome_matching_target_and_committe
 -> anyhow::Result<()> {
     let envelope = test_envelope(100)?;
     let accepted = EnvelopeSubmitResponse {
+        migration_refusal: None,
         outcome: "online".into(),
         target_delivery_id: envelope.target_delivery_id.clone(),
         inbox_seq: Some(1),

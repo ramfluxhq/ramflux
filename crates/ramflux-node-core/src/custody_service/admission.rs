@@ -102,23 +102,13 @@ impl CustodyService {
                 .map_err(invalid)?
                 .ok_or(CustodyRefusal::AuthorityUnavailable)?,
         };
-        let current = !matches!(attempt.action, CustodyProofAction::Publish { .. });
-        let authority = if matches!(attempt.action, CustodyProofAction::HomeMigration { .. }) {
-            if self.migration.is_none() || proof.body.binding_mode == BindingMode::NoChannelBinding
-            {
-                return Err(CustodyRefusal::BindingRefused);
-            }
-            if ramflux_protocol::canonical_json_bytes(&publication).map_err(invalid)?.len()
-                > 64 * 1024
-            {
-                return Err(CustodyRefusal::Capacity);
-            }
-            router.verify_migration_possession_authority(&publication, now).map_err(invalid)?
-        } else {
-            router
-                .verify_custody_possession_authority(&publication, now, current)
-                .map_err(invalid)?
-        };
+        let authority = self.possession_authority(
+            router,
+            &publication,
+            &attempt.action,
+            proof.body.binding_mode,
+            now,
+        )?;
         let historical = receipt
             .as_ref()
             .map(|receipt| {
@@ -183,6 +173,29 @@ impl CustodyService {
             attempt,
             Possession { publication: &publication, authority: &authority, holder, source },
         )
+    }
+    fn possession_authority(
+        &self,
+        router: &crate::RouterCore,
+        publication: &CustodyPublication,
+        action: &CustodyProofAction,
+        binding_mode: BindingMode,
+        now: u64,
+    ) -> Result<VerifiedRecord, CustodyRefusal> {
+        let current = !matches!(*action, CustodyProofAction::Publish { .. });
+        if matches!(*action, CustodyProofAction::HomeMigration { .. }) {
+            if self.migration.is_none() || binding_mode == BindingMode::NoChannelBinding {
+                return Err(CustodyRefusal::BindingRefused);
+            }
+            if ramflux_protocol::canonical_json_bytes(&publication).map_err(invalid)?.len()
+                > 64 * 1024
+            {
+                return Err(CustodyRefusal::Capacity);
+            }
+            router.verify_migration_possession_authority(publication, now).map_err(invalid)
+        } else {
+            router.verify_custody_possession_authority(publication, now, current).map_err(invalid)
+        }
     }
     fn finish_proof(
         &self,
@@ -505,9 +518,17 @@ impl CustodyService {
             branch_key,
         )
         .map_err(invalid)?;
+        let lease = store.acquire_acknowledgement(&session.target_delivery_id).map_err(
+            |error| match error {
+                crate::NodeCoreError::HomeMigration(reason) => {
+                    CustodyRefusal::HomeMigration { reason, nack: None }
+                }
+                _ => CustodyRefusal::PersistenceUnavailable,
+            },
+        )?;
         let cursor =
             router.apply_ack_for_target(&session.target_delivery_id, ack).map_err(invalid)?;
-        if let Err(error) = store.record_ack_increment(&cursor, &ack.envelope_id) {
+        if let Err(error) = store.record_leased_ack(&cursor, &ack.envelope_id, lease) {
             tracing::error!(%error,"custody ACK persistence failed; terminating to avoid a state fork");
             std::process::abort();
         }

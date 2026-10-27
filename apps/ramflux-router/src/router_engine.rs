@@ -29,6 +29,7 @@ pub(crate) fn submit_envelope(
         Ok(source) => source,
         Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
             return Ok(ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "rejected_capacity".into(),
                 target_delivery_id: envelope.target_delivery_id,
                 inbox_seq: None,
@@ -39,6 +40,10 @@ pub(crate) fn submit_envelope(
         Err(error) => return Err(error.into()),
     };
     state.refresh_registered_envelope_authority(&mut envelope)?;
+    let submission = match store.acquire_submission(&envelope.target_delivery_id) {
+        Ok(lease) => lease,
+        Err(error) => return submission_refusal(state, store, &envelope, error),
+    };
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let sender_root_commitment = source.root_commitment().to_owned();
     let replay_expires_at = envelope
@@ -74,11 +79,12 @@ pub(crate) fn submit_envelope(
     let save_started = Instant::now();
     let persistent_entry = persistent_entry_from_outcome(&outcome);
     if should_persist_submission(&outcome)
-        && let Err(error) = store.record_submission_increment_for_sender(
+        && let Err(error) = store.record_leased_submission(
             &replay_key,
             replay_expires_at,
             persistent_entry.as_ref(),
             Some(&sender_root_commitment),
+            Some(submission),
         )
     {
         tracing::error!(
@@ -150,6 +156,7 @@ pub(crate) async fn submit_envelope_async(
         Ok(source) => source,
         Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
             return Ok(ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "rejected_capacity".into(),
                 target_delivery_id: envelope.target_delivery_id,
                 inbox_seq: None,
@@ -160,6 +167,10 @@ pub(crate) async fn submit_envelope_async(
         Err(error) => return Err(error.into()),
     };
     state.refresh_registered_envelope_authority(&mut envelope)?;
+    let submission = match store.acquire_submission(&envelope.target_delivery_id) {
+        Ok(lease) => lease,
+        Err(error) => return submission_refusal(state, store, &envelope, error),
+    };
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let sender_root_commitment = source.root_commitment().to_owned();
     let replay_expires_at = envelope
@@ -196,11 +207,12 @@ pub(crate) async fn submit_envelope_async(
     let persistent_entry = persistent_entry_from_outcome(&outcome);
     if should_persist_submission(&outcome)
         && let Err(error) = store
-            .record_submission_increment_for_sender_async(
+            .record_leased_submission_async(
                 &replay_key,
                 replay_expires_at,
                 persistent_entry.as_ref(),
                 Some(&sender_root_commitment),
+                Some(submission),
             )
             .await
     {
@@ -224,6 +236,24 @@ pub(crate) async fn submit_envelope_async(
     ramflux_node_core::record_router_submit_response_us(elapsed_us(response_started));
     ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));
     Ok(response)
+}
+
+fn submission_refusal(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    envelope: &ramflux_protocol::Envelope,
+    error: ramflux_node_core::NodeCoreError,
+) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    match error {
+        ramflux_node_core::NodeCoreError::HomeMigration(reason) => Ok(state
+            .migration_submission_refusal(
+                store,
+                envelope,
+                reason,
+                ramflux_node_core::now_unix_seconds(),
+            )?),
+        error => Err(error.into()),
+    }
 }
 
 async fn complete_async_forward(
@@ -303,8 +333,12 @@ pub(crate) fn apply_ack(
     store: &ramflux_node_core::RouterRedbStore,
     ack: &ramflux_protocol::Ack,
 ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
+    let target = state
+        .target_for_envelope_id(&ack.envelope_id)
+        .ok_or_else(|| anyhow::anyhow!("ACK envelope unavailable"))?;
+    let lease = store.acquire_acknowledgement(&target)?;
     let cursor = state.apply_ack(ack)?;
-    store.record_ack_increment(&cursor, &ack.envelope_id)?;
+    store.record_leased_ack(&cursor, &ack.envelope_id, lease)?;
     Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
@@ -313,8 +347,9 @@ pub(crate) fn apply_bound_ack(
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::TargetAckRequest,
 ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
+    let lease = store.acquire_acknowledgement(&request.target_delivery_id)?;
     let cursor = state.apply_ack_for_target(&request.target_delivery_id, &request.ack)?;
-    store.record_ack_increment(&cursor, &request.ack.envelope_id)?;
+    store.record_leased_ack(&cursor, &request.ack.envelope_id, lease)?;
     Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
@@ -324,8 +359,12 @@ pub(crate) fn apply_nack(
     store: &ramflux_node_core::RouterRedbStore,
     nack: &ramflux_protocol::Nack,
 ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
+    let target = state
+        .target_for_envelope_id(&nack.envelope_id)
+        .ok_or_else(|| anyhow::anyhow!("NACK envelope unavailable"))?;
+    let lease = store.acquire_acknowledgement(&target)?;
     let cursor = state.apply_nack(nack)?;
-    store.record_nack_increment(&cursor)?;
+    store.record_leased_nack(&cursor, lease)?;
     Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
@@ -334,8 +373,9 @@ pub(crate) fn apply_bound_nack(
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::TargetNackRequest,
 ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
+    let lease = store.acquire_acknowledgement(&request.target_delivery_id)?;
     let cursor = state.apply_nack_for_target(&request.target_delivery_id, &request.nack)?;
-    store.record_nack_increment(&cursor)?;
+    store.record_leased_nack(&cursor, lease)?;
     Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
@@ -345,7 +385,16 @@ pub(crate) fn own_device_fanout(
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
 ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
     let now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
-    let response = state.mvp10_own_device_fanout_at(request.clone(), now)?;
+    let (plan, leases) = state.accept_leased_fanout(request.clone(), store, now)?;
+    let response = ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse {
+        principal_id: plan.principal_id,
+        source_device_id: plan.source_device_id,
+        delivered: plan
+            .deliveries
+            .into_iter()
+            .map(|delivery| state.submit_replay_accepted_fanout_delivery(delivery, now).0)
+            .collect(),
+    };
     let entries = response
         .delivered
         .iter()
@@ -371,11 +420,12 @@ pub(crate) fn own_device_fanout(
         .checked_add(i64::from(request.envelope.ttl))
         .ok_or_else(|| anyhow::anyhow!("fan-out envelope ttl overflows replay expiry"))?;
     let source = state.authenticated_envelope_source_durable(&request.envelope, store)?;
-    store.record_fanout_increment(
+    store.record_leased_fanout(
         &ramflux_node_core::envelope_replay_tuple_key(&source, &request.envelope),
         replay_expires_at,
         source.root_commitment(),
         &entries,
+        leases,
     )?;
     Ok(response)
 }
@@ -415,6 +465,7 @@ fn persistent_local_replay_response(
         ),
     };
     Ok(Some(ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
         outcome,
         target_delivery_id: query.envelope.target_delivery_id.clone(),
         inbox_seq: None,
@@ -465,6 +516,7 @@ pub(crate) fn submit_response_from_outcome(
     match outcome {
         ramflux_node_core::RouterSubmitOutcome::Online(delivery) => {
             ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "online".to_owned(),
                 target_delivery_id: delivery.target_delivery_id,
                 inbox_seq: Some(delivery.inbox_seq),
@@ -475,6 +527,7 @@ pub(crate) fn submit_response_from_outcome(
         ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => {
             let target_delivery_id = queued.entry.target_delivery_id;
             ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "offline_queued".to_owned(),
                 target_delivery_id: target_delivery_id.clone(),
                 inbox_seq: Some(queued.entry.inbox_seq),
@@ -487,6 +540,7 @@ pub(crate) fn submit_response_from_outcome(
         }
         ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(delivery) => {
             ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "forwarded_home_node_migrated".to_owned(),
                 target_delivery_id: delivery.target_delivery_id,
                 inbox_seq: delivery.delivery.inbox_seq,
@@ -496,6 +550,7 @@ pub(crate) fn submit_response_from_outcome(
         }
         ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id } => {
             ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "forward_in_progress".to_owned(),
                 target_delivery_id,
                 inbox_seq: None,
@@ -506,6 +561,7 @@ pub(crate) fn submit_response_from_outcome(
         ramflux_node_core::RouterSubmitOutcome::DuplicateFederatedForward {
             target_delivery_id,
         } => ramflux_node_core::EnvelopeSubmitResponse {
+            migration_refusal: None,
             outcome: "duplicate_federated_forward".to_owned(),
             target_delivery_id,
             inbox_seq: None,
@@ -514,6 +570,7 @@ pub(crate) fn submit_response_from_outcome(
         },
         ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) => {
             ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "rejected_home_node_migrated".to_owned(),
                 target_delivery_id: delivery.target_delivery_id,
                 inbox_seq: None,
@@ -523,6 +580,7 @@ pub(crate) fn submit_response_from_outcome(
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedDeactivated { target_delivery_id } => {
             ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "rejected_deactivated".to_owned(),
                 target_delivery_id,
                 inbox_seq: None,
@@ -532,6 +590,7 @@ pub(crate) fn submit_response_from_outcome(
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedDeleted { target_delivery_id } => {
             ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "rejected_deleted".to_owned(),
                 target_delivery_id,
                 inbox_seq: None,
@@ -541,6 +600,7 @@ pub(crate) fn submit_response_from_outcome(
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { target_delivery_id, reason } => {
             ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: format!("rejected_security:{reason}"),
                 target_delivery_id,
                 inbox_seq: None,
@@ -575,6 +635,7 @@ mod tests {
                     expires_at: 2,
                 },
                 delivery: ramflux_node_core::EnvelopeSubmitResponse {
+                    migration_refusal: None,
                     outcome: "duplicate_federated_forward".into(),
                     target_delivery_id: "target".into(),
                     inbox_seq: None,
@@ -587,3 +648,7 @@ mod tests {
         assert!(!should_persist_submission(&outcome));
     }
 }
+
+#[cfg(test)]
+#[path = "router_engine_migration_tests.rs"]
+mod migration_tests;

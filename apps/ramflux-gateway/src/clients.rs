@@ -942,6 +942,7 @@ pub(crate) mod tests {
                 let request: ramflux_protocol::Envelope =
                     serde_json::from_slice(&request.body).map_err(|source| source.to_string())?;
                 let response = ramflux_node_core::EnvelopeSubmitResponse {
+                    migration_refusal: None,
                     outcome: "offline_queued".to_owned(),
                     target_delivery_id: request.target_delivery_id.clone(),
                     inbox_seq: Some(1),
@@ -1052,6 +1053,7 @@ pub(crate) mod tests {
                             serde_json::from_value(accepted.request.body.clone())
                                 .map_err(|source| source.to_string())?;
                         let response = ramflux_node_core::EnvelopeSubmitResponse {
+ migration_refusal: None,
                             outcome: "offline_queued".to_owned(),
                             target_delivery_id: request.target_delivery_id.clone(),
                             inbox_seq: Some(1),
@@ -1075,6 +1077,7 @@ pub(crate) mod tests {
                             serde_json::from_slice(&accepted.body)
                                 .map_err(|source| source.to_string())?;
                         let response = ramflux_node_core::EnvelopeSubmitResponse {
+ migration_refusal: None,
                             outcome: "offline_queued".to_owned(),
                             target_delivery_id: request.target_delivery_id.clone(),
                             inbox_seq: Some(1),

@@ -18,7 +18,7 @@ const LOCAL_DELIVERY_EXPIRY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("router_local_delivery_expiry_v1");
 const FORMAT: TableDefinition<&str, u8> = TableDefinition::new("router_expiry_index_format_v1");
 /// Deadlines computed once for WAL records written before acceptance times were logged.
-const LEGACY_WAL_DEADLINES: TableDefinition<&str, i64> =
+pub(super) const LEGACY_WAL_DEADLINES: TableDefinition<&str, i64> =
     TableDefinition::new("router_legacy_wal_deadlines_v1");
 
 /// Durable mailbox row: the entry plus the deadline assigned when the router accepted it.

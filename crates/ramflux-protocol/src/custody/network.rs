@@ -147,6 +147,7 @@ pub enum CustodyRefusal {
     /// Temporary listener saturation; retry on a fresh connection after backoff.
     Busy,
     PersistenceUnavailable,
+    HomeMigration { reason: crate::home_migration::Refusal, nack: Option<Box<crate::Nack>> },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

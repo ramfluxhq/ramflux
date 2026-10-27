@@ -21,6 +21,7 @@ pub struct PrepareMigration<'a> {
     pub base: &'a VerifiedHome,
     pub delivery_map: &'a [DeliveryMapEntry],
 }
+#[derive(Clone, Copy)]
 pub struct MigrationAdmission<'a> {
     pub publication: &'a crate::CustodyPublication,
     pub prepare: PrepareMigration<'a>,
@@ -56,45 +57,13 @@ impl RouterCore {
         now: u64,
     ) -> Result<Signed<Receipt>, NodeCoreError> {
         let a = &authorization.body;
-        self.with_migration_authority(&a.account_anchor,now,|authority, _publication|{
-            let tx=store.migration_db().begin_write().map_err(storage)?;let now=clock(&tx,now)?;
-            let key=op_key(&a.account_anchor,&a.migration_id,MigrationRole::Destination)?;
-            let mut op:MigrationOperation=read(&tx,OPS,&key)?.ok_or_else(||refusal(Refusal::EvidenceRequired))?;
-            let auth_hash=message_hash(authorization).map_err(storage)?;
-            if let Some(existing)=&op.authorization {
-                if message_hash(existing).map_err(storage)?!=auth_hash {return Err(refusal(Refusal::IdempotencyConflict));}
-                if let Some(seal)=op.seal{return Ok(seal);}
-            }
-            if op.phase!=Phase::Prepared {return Err(refusal(Refusal::AdmissionExpired));}
-            crypto::verify_authorization(authorization,authority,now).map_err(auth_error)?;
-            let offer=&op.offer.body;
-            if now>offer.accept_until || now>a.seal_until || a.seal_until>offer.accept_until
-                || a.offer_hash!=message_hash(&op.offer).map_err(storage)? || a.previous_home_hash!=offer.previous_home_hash
-                || a.next_home_epoch!=offer.next_home_epoch || a.old_node!=offer.old_node
-                || a.destination_node!=node.node_id() || a.destination_key!=node.public_key()
-                || a.gateway_tcp_addr!=node.gateway_tcp_addr || a.delivery_map_hash!=offer.delivery_map_hash
-                || op.delivery_map!=map_for(authority)? || a.authority_record_hash!=offer.authority_record_hash
-                || a.actor!=op.prepare.body.actor {return Err(refusal(Refusal::AuthorityUpdateRequired));}
-            maintenance::require_no_live_window(&tx,&a.account_anchor,Some(&key))?;
-            let deadline=now.checked_add(a.max_commit_delay).ok_or_else(||refusal(Refusal::CommitExpired))?;
-            let seal=crypto::sign_node(Receipt{version:1,action:Action::Seal,migration_id:a.migration_id.clone(),account_anchor:a.account_anchor.clone(),node_id:node.node_id().into(),
-                request_hash:auth_hash.clone(),request_nonce:a.nonce.clone(),authorization_hash:Some(auth_hash.clone()),seal_hash:None,home_record_hash:None,
-                phase:Phase::Sealed,state_version:2,sealed_at:Some(now),commit_deadline:Some(deadline),commit_proof_hash:None,
-                response_payload_hash:ramflux_protocol::custody::framed_hash(ramflux_protocol::domain::HOME_RECEIPT,&serde_json::json!({"offer":null,"commit_proof":null,"noncommit_fence":null,"resolve_result":null,"backlog_progress":null,"attestation":null})).map_err(storage)?,
-                issued_at:now,expires_at:now+300,reason_code:None},node.node_id(),&node.key).map_err(auth_error)?;
-            op.authorization=Some(authorization.clone());op.seal=Some(seal.clone());op.phase=Phase::Sealed;op.state_version=2;op.next_due=now;
-            op.expires_at=crypto::hard_deadline(a).map_err(auth_error)?;op.recovery_guard=true;
-            maintenance::unsealed_budget(&tx,&a.account_anchor,false)?;
-            for entry in &op.delivery_map {
-                if let Some(old)=read::<InboxRoute>(&tx,TARGETS,&entry.target_delivery_id)?
-                    && (old.anchor!=a.account_anchor || old.epoch>=a.next_home_epoch) {return Err(refusal(Refusal::BaseMismatch));}
-                write(&tx,TARGETS,&entry.target_delivery_id,&InboxRoute{anchor:a.account_anchor.clone(),migration_id:a.migration_id.clone(),epoch:a.next_home_epoch,active:false})?;
-            }
-            tx.open_table(GUARDS).map_err(storage)?.insert(a.account_anchor.as_str(),key.as_str()).map_err(storage)?;
-            write(&tx,OPS,&key,&op)?;
-            write(&tx,COURIER,&maintenance::due_key(now,&a.account_anchor,&a.migration_id),&key)?;
-            write(&tx,BUSINESS,&business_key(&a.account_anchor,&a.migration_id,Action::Seal)?,&BusinessOutcome{payload_hash:auth_hash,operation_key:key,expires_at:op.expires_at})?;
-            commit_transition(store,tx)?;Ok(seal)
+        let pending = store
+            .migration_operation(&a.account_anchor, &a.migration_id, MigrationRole::Destination)?
+            .ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+        // Acquire before the global authority lock; another account never waits on this target.
+        let _submissions = store.migration_submission_barrier(&pending.delivery_map)?;
+        self.with_migration_authority(&a.account_anchor, now, |authority, _publication| {
+            seal_in_transaction(store, node, authorization, authority, now)
         })
     }
 }
@@ -112,6 +81,10 @@ impl RouterRedbStore {
             return Err(refusal(Refusal::EvidenceRequired));
         };
         let a = &authorization.body;
+        let pending = self
+            .migration_operation(&a.account_anchor, &a.migration_id, MigrationRole::Destination)?
+            .ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+        let _submissions = self.migration_submission_barrier(&pending.delivery_map)?;
         let tx = self.migration_db().begin_write().map_err(storage)?;
         let now = clock(&tx, now)?;
         let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Destination)?;
@@ -185,6 +158,7 @@ impl RouterRedbStore {
             .map_err(storage)?;
         write(&tx, OPS, &key, &op)?;
         commit_transition(self, tx)?;
+        self.cache_migration_routes(&op.delivery_map, op.phase == Phase::Active, false)?;
         Ok(())
     }
     /// A client or B's courier may relay a standalone terminal fence; no nonce freshness is needed.
@@ -196,6 +170,10 @@ impl RouterRedbStore {
         anchor: &str,
         now: u64,
     ) -> Result<(), NodeCoreError> {
+        let pending = self
+            .migration_operation(anchor, &fence.body.migration_id, MigrationRole::Destination)?
+            .ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+        let _submissions = self.migration_submission_barrier(&pending.delivery_map)?;
         let tx = self.migration_db().begin_write().map_err(storage)?;
         clock(&tx, now)?;
         let key = op_key(anchor, &fence.body.migration_id, MigrationRole::Destination)?;
@@ -244,6 +222,7 @@ impl RouterRedbStore {
         maintenance::index_expiry(&tx, &key, op.expires_at)?;
         maintenance::release_budget(&tx, anchor, false)?;
         commit_transition(self, tx)?;
+        self.cache_migration_routes(&op.delivery_map, op.phase == Phase::Active, false)?;
         Ok(())
     }
 }
@@ -385,23 +364,161 @@ fn verify_activation_base(
     op: &MigrationOperation,
     now: u64,
 ) -> Result<VerifiedHome, NodeCoreError> {
-    let base_hash = record_hash(&op.base.record).map_err(storage)?;
-    let (source, source_key) = op.base.record.home();
-    let home = crypto::verify_home_chain(
-        result,
-        &crypto::HomeTrust {
-            account_anchor: op.base.record.account_anchor(),
-            node_id: source,
-            node_key: source_key,
-            home_epoch: op.base.record.epoch(),
-            home_hash: Some(&base_hash),
-            cached_manager_range: op.base.authority.record.body.master_certificate.body.range_index,
-            cached_manager_certificate_hash: Some(
-                &object_hash(&op.base.authority.record.body.master_certificate).map_err(storage)?,
-            ),
-        },
-        now,
-    )
-    .map_err(auth_error)?;
+    let home = crypto::verify_home_chain(result, &op.base, now).map_err(auth_error)?;
     Ok(home)
+}
+
+fn empty_response_hash() -> Result<String, NodeCoreError> {
+    ramflux_protocol::custody::framed_hash(
+        ramflux_protocol::domain::HOME_RECEIPT,
+        &serde_json::json!({
+            "offer": null, "commit_proof": null, "noncommit_fence": null,
+            "resolve_result": null, "backlog_progress": null, "attestation": null
+        }),
+    )
+    .map_err(storage)
+}
+fn seal_in_transaction(
+    store: &RouterRedbStore,
+    node: &MigrationNode,
+    authorization: &Signed<Authorization>,
+    authority: &VerifiedRecord,
+    now: u64,
+) -> Result<Signed<Receipt>, NodeCoreError> {
+    let a = &authorization.body;
+
+    let tx = store.migration_db().begin_write().map_err(storage)?;
+    let now = clock(&tx, now)?;
+
+    let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Destination)?;
+
+    let mut op: MigrationOperation =
+        read(&tx, OPS, &key)?.ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+
+    let auth_hash = message_hash(authorization).map_err(storage)?;
+
+    if let Some(existing) = &op.authorization {
+        if message_hash(existing).map_err(storage)? != auth_hash {
+            return Err(refusal(Refusal::IdempotencyConflict));
+        }
+        if let Some(seal) = op.seal {
+            return Ok(seal);
+        }
+    }
+    if op.phase != Phase::Prepared {
+        return Err(refusal(Refusal::AdmissionExpired));
+    }
+    crypto::verify_authorization(authorization, authority, now).map_err(auth_error)?;
+
+    let offer = &op.offer.body;
+
+    if now > offer.accept_until
+        || now > a.seal_until
+        || a.seal_until > offer.accept_until
+        || a.offer_hash != message_hash(&op.offer).map_err(storage)?
+        || a.previous_home_hash != offer.previous_home_hash
+        || a.next_home_epoch != offer.next_home_epoch
+        || a.old_node != offer.old_node
+        || a.destination_node != node.node_id()
+        || a.destination_key != node.public_key()
+        || a.gateway_tcp_addr != node.gateway_tcp_addr
+        || a.delivery_map_hash != offer.delivery_map_hash
+        || op.delivery_map != map_for(authority)?
+        || a.authority_record_hash != offer.authority_record_hash
+        || a.actor != op.prepare.body.actor
+    {
+        return Err(refusal(Refusal::AuthorityUpdateRequired));
+    }
+    maintenance::require_no_live_window(&tx, &a.account_anchor, Some(&key))?;
+
+    let deadline =
+        now.checked_add(a.max_commit_delay).ok_or_else(|| refusal(Refusal::CommitExpired))?;
+
+    let seal = seal_receipt(node, authorization, &auth_hash, now, deadline)?;
+    op.authorization = Some(authorization.clone());
+    op.seal = Some(seal.clone());
+    op.phase = Phase::Sealed;
+    op.state_version = 2;
+    op.next_due = now;
+
+    op.expires_at = crypto::hard_deadline(a).map_err(auth_error)?;
+    op.recovery_guard = true;
+
+    maintenance::unsealed_budget(&tx, &a.account_anchor, false)?;
+
+    for entry in &op.delivery_map {
+        if let Some(old) = read::<InboxRoute>(&tx, TARGETS, &entry.target_delivery_id)?
+            && (old.anchor != a.account_anchor || old.epoch >= a.next_home_epoch)
+        {
+            return Err(refusal(Refusal::BaseMismatch));
+        }
+        write(
+            &tx,
+            TARGETS,
+            &entry.target_delivery_id,
+            &InboxRoute {
+                anchor: a.account_anchor.clone(),
+                migration_id: a.migration_id.clone(),
+                epoch: a.next_home_epoch,
+                active: false,
+            },
+        )?;
+    }
+    tx.open_table(GUARDS)
+        .map_err(storage)?
+        .insert(a.account_anchor.as_str(), key.as_str())
+        .map_err(storage)?;
+
+    write(&tx, OPS, &key, &op)?;
+
+    write(&tx, COURIER, &maintenance::due_key(now, &a.account_anchor, &a.migration_id), &key)?;
+
+    write(
+        &tx,
+        BUSINESS,
+        &business_key(&a.account_anchor, &a.migration_id, Action::Seal)?,
+        &BusinessOutcome { payload_hash: auth_hash, operation_key: key, expires_at: op.expires_at },
+    )?;
+
+    commit_transition(store, tx)?;
+
+    store.cache_migration_routes(&op.delivery_map, false, false)?;
+
+    Ok(seal)
+}
+
+fn seal_receipt(
+    node: &MigrationNode,
+    authorization: &Signed<Authorization>,
+    auth_hash: &str,
+    now: u64,
+    deadline: u64,
+) -> Result<Signed<Receipt>, NodeCoreError> {
+    let a = &authorization.body;
+    crypto::sign_node(
+        Receipt {
+            version: 1,
+            action: Action::Seal,
+            migration_id: a.migration_id.clone(),
+            account_anchor: a.account_anchor.clone(),
+            node_id: node.node_id().into(),
+            request_hash: auth_hash.to_owned(),
+            request_nonce: a.nonce.clone(),
+            authorization_hash: Some(auth_hash.to_owned()),
+            seal_hash: None,
+            home_record_hash: None,
+            phase: Phase::Sealed,
+            state_version: 2,
+            sealed_at: Some(now),
+            commit_deadline: Some(deadline),
+            commit_proof_hash: None,
+            response_payload_hash: empty_response_hash()?,
+            issued_at: now,
+            expires_at: now + 300,
+            reason_code: None,
+        },
+        node.node_id(),
+        &node.key,
+    )
+    .map_err(auth_error)
 }
