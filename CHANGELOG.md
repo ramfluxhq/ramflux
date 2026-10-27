@@ -149,6 +149,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generator and integration harness supply their own tokens and run the selected
   provider's config render as preflight. Services also refuse the known public
   admin-token value at startup, including outside Compose.
+- Writable account databases now exclude other writer processes with a local
+  advisory lock that expires when the owner closes or exits. Backup readers and
+  SQLite automatic rollback preserve managed transaction state without stale
+  guards affecting a replacement transaction. CI rejects raw account transaction
+  and savepoint bypasses, with explicit private-staging exceptions.
 
 - Demo node deployments can opt into the voice UDP overlay with an env setting
   or command-line port, retaining the existing base deployment when unset. Voice

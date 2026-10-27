@@ -8,6 +8,9 @@ pub use account_db::backup::{AccountBackupSnapshot, BackupCounts};
 pub use account_db::backup_database::{BackupAttachmentVerification, BackupDatabase};
 pub use account_db::backup_merge::BackupMergeReport;
 mod account_index;
+mod account_writer;
+#[cfg(test)]
+mod account_writer_tests;
 pub use account_index::BackupIndexInstall;
 mod clock;
 mod constants;

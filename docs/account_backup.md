@@ -9,6 +9,9 @@ copy and archive I/O use bounded page/chunk buffers; attachment verification rea
 BLOBs incrementally. Each attachment must pass its AEAD tag, ciphertext manifest
 hash and plaintext hash. Create first attempts to fetch missing deferred attachments. Unavailable files fail by default with `attachments_unavailable`; an explicit retry with `allow_missing_attachments:true` records the missing selectors and expected hashes in the authenticated omission manifest. Corrupt stored files always fail. Missing or corrupt files are never silently skipped.
 
+See [account writer ownership](account_writer_ownership.md) for process locking,
+lease expiry, backup isolation and the checkpoint-overlap residual.
+
 ## Daemon workflow
 
 An attended human frontend starts a job; agents cannot start backup/restore jobs.
