@@ -19,15 +19,22 @@ struct Gateway {
     blocked: Option<GatewayBlock>,
     cancelled: Arc<AtomicBool>,
     submits: Arc<AtomicUsize>,
+    cancelled_notice: Option<oneshot::Sender<()>>,
+}
+struct Cancelled {
+    flag: Arc<AtomicBool>,
+    notice: Option<oneshot::Sender<()>>,
 }
 struct GatewayBlock {
     entered: oneshot::Sender<()>,
     submit_envelope: Option<String>,
 }
-struct Cancelled(Arc<AtomicBool>);
 impl Drop for Cancelled {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.flag.store(true, Ordering::SeqCst);
+        if let Some(notice) = self.notice.take() {
+            let _ = notice.send(());
+        }
     }
 }
 impl GatewaySessionFrameSink for Gateway {
@@ -49,11 +56,18 @@ impl GatewaySessionFrameSink for Gateway {
 impl GatewaySessionFrameSource for Gateway {
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
-            let block = self.blocked.as_ref().and_then(|block| block.submit_envelope.as_deref()).is_none_or(|id| {
-                matches!(&self.last, Some(GatewayClientFrame::Submit { submit }) if submit.envelope.envelope_id == id)
-            });
+            let block = self
+                .blocked
+                .as_ref()
+                .and_then(|block| block.submit_envelope.as_deref())
+                .is_none_or(|id| {
+                    matches!(&self.last, Some(GatewayClientFrame::Submit { submit }) if submit.envelope.envelope_id == id)
+                });
             if block && let Some(blocked) = self.blocked.take() {
-                let _guard = Cancelled(Arc::clone(&self.cancelled));
+                let _guard = Cancelled {
+                    flag: Arc::clone(&self.cancelled),
+                    notice: self.cancelled_notice.take(),
+                };
                 let _ = blocked.entered.send(());
                 return std::future::pending().await;
             }
@@ -140,6 +154,7 @@ fn account_with_counter(
 struct AccountSetup {
     index: Option<AccountIndex>,
     blocked_submit_envelope: Option<String>,
+    cancelled_notice: Option<oneshot::Sender<()>>,
 }
 fn account_with_setup(
     root: &Path,
@@ -209,6 +224,7 @@ fn account_with_setup(
             }),
             cancelled,
             submits,
+            cancelled_notice: setup.cancelled_notice,
         }),
     );
     Ok(LocalBusAccountState::new(client, engine, format!("commitment-{id}")))
@@ -271,18 +287,42 @@ async fn client(
     Ok((client, task))
 }
 
+fn actor_account_with_cancellation_notice(
+    root: &Path,
+    id: &str,
+    blocked: oneshot::Sender<()>,
+    cancelled: Arc<AtomicBool>,
+    notice: oneshot::Sender<()>,
+) -> AccountInitializer {
+    let root = root.to_path_buf();
+    let id = id.to_owned();
+    Box::new(move |index| {
+        account_with_setup(
+            &root,
+            &id,
+            Some(blocked),
+            cancelled,
+            Arc::new(AtomicUsize::new(0)),
+            AccountSetup {
+                index: Some(index),
+                blocked_submit_envelope: Some("slow-envelope".to_owned()),
+                cancelled_notice: Some(notice),
+            },
+        )
+    })
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn slow_gateway_does_not_block_other_account_send_or_socket_reads() -> Result<(), SdkError> {
-    LocalSet::new().run_until(async {
+    // This is a deadlock watchdog, not a latency assertion for account startup or fsync.
+    tokio::time::timeout(Duration::from_secs(60), LocalSet::new().run_until(async {
         let root = root("independent");
         let (entered, blocked) = oneshot::channel();
+        let (cancelled_notice, cancellation) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let alice_root = root.clone();
-        let alice_cancelled = Arc::clone(&cancelled);
-        let alice: AccountInitializer = Box::new(move |index| account_with_setup(
-            &alice_root,"alice",Some(entered),alice_cancelled,Arc::new(AtomicUsize::new(0)),
-            AccountSetup{index:Some(index),blocked_submit_envelope:Some("slow-envelope".into())},
-        ));
+        let alice = actor_account_with_cancellation_notice(
+            &root, "alice", entered, Arc::clone(&cancelled), cancelled_notice,
+        );
         let bob = actor_account(&root, "bob", None, Arc::new(AtomicBool::new(false)));
         let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), alice), ("bob".to_owned(), bob)]))?;
         let (one, server_one) = client(Rc::clone(&supervisor), 1).await?;
@@ -308,31 +348,35 @@ async fn slow_gateway_does_not_block_other_account_send_or_socket_reads() -> Res
                 "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
             }))).await
         });
-        tokio::time::timeout(Duration::from_secs(2), blocked).await.map_err(|_| failure("gateway not entered"))?.map_err(|_| failure("gateway dropped"))?;
-        let sent = tokio::time::timeout(Duration::from_millis(500), two.request_frame(request("send", "bob", "message.submit", serde_json::json!({
+        blocked.await.map_err(|_| failure("gateway dropped before entering its stall"))?;
+        assert!(!slow.is_finished());
+        assert!(!cancelled.load(Ordering::SeqCst));
+        let sent = two.request_frame(request("send", "bob", "message.submit", serde_json::json!({
             "conversation_id":"conversation", "message_id":"message", "envelope_id":"envelope",
             "source_principal_id":"bob", "sender_id":"device-bob", "recipient_principal_commitment":"alice",
             "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
-        })))).await.map_err(|_| failure("other account send blocked"))??;
+        }))).await?;
         assert_eq!(sent["envelope"]["envelope_id"], "envelope");
-        let read = tokio::time::timeout(Duration::from_millis(500), one.request_frame(request("read", "alice", "message.list", serde_json::json!({"conversation_id":"conversation"})))).await.map_err(|_| failure("same socket read blocked"))??;
+        let read = one.request_frame(request("read", "alice", "message.list", serde_json::json!({"conversation_id":"conversation"}))).await?;
         assert!(read["messages"].is_array());
-        let other_read = tokio::time::timeout(Duration::from_millis(500), two.request_frame(request("list", "bob", "conversation.list", serde_json::json!({})))).await.map_err(|_| failure("second socket read blocked"))??;
+        let other_read = two.request_frame(request("list", "bob", "conversation.list", serde_json::json!({}))).await?;
         assert_eq!(other_read["conversations"].as_array().map(Vec::len), Some(1));
+        // A completed receive or network timeout must not turn serialization into a false pass.
+        assert!(!slow.is_finished(), "the other account and both reads must finish during Alice's stall");
+        assert!(!cancelled.load(Ordering::SeqCst), "Alice's gateway must still be stalled");
         slow.abort();
         let _ = slow.await;
         drop(one);
         drop(two);
         let _ = server_one.await;
         let _ = server_two.await;
-        tokio::time::timeout(Duration::from_millis(500), async {
-            while !cancelled.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
-        }).await.map_err(|_| failure("gateway call not cancelled on disconnect"))?;
+        cancellation.await.map_err(|_| failure("gateway call not cancelled on disconnect"))?;
+        assert!(cancelled.load(Ordering::SeqCst));
         supervisor.shutdown().await?;
         drop(supervisor);
-        let _ = std::fs::remove_dir_all(root);
+        std::fs::remove_dir_all(root)?;
         Ok(())
-    }).await
+    })).await.map_err(|_| failure("cross-account progress or cancellation deadlocked"))?
 }
 
 fn failure(message: &str) -> SdkError {
