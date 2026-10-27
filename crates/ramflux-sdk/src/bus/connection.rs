@@ -126,7 +126,11 @@ pub(super) async fn handle(
                     },
                 };
                 if super::custody_setup::handles(&incoming.frame()?.method) {
-                    let bytes = super::custody_setup::respond(incoming.frame()?, &supervisor.config, &mut ceremony)?;
+                    let bytes = if incoming.frame()?.method == "account.create.confirm" {
+                        super::creation_confirm::respond(incoming.frame()?, &supervisor, &mut ceremony, &mut disconnected).await?
+                    } else {
+                        super::custody_setup::respond(incoming.frame()?, &supervisor.config, &mut ceremony)?
+                    };
                     tokio::time::timeout(Duration::from_secs(10),secrets.send(bytes)).await.map_err(|_|closed())?.map_err(|_|closed())?;
                     continue;
                 }

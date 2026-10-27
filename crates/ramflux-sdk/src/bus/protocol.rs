@@ -144,6 +144,20 @@ pub struct LocalBusBackupContactRestoreReport {
     pub skipped: Vec<LocalBusBackupContactSkip>,
 }
 
+/// Public successful ceremony/activation result. Networking is registration state.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+pub struct LocalBusCreatedAccount {
+    pub account_id: String,
+    pub display_name: String,
+    pub state: LocalBusCreatedAccountState,
+    pub networking: crate::custody::CreationState,
+}
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalBusCreatedAccountState {
+    Unlocked,
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusAccountUnlockRequest {
     pub passphrase: String,

@@ -54,7 +54,7 @@ impl BackupJobs {
             // next reference. The final snapshot independently enumerates what is missing.
             let _ = actor
                 .request(AccountCommand {
-                    backup: None,
+                    private: None,
                     request,
                     connection_id: 0,
                     topics: std::collections::BTreeSet::default(),

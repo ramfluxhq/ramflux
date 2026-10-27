@@ -12,6 +12,8 @@ use zeroize::Zeroizing;
 
 pub(super) fn handles(method: &str) -> bool {
     method.starts_with("account.custody.")
+        || method == "account.create"
+        || method.starts_with("account.create.")
 }
 pub(super) struct Incoming(Option<LocalBusFrame>);
 impl Incoming {
@@ -59,15 +61,7 @@ pub(super) fn respond(
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-    if request.request_id.len() > 128
-        || request.sdk_api.len() > 128
-        || request.method.len() > 128
-        || request.account_id.as_ref().is_some_and(|value| value.len() > 128)
-        || request.trace_id.as_ref().is_some_and(|value| value.len() > 128)
-    {
-        *ceremony = None;
-        return Err(SdkError::CustodySetupInvalid);
-    }
+    validate_headers(request, ceremony)?;
     let result = apply(request, config, ceremony);
     // Every failed request consumes the pending ceremony, without word-level feedback.
     let result = match result {
@@ -106,12 +100,39 @@ pub(super) fn respond(
         8192,
     )
 }
+pub(super) fn validate_headers(
+    request: &LocalBusFrame,
+    ceremony: &mut Option<CreationCeremony>,
+) -> Result<(), SdkError> {
+    if request.request_id.len() > 128
+        || request.sdk_api.len() > 128
+        || request.method.len() > 128
+        || request.account_id.as_ref().is_some_and(|value| value.len() > 128)
+        || request.trace_id.as_ref().is_some_and(|value| value.len() > 128)
+    {
+        *ceremony = None;
+        return Err(SdkError::CustodySetupInvalid);
+    }
+    Ok(())
+}
 fn empty(request: &LocalBusFrame) -> Result<(), SdkError> {
     if request.body.as_object().is_none_or(|map| !map.is_empty()) {
         return Err(SdkError::CustodySetupInvalid);
     }
     Ok(())
 }
+pub(super) fn primary_provider(
+    config: &LocalBusConfig,
+) -> std::sync::Arc<dyn crate::custody::PrimaryVault> {
+    #[cfg(any(test, feature = "itest-memory-vault"))]
+    if let Some(vault) = &config.custody_vault {
+        return vault.clone();
+    }
+    #[cfg(not(any(test, feature = "itest-memory-vault")))]
+    let _ = config;
+    std::sync::Arc::new(NativePrimaryVault)
+}
+
 fn primary_vault(config: &LocalBusConfig) -> &dyn crate::custody::PrimaryVault {
     static NATIVE: NativePrimaryVault = NativePrimaryVault;
     #[cfg(any(test, feature = "itest-memory-vault"))]
@@ -265,10 +286,10 @@ pub(super) fn guard_account(
     if !crate::custody::account_exists(root, id)? {
         return Ok(None);
     }
-    if request.method == "account.status" {
-        return Ok(Some(crate::custody::load_account(root, id, now()?)?.summary()));
+    if matches!(request.method.as_str(), "account.create" | "account.backup.import") {
+        return Err(SdkError::CustodyModeDowngrade);
     }
-    Err(SdkError::NetworkingPending)
+    Ok(None)
 }
 
 #[cfg(test)]

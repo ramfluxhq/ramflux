@@ -4,7 +4,9 @@
 //! Born-v3 setup and explicit channel-bound networking; legacy authentication stays separate.
 mod bus;
 mod ceremony;
+mod commit_gate;
 pub use bus::{ConfirmedAccount, CustodyBusClient};
+pub(crate) use commit_gate::CommitGate;
 mod secret_buffer;
 pub(crate) use secret_buffer::serialize_secret;
 mod store;

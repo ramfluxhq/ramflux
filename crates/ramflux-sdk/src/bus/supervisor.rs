@@ -232,7 +232,7 @@ impl Supervisor {
             }
             "daemon.status" => {
                 return Ok(reply(
-                    serde_json::json!({"accounts": self.accounts.borrow().values().filter(|actor| actor.is_open()).count(), "socket_path": self.config.socket_path}),
+                    serde_json::json!({"accounts": self.accounts.borrow().values().filter(|actor| actor.is_open()).count(), "socket_path": self.config.socket_path, "born_v3_creation":self.config.enable_born_v3_creation}),
                 ));
             }
             "daemon.stop" => {
@@ -310,6 +310,32 @@ impl Supervisor {
         response
     }
 
+    pub(super) async fn activate_native(
+        &self,
+        id: &str,
+        passphrase: zeroize::Zeroizing<String>,
+    ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
+        self.start_event_router();
+        let existing = self.accounts.borrow().get(id).cloned();
+        let actor = if let Some(actor) = existing {
+            actor
+        } else {
+            let actor = AccountActor::start(
+                id.into(),
+                self.config.clone(),
+                self.nodes.borrow().clone(),
+                self.index.clone(),
+                self.events.clone(),
+            )?;
+            self.accounts.borrow_mut().insert(id.into(), actor.clone());
+            actor
+        };
+        let result = actor.unlock_native(passphrase).await?;
+        self.set_active(id).await?;
+        self.set_unlocked(id, true).await?;
+        Ok(result)
+    }
+
     async fn account_list(&self) -> Result<ActorResponse, SdkError> {
         let index = self.index.clone();
         let root = self.config.data_root.clone();
@@ -340,7 +366,7 @@ impl Supervisor {
         let mut known = known;
         for row in &mut known {
             if row["custody_v3_observed"].as_bool() == Some(true) {
-                continue;
+                row["networking"] = row["state"].clone();
             }
             row["state"] = serde_json::json!(if row
                 .get("id")
@@ -564,7 +590,7 @@ impl Drop for Supervisor {
 fn command(request: LocalBusFrame, connection: &LocalBusConnectionState) -> AccountCommand {
     let (reply, _) = oneshot::channel();
     AccountCommand {
-        backup: None,
+        private: None,
         request,
         connection_id: connection.connection_id,
         topics: connection.topics.clone(),
