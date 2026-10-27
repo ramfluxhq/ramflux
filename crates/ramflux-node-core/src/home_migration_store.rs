@@ -91,6 +91,62 @@ struct InboxRoute {
     active: bool,
 }
 
+/// Immutable admission evidence on the mesh; never import a peer's live scheduler state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealedMigration {
+    pub prepare: Signed<Prepare>,
+    pub offer: Signed<Offer>,
+    pub authorization: Signed<Authorization>,
+    pub seal: Signed<Receipt>,
+    pub base: RecordEvidence,
+    pub attestation: Signed<HomeAttestation>,
+    pub delivery_map: Vec<DeliveryMapEntry>,
+}
+impl MigrationOperation {
+    /// Export only the signed admission and its routing evidence.
+    /// # Errors
+    /// Rejects an operation that has not been sealed.
+    pub fn sealed_evidence(&self) -> Result<SealedMigration, NodeCoreError> {
+        Ok(SealedMigration {
+            prepare: self.prepare.clone(),
+            offer: self.offer.clone(),
+            authorization: self
+                .authorization
+                .clone()
+                .ok_or_else(|| refusal(Refusal::EvidenceRequired))?,
+            seal: self.seal.clone().ok_or_else(|| refusal(Refusal::EvidenceRequired))?,
+            base: self.base.clone(),
+            attestation: self.attestation.clone(),
+            delivery_map: self.delivery_map.clone(),
+        })
+    }
+}
+impl SealedMigration {
+    fn source_operation(
+        &self,
+        base: RecordEvidence,
+        now: u64,
+    ) -> Result<MigrationOperation, NodeCoreError> {
+        Ok(MigrationOperation {
+            role: MigrationRole::Source,
+            phase: Phase::Committed,
+            prepare: self.prepare.clone(),
+            offer: self.offer.clone(),
+            authorization: Some(self.authorization.clone()),
+            seal: Some(self.seal.clone()),
+            proof: None,
+            fence: None,
+            base,
+            attestation: self.attestation.clone(),
+            delivery_map: self.delivery_map.clone(),
+            state_version: 1,
+            next_due: now,
+            expires_at: crypto::hard_deadline(&self.authorization.body).map_err(auth_error)?,
+            recovery_guard: true,
+        })
+    }
+}
 /// Configured service authority. Never constructed from a request-supplied node key.
 pub struct MigrationNode {
     pub(crate) record: Envelope<NodeIdentityRecord>,
