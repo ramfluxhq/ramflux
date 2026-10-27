@@ -937,6 +937,33 @@ pub(crate) mod tests {
         assert!(rows[0].deleted);
         assert!(client.account_db()?.message_content("live-message")?.is_none());
         assert!(client.message_origin("direct", "live-message")?.is_none());
+        for device in ["other_device_sync", "third_device_sync"] {
+            let other = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+                client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+                device,
+            )?;
+            for remote in [&other, &source, &other] {
+                client.receive_own_sent_message(
+                    remote,
+                    super::super::own_device_copy::OwnMessageInput {
+                        id: "live-envelope",
+                        conversation: "direct",
+                        group: None,
+                        created_at: 1,
+                        body: &bytes,
+                    },
+                )?;
+            }
+        }
+        assert_eq!(client.direct_messages("direct")?.len(), 3);
+        assert!(
+            client
+                .direct_message_by_id("live-message")?
+                .ok_or(SdkError::IdentityRootMissing)?
+                .deleted
+        );
+        assert!(client.message_origin("direct", "live-message")?.is_none());
+        assert!(client.account_db()?.message_content("live-message")?.is_none());
         drop(client);
         std::fs::remove_dir_all(root)?;
         Ok(())
