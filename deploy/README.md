@@ -24,9 +24,12 @@ RF_COMPOSE_NOTIFY_PROVIDER_CREDENTIALS_FILE=/run/secrets/providers.json
 
 Migrate the mapped names in operator Compose env files or exported Compose inputs.
 Names absent from the map, including published-port variables and the required
-federation offline-root pin, retain their existing spelling. Unset and empty
-inputs keep their existing `:-` defaults; nonempty inputs and shared references
-(such as the federation admin token used by the router) retain the same values.
+federation offline-root pin, retain their existing spelling. **Breaking operator
+migration:** production security/identity inputs must now be explicitly configured;
+unset or empty required inputs fail closed. Only optional inputs retain `:-`
+defaults. Explicit migrated values and shared references retain their values.
+Run the [mandatory preflight](#mandatory-compose-input-preflight-breaking-operator-migration)
+with the same env files before every Compose command.
 Production voice still requires a public endpoint, now supplied by
 `RF_COMPOSE_RELAY_VOICE_PUBLIC_ENDPOINT`. Direct service launches continue to use
 the original `RAMFLUX_*` runtime environment names.
@@ -34,16 +37,16 @@ the original `RAMFLUX_*` runtime environment names.
 The demo wrapper keeps `identity.env` unchanged and appends matching Compose aliases
 to its private generated `runtime.env`. Existing demo data needs no identity,
 certificate or volume migration: the next `up` regenerates that file. The integration
-harness must similarly pass the mapped input aliases, preserving its fixture-over-
-process precedence and original bootstrap inputs; its self-default workaround can
-then be removed while retaining the lint against new self-defaults.
+harness passes the mapped input aliases, preserving fixture-over-process
+precedence and bootstrap inputs, generates admin tokens, runs preflight, and lints
+against reintroduced self-defaults and missing aliases.
 
-Services reject literal `${…}` values as unconfigured, with a warning that names the
-setting and omits its value. Invalid optional numeric/runtime settings select their
-existing defaults; explicit empty listener settings keep their existing meaning.
-Required secrets, trust material, certificates and explicitly configured credential
-files still undergo their normal validation. A malformed optional input cannot
-turn off required authentication or invent replacement signing material.
+Services ignore literal `${…}` values only for the explicit non-security tuning
+allowlist, with a key-only warning. Other unresolved inputs, including optional
+security file paths, fail startup. Malformed relay budgets remain fatal. Other
+optional numeric/runtime inputs retain their defaults; explicit empty settings
+keep their existing meaning. Concrete secrets and trust files still undergo
+normal validation; unresolved paths cannot select replacement signing material.
 
 The following tests render all Compose variants without contacting a container
 engine. `DEMO_TEST_PODMAN_COMPOSE` selects the installed provider; optionally set
