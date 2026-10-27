@@ -165,6 +165,47 @@ else:
                 self.assertFalse(self.state.exists())
                 self.assertEqual(self.commands(), [])
 
+    def test_invalid_federation_budgets_refuse_before_state_or_runtime_changes(self):
+        for listener in ("PUBLIC", "ADMIN"):
+            for suffix, maximum in (("MAX_HEADER_BYTES", 65536), ("MAX_BODY_BYTES", 67108864),
+                                    ("REQUEST_TIMEOUT_SECONDS", 3600)):
+                key = f"RAMFLUX_FEDERATION_{listener}_{suffix}"
+                for value in ("", "0", "01", "-1", "abc", "${UNRESOLVED}", str(maximum + 1), "9" * 40):
+                    with self.subTest(key=key, value=value):
+                        original = self.env_file.read_text()
+                        try:
+                            with self.env_file.open("a") as output:
+                                output.write(f"{key}={shlex.quote(value)}\n")
+                            result = self.run_script("up", success=False)
+                            self.assertIn(key, result.stderr)
+                            self.assertFalse(self.state.exists())
+                            self.assertEqual(self.commands(), [])
+                        finally:
+                            self.env_file.write_text(original)
+
+    def test_federation_budget_boundaries_are_forwarded_without_changes(self):
+        with self.env_file.open("a") as output:
+            for listener in ("PUBLIC", "ADMIN"):
+                for suffix, value in (("MAX_HEADER_BYTES", 1), ("MAX_BODY_BYTES", 67108864),
+                                      ("REQUEST_TIMEOUT_SECONDS", 3600), ("MAX_CONNECTIONS", 1)):
+                    output.write(f"RAMFLUX_FEDERATION_{listener}_{suffix}={value}\n")
+        self.run_script("up")
+        runtime = dict(line.split("=", 1) for line in (self.state / "runtime.env").read_text().splitlines() if "=" in line)
+        for listener in ("PUBLIC", "ADMIN"):
+            for suffix, value in (("MAX_HEADER_BYTES", "1"), ("MAX_BODY_BYTES", "67108864"),
+                                  ("REQUEST_TIMEOUT_SECONDS", "3600"), ("MAX_CONNECTIONS", "1")):
+                self.assertEqual(runtime[f"RF_COMPOSE_FEDERATION_{listener}_{suffix}"], value)
+
+    def test_invalid_admin_connection_limit_refuses_before_state_or_runtime_changes(self):
+        for value in ("", "0", "4097", "invalid", "${UNRESOLVED}", "9" * 40):
+            with self.subTest(value=value):
+                with self.env_file.open("a") as output:
+                    output.write(f"RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS={shlex.quote(value)}\n")
+                result = self.run_script("up", success=False)
+                self.assertIn("RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS", result.stderr)
+                self.assertFalse(self.state.exists())
+                self.assertEqual(self.commands(), [])
+
     def seed_pre_split_state(self):
         self.run_script("up")
         # Existing ownership, identity and volumes use the same pre-split schemas.
