@@ -227,8 +227,11 @@ impl RouterRedbStore {
         let tx = self.db.begin_write().map_err(error)?;
         self.record_custody_account_in_tx(&tx, anchor, state, is_new, source, now)?;
         tx.commit().map_err(error)?;
-        self.custody_publication_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.observe_custody_publication_commit();
         Ok(())
+    }
+    pub(crate) fn observe_custody_publication_commit(&self) {
+        self.custody_publication_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     pub(crate) fn record_custody_account_in_tx(
         &self,

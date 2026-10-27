@@ -13,6 +13,10 @@ pub trait HomeMigrationMesh: Send + Sync {
     /// Rejects unknown, removed or unavailable peers.
     fn peer_key(&self, node: &str) -> Result<String, NodeCoreError>;
 }
+pub(crate) struct MigrationCaller {
+    pub publication: crate::CustodyPublication,
+    pub source: std::net::IpAddr,
+}
 pub struct HomeMigrationService {
     pub(crate) node: Arc<MigrationNode>,
     pub(crate) mesh: Arc<dyn HomeMigrationMesh>,
@@ -27,9 +31,11 @@ impl HomeMigrationService {
         _router: &crate::RouterCore,
         _store: &crate::RouterRedbStore,
         _request: Request,
+        caller: MigrationCaller,
         _now: u64,
     ) -> Result<Response, ramflux_protocol::custody::CustodyRefusal> {
         let _ = &self.mesh;
+        drop((caller.publication, caller.source));
         Err(ramflux_protocol::custody::CustodyRefusal::Unsupported)
     }
 }

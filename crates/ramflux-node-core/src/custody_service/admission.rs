@@ -188,7 +188,7 @@ impl CustodyService {
                 return Err(CustodyRefusal::BindingRefused);
             }
             if ramflux_protocol::canonical_json_bytes(&publication).map_err(invalid)?.len()
-                > 64 * 1024
+                > ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES
             {
                 return Err(CustodyRefusal::Capacity);
             }
@@ -259,7 +259,7 @@ impl CustodyService {
                     record_hash: proof.body.record_hash.clone(),
                     proof_hash: object_hash(&proof).map_err(invalid)?,
                     binding_mode: proof.body.binding_mode,
-                    expires_at: proof.body.expires_at.min(now.saturating_add(300)),
+                    expires_at: proof.body.expires_at.min(now.saturating_add(30)),
                 };
                 let session = self.leases().open_migration(
                     session,
@@ -268,6 +268,7 @@ impl CustodyService {
                     tick,
                     crate::custody_sessions::MigrationGrant {
                         control_hash,
+                        source,
                         publication: *publication,
                     },
                 )?;
@@ -321,6 +322,7 @@ impl CustodyService {
         &self,
         scope: Scope<'_>,
         attempt: SessionRequest,
+        admission: std::sync::MutexGuard<'_, ()>,
     ) -> Result<CustodyServerFrame, CustodyRefusal> {
         let SessionRequest { ref session_id, ref request, ref action, ref connection_id } = attempt;
         let Scope { router, peer, now, tick, .. } = scope;
@@ -381,6 +383,7 @@ impl CustodyService {
                 return Err(CustodyRefusal::BindingRefused);
             };
             if migration.control.body.requester != session.device_ref
+                || migration.control.body.authority_record_hash != session.record_hash
                 || ramflux_protocol::home_migration::message_hash(&migration.control)
                     .map_err(invalid)?
                     != grant.control_hash
@@ -390,11 +393,23 @@ impl CustodyService {
             }
             self.leases().request(session_id, &request.nonce)?;
             self.leases().close(session_id);
+            // Consume the one-use grant before releasing admission; peer calls never
+            // hold this service-wide mutex across a network exchange.
+            drop(admission);
             return self
                 .migration
                 .as_ref()
                 .ok_or(CustodyRefusal::Unsupported)?
-                .execute(router, scope.store, *migration.clone(), now)
+                .execute(
+                    router,
+                    scope.store,
+                    *migration.clone(),
+                    crate::home_migration_service::MigrationCaller {
+                        publication,
+                        source: grant.source,
+                    },
+                    now,
+                )
                 .map(|response| CustodyServerFrame::HomeMigration {
                     response: Box::new(response),
                 });

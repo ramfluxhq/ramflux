@@ -220,7 +220,7 @@ impl CustodyService {
         request: CustodyMeshRequest,
         scope: Scope<'_>,
     ) -> Result<CustodyServerFrame, CustodyRefusal> {
-        let _admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Queueing behind another writer must never extend authentication deadlines.
         let scope = Scope {
             now: scope.now.saturating_add(scope.tick.elapsed().as_secs()),
@@ -269,9 +269,12 @@ impl CustodyService {
             CustodyMeshRequest::Prove { action, proof, receipt, connection_id } => {
                 self.prove(scope, ProofAttempt { action, proof, receipt, connection_id })
             }
-            CustodyMeshRequest::Request { session_id, request, action, connection_id } => {
-                self.request(scope, SessionRequest { session_id, request, action, connection_id })
-            }
+            CustodyMeshRequest::Request { session_id, request, action, connection_id } => self
+                .request(
+                    scope,
+                    SessionRequest { session_id, request, action, connection_id },
+                    admission,
+                ),
         }
     }
 }

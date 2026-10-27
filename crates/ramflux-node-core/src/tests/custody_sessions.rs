@@ -708,3 +708,5 @@ fn custody_direct_prove_busy_and_revoked_grants_never_establish_a_session() -> R
     std::fs::remove_file(path)?;
     Ok(())
 }
+#[path = "custody_migration.rs"]
+mod migration;

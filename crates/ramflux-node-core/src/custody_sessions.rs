@@ -51,6 +51,7 @@ pub(crate) struct ChallengeLease {
 }
 #[derive(Clone)]
 pub(crate) struct MigrationGrant {
+    pub source: std::net::IpAddr,
     pub control_hash: String,
     pub publication: ramflux_protocol::custody::Publication,
 }
@@ -292,16 +293,17 @@ impl CustodyLeases {
         tick: Instant,
         grant: MigrationGrant,
     ) -> Result<CustodySession, CustodyRefusal> {
+        self.prune(tick);
         if !ramflux_protocol::decode_base64url(&grant.control_hash).is_ok_and(|bytes| {
             bytes.len() == 32 && ramflux_protocol::encode_base64url(bytes) == grant.control_hash
         }) {
             return Err(CustodyRefusal::InvalidInput);
         }
-        if self.sessions.values().filter(|s| s.migration.is_some()).count() >= 64
+        if self.sessions.values().filter(|s| s.migration.is_some()).count() >= 16
             || ramflux_protocol::canonical_json_bytes(&grant.publication)
                 .map_err(|_| CustodyRefusal::InvalidInput)?
                 .len()
-                > 64 * 1024
+                > ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES
         {
             return Err(CustodyRefusal::Capacity);
         }
