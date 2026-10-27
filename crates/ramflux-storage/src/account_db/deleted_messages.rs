@@ -175,8 +175,8 @@ impl AccountDb {
             ids.insert(raw);
         }
         if let Some(device) = self.device_signer() {
-            ids.insert(device.device_id.clone());
-            ids.insert(device.principal_id.clone());
+            // These are comparison aliases only; no bare identifier becomes a storage key.
+            ids.extend([device.device_id.clone(), device.principal_id.clone()]);
         }
         Ok(ids)
     }
