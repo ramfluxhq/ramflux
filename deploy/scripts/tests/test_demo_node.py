@@ -869,7 +869,10 @@ else:
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
         environment = (self.state / "runtime.env").read_text()
         self.assertIn("RAMFLUX_FEDERATION_PUBLIC_PORT=0.0.0.0:59482", environment)
-        self.assertIn("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on", environment)
+        expected_source_limits = "on" if self.PROVIDER == "docker" else "off"
+        self.assertIn(
+            f"RAMFLUX_FEDERATION_PER_SOURCE_LIMITS={expected_source_limits}", environment
+        )
         self.assertNotIn("RAMFLUX_FEDERATION_ADMIN_PORT=", environment)
         for advertised in ("59443", "59447", "59482", "59478", "59453"):
             self.assertIn(advertised, environment)
@@ -1108,18 +1111,53 @@ else:
 class PodmanComposeDemoNodeTests(DemoNodeTests):
     PROVIDER = "podman"
 
-    def test_rootless_network_mode_controls_per_source_limits(self):
-        self.control.write_text('{"rootless_network_mode": "slirp4netns"}')
+    def test_source_address_topology_controls_per_source_limits(self):
         result = self.run_script("up")
         runtime = (self.state / "runtime.env").read_text()
         self.assertIn("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=off", runtime)
-        self.assertIn("does not preserve client source addresses", result.stderr)
+        self.assertIn("rootless-bridge port publishing may collapse", result.stderr)
 
         self.run_script("down", "--purge")
-        self.control.write_text('{"rootless_network_mode": "pasta"}')
+        self.control.write_text('{"rootless": false, "service_is_remote": true}')
+        result = self.run_script("up")
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=off", runtime)
+        self.assertIn("machine port publishing may collapse", result.stderr)
+
+        self.run_script("down", "--purge")
+        self.control.write_text('{"rootless": null, "host_os": "unknown"}')
+        result = self.run_script("up")
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=off", runtime)
+        self.assertIn("unknown port publishing may collapse", result.stderr)
+
+        self.run_script("down", "--purge")
+        self.control.write_text('{"rootless": false, "host_os": "linux"}')
         self.run_script("up")
         runtime = (self.state / "runtime.env").read_text()
         self.assertIn("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on", runtime)
+
+    def test_operator_source_limit_choice_is_preserved_and_warned_when_unsafe(self):
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on\n")
+        result = self.run_script("up")
+        self.assertIn(
+            "RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on", (self.state / "runtime.env").read_text()
+        )
+        self.assertIn("operator kept per-source federation limits on", result.stderr)
+
+        self.run_script("down", "--purge")
+        self.control.write_text('{"rootless": false, "host_os": "linux"}')
+        self.env_file.write_text(
+            self.env_file.read_text().replace(
+                "RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on",
+                "RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=off",
+            )
+        )
+        self.run_script("up")
+        self.assertIn(
+            "RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=off", (self.state / "runtime.env").read_text()
+        )
 
 
 

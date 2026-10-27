@@ -581,6 +581,90 @@ fn source_slot_releases_after_error_and_timeout_and_full_idle_table_admits() -> 
 }
 
 #[test]
+fn disabled_source_limits_allow_same_source_until_global_cap() -> TestResult {
+    use std::sync::atomic::AtomicUsize;
+
+    let root = temp_cert_root("http-source-disabled")?;
+    let admin = context(&root)?;
+    let public = FederationPublicHttpContext {
+        router: admin.router.clone(),
+        discovery: admin.discovery.clone(),
+    };
+    let active = Arc::new(AtomicUsize::new(0));
+    let source_limits = PublicSourceLimits::new(
+        PublicSourceLimitConfig::for_test(1, 1, 2).with_request_rate(1, 1).disabled(),
+    );
+    let limits = ramflux_node_core::HttpRequestLimits {
+        request_timeout: Duration::from_millis(100),
+        ..crate::http_limits::defaults(true)
+    };
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let mut workers = Vec::new();
+    let mut clients = Vec::new();
+    for _ in 0..2 {
+        let mut client = TcpStream::connect(listener.local_addr()?)?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let (stream, _) = listener.accept()?;
+        let worker = crate::public_http::spawn_public_connection(
+            stream,
+            public.clone(),
+            active.clone(),
+            2,
+            limits,
+            &source_limits,
+        )
+        .ok_or("disabled source limits refused a same-source connection")?;
+        client.write_all(b"G")?;
+        workers.push(worker);
+        clients.push(client);
+    }
+
+    let mut refused = TcpStream::connect(listener.local_addr()?)?;
+    refused.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    assert!(
+        crate::public_http::spawn_public_connection(
+            stream,
+            public.clone(),
+            active.clone(),
+            2,
+            limits,
+            &source_limits,
+        )
+        .is_none()
+    );
+    let mut response = String::new();
+    refused.read_to_string(&mut response)?;
+    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+
+    for worker in workers {
+        worker.join().map_err(|_| "worker panicked")?;
+    }
+    let mut healthy = TcpStream::connect(listener.local_addr()?)?;
+    healthy.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    let worker = crate::public_http::spawn_public_connection(
+        stream,
+        public,
+        active,
+        2,
+        limits,
+        &source_limits,
+    )
+    .ok_or("global slot was not released")?;
+    healthy.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+    response.clear();
+    healthy.read_to_string(&mut response)?;
+    worker.join().map_err(|_| "worker panicked")?;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+    drop(clients);
+    drop(admin);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn occupied_admin_address_reports_listener_and_address() -> TestResult {
     let root = temp_cert_root("admin-bind-error")?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
