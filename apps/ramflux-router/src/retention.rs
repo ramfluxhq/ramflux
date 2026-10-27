@@ -26,9 +26,8 @@ pub(crate) fn sweep(
     Ok(request.response(u64::try_from(removed)?))
 }
 pub(crate) fn start(router: std::sync::Arc<RouterHandle>) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(30));
+    if let Err(error) = ramflux_node_core::spawn_service_worker("router-retention", move |_| {
+        while ramflux_node_core::service_shutdown_sleep(std::time::Duration::from_secs(30)) {
             let request = ramflux_node_core::RetentionGcSweepRequest {
                 owner_service: "router".into(),
                 sweep_id: "router-periodic".into(),
@@ -39,5 +38,7 @@ pub(crate) fn start(router: std::sync::Arc<RouterHandle>) {
                 tracing::warn!(%error,"router retention deferred");
             }
         }
-    });
+    }) {
+        tracing::error!(%error, "router retention worker unavailable");
+    }
 }

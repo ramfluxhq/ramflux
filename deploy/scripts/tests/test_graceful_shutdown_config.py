@@ -30,6 +30,10 @@ class GracefulShutdownConfigTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(section)
                 self.assertIn("stop_grace_period: 5s", section.group(1))
+                self.assertIn(
+                'RAMFLUX_SHUTDOWN_GRACE_SECONDS: "${RF_COMPOSE_SHUTDOWN_GRACE_SECONDS:-1}"',
+                    section.group(1),
+                )
 
 
 if __name__ == "__main__":

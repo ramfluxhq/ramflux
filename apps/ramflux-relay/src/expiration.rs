@@ -5,7 +5,6 @@
 
 use crate::config::now_unix_seconds;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
 pub(crate) fn start_expire_scheduler(
@@ -17,14 +16,18 @@ pub(crate) fn start_expire_scheduler(
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(60)
         .max(60);
-    thread::spawn(move || {
-        loop {
+    if let Err(error) = ramflux_node_core::spawn_service_worker("relay-expiration", move |_| {
+        while !ramflux_node_core::service_shutdown_token().is_cancelled() {
             if let Err(error) = expire_relay_chunks_once(&store, &state) {
                 tracing::warn!(%error, "relay background object chunk expiry failed");
             }
-            thread::sleep(Duration::from_secs(interval));
+            if !ramflux_node_core::service_shutdown_sleep(Duration::from_secs(interval)) {
+                break;
+            }
         }
-    });
+    }) {
+        tracing::error!(%error, "relay expiration worker unavailable");
+    }
 }
 
 pub(crate) fn expire_relay_chunks_once(

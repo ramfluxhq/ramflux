@@ -20,6 +20,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         println!("{service}:healthy");
         return Ok(());
     }
+    let shutdown = ramflux_node_core::ServiceShutdown::install(service)?;
     tracing_subscriber::fmt().with_target(false).init();
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
@@ -38,13 +39,24 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             .and_then(|signaling| signaling.service_key_ref.as_deref())
             .map(read_signaling_secret_ref)
             .transpose()?;
-        serve_itest_turn_udp(config.signaling.as_ref(), Arc::new(Mutex::new(state)), service_key)?;
+        let state = Arc::new(Mutex::new(state));
+        serve_itest_turn_udp(config.signaling.as_ref(), Arc::clone(&state), service_key)?;
+        tracing::info!(service, "service initialized");
+        if std::env::args().any(|arg| arg == "--once") {
+            return Ok(());
+        }
+        return shutdown
+            .wait_and_finalize(move || {
+                drop((state, store));
+                Ok(())
+            })
+            .map_err(Into::into);
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    ramflux_node_core::wait_for_service_shutdown(service).map_err(Into::into)
+    shutdown.wait_and_finalize(|| Ok(())).map_err(Into::into)
 }
 
 fn serve_itest_turn_udp(
@@ -58,18 +70,13 @@ fn serve_itest_turn_udp(
         .unwrap_or_else(|| "0.0.0.0:3478".to_owned());
     let socket = UdpSocket::bind(&addr)?;
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
-    std::thread::Builder::new().name("ramflux-signaling-turn-udp-itest".to_owned()).spawn(
-        move || {
-            tracing::info!(addr, "signaling itest STUN/TURN UDP surface listening");
-            let mut buf = [0_u8; 1500];
-            loop {
-                match socket.recv_from(&mut buf) {
-                    Ok((len, peer)) => match stun_turn_response(
-                        &buf[..len],
-                        peer,
-                        &state,
-                        service_key.as_deref(),
-                    ) {
+    ramflux_node_core::spawn_service_worker("ramflux-signaling-turn-udp-itest", move |shutdown| {
+        tracing::info!(addr, "signaling itest STUN/TURN UDP surface listening");
+        let mut buf = [0_u8; 1500];
+        while !shutdown.is_cancelled() {
+            match socket.recv_from(&mut buf) {
+                Ok((len, peer)) => {
+                    match stun_turn_response(&buf[..len], peer, &state, service_key.as_deref()) {
                         Ok(response) => {
                             if let Err(error) = socket.send_to(&response, peer) {
                                 tracing::warn!(%error, %peer, "failed to send STUN/TURN response");
@@ -78,20 +85,20 @@ fn serve_itest_turn_udp(
                         Err(error) => {
                             tracing::warn!(%error, %peer, "invalid STUN/TURN packet");
                         }
-                    },
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) => {}
-                    Err(error) => {
-                        tracing::error!(%error, "STUN/TURN UDP listener stopped");
-                        return;
                     }
                 }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => {
+                    tracing::error!(%error, "STUN/TURN UDP listener stopped");
+                    return;
+                }
             }
-        },
-    )?;
+        }
+    })?;
     Ok(())
 }
 

@@ -45,6 +45,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         println!("{service}:healthy");
         return Ok(());
     }
+    let shutdown = ramflux_node_core::ServiceShutdown::install(service)?;
     tracing_subscriber::fmt().with_target(false).init();
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
@@ -104,15 +105,23 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         }
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
-            return serve_itest_http(&ingress);
+            let itest_ingress = Arc::clone(&ingress);
+            ramflux_node_core::spawn_service_worker("ramflux-notify-itest-http", move |_| {
+                if let Err(error) = serve_itest_http(&itest_ingress) {
+                    tracing::error!(%error, "notify itest HTTP listener stopped");
+                }
+            })?;
         }
-        return ramflux_node_core::wait_for_service_shutdown(service);
+        return shutdown.wait_and_finalize(move || {
+            drop(ingress);
+            Ok(())
+        });
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    ramflux_node_core::wait_for_service_shutdown(service)
+    shutdown.wait_and_finalize(|| Ok(()))
 }
 
 struct NotifyIngressState {
@@ -200,9 +209,9 @@ impl NotifyWakeVerifyBatcher {
             let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
             let thread_auth = wake_auth.clone();
             let thread_store = Arc::clone(store);
-            std::thread::Builder::new()
-                .name(format!("ramflux-notify-wake-verify-batcher-{shard_id}"))
-                .spawn(move || {
+            ramflux_node_core::spawn_service_worker(
+                format!("ramflux-notify-wake-verify-batcher-{shard_id}"),
+                move |_| {
                     wake_verify_batcher_loop(
                         &thread_auth,
                         &thread_store,
@@ -211,10 +220,9 @@ impl NotifyWakeVerifyBatcher {
                         batch_max,
                         window,
                     );
-                })
-                .map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
-                })?;
+                },
+            )
+            .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
             senders.push(sender);
         }
         tracing::info!(
@@ -270,7 +278,16 @@ fn wake_verify_batcher_loop(
     batch_max: usize,
     window: Duration,
 ) {
-    while let Some(first) = receiver.blocking_recv() {
+    let shutdown = ramflux_node_core::service_shutdown_token();
+    while !shutdown.is_cancelled() {
+        let first = match receiver.try_recv() {
+            Ok(request) => request,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        };
         let mut batch = Vec::with_capacity(batch_max);
         batch.push(first);
         let deadline = std::time::Instant::now() + window;
@@ -370,6 +387,9 @@ fn serve_itest_http(
         .unwrap_or_else(|_| "0.0.0.0:18083".to_owned());
     let listener = TcpListener::bind(&addr)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     let worker_count = notify_ingress_worker_count();
     let queue_capacity = worker_count.saturating_mul(4).max(1);
     let (sender, receiver) = std::sync::mpsc::sync_channel(queue_capacity);
@@ -377,15 +397,24 @@ fn serve_itest_http(
     for worker_id in 0..worker_count {
         let worker_receiver = Arc::clone(&receiver);
         let worker_ingress = Arc::clone(ingress);
-        std::thread::Builder::new()
-            .name(format!("ramflux-notify-http-ingress-{worker_id}"))
-            .spawn(move || notify_ingress_worker_loop(&worker_receiver, &worker_ingress))
-            .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+        ramflux_node_core::spawn_service_worker(
+            format!("ramflux-notify-http-ingress-{worker_id}"),
+            move |_| notify_ingress_worker_loop(&worker_receiver, &worker_ingress),
+        )
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     }
     tracing::info!(addr, worker_count, queue_capacity, "notify itest HTTP surface listening");
-    for stream in listener.incoming() {
-        let stream = stream
-            .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+        let stream = match listener.accept().map(|(stream, _)| stream) {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(source) => {
+                return Err(ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()));
+            }
+        };
         if let Err(error) = stream.set_nodelay(true) {
             tracing::warn!(%error, "failed to enable TCP_NODELAY on notify ingress connection");
         }
@@ -407,14 +436,12 @@ fn serve_notify_mesh_quic(
     let listen_addr = listen_addr.to_owned();
     let ingress = Arc::clone(ingress);
     let tls = tls.clone();
-    std::thread::Builder::new()
-        .name("ramflux-notify-mesh-quic".to_owned())
-        .spawn(move || {
-            if let Err(error) = run_notify_mesh_quic_listener(&listen_addr, ingress, &tls) {
-                tracing::error!(%error, "notify mesh QUIC listener stopped");
-            }
-        })
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    ramflux_node_core::spawn_service_worker("ramflux-notify-mesh-quic", move |shutdown| {
+        if let Err(error) = run_notify_mesh_quic_listener(&listen_addr, ingress, &tls, shutdown) {
+            tracing::error!(%error, "notify mesh QUIC listener stopped");
+        }
+    })
+    .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     Ok(())
 }
 
@@ -422,6 +449,7 @@ fn run_notify_mesh_quic_listener(
     listen_addr: &str,
     ingress: Arc<NotifyIngressState>,
     tls: &ramflux_transport::MeshTlsConfig,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -439,7 +467,10 @@ fn run_notify_mesh_quic_listener(
             server.local_addr().map_err(|error| notify_mesh_transport_error(&error))?;
         tracing::info!(addr = %local_addr, "notify mesh QUIC surface listening");
         loop {
-            let connection = match server.accept_connection().await {
+            let connection = match tokio::select! {
+                () = shutdown.cancelled() => break,
+                connection = server.accept_connection() => connection,
+            } {
                 Ok(connection) => connection,
                 Err(error) => {
                     tracing::warn!(%error, "notify mesh QUIC connection rejected");
@@ -448,6 +479,9 @@ fn run_notify_mesh_quic_listener(
             };
             let connection_ingress = Arc::clone(&ingress);
             tokio::spawn(async move {
+                let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                    return;
+                };
                 if let Err(error) =
                     notify_mesh_quic_connection_loop(connection, connection_ingress).await
                 {
@@ -455,6 +489,7 @@ fn run_notify_mesh_quic_listener(
                 }
             });
         }
+        Ok::<(), ramflux_node_core::NodeCoreError>(())
     })
 }
 
@@ -476,6 +511,9 @@ async fn notify_mesh_quic_connection_loop(
         };
         let request_ingress = Arc::clone(&ingress);
         tokio::spawn(async move {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
             if let Err(error) =
                 handle_notify_mesh_quic_accepted_request(accepted, request_ingress).await
             {
@@ -605,10 +643,14 @@ fn serve_itest_http_async(
             .await
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
         tracing::info!(addr, worker_count, "notify async itest HTTP surface listening");
+        let shutdown = ramflux_node_core::service_shutdown_token();
         loop {
-            let (stream, _peer) = listener.accept().await.map_err(|source| {
-                ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
-            })?;
+            let (stream, _peer) = tokio::select! {
+                () = shutdown.cancelled() => break,
+                accepted = listener.accept() => accepted.map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
+                })?,
+            };
             if let Err(error) = stream.set_nodelay(true) {
                 tracing::warn!(
                     %error,
@@ -617,6 +659,9 @@ fn serve_itest_http_async(
             }
             let connection_ingress = Arc::clone(&runtime_ingress);
             tokio::spawn(async move {
+                let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                    return;
+                };
                 if let Err(error) =
                     notify_async_ingress_connection_loop(stream, connection_ingress).await
                 {
@@ -624,6 +669,7 @@ fn serve_itest_http_async(
                 }
             });
         }
+        Ok::<(), ramflux_node_core::NodeCoreError>(())
     })
 }
 
@@ -668,6 +714,9 @@ fn notify_ingress_worker_loop(
             receiver.recv()
         };
         let Ok(mut stream) = stream else {
+            return;
+        };
+        let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
             return;
         };
         loop {
@@ -2185,9 +2234,9 @@ fn start_notify_async_delivery_workers(
         let thread_store = Arc::clone(store);
         let thread_provider_workers = Arc::clone(&provider_workers);
         let thread_in_flight = Arc::clone(&in_flight);
-        std::thread::Builder::new()
-            .name(format!("ramflux-notify-async-delivery-{worker_id}"))
-            .spawn(move || {
+        ramflux_node_core::spawn_service_worker(
+            format!("ramflux-notify-async-delivery-{worker_id}"),
+            move |_| {
                 notify_async_delivery_worker_loop(
                     &thread_store,
                     &thread_provider_workers,
@@ -2195,8 +2244,9 @@ fn start_notify_async_delivery_workers(
                     scan_limit,
                     Duration::from_millis(u64::try_from(idle_sleep_ms).unwrap_or(u64::MAX)),
                 );
-            })
-            .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+            },
+        )
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     }
     tracing::info!(
         worker_count,
@@ -2227,7 +2277,7 @@ fn notify_async_delivery_worker_loop(
     scan_limit: usize,
     idle_sleep: Duration,
 ) {
-    loop {
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         match notify_async_claim_entries(store, in_flight, scan_limit) {
             Ok(entries) if entries.is_empty() => std::thread::sleep(idle_sleep),
             Ok(entries) => {

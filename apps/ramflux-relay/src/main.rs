@@ -64,6 +64,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         println!("{service}:healthy");
         return Ok(());
     }
+    let shutdown = ramflux_node_core::ServiceShutdown::install(service)?;
     tracing_subscriber::fmt().with_target(false).init();
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
@@ -279,14 +280,39 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         tracing::info!(service, node_id = config.node_id, "relay cache initialized");
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
-            return serve_itest_http(&store, &state, &config);
+            let itest_store = Arc::clone(&store);
+            let itest_state = Arc::clone(&state);
+            let itest_config = config.clone();
+            ramflux_node_core::spawn_service_worker("ramflux-relay-itest-http", move |_| {
+                if let Err(error) = serve_itest_http(&itest_store, &itest_state, &itest_config) {
+                    tracing::error!(%error, "relay itest HTTP listener stopped");
+                }
+            })?;
         }
+        tracing::info!(service, "service initialized");
+        if once {
+            return Ok(());
+        }
+        return shutdown
+            .wait_and_finalize(move || {
+                drop((trust_snapshot_cache, state, store));
+                #[cfg(feature = "itest-alloc-prof")]
+                alloc_prof::flush_and_wait();
+                Ok(())
+            })
+            .map_err(Into::into);
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    ramflux_node_core::wait_for_service_shutdown(service).map_err(Into::into)
+    shutdown
+        .wait_and_finalize(|| {
+            #[cfg(feature = "itest-alloc-prof")]
+            alloc_prof::flush_and_wait();
+            Ok(())
+        })
+        .map_err(Into::into)
 }
 mod config;
 mod voice;
