@@ -85,7 +85,7 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
 {
     let sender = Fixture::new("native-consent-sender").await?;
     let target = Fixture::new("native-consent-target").await?;
-    target.client.persist_identity_directory(&sender.manifest)?;
+    target.client.persist_fetched_identity_directory(&sender.manifest)?;
     let bytes = approve_request(&sender, &target).await?;
     let (entry, route) = transport(&sender, &target)?;
     let original = sender.manifest.custody.as_ref().ok_or("native")?.publication.clone();
@@ -100,7 +100,7 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
     let renamed = primary.sign_record(body)?;
     let mut manifest = sender.manifest.clone();
     manifest.custody.as_mut().ok_or("native")?.publication.record = renamed;
-    target.client.persist_identity_directory(&manifest)?;
+    target.client.persist_fetched_identity_directory(&manifest)?;
     assert!(matches!(
         target.client.verify_contact_control(&entry, &route, &bytes),
         Err(SdkError::ContactUnavailable(_))
@@ -132,7 +132,7 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
     let mut native = manifest.custody.ok_or("native")?;
     native.publication.record = revoked;
     native.devices.clear();
-    target.client.persist_identity_directory(
+    target.client.persist_fetched_identity_directory(
         &crate::prekey::SdkDeviceManifestResponse::from_native(*native)?,
     )?;
     assert!(target.client.verify_contact_control(&entry, &route, &bytes).is_err());

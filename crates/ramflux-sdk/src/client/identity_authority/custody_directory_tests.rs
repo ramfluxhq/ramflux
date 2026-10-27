@@ -65,6 +65,14 @@ fn ordinary_directory_accepts_native_provenance_and_rejects_metadata_or_key_subs
     client.persist_identity_directory(&material)?;
     let identity = client.peer_device_identity(&principal, "primary")?;
     assert_eq!(identity.root_commitment(), anchor);
+    assert!(client.require_current_device_authorization(&identity).is_err());
+    client.persist_fetched_identity_directory(&material)?;
+    client.require_current_device_authorization(&identity)?;
+    // Neither restored evidence nor the public JSON import API can manufacture a fresh fetch.
+    *client.native_head_freshness.borrow_mut() = NativeHeadFreshness::default();
+    client.observe_device_manifest_json(serde_json::to_value(&material)?, &anchor)?;
+    assert!(client.require_current_device_authorization(&identity).is_err());
+    client.persist_fetched_identity_directory(&material)?;
     client.require_current_device_authorization(&identity)?;
     assert_eq!(client.root_asserted_principal_kind(&principal)?, Some(PrincipalKind::Human));
     let profile = client.verified_identity_profile(&principal)?.ok_or("native profile absent")?;
@@ -73,12 +81,12 @@ fn ordinary_directory_accepts_native_provenance_and_rejects_metadata_or_key_subs
     assert_eq!(profile.kind, PrincipalKind::Human);
     let mut mixed = material.clone();
     mixed.root_public_key = ramflux_crypto::fixture_public_key_base64url();
-    assert!(client.persist_identity_directory(&mixed).is_err());
+    assert!(client.persist_fetched_identity_directory(&mixed).is_err());
     let mut substituted = native;
     substituted.devices[0].prekey_bundle["device_identity_ed25519_public"] =
         serde_json::json!(ramflux_crypto::fixture_public_key_base64url());
     let substituted = crate::prekey::SdkDeviceManifestResponse::from_native(substituted)?;
-    assert!(client.persist_identity_directory(&substituted).is_err());
+    assert!(client.persist_fetched_identity_directory(&substituted).is_err());
     client.require_current_device_authorization(&identity)?;
     Ok(())
 }

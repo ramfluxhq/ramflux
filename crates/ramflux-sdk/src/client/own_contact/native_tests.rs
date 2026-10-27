@@ -9,7 +9,7 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
 {
     let mut own = Fixture::new("native-own-contact").await?;
     let peer = Fixture::new("native-own-contact-peer").await?;
-    own.client.persist_identity_directory(&peer.manifest)?;
+    own.client.persist_fetched_identity_directory(&peer.manifest)?;
     own.client.establish_friend_link(
         "native-before-enrollment",
         &own.manifest.principal_commitment,
