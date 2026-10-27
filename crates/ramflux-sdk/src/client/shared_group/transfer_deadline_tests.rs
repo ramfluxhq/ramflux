@@ -280,3 +280,6 @@ fn a_poisoned_deadline_item_does_not_block_healthy_lease_release() -> Result<(),
     }
     Ok(())
 }
+
+#[path = "transfer_maintenance_tests.rs"]
+mod maintenance_tests;

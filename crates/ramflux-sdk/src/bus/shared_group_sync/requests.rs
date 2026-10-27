@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded creator request courier and device-set hints on existing encrypted pair transport.
+use crate::client::shared_group::maintenance;
 use crate::client::shared_group::{
     BeaconRecord, GroupControlBody, GroupControlPacket, TRANSFER_SEND_PREFIX, TransferDelivery,
 };
@@ -32,9 +33,7 @@ pub(in crate::bus) async fn flush_with_clock(
 ) -> Result<usize, SdkError> {
     let now = clock();
     let client = &account.client;
-    if let Err(error) = client.advance_group_transfer_deadlines(now) {
-        tracing::warn!(%error, "group transfer deadline scan deferred");
-    }
+    client.advance_group_transfer_deadlines(now)?;
     client.account_db()?.retain_expiring_actor_states("group-beacon/", now, 4096)?;
     client.account_db()?.retain_expiring_actor_states(TRANSFER_SEND_PREFIX, now, 512)?;
     client.account_db()?.retain_expiring_actor_states("group-courier/sealed/", now, 4096)?;
@@ -262,7 +261,7 @@ fn pending_packets(
             record.packet,
         ));
     }
-    for id in client.account_db()?.actor_state_key_page(TRANSFER_SEND_PREFIX, 512)? {
+    for id in maintenance::page(client.account_db()?, TRANSFER_SEND_PREFIX, now, 512)? {
         // A failed deadline delivery can appear here again in the same tick.
         let item = (|| -> Result<_, SdkError> {
             let Some(mut record) =
@@ -284,12 +283,9 @@ fn pending_packets(
                 control: Box::new(record.control),
             })))
         })();
-        match item {
-            Ok(Some(packet)) => pending.push((id, packet)),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(%error, item = %id, "group transfer courier item deferred");
-            }
+        if let Some(Some(packet)) = maintenance::item_result(client.account_db()?, &id, now, item)?
+        {
+            pending.push((id, packet));
         }
     }
     Ok(pending)
@@ -569,3 +565,7 @@ fn was_delivered(
             .is_some_and(|record| record.delivered.contains(&(root.into(), device.into()))),
     })
 }
+
+#[cfg(test)]
+#[path = "request_maintenance_tests.rs"]
+mod maintenance_tests;

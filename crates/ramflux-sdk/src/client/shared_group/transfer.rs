@@ -158,26 +158,17 @@ impl RamfluxClient {
         Ok(pending)
     }
     /// Advance abandoned proposals without needing another user transfer request.
-    /// Item failures remain retryable and must not block unrelated groups.
+    /// Bad-data items back off; operational errors end this bounded scan.
     pub(crate) fn advance_group_transfer_deadlines(&self, now: i64) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        for id in db.actor_state_key_page(PENDING, 128)? {
-            if let Err(error) = db.write_transaction(|| self.advance_pending_deadline(&id, now)) {
-                tracing::warn!(%error, item = %id, "group transfer pending deadline deferred");
-            }
-        }
-        for id in db.actor_state_key_page(LEASE, 4096)? {
-            if let Err(error) = db.write_transaction(|| self.advance_lease_deadline(&id, now)) {
-                tracing::warn!(%error, item = %id, "group transfer lease deadline deferred");
-            }
-        }
-        // Visit each delivery once; do not re-scan the complete queue for each group.
-        for id in db.actor_state_key_page(SEND_PREFIX, 512)? {
-            if let Err(error) = db.write_transaction(|| self.advance_cancel_delivery(&id)) {
-                tracing::warn!(%error, item = %id, "group transfer cancellation deadline deferred");
-            }
-        }
-        Ok(())
+        super::maintenance::scan(db, PENDING, now, 128, |id| {
+            db.write_transaction(|| self.advance_pending_deadline(id, now))
+        })?;
+        super::maintenance::scan(db, LEASE, now, 4096, |id| {
+            db.write_transaction(|| self.advance_lease_deadline(id, now))
+        })?;
+        // Normal deliveries are read-only; acquire a writer only for an actual cancellation.
+        super::maintenance::scan(db, SEND_PREFIX, now, 512, |id| self.advance_cancel_delivery(id))
     }
     fn advance_pending_deadline(&self, id: &str, now: i64) -> Result<(), SdkError> {
         let db = self.account_db()?;
@@ -208,14 +199,23 @@ impl RamfluxClient {
     fn advance_cancel_delivery(&self, id: &str) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let Some(mut row) = db.load_actor_state::<TransferDelivery>(id)? else { return Ok(()) };
-        if matches!(&row.control.body, TransferBody::Head{reply} if reply.cancelled) {
+        if !matches!(&row.control.body, TransferBody::Head{reply} if reply.cancelled) {
+            return Ok(());
+        }
+        db.write_transaction(|| -> Result<(), SdkError> {
+            // Reload after acquiring the writer so the update uses the current row.
+            let Some(current) = db.load_actor_state::<TransferDelivery>(id)? else { return Ok(()) };
+            row = current;
+            if !matches!(&row.control.body, TransferBody::Head{reply} if reply.cancelled) {
+                return Ok(());
+            }
             if self.release_cancel_targets(&mut row)? {
                 db.remove_actor_state(id)?;
             } else {
                 db.persist_actor_state(id, &row)?;
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
     pub(crate) fn stage_group_transfer_control(
         &self,
