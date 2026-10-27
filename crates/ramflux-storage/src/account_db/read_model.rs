@@ -104,7 +104,7 @@ impl AccountDb {
     /// # Errors
     /// Returns SQL errors.
     pub fn client_conversation_senders(&self, id: &str) -> Result<Vec<String>, StorageError> {
-        let mut statement=self.connection.prepare("SELECT DISTINCT sender_id FROM direct_message_projection WHERE conversation_id=?1 ORDER BY sender_id LIMIT 256")?;
+        let mut statement=self.connection.prepare("SELECT DISTINCT sender_id FROM direct_message_projection WHERE conversation_id=?1 AND deleted=0 ORDER BY sender_id LIMIT 256")?;
         Ok(statement
             .query_map(params![id], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -136,7 +136,14 @@ impl AccountDb {
     /// # Errors
     /// Returns SQL errors.
     pub fn client_message_metadata(&self, id: &str) -> Result<Option<Value>, StorageError> {
-        Ok(self.connection.query_row("SELECT message_id,conversation_id,sender_id,deleted,created_at FROM direct_message_projection WHERE message_id=?1",params![id],|row|Ok(json!({"id":row.get::<_,String>(0)?,"message_id":row.get::<_,String>(0)?,"conversation_id":row.get::<_,String>(1)?,"sender_id":row.get::<_,String>(2)?,"deleted":row.get::<_,i64>(3)?!=0,"created_at":row.get::<_,i64>(4)?}))).optional()?)
+        Ok(self.connection.query_row("SELECT message_id,conversation_id,sender_id,deleted,is_own,created_at FROM direct_message_projection WHERE message_id=?1",params![id],|row|{
+            let deleted=row.get::<_,i64>(3)?!=0;
+            if deleted {
+                Ok(json!({"deleted":true,"conversation_id":row.get::<_,String>(1)?,"is_own":row.get::<_,i64>(4)?!=0,"created_at":row.get::<_,i64>(5)?}))
+            } else {
+                Ok(json!({"id":row.get::<_,String>(0)?,"message_id":row.get::<_,String>(0)?,"conversation_id":row.get::<_,String>(1)?,"sender_id":row.get::<_,String>(2)?,"deleted":false,"created_at":row.get::<_,i64>(5)?}))
+            }
+        }).optional()?)
     }
     /// Reads an existing audit record for explicit metadata-field projection.
     ///

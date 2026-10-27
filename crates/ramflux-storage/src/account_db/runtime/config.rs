@@ -61,6 +61,7 @@ impl AccountDb {
         connection.execute_batch("PRAGMA query_only=ON; PRAGMA synchronous=FULL;")?;
         Ok(Self {
             local_account_id: self.local_account_id.clone(),
+            principal_commitment: self.principal_commitment.clone(),
             path: self.path.clone(),
             mode: self.mode,
             current_key: self.current_key.clone(),

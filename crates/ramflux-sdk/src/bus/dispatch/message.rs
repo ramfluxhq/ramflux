@@ -57,7 +57,12 @@ pub(crate) async fn dispatch_message_bus_request(
             let account_id = request_account_id(request)?;
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
             let account = local_bus_account(state, account_id)?;
-            let messages = account.client.direct_messages(&body.conversation_id)?;
+            let messages = account
+                .client
+                .direct_messages(&body.conversation_id)?
+                .iter()
+                .map(super::super::message_projection::row)
+                .collect::<Result<Vec<_>, _>>()?;
             let rejected = account.client.rejected_inbox(&body.conversation_id)?;
             Ok(local_bus_ok(serde_json::json!({
                 "messages": messages,
