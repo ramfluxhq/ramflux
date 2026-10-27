@@ -226,6 +226,8 @@ pub(crate) struct IdentityDeviceRecord {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IdentityRegistry {
+    #[serde(default, skip_serializing_if = "crate::custody_authority::CustodyRegistry::is_empty")]
+    pub(crate) custody: crate::custody_authority::CustodyRegistry,
     // A metadata purge is not a root-signed release of a registered principal name.
     #[serde(default)]
     principal_root_bindings: BTreeMap<String, String>,

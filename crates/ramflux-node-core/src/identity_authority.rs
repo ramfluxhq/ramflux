@@ -48,6 +48,9 @@ impl IdentityRegistry {
         &self,
         request: &DeviceSetPublishRequest,
     ) -> Result<(), NodeCoreError> {
+        if !self.custody.permits_legacy(&request.record.principal_commitment) {
+            return Err(reject("custody anchor cannot use legacy publication"));
+        }
         if self.root_public_keys_by_commitment.get(&request.record.principal_commitment)
             != Some(&request.root_public_key)
         {
@@ -72,6 +75,9 @@ impl IdentityRegistry {
         &mut self,
         request: &DeviceSetPublishRequest,
     ) -> Result<(), NodeCoreError> {
+        if !self.custody.permits_legacy(&request.record.principal_commitment) {
+            return Err(reject("custody anchor cannot use legacy publication"));
+        }
         if self.exact_signed_device_set(request).is_some() {
             return Ok(());
         }
@@ -217,6 +223,9 @@ impl IdentityRegistry {
         &mut self,
         request: &IdentityRegisterRequest,
     ) -> Result<(), NodeCoreError> {
+        if !self.custody.permits_legacy(&request.principal_commitment) {
+            return Err(reject("custody anchor cannot use legacy registration"));
+        }
         let binding = request.proof.key_binding.as_ref().ok_or_else(|| {
             reject("legacy branch proof is read-only; root-bound authorization required")
         })?;
