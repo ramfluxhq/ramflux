@@ -31,6 +31,8 @@ pub enum StorageError {
     RekeyRollbackFailed(String),
     #[error("account not found: {0}")]
     AccountNotFound(String),
+    #[error("account already exists: {0}")]
+    AccountAlreadyExists(String),
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("history bundle hash mismatch")]

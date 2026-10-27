@@ -96,11 +96,20 @@ impl IdentityRegistry {
         }
         let verified = self.verify_custody(publication, now)?;
         let previous = self.custody.records.get(anchor).map(|entry| entry.record.clone());
+        let pruned_before = self.custody.pins.pruned_evidence(anchor);
         let outcome = self
             .custody
             .pins
             .observe_with_previous(&verified, previous.as_ref())
             .map_err(|error| crypto(&error))?;
+        let pruned_after = self.custody.pins.pruned_evidence(anchor);
+        if pruned_after > pruned_before {
+            tracing::warn!(
+                account_anchor = %anchor,
+                dropped = pruned_after - pruned_before,
+                "dropped older custody conflict evidence to enforce retention bounds"
+            );
+        }
         if outcome == PinOutcome::Advanced {
             if verified.capacity_pressure().any() {
                 tracing::warn!(account_anchor = %anchor, "custody authority reached eighty percent capacity; prioritize revocations");

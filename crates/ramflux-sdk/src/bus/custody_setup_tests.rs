@@ -201,6 +201,148 @@ async fn custody_bus_unavailable_provider_refuses_before_phrase_display() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn custody_disabled_and_oversized_request_ids_have_no_side_effects() -> Result {
+    let root = Root::new()?;
+    let vault = Arc::new(TestVault::default());
+    let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
+    config.custody_vault = Some(vault.clone());
+    let mut ceremony = None;
+    let mut disabled = LocalBusFrame::request(
+        "disabled",
+        None,
+        "account",
+        "account.custody.begin",
+        serde_json::to_value(input("disabled"))?,
+    );
+    let reply = crate::bus::custody_setup::respond(&mut disabled, &config, &mut ceremony).await?;
+    assert!(std::str::from_utf8(&reply)?.contains("CustodyCreationDisabled"));
+    assert!(!root.0.join("custody_accounts/disabled").exists());
+    assert_eq!(
+        ramflux_storage::AccountIndex::open(&root.0)?.known_account_ids()?,
+        Vec::<String>::new()
+    );
+    assert_eq!(vault.len(), 0);
+
+    let mut oversized = LocalBusFrame::request(
+        "x".repeat(crate::custody::SETUP_REQUEST_ID_BYTES + 1),
+        None,
+        "account",
+        "account.custody.begin",
+        serde_json::to_value(input("oversized"))?,
+    );
+    assert!(matches!(
+        crate::bus::custody_setup::respond(&mut oversized, &config, &mut ceremony).await,
+        Err(SdkError::CustodySetupInvalid)
+    ));
+    assert!(!root.0.join("custody_accounts/oversized").exists());
+    assert_eq!(vault.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_removes_an_orphan_marker_and_releases_its_id() -> Result {
+    let root = Root::new()?;
+    let marker = root.0.join("custody_accounts/reusable");
+    std::fs::create_dir_all(&marker)?;
+    let socket = root.0.join("bus.sock");
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.enable_born_v3_creation = true;
+    config.custody_vault = Some(Arc::new(TestVault::default()));
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _shutdown = Shutdown(stop.clone());
+        let mut bus = connect(&socket).await?;
+        assert!(!marker.exists());
+        assert_ne!(bus.begin(&input("reusable")).await?, "");
+        stop.send(true)?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    server?;
+    flow?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_create_between_begin_and_confirm_is_preserved_and_unlockable() -> Result {
+    let root = Root::new()?;
+    let socket = root.0.join("bus.sock");
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.enable_born_v3_creation = true;
+    config.custody_vault = Some(Arc::new(TestVault::default()));
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _shutdown = Shutdown(stop.clone());
+        let mut custody = connect(&socket).await?;
+        custody.begin(&input("legacy-wins")).await?;
+        let phrase = custody.show_once().await?;
+        let positions = custody.hidden_challenge().await?;
+        let answers = words(&phrase, positions)?;
+
+        let ordinary = LocalBusClient::connect(&socket).await?;
+        let request = LocalBusAccountCreateRequest {
+            label: None,
+            kind: None,
+            node_id: None,
+            local_account_id: "legacy-wins".into(),
+            principal_id: "legacy-principal".into(),
+            principal_commitment: String::new(),
+            device_id: "legacy-device".into(),
+            target_delivery_id: "legacy-delivery".into(),
+            account_secret: "legacy-secret".into(),
+            root_seed: [0x81; 32],
+            device_seed: [0x82; 32],
+            client_mode: LocalBusClientMode::AttendedCli,
+            gateway: crate::gateway::GatewayQuicEndpointConfig {
+                bind_addr: "127.0.0.1:0".parse()?,
+                gateway_addr: "127.0.0.1:1".parse()?,
+                server_name: "missing-gateway".into(),
+                ca_cert: root.0.join("missing-ca.pem"),
+                principal_id: String::new(),
+                device_id: String::new(),
+                target_delivery_id: String::new(),
+                prekey_http_url: None,
+            },
+        };
+        let response = ordinary
+            .request_frame_response(LocalBusFrame::request(
+                "legacy-create",
+                None,
+                "account",
+                "account.create",
+                serde_json::to_value(request)?,
+            ))
+            .await?;
+        assert!(response.error.is_some(), "activation must fail against the absent gateway");
+        let manifest = super::daemon::local_bus_account_manifest_path(&root.0, "legacy-wins");
+        assert!(manifest.exists());
+        let index = ramflux_storage::AccountIndex::open(&root.0)?;
+        let before = index.account("legacy-wins")?;
+        let before_wrapped = index.load_wrapped_db_key("legacy-wins")?;
+        assert!(before_wrapped.is_some());
+
+        assert!(matches!(custody.confirm(&answers).await, Err(SdkError::CustodyAccountConflict)));
+        assert!(!root.0.join("custody_accounts/legacy-wins").exists());
+        let after = index.account("legacy-wins")?;
+        assert_eq!(after, before);
+        assert_eq!(index.load_wrapped_db_key("legacy-wins")?, before_wrapped);
+        drop(index);
+        drop(custody);
+        drop(ordinary);
+        stop.send(true)?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    server?;
+    flow?;
+
+    let mut client = RamfluxClient::new();
+    client.open_account_index(&root.0)?;
+    client.unlock_account("legacy-wins", b"legacy-secret")?;
+    Ok(())
+}
+
 struct BlockingVault {
     inner: TestVault,
     entered: tokio::sync::Notify,
@@ -277,6 +419,52 @@ async fn custody_confirm_vault_and_fsync_work_does_not_stall_the_daemon_thread()
         assert_eq!(status["accounts"], 0);
         vault.release();
         assert_eq!(confirm.await??.state, CreationState::NetworkingPending);
+        stop.send(true)?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    vault.release();
+    server?;
+    flow?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn disconnect_during_confirm_finishes_a_complete_pending_account() -> Result {
+    let root = Root::new()?;
+    let socket = root.0.join("bus.sock");
+    let vault = Arc::new(BlockingVault::new());
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.enable_born_v3_creation = true;
+    config.custody_vault = Some(vault.clone());
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _shutdown = Shutdown(stop.clone());
+        let mut bus = connect(&socket).await?;
+        bus.begin(&input("disconnect-confirm")).await?;
+        let phrase = bus.show_once().await?;
+        let positions = bus.hidden_challenge().await?;
+        let answers = words(&phrase, positions)?;
+        let confirm = tokio::spawn(async move { bus.confirm(&answers).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), vault.entered.notified()).await?;
+        confirm.abort();
+        let _ = confirm.await;
+        vault.release();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !root.0.join("custody_accounts/disconnect-confirm/authority.json").exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            crate::custody::load_account(
+                &root.0,
+                "disconnect-confirm",
+                super::custody_setup::now()?
+            )?
+            .state(),
+            CreationState::NetworkingPending
+        );
         stop.send(true)?;
         Ok::<_, Box<dyn std::error::Error>>(())
     };

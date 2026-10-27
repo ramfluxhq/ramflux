@@ -19,6 +19,23 @@ pub struct AccountIndex {
 }
 
 impl AccountIndex {
+    fn account_record(local_account_id: &str) -> (String, String, String) {
+        (
+            format!("accounts/{local_account_id}/{ACCOUNT_DB_FILE}"),
+            format!("accounts/{local_account_id}/objects"),
+            format!("platform-local-vault:{local_account_id}"),
+        )
+    }
+
+    fn prepare_account_directories(&self, local_account_id: &str) -> Result<(), StorageError> {
+        let account_dir = self.root.join(format!("accounts/{local_account_id}"));
+        fs::create_dir_all(account_dir.join("objects"))?;
+        fs::File::open(&account_dir)?.sync_all()?;
+        fs::File::open(self.root.join("accounts"))?.sync_all()?;
+        fs::File::open(&self.root)?.sync_all()?;
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StorageError> {
@@ -42,13 +59,9 @@ impl AccountIndex {
         local_account_id: &str,
         principal_commitment: &str,
     ) -> Result<LocalAccountRecord, StorageError> {
-        let db_relative_path = format!("accounts/{local_account_id}/{ACCOUNT_DB_FILE}");
-        let object_dir_relative_path = format!("accounts/{local_account_id}/objects");
-        let account_dir = self.root.join(format!("accounts/{local_account_id}"));
-        fs::create_dir_all(account_dir.join("objects"))?;
-        fs::File::open(&account_dir)?.sync_all()?;
-        fs::File::open(self.root.join("accounts"))?.sync_all()?;
-        fs::File::open(&self.root)?.sync_all()?;
+        let (db_relative_path, object_dir_relative_path, key_ref) =
+            Self::account_record(local_account_id);
+        self.prepare_account_directories(local_account_id)?;
         self.connection.execute(
             "INSERT OR REPLACE INTO local_account (
                 local_account_id, principal_commitment, display_label, db_relative_path,
@@ -60,7 +73,7 @@ impl AccountIndex {
                 principal_commitment,
                 db_relative_path,
                 object_dir_relative_path,
-                format!("platform-local-vault:{local_account_id}"),
+                key_ref,
                 unix_now()
             ],
         )?;
@@ -71,6 +84,61 @@ impl AccountIndex {
             object_dir_relative_path,
             account_state: "active".to_owned(),
         })
+    }
+
+    /// Reserves a new account id without replacing any existing account or wrapped key.
+    /// # Errors
+    /// Returns [`StorageError::AccountAlreadyExists`] when the id is already reserved.
+    pub fn reserve_account(
+        &self,
+        local_account_id: &str,
+        principal_commitment: &str,
+    ) -> Result<LocalAccountRecord, StorageError> {
+        let (db_relative_path, object_dir_relative_path, key_ref) =
+            Self::account_record(local_account_id);
+        self.prepare_account_directories(local_account_id)?;
+        let changed = self.connection.execute(
+            "INSERT INTO local_account (
+                local_account_id, principal_commitment, display_label, db_relative_path,
+                object_dir_relative_path, key_wrapping_provider, key_wrapping_ref,
+                account_state, created_at, last_opened_at
+            ) VALUES (?1, ?2, NULL, ?3, ?4, 'platform-local-vault', ?5, 'active', ?6, NULL)
+            ON CONFLICT(local_account_id) DO NOTHING",
+            params![
+                local_account_id,
+                principal_commitment,
+                db_relative_path,
+                object_dir_relative_path,
+                key_ref,
+                unix_now()
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::AccountAlreadyExists(local_account_id.to_owned()));
+        }
+        Ok(LocalAccountRecord {
+            local_account_id: local_account_id.to_owned(),
+            principal_commitment: principal_commitment.to_owned(),
+            db_relative_path,
+            object_dir_relative_path,
+            account_state: "active".to_owned(),
+        })
+    }
+
+    /// Removes only an unwrapped reservation whose anchor still matches the caller.
+    /// # Errors
+    /// Returns storage errors without deleting a replaced or initialized account row.
+    pub fn release_unwrapped_reservation(
+        &self,
+        local_account_id: &str,
+        principal_commitment: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self.connection.execute(
+            "DELETE FROM local_account
+              WHERE local_account_id=?1 AND principal_commitment=?2
+                AND wrapped_key IS NULL AND wrapped_key_nonce IS NULL",
+            params![local_account_id, principal_commitment],
+        )? == 1)
     }
 
     /// # Errors

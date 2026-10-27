@@ -13,6 +13,7 @@ pub(super) async fn serve(
 ) -> Result<(), SdkError> {
     std::fs::create_dir_all(&config.data_root)?;
     set_owner_only_dir_permissions(&config.data_root)?;
+    crate::custody::reconcile_incomplete_markers(&config.data_root)?;
     let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
     if let Some(parent) = config.socket_path.parent() {
         std::fs::create_dir_all(parent)?;

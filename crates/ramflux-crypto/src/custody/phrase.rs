@@ -11,6 +11,21 @@ use zeroize::Zeroizing;
 fn invalid() -> CryptoError {
     CryptoError::IdentityAuthority("invalid 24-word English recovery phrase")
 }
+fn normalized(input: &str, limit: usize) -> Result<Zeroizing<String>, CryptoError> {
+    if input.len() > limit {
+        return Err(invalid());
+    }
+    let capacity = input.len().checked_mul(3).ok_or_else(invalid)?;
+    let mut normalized = Zeroizing::new(String::with_capacity(capacity));
+    for character in input.nfkd() {
+        if normalized.len().saturating_add(character.len_utf8()) > capacity {
+            return Err(invalid());
+        }
+        normalized.push(character);
+    }
+    normalized.make_ascii_lowercase();
+    Ok(normalized)
+}
 /// A checked 256-bit recovery phrase whose buffers are erased on drop.
 /// Debug deliberately reveals no words or entropy.
 pub struct RecoveryPhrase(Zeroizing<Mnemonic>);
@@ -39,11 +54,7 @@ impl RecoveryPhrase {
     /// # Errors
     /// Rejects wrong word counts, unknown/ambiguous tokens, invalid checksums and excessive input.
     pub fn parse(input: &str) -> Result<Self, CryptoError> {
-        if input.len() > 4096 {
-            return Err(invalid());
-        }
-        let mut normalized = Zeroizing::new(input.nfkd().collect::<String>());
-        normalized.make_ascii_lowercase();
+        let normalized = normalized(input, 4096)?;
         let tokens = normalized.split_whitespace().collect::<Vec<_>>();
         if tokens.len() != 24 {
             return Err(invalid());
@@ -98,8 +109,7 @@ impl RecoveryPhrase {
         if !(1..=24).contains(&position) || input.len() > 128 {
             return Err(invalid());
         }
-        let mut normalized = Zeroizing::new(input.nfkd().collect::<String>());
-        normalized.make_ascii_lowercase();
+        let normalized = normalized(input, 128)?;
         let mut tokens = normalized.split_whitespace();
         let token = tokens.next().ok_or_else(invalid)?;
         if tokens.next().is_some() {
@@ -107,5 +117,22 @@ impl RecoveryPhrase {
         }
         let expected = self.0.words().nth(position - 1).ok_or_else(invalid)?;
         Ok(token == expected || (token.len() == 4 && expected.starts_with(token)))
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn secret_normalization_and_display_never_grow_their_allocations() -> Result<(), CryptoError> {
+        let input = "abandon ".repeat(23) + "art";
+        let normalized = normalized(&input, 4096)?;
+        assert_eq!(normalized.capacity(), input.len() * 3);
+        let phrase = RecoveryPhrase::parse(&input)?;
+        let displayed = phrase.display_words();
+        assert_eq!(displayed.capacity(), 256);
+        assert!(displayed.len() <= displayed.capacity());
+        Ok(())
     }
 }

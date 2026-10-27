@@ -11,6 +11,41 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
+pub(crate) const SETUP_FRAME_BYTES: usize = 4096;
+pub(crate) const SETUP_REQUEST_ID_BYTES: usize = 128;
+
+pub(crate) struct SecretBuffer {
+    bytes: Zeroizing<Vec<u8>>,
+    limit: usize,
+}
+impl SecretBuffer {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self { bytes: Zeroizing::new(Vec::with_capacity(limit)), limit }
+    }
+    pub(crate) fn finish(self) -> Zeroizing<Vec<u8>> {
+        self.bytes
+    }
+    #[cfg(test)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.bytes.capacity()
+    }
+}
+impl std::io::Write for SecretBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(bytes.len()) > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "custody setup frame exceeds fixed secret buffer",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Owns a dedicated connection; dropping it cancels and erases the server ceremony.
 pub struct CustodyBusClient {
     stream: UnixStream,
@@ -93,6 +128,9 @@ impl CustodyBusClient {
         struct Words<'a> {
             words: &'a [Zeroizing<String>; 3],
         }
+        if words.iter().any(|word| word.len() > 128) {
+            return Err(SdkError::CustodySetupInvalid);
+        }
         match self.exchange("account.custody.confirm", Words { words }).await? {
             Response::NetworkingPending { account } => {
                 Ok(ConfirmedAccount { state: CreationState::NetworkingPending, account })
@@ -126,17 +164,15 @@ impl CustodyBusClient {
             body,
             trace_id: None,
         };
-        let mut bytes = Zeroizing::new(Vec::with_capacity(4096));
-        serde_json::to_writer(&mut *bytes, &request)?;
-        if bytes.len() > 4096 {
-            return Err(SdkError::CustodySetupInvalid);
-        }
+        let mut bytes = SecretBuffer::new(SETUP_FRAME_BYTES);
+        serde_json::to_writer(&mut bytes, &request).map_err(|_| SdkError::CustodySetupInvalid)?;
+        let bytes = bytes.finish();
         let len = u32::try_from(bytes.len()).map_err(|_| SdkError::CustodySetupInvalid)?;
         self.stream.write_all(&len.to_be_bytes()).await?;
         self.stream.write_all(&bytes).await?;
         self.stream.flush().await?;
         let len = self.stream.read_u32().await?;
-        if len > 4096 {
+        if len > u32::try_from(SETUP_FRAME_BYTES).map_err(|_| SdkError::CustodySetupInvalid)? {
             return Err(SdkError::CustodySetupInvalid);
         }
         let mut bytes = Zeroizing::new(vec![0; len as usize]);
@@ -149,6 +185,7 @@ impl CustodyBusClient {
         if let Response::Error { code } = &reply.result {
             return Err(match code.as_str() {
                 "CustodyCreationDisabled" => SdkError::CustodyCreationDisabled,
+                "CustodyAccountConflict" => SdkError::CustodyAccountConflict,
                 "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
                 "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,
                 "NetworkingPending" => SdkError::NetworkingPending,
@@ -156,5 +193,32 @@ impl CustodyBusClient {
             });
         }
         Ok(reply.result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maximal_confirmation_uses_one_fixed_zeroizing_request_allocation() -> Result<(), SdkError> {
+        let words = ["\0".repeat(128), "\0".repeat(128), "\0".repeat(128)];
+        let request_id = "r".repeat(SETUP_REQUEST_ID_BYTES);
+        let request = SetupFrame {
+            bus_protocol: "ramflux.local_bus.v1",
+            frame_id: &request_id,
+            kind: "request",
+            request_id: &request_id,
+            account_id: None,
+            sdk_api: "account",
+            method: "account.custody.confirm",
+            body: serde_json::json!({"words":words}),
+            trace_id: None,
+        };
+        let mut bytes = SecretBuffer::new(SETUP_FRAME_BYTES);
+        let capacity = bytes.capacity();
+        serde_json::to_writer(&mut bytes, &request).map_err(|_| SdkError::CustodySetupInvalid)?;
+        assert_eq!(bytes.capacity(), capacity);
+        Ok(())
     }
 }

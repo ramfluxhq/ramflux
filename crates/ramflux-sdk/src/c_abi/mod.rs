@@ -860,6 +860,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::ContactRequestCapacity(_)
         | SdkError::CallControlReceiptCapacity { .. } => RamfluxErrorCode::RateLimited,
         SdkError::CustodySetupInvalid
+        | SdkError::CustodyAccountConflict
         | SdkError::SurfaceRefused { .. }
         | SdkError::TaskRefused { .. }
         | SdkError::TaskDeliveryTooLarge { .. }

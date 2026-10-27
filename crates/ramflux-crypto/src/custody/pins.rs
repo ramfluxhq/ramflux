@@ -8,6 +8,9 @@ use ramflux_protocol::custody::{DeviceSet, Envelope, decode_epoch, object_hash};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+const MAX_CONFLICT_RANGES: usize = 8;
+const MAX_CONFLICT_EVIDENCE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Persist atomically with the accepted head before exposing new authority.
 /// Deserialization is only for trusted local storage, never a network capability.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +32,14 @@ struct AccountPin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     current_record: Option<Envelope<DeviceSet>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    range_records: BTreeMap<u64, Envelope<DeviceSet>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     conflicts: BTreeMap<u64, CustodyConflictEvidence>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pruned_evidence: u64,
+}
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    value == &T::default()
 }
 /// Authenticated conflict class surfaced to callers as a blocking security alert.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +133,9 @@ impl AuthorityPins {
                 revoked_ids: record.revoked_ids().clone(),
                 devices,
                 current_record: Some(record.envelope().clone()),
+                range_records: BTreeMap::from([(range, record.envelope().clone())]),
                 conflicts: BTreeMap::new(),
+                pruned_evidence: 0,
             },
         );
         Ok(PinOutcome::Advanced)
@@ -132,6 +144,19 @@ impl AuthorityPins {
     #[must_use]
     pub fn conflict_evidence(&self, anchor: &str, range: u64) -> Option<&CustodyConflictEvidence> {
         self.accounts.get(anchor)?.conflicts.get(&range)
+    }
+    /// Number of full conflict pairs discarded to enforce evidence retention bounds.
+    #[must_use]
+    pub fn pruned_evidence(&self, anchor: &str) -> u64 {
+        self.accounts.get(anchor).map_or(0, |pin| pin.pruned_evidence)
+    }
+    /// Remove full record copies when only current hashes and certificate pins are needed locally.
+    pub fn discard_retained_records(&mut self) {
+        for pin in self.accounts.values_mut() {
+            pin.current_record = None;
+            pin.range_records.clear();
+            pin.conflicts.clear();
+        }
     }
 }
 
@@ -148,6 +173,9 @@ fn observe_existing(
     if pin.principal_id != body.principal_id || pin.principal_kind != body.principal_kind {
         return Err(reject("custody immutable identity changed"));
     }
+    if body.device_set_epoch < pin.epoch {
+        return Err(reject("custody epoch rollback"));
+    }
     if pin.certificates.get(&range).is_some_and(|old| old != &certificate) {
         return fence(
             pin,
@@ -156,9 +184,6 @@ fn observe_existing(
             range,
             CustodyConflictKind::MasterCertificate,
         );
-    }
-    if body.device_set_epoch < pin.epoch {
-        return Err(reject("custody epoch rollback"));
     }
     if body.device_set_epoch == pin.epoch {
         if pin.hash != hash {
@@ -186,6 +211,8 @@ fn observe_existing(
     pin.epoch = body.device_set_epoch;
     pin.hash = hash;
     pin.current_record = Some(record.envelope().clone());
+    pin.range_records.insert(range, record.envelope().clone());
+    prune_evidence(pin, None)?;
     pin.revoked_ids.extend(record.revoked_ids().iter().cloned());
     pin.devices.extend(devices);
     Ok(PinOutcome::Advanced)
@@ -198,16 +225,10 @@ fn fence(
     range: u64,
     kind: CustodyConflictKind,
 ) -> Result<PinOutcome, CryptoError> {
-    pin.fenced_ranges.insert(range);
     if let Some(evidence) = pin.conflicts.get(&range) {
         return Ok(PinOutcome::Fenced(evidence.alert.clone()));
     }
-    let accepted = pin
-        .current_record
-        .as_ref()
-        .or(previous)
-        .ok_or_else(|| reject("custody conflict evidence unavailable"))?
-        .clone();
+    let accepted = same_range_record(pin, previous, range)?.clone();
     let alert = CustodyConflictAlert {
         account_anchor: conflicting.body.account_anchor.clone(),
         range_index: range,
@@ -215,15 +236,67 @@ fn fence(
         accepted_record_hash: object_hash(&accepted)?,
         conflicting_record_hash: object_hash(conflicting)?,
     };
-    pin.conflicts.insert(
-        range,
-        CustodyConflictEvidence {
-            alert: alert.clone(),
-            accepted,
-            conflicting: conflicting.clone(),
-        },
-    );
+    let evidence = CustodyConflictEvidence {
+        alert: alert.clone(),
+        accepted,
+        conflicting: conflicting.clone(),
+    };
+    let singleton = BTreeMap::from([(range, &evidence)]);
+    if ramflux_protocol::canonical_json_bytes(&(
+        BTreeMap::<u64, Envelope<DeviceSet>>::new(),
+        singleton,
+    ))?
+    .len()
+        > MAX_CONFLICT_EVIDENCE_BYTES
+    {
+        return Err(reject("custody conflict evidence exceeds retention budget"));
+    }
+    pin.fenced_ranges.insert(range);
+    pin.range_records.remove(&range);
+    pin.conflicts.insert(range, evidence);
+    prune_evidence(pin, Some(range))?;
     Ok(PinOutcome::Fenced(alert))
+}
+
+fn same_range_record<'a>(
+    pin: &'a AccountPin,
+    previous: Option<&'a Envelope<DeviceSet>>,
+    range: u64,
+) -> Result<&'a Envelope<DeviceSet>, CryptoError> {
+    if let Some(record) = pin.range_records.get(&range) {
+        return Ok(record);
+    }
+    for record in [pin.current_record.as_ref(), previous].into_iter().flatten() {
+        if decode_epoch(record.body.device_set_epoch)?.0 == range
+            && object_hash(record)? == pin.hash
+        {
+            return Ok(record);
+        }
+    }
+    Err(reject("custody conflict evidence unavailable"))
+}
+
+fn prune_evidence(pin: &mut AccountPin, retained_conflict: Option<u64>) -> Result<(), CryptoError> {
+    loop {
+        let bytes =
+            ramflux_protocol::canonical_json_bytes(&(&pin.range_records, &pin.conflicts))?.len();
+        if pin.conflicts.len() <= MAX_CONFLICT_RANGES
+            && pin.range_records.len() <= MAX_CONFLICT_RANGES
+            && bytes <= MAX_CONFLICT_EVIDENCE_BYTES
+        {
+            return Ok(());
+        }
+        if let Some(oldest) =
+            pin.conflicts.keys().copied().find(|range| Some(*range) != retained_conflict)
+        {
+            pin.conflicts.remove(&oldest);
+        } else if let Some(oldest) = pin.range_records.keys().next().copied() {
+            pin.range_records.remove(&oldest);
+        } else {
+            return Err(reject("custody conflict evidence exceeds retention budget"));
+        }
+        pin.pruned_evidence = pin.pruned_evidence.saturating_add(1);
+    }
 }
 
 fn validate_transition(pin: &AccountPin, record: &VerifiedRecord) -> Result<(), CryptoError> {
@@ -291,4 +364,46 @@ fn indexed_devices(
             ))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::custody::verify_record;
+
+    #[test]
+    fn conflict_evidence_is_bounded_by_range_count_and_serialized_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/custody_v3.json"))?;
+        let record: Envelope<DeviceSet> = serde_json::from_value(vector["record"].clone())?;
+        let anchor = record.body.account_anchor.clone();
+        let verified = verify_record(&record, record.body.issued_at, None, None)?;
+        let mut pins = AuthorityPins::default();
+        pins.observe(&verified)?;
+        let pin = pins.accounts.get_mut(&anchor).ok_or("account pin")?;
+        for range in 0..10 {
+            let mut conflicting = record.clone();
+            conflicting.body.profile.display_name = format!("{range}-{}", "x".repeat(600_000));
+            let alert = CustodyConflictAlert {
+                account_anchor: anchor.clone(),
+                range_index: range,
+                kind: CustodyConflictKind::RecordHead,
+                accepted_record_hash: object_hash(&record)?,
+                conflicting_record_hash: object_hash(&conflicting)?,
+            };
+            pin.conflicts.insert(
+                range,
+                CustodyConflictEvidence { alert, accepted: record.clone(), conflicting },
+            );
+        }
+        prune_evidence(pin, Some(9))?;
+        assert!(pin.conflicts.len() <= MAX_CONFLICT_RANGES);
+        assert!(
+            ramflux_protocol::canonical_json_bytes(&(&pin.range_records, &pin.conflicts))?.len()
+                <= MAX_CONFLICT_EVIDENCE_BYTES
+        );
+        assert!(pin.pruned_evidence > 0);
+        Ok(())
+    }
 }

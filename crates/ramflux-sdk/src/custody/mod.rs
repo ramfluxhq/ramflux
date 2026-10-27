@@ -5,12 +5,13 @@
 mod bus;
 mod ceremony;
 pub use bus::{ConfirmedAccount, CustodyBusClient};
+pub(crate) use bus::{SETUP_FRAME_BYTES, SETUP_REQUEST_ID_BYTES, SecretBuffer};
 pub(crate) mod store;
 mod vault;
 pub use ceremony::CreateInput;
 pub(crate) use ceremony::CreationCeremony;
 pub use store::{BornAccount, CreationState, load_account};
-pub(crate) use store::{account_exists, list_accounts};
+pub(crate) use store::{account_exists, list_accounts, reconcile_incomplete_markers};
 pub use vault::{NativePrimaryVault, PrimaryVault};
 
 use crate::SdkError;
