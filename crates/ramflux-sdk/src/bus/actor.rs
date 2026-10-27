@@ -12,11 +12,15 @@ use tokio::sync::oneshot;
 pub(super) type AccountInitializer =
     Box<dyn FnOnce(AccountIndex) -> Result<LocalBusAccountState, SdkError> + Send>;
 
-pub(super) enum BackupCommand {
+pub(super) enum PrivateCommand {
+    NativeUnlock {
+        passphrase: zeroize::Zeroizing<String>,
+        reply: oneshot::Sender<Result<crate::LocalBusCreatedAccount, SdkError>>,
+    },
     Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
 }
 pub(super) struct AccountCommand {
-    pub backup: Option<BackupCommand>,
+    pub private: Option<PrivateCommand>,
     pub request: LocalBusFrame,
     pub connection_id: u64,
     pub topics: BTreeSet<String>,
@@ -105,13 +109,22 @@ impl AccountActor {
         })
     }
 
+    pub(super) async fn unlock_native(
+        &self,
+        passphrase: zeroize::Zeroizing<String>,
+    ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::NativeUnlock { passphrase, reply }).await?;
+        response.await.map_err(|_| stopped())?
+    }
+
     pub(super) async fn capture_backup(
         &self,
     ) -> Result<super::backup_jobs::CapturedAccount, SdkError> {
         #[cfg(test)]
         self.backup_captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (backup, received) = oneshot::channel();
-        self.send_backup(BackupCommand::Capture(backup)).await?;
+        self.send_private(PrivateCommand::Capture(backup)).await?;
         received.await.map_err(|_| stopped())?
     }
     pub(super) async fn backup_missing_references(
@@ -119,11 +132,11 @@ impl AccountActor {
     ) -> Result<super::backup_jobs::MissingAttachments, SdkError> {
         self.reader_pool()?.backup_missing_references().await
     }
-    async fn send_backup(&self, backup: BackupCommand) -> Result<(), SdkError> {
+    async fn send_private(&self, backup: PrivateCommand) -> Result<(), SdkError> {
         let (outbound, _events) = mpsc::channel(1);
         self.sender
             .send(AccountCommand {
-                backup: Some(backup),
+                private: Some(backup),
                 request: LocalBusFrame::request(
                     "backup-query",
                     None,

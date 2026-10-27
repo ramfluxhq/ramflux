@@ -39,6 +39,7 @@ pub(crate) struct TestVault {
     pub(crate) fail: AtomicBool,
     fail_branch: AtomicBool,
     commit_obstacle: Mutex<Option<PathBuf>>,
+    cancel_commit: Mutex<Option<std::sync::Arc<CommitGate>>>,
 }
 impl TestVault {
     pub(crate) fn primary_for_public_key(
@@ -126,6 +127,11 @@ impl PrimaryVault for TestVault {
             return Err(SdkError::CustodyVaultUnavailable);
         }
         self.put(reference, &**seeds)?;
+        if let Some(gate) =
+            self.cancel_commit.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.take()
+        {
+            gate.cancel();
+        }
         if let Some(path) =
             self.commit_obstacle.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.take()
         {
@@ -399,5 +405,35 @@ fn custody_final_publication_failure_deletes_both_new_vault_entries() -> Result 
     assert!(account_exists(&root.0, "final-failure")?);
     assert!(load_account(&root.0, "final-failure", 100).is_err());
     assert!(!root.0.join("local_bus_accounts/final-failure.json").exists());
+    Ok(())
+}
+
+#[test]
+fn custody_cancel_during_persistence_removes_new_primary_and_branch_credentials() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let mut pending = CreationCeremony::begin(true, &root.0, input("cancelled-commit"), 100)?;
+    let phrase = pending.show_once()?;
+    let positions = pending.hidden_challenge()?;
+    let gate = std::sync::Arc::new(CommitGate::new(pending.deadline()));
+    pending.guard_commit(std::sync::Arc::clone(&gate));
+    *vault.cancel_commit.lock().map_err(|_| "vault lock")? = Some(gate);
+    assert!(
+        pending
+            .confirm_with_passphrase(
+                &words(&phrase, positions)?,
+                &vault,
+                100,
+                b"discarded passphrase"
+            )
+            .is_err()
+    );
+    assert_eq!(vault.secrets.lock().map_err(|_| "vault lock")?.len(), 0);
+    assert!(!root.0.join("custody_accounts/cancelled-commit/authority.json").exists());
+    // The failed reservation retains its mode denial, but publishes no account authority.
+    assert!(account_exists(&root.0, "cancelled-commit")?);
+    let accounts = list_accounts(&root.0, 100)?;
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0]["setup_incomplete"], true);
     Ok(())
 }

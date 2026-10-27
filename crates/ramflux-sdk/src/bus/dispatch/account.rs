@@ -36,36 +36,7 @@ pub(crate) async fn dispatch_account_bus_request(
             state.active_account_id = Some(account_id.clone());
             Ok(local_bus_ok(serde_json::json!({ "active_account_id": account_id })))
         }
-        "account.status" => {
-            let account_id = request_account_id(request)?;
-            let account = local_bus_account(state, account_id)?;
-            let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-                &state.config.data_root,
-                account_id,
-            ))?;
-            let reestablishing = account
-                .client
-                .account_db()
-                .ok()
-                .map(|db| db.load_actor_state::<bool>("backup/reestablishing"))
-                .transpose()?
-                .flatten()
-                .unwrap_or(false);
-            Ok(local_bus_ok(serde_json::json!({
-                "local_account_id": account_id,
-                "secure_sessions":if reestablishing{"reestablishing"}else{"ready"},
-                "node_id": manifest.node_id,
-                "client_mode":manifest.client_mode,
-                "local_device_authorized":manifest.devices.iter().any(|device|device.device_id==account.gateway_config.device_id),
-                "principal_id": account.gateway_config.principal_id,
-                "principal_commitment":account.principal_commitment,
-                "device_id": account.gateway_config.device_id,
-                "target_delivery_id": account.target_delivery_id,
-                "session_id": account.engine.as_ref().map(|engine| engine.session().session_id.clone()),
-                "active_transport_kind": account.engine.as_ref().map(|engine| engine.active_transport_kind().wire_name()),
-                "pending_deliveries": account.pending_deliveries.len(),
-            })))
-        }
+        "account.status" => account_status(state, request),
         "account.lock" => {
             let account_id = request_account_id(request)?.to_owned();
             local_bus_account_lock(state, &account_id)?;
@@ -76,6 +47,13 @@ pub(crate) async fn dispatch_account_bus_request(
         }
         "account.unlock" => {
             let account_id = request_account_id(request)?.to_owned();
+            if crate::custody::account_exists(&state.config.data_root, &account_id)? {
+                let result =
+                    super::super::native_account::unlock_request(state, &account_id, request)
+                        .await?;
+                return Ok(local_bus_ok(serde_json::to_value(result)?));
+            }
+
             let mut body: LocalBusAccountUnlockRequest =
                 serde_json::from_value(request.body.clone())?;
             let response = local_bus_account_unlock(state, &account_id, &mut body).await?;
@@ -112,6 +90,43 @@ pub(crate) async fn dispatch_account_bus_request(
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
+}
+
+fn account_status(
+    state: &LocalBusDaemonState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?;
+    let account = local_bus_account(state, account_id)?;
+    if account.client.born_v3_account.is_some() {
+        return Ok(local_bus_ok(super::super::native_account::status(account, account_id)?));
+    }
+    let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
+        &state.config.data_root,
+        account_id,
+    ))?;
+    let reestablishing = account
+        .client
+        .account_db()
+        .ok()
+        .map(|db| db.load_actor_state::<bool>("backup/reestablishing"))
+        .transpose()?
+        .flatten()
+        .unwrap_or(false);
+    Ok(local_bus_ok(serde_json::json!({
+        "local_account_id": account_id,
+        "secure_sessions":if reestablishing{"reestablishing"}else{"ready"},
+        "node_id": manifest.node_id,
+        "client_mode":manifest.client_mode,
+        "local_device_authorized":manifest.devices.iter().any(|device|device.device_id==account.gateway_config.device_id),
+        "principal_id": account.gateway_config.principal_id,
+        "principal_commitment":account.principal_commitment,
+        "device_id": account.gateway_config.device_id,
+        "target_delivery_id": account.target_delivery_id,
+        "session_id": account.engine.as_ref().map(|engine| engine.session().session_id.clone()),
+        "active_transport_kind": account.engine.as_ref().map(|engine| engine.active_transport_kind().wire_name()),
+        "pending_deliveries": account.pending_deliveries.len(),
+    })))
 }
 
 pub(crate) async fn local_bus_account_create(
@@ -408,6 +423,10 @@ fn local_bus_account_passphrase_rotate(
     {
         let account = local_bus_account_mut(state, account_id)?;
         account.client.rekey_active_account(account_id, body.new_passphrase.as_bytes())?;
+    }
+    if local_bus_account(state, account_id)?.client.born_v3_account.is_some() {
+        body.new_passphrase.zeroize();
+        return Ok(());
     }
     let manifest_path = local_bus_account_manifest_path(&state.config.data_root, account_id);
     let mut manifest = read_local_bus_account_manifest(&manifest_path)?;

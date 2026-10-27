@@ -43,6 +43,7 @@ pub struct CreationCeremony {
     phase: Phase,
     positions: Option<[u8; 3]>,
     deadline: Instant,
+    commit_gate: Option<std::sync::Arc<super::CommitGate>>,
 }
 impl std::fmt::Debug for CreationCeremony {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -142,6 +143,7 @@ impl CreationCeremony {
         Ok(Self {
             ceremony_id: format!("ceremony-{}", encode_base64url(*random()?)),
             expired: false,
+            commit_gate: None,
             root: root.into(),
             input,
             phrase: Some(phrase),
@@ -228,6 +230,9 @@ impl CreationCeremony {
     ) -> Result<BornAccount, SdkError> {
         self.complete(words, vault, now, None)
     }
+    pub(crate) fn guard_commit(&mut self, gate: std::sync::Arc<super::CommitGate>) {
+        self.commit_gate = Some(gate);
+    }
     pub(crate) fn confirm_with_passphrase(
         self,
         words: &[Zeroizing<String>; 3],
@@ -303,6 +308,7 @@ impl CreationCeremony {
                 branch: &branch_seeds,
                 now,
                 data_secret,
+                commit_gate: self.commit_gate.as_deref(),
             },
             vault,
         )

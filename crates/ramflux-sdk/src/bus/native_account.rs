@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Ordinary unlocked account state using public native authority and independent node pins.
+use super::state::{LocalBusAccountState, LocalBusDaemonState};
+use crate::{
+    GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig, LocalBusCreatedAccount,
+    LocalBusCreatedAccountState, RamfluxClient, SdkError,
+};
+use std::{net::SocketAddr, path::PathBuf};
+use zeroize::Zeroizing;
+
+pub(super) async fn unlock(
+    state: &mut LocalBusDaemonState,
+    id: &str,
+    passphrase: Zeroizing<String>,
+) -> Result<LocalBusCreatedAccount, SdkError> {
+    if let Some(account) = state.accounts.get(id) {
+        account.client.verify_active_account_secret(id, passphrase.as_bytes())?;
+        return response(account);
+    }
+    let root = state.config.data_root.clone();
+    let mut client = RamfluxClient::new();
+    client.open_account_index(&root)?;
+    client.unlock_account(id, passphrase.as_bytes())?;
+    drop(passphrase);
+    let native = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    let anchor = native.record().body.account_anchor.clone();
+    let device = native.local_device_id()?.to_owned();
+    let owned = client.owned_device_identity()?;
+    let record = native.record().clone();
+    let custodian_publication =
+        native.custodian_publication(&root, crate::custody::network_now()?)?;
+    client.observe_custody_manifest(
+        &ramflux_protocol::custody::CustodyManifest {
+            publication: ramflux_protocol::custody::Publication { record, compacted_ids: None },
+            custodian_publication,
+            devices: Vec::new(),
+        },
+        &anchor,
+        crate::custody::network_now()?,
+    )?;
+    let endpoint = GatewayQuicEndpointConfig {
+        bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+        gateway_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+        server_name: String::new(),
+        ca_cert: PathBuf::new(),
+        principal_id: client
+            .born_v3_account
+            .as_ref()
+            .ok_or(SdkError::CustodySetupInvalid)?
+            .record()
+            .body
+            .principal_id
+            .clone(),
+        device_id: device,
+        target_delivery_id: owned.storage_key().into(),
+        prekey_http_url: None,
+    };
+    let gateway = GatewaySessionConfig::auto(endpoint).with_born_v3_account(
+        client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?,
+    );
+    let mut account = LocalBusAccountState::disconnected(client, gateway, anchor);
+    account.activation_pending = true;
+    account.native_setup = Some(state.config.clone());
+    if let Err(error) = account.ensure_gateway_live().await {
+        tracing::debug!(%error, "native account data unlocked; networking pending");
+    }
+    let result = response(&account)?;
+    state.accounts.insert(id.into(), account);
+    state.active_account_id = Some(id.into());
+    Ok(result)
+}
+
+pub(super) fn response(account: &LocalBusAccountState) -> Result<LocalBusCreatedAccount, SdkError> {
+    let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    Ok(LocalBusCreatedAccount {
+        account_id: native.local_account_id().into(),
+        display_name: native.record().body.profile.display_name.clone(),
+        state: LocalBusCreatedAccountState::Unlocked,
+        networking: native.state(),
+    })
+}
+
+pub(super) fn status(
+    account: &LocalBusAccountState,
+    account_id: &str,
+) -> Result<serde_json::Value, SdkError> {
+    let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    Ok(serde_json::json!({
+        "account_id":account_id,"local_account_id":account_id,"state":"unlocked","networking":native.state(),
+        "display_name":native.record().body.profile.display_name,"principal_id":native.record().body.principal_id,
+        "principal_commitment":native.record().body.account_anchor,"device_id":account.gateway_config.device_id,
+        "target_delivery_id":account.target_delivery_id,
+        "node_id":account.client.account_db()?.load_actor_state::<String>("account/node-id")?,
+        "session_id":account.engine.as_ref().map(|engine|engine.session().session_id.clone()),
+        "active_transport_kind":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),
+        "pending_deliveries":account.pending_deliveries.len(),
+    }))
+}
+
+pub(super) async fn unlock_request(
+    state: &mut LocalBusDaemonState,
+    id: &str,
+    request: &crate::LocalBusFrame,
+) -> Result<LocalBusCreatedAccount, SdkError> {
+    let passphrase = request
+        .body
+        .as_object()
+        .filter(|body| body.len() == 1)
+        .and_then(|body| body.get("passphrase"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SdkError::CustodySetupInvalid)?;
+    unlock(state, id, Zeroizing::new(passphrase.to_owned())).await
+}
+
+pub(super) fn finish_connection(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+    if let Some(engine) = &account.engine {
+        account.gateway_config = engine.config.clone();
+        engine.target_delivery_id().clone_into(&mut account.target_delivery_id);
+    }
+    account.client.born_v3_account = Some(Box::new(crate::custody::load_account(
+        account.client.account_index()?.root(),
+        &account.client.account_db()?.local_account_id,
+        crate::custody::network_now()?,
+    )?));
+    account.activation_pending = false;
+    Ok(())
+}
+
+pub(super) async fn configure_pending(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+    if account.gateway_config.custody.is_some() {
+        return Ok(());
+    }
+    let setup = account.native_setup.as_ref().ok_or(SdkError::NetworkingPending)?;
+    let root = &setup.data_root;
+    let saved = account.client.account_db()?.load_actor_state::<String>("account/node-id")?;
+    let nodes = crate::node::NodeStore::load(root, &setup.builtin_nodes)?;
+    let profile =
+        nodes.selected(saved.as_deref(), saved.is_some())?.ok_or(SdkError::NetworkingPending)?;
+    let old = &account.gateway_config;
+    let endpoint = GatewayQuicEndpointConfig {
+        bind_addr: old.bind_addr,
+        gateway_addr: old.gateway_addr,
+        server_name: old.server_name.clone(),
+        ca_cert: old.ca_cert.clone(),
+        principal_id: old.principal_id.clone(),
+        device_id: old.device_id.clone(),
+        target_delivery_id: old.target_delivery_id.clone(),
+        prekey_http_url: None,
+    };
+    let endpoint = profile.gateway_config(root, endpoint).await?;
+    let tcp = crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?;
+    let gateway = GatewaySessionConfig::auto(endpoint)
+        .with_tcp_gateway_addr(tcp)
+        .with_native_custody(GatewayCustodyConfig {
+            account_root: root.clone(),
+            account_id: account.client.account_db()?.local_account_id.clone(),
+            node_id: profile.node_id.clone(),
+            node_public_key: profile.node_public_key.clone(),
+            vault: super::custody_setup::primary_provider(setup),
+        })
+        .with_account_identity(&account.client)?;
+    let relay = profile.relay_options(root, &gateway.principal_id).await?;
+    account.client.account_db()?.persist_actor_state("account/node-id", &profile.node_id)?;
+    account.client.account_db()?.persist_actor_state("sync/node-id", &Some(&profile.node_id))?;
+    account.client.node_relay_options = Some(relay);
+    account.gateway_config = gateway;
+    Ok(())
+}

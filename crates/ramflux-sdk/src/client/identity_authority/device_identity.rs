@@ -11,18 +11,22 @@ impl RamfluxClient {
     /// # Errors
     /// Rejects missing owned root/branch state or inconsistent account ownership.
     pub fn owned_device_identity(&self) -> Result<RootQualifiedDeviceRef, SdkError> {
-        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if let Some(device) = self.own_custody_device(&branch.device_id)? {
-            return Ok(device);
+        if let Some(account) = &self.born_v3_account {
+            let device = self
+                .device_branch
+                .as_ref()
+                .map_or(account.local_device_id()?, |branch| branch.device_id.as_str());
+            return self.own_custody_device(device)?.ok_or(SdkError::IdentityRootMissing);
         }
+        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         Ok(RootQualifiedDeviceRef::for_owned_device(
             self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             branch,
         )?)
     }
     pub(crate) fn read_device_identity(&self) -> Result<Option<RootQualifiedDeviceRef>, SdkError> {
-        if (self.born_v3_account.is_some() || self.identity_root.is_some())
-            && self.device_branch.is_some()
+        if self.born_v3_account.is_some()
+            || (self.identity_root.is_some() && self.device_branch.is_some())
         {
             return self.owned_device_identity().map(Some);
         }
@@ -39,6 +43,14 @@ impl RamfluxClient {
                 None => selector.to_owned(),
             };
             return self.own_custody_device(&device)?.ok_or(SdkError::IdentityRootMissing);
+        }
+        if let Some(reader) = &self.reader_device_identity {
+            let device = match ramflux_protocol::parse_qualified_device_id(selector)? {
+                Some((root, name)) if root == reader.root_commitment() => name,
+                Some(_) => return Err(invalid("reader account device root mismatch")),
+                None => selector.to_owned(),
+            };
+            return self.device_identity_for_root(reader.root_commitment(), &device);
         }
         let owner = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let device = if let Some((root, name)) =

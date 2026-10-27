@@ -156,7 +156,7 @@ impl Supervisor {
         let (reply, _) = tokio::sync::oneshot::channel();
         actor
             .request(AccountCommand {
-                backup: None,
+                private: None,
                 request,
                 connection_id: connection.connection_id,
                 topics: BTreeSet::default(),
