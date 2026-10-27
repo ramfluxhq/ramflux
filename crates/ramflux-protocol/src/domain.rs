@@ -105,7 +105,7 @@ pub const CUSTODY_TRANSFER_AAD: &str = "ramflux.identity.transfer.aad.v1";
 pub const CUSTODY_TRANSFER_HPKE: &str = "ramflux.identity.transfer.hpke.v1";
 pub const CUSTODY_TRANSFER_PAYLOAD: &str = "ramflux.identity.transfer.payload.v1";
 pub const CUSTODY_TRANSFER_HPKE_SUITE: &str = "ramflux.identity.transfer.hpke_suite.v1";
-pub const CUSTODY_BRANCH_EXPORTER: &str = "ramflux.identity.branch_proof.exporter.v3";
+pub const CUSTODY_BRANCH_EXPORTER: &str = "EXPERIMENTAL-ramflux.identity.branch_proof.exporter.v3";
 pub const CUSTODY_REVOKED_LIST: &str = "ramflux.identity.revoked_devices.list.v1";
 pub const CUSTODY_TIME_PROBE: &str = "ramflux.identity.time_probe.v1";
 
@@ -233,8 +233,14 @@ mod tests {
             }
         }
         for label in &super::ALL[66..] {
-            assert!(label.starts_with("ramflux.identity."));
+            assert!(
+                label.starts_with("ramflux.identity.") || *label == super::CUSTODY_BRANCH_EXPORTER
+            );
         }
+        assert_eq!(
+            super::CUSTODY_BRANCH_EXPORTER,
+            "EXPERIMENTAL-ramflux.identity.branch_proof.exporter.v3"
+        );
         assert_eq!(super::CUSTODY_PAIRING_TRANSCRIPT, "ramflux.identity.pairing_transcript.v1");
     }
 }
