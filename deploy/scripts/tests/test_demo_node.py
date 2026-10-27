@@ -267,6 +267,19 @@ else:
         self.run_script("up")
         self.assertIn("http://demo.example.org:58482", (self.state / "runtime.env").read_text())
 
+    def test_every_maintenance_compose_call_refuses_conflicting_legacy_inputs(self):
+        self.run_script("up")
+        with (self.state / "runtime.env").open("a") as output:
+            output.write("RF_COMPOSE_FEDERATION_ADMIN_TOKEN=DO_NOT_LOG\n")
+        for command, flags in (("status", ()), ("logs", ()), ("down", ()),
+                               ("down", ("--purge",))):
+            with self.subTest(command=command, flags=flags):
+                self.journal.write_text("")
+                result = self.run_script(command, *flags, success=False)
+                self.assertIn("RF_COMPOSE_FEDERATION_ADMIN_TOKEN", result.stderr)
+                self.assertNotIn("DO_NOT_LOG", result.stderr)
+                self.assertEqual(self.compose_commands(), [])
+
     def test_voice_port_refuses_the_mesh_udp_port_before_runtime_access(self):
         result = self.run_script("up", "--voice-udp-port", "59453", success=False)
         self.assertIn("conflicts with another demo UDP port", result.stderr)

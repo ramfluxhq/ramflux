@@ -80,9 +80,9 @@ services:
       RAMFLUX_MESH_QUIC_RECEIVE_WINDOW: "${RF_COMPOSE_MESH_QUIC_RECEIVE_WINDOW:-16777216}"
       RAMFLUX_MESH_QUIC_STREAM_RECEIVE_WINDOW: "${RF_COMPOSE_MESH_QUIC_STREAM_RECEIVE_WINDOW:-1048576}"
       RAMFLUX_MESH_QUIC_SEND_WINDOW: "${RF_COMPOSE_MESH_QUIC_SEND_WINDOW:-16777216}"
-      RAMFLUX_ROUTER_ADMIN_TOKEN: "ramflux-local-admin-token"
+      RAMFLUX_ROUTER_ADMIN_TOKEN: "${RF_COMPOSE_ROUTER_ADMIN_TOKEN:?generated fixture token required}"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_URL: "http://ramflux-federation:18084/internal/home-node-migration/forward"
-      RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN: "ramflux-local-admin-token"
+      RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:?generated fixture token required}"
     volumes:
       - ./config/router.toml:/etc/ramflux/config/router.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/router:/etc/ramflux/mesh:ro
@@ -160,7 +160,7 @@ services:
       RAMFLUX_ITEST_PERF: "${RF_COMPOSE_ITEST_PERF:-0}"
       RAMFLUX_ITEST_FEDERATION_HTTP_ADDR: "0.0.0.0:18082"
       RAMFLUX_FEDERATION_ADMIN_ADDR: "0.0.0.0:18084"
-      RAMFLUX_FEDERATION_ADMIN_TOKEN: "ramflux-local-admin-token"
+      RAMFLUX_FEDERATION_ADMIN_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:?generated fixture token required}"
       RAMFLUX_FEDERATION_NODE_ID: "${RF_COMPOSE_FEDERATION_NODE_ID:-localhost}"
       RAMFLUX_FEDERATION_PUBLIC_ENDPOINT: "${RF_COMPOSE_FEDERATION_PUBLIC_ENDPOINT:-ramflux-federation:7443}"
       RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE: "/etc/ramflux/node-identity/node-signing.key"

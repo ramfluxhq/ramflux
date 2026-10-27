@@ -89,6 +89,24 @@ class RenderedComposeInputTests(unittest.TestCase):
             "RAMFLUX_FEDERATION_TRUST_ENDPOINT": "federation.example:7443",
             "RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID": "node.example",
+            "RF_COMPOSE_FEDERATION_ADMIN_TOKEN": "generated-test-token",
+            "RF_COMPOSE_ROUTER_ADMIN_TOKEN": "generated-test-token",
+            "RF_COMPOSE_CLIENT_GATEWAY_QUIC_ADDR": "explicit-input",
+            "RF_COMPOSE_CLIENT_GATEWAY_SERVER_NAME": "explicit-input",
+            "RF_COMPOSE_CLIENT_GATEWAY_TCP_ADDR": "explicit-input",
+            "RF_COMPOSE_CLIENT_PREKEY_HTTP_URL": "explicit-input",
+            "RF_COMPOSE_CLIENT_RELAY_QUIC_ADDR": "explicit-input",
+            "RF_COMPOSE_CLIENT_RELAY_SERVER_NAME": "explicit-input",
+            "RF_COMPOSE_CLIENT_SIGNALING_TURN_ADDR": "explicit-input",
+            "RF_COMPOSE_FEDERATION_NODE_ID": "explicit-input",
+            "RF_COMPOSE_FEDERATION_PROVIDER_KEYRING_FILE": "explicit-input",
+            "RF_COMPOSE_FEDERATION_PUBLIC_ENDPOINT": "explicit-input",
+            "RF_COMPOSE_FEDERATION_TRUST_SNAPSHOT_FILE": "explicit-input",
+            "RF_COMPOSE_GATEWAY_V3_ISSUER_CERT_FILE": "explicit-input",
+            "RF_COMPOSE_GATEWAY_V3_ISSUER_SEED": "explicit-input",
+            "RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL": "explicit-input",
+            "RF_COMPOSE_RELAY_TRUST_SNAPSHOT_CACHE_FILE": "explicit-input",
+
         }
         for path in sorted(DEPLOY.glob("docker-compose*.yml")):
             with self.subTest(compose=path.name):
@@ -125,3 +143,25 @@ class RenderedComposeInputTests(unittest.TestCase):
         if not provider:
             self.skipTest("set COMPOSE_TEST_DOCKER_COMPOSE for config-only Docker Compose v2 testing")
         self.check_provider(shlex.split(provider))
+
+    def test_old_names_only_env_is_refused_before_required_production_config_can_start(self):
+        provider = os.environ.get("COMPOSE_TEST_DOCKER_COMPOSE")
+        if not provider:
+            self.skipTest("set COMPOSE_TEST_DOCKER_COMPOSE for config-only testing")
+        env_file = self.root / "legacy.env"
+        env_file.write_text("".join(f"{old}=DO_NOT_LOG\n" for old in MAPPING)
+            + "RAMFLUX_FEDERATION_TRUST_ENDPOINT=federation.example:7443\n"
+            + "RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY=fixture-root\n"
+            + "RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID=node.example\n")
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.root)}
+        checked = subprocess.run([__import__('sys').executable,
+            str(DEPLOY / "scripts/compose-preflight.py"), "--env-file", str(env_file)],
+            env=env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertNotIn("DO_NOT_LOG", checked.stderr)
+        rendered = subprocess.run(shlex.split(provider) + ["--env-file", str(env_file),
+            "-f", str(DEPLOY / "docker-compose.yml"), "config"], env=env,
+            capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(rendered.returncode, 0)
+        self.assertIn("RF_COMPOSE_", rendered.stderr)
+        self.assertNotIn("ramflux-local-admin-token", (DEPLOY / "docker-compose.yml").read_text())

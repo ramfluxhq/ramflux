@@ -242,3 +242,41 @@ Service lookup uses project/service labels rather than `compose ps -q SERVICE`,
 which podman-compose 1.3.0 does not filter by service. Inherited remote-engine and
 compose overrides are ignored; `XDG_RUNTIME_DIR` is preserved for rootless Podman.
 Use the same user's default engine context for every operation.
+
+### Mandatory Compose input preflight (breaking operator migration)
+
+Before **every** Compose invocation (including config, logs and down), run:
+
+```sh
+python3 deploy/scripts/compose-preflight.py --env-file /path/to/operator.env
+# Use exactly the same env files, in the same order, and the same process environment:
+docker compose --env-file /path/to/operator.env -f deploy/docker-compose.yml config
+```
+
+With no explicit env file, preflight reads `.env` in the current directory. Repeated
+`--env-file` arguments apply in order; process environment wins. Run both commands
+from the same directory. If Compose's project directory has another implicit env
+file, pass it explicitly to both commands; do not rely on implicit project lookup.
+Use the same explicit files for Podman Compose. The demo wrapper and itest harness
+invoke preflight automatically; existing frozen demo projects must be regenerated
+through their normal `up` workflow before maintenance commands can pass migration.
+
+Rename the outer inputs according to `deploy/compose-inputs.json` (service
+variables **inside containers** retain `RAMFLUX_*`). Legacy names without an equal
+new name, conflicting pairs, unresolved expressions and public default admin
+secrets are refused with key names only. Equal dual names support generated env
+files consumed by other tools. Remove stale exported legacy names too. Production
+Compose now requires explicit federation/router admin tokens, signing and issuer
+material, trust/cache paths, node identity, and all advertised client endpoints;
+there is no public admin-token fallback. Generate independent random secrets,
+provision the matching certificates/trust files, and set every required input
+before rendering. Intentional unset/empty production inputs fail closed; this is
+an operator-visible security change, not backward-compatible unset behaviour.
+
+Only the explicitly enumerated non-security runtime/tuning keys in
+`ramflux_core::environment::OPTIONAL_EXPRESSION_KEYS` may ignore a literal `${…}`
+with a key-only warning. Security inputs, including optional credential, privacy,
+trust and certificate file paths, fail startup rather than select another key.
+Malformed relay metadata budgets fail startup; absence (or an unresolved optional
+expression) selects the bounded default. Empty credential paths retain their
+existing explicitly-disabled semantics where supported.
