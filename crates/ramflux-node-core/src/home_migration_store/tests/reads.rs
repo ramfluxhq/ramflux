@@ -68,13 +68,22 @@ fn owner_control(
     id: &str,
     now: u64,
 ) -> TestResult<Request> {
+    owner_control_at(action, payload, id, now, "A")
+}
+fn owner_control_at(
+    action: Action,
+    payload: ActionPayload,
+    id: &str,
+    now: u64,
+    audience: &str,
+) -> TestResult<Request> {
     let pubn = publication()?;
     let authority = verify_record(&pubn.record, now, None, None)?;
     let branch = ramflux_crypto::create_device_branch("vector.example", "primary", 1, [3; 32]);
     let control = Control {
         version: 1,
         action,
-        audience_node: "A".into(),
+        audience_node: audience.into(),
         migration_id: id.into(),
         requester: authority.envelope().body.master_certificate.body.primary_device_ref.clone(),
         authority_record_hash: object_hash(&pubn.record)?,
@@ -172,5 +181,49 @@ fn former_home_private_status_checks_destination_revocation_while_resolve_is_onl
         a.core.custody_record(&s.anchor, NOW + 3)?.ok_or("old local authority")?.record,
         publication()?.record
     );
+    Ok(())
+}
+
+#[test]
+fn committed_public_proof_and_pending_destination_status_do_not_depend_on_source_reachability()
+-> TestResult {
+    let s = Scenario::prepared()?;
+    let op = s.seal()?;
+    s.commit(&op)?;
+    let unavailable = Arc::new(Mesh(BTreeMap::new()));
+    let former = service(&s.a, unavailable.clone())?;
+    let destination = service(&s.b, unavailable)?;
+    let resolve = owner_control(
+        Action::Resolve,
+        ActionPayload::Resolve(ResolvePayload {
+            target_anchor: s.anchor.clone(),
+            after_home_hash: Some(s.base.hash().into()),
+            limit: 64,
+            old_node_hint: None,
+        }),
+        &s.authorization.body.migration_id,
+        NOW + 2,
+    )?;
+    let proof = former
+        .execute(&s.a.core, s.a.store()?, resolve, caller()?, NOW + 2)
+        .map_err(|e| format!("retained proof {e:?}"))?;
+    assert_eq!(proof.resolve_result.ok_or("proof")?.home.record.home().0, "B");
+    let status = owner_control_at(
+        Action::Status,
+        ActionPayload::Operation(OperationPayload {
+            account_anchor: s.anchor.clone(),
+            migration_id: s.authorization.body.migration_id.clone(),
+        }),
+        &s.authorization.body.migration_id,
+        NOW + 2,
+        "B",
+    )?;
+    let response = destination
+        .execute(&s.b.core, s.b.store()?, status, caller()?, NOW + 2)
+        .map_err(|e| format!("pending status {e:?}"))?;
+    assert_eq!(response.receipt.body.phase, Phase::Sealed);
+    assert!(response.backlog_progress.is_none());
+    assert!(response.commit_proof.is_none());
+    assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
     Ok(())
 }

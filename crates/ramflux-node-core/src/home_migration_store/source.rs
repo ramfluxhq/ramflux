@@ -53,6 +53,7 @@ impl RouterCore {
         let anchor = request.payload.account_anchor.as_str();
         let destination = request.payload.destination_node.as_str();
         let nonce = request.payload.nonce.as_str();
+        let _root = store.migration_root_barrier(anchor)?;
         self.with_migration_authority(anchor, now, |authority, publication| {
             crypto::verify_actor(&request.control, authority, now).map_err(auth_error)?;
             let control = &request.control.body;
@@ -79,6 +80,7 @@ impl RouterCore {
             }
             let tx = store.migration_db().begin_write().map_err(storage)?;
             let now = clock(&tx, now)?;
+            super::signer_pin::retain(&tx, node)?;
             super::authority_evidence::remember(&tx, publication, now)?;
             let head = if let Some(head) = read::<RecordEvidence>(&tx, HEADS, anchor)? {
                 head
@@ -168,6 +170,7 @@ impl RouterCore {
         self.with_migration_authority(&a.account_anchor, now, |authority, _publication| {
             validate_commit_request(store, node, sealed, peer, authority, now)
         })?;
+        let _root = store.migration_root_barrier(&a.account_anchor)?;
         let _submissions = store.migration_submission_barrier(&sealed.delivery_map)?;
         let now = observed();
         // A competing commit/cancel/recovery may have won while this writer waited.
@@ -189,17 +192,7 @@ impl RouterCore {
             let now = clock(&tx, observed())?;
             let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Source)?;
             let auth_key = super::authorization_key(auth)?;
-            if let Some(hash) = read::<String>(&tx, PROOFS, &auth_key)? {
-                let record: RecordEvidence = read(&tx, RECORDS, &hash)?
-                    .ok_or_else(|| storage("migration permanent proof lost its record"))?;
-                let HomeRecord::Committed { authorization, .. } = &record.record else {
-                    return Err(storage("migration proof index points to genesis"));
-                };
-                if message_hash(authorization).map_err(storage)?
-                    != message_hash(auth).map_err(storage)?
-                {
-                    return Err(refusal(Refusal::IdempotencyConflict));
-                }
+            if let Some(record) = permanent_commit(&tx, auth, &auth_key)? {
                 return Ok(record);
             }
             if read::<Signed<NoncommitFence>>(&tx, super::FENCES, &auth_key)?.is_some() {
@@ -252,7 +245,9 @@ impl RouterCore {
                 &tx,
                 SourceCommit { sealed, base: current, evidence: &evidence, cursors: &cursors, now },
             )?;
+            super::root_gate::persist(&tx, &a.account_anchor, Some(Refusal::HomeMigrated))?;
             commit_transition(store, tx)?;
+            store.cache_migration_root(&a.account_anchor, Some(Refusal::HomeMigrated))?;
             store.cache_migration_routes(&sealed.delivery_map, false, true)?;
             Ok(evidence)
         })
@@ -531,4 +526,23 @@ fn validate_commit_request(
         return Err(refusal(Refusal::BaseMismatch));
     }
     Ok(())
+}
+
+fn permanent_commit(
+    tx: &redb::WriteTransaction,
+    auth: &Signed<ramflux_protocol::home_migration::Authorization>,
+    auth_key: &str,
+) -> Result<Option<RecordEvidence>, NodeCoreError> {
+    let Some(hash) = read::<String>(tx, PROOFS, auth_key)? else {
+        return Ok(None);
+    };
+    let record: RecordEvidence = read(tx, RECORDS, &hash)?
+        .ok_or_else(|| storage("migration permanent proof lost its record"))?;
+    let HomeRecord::Committed { authorization, .. } = &record.record else {
+        return Err(storage("migration proof index points to genesis"));
+    };
+    if message_hash(authorization).map_err(storage)? != message_hash(auth).map_err(storage)? {
+        return Err(refusal(Refusal::IdempotencyConflict));
+    }
+    Ok(Some(record))
 }

@@ -32,11 +32,17 @@ pub struct VerifiedHome {
     evidence: RecordEvidence,
     hash: String,
     ancestry: BTreeMap<u64, String>,
+    records: Vec<RecordEvidence>,
 }
 impl VerifiedHome {
     #[must_use]
     pub fn extends(&self, epoch: u64, hash: &str) -> bool {
         self.ancestry.get(&epoch).is_some_and(|known| known == hash)
+    }
+    /// Authenticated retained base and successor records, in strictly increasing home order.
+    #[must_use]
+    pub fn records(&self) -> &[RecordEvidence] {
+        &self.records
     }
     #[must_use]
     pub fn evidence(&self) -> &RecordEvidence {
@@ -209,7 +215,15 @@ pub fn verify_home_chain(
         cached_manager_range: manager.body.range_index,
         cached_manager_certificate_hash: Some(&manager_hash),
     };
-    verify_retained_chain(result, &trust, now)
+    let mut verified = verify_retained_chain(result, &trust, now)?;
+    let mut records = vec![stored_base.clone()];
+    for record in result.predecessors.iter().chain(std::iter::once(&result.home)) {
+        if records.last().is_none_or(|last| record.record.epoch() > last.record.epoch()) {
+            records.push(record.clone());
+        }
+    }
+    verified.records = records;
+    Ok(verified)
 }
 fn verify_retained_chain(
     result: &ResolveResult,
@@ -306,7 +320,7 @@ fn verify_retained_chain(
     if record_hash(&result.home.record)? != hash {
         return Err(reject("migration result head mismatch"));
     }
-    Ok(VerifiedHome { evidence: result.home.clone(), hash, ancestry })
+    Ok(VerifiedHome { evidence: result.home.clone(), hash, ancestry, records: vec![] })
 }
 /// Binding from B's durable sealed operation, never from unverified request metadata.
 pub struct SealedBinding<'a> {

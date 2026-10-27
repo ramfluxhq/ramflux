@@ -118,6 +118,17 @@ fn handle_admin_request_with_limits(
         ("POST", "/s8/federation/forward") => {
             handle_admin_forward_request(stream, &request, context, admin_token)?;
         }
+        ("POST", ramflux_node_core::MIGRATION_LOCAL_PATH) => {
+            let local = ramflux_protocol::home_migration::decode(
+                &request.body,
+                ramflux_protocol::home_migration::MAX_FRAME_BYTES,
+            )
+            .map_err(|_| {
+                ramflux_node_core::NodeCoreError::ItestHttp("invalid migration RPC".into())
+            })?;
+            let reply = crate::home_migration::local(local, context, accepted_at)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &reply)?;
+        }
         ("POST", "/internal/home-node-migration/forward") => {
             handle_home_node_forward_request(stream, &request, context, admin_token)?;
         }

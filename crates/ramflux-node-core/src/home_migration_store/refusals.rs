@@ -3,8 +3,7 @@
 
 //! Typed submission refusals preserve signed routing evidence without mutating acceptance state.
 use super::{
-    HEADS, InboxRoute, NodeCoreError, RecordEvidence, Refusal, RouterCore, RouterRedbStore,
-    TARGETS, record_hash, storage,
+    InboxRoute, NodeCoreError, Refusal, RouterCore, RouterRedbStore, TARGETS, record_hash, storage,
 };
 use redb::ReadableDatabase;
 impl RouterCore {
@@ -30,22 +29,68 @@ impl RouterCore {
             return Ok(response);
         }
         let tx = store.migration_db().begin_read().map_err(storage)?;
-        let table = tx.open_table(TARGETS).map_err(storage)?;
-        let route: InboxRoute = super::decode(
-            table
+        let anchor = match tx.open_table(TARGETS) {
+            Ok(table) => table
                 .get(envelope.target_delivery_id.as_str())
                 .map_err(storage)?
-                .ok_or_else(|| storage("migrated target route unavailable"))?
-                .value(),
-        )?;
-        let heads = tx.open_table(HEADS).map_err(storage)?;
-        let head: RecordEvidence = super::decode(
-            heads
-                .get(route.anchor.as_str())
-                .map_err(storage)?
-                .ok_or_else(|| storage("migrated target home evidence unavailable"))?
-                .value(),
-        )?;
+                .map(|row| super::decode::<InboxRoute>(row.value()))
+                .transpose()?
+                .map(|route| route.anchor),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(storage(error)),
+        }
+        .or_else(|| {
+            ramflux_protocol::parse_qualified_device_id(&envelope.target_delivery_id)
+                .ok()
+                .flatten()
+                .map(|(anchor, _)| anchor)
+        })
+        .ok_or_else(|| storage("migrated target root unavailable"))?;
+        response.nack = Some(self.migration_nack(
+            store,
+            &anchor,
+            &envelope.target_delivery_id,
+            &envelope.envelope_id,
+            now,
+        )?);
+        Ok(response)
+    }
+    /// Bind an ordinary-client refusal to the authenticated challenge/request nonce.
+    pub(crate) fn migration_owner_refusal(
+        &self,
+        store: &RouterRedbStore,
+        device: &ramflux_protocol::custody::DeviceRef,
+        nonce: &str,
+        reason: Refusal,
+        now: u64,
+    ) -> Result<ramflux_protocol::custody::CustodyRefusal, NodeCoreError> {
+        let nack = if reason == Refusal::HomeMigrated {
+            let target =
+                ramflux_protocol::qualified_device_id(&device.account_anchor, &device.device_id)
+                    .map_err(storage)?;
+            Some(Box::new(self.migration_nack(
+                store,
+                &device.account_anchor,
+                &target,
+                nonce,
+                now,
+            )?))
+        } else {
+            None
+        };
+        Ok(ramflux_protocol::custody::CustodyRefusal::HomeMigration { reason, nack })
+    }
+    fn migration_nack(
+        &self,
+        store: &RouterRedbStore,
+        anchor: &str,
+        target: &str,
+        operation_id: &str,
+        now: u64,
+    ) -> Result<ramflux_protocol::Nack, NodeCoreError> {
+        let head = store
+            .migration_home(anchor)?
+            .ok_or_else(|| storage("migrated root home evidence unavailable"))?;
         let signer = self
             .node_service_signer()
             .ok_or_else(|| storage("migration refusal requires node signer"))?;
@@ -62,9 +107,9 @@ impl RouterCore {
                 signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
                 signature: String::new(),
             },
-            nack_id: format!("migrated:{}:{}", head.record.epoch(), envelope.envelope_id),
-            envelope_id: envelope.envelope_id.clone(),
-            receiver_device_id: envelope.target_delivery_id.clone(),
+            nack_id: format!("migrated:{}:{}", head.record.epoch(), operation_id),
+            envelope_id: operation_id.into(),
+            receiver_device_id: target.into(),
             reason: ramflux_protocol::NackReason::HomeNodeMigrated,
             received_at: i64::try_from(now).map_err(storage)?,
             retry_after: None,
@@ -72,7 +117,6 @@ impl RouterCore {
             new_home_node_hint: Some(head.record.home().0.into()),
         };
         signer.sign_nack(&mut nack)?;
-        response.nack = Some(nack);
-        Ok(response)
+        Ok(nack)
     }
 }

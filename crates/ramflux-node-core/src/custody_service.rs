@@ -103,6 +103,28 @@ impl CustodyService {
         self.migration = Some(service);
         Ok(self)
     }
+    /// Run bounded persisted retry/cleanup work; an idle node performs no database write.
+    /// # Errors
+    /// Returns local durable failures without converting them into commit or noncommit evidence.
+    pub fn home_migration_tick(
+        &self,
+        store: &crate::RouterRedbStore,
+        now: u64,
+        limit: usize,
+    ) -> Result<usize, crate::NodeCoreError> {
+        let Some(service) = &self.migration else {
+            return Ok(0);
+        };
+        if !store.home_migration_work_due(now)? {
+            return Ok(0);
+        }
+        store.cleanup_home_migrations(now)?;
+        service.courier_tick(store, now, limit)
+    }
+    #[must_use]
+    pub fn home_migration_enabled(&self) -> bool {
+        self.migration.is_some()
+    }
     /// Dispatch only the local federation service's authenticated peer envelope.
     /// The peer key is reloaded from local admission policy, never accepted from request JSON.
     /// # Errors

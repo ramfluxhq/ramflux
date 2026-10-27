@@ -13,6 +13,7 @@ use super::{
 };
 use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::custody::object_hash;
+use redb::ReadableTable;
 
 #[derive(Clone, Copy)]
 pub struct PrepareMigration<'a> {
@@ -39,10 +40,12 @@ impl RouterCore {
         now: u64,
     ) -> Result<Signed<Offer>, NodeCoreError> {
         let p = &input.prepare.body;
+        let _root = store.migration_root_barrier(&p.account_anchor)?;
         self.with_migration_authority(&p.account_anchor, now, |authority, _publication| {
             let tx = store.migration_db().begin_write().map_err(storage)?;
             let offer = prepare_in_transaction(&tx, node, input, authority, now)?;
             commit_transition(store, tx)?;
+            store.refresh_migration_root(&p.account_anchor)?;
             Ok(offer)
         })
     }
@@ -84,6 +87,7 @@ impl RouterRedbStore {
         let pending = self
             .migration_operation(&a.account_anchor, &a.migration_id, MigrationRole::Destination)?
             .ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+        let _root = self.migration_root_barrier(&a.account_anchor)?;
         let _submissions = self.migration_submission_barrier(&pending.delivery_map)?;
         let tx = self.migration_db().begin_write().map_err(storage)?;
         let now = clock(&tx, now)?;
@@ -141,6 +145,7 @@ impl RouterRedbStore {
             )?;
         }
         save_head(&tx, home.evidence())?;
+        super::root_gate::persist(&tx, &a.account_anchor, None)?;
         for entry in &op.delivery_map {
             write(
                 &tx,
@@ -170,6 +175,9 @@ impl RouterRedbStore {
             .map_err(storage)?;
         write(&tx, OPS, &key, &op)?;
         commit_transition(self, tx)?;
+        if op.phase == Phase::Active {
+            self.cache_migration_root(&op.prepare.body.account_anchor, None)?;
+        }
         self.cache_migration_routes(&op.delivery_map, op.phase == Phase::Active, false)?;
         Ok(())
     }
@@ -185,6 +193,7 @@ impl RouterRedbStore {
         let pending = self
             .migration_operation(anchor, &fence.body.migration_id, MigrationRole::Destination)?
             .ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+        let _root = self.migration_root_barrier(anchor)?;
         let _submissions = self.migration_submission_barrier(&pending.delivery_map)?;
         let tx = self.migration_db().begin_write().map_err(storage)?;
         clock(&tx, now)?;
@@ -236,6 +245,9 @@ impl RouterRedbStore {
         maintenance::release_budget(&tx, anchor, false)?;
         maintenance::sealed_peer_budget(&tx, &op.prepare.body.old_node, false)?;
         commit_transition(self, tx)?;
+        if op.phase == Phase::Active {
+            self.cache_migration_root(&op.prepare.body.account_anchor, None)?;
+        }
         self.cache_migration_routes(&op.delivery_map, op.phase == Phase::Active, false)?;
         Ok(())
     }
@@ -265,6 +277,17 @@ pub(crate) fn prepare_in_transaction(
     {
         return Err(refusal(Refusal::EvidenceRequired));
     }
+    if read::<RecordEvidence>(tx, HEADS, &p.account_anchor)?.is_none() {
+        reject_existing_registration(tx, &expected_map)?;
+    }
+    super::signer_pin::retain(tx, node)?;
+    // A staged root remains bound to its verified former home even after an
+    // unsealed/failed attempt is compacted. It cannot become a second genesis here.
+    for record in input.base.records() {
+        write(tx, super::RECORDS, &record_hash(&record.record).map_err(storage)?, record)?;
+    }
+    save_head(tx, input.base.evidence())?;
+    super::root_gate::persist(tx, &p.account_anchor, Some(Refusal::DormantInbox))?;
     maintenance::reserve_budget(tx, &p.account_anchor, true)?;
     let offer = crypto::sign_node(
         Offer {
@@ -549,4 +572,21 @@ fn seal_receipt(
         &node.key,
     )
     .map_err(auth_error)
+}
+
+fn reject_existing_registration(
+    tx: &redb::WriteTransaction,
+    map: &[DeliveryMapEntry],
+) -> Result<(), NodeCoreError> {
+    // A primary authorization is still absent at Prepare. Do not let a
+    // foreign preflight demote a root already serving local registrations.
+    let prekeys: redb::TableDefinition<&str, &[u8]> =
+        redb::TableDefinition::new("custody_prekeys_v3");
+    let table = tx.open_table(prekeys).map_err(storage)?;
+    for entry in map {
+        if table.get(entry.target_delivery_id.as_str()).map_err(storage)?.is_some() {
+            return Err(refusal(Refusal::HomeFork));
+        }
+    }
+    Ok(())
 }

@@ -271,7 +271,10 @@ fn failed_seal_source_commit_and_activation_roll_back_every_table() -> TestResul
     s.b.fail_commit()?;
     assert!(s.b.store()?.activate_home_migration(&s.b.node, &resolve(&verified), NOW + 2).is_err());
     assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
-    assert!(s.b.store()?.migration_home(&s.anchor)?.is_none());
+    assert_eq!(
+        record_hash(&s.b.store()?.migration_home(&s.anchor)?.ok_or("staged floor")?.record)?,
+        s.base.hash()
+    );
     s.b.store()?.activate_home_migration(&s.b.node, &resolve(&verified), NOW + 2)?;
     Ok(())
 }

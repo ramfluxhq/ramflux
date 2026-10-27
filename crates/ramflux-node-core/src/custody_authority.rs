@@ -316,6 +316,7 @@ impl RouterCore {
         NodeCoreError,
     > {
         let crate::MigrationAdmission { publication, prepare: input, source } = admission;
+        let _root = store.migration_root_barrier(&publication.record.body.account_anchor)?;
         let mut control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let registry = &mut control.mvp1_identities;
         let body = &publication.record.body;
@@ -370,6 +371,7 @@ impl RouterCore {
             )?;
         }
         crate::home_migration_store::commit_transition(store, tx)?;
+        store.refresh_migration_root(anchor)?;
         if outcome != PinOutcome::Unchanged {
             store.observe_custody_publication_commit();
             registry.apply_custody_account(anchor.clone(), state)?;

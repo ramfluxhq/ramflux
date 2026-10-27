@@ -24,10 +24,13 @@ pub use destination::{MigrationAdmission, PrepareMigration};
 pub use source::{AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationPeer};
 mod authority_evidence;
 mod courier;
+pub(crate) use courier::MigrationCourierClaim;
 mod fence;
 mod maintenance;
 mod queries;
 mod refusals;
+mod root_gate;
+mod signer_pin;
 mod source;
 #[cfg(test)]
 mod tests;

@@ -107,7 +107,7 @@ fn former_home_read_requires_current_home_and_exact_current_owner_control() -> T
             .map_err(Into::into)
     };
     let result: TestResult<MigrationPeerReply> = invoke(&call);
-    assert!(matches!(result?, MigrationPeerReply::Refused(Refusal::HomeGenesisRequired)));
+    assert!(matches!(result?, MigrationPeerReply::Refused(Refusal::BaseMismatch)));
     let op = s.seal()?;
     let committed = s.commit(&op)?;
     s.b.store()?.activate_home_migration(

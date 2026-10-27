@@ -5,6 +5,7 @@ mod admin_http;
 mod discovery;
 mod flow;
 mod helpers;
+mod home_migration;
 mod http_limits;
 #[cfg(test)]
 mod http_listener_tests;

@@ -16,7 +16,8 @@ pub(crate) struct TokioRouterRuntime {
     home_node_forward: Option<LocalFederationForwardClient>,
     forward_semaphore: Arc<tokio::sync::Semaphore>,
     forward_timeout: Duration,
-    custody: std::sync::OnceLock<ramflux_node_core::CustodyService>,
+    custody: std::sync::OnceLock<Arc<ramflux_node_core::CustodyService>>,
+    migration_courier: std::sync::OnceLock<crate::migration_courier::MigrationCourier>,
 }
 
 impl TokioRouterRuntime {
@@ -56,6 +57,7 @@ impl TokioRouterRuntime {
             forward_semaphore: Arc::new(tokio::sync::Semaphore::new(concurrency.max(1))),
             forward_timeout,
             custody: std::sync::OnceLock::new(),
+            migration_courier: std::sync::OnceLock::new(),
         }
     }
 }
@@ -225,8 +227,18 @@ impl RouterHandle {
         &self,
         config: &ramflux_node_core::NodeServiceConfig,
     ) -> anyhow::Result<()> {
-        let Ok(path) = std::env::var("RAMFLUX_CUSTODY_NODE_RECORD_FILE") else { return Ok(()) };
+        let Ok(path) = std::env::var("RAMFLUX_CUSTODY_NODE_RECORD_FILE") else {
+            if crate::home_migration::enabled()? {
+                anyhow::bail!("migration requires RAMFLUX_CUSTODY_NODE_RECORD_FILE");
+            }
+            self.store().validate_home_migration_runtime(None)?;
+            return Ok(());
+        };
         if path.trim().is_empty() {
+            if crate::home_migration::enabled()? {
+                anyhow::bail!("migration requires RAMFLUX_CUSTODY_NODE_RECORD_FILE");
+            }
+            self.store().validate_home_migration_runtime(None)?;
             return Ok(());
         }
         let mut bytes = Vec::new();
@@ -241,13 +253,54 @@ impl RouterHandle {
             now,
         )?;
         let allow = std::env::var("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING").as_deref() == Ok("1");
-        let service = ramflux_node_core::CustodyService::new(node, allow, self.store(), now)?;
-        match self {
-            Self::Tokio(runtime) => runtime
-                .custody
-                .set(service)
-                .map_err(|_| anyhow::anyhow!("custody already configured")),
+        let migration = crate::home_migration::configured(config, &record, now)?;
+        self.store().validate_home_migration_runtime(
+            migration.as_ref().map(|_| (config.node_id.as_str(), trusted.as_str())),
+        )?;
+        let mut service = ramflux_node_core::CustodyService::new(node, allow, self.store(), now)?;
+        if let Some(migration) = migration {
+            service = service.with_home_migration(migration)?;
         }
+        let Self::Tokio(runtime) = self;
+        let service = Arc::new(service);
+        runtime
+            .custody
+            .set(service.clone())
+            .map_err(|_| anyhow::anyhow!("custody already configured"))?;
+        if service.home_migration_enabled() {
+            let worker = crate::migration_courier::MigrationCourier::start(
+                Arc::downgrade(&service),
+                Arc::downgrade(&runtime.store),
+            )?;
+            runtime
+                .migration_courier
+                .set(worker)
+                .map_err(|_| anyhow::anyhow!("migration courier already configured"))?;
+        }
+        Ok(())
+    }
+    pub(crate) fn home_migration_enabled(&self) -> bool {
+        let Self::Tokio(runtime) = self;
+        runtime.custody.get().is_some_and(|service| service.home_migration_enabled())
+    }
+    pub(crate) fn migration_peer(
+        &self,
+        request: &ramflux_node_core::MigrationPeerRequest,
+    ) -> anyhow::Result<ramflux_node_core::MigrationPeerReply> {
+        let Self::Tokio(runtime) = self;
+        let Some(service) = runtime.custody.get() else {
+            return Ok(ramflux_node_core::MigrationPeerReply::Refused(
+                ramflux_protocol::home_migration::Refusal::PeeringUnavailable,
+            ));
+        };
+        service
+            .home_migration_peer(
+                self.state(),
+                self.store(),
+                request,
+                ramflux_node_core::now_unix_seconds(),
+            )
+            .map_err(Into::into)
     }
     pub(crate) fn custody(
         &self,

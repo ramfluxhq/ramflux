@@ -10,7 +10,7 @@ pub(crate) fn federation_discovery_surface(
     node_signing_seed: [u8; 32],
 ) -> FederationDiscoverySurface {
     let node_ca_cert_pem = std::fs::read_to_string(&config.mesh.ca_cert).unwrap_or_default();
-    FederationDiscoverySurface {
+    let mut surface = FederationDiscoverySurface {
         node_id: ramflux_node_core::environment::var("RAMFLUX_FEDERATION_NODE_ID")
             .unwrap_or_else(|_| config.node_id.clone()),
         public_endpoint: ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ENDPOINT")
@@ -25,7 +25,11 @@ pub(crate) fn federation_discovery_surface(
             "federation_relay".to_owned(),
             "friend_request".to_owned(),
         ],
+    };
+    if ramflux_node_core::environment::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() == Ok("1") {
+        surface.node_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
     }
+    surface
 }
 
 pub(crate) fn federation_node_signing_seed(
@@ -89,6 +93,13 @@ impl FederationDiscoverySurface {
             expires_at: now.saturating_add(ramflux_protocol::DISCOVERY_MAX_CACHE_TTL_SECONDS),
             signature: String::new(),
         };
+        if self
+            .node_capabilities
+            .iter()
+            .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+        {
+            record.client_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
+        }
         let bytes = ramflux_protocol::client_discovery_signing_bytes(&record)
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
         record.signature =

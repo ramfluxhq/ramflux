@@ -138,7 +138,37 @@ pub(super) fn index_expiry(
 ) -> Result<(), NodeCoreError> {
     write(tx, EXPIRES, &expiry_key(expiry, key), &key)
 }
+fn due_table(
+    tx: &redb::ReadTransaction,
+    definition: redb::TableDefinition<&str, &[u8]>,
+    now: u64,
+) -> Result<bool, NodeCoreError> {
+    let table = match tx.open_table(definition) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+        Err(error) => return Err(storage(error)),
+    };
+    let Some((key, _)) = table.first().map_err(storage)? else {
+        return Ok(false);
+    };
+    let deadline = key
+        .value()
+        .get(..20)
+        .and_then(|text| text.parse::<u64>().ok())
+        .ok_or_else(|| storage("invalid migration due index"))?;
+    Ok(deadline <= now)
+}
 impl RouterRedbStore {
+    pub(crate) fn home_migration_work_due(&self, now: u64) -> Result<bool, NodeCoreError> {
+        let now = self.migration_clock_floor(now)?;
+        let tx = self.migration_db().begin_read().map_err(storage)?;
+        for table in [COURIER, EXPIRES, FENCE_EXPIRES, super::authority_evidence::EXPIRY] {
+            if due_table(&tx, table, now)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     /// Terminal cleanup is bounded; permanent heads/proofs are never pruned.
     /// # Errors
     /// Propagates durable errors; local time never moves below its persisted floor.
@@ -303,6 +333,12 @@ impl RouterRedbStore {
     /// # Errors
     /// Propagates durable read/decode failures.
     pub fn home_migration_target_active(&self, target: &str) -> Result<bool, NodeCoreError> {
+        if let Some((anchor, _)) =
+            ramflux_protocol::parse_qualified_device_id(target).map_err(storage)?
+            && self.inactive_migration_roots.read().map_err(storage)?.contains_key(&anchor)
+        {
+            return Ok(false);
+        }
         Ok(!self.inactive_migration_targets.read().map_err(storage)?.contains_key(target))
     }
 }

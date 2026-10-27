@@ -119,12 +119,7 @@ impl HomeMigrationService {
         if cached.home.record.home() != (p.old_node.as_str(), pin.as_str()) {
             return Err(failure(Refusal::PinMismatch));
         }
-        let base = crypto::verify_home_chain(
-            &ResolveResult { home: cached.home.clone(), predecessors: vec![] },
-            &cached.home,
-            now,
-        )
-        .map_err(|_| failure(Refusal::EvidenceRequired))?;
+        let base = self.preparation_base(scope, prepare, &cached.home)?;
         let prepared_node = self.node.for_client_discovery(
             request.evidence.client_record.as_ref(),
             &p.discovery_hash,
@@ -159,6 +154,55 @@ impl HomeMigrationService {
             Some(&op),
             now,
         )
+    }
+    fn preparation_base(
+        &self,
+        scope: &super::home_migration_service::MigrationExecution<'_>,
+        prepare: &Signed<Prepare>,
+        home: &ramflux_protocol::home_migration::RecordEvidence,
+    ) -> Result<ramflux_crypto::home_migration::VerifiedHome, NodeCoreError> {
+        let p = &prepare.body;
+        let store = scope.store;
+        let now = scope.now;
+        Ok(if let Some(floor) = store.migration_home(&p.account_anchor)? {
+            if record_hash(&floor.record).map_err(wire)? == p.previous_home_hash {
+                crypto::verify_home_chain(
+                    &ResolveResult { home: home.clone(), predecessors: vec![] },
+                    &floor,
+                    now,
+                )
+                .map_err(|_| failure(Refusal::HomeFork))?
+            } else {
+                let query = self.node.peer_resolve_call(
+                    &p.old_node,
+                    ramflux_protocol::home_migration::ResolvePayload {
+                        target_anchor: p.account_anchor.clone(),
+                        after_home_hash: Some(record_hash(&floor.record).map_err(wire)?),
+                        limit: 64,
+                        old_node_hint: None,
+                    },
+                    &p.migration_id,
+                    now,
+                )?;
+                let history = match self.mesh.exchange(&p.old_node, &query, scope.deadline)? {
+                    MigrationPeerReply::Resolved(result) => *result,
+                    MigrationPeerReply::Refused(reason) => return Err(failure(reason)),
+                    _ => return Err(failure(Refusal::EvidenceRequired)),
+                };
+                if record_hash(&history.home.record).map_err(wire)? != p.previous_home_hash {
+                    return Err(failure(Refusal::AuthorityUpdateRequired));
+                }
+                crypto::verify_home_chain(&history, &floor, now)
+                    .map_err(|_| failure(Refusal::HomeFork))?
+            }
+        } else {
+            crypto::verify_home_chain(
+                &ResolveResult { home: home.clone(), predecessors: vec![] },
+                home,
+                now,
+            )
+            .map_err(|_| failure(Refusal::EvidenceRequired))?
+        })
     }
 }
 fn verify_preflight(

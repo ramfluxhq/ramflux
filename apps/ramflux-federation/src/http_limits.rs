@@ -8,8 +8,14 @@ use std::time::Duration;
 pub(crate) fn defaults(public: bool) -> HttpRequestLimits {
     HttpRequestLimits {
         max_header_bytes: if public { 8192 } else { 65536 },
-        max_body_bytes: if public { 65536 } else { 1024 * 1024 },
-        request_timeout: Duration::from_secs(if public { 10 } else { 30 }),
+        max_body_bytes: if public {
+            65536
+        } else if migration_enabled() {
+            ramflux_protocol::home_migration::MAX_FRAME_BYTES
+        } else {
+            1024 * 1024
+        },
+        request_timeout: Duration::from_secs(if public || migration_enabled() { 10 } else { 30 }),
         ..HttpRequestLimits::default()
     }
 }
@@ -28,7 +34,20 @@ pub(crate) fn configured(public: bool) -> Result<HttpRequestLimits, NodeCoreErro
         )?)
         .unwrap_or(30),
     );
+    if !public && migration_enabled() {
+        if limits.max_body_bytes < ramflux_protocol::home_migration::MAX_FRAME_BYTES {
+            return Err(NodeCoreError::ItestHttp(
+                "RAMFLUX_FEDERATION_ADMIN_MAX_BODY_BYTES is below the migration frame budget"
+                    .into(),
+            ));
+        }
+        limits.max_body_bytes = ramflux_protocol::home_migration::MAX_FRAME_BYTES;
+        limits.request_timeout = limits.request_timeout.min(Duration::from_secs(10));
+    }
     Ok(limits)
+}
+fn migration_enabled() -> bool {
+    ramflux_node_core::environment::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() == Ok("1")
 }
 fn setting(key: &str, default: usize, maximum: usize) -> Result<usize, NodeCoreError> {
     let Some(value) = ramflux_node_core::environment::var_os(key) else { return Ok(default) };

@@ -92,10 +92,7 @@ fn claimed_courier_recovers_worker_crash_and_never_commits_after_deadline() -> T
     let s = Scenario::prepared()?;
     let op = s.seal()?;
     assert_eq!(s.b.store()?.claim_migration_courier(NOW + 2, 128)?.len(), 1);
-    assert_eq!(
-        s.b.store()?.claim_migration_courier(NOW + 3, 128)?,
-        Vec::<MigrationOperation>::new()
-    );
+    assert_eq!(s.b.store()?.claim_migration_courier(NOW + 3, 128)?.len(), 0);
     let mesh = Arc::new(NativeMesh {
         source: Mutex::new(s.a),
         lose: false.into(),
@@ -154,5 +151,37 @@ fn unresolved_peer_capacity_is_reserved_before_seal_and_released_only_with_signe
     s.b.store()?.accept_home_noncommit_fence(&fence, &s.anchor, NOW + 2)?;
     let tx = s.b.store()?.migration_db().begin_read()?;
     assert_eq!(tx.open_table(BUDGETS)?.get("sealed-peer/A")?.ok_or("budget")?.value(), 0);
+    Ok(())
+}
+
+#[test]
+fn verification_capacity_cannot_downgrade_an_unknown_commit_outcome() -> TestResult {
+    let s = Scenario::prepared()?;
+    let op = s.seal()?;
+    let deadline = op.seal.as_ref().and_then(|seal| seal.body.commit_deadline).ok_or("deadline")?;
+    let mesh = Arc::new(NativeMesh {
+        source: Mutex::new(s.a),
+        lose: false.into(),
+        calls: Mutex::new(vec![]),
+    });
+    let service = service(&s.b.node, mesh.clone())?;
+    service.courier_tick(s.b.store()?, deadline + 1, 128)?;
+    let permits = (0..16)
+        .map(|_| service.node.acquire_migration_verification())
+        .collect::<Result<Vec<_>, _>>()?;
+    service.courier_tick(s.b.store()?, deadline + 3, 128)?;
+    assert_eq!(
+        s.b.store()?
+            .migration_operation(
+                &s.anchor,
+                &s.authorization.body.migration_id,
+                MigrationRole::Destination
+            )?
+            .ok_or("op")?
+            .phase,
+        Phase::CommitOutcomeUnknown
+    );
+    assert!(mesh.calls.lock().map_err(|_| "calls")?.is_empty());
+    drop(permits);
     Ok(())
 }
