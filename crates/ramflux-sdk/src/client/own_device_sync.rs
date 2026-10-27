@@ -711,7 +711,13 @@ impl RamfluxClient {
                 metadata: &message.metadata,
                 created_at: message.created_at,
             })?;
-            if let Some(content) = bundle.contents.get(&message.message_id) {
+            if message.deleted {
+                self.account_db()?.import_deleted_message_projection(
+                    &message.conversation_id,
+                    &message.message_id,
+                    message.is_own,
+                )?;
+            } else if let Some(content) = bundle.contents.get(&message.message_id) {
                 self.account_db()?.store_message_content(
                     &message.conversation_id,
                     &message.message_id,
@@ -1057,6 +1063,7 @@ pub(crate) mod tests {
             encrypted_body: b"safe history".to_vec(),
             metadata: MessageMetadata::default(),
             deleted: false,
+            is_own: false,
             created_at: 1,
             receipts: Vec::new(),
         };
@@ -1094,6 +1101,7 @@ pub(crate) mod tests {
             encrypted_body: b"ciphertext".to_vec(),
             metadata: MessageMetadata::default(),
             deleted: false,
+            is_own: false,
             created_at: 1_760_000_111,
             receipts: Vec::new(),
         };
@@ -1146,6 +1154,7 @@ pub(crate) mod tests {
             })?,
             metadata: MessageMetadata::default(),
             deleted: false,
+            is_own: false,
             created_at: 1_760_000_010,
             receipts: Vec::new(),
         };

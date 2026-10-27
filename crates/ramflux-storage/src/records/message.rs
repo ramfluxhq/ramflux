@@ -1,18 +1,74 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct DirectMessageRecord {
     pub conversation_id: String,
     pub message_id: String,
+    #[serde(default)]
     pub sender_id: String,
+    #[serde(default)]
     pub encrypted_body: Vec<u8>,
+    #[serde(default)]
     pub metadata: MessageMetadata,
     pub deleted: bool,
+    #[serde(default)]
+    pub is_own: bool,
     pub created_at: i64,
+    #[serde(default)]
     pub receipts: Vec<MessageReceiptState>,
+}
+
+#[derive(Serialize)]
+struct MessageTombstoneWire<'a> {
+    conversation_id: &'a str,
+    message_id: &'a str,
+    deleted: bool,
+    is_own: bool,
+    created_at: i64,
+}
+
+#[derive(Serialize)]
+struct LiveMessageWire<'a> {
+    conversation_id: &'a str,
+    message_id: &'a str,
+    sender_id: &'a str,
+    encrypted_body: &'a [u8],
+    metadata: &'a MessageMetadata,
+    deleted: bool,
+    created_at: i64,
+    receipts: &'a [MessageReceiptState],
+}
+
+impl Serialize for DirectMessageRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.deleted {
+            return MessageTombstoneWire {
+                conversation_id: &self.conversation_id,
+                message_id: &self.message_id,
+                deleted: true,
+                is_own: self.is_own,
+                created_at: self.created_at,
+            }
+            .serialize(serializer);
+        }
+        LiveMessageWire {
+            conversation_id: &self.conversation_id,
+            message_id: &self.message_id,
+            sender_id: &self.sender_id,
+            encrypted_body: &self.encrypted_body,
+            metadata: &self.metadata,
+            deleted: false,
+            created_at: self.created_at,
+            receipts: &self.receipts,
+        }
+        .serialize(serializer)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

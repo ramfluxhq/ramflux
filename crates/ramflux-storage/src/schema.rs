@@ -182,6 +182,7 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 encrypted_body BLOB NOT NULL,
                 metadata_json BLOB NOT NULL,
                 deleted INTEGER NOT NULL,
+                is_own INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_direct_message_conversation
@@ -898,6 +899,54 @@ fn apply_account_migration(
 }
 
 fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
+    ensure_message_legacy_columns(connection)?;
+    ensure_contact_legacy_columns(connection)?;
+    ensure_group_legacy_columns(connection)?;
+    ensure_group_control_tables(connection)?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS bot_trust_pin (
+            bot_identity_commitment TEXT PRIMARY KEY,
+            bot_public_key TEXT NOT NULL,
+            signing_key_id TEXT NOT NULL,
+            trust_source TEXT NOT NULL,
+            pinned_at INTEGER NOT NULL
+        );",
+    )?;
+    ensure_column(connection, "bot_install_grant", "grant_hash", "grant_hash TEXT")?;
+    ensure_column(connection, "bot_install_grant", "grant_body", "grant_body BLOB")?;
+    ensure_column(
+        connection,
+        "bot_install_grant",
+        "consent_member_ids_json",
+        "consent_member_ids_json BLOB",
+    )?;
+    ensure_column(
+        connection,
+        "bot_install_grant",
+        "state",
+        "state TEXT NOT NULL DEFAULT 'installed'",
+    )?;
+    ensure_mcp_legacy_columns(connection)?;
+    ensure_column(connection, "audit_log", "audit_body", "audit_body BLOB")?;
+    ensure_object_index_legacy_columns(connection)?;
+    ensure_object_transfer_state_columns(connection)?;
+    ensure_device_directory_table(connection)?;
+    ensure_object_share_grant_table(connection)?;
+    ensure_guardian_recovery_share_table(connection)?;
+    ensure_pending_recovery_tables(connection)?;
+    Ok(())
+}
+
+fn ensure_message_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
+    ensure_column(
+        connection,
+        "direct_message_projection",
+        "is_own",
+        "is_own INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+fn ensure_contact_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
     ensure_column(
         connection,
         "contact_verification_projection",
@@ -934,7 +983,10 @@ fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
         "friend_link_projection",
         "capability_revoked_at",
         "capability_revoked_at INTEGER",
-    )?;
+    )
+}
+
+fn ensure_group_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
     ensure_column(connection, "group_projection", "role", "role TEXT")?;
     ensure_column(connection, "group_projection", "notification_state", "notification_state TEXT")?;
     ensure_column(connection, "group_projection", "deleted_at", "deleted_at INTEGER")?;
@@ -964,38 +1016,6 @@ fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
         "updated_at",
         "updated_at INTEGER NOT NULL DEFAULT 1760000000",
     )?;
-    ensure_group_control_tables(connection)?;
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS bot_trust_pin (
-            bot_identity_commitment TEXT PRIMARY KEY,
-            bot_public_key TEXT NOT NULL,
-            signing_key_id TEXT NOT NULL,
-            trust_source TEXT NOT NULL,
-            pinned_at INTEGER NOT NULL
-        );",
-    )?;
-    ensure_column(connection, "bot_install_grant", "grant_hash", "grant_hash TEXT")?;
-    ensure_column(connection, "bot_install_grant", "grant_body", "grant_body BLOB")?;
-    ensure_column(
-        connection,
-        "bot_install_grant",
-        "consent_member_ids_json",
-        "consent_member_ids_json BLOB",
-    )?;
-    ensure_column(
-        connection,
-        "bot_install_grant",
-        "state",
-        "state TEXT NOT NULL DEFAULT 'installed'",
-    )?;
-    ensure_mcp_legacy_columns(connection)?;
-    ensure_column(connection, "audit_log", "audit_body", "audit_body BLOB")?;
-    ensure_object_index_legacy_columns(connection)?;
-    ensure_object_transfer_state_columns(connection)?;
-    ensure_device_directory_table(connection)?;
-    ensure_object_share_grant_table(connection)?;
-    ensure_guardian_recovery_share_table(connection)?;
-    ensure_pending_recovery_tables(connection)?;
     Ok(())
 }
 

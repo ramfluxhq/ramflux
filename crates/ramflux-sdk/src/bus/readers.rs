@@ -11,6 +11,9 @@ type ReaderIdentity = Arc<RwLock<Option<RootQualifiedDeviceRef>>>;
 #[cfg(test)]
 #[path = "readers_backup_tests.rs"]
 mod backup_tests;
+#[cfg(test)]
+#[path = "readers_deleted_tests.rs"]
+mod deleted_tests;
 
 pub(super) enum ReadCommand {
     Request(Box<LocalBusFrame>, oneshot::Sender<Result<serde_json::Value, SdkError>>),
@@ -206,16 +209,18 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
     let db = client.account_db()?;
     let mut messages = Vec::new();
     for message in client.direct_messages(conversation)? {
-        let mut value = serde_json::to_value(&message)?;
+        let mut value = super::message_projection::row(&message)?;
+        if message.deleted {
+            messages.push(value);
+            continue;
+        }
         let origin = client
             .message_origin(conversation, &message.message_id)?
             .unwrap_or(serde_json::Value::Null);
         for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"] {
             value[field] = origin[field].clone();
         }
-        if !message.deleted
-            && let Some(content) = db.message_content(&message.message_id)?
-        {
+        if let Some(content) = db.message_content(&message.message_id)? {
             value["body_utf8"] = if content.starts_with(crate::client::surface::carrier::PREFIX) {
                 serde_json::json!("[Surface pending validation]")
             } else {
@@ -242,16 +247,12 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
             }
             value["attachments"] = serde_json::json!(attachments);
         }
-        if !message.deleted
-            && let Some((surface, text)) = client.surface_message_fallback(&message.message_id)?
-        {
+        if let Some((surface, text)) = client.surface_message_fallback(&message.message_id)? {
             value["content_type"] = serde_json::json!("surface");
             value["surface_id"] = serde_json::json!(surface);
             value["body_utf8"] = serde_json::json!(text);
         }
-        if !message.deleted
-            && let Some(task) = client.task_message_metadata(conversation, &message.message_id)?
-        {
+        if let Some(task) = client.task_message_metadata(conversation, &message.message_id)? {
             value["content_type"] = serde_json::json!("task");
             value["task_id"] = task["task_id"].clone();
             value["actor_kind_verified"] = task["actor_kind_verified"].clone();

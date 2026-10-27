@@ -414,6 +414,7 @@ fn snapshot_message(
         encrypted_body: serde_json::to_vec(&encrypted)?,
         metadata: MessageMetadata::default(),
         deleted: false,
+        is_own: false,
         created_at: 1,
         receipts: Vec::new(),
     })
@@ -426,6 +427,7 @@ fn direct_history(id: &str) -> DirectMessageRecord {
         encrypted_body: b"direct history".to_vec(),
         metadata: MessageMetadata::default(),
         deleted: false,
+        is_own: false,
         created_at: 2,
         receipts: Vec::new(),
     }
