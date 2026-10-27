@@ -75,6 +75,7 @@ zeroize = { version = "1.8", features = ["serde"] }
 [dev-dependencies]
 ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }
+tempfile = "3"
 tokio = { version = "1.42", features = ["test-util"] }
 tempfile = "3"
 

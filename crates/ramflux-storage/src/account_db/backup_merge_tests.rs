@@ -156,6 +156,10 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
                 created_at: 1,
             })?;
             db.store_message_content("thread", id, b"historical plaintext")?;
+            db.persist_actor_state(
+                &super::runtime::message_origin::message_origin_key("thread", id)?,
+                &serde_json::json!({"sender_device_id":"sender-device"}),
+            )?;
         }
     }
     source.persist_actor_state(
@@ -164,6 +168,10 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     )?;
     source.delete_direct_message("thread", "source-deleted", "me", "source-tombstone")?;
     local.delete_direct_message("thread", "local-deleted", "me", "local-tombstone")?;
+    local.persist_actor_state(
+        &super::runtime::message_origin::message_origin_key("thread", "local-deleted")?,
+        &serde_json::json!({"sender_device_id":"stale-device"}),
+    )?;
     source.connection.execute_batch(
         "INSERT INTO conversation_read_state VALUES('thread','reader','last',20);",
     )?;
@@ -182,6 +190,27 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     assert_eq!(merged.counts()?.conversations, 2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND deleted=1",[],|r|r.get::<_,u64>(0))?,2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM runtime_message_content WHERE message_id IN ('source-deleted','local-deleted')",[],|r|r.get::<_,u64>(0))?,0);
+    for id in ["source-deleted", "local-deleted"] {
+        let key = super::runtime::message_origin::message_origin_key("thread", id)?;
+        assert_eq!(
+            merged.db.query_row(
+                "SELECT count(*) FROM runtime_actor_state WHERE state_kind=?1",
+                [&key],
+                |row| row.get::<_, u64>(0)
+            )?,
+            0,
+            "deleted message {id} retained attribution"
+        );
+    }
+    let retained = super::runtime::message_origin::message_origin_key("thread", "last")?;
+    assert_eq!(
+        merged.db.query_row(
+            "SELECT count(*) FROM runtime_actor_state WHERE state_kind=?1",
+            [&retained],
+            |row| row.get::<_, u64>(0)
+        )?,
+        1
+    );
     assert_eq!(
         merged.db.query_row(
             "SELECT read_at FROM conversation_read_state WHERE reader_id='reader'",

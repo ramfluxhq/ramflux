@@ -150,8 +150,13 @@ async fn surface_get_and_list_survive_repeated_socket_daemon_restart()
                 tokio::time::sleep(Duration::from_millis(1)).await;
             };
             loop {
-                let status = bus.request(None, "daemon", "daemon.status", json!({})).await?;
-                if status["accounts"] == 1 {
+                let accounts = bus.request(None, "account", "account.list", json!({})).await?;
+                let restored = accounts["account_details"].as_array().is_some_and(|details| {
+                    details
+                        .iter()
+                        .any(|detail| detail["id"] == "alice" && detail["state"] == "unlocked")
+                });
+                if restored {
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {

@@ -207,9 +207,13 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
     let mut messages = Vec::new();
     for message in client.direct_messages(conversation)? {
         let mut value = serde_json::to_value(&message)?;
-        let origin = client
-            .message_origin(conversation, &message.message_id)?
-            .unwrap_or(serde_json::Value::Null);
+        let origin = if message.deleted {
+            serde_json::Value::Null
+        } else {
+            client
+                .message_origin(conversation, &message.message_id)?
+                .unwrap_or(serde_json::Value::Null)
+        };
         for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"] {
             value[field] = origin[field].clone();
         }

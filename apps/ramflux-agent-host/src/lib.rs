@@ -28,6 +28,10 @@ pub enum Error {
     SurfaceRefused(ramflux_sdk::SurfaceRefusalCode),
     #[error("host identity is unavailable or revoked")]
     IdentityLost,
+    #[error("rfd is restoring the configured account; retrying")]
+    AccountRestorePending,
+    #[error("rfd could not restore the configured account; operator unlock is required")]
+    AccountRestoreFailed,
     #[error("durable host storage is unavailable")]
     Storage,
     #[error("malformed local row field: {0}")]

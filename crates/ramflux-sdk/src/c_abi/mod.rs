@@ -869,6 +869,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::ContactHomeNodeUnsupported
         | SdkError::ContactInput(_)
         | SdkError::AccountNotOpen(_)
+        | SdkError::AccountRestorePending(_)
+        | SdkError::AccountRestoreFailed { .. }
         | SdkError::LocalBus(_)
         | SdkError::LocalBusRefused { .. }
         | SdkError::InboundRejected(_)

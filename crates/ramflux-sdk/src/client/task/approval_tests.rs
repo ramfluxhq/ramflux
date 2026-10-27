@@ -240,9 +240,16 @@ fn remote_task_approvals_are_paged_with_local_mcp_rows_on_keyless_readers_and_di
     assert!(second["next_cursor"].is_null());
     let legacy = page(json!({}))?;
     assert_eq!(legacy["approvals"].as_array().ok_or("rows")?.len(), 2);
+    db.persist_client_record(
+        "approval",
+        remote["approval_id"].as_str().ok_or("approval id")?,
+        remote,
+    )?;
     f.human.decide_task_approval(remote["approval_id"].as_str().ok_or("approval id")?, false)?;
     let remaining = page(json!({"limit":100}))?;
     assert_eq!(remaining["approvals"].as_array().ok_or("rows")?.len(), 1);
+    let legacy_remaining = page(json!({}))?;
+    assert_eq!(legacy_remaining["approvals"], remaining["approvals"]);
     Ok(())
 }
 

@@ -66,7 +66,8 @@ inbox does not automatically re-stage failures. The response adds `delivery_rece
 (`pending`, `sent`, `failed`) and `already_sent`; its scope is `network_e2ee` after
 submission and `daemon_queue` otherwise. Client-supplied routing never replaces the saved
 intent. Once retention removes a status, the existing legacy explicit path is available
-again, using retained attribution and current authenticated routing.
+again. That compatibility path uses client-supplied routing and permits the request only
+from the owned signing device; it does not derive a route from retained attribution.
 
 `message.read` / `message.list` rows and received-message journal rows add:
 
