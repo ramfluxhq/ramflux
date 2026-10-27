@@ -362,7 +362,7 @@ fn write_itest_response(
     Ok(())
 }
 
-/// Write one close-delimited HTTP response within an absolute deadline.
+/// Write one HTTP response with `Connection: close` within an absolute deadline.
 /// Each socket write is also limited to five seconds; partial progress cannot renew the deadline.
 /// # Errors
 /// Returns an error on an expired deadline, a stalled peer, or a failed socket write.

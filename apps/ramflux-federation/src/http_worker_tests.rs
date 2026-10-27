@@ -71,7 +71,7 @@ fn oversized_headers_receive_a_complete_413_on_both_listeners_without_a_reset() 
                 .ok_or("missing length")?
                 .parse()?;
             assert_eq!(declared, body.len());
-            assert!(!body.is_empty());
+            assert_ne!(body, "");
         }
     }
     drop(context);

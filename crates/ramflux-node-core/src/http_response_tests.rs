@@ -31,7 +31,7 @@ fn http_response_expired_deadline_writes_no_partial_status() -> TestResult {
     drop(server);
     let mut response = Vec::new();
     client.read_to_end(&mut response)?;
-    assert!(response.is_empty());
+    assert_eq!(response, Vec::<u8>::new());
     Ok(())
 }
 
