@@ -90,7 +90,11 @@ impl IdentityRegistry {
             return Err(reject("legacy-to-custody migration is not enabled"));
         }
         let verified = self.verify_custody(publication, now)?;
+        let body = &publication.record.body;
+        let master = &body.master_certificate.body.master_public_key;
+        self.check_principal_root_ownership(&body.principal_id, master)?;
         let outcome = self.custody.pins.observe(&verified).map_err(|error| crypto(&error))?;
+        self.reserve_custody_principal(&body.principal_id, master);
         if outcome == PinOutcome::Advanced {
             if verified.capacity_pressure().any() {
                 tracing::warn!(account_anchor = %anchor, "custody authority reached eighty percent capacity; prioritize revocations");
