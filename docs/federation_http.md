@@ -91,9 +91,10 @@ The override is never included by demo-node.sh or normal production Compose.
 
 ## Public bounds, errors and host configuration
 
-`RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS` defaults to 64 concurrent connections;
+`RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS` and
+`RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS` each default to 64 concurrent connections;
 valid values are 1..4096 and invalid configuration fails startup. Excess connections
-receive a generic 503 without spawning another worker. Slots are released after
+receive a generic 503 without spawning another worker on either listener. Slots are released after
 success, request failure or worker termination. The existing request read timeout
 still applies. Public 500 responses contain only `internal server error`; causes
 are logged privately. Per-source-IP rate limiting is separate follow-up work.
@@ -150,3 +151,30 @@ body cap is 1 MiB. Parsing rejection is fail-closed and never shares admin route
 Over-cap 503 is best-effort: unread queued bytes can make the kernel close with a
 reset instead. Either result refuses the excess connection without a worker.
 Per-IP rate limiting remains follow-up work.
+
+## Response delivery and bounded shutdown
+
+Federation responses are serialized before socket writes. Every write uses the
+remaining request budget, with at most five seconds for response delivery; partial
+progress never renews either deadline. Mesh/router work retains its own transport
+timeouts, but cannot restart the response budget. A read which exhausts its budget
+may send only the 408 rejection using a separate 100 ms allowance. Failed writes
+are logged and closed; no second response is appended to a partial response.
+
+After a complete response the server shuts down its write half, then drains unread
+request bytes with a fixed buffer until EOF or 100 ms, capped by the remaining
+request budget. Oversized finite headers therefore receive a complete 413 rather
+than a truncated status line. A peer which streams indefinitely beyond the drain
+budget may still see a reset after the response; it cannot prolong a worker slot.
+The over-cap 503 remains best-effort, with no drain on the accept thread.
+
+The demo validates all six header/body/deadline inputs and both connection caps
+before creating state, invoking tools or recreating containers. Explicit empty,
+unresolved, malformed, zero and out-of-range values fail; unset values use the
+listener defaults. Production and itest Compose accept the corresponding
+`RF_COMPOSE_FEDERATION_ADMIN_MAX_CONNECTIONS` input, as for the public cap.
+
+The admin hop still uses a bearer token over plaintext HTTP inside the Compose
+network. Thread caps and timeouts do not provide transport confidentiality or peer
+authentication. Keep network membership restricted; authenticated TLS for this hop
+remains separate follow-up work and is not implemented by these limits.
