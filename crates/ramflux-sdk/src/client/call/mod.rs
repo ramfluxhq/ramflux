@@ -3,6 +3,8 @@
 
 //! Pair-control authentication and public call projection; media secrets stay in RAM.
 mod lease;
+#[cfg(test)]
+mod native_tests;
 pub(crate) mod state;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use ramflux_protocol::{CallControl, CallEndpoint, CallRow};
