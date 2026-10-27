@@ -82,11 +82,11 @@ fn empty(request: &LocalBusFrame) -> Result<(), SdkError> {
 }
 fn primary_vault(config: &LocalBusConfig) -> &dyn crate::custody::PrimaryVault {
     static NATIVE: NativePrimaryVault = NativePrimaryVault;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "itest-memory-vault"))]
     if let Some(vault) = &config.custody_vault {
         return vault.as_ref();
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "itest-memory-vault")))]
     let _ = config;
     &NATIVE
 }

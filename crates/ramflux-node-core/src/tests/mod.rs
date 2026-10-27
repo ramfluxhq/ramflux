@@ -43,3 +43,5 @@ mod server_retention_r6;
 mod custody;
 mod registration_persistence;
 mod custody_registration;
+
+mod custody_sessions;

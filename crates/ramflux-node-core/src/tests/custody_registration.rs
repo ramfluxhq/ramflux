@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-fn native(principal: &str, seed: u8) -> TestResult<crate::CustodyPublication> {
+pub(super) fn native(principal: &str, seed: u8) -> TestResult<crate::CustodyPublication> {
     let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[seed; 32])?)?;
     let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
     let branch = ramflux_crypto::create_device_branch(principal, "primary", 1, [seed + 2; 32]);

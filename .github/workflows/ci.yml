@@ -50,6 +50,9 @@ jobs:
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
 
+      - name: Production feature provenance
+        run: python3 -B scripts/check-production-features.py
+
       - name: Format
         run: cargo fmt --check --all
 
@@ -81,6 +84,9 @@ jobs:
 
       - name: Test SDK
         run: cargo test -p ramflux-sdk
+
+      - name: Born-v3 memory vault regression tests
+        run: cargo test -p ramflux-sdk --features itest-memory-vault custody
 
   test-rest:
     name: Rust tests (workspace except SDK)

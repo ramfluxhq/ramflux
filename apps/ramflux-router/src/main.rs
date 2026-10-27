@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod custody_listener;
 mod handlers;
 mod identity_authority;
 mod lifecycle;
@@ -73,6 +74,8 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         let state = Arc::new(router);
         let store = Arc::new(store);
         let router = Arc::new(router_handle_from_env(state, store, home_node_forward));
+        router.enable_custody(&config)?;
+        custody_listener::start(&config, Arc::clone(&router))?;
         retention::start(Arc::clone(&router));
         serve_router_mesh_from_env(&config, &router)?;
         #[cfg(feature = "itest-http")]

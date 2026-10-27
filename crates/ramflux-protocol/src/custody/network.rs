@@ -42,13 +42,14 @@ pub enum CustodySessionAction {
     Lookup { device_ref: DeviceRef },
     Submit { envelope: Box<crate::Envelope> },
     Inbox { after_seq: u64, limit: u32 },
-    Ack { inbox_seq: u64 },
+    Ack { ack: Box<crate::Ack> },
     Close,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodyClientFrame {
     CustodyOpen { binding_mode: BindingMode },
+    NodeIdentity { record_hash: Option<String> },
     Challenge { device_ref: DeviceRef, action: CustodyProofAction },
     Prove { action: CustodyProofAction, proof: Box<Envelope<BranchProofV3>> },
     Request { session_id: String, request: Box<crate::SignedRequest>, action: CustodySessionAction },
@@ -85,6 +86,7 @@ pub struct CustodySession {
 #[serde(deny_unknown_fields)]
 pub struct CustodyPeer {
     pub publication: Publication,
+    pub custodian_publication: Option<Publication>,
     pub device_ref: DeviceRef,
     pub target_delivery_id: String,
     pub prekey_bundle: Value,
@@ -142,15 +144,39 @@ pub enum CustodyMeshRequest {
         action: CustodyProofAction,
         binding_mode: BindingMode,
         client_source: String,
+        connection_id: String,
     },
     Prove {
         action: CustodyProofAction,
         proof: Box<Envelope<BranchProofV3>>,
         receipt: Option<Box<Envelope<RelayAcceptance>>>,
+        connection_id: String,
     },
     Request {
+        connection_id: String,
         session_id: String,
         request: Box<crate::SignedRequest>,
         action: CustodySessionAction,
     },
+}
+
+impl std::fmt::Display for CustodyRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for CustodyRefusal {}
+/// Hash the complete operation before issuing its one-use challenge.
+/// # Errors
+/// Rejects canonical serialization failure.
+pub fn custody_action_hash(action: &CustodyProofAction) -> Result<String, crate::ProtocolError> {
+    super::framed_hash("ramflux.identity.custody_action.v1", action)
+}
+/// Hash the complete per-session operation for its signed request.
+/// # Errors
+/// Rejects canonical serialization failure.
+pub fn custody_session_action_hash(
+    action: &CustodySessionAction,
+) -> Result<String, crate::ProtocolError> {
+    super::framed_hash("ramflux.identity.custody_session_action.v1", action)
 }

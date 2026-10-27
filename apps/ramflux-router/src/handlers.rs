@@ -335,6 +335,20 @@ pub(crate) fn handle_mesh_request_value(
     peer_service_id: &str,
 ) -> anyhow::Result<MeshResponse> {
     let ramflux_transport::MeshHttpRequest { method, path, body } = request;
+    if method == "POST" && path == ramflux_protocol::custody::CUSTODY_RPC_PATH {
+        if peer_service_id != "ramflux-gateway" {
+            anyhow::bail!("custody proxy ingress requires authenticated gateway")
+        }
+        let request = ramflux_protocol::custody::decode(
+            &body,
+            ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES,
+        )?;
+        return Ok(MeshResponse::json(
+            "200 OK",
+            serde_json::to_vec(&router.custody(request, peer_service_id))?,
+        ));
+    }
+
     if method == "POST" && path == "/mvp1/envelope-authority" {
         if peer_service_id != "ramflux-federation" {
             anyhow::bail!("source authority refresh requires federation peer");
@@ -375,15 +389,19 @@ pub(crate) async fn handle_mesh_quic_request_value(
             body: serde_json::to_value(response)?,
         });
     }
-    let response = handle_mesh_request_value(
-        ramflux_transport::MeshHttpRequest {
-            method: request.method.clone(),
-            path: request.path.clone(),
-            body,
-        },
-        router,
-        peer_service_id,
-    )?;
+    let mesh_request = ramflux_transport::MeshHttpRequest {
+        method: request.method.clone(),
+        path: request.path.clone(),
+        body,
+    };
+    let response = if request.path == ramflux_protocol::custody::CUSTODY_RPC_PATH {
+        let router = router.clone();
+        let peer = peer_service_id.to_owned();
+        tokio::task::spawn_blocking(move || handle_mesh_request_value(mesh_request, &router, &peer))
+            .await??
+    } else {
+        handle_mesh_request_value(mesh_request, router, peer_service_id)?
+    };
     Ok(ramflux_transport::GatewayQuicResponse {
         status: mesh_response_status_code(response.status),
         body: serde_json::from_slice(&response.body).unwrap_or_else(

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use std::io::Read;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,7 @@ pub(crate) struct TokioRouterRuntime {
     home_node_forward: Option<LocalFederationForwardClient>,
     forward_semaphore: Arc<tokio::sync::Semaphore>,
     forward_timeout: Duration,
+    custody: std::sync::OnceLock<ramflux_node_core::CustodyService>,
 }
 
 impl TokioRouterRuntime {
@@ -53,10 +55,12 @@ impl TokioRouterRuntime {
             home_node_forward,
             forward_semaphore: Arc::new(tokio::sync::Semaphore::new(concurrency.max(1))),
             forward_timeout,
+            custody: std::sync::OnceLock::new(),
         }
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum RouterHandle {
     Tokio(Arc<TokioRouterRuntime>),
 }
@@ -213,6 +217,96 @@ impl RouterHandle {
                 request,
             ),
         }
+    }
+}
+
+impl RouterHandle {
+    pub(crate) fn enable_custody(
+        &self,
+        config: &ramflux_node_core::NodeServiceConfig,
+    ) -> anyhow::Result<()> {
+        let Ok(path) = std::env::var("RAMFLUX_CUSTODY_NODE_RECORD_FILE") else { return Ok(()) };
+        if path.trim().is_empty() {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?.take(512 * 1024 + 1).read_to_end(&mut bytes)?;
+        let record = ramflux_protocol::custody::decode(&bytes, 512 * 1024)?;
+        let trusted = std::env::var("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY")?;
+        let now = ramflux_node_core::now_unix_seconds();
+        let node = ramflux_crypto::custody::verify_node_identity_record(
+            &record,
+            &config.node_id,
+            &trusted,
+            now,
+        )?;
+        let allow = std::env::var("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING").as_deref() == Ok("1");
+        let service = ramflux_node_core::CustodyService::new(
+            node,
+            config.service_id.clone(),
+            allow,
+            self.store(),
+            now,
+        )?;
+        match self {
+            Self::Tokio(runtime) => runtime
+                .custody
+                .set(service)
+                .map_err(|_| anyhow::anyhow!("custody already configured")),
+        }
+    }
+    pub(crate) fn custody(
+        &self,
+        request: ramflux_protocol::custody::CustodyMeshRequest,
+        peer: &str,
+    ) -> ramflux_protocol::custody::CustodyServerFrame {
+        let Self::Tokio(runtime) = self;
+        runtime.custody.get().map_or(
+            ramflux_protocol::custody::CustodyServerFrame::Refused {
+                code: ramflux_protocol::custody::CustodyRefusal::Unsupported,
+            },
+            |service| {
+                service.mesh(
+                    self.state(),
+                    self.store(),
+                    request,
+                    peer,
+                    ramflux_node_core::now_unix_seconds(),
+                )
+            },
+        )
+    }
+}
+
+impl RouterHandle {
+    pub(crate) fn custody_tls(
+        &self,
+        frame: ramflux_protocol::custody::CustodyClientFrame,
+        connection: &str,
+        peer: &str,
+        mode: ramflux_protocol::custody::BindingMode,
+        exporter: Option<[u8; 32]>,
+    ) -> ramflux_protocol::custody::CustodyServerFrame {
+        let Self::Tokio(runtime) = self;
+        runtime.custody.get().map_or(
+            ramflux_protocol::custody::CustodyServerFrame::Refused {
+                code: ramflux_protocol::custody::CustodyRefusal::Unsupported,
+            },
+            |service| {
+                service.tls(
+                    self.state(),
+                    self.store(),
+                    frame,
+                    ramflux_node_core::CustodyTlsContext {
+                        connection_id: connection,
+                        remote_ip: peer,
+                        mode,
+                        exporter,
+                    },
+                    ramflux_node_core::now_unix_seconds(),
+                )
+            },
+        )
     }
 }
 

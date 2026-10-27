@@ -19,17 +19,18 @@ compio = { version = "=0.19.1", optional = true }
 
 [dependencies]
 anyhow = { workspace = true }
+ramflux-crypto = { workspace = true }
 ramflux-node-core = { workspace = true }
 ramflux-protocol = { workspace = true }
 ramflux-transport = { workspace = true }
 serde_json = { workspace = true }
+tokio-rustls = { workspace = true }
 socket2 = { version = "0.6", features = ["all"] }
 tokio = { workspace = true, features = ["macros", "rt", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-ramflux-crypto = { workspace = true }
 redb = { workspace = true }
 
 [lints]

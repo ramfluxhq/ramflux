@@ -4,6 +4,9 @@
 //! Rust core SDK facade and stable C-ABI boundary substrate.
 
 pub mod backup;
+#[cfg(all(feature = "itest-memory-vault", ramflux_production))]
+compile_error!("production builds must not enable itest-memory-vault");
+
 mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;
