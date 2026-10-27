@@ -11,6 +11,14 @@ fn persisted_account(root: &Path) -> Result<(), SdkError> {
     Ok(())
 }
 
+fn persisted_account_with_stored_secret(root: &Path, secret: &str) -> Result<(), SdkError> {
+    persisted_account(root)?;
+    let path = local_bus_account_manifest_path(root, "alice");
+    let mut manifest = read_local_bus_account_manifest(&path)?;
+    manifest.account_secret = secret.to_owned();
+    write_local_bus_account_manifest(root, &manifest)
+}
+
 fn subscribe_restore(supervisor: &Supervisor) -> mpsc::Receiver<LocalBusFrame> {
     let (outbound, receiver) = mpsc::channel(8);
     let mut connection = LocalBusConnectionState::new(99, outbound);
@@ -88,6 +96,66 @@ async fn explicit_unlock_and_startup_restore_race_succeeds_in_both_orders() -> R
                 drop(supervisor);
                 std::fs::remove_dir_all(root)?;
             }
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_startup_restore_cannot_replace_an_explicitly_unlocked_account_state()
+-> Result<(), SdkError> {
+    LocalSet::new()
+        .run_until(async {
+            let root = root("restore-failed-after-unlock");
+            persisted_account_with_stored_secret(&root, "wrong-startup-secret")?;
+            let (gate, control) = LocalBusStartupRestoreGate::new("alice");
+            let config =
+                LocalBusConfig::new(root.join("bus.sock"), &root).with_startup_restore_gate(gate);
+            let supervisor = Supervisor::new(config)?;
+            let mut events = subscribe_restore(&supervisor);
+            let mut background = tokio::task::JoinSet::new();
+            supervisor.hydrate(&mut background)?;
+            tokio::time::timeout(Duration::from_secs(5), control.entered())
+                .await
+                .map_err(|_| failure("startup restore must enter its test gate"))?;
+
+            let (outbound, _receiver) = mpsc::channel(8);
+            let connection = LocalBusConnectionState::new(1, outbound);
+            let unlocked = supervisor
+                .request(
+                    request(
+                        "explicit-unlock",
+                        "alice",
+                        "account.unlock",
+                        serde_json::json!({"passphrase":"actor-test-secret"}),
+                    ),
+                    &connection,
+                )
+                .await?;
+            assert_eq!(unlocked.body["local_account_id"], "alice");
+            control.release();
+            assert_eq!(restore_event(&mut events).await?.body["state"], "unlocked");
+            let status = supervisor
+                .request(
+                    request("status", "alice", "account.status", serde_json::json!({})),
+                    &connection,
+                )
+                .await?;
+            assert_eq!(status.body["local_account_id"], "alice");
+            let list = supervisor
+                .request(
+                    request("list", "alice", "account.list", serde_json::json!({})),
+                    &connection,
+                )
+                .await?;
+            assert_eq!(list.body["account_details"][0]["state"], "unlocked");
+
+            while let Some(task) = background.join_next().await {
+                task.map_err(|_| failure("restore task panicked"))?;
+            }
+            supervisor.shutdown().await?;
+            drop(supervisor);
+            std::fs::remove_dir_all(root)?;
             Ok(())
         })
         .await

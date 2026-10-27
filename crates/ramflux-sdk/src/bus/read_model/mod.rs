@@ -128,7 +128,8 @@ pub(super) fn validate(request: &LocalBusFrame) -> Result<(), SdkError> {
     }
     match request.method.as_str() {
         "account.create" => {
-            let _: LocalBusAccountCreateRequest = serde_json::from_value(request.body.clone())?;
+            let _: LocalBusAccountCreateRequest = serde_json::from_value(request.body.clone())
+                .map_err(|_| invalid("invalid account request"))?;
         }
         "message.submit" => {
             let _: LocalBusMessageSubmitRequest = serde_json::from_value(request.body.clone())?;

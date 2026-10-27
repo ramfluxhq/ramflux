@@ -86,7 +86,8 @@ pub(crate) fn capture(
         let root = account.client.account_index()?.root();
         let path = local_bus_account_manifest_path(root, &db.local_account_id);
         let mut manifest = read_local_bus_account_manifest(&path)?;
-        let metadata: LocalBusAccountCreateRequest = serde_json::from_value(body.clone())?;
+        let metadata: LocalBusAccountCreateRequest = serde_json::from_value(body.clone())
+            .map_err(|_| SdkError::LocalBus("invalid account request".to_owned()))?;
         if metadata.label.is_some() {
             manifest.label = metadata.label;
         }

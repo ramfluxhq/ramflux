@@ -554,9 +554,8 @@ fn parse_json_input<T: for<'de> Deserialize<'de>>(
     len: usize,
 ) -> CAbiResult<T> {
     let bytes = input_bytes(ptr, len)?;
-    serde_json::from_slice(&bytes).map_err(|source| {
-        CAbiError::new(RamfluxErrorCode::InvalidCanonicalJson, source.to_string())
-    })
+    serde_json::from_slice(&bytes)
+        .map_err(|_| CAbiError::new(RamfluxErrorCode::InvalidCanonicalJson, "invalid JSON input"))
 }
 
 fn input_bytes(ptr: *const c_uchar, len: usize) -> CAbiResult<Vec<u8>> {
@@ -871,6 +870,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::AccountNotOpen(_)
         | SdkError::AccountRestorePending(_)
         | SdkError::AccountRestoreFailed { .. }
+        | SdkError::AccountManifestUnreadable
         | SdkError::LocalBus(_)
         | SdkError::LocalBusRefused { .. }
         | SdkError::InboundRejected(_)

@@ -6,6 +6,7 @@ use crate::backup::{BackupJob, BackupJobState};
 use crate::bus::{actor::AccountInitializer, supervisor::Supervisor};
 use crate::prelude::*;
 use serde_json::json;
+use std::sync::Arc;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[derive(Clone, Copy)]
 struct Scale {
@@ -550,6 +551,43 @@ async fn r2_older_epoch_archive_merges_without_rolling_back_live_identity() -> T
             let kept =
                 read_local_bus_account_manifest(&local_bus_account_manifest_path(&root, "alice"))?;
             assert_eq!(kept.devices, local.devices);
+            supervisor.shutdown().await?;
+            std::fs::remove_dir_all(root)?;
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_install_with_a_healthy_reopen_clears_stale_restore_state() -> TestResult {
+    LocalSet::new()
+        .run_until(async {
+            let root = crate::bus::runtime_tests::root("backup-failed-install-reopen");
+            let supervisor = source_supervisor(&root, SMALL)?;
+            let archive = root.join("failed-install.rfb");
+            let secret = "failed install reopen regression";
+            archive_while_reading(&supervisor, &archive, secret).await?;
+            let row = call(
+                &supervisor,
+                "account.restore.verify",
+                None,
+                json!({"input_path":archive,"passphrase":secret}),
+            )
+            .await?;
+            let id = row["job"]["job_id"].as_str().ok_or("job")?;
+            finished(&supervisor, id, BackupJobState::Verified).await?;
+            supervisor.mark_restore_failed("alice", "wrong_passphrase");
+            *supervisor.backup_jobs.install_hook.lock().map_err(|_| "hook")? =
+                Some(Arc::new(|point, _| {
+                    if point == super::test_install::InstallPoint::Prepared {
+                        return Err(std::io::Error::other("injected install failure"));
+                    }
+                    Ok(())
+                }));
+            call(&supervisor, "account.restore.install", None, json!({"job_id":id})).await?;
+            finished(&supervisor, id, BackupJobState::Failed).await?;
+            let status = call(&supervisor, "account.status", Some("alice"), json!({})).await?;
+            assert_eq!(status["local_account_id"], "alice");
             supervisor.shutdown().await?;
             std::fs::remove_dir_all(root)?;
             Ok(())

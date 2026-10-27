@@ -14,13 +14,20 @@ const ACCOUNT_BACKUP_ARGON2_MEMORY_KIB: u32 = 256 * 1024;
 const ACCOUNT_BACKUP_ARGON2_TIME_COST: u32 = 3;
 const ACCOUNT_BACKUP_ARGON2_PARALLELISM: u32 = 1;
 
+fn account_request<T: serde::de::DeserializeOwned>(
+    body: &serde_json::Value,
+) -> Result<T, SdkError> {
+    serde_json::from_value(body.clone())
+        .map_err(|_| SdkError::LocalBus("invalid account request".to_owned()))
+}
+
 pub(crate) async fn dispatch_account_bus_request(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
         "account.create" => {
-            let body: LocalBusAccountCreateRequest = serde_json::from_value(request.body.clone())?;
+            let body: LocalBusAccountCreateRequest = account_request(&request.body)?;
             let response = local_bus_account_create(state, body).await?;
             Ok(local_bus_ok(serde_json::to_value(response)?))
         }
@@ -76,15 +83,13 @@ pub(crate) async fn dispatch_account_bus_request(
         }
         "account.unlock" => {
             let account_id = request_account_id(request)?.to_owned();
-            let mut body: LocalBusAccountUnlockRequest =
-                serde_json::from_value(request.body.clone())?;
+            let mut body: LocalBusAccountUnlockRequest = account_request(&request.body)?;
             let response = local_bus_account_unlock(state, &account_id, &mut body).await?;
             Ok(local_bus_ok(serde_json::to_value(response)?))
         }
         "account.backup.export" => {
             let account_id = request_account_id(request)?.to_owned();
-            let mut body: LocalBusAccountBackupExportRequest =
-                serde_json::from_value(request.body.clone())?;
+            let mut body: LocalBusAccountBackupExportRequest = account_request(&request.body)?;
             local_bus_account_backup_export(state, &account_id, &mut body)?;
             Ok(local_bus_ok(serde_json::json!({
                 "local_account_id": account_id,
@@ -93,8 +98,7 @@ pub(crate) async fn dispatch_account_bus_request(
             })))
         }
         "account.backup.import" => {
-            let mut body: LocalBusAccountBackupImportRequest =
-                serde_json::from_value(request.body.clone())?;
+            let mut body: LocalBusAccountBackupImportRequest = account_request(&request.body)?;
             let response =
                 local_bus_account_backup_import(state, &mut body, request.account_id.as_deref())
                     .await?;
@@ -102,8 +106,7 @@ pub(crate) async fn dispatch_account_bus_request(
         }
         "account.passphrase.rotate" => {
             let account_id = request_account_id(request)?.to_owned();
-            let mut body: LocalBusAccountPassphraseRotateRequest =
-                serde_json::from_value(request.body.clone())?;
+            let mut body: LocalBusAccountPassphraseRotateRequest = account_request(&request.body)?;
             local_bus_account_passphrase_rotate(state, &account_id, &mut body)?;
             Ok(local_bus_ok(serde_json::json!({
                 "local_account_id": account_id,
@@ -351,7 +354,7 @@ async fn local_bus_account_backup_import(
     expected_account: Option<&str>,
 ) -> Result<LocalBusAccountCreateResponse, SdkError> {
     let bytes = std::fs::read(&body.input_path)?;
-    let backup: LocalBusAccountBackupFile = serde_json::from_slice(&bytes)?;
+    let backup = decode_account_backup_file(&bytes)?;
     let restored = decrypt_account_backup_state(&backup, &mut body.passphrase)?;
     let manifest = restored.manifest;
     if expected_account.is_some_and(|id| id != manifest.local_account_id) {
@@ -422,7 +425,7 @@ pub(crate) fn local_bus_backup_account_id(
     mut body: LocalBusAccountBackupImportRequest,
 ) -> Result<String, SdkError> {
     let bytes = std::fs::read(&body.input_path)?;
-    let backup: LocalBusAccountBackupFile = serde_json::from_slice(&bytes)?;
+    let backup = decode_account_backup_file(&bytes)?;
     let manifest = decrypt_account_backup(&backup, &mut body.passphrase)?;
     Ok(manifest.local_account_id)
 }
@@ -449,6 +452,11 @@ struct LocalBusAccountBackupKdf {
 struct LocalBusAccountBackupAead {
     alg: String,
     nonce_base64url: String,
+}
+
+fn decode_account_backup_file(bytes: &[u8]) -> Result<LocalBusAccountBackupFile, SdkError> {
+    serde_json::from_slice(bytes)
+        .map_err(|_| SdkError::LocalBus("invalid account backup file".to_owned()))
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -538,7 +546,8 @@ fn decrypt_account_backup_state(
                 "account backup decrypt failed; passphrase or file is invalid".to_owned(),
             )
         })?;
-    let backup_plaintext: LocalBusAccountBackupPlaintext = serde_json::from_slice(&plaintext)?;
+    let backup_plaintext: LocalBusAccountBackupPlaintext = serde_json::from_slice(&plaintext)
+        .map_err(|_| SdkError::LocalBus("invalid account backup plaintext".to_owned()))?;
     Ok(backup_plaintext)
 }
 

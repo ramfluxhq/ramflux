@@ -79,7 +79,6 @@ ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }
 tempfile = "3"
 tokio = { version = "1.42", features = ["test-util"] }
-tempfile = "3"
 
 [build-dependencies]
 cbindgen = "0.29.3"

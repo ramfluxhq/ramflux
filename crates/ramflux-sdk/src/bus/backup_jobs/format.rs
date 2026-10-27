@@ -109,8 +109,10 @@ impl Write for Unpack {
             self.prefix.extend_from_slice(&input[..n]);
             input = &input[n..];
             if self.prefix.len() == size {
-                self.metadata =
-                    Some(serde_json::from_slice(&self.prefix).map_err(std::io::Error::other)?);
+                self.metadata = Some(
+                    serde_json::from_slice(&self.prefix)
+                        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?,
+                );
                 self.prefix.zeroize();
                 self.prefix.clear();
             }
@@ -160,5 +162,6 @@ pub(super) fn load_metadata(path: &Path, key: &[u8; 32]) -> Result<Metadata, Sdk
             .decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..])
             .map_err(|_| SdkError::LocalBus("staging authentication failed".into()))?,
     );
-    Ok(serde_json::from_slice(&clear)?)
+    serde_json::from_slice(&clear)
+        .map_err(|_| SdkError::LocalBus("invalid staging metadata".into()))
 }
