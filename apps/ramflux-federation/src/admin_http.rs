@@ -101,10 +101,10 @@ pub(crate) fn handle_admin_connection_with_limits(
             ))
         }
     };
-    if let Some(response) = response {
-        if let Err(error) = response.write(stream, limits, accepted_at) {
-            tracing::warn!(%error, "federation admin response failed");
-        }
+    if let Some(response) = response
+        && let Err(error) = response.write(stream, limits, accepted_at)
+    {
+        tracing::warn!(%error, "federation admin response failed");
     }
 }
 

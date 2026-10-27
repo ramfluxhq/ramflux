@@ -101,10 +101,10 @@ pub(crate) fn handle_public_connection_with_limits(
             Some(HttpResponse::text(status, body))
         }
     };
-    if let Some(response) = response {
-        if let Err(error) = response.write(stream, limits, accepted_at) {
-            tracing::warn!(%error, "federation public response failed");
-        }
+    if let Some(response) = response
+        && let Err(error) = response.write(stream, limits, accepted_at)
+    {
+        tracing::warn!(%error, "federation public response failed");
     }
 }
 
