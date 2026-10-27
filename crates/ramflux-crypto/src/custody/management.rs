@@ -4,7 +4,13 @@
 //! Typed primary operations preserve space and give revocation priority over enrollment.
 use super::{SelfSigningKey, VerifiedRecord, validate::reject};
 use crate::CryptoError;
-use ramflux_protocol::{DeviceSetStatus, custody::*};
+use ramflux_protocol::{
+    DeviceSetStatus,
+    custody::{
+        BranchCertificate, Device, DeviceSet, Envelope, MAX_ENROLLMENT_ROSTER, MigrationState,
+        decode_epoch, encode_epoch, object_hash,
+    },
+};
 
 impl SelfSigningKey {
     /// Revoke in place, including the primary branch, without allocating a roster slot or
@@ -17,7 +23,7 @@ impl SelfSigningKey {
         device_id: &str,
         now: u64,
     ) -> Result<Envelope<DeviceSet>, CryptoError> {
-        let mut body = self.next_body(current, now)?;
+        let mut body = Self::next_body(current, now)?;
         let device = body
             .devices
             .iter_mut()
@@ -41,7 +47,7 @@ impl SelfSigningKey {
         certificate: Envelope<BranchCertificate>,
         now: u64,
     ) -> Result<Envelope<DeviceSet>, CryptoError> {
-        let mut body = self.next_body(current, now)?;
+        let mut body = Self::next_body(current, now)?;
         let branch = &certificate.body;
         if body.devices.len() >= MAX_ENROLLMENT_ROSTER
             || current.revoked_ids().contains(&branch.device_id)
@@ -66,7 +72,7 @@ impl SelfSigningKey {
         body.devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
         self.sign_record(body)
     }
-    fn next_body(&self, current: &VerifiedRecord, now: u64) -> Result<DeviceSet, CryptoError> {
+    fn next_body(current: &VerifiedRecord, now: u64) -> Result<DeviceSet, CryptoError> {
         let mut body = current.envelope().body.clone();
         let (range, revision) = decode_epoch(body.device_set_epoch)?;
         if now < body.issued_at || now > ramflux_protocol::MAX_SAFE_JSON_INTEGER {

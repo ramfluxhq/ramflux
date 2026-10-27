@@ -92,27 +92,7 @@ impl AuthorityPins {
             if pin.fenced_ranges.contains(&range) {
                 return Ok(PinOutcome::Fenced);
             }
-            if !pin.revoked_ids.is_subset(record.revoked_ids()) {
-                return Err(reject("custody revocation rollback"));
-            }
-            for device in &body.devices {
-                if let Some((epoch, signing, agreement)) = pin.devices.get(&device.device_id) {
-                    if device.device_epoch < *epoch
-                        || (device.device_epoch == *epoch
-                            && (device.signing_key_commitment != *signing
-                                || device.agreement_key_commitment != *agreement))
-                    {
-                        return Err(reject("custody branch epoch or key rollback"));
-                    }
-                }
-            }
-            for (id, _) in &pin.devices {
-                if !body.devices.iter().any(|d| &d.device_id == id)
-                    && !record.revoked_ids().contains(id)
-                {
-                    return Err(reject("custody roster entry disappeared without revocation"));
-                }
-            }
+            validate_transition(pin, record)?;
             pin.certificates.insert(range, certificate);
             pin.epoch = body.device_set_epoch;
             pin.hash = hash;
@@ -157,4 +137,35 @@ impl AuthorityPins {
         }
         Ok(PinOutcome::Advanced)
     }
+}
+
+fn validate_transition(pin: &AccountPin, record: &VerifiedRecord) -> Result<(), CryptoError> {
+    let body = &record.envelope().body;
+    if body.devices.len() > ramflux_protocol::custody::MAX_ENROLLMENT_ROSTER
+        && body.devices.iter().any(|device| {
+            device.status == ramflux_protocol::DeviceSetStatus::Active
+                && !pin.devices.contains_key(&device.device_id)
+        })
+    {
+        return Err(reject("custody enrollment reserve exhausted; prioritize revocation"));
+    }
+    if !pin.revoked_ids.is_subset(record.revoked_ids()) {
+        return Err(reject("custody revocation rollback"));
+    }
+    for device in &body.devices {
+        if let Some((epoch, signing, agreement)) = pin.devices.get(&device.device_id)
+            && (device.device_epoch < *epoch
+                || (device.device_epoch == *epoch
+                    && (device.signing_key_commitment != *signing
+                        || device.agreement_key_commitment != *agreement)))
+        {
+            return Err(reject("custody branch epoch or key rollback"));
+        }
+    }
+    for id in pin.devices.keys() {
+        if !body.devices.iter().any(|d| &d.device_id == id) && !record.revoked_ids().contains(id) {
+            return Err(reject("custody roster entry disappeared without revocation"));
+        }
+    }
+    Ok(())
 }

@@ -13,7 +13,7 @@ mod validate;
 mod verify;
 pub use keys::{MasterKey, SelfSigningKey};
 pub use phrase::RecoveryPhrase;
-pub use verify::{CapacityPressure, VerifiedRecord, verify_record};
+pub use verify::{CapacityLimit, CapacityPressure, VerifiedRecord, verify_record};
 
 #[cfg(test)]
 mod tests;

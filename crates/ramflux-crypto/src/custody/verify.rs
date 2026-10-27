@@ -4,7 +4,15 @@
 //! Verified record capability; public bytes cannot manufacture this type by deserialization.
 use super::validate::{bytes, key, record_structure, reject, signature};
 use crate::CryptoError;
-use ramflux_protocol::{DeviceSetStatus, MAX_SAFE_JSON_INTEGER, PrincipalKind, custody::*, domain};
+use ramflux_protocol::{
+    DeviceSetStatus, MAX_SAFE_JSON_INTEGER, PrincipalKind,
+    custody::{
+        BranchCertificate, CLOCK_SKEW_SECONDS, CustodyKind, DeviceRef, DeviceSet, Envelope,
+        MAX_RECORD_BYTES, MAX_REVOKED_IDS, MAX_REVOKED_LIST_BYTES, MAX_ROSTER, decode_epoch,
+        framed_hash, object_hash,
+    },
+    domain,
+};
 use std::collections::BTreeSet;
 
 /// Complete authenticated authority, still subject to freshness and durable mode/epoch pins.
@@ -14,19 +22,28 @@ pub struct VerifiedRecord {
     revoked: BTreeSet<String>,
     encoded_bytes: usize,
     compacted_bytes: usize,
+    human_custodian: Option<Box<VerifiedRecord>>,
 }
 /// Authenticated capacity warnings; crossing a threshold never blocks revocation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CapacityLimit {
+    Roster,
+    RecordBytes,
+    CompactedCount,
+    CompactedBytes,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapacityPressure {
-    pub roster: bool,
-    pub record_bytes: bool,
-    pub compacted_count: bool,
-    pub compacted_bytes: bool,
+    warnings: BTreeSet<CapacityLimit>,
 }
 impl CapacityPressure {
     #[must_use]
-    pub const fn any(self) -> bool {
-        self.roster || self.record_bytes || self.compacted_count || self.compacted_bytes
+    pub fn any(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+    #[must_use]
+    pub fn warned(&self, limit: CapacityLimit) -> bool {
+        self.warnings.contains(&limit)
     }
 }
 impl VerifiedRecord {
@@ -48,6 +65,9 @@ impl VerifiedRecord {
         now: u64,
     ) -> Result<&BranchCertificate, CryptoError> {
         let record = &self.envelope.body;
+        if let Some(human) = &self.human_custodian {
+            human.authorize(&record.master_certificate.body.primary_device_ref, "register", now)?;
+        }
         if reference.account_anchor != record.account_anchor
             || self.revoked.contains(&reference.device_id)
         {
@@ -80,10 +100,11 @@ impl VerifiedRecord {
         fn warn(used: usize, limit: usize) -> bool {
             used >= limit - limit / 5
         }
-        CapacityPressure {
-            roster: warn(self.envelope.body.devices.len(), MAX_ROSTER),
-            record_bytes: warn(self.encoded_bytes, MAX_RECORD_BYTES),
-            compacted_count: warn(
+        let values = [
+            (CapacityLimit::Roster, self.envelope.body.devices.len(), MAX_ROSTER),
+            (CapacityLimit::RecordBytes, self.encoded_bytes, MAX_RECORD_BYTES),
+            (
+                CapacityLimit::CompactedCount,
                 self.envelope
                     .body
                     .revoked_device_checkpoint
@@ -91,7 +112,13 @@ impl VerifiedRecord {
                     .map_or(0, |c| usize::try_from(c.body.count).unwrap_or(MAX_REVOKED_IDS)),
                 MAX_REVOKED_IDS,
             ),
-            compacted_bytes: warn(self.compacted_bytes, MAX_REVOKED_LIST_BYTES),
+            (CapacityLimit::CompactedBytes, self.compacted_bytes, MAX_REVOKED_LIST_BYTES),
+        ];
+        CapacityPressure {
+            warnings: values
+                .into_iter()
+                .filter_map(|(limit, used, max)| warn(used, max).then_some(limit))
+                .collect(),
         }
     }
 }
@@ -192,5 +219,13 @@ pub fn verify_record(
             return Err(reject("compacted device cannot reactivate"));
         }
     }
-    Ok(VerifiedRecord { envelope: envelope.clone(), revoked, encoded_bytes, compacted_bytes })
+    Ok(VerifiedRecord {
+        envelope: envelope.clone(),
+        revoked,
+        encoded_bytes,
+        compacted_bytes,
+        human_custodian: (master.custody_kind == CustodyKind::ExternalHuman)
+            .then(|| human_custodian.cloned().map(Box::new))
+            .flatten(),
+    })
 }

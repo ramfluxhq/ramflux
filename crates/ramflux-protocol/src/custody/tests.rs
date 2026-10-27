@@ -36,7 +36,7 @@ fn original_wire_rejects_missing_nulls_duplicates_depth_and_byte_overflow() -> R
     let value: Nullable = decode(br#"{"value":null}"#, 128)?;
     assert!(value.value.is_none());
     for bytes in
-        [br#"{}"#.as_slice(), br#"{"value":null,"value":null}"#, br#"{"value":null,"extra":1}"#]
+        [br"{}".as_slice(), br#"{"value":null,"value":null}"#, br#"{"value":null,"extra":1}"#]
     {
         assert!(decode::<Nullable>(bytes, 128).is_err());
     }
