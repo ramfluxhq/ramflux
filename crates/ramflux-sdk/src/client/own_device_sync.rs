@@ -32,6 +32,7 @@ impl RamfluxClient {
                 "own_device_sync_export",
             )
             .await?;
+        self.require_native_sync(principal_commitment, &source_device_id, target_device_id)?;
         let source_device =
             manifest.devices.iter().find(|d| d.device_id == source_device_id).ok_or_else(|| {
                 SdkError::InboundRejected("own sync source revoked or unavailable".into())
@@ -103,6 +104,7 @@ impl RamfluxClient {
                 "own_history_page",
             )
             .await?;
+        self.require_native_sync(principal_commitment, &source_device_id, target_device_id)?;
         let target_device =
             manifest.devices.iter().find(|d| d.device_id == target_device_id).ok_or_else(|| {
                 SdkError::InboundRejected("own history target unavailable".into())
@@ -177,16 +179,30 @@ impl RamfluxClient {
             )?,
             signed: sdk_device_signed_fields(&source_device_id, ""),
         };
-        envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
-            &source_branch,
-            &own_device_sync_signing_body(&envelope),
-        )?;
+        self.sign_own_history_envelope(&mut envelope)?;
         Ok(SdkOwnDeviceSyncExportResponse {
             snapshot_id,
             object_id: object.object_id,
             transfer,
             envelope,
         })
+    }
+
+    fn sign_own_history_envelope(
+        &self,
+        envelope: &mut SdkOwnDeviceSyncEnvelope,
+    ) -> Result<(), SdkError> {
+        self.require_native_sync(
+            &envelope.principal_commitment,
+            &envelope.source_device_id,
+            &envelope.target_device_id,
+        )?;
+        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
+            branch,
+            &own_device_sync_signing_body(envelope),
+        )?;
+        Ok(())
     }
 
     fn own_history_relay_options(
@@ -606,6 +622,11 @@ impl RamfluxClient {
                     envelope.target_device_id
                 ))
             })?;
+        self.require_native_sync(
+            &envelope.principal_commitment,
+            &source.device_id,
+            &target.device_id,
+        )?;
         self.require_cached_root_authority(
             &self.device_identity_for_root(&envelope.principal_commitment, &source.device_id)?,
         )?;

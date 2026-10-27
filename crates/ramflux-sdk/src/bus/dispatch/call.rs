@@ -3,6 +3,7 @@
 
 //! Account-owned call RPCs and bounded pair-control delivery, without a parallel scheduler.
 use crate::client::call::state::LiveCall;
+use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 use ramflux_protocol::CallEndpoint;
 use serde_json::{Value, json};
@@ -161,6 +162,10 @@ pub(crate) fn recover(account: &mut LocalBusAccountState) -> Result<(), SdkError
     Ok(())
 }
 fn media(account: &mut LocalBusAccountState, id: &str) -> Result<LocalBusDispatchResult, SdkError> {
+    account.client.require_native_operation(
+        &account.client.owned_device_identity()?,
+        NativeOperation::Call,
+    )?;
     let c =
         account.client.voice_calls.get_mut(id).ok_or_else(|| invalid("media keys unavailable"))?;
     if c.row.state != "active" || c.media_taken {

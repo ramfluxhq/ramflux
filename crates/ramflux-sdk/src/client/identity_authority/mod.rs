@@ -6,6 +6,8 @@ mod custody_directory;
 mod custody_freshness;
 pub(crate) use custody_freshness::NativeHeadFreshness;
 mod custody_lifecycle;
+mod custody_scopes;
+pub(crate) use custody_scopes::NativeOperation;
 #[cfg(test)]
 mod custody_lifecycle_tests;
 pub(crate) use custody_directory::native_fingerprint as native_authority_fingerprint;
