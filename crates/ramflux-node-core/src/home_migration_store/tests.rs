@@ -47,7 +47,7 @@ impl TestNode {
             std::process::id(),
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
         ));
-        let store = RouterRedbStore::open_without_wal(&path)?;
+        let store = RouterRedbStore::open_with_wal(&path, path.with_extension("wal"))?;
         let core = RouterCore::new();
         let pubn = publication()?;
         core.publish_custody_record(&pubn, NOW, &store)?;
@@ -80,7 +80,7 @@ impl TestNode {
     }
     fn restart(&mut self) -> TestResult {
         drop(self.store.take());
-        let store = RouterRedbStore::open_without_wal(&self.path)?;
+        let store = RouterRedbStore::open_with_wal(&self.path, self.path.with_extension("wal"))?;
         self.core = store.load_router()?.ok_or("router snapshot")?;
         self.store = Some(store);
         Ok(())
@@ -569,3 +569,5 @@ fn recovery_winning_before_source_commit_invalidates_move_and_fence_releases_des
     assert_eq!(s.a.store()?.migration_home(&s.anchor)?.ok_or("head")?.record.epoch(), 0);
     Ok(())
 }
+
+mod wal_barrier;
