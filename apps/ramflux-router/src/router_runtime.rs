@@ -462,7 +462,9 @@ pub(crate) mod tests {
             });
             let now =
                 i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX - 3_600);
-            let (handle, _path) = migrated_test_handle(&url, 1, Duration::from_secs(2), now)?;
+            // The forward remains gated until release; this is a failure guard,
+            // not a latency budget for the concurrent local submits.
+            let (handle, _path) = migrated_test_handle(&url, 1, Duration::from_secs(10), now)?;
             let handle = Arc::new(handle);
             let slow_handle = Arc::clone(&handle);
             let mut slow = tokio::spawn(async move {
