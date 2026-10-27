@@ -138,11 +138,16 @@ the global connection cap or startup fails. Configure the service with:
 Compose uses the corresponding `RF_COMPOSE_` aliases. Invalid values fail service
 startup. The global connection cap remains an independent upper bound.
 
-Rootless Podman `pasta` preserves client source addresses, so `demo-node.sh` keeps
-per-source limits on. `rootlessport` and `slirp4netns` do not preserve them; the
-demo wrapper detects those modes, writes the switch as `off`, and prints a warning.
-Operators using another reverse proxy or container port implementation must verify
-the address observed by the federation container and select the switch explicitly.
+Published ports into the demo's bridge network preserve client source addresses
+only with a rootful Linux Podman or Docker engine. Rootless bridge publishing uses
+a port proxy even when Podman's default rootless network command is `pasta`, and a
+Podman machine uses a host proxy; both collapse clients onto a private source. The
+demo wrapper therefore defaults the switch to `off` for rootless, machine/remote,
+and unknown topologies, with a warning, and to `on` only for detected rootful Linux.
+An explicit operator `on` or `off` is never overwritten; `on` in a collapsing or
+unknown topology emits a warning. Operators must verify the address observed by the
+federation container before forcing `on`. A source-preserving rootless topology is
+tracked separately and is not provided by the bridge-network demo.
 
 For host runs, set `RAMFLUX_FEDERATION_PUBLIC_ADDR` and
 `RAMFLUX_FEDERATION_ADMIN_ADDR` to distinct available addresses, for example

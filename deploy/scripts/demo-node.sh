@@ -101,6 +101,11 @@ RAMFLUX_FEDERATION_ADMIN_MAX_BODY_BYTES=${RAMFLUX_FEDERATION_ADMIN_MAX_BODY_BYTE
 validate_federation_limit RAMFLUX_FEDERATION_ADMIN_MAX_BODY_BYTES "$RAMFLUX_FEDERATION_ADMIN_MAX_BODY_BYTES" 67108864
 RAMFLUX_FEDERATION_ADMIN_REQUEST_TIMEOUT_SECONDS=${RAMFLUX_FEDERATION_ADMIN_REQUEST_TIMEOUT_SECONDS-30}
 validate_federation_limit RAMFLUX_FEDERATION_ADMIN_REQUEST_TIMEOUT_SECONDS "$RAMFLUX_FEDERATION_ADMIN_REQUEST_TIMEOUT_SECONDS" 3600
+source_limits_operator_set=0
+if [ "${RAMFLUX_FEDERATION_PER_SOURCE_LIMITS+x}" = x ]; then
+  case "$RAMFLUX_FEDERATION_PER_SOURCE_LIMITS" in on|off) ;; *) fail 'per-source federation limits must be on or off' ;; esac
+  source_limits_operator_set=1
+fi
 RAMFLUX_DEMO_VOICE_UDP_PORT=${voice_cli:-${RAMFLUX_DEMO_VOICE_UDP_PORT:-}}
 if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
   case "$RAMFLUX_DEMO_VOICE_UDP_PORT" in
@@ -202,27 +207,51 @@ runtime() { clean_env "$container_engine" "$@"; }
 check_prebuilt_images() {
   clean_env python3 "$script_dir/demo-image-check.py" "$container_engine" "${1:-$DEMO_VERSION}"
 }
-RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on
-if [ "$container_engine" = podman ]; then
-  rootless_network_mode=$(runtime info --format json | python3 -c '
+source_address_mode=$(runtime info --format json 2>/dev/null | python3 -c '
 import json
 import sys
 data = json.load(sys.stdin)
 host = data.get("host") or data.get("Host") or {}
 security = host.get("security") or host.get("Security") or {}
-if not bool(security.get("rootless", security.get("Rootless", False))):
-    print("rootful")
+remote = host.get("serviceIsRemote", host.get("ServiceIsRemote"))
+rootless = security.get("rootless", security.get("Rootless"))
+host_os = str(host.get("os") or host.get("Os") or "").lower()
+if remote is True:
+    print("machine")
+elif rootless is True:
+    print("rootless-bridge")
+elif rootless is False and host_os == "linux":
+    print("rootful-linux")
+elif not host:
+    options = [str(value).lower() for value in data.get("SecurityOptions", [])]
+    operating_system = str(data.get("OperatingSystem", "")).lower()
+    os_type = str(data.get("OSType", "")).lower()
+    if any("rootless" in value for value in options):
+        print("rootless-bridge")
+    elif "desktop" in operating_system or "machine" in operating_system:
+        print("machine")
+    elif os_type == "linux":
+        print("rootful-linux")
+    else:
+        print("unknown")
 else:
-    print(str(host.get("rootlessNetworkCmd") or host.get("RootlessNetworkCmd") or "unknown").lower())
-') || fail 'cannot determine the rootless Podman network mode'
-  case "$rootless_network_mode" in
-    rootful|pasta) RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on ;;
-    rootlessport|slirp4netns|unknown)
-      RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=off
-      printf 'warning: per-source federation limits disabled because rootless Podman mode %s does not preserve client source addresses\n' "$rootless_network_mode" >&2
-      ;;
-    *) fail 'unsupported rootless Podman network mode' ;;
-  esac
+    print("unknown")
+') || source_address_mode=unknown
+case "$source_address_mode" in
+  rootful-linux) detected_source_limits=on ;;
+  rootless-bridge|machine) detected_source_limits=off ;;
+  *)
+    source_address_mode=unknown
+    detected_source_limits=off
+    ;;
+esac
+if [ "$source_limits_operator_set" -eq 0 ]; then
+  RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=$detected_source_limits
+  if [ "$detected_source_limits" = off ]; then
+    printf 'warning: per-source federation limits disabled because %s port publishing may collapse client source addresses\n' "$source_address_mode" >&2
+  fi
+elif [ "$RAMFLUX_FEDERATION_PER_SOURCE_LIMITS" = on ] && [ "$detected_source_limits" = off ]; then
+  printf 'warning: operator kept per-source federation limits on although %s port publishing may collapse client source addresses\n' "$source_address_mode" >&2
 fi
 check_resources() {
   for kind in container volume network; do

@@ -130,7 +130,7 @@ impl PublicSourceLimitConfig {
     }
 
     #[cfg(test)]
-    fn disabled(mut self) -> Self {
+    pub(crate) fn disabled(mut self) -> Self {
         self.enabled = false;
         self
     }
@@ -245,6 +245,14 @@ struct SourceState {
     idle_next: Option<SourceKey>,
 }
 
+#[derive(Debug)]
+struct AggregateState {
+    active_connections: usize,
+    tracked_sources: usize,
+    connection_tokens: f64,
+    connection_token_updated_at: Instant,
+}
+
 #[derive(Debug, Default)]
 struct IdleList {
     head: Option<SourceKey>,
@@ -254,7 +262,7 @@ struct IdleList {
 #[derive(Debug, Default)]
 struct TrackerState {
     sources: HashMap<SourceKey, SourceState>,
-    aggregates: HashMap<AggregateKey, usize>,
+    aggregates: HashMap<AggregateKey, AggregateState>,
     refilled_idle: IdleList,
     limited_idle: IdleList,
 }
@@ -325,7 +333,15 @@ impl TrackerState {
             .min_by_key(|key| self.sources.get(key).map(|entry| entry.last_seen));
         let key = expired.or(refilled).or(limited)?;
         self.remove_idle(key);
-        self.sources.remove(&key);
+        self.sources.remove(&key)?;
+        let aggregate = key.aggregate();
+        let remove_aggregate = self.aggregates.get_mut(&aggregate).is_some_and(|state| {
+            state.tracked_sources = state.tracked_sources.saturating_sub(1);
+            state.tracked_sources == 0 && state.active_connections == 0
+        });
+        if remove_aggregate {
+            self.aggregates.remove(&aggregate);
+        }
         Some(key)
     }
 }
@@ -349,6 +365,7 @@ pub(crate) enum ConnectionRefusal {
     SourceLimit,
     AggregateLimit,
     ConnectionRate,
+    AggregateConnectionRate,
     TrackingCapacity,
 }
 
@@ -414,41 +431,74 @@ impl PublicSourceLimits {
                     idle_next: None,
                 },
             );
+            let aggregate_state = state.aggregates.entry(aggregate).or_insert(AggregateState {
+                active_connections: 0,
+                tracked_sources: 0,
+                connection_tokens: f64::from(self.config.connection_burst),
+                connection_token_updated_at: now,
+            });
+            aggregate_state.tracked_sources += 1;
             state.push_idle(key, IdleClass::Refilled);
         }
 
-        let aggregate_connections = state.aggregates.get(&aggregate).copied().unwrap_or_default();
-        let entry = state.sources.get_mut(&key).ok_or(ConnectionRefusal::TrackingCapacity)?;
-        refill(
-            &mut entry.connection_tokens,
-            &mut entry.connection_token_updated_at,
-            now,
-            self.config.connection_rate_per_second,
-            self.config.connection_burst,
-        );
-        entry.last_seen = now;
-        if entry.connection_tokens < 1.0 {
-            if entry.active_connections == 0 {
+        let (source_connections, source_rate_limited) = {
+            let entry = state.sources.get_mut(&key).ok_or(ConnectionRefusal::TrackingCapacity)?;
+            refill(
+                &mut entry.connection_tokens,
+                &mut entry.connection_token_updated_at,
+                now,
+                self.config.connection_rate_per_second,
+                self.config.connection_burst,
+            );
+            entry.last_seen = now;
+            let limited = entry.connection_tokens < 1.0;
+            if !limited {
+                entry.connection_tokens -= 1.0;
+            }
+            (entry.active_connections, limited)
+        };
+        if source_rate_limited {
+            if source_connections == 0 {
                 state.push_idle(key, IdleClass::Limited);
             }
             return Err(ConnectionRefusal::ConnectionRate);
         }
-        entry.connection_tokens -= 1.0;
-        if entry.active_connections >= self.config.max_connections {
+        let aggregate_connections = {
+            let aggregate_state =
+                state.aggregates.get_mut(&aggregate).ok_or(ConnectionRefusal::TrackingCapacity)?;
+            refill(
+                &mut aggregate_state.connection_tokens,
+                &mut aggregate_state.connection_token_updated_at,
+                now,
+                self.config.connection_rate_per_second,
+                self.config.connection_burst,
+            );
+            if aggregate_state.connection_tokens < 1.0 {
+                return Err(ConnectionRefusal::AggregateConnectionRate);
+            }
+            aggregate_state.connection_tokens -= 1.0;
+            aggregate_state.active_connections
+        };
+        if source_connections >= self.config.max_connections {
             return Err(ConnectionRefusal::SourceLimit);
         }
         if aggregate_connections >= self.config.aggregate_max_connections {
-            if entry.active_connections == 0 {
+            if source_connections == 0 {
                 state.push_idle(key, IdleClass::Limited);
             }
             return Err(ConnectionRefusal::AggregateLimit);
         }
-        let was_idle = entry.active_connections == 0;
-        entry.active_connections += 1;
-        if was_idle {
+        state
+            .sources
+            .get_mut(&key)
+            .ok_or(ConnectionRefusal::TrackingCapacity)?
+            .active_connections += 1;
+        if source_connections == 0 {
             state.remove_idle(key);
         }
-        *state.aggregates.entry(aggregate).or_default() += 1;
+        let aggregate_state =
+            state.aggregates.get_mut(&aggregate).ok_or(ConnectionRefusal::TrackingCapacity)?;
+        aggregate_state.active_connections += 1;
         Ok(SourceConnectionPermit { limits: Arc::clone(self), key: Some(key) })
     }
 
@@ -473,11 +523,9 @@ impl PublicSourceLimits {
     fn release_connection(&self, key: SourceKey, now: Instant) {
         let mut state = self.lock_state();
         let aggregate = key.aggregate();
-        if let Some(count) = state.aggregates.get_mut(&aggregate) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                state.aggregates.remove(&aggregate);
-            }
+        if let Some(aggregate_state) = state.aggregates.get_mut(&aggregate) {
+            aggregate_state.active_connections =
+                aggregate_state.active_connections.saturating_sub(1);
         }
         let Some(entry) = state.sources.get_mut(&key) else { return };
         entry.active_connections = entry.active_connections.saturating_sub(1);
@@ -583,6 +631,7 @@ mod tests {
     -> Result<(), String> {
         let limits = PublicSourceLimits::new(
             PublicSourceLimitConfig::for_test(8, 16, 4096)
+                .with_connection_rate(10_000, 10_000)
                 .with_idle_expiry(Duration::from_secs(300)),
         );
         let now = Instant::now();
@@ -662,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_aggregate_is_per_24_and_connection_open_rate_refills() -> Result<(), String> {
+    fn source_and_aggregate_connection_open_rates_refill() -> Result<(), String> {
         let limits = PublicSourceLimits::new(
             PublicSourceLimitConfig::for_test(8, 2, 16).with_connection_rate(1, 2),
         );
@@ -683,17 +732,65 @@ mod tests {
         );
         assert!(limits.acquire_connection(ip4(192, 0, 2, 1), now + Duration::from_secs(1)).is_ok());
 
-        let one = limits
+        let aggregate_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(8, 2, 16));
+        let one = aggregate_limits
             .acquire_connection(ip4(198, 51, 100, 1), now)
             .map_err(|error| format!("{error:?}"))?;
-        let two = limits
+        let two = aggregate_limits
             .acquire_connection(ip4(198, 51, 100, 2), now)
             .map_err(|error| format!("{error:?}"))?;
         assert_eq!(
-            limits.acquire_connection(ip4(198, 51, 100, 3), now).err(),
+            aggregate_limits.acquire_connection(ip4(198, 51, 100, 3), now).err(),
             Some(ConnectionRefusal::AggregateLimit)
         );
         drop((one, two));
+
+        let ipv4_aggregate_rate = PublicSourceLimits::new(
+            PublicSourceLimitConfig::for_test(8, 16, 16).with_connection_rate(1, 2),
+        );
+        drop(
+            ipv4_aggregate_rate
+                .acquire_connection(ip4(198, 51, 100, 1), now)
+                .map_err(|error| format!("{error:?}"))?,
+        );
+        drop(
+            ipv4_aggregate_rate
+                .acquire_connection(ip4(198, 51, 100, 2), now)
+                .map_err(|error| format!("{error:?}"))?,
+        );
+        assert_eq!(
+            ipv4_aggregate_rate.acquire_connection(ip4(198, 51, 100, 3), now).err(),
+            Some(ConnectionRefusal::AggregateConnectionRate)
+        );
+        assert!(ipv4_aggregate_rate.acquire_connection(ip4(198, 51, 101, 1), now).is_ok());
+
+        let aggregate_rate = PublicSourceLimits::new(
+            PublicSourceLimitConfig::for_test(8, 16, 16).with_connection_rate(1, 2),
+        );
+        for subnet in 0..2_u16 {
+            let source = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 7, subnet, 0, 0, 0, 1));
+            drop(
+                aggregate_rate
+                    .acquire_connection(source, now)
+                    .map_err(|error| format!("{error:?}"))?,
+            );
+        }
+        let same_prefix = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 7, 2, 0, 0, 0, 1));
+        assert_eq!(
+            aggregate_rate.acquire_connection(same_prefix, now).err(),
+            Some(ConnectionRefusal::AggregateConnectionRate)
+        );
+        assert!(
+            aggregate_rate
+                .acquire_connection(
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 8, 0, 0, 0, 0, 1)),
+                    now,
+                )
+                .is_ok()
+        );
+        assert!(
+            aggregate_rate.acquire_connection(same_prefix, now + Duration::from_secs(1)).is_ok()
+        );
         Ok(())
     }
 
