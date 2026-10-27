@@ -340,6 +340,7 @@ prove that a vault provider is hardware-backed.
 | Initial master/self-signing setup | Phrase-derived master, explicit human ceremony |
 | Replacement primary or self-signing key | Phrase-derived master certifies a fresh key/range; old authority revoked |
 | Device add, branch rotation, revocation, lease renewal, signed-set publish | Primary self-signing key and exact current record |
+| Home-migration authorization | Primary self-signing key and exact current record; native OS user presence for each migration signature |
 | Contact request, accept or decline (v2 consent) | Primary self-signing key; a secondary queues the exact intent for primary approval |
 | Public display-name change | Primary self-signing key; secondary request remains pending |
 | Issue/revoke account-level own-group scope or private group restriction | Primary self-signing key within master-certified scopes |
