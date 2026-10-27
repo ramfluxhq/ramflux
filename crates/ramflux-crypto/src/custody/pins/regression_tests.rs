@@ -86,6 +86,7 @@ fn normal_range_advances_retain_recent_conflicts_instead_of_stale_accepted_copie
         }
         if range == 9 || range == 10 {
             assert!(pins.conflict_evidence(&anchor, 8).is_some());
+            assert_eq!(pins.pruned_evidence(&anchor), 0);
         }
     }
     assert!(pins.conflict_evidence(&anchor, 8).is_none());
@@ -93,6 +94,7 @@ fn normal_range_advances_retain_recent_conflicts_instead_of_stale_accepted_copie
         assert!(pins.conflict_evidence(&anchor, range).is_some());
     }
     assert_eq!(pins.accounts[&anchor].conflicts.len(), 8);
+    assert_eq!(pins.pruned_evidence(&anchor), 1);
     assert!(pins.accounts[&anchor].range_records.len() <= 1);
     Ok(())
 }
