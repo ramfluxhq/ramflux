@@ -271,8 +271,13 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         while let Some(action) = actions.get(*next) {
             let response = self.prove(action.clone()).await?;
             match (*next, response) {
-                (0, CustodyServerFrame::Published { .. })
-                | (1, CustodyServerFrame::Registered { .. }) => {}
+                (0, CustodyServerFrame::Published { record_hash })
+                    if record_hash == object_hash(self.account.record())? => {}
+                (1, CustodyServerFrame::Registered { device_ref, target_delivery_id })
+                    if device_ref == self.device
+                        && target_delivery_id == ramflux_protocol::qualified_device_id(
+                            &self.device.account_anchor, &self.device.device_id,
+                        )? => {}
                 (2, CustodyServerFrame::SessionEstablished { session }) => {
                     if session.device_ref != self.device
                         || session.binding_mode != self.mode
