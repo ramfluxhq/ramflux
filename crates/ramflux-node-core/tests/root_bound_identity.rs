@@ -748,6 +748,88 @@ fn assert_authority_unchanged_after_admission(
 }
 
 #[test]
+fn repeated_public_manifest_lookup_preserves_active_authority_and_opk_stripping() -> TestResult {
+    let first = Fixture::named("alice", "one", 111)?;
+    let second = Fixture::named("alice", "two", 111)?;
+    let mut entries = first.request.device_set.as_ref().ok_or("set")?.devices.clone();
+    entries.extend(second.request.device_set.as_ref().ok_or("set")?.devices.clone());
+    let record = sign_device_set(
+        &first.root,
+        DeviceSetSigningInput {
+            principal_kind: PrincipalKind::HeadlessAi,
+            device_set_epoch: 1,
+            devices: entries,
+        },
+    )?;
+    let mut registry = IdentityRegistry::new();
+    for f in [&first, &second] {
+        let mut request = f.request.clone();
+        request.device_set = Some(record.clone());
+        request.now = i64::try_from(
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+        )?;
+        request.proof.issued_at = request.now - 1;
+        request.proof.expires_at = request.now + 3600;
+        request.proof.signature = sign_canonical_bytes_with_seed(
+            &branch_proof_signing_bytes(&request.proof)?,
+            f.root.signing_key.to_bytes(),
+        );
+        registry.register_identity(&request)?;
+        let bundle = create_rotating_prekey_bundle_with_lineage(
+            &f.device,
+            &f.device.signing_key,
+            &f.x,
+            &PrekeyBundleOptions {
+                signed_prekey_id: "signed",
+                signed_prekey: &X25519KeyPair::from_seed([151; 32]),
+                signed_prekey_created_at: 1000,
+                signed_prekey_expires_at: 2000,
+                one_time_prekeys: &[("pooled".into(), X25519KeyPair::from_seed([152; 32]).public)],
+                prekey_bundle_counter: 1,
+            },
+        )?;
+        registry.publish_prekey(PrekeyPublishRequest {
+            device_id: f.device.device_id.clone(),
+            bundle,
+        })?;
+    }
+    let root = &first.request.principal_commitment;
+    let start = std::time::Instant::now();
+    for _ in 0..20 {
+        let manifest = registry.device_manifest(root).ok_or("manifest")?;
+        assert_eq!(manifest.devices.len(), 2);
+        for entry in manifest.devices {
+            assert_eq!(entry.prekey_bundle.one_time_prekey_ids, Vec::<String>::new());
+            assert!(entry.prekey_bundle.one_time_prekey.is_none());
+            verify_prekey_bundle(&first.device.signing_key.verifying_key(), &entry.prekey_bundle)?;
+        }
+    }
+    eprintln!("20 two-device public manifest lookups: {:?}", start.elapsed());
+    let mut changed = record;
+    changed.device_set_epoch = 2;
+    changed.devices[1].status = DeviceSetStatus::Revoked;
+    changed.devices[1].revoked_at = Some(1200);
+    changed = sign_device_set(
+        &first.root,
+        DeviceSetSigningInput {
+            principal_kind: changed.principal_kind,
+            device_set_epoch: 2,
+            devices: changed.devices,
+        },
+    )?;
+    registry.publish_signed_device_set(&first.publish(changed))?;
+    assert_eq!(registry.device_manifest(root).ok_or("manifest")?.devices.len(), 1);
+    let mut tampered = serde_json::to_value(&registry)?;
+    tampered["signed_device_sets"][root]["signature"] = serde_json::json!("invalid");
+    let tampered: IdentityRegistry = serde_json::from_value(tampered)?;
+    assert_eq!(
+        tampered.device_manifest(root).ok_or("manifest")?.devices,
+        Vec::<DeviceManifestEntry>::new()
+    );
+    Ok(())
+}
+
+#[test]
 fn five_thousand_distinct_account_target_pairs_still_receive_opks_within_one_day() -> TestResult {
     let mut registry = IdentityRegistry::new();
     let signed = X25519KeyPair::from_seed([251; 32]);
