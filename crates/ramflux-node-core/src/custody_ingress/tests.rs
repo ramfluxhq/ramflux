@@ -241,7 +241,7 @@ fn challenge_share_caps_cover_mapped_ipv4_ipv6_48_and_64_and_reset_after_one_min
     Ok(())
 }
 #[test]
-fn filling_the_challenge_window_requires_at_least_128_shares() -> Result {
+fn filling_the_challenge_window_requires_at_least_128_shares() {
     let tick = Instant::now();
     let mut budget = CustodySourceBudget::default();
     for share in 0..128 {
@@ -261,5 +261,4 @@ fn filling_the_challenge_window_requires_at_least_128_shares() -> Result {
     }
     assert!(budget.admit(ip(999, 1), tick).is_none());
     assert!(budget.admit(ip(999, 1), tick + Duration::from_secs(60)).is_some());
-    Ok(())
 }
