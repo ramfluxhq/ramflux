@@ -322,6 +322,52 @@ async fn a_rejected_primary_dm_discards_its_staged_copy() -> TestResult {
     f.cleanup()
 }
 #[tokio::test]
+async fn a_rejected_primary_group_send_discards_its_staged_copy() -> TestResult {
+    let mut f = Fixture::new("own-copy-group-reject").await?;
+    f.source.client.create_group("group", "device-sender")?;
+    let peer_root = f.message("rejected")?.recipient_principal_commitment.ok_or("peer root")?;
+    f.source.client.add_group_member_with_root("group", "device-peer-one", "member", &peer_root)?;
+    let captured = Arc::default();
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::clone(&captured));
+    gateway.fail_after = Some(0);
+    let own = Arc::clone(&gateway.own);
+    f.source
+        .put_engine(GatewaySessionEngine::with_test_transport(f.config.clone(), Box::new(gateway)));
+    let request = LocalBusFrame::request(
+        "group",
+        Some("sender".into()),
+        "group",
+        "group.send",
+        json!({"group_id":"group","conversation_id":"group-thread","message_id":"rejected",
+            "sender_id":"device-sender","envelope_id":"rejected-envelope",
+            "source_principal_id":"sender","target_delivery_id":"device-peer-one",
+            "encrypted_body_base64":"",
+            "plaintext_body_base64":ramflux_protocol::encode_base64url(b"not accepted")}),
+    );
+    let error = super::super::group::dispatch_group_send_request(&request, &mut f.source)
+        .await
+        .err()
+        .ok_or("primary group send unexpectedly succeeded")?;
+    assert!(error.to_string().contains("injected submit failure"), "{error}");
+    let sender = f.source.client.owned_device_identity()?;
+    let canonical = ramflux_protocol::group_message_id(
+        "group",
+        sender.root_commitment(),
+        sender.device_id(),
+        "rejected",
+    )?;
+    let db = f.source.client.account_db()?;
+    assert_eq!(db.actor_state_usage("own-device/send/")?.0, 0);
+    let status = db.client_record("message", &canonical)?.ok_or("copy status")?;
+    assert_eq!(status["own_device_copy_state"], "failed");
+    assert!(status["own_copy_message_id"].as_str().is_some());
+    assert_eq!(db.load_actor_state::<u64>("own-device/sent-failures")?, None);
+    assert!(captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
+    assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
+    assert!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
+    f.cleanup()
+}
+#[tokio::test]
 async fn offline_authored_dates_do_not_expire_freshly_staged_live_copies() -> TestResult {
     let mut f = Fixture::new("own-copy-offline-date").await?;
     let mut message = f.message("offline")?;
@@ -342,7 +388,12 @@ async fn offline_authored_dates_do_not_expire_freshly_staged_live_copies() -> Te
         .client
         .receive_own_device_message(
             &f.receiver,
-            &GatewayInboxEntry { inbox_seq: 1, target_delivery_id: "sibling".into(), envelope },
+            &GatewayInboxEntry {
+                forwarded: false,
+                inbox_seq: 1,
+                target_delivery_id: "sibling".into(),
+                envelope,
+            },
         )
         .await?;
     let rows = f.sibling.client.direct_messages("thread")?;

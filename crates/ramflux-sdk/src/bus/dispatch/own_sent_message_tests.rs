@@ -52,7 +52,12 @@ async fn sent_dm_arrives_on_an_active_sibling_as_one_outgoing_row_despite_retrie
     crate::bus::own_device_copy::flush(&mut source).await?;
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     assert!(!envelope.encrypted_payload.contains("sent to peer"));
-    let entry = GatewayInboxEntry { inbox_seq: 1, target_delivery_id: "sibling".into(), envelope };
+    let entry = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: "sibling".into(),
+        envelope,
+    };
     assert!(sibling.client.receive_own_device_message(&receiver, &entry).await?);
     assert!(sibling.client.receive_own_device_message(&receiver, &entry).await?);
     let rows = sibling.client.direct_messages("thread")?;
@@ -112,7 +117,12 @@ async fn sent_group_message_creates_an_outgoing_sibling_row_without_history_impo
     assert_eq!(result.response_body["client_message_id"], "group-message");
     crate::bus::own_device_copy::flush(&mut source).await?;
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    let entry = GatewayInboxEntry { inbox_seq: 1, target_delivery_id: "sibling".into(), envelope };
+    let entry = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: "sibling".into(),
+        envelope,
+    };
     assert!(sibling.client.receive_own_device_message(&receiver, &entry).await?);
     assert!(sibling.client.receive_own_device_message(&receiver, &entry).await?);
     let snapshot = crate::bus::readers::read(
@@ -182,8 +192,12 @@ async fn an_original_self_dm_and_its_pair_encrypted_copy_produce_one_outgoing_ro
     source.put_engine(engine);
     crate::bus::own_device_copy::flush(&mut source).await?;
     let copy = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    let copy =
-        GatewayInboxEntry { inbox_seq: 2, target_delivery_id: "sibling".into(), envelope: copy };
+    let copy = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 2,
+        target_delivery_id: "sibling".into(),
+        envelope: copy,
+    };
     assert!(sibling.client.receive_own_device_message(&receiver, &copy).await?);
     assert_eq!(sibling.client.direct_messages("self-thread")?.len(), 0);
     let original = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
