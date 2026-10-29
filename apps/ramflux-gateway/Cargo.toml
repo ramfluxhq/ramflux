@@ -11,6 +11,7 @@ commercial-license = true
 
 [features]
 default = []
+itest-inprocess = []
 compio-gateway = ["dep:compio", "ramflux-transport/compio-gateway"]
 itest-http = ["ramflux-node-core/itest-http"]
 # T22-A1 / RQ-04: legacy v2 shared-HMAC relay-token issuance (RelayTokenIssue frame + service-key

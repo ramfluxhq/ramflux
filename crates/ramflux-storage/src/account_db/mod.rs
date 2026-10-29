@@ -77,6 +77,7 @@ pub struct AccountDb {
     device_signer: Option<ramflux_crypto::DeviceBranch>,
     clock: AccountClock,
     pub(crate) connection: Connection,
+    secret_checkpoint_count: std::cell::Cell<u64>,
     volatile_typing: RefCell<BTreeMap<(String, String), TypingStateRecord>>,
     volatile_presence: RefCell<BTreeMap<String, ContactPresenceRecord>>,
 }
@@ -107,6 +108,7 @@ impl AccountDb {
             device_signer: None,
             clock: AccountClock::real(),
             connection,
+            secret_checkpoint_count: std::cell::Cell::new(0),
             volatile_typing: RefCell::new(BTreeMap::new()),
             volatile_presence: RefCell::new(BTreeMap::new()),
         };

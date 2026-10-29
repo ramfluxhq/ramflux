@@ -3,6 +3,7 @@
 
 #![allow(unused_imports)]
 
+use crate::RouterRedbStore;
 use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, DeliveryDecision,
     DeviceAuthKeyResponse, DeviceManifestResponse, DeviceRevokeResponse,
@@ -584,6 +585,25 @@ impl RouterCore {
         &self,
         request: PrekeyPublishRequest,
     ) -> Result<PrekeyResponse, NodeCoreError> {
+        self.publish_prekey_with_store(request, None)
+    }
+
+    /// Publish keys and commit the publication and lease cursor before releasing the control lock.
+    /// # Errors
+    /// Returns validation or durable storage errors.
+    pub fn mvp1_publish_prekey_durable(
+        &self,
+        request: PrekeyPublishRequest,
+        store: &RouterRedbStore,
+    ) -> Result<PrekeyResponse, NodeCoreError> {
+        self.publish_prekey_with_store(request, Some(store))
+    }
+
+    fn publish_prekey_with_store(
+        &self,
+        request: PrekeyPublishRequest,
+        store: Option<&RouterRedbStore>,
+    ) -> Result<PrekeyResponse, NodeCoreError> {
         let device_id = request.device_id.clone();
         let lookup = IdentityRegistry::principal_device_lookup(
             &request.bundle.identity_commitment,
@@ -596,9 +616,15 @@ impl RouterCore {
             .resolve_device_selector(&lookup)
             .ok_or_else(|| NodeCoreError::ItestHttp("prekey authority missing".into()))?;
         let available = control.mvp1_identities.available_one_time_prekeys(&identity);
+        if let Some(store) = store {
+            store.record_prekey_publication(
+                &control.mvp1_identities,
+                &control.mvp1_identities.prekey_lease_state(&identity),
+            )?;
+        }
         Ok(PrekeyResponse {
             device_id: device_id.clone(),
-            bundle: control.mvp1_identities.prekey_bundle(&identity).cloned(),
+            bundle: control.mvp1_identities.public_prekey_bundle(&identity),
             principal_commitment: control
                 .mvp1_identities
                 .principal_commitment_for_device(&identity)
@@ -679,11 +705,32 @@ impl RouterCore {
     /// Lease one OPK for an authenticated gateway session and return the incremental durable
     /// lease state which must be committed before the response is released.
     /// # Errors
-    /// Rejects unknown fetchers, unqualified targets, and exhausted requester budgets.
+    /// Rejects unknown fetchers and unqualified targets. Over-budget fetches return SPK-only bundles.
     pub fn mvp1_prekey_lease(
         &self,
         request: &PrekeyLeaseRequest,
         now: i64,
+    ) -> Result<(PrekeyResponse, PrekeyLeaseState), NodeCoreError> {
+        self.lease_prekey_with_store(request, now, None)
+    }
+
+    /// Commit the selected OPK under the same lock as selection, before returning a response.
+    /// # Errors
+    /// Returns authentication, selection, or durable storage errors.
+    pub fn mvp1_prekey_lease_durable(
+        &self,
+        request: &PrekeyLeaseRequest,
+        now: i64,
+        store: &RouterRedbStore,
+    ) -> Result<PrekeyResponse, NodeCoreError> {
+        self.lease_prekey_with_store(request, now, Some(store)).map(|(response, _)| response)
+    }
+
+    fn lease_prekey_with_store(
+        &self,
+        request: &PrekeyLeaseRequest,
+        now: i64,
+        store: Option<&RouterRedbStore>,
     ) -> Result<(PrekeyResponse, PrekeyLeaseState), NodeCoreError> {
         let mut control = lock_unpoisoned(&self.control);
         let identities = &mut control.mvp1_identities;
@@ -705,7 +752,8 @@ impl RouterCore {
             identities.principal_commitment_for_device(&target).unwrap_or_default().to_owned();
         let target_delivery_id =
             identities.target_delivery_id_for_device(&target).map(str::to_owned);
-        let pair = format!("{}\0{}", fetcher.storage_key(), target.storage_key());
+        let pair = format!("{}\0{}", fetcher.root_commitment(), target.storage_key());
+        let before = identities.prekey_lease_state(&target);
         let leased = identities.lease_prekey_bundle(
             &target,
             fetcher.root_commitment(),
@@ -717,6 +765,12 @@ impl RouterCore {
             leased.map_or((None, false, false), |value| (Some(value.0), value.1, value.2));
         let available = identities.available_one_time_prekeys(&target);
         let state = identities.prekey_lease_state(&target);
+        if let Some(store) = store
+            && let Err(error) = store.record_prekey_lease_state(&state)
+        {
+            identities.restore_prekey_lease_state(before);
+            return Err(error);
+        }
         Ok((
             PrekeyResponse {
                 device_id,

@@ -80,6 +80,8 @@ zeroize = { version = "1.8", features = ["serde"] }
 [dev-dependencies]
 ed25519-dalek.workspace = true
 rusqlite = { workspace = true }
+ramflux-router = { path = "../../apps/ramflux-router", features = ["itest-inprocess"] }
+ramflux-gateway = { path = "../../apps/ramflux-gateway", features = ["itest-inprocess"] }
 ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }
 tokio = { version = "1.42", features = ["test-util"] }
