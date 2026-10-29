@@ -202,6 +202,7 @@ async fn an_original_self_dm_and_its_pair_encrypted_copy_produce_one_outgoing_ro
     assert_eq!(sibling.client.direct_messages("self-thread")?.len(), 0);
     let original = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     let original = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "sibling".into(),
         envelope: original,
