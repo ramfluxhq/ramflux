@@ -17,6 +17,8 @@ pub(crate) mod device;
 pub(crate) mod dm;
 pub(crate) mod grant;
 pub(crate) mod group;
+#[cfg(feature = "itest-legacy-accounts")]
+mod itest_legacy_account;
 pub(crate) mod keychain;
 pub(crate) mod mcp;
 pub(crate) mod node;
