@@ -124,6 +124,7 @@ impl AccountDb {
             )
             .optional()?;
         if let Some(existing_message_id) = existing
+            && !existing_message_id.is_empty()
             && !self.message_is_at_or_after(
                 conversation_id,
                 new_message_id,
@@ -175,7 +176,8 @@ impl AccountDb {
                 "SELECT conversation_id, receiver_device_id, delivered_through_message_id,
                         delivered_at, ttl_seconds
                    FROM conversation_delivery_state
-                  WHERE conversation_id = ?1 AND receiver_device_id = ?2",
+                  WHERE conversation_id = ?1 AND receiver_device_id = ?2
+                    AND delivered_through_message_id<>''",
                 params![conversation_id, receiver_device_id],
                 |row| {
                     Ok(DeliveryReceiptRecord {
@@ -285,7 +287,7 @@ impl AccountDb {
         let read_through_message_id = self
             .connection
             .query_row(
-                "SELECT read_through_message_id
+                "SELECT NULLIF(read_through_message_id,'')
                    FROM conversation_read_state
                   WHERE conversation_id = ?1 AND reader_id = ?2",
                 params![conversation_id, reader_id],
@@ -295,7 +297,7 @@ impl AccountDb {
         let delivered_through_message_id = self
             .connection
             .query_row(
-                "SELECT delivered_through_message_id
+                "SELECT NULLIF(delivered_through_message_id,'')
                    FROM conversation_delivery_state
                   WHERE conversation_id = ?1 AND receiver_device_id = ?2",
                 params![conversation_id, reader_id],
