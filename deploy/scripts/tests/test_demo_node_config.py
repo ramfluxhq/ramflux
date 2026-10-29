@@ -48,6 +48,25 @@ class DemoNodeConfigTests(unittest.TestCase):
         for service in CONFIG.SERVICES:
             (config / f"{service}.toml").write_text(f"service_id = 'ramflux-{service}'\n")
 
+    def test_interrupted_initial_cleanup_retains_authority_without_pending_owner(self):
+        pending = self.state / "owner.json.pending"
+        owner = json.loads((self.state / "owner.json").read_text())
+        pending.write_text(json.dumps(owner))
+        marker = self.state / "transaction.pending"
+        marker.write_text(json.dumps({"command": "up", "previous_snapshot": None,
+                                      "target_snapshot": "demo-v1/initial"}))
+        settings = owner["settings"]
+        with mock.patch.dict(os.environ, settings, clear=False):
+            with mock.patch.object(CONFIG.shutil, "rmtree", side_effect=OSError("disk failure")):
+                with self.assertRaisesRegex(OSError, "disk failure"):
+                    CONFIG.finish_initial_recovery(self.state)
+            self.assertTrue(marker.exists())
+            self.assertEqual(json.loads(marker.read_text())["initial_owner"], owner)
+            pending.unlink(missing_ok=True)
+            self.assertEqual(CONFIG.initial_recovery_owner(self.state), owner)
+            CONFIG.finish_initial_recovery(self.state)
+        self.assertEqual(list(self.state.iterdir()), [])
+
     def test_legacy_snapshot_copy_failures_never_publish_the_transaction_marker(self):
         real_atomic = CONFIG.atomic_bytes
         for failure_at in range(1, 13):

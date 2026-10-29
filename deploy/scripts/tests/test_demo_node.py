@@ -171,6 +171,114 @@ else:
         return {name: (self.state / name).read_bytes() if (self.state / name).exists() else None
                 for name in names}
 
+    def state_tree(self):
+        return {str(path.relative_to(self.state)): (
+            path.lstat().st_mode & 0o777,
+            path.read_bytes() if path.is_file() else None,
+        ) for path in [self.state, *self.state.rglob("*")]}
+
+    def test_failed_initial_up_can_be_undone_without_touching_other_projects(self):
+        self.state.mkdir(mode=0o750)
+        before = self.state_tree()
+        other_resources = {
+            "other-container": {"kind": "container", "project": "other", "owner": "other-owner"},
+            "other-network": {"kind": "network", "project": "other", "owner": "other-owner"},
+            "other-volume": {"kind": "volume", "project": "other", "owner": "other-owner"},
+        }
+        resources = self.root / "resources.json"
+        for recovery in ("recover", "rollback"):
+            with self.subTest(recovery=recovery):
+                resources.write_text(json.dumps(other_resources))
+                self.control.write_text('{"health": "unhealthy"}')
+                self.run_script("up", success=False)
+                failed_tree = self.state_tree()
+                marker = self.state / "transaction.pending"
+                pending = marker.read_bytes()
+                identifier = json.loads(pending)["target_snapshot"]
+                for command, flags in (("status", ()), ("status", ("--remote",)),
+                                       ("down", ()), ("down", ("--purge",)),
+                                       ("logs", ()), ("up", ()), ("upgrade", ())):
+                    self.journal.write_text("")
+                    result = self.run_script(command, *flags, success=False)
+                    self.assertEqual(result.returncode, 3)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, f"pending upgrade transaction {identifier}: "
+                                     "initial setup failed: run `demo-node.sh recover` to undo it\n")
+                    self.assertEqual(marker.read_bytes(), pending)
+                    self.assertEqual(self.state_tree(), failed_tree)
+                    self.assertEqual(self.commands(), [])
+                # Cleanup needs neither the target images nor complete Compose inputs.
+                (self.state / "compose.yml").unlink()
+                self.control.write_text('{"image_bins": {"gateway": "wrong-binary"}}')
+                self.journal.write_text("")
+                result = self.run_script(recovery)
+                self.assertEqual(result.stdout, "initial setup rolled back; run `up` again\n")
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(json.loads(resources.read_text()), other_resources)
+                self.assertEqual(self.state_tree(), before)
+                self.assertEqual(self.compose_commands(), [])
+                self.assertFalse((self.root / "deployed").exists())
+                removed = [args[-1] for args in self.commands()
+                           if args[:2] in (["rm", "-f"], ["network", "rm"], ["volume", "rm"])]
+                self.assertEqual(set(removed), {"id-demo-network", *(f"id-ramflux-{service}" for service
+                    in ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")),
+                    *(f"demo-test_{service}-redb" for service
+                    in ("gateway", "router", "notify", "federation", "relay", "signaling", "retention"))})
+                for args in self.commands():
+                    if args[:2] == ["ps", "-aq"] or args[:3] == ["network", "ls", "-q"]:
+                        self.assertIn("label=com.docker.compose.project=demo-test", args)
+                self.control.write_text("{}")
+                self.run_script("up")
+                self.run_script("down", "--purge")
+                self.state.mkdir(mode=0o750)
+
+    def test_initial_recovery_retries_removal_and_refuses_changed_project(self):
+        self.state.mkdir()
+        before = self.state_tree()
+        self.control.write_text('{"health": "unhealthy"}')
+        self.run_script("up", success=False)
+        marker = self.state / "transaction.pending"
+        pending = marker.read_bytes()
+        original_env = self.env_file.read_text()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_PROJECT=other\n")
+        self.journal.write_text("")
+        self.run_script("recover", success=False)
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(marker.read_bytes(), pending)
+        self.env_file.write_text(original_env)
+        self.control.write_text('{"foreign": "network"}')
+        self.journal.write_text("")
+        refused = self.run_script("recover", success=False)
+        self.assertIn("refusing foreign network", refused.stderr)
+        self.assertEqual(marker.read_bytes(), pending)
+        self.assertFalse(any(args[:2] == ["rm", "-f"] for args in self.commands()))
+        self.control.write_text('{"remove_exit": 1}')
+        self.run_script("recover", success=False)
+        self.assertEqual(marker.read_bytes(), pending)
+        # A crash can leave neither owner.token nor complete frozen inputs.
+        (self.state / "owner.token").unlink()
+        self.control.write_text("{}")
+        self.run_script("recover")
+        self.assertEqual(self.state_tree(), before)
+
+    def test_resource_conflicts_refuse_before_initial_or_adopted_transaction_writes(self):
+        self.state.mkdir()
+        for adopted in (False, True):
+            if adopted:
+                self.run_script("up")
+            before = self.state_tree()
+            for kind in ("container", "volume", "network"):
+                with self.subTest(adopted=adopted, kind=kind):
+                    self.control.write_text(json.dumps({"foreign": kind}))
+                    self.journal.write_text("")
+                    result = self.run_script("up", success=False)
+                    self.assertIn(f"refusing foreign {kind}", result.stderr)
+                    self.assertEqual(self.state_tree(), before)
+                    self.assertFalse(self.compose_commands())
+                    self.assertFalse((self.state / "transaction.pending").exists())
+            self.control.write_text("{}")
+
     def test_requires_env_and_refuses_unowned_data(self):
         self.run_script("up", env_file=self.root / "missing.env", success=False)
         self.state.mkdir()
@@ -660,8 +768,8 @@ else:
                 refused = self.run_script("up", success=False)
                 self.assertIn(f"refusing foreign {kind}", refused.stderr)
                 self.assertFalse(self.compose_commands())
+                self.assertFalse((self.state / "transaction.pending").exists())
                 self.control.write_text("{}")
-                self.run_script("recover")
 
     def test_status_fails_for_stopped_or_unhealthy_services(self):
         self.run_script("up")
