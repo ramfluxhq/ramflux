@@ -6,10 +6,18 @@ use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 use std::sync::atomic::Ordering;
 async fn refresh(fixture: &Fixture, body: serde_json::Value) -> TestResult<Result<(), SdkError>> {
+    refresh_at(&fixture.root.0, &fixture.config, &fixture.manifest.principal_commitment, body).await
+}
+async fn refresh_at(
+    root: &std::path::Path,
+    gateway: &GatewaySessionConfig,
+    anchor: &str,
+    body: serde_json::Value,
+) -> TestResult<Result<(), SdkError>> {
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
-    let ca = fixture.root.0.join("public-ca.pem");
-    let cert = fixture.root.0.join("public-tls.pem");
-    let key = fixture.root.0.join("public-tls.key");
+    let ca = root.join("public-ca.pem");
+    let cert = root.join("public-tls.pem");
+    let key = root.join("public-tls.key");
     std::fs::write(&ca, certificate.cert.pem())?;
     std::fs::write(&cert, certificate.cert.pem())?;
     std::fs::write(&key, certificate.signing_key.serialize_pem())?;
@@ -22,7 +30,7 @@ async fn refresh(fixture: &Fixture, body: serde_json::Value) -> TestResult<Resul
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let anchor = fixture.manifest.principal_commitment.clone();
+    let anchor = anchor.to_owned();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut stream = tokio_rustls::TlsStream::Server(acceptor.accept(stream).await?);
@@ -38,7 +46,7 @@ async fn refresh(fixture: &Fixture, body: serde_json::Value) -> TestResult<Resul
         .await?;
         Ok::<_, SdkError>(())
     });
-    let mut config = fixture.config.clone();
+    let mut config = gateway.clone();
     config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
     config.gateway_addr = address;
     config.tcp_gateway_addr = Some(address);
@@ -104,5 +112,50 @@ async fn native_public_tls_refresh_refuses_bad_signature_and_missing_previously_
     assert!(refresh(&fixture, serde_json::Value::Null).await?.is_ok());
     crate::custody::tests::mark_live(&fixture.root.0, id, now)?;
     assert!(refresh(&fixture, serde_json::Value::Null).await?.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_pending_recovery_publishes_before_refreshing_the_old_directory_head() -> TestResult
+{
+    let fixture = Fixture::new("recovery-directory-config").await?;
+    let root = crate::custody::tests::Root::new()?;
+    let vault = Arc::new(crate::custody::tests::TestVault::default());
+    let now = crate::custody::network_now()?;
+    let (original, phrase) =
+        crate::custody::tests::create_with_phrase(&root.0, "recovery", vault.as_ref(), now)?;
+    let anchor = original.record().body.account_anchor.clone();
+    let old_directory = crate::prekey::SdkDeviceManifestResponse::from_native(
+        ramflux_protocol::custody::CustodyManifest {
+            publication: original.publication(),
+            custodian_publication: None,
+            devices: Vec::new(),
+        },
+    )?;
+    let mut config = fixture.config.clone();
+    config.custody = Some(GatewayCustodyConfig {
+        account_root: root.0.clone(),
+        account_id: "recovery".into(),
+        node_id: "fixture-node".into(),
+        node_public_key: ramflux_protocol::encode_base64url([7; 32]),
+        vault: vault.clone(),
+    });
+    let pending = crate::custody::RecoveryCeremony::begin(&root.0, "recovery", now)?;
+    let recovered = pending.confirm(&phrase, &anchor, vault.as_ref(), now)?;
+    assert!(recovered.recovery_publication_pending(&root.0)?);
+    let mut forged = old_directory.clone();
+    forged.custody.as_mut().ok_or("native")?.publication.record.body.profile.display_name =
+        "forged predecessor".into();
+    assert!(refresh_at(&root.0, &config, &anchor, serde_json::to_value(forged)?).await?.is_err());
+    // The directory necessarily still serves the predecessor before the recovery publish.
+    refresh_at(&root.0, &config, &anchor, serde_json::to_value(&old_directory)?).await??;
+    let loaded = crate::custody::load_account(&root.0, "recovery", now)?;
+    assert_eq!(loaded.record(), recovered.record());
+    assert!(loaded.recovery_publication_pending(&root.0)?);
+    assert_eq!(loaded.state(), crate::custody::CreationState::NetworkingPending);
+    crate::custody::tests::mark_live(&root.0, "recovery", now)?;
+    assert!(
+        refresh_at(&root.0, &config, &anchor, serde_json::to_value(old_directory)?).await?.is_err()
+    );
     Ok(())
 }

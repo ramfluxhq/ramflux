@@ -139,6 +139,12 @@ async fn native_fresh_restore_requires_phrase_recovery_and_exact_ack_before_live
                 crate::custody::network_now()?,
             )?;
             assert_eq!(recovered.local_device_id()?, device);
+            // Ordinary activation prepares the certified branch before publishing recovery.
+            let mut ordinary = RamfluxClient::new();
+            ordinary.open_account_index(&target_root.0)?;
+            ordinary.unlock_account(&local, LOCAL_SECRET.as_bytes())?;
+            ordinary.initialize_born_v3_branch(&device, vault.clone()).await?;
+            drop(ordinary);
             assert!(matches!(
                 CustodyConnection::connect(
                     network(&target_root.0, &local, &device, address, &ca),
