@@ -81,9 +81,15 @@ pub(crate) fn spawn_admin_connection(
     limit: usize,
     limits: ramflux_node_core::HttpRequestLimits,
 ) -> Option<std::thread::JoinHandle<()>> {
-    crate::http_connections::spawn_connection(stream, active, limit, move |stream, accepted_at| {
-        handle_admin_connection_with_limits(stream, &context, limits, accepted_at);
-    })
+    crate::http_connections::spawn_connection(
+        stream,
+        active,
+        limit,
+        std::time::Instant::now(),
+        move |stream, accepted_at| {
+            handle_admin_connection_with_limits(stream, &context, limits, accepted_at);
+        },
+    )
 }
 pub(crate) fn handle_admin_connection_with_limits(
     stream: &mut TcpStream,
