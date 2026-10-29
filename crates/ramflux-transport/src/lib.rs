@@ -48,7 +48,8 @@ pub use mesh_quic::{
     mesh_quic_post_postcard_with_peer_ca_pems_async,
 };
 pub use mesh_tls::{
-    MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, extract_spiffe_uri_from_certificate,
+    MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, authenticate_tcp_stream,
+    authenticate_tcp_stream_with_pem_roots, extract_spiffe_uri_from_certificate,
 };
 pub use perf_metrics::{MeshHttpPerfSnapshot, mesh_perf_reset, mesh_perf_snapshot};
 

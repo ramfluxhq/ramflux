@@ -133,6 +133,9 @@ async fn handle_gateway_quic_stream_with_connection(
         let crate::ingress::Ingress::Request(request) = first else {
             anyhow::bail!("gateway ingress dispatch mismatch");
         };
+        let Some(_request) = ramflux_node_core::begin_service_request() else {
+            return Ok(());
+        };
         let response =
             dispatch_quic_json_request(&context.router, request, context.remote_addr.ip()).await?;
         let write_started = Instant::now();
@@ -187,6 +190,9 @@ pub(crate) async fn handle_gateway_tcp_tls_stream(
         let crate::ingress::Ingress::Request(request) = first else {
             anyhow::bail!("gateway ingress dispatch mismatch");
         };
+        let Some(_request) = ramflux_node_core::begin_service_request() else {
+            return Ok(());
+        };
         let response =
             dispatch_quic_json_request(&context.router, request, context.remote_addr.ip()).await?;
         ramflux_transport::write_gateway_session_json(&mut *send, &response).await?;
@@ -221,6 +227,9 @@ async fn handle_gateway_session_transport_inner(
     first_frame: ramflux_node_core::GatewayClientFrame,
     grant: Option<super::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
+    let Some(auth_request) = ramflux_node_core::begin_service_request() else {
+        return Ok(());
+    };
     if matches!(first_frame, ramflux_node_core::GatewayClientFrame::IdentityRegister { .. }) {
         write_gateway_frame(
             &mut *send,
@@ -317,6 +326,7 @@ async fn handle_gateway_session_transport_inner(
     else {
         return Ok(());
     };
+    drop(auth_request);
     run_registered_gateway_session(send, recv, context, runtime, grant).await
 }
 
@@ -781,6 +791,9 @@ async fn run_gateway_session_loop_until_closed(
                 .await?;
                 continue;
             }
+        };
+        let Some(_request) = ramflux_node_core::begin_service_request() else {
+            return Ok(());
         };
         if let Some(grant) = native.as_ref()
             && let Err(error) = validate_native_frame(&context, &runtime, grant, &frame).await
