@@ -219,7 +219,7 @@ jobs:
       # push=false so a manual run still builds both platforms without touching GHCR.
       - name: Log in to GHCR
         if: ${{ startsWith(github.ref, 'refs/tags/') }}
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
