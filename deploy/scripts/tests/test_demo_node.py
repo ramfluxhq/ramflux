@@ -175,28 +175,77 @@ else:
                          b'{"signed-record":"version-one"}\n')
 
     def test_incomplete_custody_inputs_refuse_initial_and_legacy_upgrade_before_writes(self):
-        self.state.mkdir(mode=0o700)
         record = self.root / "node-record.json"
         record.write_text("{}")
         baseline = self.env_file.read_text()
+        complete = {
+            "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY": "test-public",
+            "RAMFLUX_CUSTODY_NODE_RECORD_FILE": str(record),
+            "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED": "test-proxy-seed",
+        }
         for existing in (False, True):
             if existing:
                 self.env_file.write_text(baseline)
                 self.run_script("up")
                 baseline += "DEMO_VERSION=demo-v2\n"
-            for inputs, missing in (
-                (f"RAMFLUX_CUSTODY_NODE_RECORD_FILE={record}\n", "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY"),
-                ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY=test-public\n", "RAMFLUX_CUSTODY_NODE_RECORD_FILE"),
-            ):
+            for missing in complete:
                 with self.subTest(existing=existing, missing=missing):
+                    inputs = "".join(f"{key}={value}\n" for key, value in complete.items()
+                                     if key != missing)
                     self.env_file.write_text(baseline + inputs)
-                    before = self.state_tree()
+                    before = self.state_tree() if existing else None
                     self.journal.write_text("")
                     refused = self.run_script("upgrade" if existing else "up", success=False)
                     self.assertEqual(refused.stderr, f"DEMO_CUSTODY_INPUT_MISSING: {missing}\n")
-                    self.assertEqual(self.state_tree(), before)
+                    if existing:
+                        self.assertEqual(self.state_tree(), before)
+                    else:
+                        self.assertFalse(self.state.exists())
+                    self.assertFalse(self.state.with_suffix(".lock").exists())
                     self.assertEqual(self.commands(), [])
                     self.assertFalse((self.state / "transaction.pending").exists())
+
+    def test_absent_custody_warns_once_on_up_and_keeps_public_probes_available(self):
+        for _ in range(2):
+            result = self.run_script("up")
+            warnings = [line for line in result.stderr.splitlines() if line.startswith("WARNING:")]
+            self.assertEqual(warnings,
+                             ["WARNING: custody is not configured; accounts remain networking_pending"])
+            self.assertIn("mock discovery and QUIC verification", result.stdout)
+        result = self.run_script("status")
+        self.assertEqual(result.stderr, "")
+
+    def test_same_version_record_renewal_restarts_only_the_router(self):
+        record = self.root / "node-record.json"
+        record.write_bytes(b"record-v1")
+        with self.env_file.open("a") as output:
+            output.write(f"RAMFLUX_CUSTODY_NODE_RECORD_FILE={record}\n"
+                         "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY=test-public\n"
+                         "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED=test-proxy-seed\n")
+        first = self.run_script("up")
+        self.assertNotIn("WARNING:", first.stderr)
+        loaded = self.root / "router-loaded-record"
+        self.assertEqual(loaded.read_bytes(), b"record-v1")
+        owner = json.loads((self.state / "owner.json").read_text())
+        record.write_bytes(b"record-v2")
+        self.journal.write_text("")
+        changed = self.run_script("up")
+        self.assertIn("custody record changed; restarting ramflux-router", changed.stdout)
+        self.assertEqual(loaded.read_bytes(), b"record-v2")
+        restarts = [args[args.index("restart"):] for args in self.compose_commands()
+                    if "restart" in args]
+        self.assertEqual(restarts, [["restart", "ramflux-router"]])
+        renewed = json.loads((self.state / "owner.json").read_text())
+        self.assertEqual(renewed["settings"], owner["settings"])
+        self.assertEqual(renewed["token"], owner["token"])
+        self.journal.write_text("")
+        self.run_script("up")
+        self.assertFalse(any("restart" in args for args in self.compose_commands()))
+        record.write_bytes(b"record-v3")
+        self.control.write_text('{"restart_exit": 1}')
+        self.run_script("up", success=False)
+        self.assertTrue((self.state / "transaction.pending").exists())
+        self.assertEqual(loaded.read_bytes(), b"record-v2")
 
     def test_default_up_builds_locally_and_uses_compose_build(self):
         self.run_script("up")

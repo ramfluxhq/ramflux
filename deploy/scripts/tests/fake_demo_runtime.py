@@ -79,6 +79,12 @@ if normalized and normalized[0] == "compose":
             sys.exit("controlled version-specific compose failure")
         if control.get("up_exit"):
             sys.exit(control["up_exit"])
+        loaded_version = root / "router-loaded-version"
+        version = values.get("RAMFLUX_VERSION", "")
+        if not deployed.exists() or not loaded_version.exists() or loaded_version.read_text() != version:
+            record = state / "secrets/custody/node-record.json"
+            (root / "router-loaded-record").write_bytes(record.read_bytes() if record.exists() else b"")
+            loaded_version.write_text(version)
         deployed.touch()
         token = (state / "owner.token").read_text().strip()
         for service in services:
@@ -90,6 +96,12 @@ if normalized and normalized[0] == "compose":
             }
         resources["id-demo-network"] = {"kind": "network", "project": "demo-test", "owner": token}
         save_resources()
+    elif "restart" in normalized:
+        if normalized[normalized.index("restart"):] != ["restart", "ramflux-router"]:
+            sys.exit("unexpected restart scope")
+        if control.get("restart_exit"):
+            sys.exit(control["restart_exit"])
+        (root / "router-loaded-record").write_bytes((state / "secrets/custody/node-record.json").read_bytes())
     elif "down" in normalized:
         deployed.unlink(missing_ok=True)
         resources = {key: value for key, value in resources.items()

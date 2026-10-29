@@ -353,17 +353,22 @@ and prints the canonical rollback command. A plain `up` still refuses a version 
 An upgrade also refuses a missing or newly selected voice/admin overlay, reporting only
 the relevant configuration key.
 
-Custody remains disabled when its identity inputs are absent, as on first install.
-To configure it, provide both `RAMFLUX_CUSTODY_NODE_PUBLIC_KEY` (the independently
-trusted receiving-node public key) and `RAMFLUX_CUSTODY_NODE_RECORD_FILE` (an
-absolute host path to its signed record). A partial configuration refuses before
-any transaction or engine action with `DEMO_CUSTODY_INPUT_MISSING: <key>`; an
+Without custody inputs the node still runs and serves public probes, but accounts
+remain `networking_pending` and cannot use contacts, messaging, groups, or calls.
+Each `up` prints one `WARNING: custody is not configured; accounts remain networking_pending`
+line when custody is absent. To enable custody, provide all three inputs:
+`RAMFLUX_CUSTODY_NODE_PUBLIC_KEY` (the independently trusted receiving-node public
+key), `RAMFLUX_CUSTODY_NODE_RECORD_FILE` (an absolute host path to its signed
+record), and `RAMFLUX_CUSTODY_PROXY_SIGNING_SEED` (the matching node-authorized
+gateway proxy seed). Once any is set, a partial configuration refuses before
+creating the data directory or performing any transaction or engine action with
+`DEMO_CUSTODY_INPUT_MISSING: <key>`; an
 unreadable, empty, oversized, or symlinked record reports
 `DEMO_CUSTODY_INPUT_INVALID: RAMFLUX_CUSTODY_NODE_RECORD_FILE`. The same checks
 apply to first install and an upgrade from a version without custody inputs.
 No receiving-node key, record, or proxy signing seed is generated or inferred.
-`RAMFLUX_CUSTODY_PROXY_SIGNING_SEED` is forwarded only to the gateway when
-configured; receipt mode requires the dedicated node-authorized seed described in
+`RAMFLUX_CUSTODY_PROXY_SIGNING_SEED` is forwarded only to the gateway;
+receipt mode requires the dedicated node-authorized seed described in
 [custody configuration](../docs/custody_networking.md#receiving-node-configuration).
 
 The wrapper keeps a private managed copy of the signed record, mounts it read-only
@@ -378,6 +383,22 @@ the exact snapshot inputs and record bytes, without consulting the operator's
 current custody settings or the original record path. Service startup still
 performs signed-record and pool validation; wrapper validation is not a signature
 or authorization check.
+
+A same-version `up` accepts a renewed signed record under the retained node pin
+and proxy seed. When its bytes change, the wrapper prints
+`custody record changed; restarting ramflux-router` and restarts only that service
+before health and public probes. Unchanged record bytes do not trigger this restart.
+If the restart or probes fail, the pending marker remains for explicit recovery.
+Proxy-seed rotation still requires a separately supported transaction; ordinary
+`up` and `upgrade` keep refusing a changed seed.
+
+Rollback restores record and configuration files, but does not restore the
+router custody state in `router-redb`. A previously applied record epoch or pin
+cannot be undone by restoring older files. A rollback across record versions may
+therefore fail router validation; it retains the pending marker, and `recover`
+restores the last-good snapshot and reruns health and public probes before
+clearing it. Recovery preserves the router's monotonic custody checks and never
+resets its volume or bypasses record validation.
 
 When transferring prebuilt images, use one image per archive, especially with Podman.
 On the source host, set the selected engine and exact version, then save each image:

@@ -99,6 +99,12 @@ if [ "$flag" = --remote ]; then
   exec "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
 fi
 # Canonicalize before checking ownership or allowing recursive deletion.
+case "$command" in
+  up|upgrade)
+    # Partial custody inputs must not even create an initial data directory.
+    python3 "$script_dir/demo-node-config.py" "$repo" "$DEMO_DATA_DIR" custody-status >/dev/null
+    ;;
+esac
 case "$command" in up) mkdir -p "$DEMO_DATA_DIR" ;; esac
 [ -d "$DEMO_DATA_DIR" ] || fail 'demo data directory does not exist'
 state=$(CDPATH='' cd -- "$DEMO_DATA_DIR" && pwd -P)
@@ -126,6 +132,15 @@ if [ "$command" = recover ]; then
 else
   owner=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" validate "$command")
 fi
+custody_state=
+case "$command" in
+  up|upgrade)
+    custody_state=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" custody-status)
+    if [ "$command" = up ] && [ "$custody_state" = absent ]; then
+      printf 'WARNING: custody is not configured; accounts remain networking_pending\n' >&2
+    fi
+    ;;
+esac
 # Even a matching project name is insufficient: every existing resource must carry our owner token.
 clean_env() {
   # Rootless Podman needs the user's runtime directory; ignore inherited compose/remote overrides.
@@ -496,6 +511,10 @@ PY
     else
       sh "$script_dir/build-prod-images.sh"
       compose_up build
+    fi
+    if [ "$command" = up ] && [ "$custody_state" = record-changed ]; then
+      printf 'custody record changed; restarting ramflux-router\n'
+      compose restart ramflux-router
     fi
     wait_for_services
     verify_public_endpoints
