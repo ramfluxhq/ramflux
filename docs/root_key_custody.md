@@ -1,10 +1,14 @@
 # Root key custody
 
-Design revision 5, phase 1. This proposal changes no executable behavior. The
-inspected product baseline is `eae12fbb197f8bbea21b682686c8548fc1a27958`.
-Current accounts still keep the root seed on each device. Activation requires
-coordinated protocol, verifier, vault, backup and client changes; the guarantees
-below describe that future system, not an implemented or audited feature.
+Native v3 accounts use a generated recovery phrase, an offline master, a primary
+self-signing credential and independent device branch credentials. Creation is
+available by default through the ordinary local-bus ceremony. There are no
+production guarantees from an independent custody audit. Sections describing
+pairing, secondary delegation or cooperative handover are future design work;
+explicit phrase recovery is the implemented replacement-device ceremony.
+
+Legacy identity migration is not supported. Development data from older identity
+schemes requires a reset; no legacy root is converted into native authority.
 
 ## Ordinary DM security boundary
 
@@ -83,39 +87,22 @@ migration to a new identity while it is still available. There is no support res
 
 ## Verified current implementation
 
-These source facts were checked on the baseline above:
-
-- [Account manifests](../crates/ramflux-sdk/src/bus/protocol.rs) persist
-  `root_seed`, `device_seed` and `account_secret`.
-  [Daemon startup](../crates/ramflux-sdk/src/bus/daemon.rs) reconstructs the root
-  signer from the manifest, so deleting a field alone would break startup.
-- [Owned authority](../crates/ramflux-sdk/src/client/identity_authority/owned.rs)
-  signs root-bound branch proofs and complete device sets.
-  [Registration refresh](../crates/ramflux-sdk/src/client/identity_authority/registration.rs)
-  normally renews proofs with a one-hour lifetime. Secondaries currently need the
-  root for this refresh even when device membership does not change.
-- [Device-set types](../crates/ramflux-protocol/src/identity_keys.rs) preserve
-  immutable principal kind and revocation tombstones. Device-set v2 incorporates
-  the root-signed [public profile](identity_profiles.md); profile omission and
-  downgrade floors already matter. This proposal extends that family to v3.
-- [Legacy key backup](../crates/ramflux-sdk/src/bus/dispatch/account.rs) encrypts
-  the whole account manifest. The streamed full archive's
-  [identity metadata](../crates/ramflux-sdk/src/bus/backup_jobs/format.rs) also
-  contains that manifest and a database key. Both currently include the root seed.
-- [The recovery KDF](../crates/ramflux-crypto/src/kdf.rs) currently uses Argon2id
-  v19 with 262144 KiB, three passes and one lane. That existing password-based
-  behavior is not the proposed generated-phrase derivation below.
-- Current root access also serves group actor/certificate and profile signing.
-  This includes first-contact request/accept/decline signing under
-  `ramflux.contact_request.v1` in
-  [contact request wire](../crates/ramflux-sdk/src/client/contact_requests/wire.rs).
-  Every such accessor needs an explicit authority capability; a missing secret
-  must never trigger legacy seed copying or implicit account creation.
-
-The separately developed
-[creator snapshot protocol](https://github.com/ramfluxhq/ramflux/blob/0e769262faa869e00f46dfa9d95dd8e76f3d007d/docs/group_state.md)
-uses creator authority plus authenticated branch transport. It needs a delegation
-verification version before a creator secondary can discard its legacy root.
+- [Native creation](../crates/ramflux-sdk/src/custody/ceremony.rs) derives the
+  master only during the explicit ceremony and persists public authority separately
+  from primary/branch vault credentials and the independent wrapped data key.
+- [Ordinary account unlock](../crates/ramflux-sdk/src/bus/native_account.rs) uses
+  the data passphrase. Missing authority credentials do not generate a legacy root.
+- [Publication and registration](../crates/ramflux-sdk/src/custody/network.rs)
+  verify the exact publication ACK and registered branch before networking is live.
+- [Local recovery](local_bus_account_recovery.md) replaces the primary in a higher
+  master-certified range and retains denial fences. Its public crash journal is
+  not a credential or an archive authority source.
+- [Native data backup](account_backup.md) removes runtime and authority secrets;
+  restoration preserves independently installed authority and replay floors.
+- [Native cards](contact_cards.md) carry a master-certified self-signing chain.
+  Contacts, groups, calls and ordinary DMs use the ordinary SDK stack.
+- The independent data-password KDF remains Argon2id v19 with 262144 KiB,
+  three passes and one lane; it is separate from phrase/master derivation.
 
 ## Threat model
 
@@ -127,7 +114,7 @@ verification version before a creator secondary can discard its legacy root.
 | Malware during a recovery ceremony | It may capture the temporarily derived master or phrase. The ceremony's OS and trusted UI are part of the trust boundary; routine primary isolation does not stop this attacker. |
 | Malicious directory, gateway or relay | It cannot forge authority, approve pairing or decrypt a phrase that is never uploaded. It can withhold records, erasure acknowledgements or renewals and deny service. Signatures alone cannot prove a globally latest head. |
 | Rollback, stale backup or old client | Custody-mode latches, one signed-record epoch floor, exact key bindings and revocation tombstones apply before authorization. Restore cannot lower these floors or restore a primary role. |
-| Copied legacy root | Erasure cannot remove an attacker's copy. Migration cannot retroactively establish that a historical root was never compromised; an untrusted former holder requires a new identity. |
+| Compromised master | Revoking a primary cannot remove an attacker's master copy; create a new identity and reverify contacts. |
 
 Every own device records a blocking security alert for a primary-holder or
 self-signing-key change, including a revoked old primary on its next public
@@ -233,15 +220,15 @@ order. It is a stage-1 review artifact, not an implemented protocol.
 New accounts use `identity_root_commitment(master_public_key)` as their immutable
 anchor, start in v3 at genesis and never accept v1/v2 sets or legacy branch proofs.
 The master signs master certificates only, never legacy sets/profiles/proofs.
-Migrated accounts keep `identity_root_commitment(legacy_root_public_key)` and embed
-the proposed legacy binding in **every** v3 record. Account fingerprints and
+Native records require `origin = "new"`, `legacy_binding = null` and
+`migration = null`; migrated-origin records are unsupported. Account fingerprints and
 custody contact safety numbers derive from the anchors as specified in the wire
 spec; management-key replacement never changes them. Current v1 safety material
 also includes device/lineage state, so v3 uses an explicitly versioned stable
 anchor comparison and keeps device-change verification state separate. Master
 compromise requires a new identity/anchor, not a binding to a new master.
 
-**Epoch ranges (controller-approved policy; wire review pending):**
+**Native authority epoch ranges:**
 `epoch = range_index * 2^32 + revision`, with `range_index` in
 `[1, 2^21 - 1]` and `revision` in `[1, 2^32 - 1]`; all values remain safe JSON
 integers. Each master certificate authorizes exactly one range and one
@@ -251,8 +238,8 @@ range and raises the takeover alert until a higher range is certified. Accept
 **any** higher range, not only the next integer. Recovery chooses the maximum
 observed range plus one, querying all available trusted checkpoints, and retries
 higher on conflict. A primary cannot spend revisions outside its certified range.
-Migration starts at v3 range 1, independently of legacy epochs: v3 ranks above
-all legacy records regardless of their numeric epoch. Exhaustion is a typed
+Genesis starts at v3 range 1. Native mode rejects legacy records regardless of
+their numeric epoch. Exhaustion is a typed
 refusal, never wraparound. No globally latest range can be proved against
 withholding directories; preserve that limitation in the recovery UI.
 
@@ -267,9 +254,9 @@ record floor: router, gateway/directory, peer SDK, federation and any service
 checking device authority. Once latched, reject v1/v2 sets and legacy one-hour
 root proofs for that account, even at a larger numeric epoch. A backup import,
 cache eviction, server restart or missing optional field cannot clear it. A known
-master binding cannot be replaced by another legacy-root endorsement. Unknown
-critical formats fail closed. Old peers that only understand v1/v2 cannot contact
-a migrated account; rollout/release notes must say so.
+master cannot be replaced by a legacy-root endorsement. Unknown critical formats
+fail closed. Peers supporting only v1/v2 cannot authenticate native accounts;
+release notes must state that incompatibility.
 
 The public record includes hashes of its profile, device, delegation, migration,
 revocation-id and revoked-checkpoint sections. Conditional fetch by a known head
@@ -380,12 +367,11 @@ if its referenced historical record authenticates, its self-signing key is uncha
 its sending branch/key epoch is still active with current authority, and its seven-day
 TTL, time and replay checks pass. A higher range/key replacement or revocation
 requires a new approval. Directories serve superseded records by hash for the TTL
-plus skew; the initial migration record and last legacy head are retained forever.
+plus skew.
 A secondary can transport a primary-approved exact intent but cannot mint
 it. All request/accept/decline kinds follow this rule. Never reinterpret v1's
 `actor_root` as a self-signing key or let a secondary fetch the legacy root.
-Legacy accounts keep v1 until migration; custody accounts require peers with v2
-consent capability. Otherwise show "this contact needs to update" and keep the
+Native accounts require peers with v2 consent capability. Otherwise show "this contact needs to update" and keep the
 intent pending, without a downgraded v1 signature.
 
 Expired devices can read local history but cannot send, register, resume or mint
@@ -394,8 +380,8 @@ the secondary and managing primary seven days before branch-lease expiry. The
 primary can batch renewals; expiry never activates a legacy proof fallback. A
 travelling user may explicitly promote a secondary with the phrase, thereby
 replacing/revoking the old primary. Preserve agreement identities and data keys
-through migration; do not regenerate existing prekeys from a different authority
-seed. Root-qualified identity types and the existing CI identity check still apply.
+during data restore; authority recovery deliberately allocates a fresh branch
+and reboots its outbound sessions. Root-qualified identity types and the existing CI identity check still apply.
 
 ## Pairing and approval
 
@@ -490,77 +476,13 @@ Recovery derivation needs no memory-hard KDF; nevertheless benchmark the complet
 flow, including vault, registration and account-data initialization, on the
 minimum supported machine. No "low-memory" shortcut may weaken legacy data KDFs.
 
-## Legacy migration and erasure
-
-Migration is opt-in for existing accounts and mandatory-default for new accounts
-after the coordinated rollout. Upgrade every verifier and both backup paths first.
-
-**Open compatibility decision:** an existing random root seed cannot simply be
-turned into the specified HKDF-derived master while retaining its old public key.
-The proposed same-identity migration uses one legacy-root-signed public binding
-from the existing account anchor to the new phrase-derived master, included in
-normal v3 authority metadata. After accepting it, verifiers pin that master;
-the legacy root can never authorize a second binding or replace the new master.
-This adds no recovery secret/capsule on a node, but phrase-only legacy restoration
-needs availability of the normal public binding. Confirm this policy before
-implementation. If even that public-metadata dependency is unacceptable, legacy
-migration requires a new identity with retained local history. Do not disguise
-this choice by skipping HKDF or retaining the old secret in a backup.
-
-For this proposed path, **only after owner approval**:
-
-1. Confirm the saved phrase and primary vault, freeze legacy writers, independently
-   verify the existing device keys and profile, and stage the exact v3 transition.
-2. Publish it and receive its exact durable ACK before sending irreversible erase
-   commands. The v3 mode floor rejects further legacy proofs at every verifier.
-3. The primary erases its superseded legacy seed after publication and uses only
-   its self-signing key. Provision public branch certificates and creator
-   delegations before a secondary erases. Keep its branch/data keys; remove root/self-signing material
-   from manifests, DB/WAL, staging and signer caches. Restart without a legacy
-   signer and send a branch-signed ACK bound to migration id, signed record hash
-   and device epoch through a narrow, quota-protected migration endpoint.
-4. Batch ACKs into the next signed v3 set. Until published, show those devices as
-   pending rather than falsely complete. A crash resumes erasure/reconciliation,
-   never the old root-enabled runtime.
-5. Pending/unreachable devices have a signed 30-day deadline and cannot use normal
-   custody sessions without erasure ACK. At the deadline their migration authority
-   expires; revocation is the default, published by the primary on reconciliation.
-   Later return requires explicit fresh enrollment, not silent reactivation.
-
-Before a trusted re-attestation has resolved the binding, two different
-authenticated legacy bindings for one anchor mark the account `identity_compromised`, alert every observing own device/contact safety view and
-refuse both bindings. Never choose by arrival order or lowest hash. Resume only
-after a higher-range master re-attestation to the chosen binding under the
-already trusted master; a fresh verifier with no trusted master must independently
-reverify it out of band. A signature by an arbitrary competing master cannot
-resolve which identity was intended. After a trusted-master re-attestation resolves
-the conflict, permanently pin that master and the chosen binding hash. Later
-competing legacy bindings are ignored for authority and logged as security events;
-they cannot suspend that verifier again or force repeated phrase ceremonies.
-New observers without this resolved pin remain first-observer limited. See the
-wire verification algorithm. Test loss of the primary before and after publication,
-rejected/uncertain
-publish results and partially received ACK batches. The phrase can recover the
-new management authority only once the corresponding public transition exists.
-Erasure ACKs are honest-client statements, not remote attestation. Inventory old
-backups/snapshots and warn that a copied legacy root cannot be made secret again.
-Use a new identity if any former root holder cannot be trusted.
-
 ## Full backup and restore
 
 Native streamed backups use a custody-aware snapshot sanitizer and public identity
-metadata. The legacy key and streamed formats remain root-bearing until retired;
-neither can be imported into a native installation. Full native backups must never
+metadata. Legacy root-bearing archives cannot be imported into native authority. Full native backups must never
 contain master entropy, master/self-signing seeds, a recovery capsule, primary
 vault contents or an ordinary-backup-decryptable wrapper for authority. This
 applies on primaries and secondaries alike, even if the outer archive is encrypted.
-
-Add an authenticated `contains_legacy_root_seed` header flag and show it before
-restoration. Older archives lacking the flag are potentially root-bearing; an
-unauthenticated header is not proof of safety. Decrypt/classify inside a trusted
-migration/sanitization flow before importing. Never import root material into a
-secondary or headless process. Retained legacy root-bearing archives need an
-explicit warning even after live-device erasure.
 
 Preserve history, complete attachments and existing unavailable-attachment policy.
 Sanitize logical manifests, DB/WAL rows, configuration, staging, diagnostics and
@@ -713,40 +635,19 @@ TUI provides the same ceremonies and seven standard emoji names, safe delimited
 text and interactive hidden secret entry. Never accept
 phrases in shell arguments, environment or unattended confirmation flags. Routine
 unlock and automatic reminders never ask for the phrase. State loss/recovery and
-incomplete migration plainly rather than silently creating another account.
+incomplete publication plainly rather than silently creating another account.
 
 ## Staged implementation and acceptance
 
-1. Freeze v3 authority/profile, master certification, epoch-range policy, branch
-   certificates/session proofs, section fetch/checkpoint, node receipt/time and
-   group delegation formats. Decide legacy public binding semantics, review SAS/HPKE implementations and vault classes, and
-   publish cross-client vectors. Stage 1 exits only after independent approval
-   of both this design and `root_key_custody_wire.md`, owner disposition of the
-   legacy-binding proposal, reviewed epoch-range encoding, the pinned SAS provider/audit delta, vault providers
-   and full-flow minimum-machine benchmark plan. Reviewed golden wire vectors
-   must be published before stage 2b begins. No account activates custody yet.
-2. **2a: public identity and typed signer separation.** Preserve current wire and
-   legacy storage while removing implicit root access from ordinary SDK startup,
-   owned identity lookup and non-root operations. Test the abstraction separately;
-   this stage alone does not authorize erasure. Produce a complete reviewed
-   appendix inventorying every private-root use: registration, gateway auth,
-   contact request/accept/decline, group actor certificates/genesis/snapshots,
-   profile, device namespace, backups, manifest import/export and all additional
-   accessors found by the source audit, with each replacement signer/path.
-3. **2b: registration v3 and verifiers.** Implement certificate plus branch proof
-   across router, gateway, directory, SDK and federation. Enforce current authority,
-   all mode/epoch floors, immutable profiles, leases, replay and exact ACKs before
-   enabling writers. Entry requires approved wire spec and published vectors
-   from stage 1 plus the reviewed 2a root-use inventory. Prove keyless registration
-   beyond one hour and resume. Legacy accounts remain unchanged until migration.
-4. Add vaults, SAS approval, replacement/recovery journals, mandatory phrase setup
-   and both backup sanitizers/header classification. Fail closed on unavailable
-   providers. No migration before the whole secret path is covered.
-5. Add delegated group genesis/snapshots/results and seven-day renewal/revocation.
-   Provision actor/delegation certificates before erasing creator secondaries.
-6. Ship desktop/TUI and external service custody, then opt-in legacy migration and
-   new-account custody default. Explain old-client incompatibility and old-backup
-   risk. Controller-run realnet gates precede enabling the default.
+Creation, ordinary SDK operations, data-only backup, phrase recovery/promotion and
+v3 contact cards are native implementation surfaces. Focused native tests are not
+cross-service acceptance. Controller-run realnet slices must verify the CLI/local
+bus contacts, DM, group, call and backup flow against the deployed product revision.
+
+SAS pairing/primary approval, cooperative handover and external custody providers
+remain separate integration work. Their design sections do not imply availability.
+A second installation currently uses explicit phrase recovery; this promotes it
+and revokes the former branches rather than leaving both approved.
 
 Required native/property/security tests:
 
@@ -754,10 +655,9 @@ Required native/property/security tests:
   seed derivation, invalid phrase/length/domain, cancellation and zeroization.
 - No master/self-signing secret in secondary files, manifests, DB/WAL, exports,
   logs, API output or headless provisioning. Vault failure has no plaintext path.
-- New anchors refuse legacy records from genesis; migrated anchors always carry
-  binding; conflicting bindings mark compromise and require trusted re-attestation.
+- Native anchors refuse legacy records and proofs from genesis.
 - Master recovery defeats poisoned primary revisions, accepts skipped ranges and
-  migrates despite a maximal legacy epoch. Wrong ranges, forged certificates,
+  preserves all observed denial fences. Wrong ranges, forged certificates,
   same-range certificate equivocation, same-epoch record conflicts, profile
   downgrade/omission/kind swaps and restart/restore floor rollback fail closed.
 - Keyless proof renewal after one hour, fresh retry ids, resume, per-request
@@ -778,10 +678,10 @@ Required native/property/security tests:
 - Minimum-memory complete recovery on supported hardware, TUI/desktop parity,
   three-word setup, normalization/checksum/prefix rejection, reminders at day
   1/7/30/90, dry runs, expiry warnings and new-identity history migration.
-- Concurrent migration, primary loss mid-migration, ACK batching, malformed ACKs,
-  node-withheld ACK/renewal, pending deadline/revocation and old clients facing v3.
-- Streamed/full/key backup root-header classification, missing flags, sanitized
-  legacy import, primary/secondary restore, attachment completeness, deletions,
+- Concurrent recovery, primary loss during replacement, malformed ACKs,
+  node-withheld ACK/renewal and old clients facing v3.
+- Native full-data archives reject legacy authority material; primary/secondary
+  restore retains attachment completeness, deletions,
   inactive outbound state and no ordinary-backup primary promotion.
 - Creator secondary creates and mutates while primary is offline; a compromised
   delegate adds a foreign root and triggers the primary alert, then revocation,
@@ -791,7 +691,6 @@ Required native/property/security tests:
   no unchanged-body download on renewal; public records contain no group metadata.
 - Aged tombstone compaction preserves full-list membership/absence and supersets;
   missing evidence, restart and restore cannot reactivate a compacted device id.
-- Resolved binding/master pins cannot be suspended by later legacy-root bindings.
 - Node receipt-key rotation/overlap, historical keys, compromise revocation and
   TLS proxy proof/receipt substitution fail closed.
 - N-agent re-certification after planned/lost primary, per-agent pause/resume,
@@ -799,76 +698,30 @@ Required native/property/security tests:
 - Service custodian references must be verified human identities; bot/workflow/
   headless devices cannot become primary through API, restore or kind spoofing.
 
-Reserve realnet slices `custody01_pairing_and_primary_offline`,
-`custody02_primary_loss_same_identity`, `custody03_legacy_erasure_and_downgrade`,
-`custody04_creator_delegation` and `custody05_backup_and_service_custody`.
-Run them with existing identity/proof-renewal, sibling restore, group convergence,
-agent, call and full-backup slices. These are implementation acceptance plans;
-phase 1 supplies only this design and its review report.
 
-Revision 5 keeps the legacy public binding **pending owner confirmation**. Channel
-binding, bounded revocation deltas, pre-recovery time pins and inherited private
-group floors above are design requirements; their future vectors do not imply
-implemented or audited custody support.
+These include planned pairing/delegation/provider tests. Listing a requirement
+does not claim it has passed or that its feature is implemented.
 
 ## Local born-v3 implementation boundary
 
-Experimental born-v3 creation is available only with the explicit default-off
-`LocalBusConfig.enable_born_v3_creation` option, exposed by
-`rf daemon start --enable-born-v3-creation`. Existing `account.create` requests,
-legacy manifests and legacy registration/session behavior keep their v1/v2 flow.
-This stage creates local authority only: its typed result is `NetworkingPending`.
-It does not attempt registration, publish to a node or open a session. Born-v3
-accounts receive a typed `NetworkingPending` error on the legacy gateway path;
-there is no root-proof fallback. V3 live registration is a separate implementation
-boundary, including channel-bound branch proofs and authenticated node/proxy keys.
+The daemon reports `born_v3_creation: true` without an opt-in flag. Trusted clients
+use the ordinary [creation contract](local_bus_account_creation.md), with one
+exclusive same-user connection, a once-only erasing phrase display, hidden random
+word confirmation and an independent local data passphrase. The CLI drives this
+ceremony interactively. The public response distinguishes an unlocked data actor
+from live networking. Publication/registration failures leave networking pending;
+there is no legacy authentication fallback.
 
-Trusted local frontends use the SDK's exclusive `CustodyBusClient` connection:
+The native primary provider supports macOS's protected OS credential keychain
+with synchronization disabled and When-Unlocked/This-Device-Only access control.
+It requires the appropriate user context and provisioning entitlements. It is
+software credential custody, not nonexportable hardware Ed25519 isolation. Other
+platforms fail closed until an appropriate provider is implemented. There is no
+plaintext file fallback. Integration-only memory custody is explicitly selected
+and loses credentials when its process exits; production builds exclude it.
 
-1. `account.custody.begin` validates public setup intent and returns the anchor.
-2. `account.custody.show_once` returns one zeroizing display buffer. This uses the
-   dedicated `ramflux.local_bus.custody.v1` reply protocol, never an ordinary bus
-   response, event, actor command or idempotency/retry journal. The ordinary
-   `LocalBusClient` refuses these reserved methods.
-3. After hiding and erasing that display buffer, call
-   `account.custody.hidden_challenge`. Only then are three distinct word positions
-   chosen uniformly from 1–24.
-4. `account.custody.confirm` accepts one three-word attempt in challenge order.
-   A wrong answer cancels the entire ceremony without per-word feedback.
-   `account.custody.cancel`, disconnect, expiry or any setup error also destroys
-   pending phrase state. Ceremonies expire after five minutes of monotonic time.
-
-The trusted frontend must keep the display out of logs, shell history, ordinary
-bus diagnostics, analytics and crash reporting. It owns and erases the returned
-`Zeroizing<String>` and the confirmation-word buffers. There is no CLI phrase
-printing flow or user interface in this stage. Secret transport buffers and
-queued inbound setup values erase on drop, including cancellation. No phrase,
-entropy or master is stored in an account manifest, database, keychain or backup.
-
-The native primary provider currently supports macOS's protected OS credential
-keychain with synchronization explicitly disabled for reads and writes, and
-When-Unlocked/This-Device-Only access control on inserted credentials. It is
-software credential custody, not nonexportable hardware Ed25519 isolation.
-The host must run in a user context and carry provisioning-authorized keychain
-access entitlements; a plain unprovisioned CLI build is not sufficient. See
-[Apple's keychain implementation requirements](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains).
-The bus checks provider availability before generating or showing a phrase;
-a missing entitlement or unavailable vault returns `CustodyVaultUnavailable`.
-No signing or provisioning configuration is changed by enabling the creation option.
-Other platforms refuse primary creation until an appropriate provider is implemented;
-there is no plaintext file fallback. Primary self-signing authority and branch
-credentials occupy separate vault references, independent of data unlock secrets.
-Provider and local persistence failures never silently select a weaker vault.
-
-Public authority and the signed publication record are retained in
-`custody_accounts/<local_account_id>/authority.json`, together with the immutable
-born-v3 mode latch and authenticated head/certificate/revocation pins. Public
-reads do not unlock the primary signer. The account index arbitrates concurrent
-legacy/new creation. Failed writes or vault operations can leave an incomplete
-reservation; keep it blocked for reconciliation rather than retrying the id as a
-legacy account. An existing reservation continues to reject legacy sessions even
-when its public authority file is incomplete. Primary credentials and this
-reserved setup state are not exported through legacy account/data backup APIs.
-The local signed record is ready for a later publication implementation; its
-presence is not evidence of remote acceptance, account networking or live custody
-rollout. The proposed legacy public binding remains pending owner confirmation.
+Public signed authority, the native mode latch and authenticated head/revocation
+pins live under `custody_accounts/<local_account_id>/`. Reading them does not
+unlock the primary signer. Creation failure removes newly written credential
+entries; unresolved reservations remain blocked for reconciliation. No phrase,
+master or primary vault credential enters ordinary data archives.

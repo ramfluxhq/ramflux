@@ -149,9 +149,6 @@ fn apply(
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
 ) -> Result<ResultBody, SdkError> {
-    if !config.enable_born_v3_creation {
-        return Err(SdkError::CustodyCreationDisabled);
-    }
     super::requests::deadline(request)?;
     if request.kind != crate::LocalBusFrameKind::Request || request.operation_id.is_some() {
         return Err(SdkError::CustodySetupInvalid);
@@ -174,7 +171,6 @@ fn apply(
                 ramflux_protocol::normalize_profile_display_name(&input.display_name)?;
             primary_vault(config).preflight()?;
             let pending = CreationCeremony::begin_account(
-                true,
                 &config.data_root,
                 display_name,
                 input.principal_kind,
@@ -198,7 +194,7 @@ fn apply(
                 return Err(SdkError::CustodySetupInvalid);
             }
             primary_vault(config).preflight()?;
-            let pending = CreationCeremony::begin(true, &config.data_root, input, now()?)?;
+            let pending = CreationCeremony::begin(&config.data_root, input, now()?)?;
             let anchor = pending.account_anchor().into();
             let ceremony_id = pending.ceremony_id().into();
             let expires_in_ms = pending.expires_in_ms();
@@ -326,7 +322,7 @@ mod tests {
     fn ordinary_setup_reply_uses_normal_envelope_and_zeroizing_phrase() -> Result {
         let root = crate::custody::tests::Root::new()?;
         let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
-        config.enable_born_v3_creation = true;
+
         config.custody_vault =
             Some(std::sync::Arc::new(crate::custody::tests::TestVault::default()));
         let mut pending = None;
@@ -381,12 +377,8 @@ mod tests {
     fn oversized_request_id_cancels_pending_setup_before_secret_output() -> Result {
         let root = crate::custody::tests::Root::new()?;
         let config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
-        let mut pending = Some(CreationCeremony::begin(
-            true,
-            &root.0,
-            crate::custody::tests::input("pending"),
-            100,
-        )?);
+        let mut pending =
+            Some(CreationCeremony::begin(&root.0, crate::custody::tests::input("pending"), 100)?);
         let mut request = LocalBusFrame::request(
             "x".repeat(129),
             None,

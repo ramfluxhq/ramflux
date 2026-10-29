@@ -17,7 +17,6 @@ pub(crate) struct AccountCommand {
 pub(crate) enum AccountAction {
     Backup(AccountBackupCommand),
     Create(Box<AccountCreate>),
-    Login(Box<AccountCreate>),
     Recover(AccountSelector),
     List,
     Lock(AccountLock),
@@ -54,35 +53,7 @@ pub(crate) struct AccountUnlock {
 #[derive(Args)]
 pub(crate) struct AccountCreate {
     #[arg(long)]
-    pub(crate) node: Option<String>,
-    #[arg(long)]
-    pub(crate) account: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) principal: String,
-    #[arg(long, hide = true)]
-    pub(crate) expected_commitment: Option<String>,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) device: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) target: String,
-    #[arg(long)]
-    pub(crate) secret: String,
-    #[arg(long)]
-    pub(crate) use_keychain: bool,
-    #[arg(long, default_value = "headless_ai")]
-    pub(crate) client_mode: String,
-    #[arg(long, default_value = "127.0.0.1:7443")]
-    pub(crate) gateway_addr: String,
-    #[arg(long, default_value = "localhost")]
-    pub(crate) server_name: String,
-    #[arg(long, hide = true)]
-    pub(crate) prekey_http_url: Option<String>,
-    #[arg(long)]
-    pub(crate) ca_cert: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) root_seed_byte_hex: Option<String>,
-    #[arg(long)]
-    pub(crate) device_seed_byte_hex: Option<String>,
+    pub(crate) display_name: String,
 }
 
 #[derive(Args)]
@@ -113,6 +84,9 @@ pub(crate) struct AccountBackupImport {
     pub(crate) input: PathBuf,
     #[arg(long)]
     pub(crate) passphrase_env: Option<String>,
+    /// Independent local data passphrase for a new installation, never the archive password.
+    #[arg(long)]
+    pub(crate) new_passphrase_env: Option<String>,
 }
 
 #[derive(Args)]

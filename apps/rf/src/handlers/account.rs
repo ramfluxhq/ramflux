@@ -11,36 +11,18 @@ pub(crate) async fn handle_account(
     socket: PathBuf,
     command: AccountCommand,
 ) -> Result<(), RfError> {
-    if let AccountAction::Recover(ref selector) = command.action {
-        return super::account_ceremony::recover(&socket, &selector.account).await;
+    match &command.action {
+        AccountAction::Recover(selector) => {
+            return super::account_ceremony::recover(&socket, &selector.account).await;
+        }
+        AccountAction::Create(create) => {
+            return super::account_ceremony::create(&socket, &create.display_name).await;
+        }
+        _ => {}
     }
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
-        AccountAction::Backup(backup) => handle_account_backup(&mut bus, backup).await,
-        AccountAction::Create(create) | AccountAction::Login(create) => {
-            let use_keychain = create.use_keychain;
-            let request = local_bus_account_create_request(*create)?;
-            let keychain_secret =
-                KeychainSecret::new(request.account_secret.clone(), Some(request.device_seed));
-            let account_id = request.local_account_id.clone();
-            let response = bus
-                .request(None, "account", "account.create", serde_json::to_value(request)?)
-                .await?;
-            if response.is_null() {
-                return Err(RfError::Message(
-                    "account.create returned an empty response".to_owned(),
-                ));
-            }
-            let response = if use_keychain {
-                with_keychain_store_result(
-                    response,
-                    store_keychain_secret(&OsKeychain, &account_id, &keychain_secret),
-                )
-            } else {
-                response
-            };
-            print_json(&response)
-        }
+        AccountAction::Backup(backup) => super::account_backup::handle(&mut bus, backup).await,
         AccountAction::List => {
             print_json(&bus.request(None, "account", "account.list", serde_json::json!({})).await?)
         }
@@ -78,9 +60,9 @@ pub(crate) async fn handle_account(
             .await?,
         ),
         AccountAction::Unlock(unlock) => handle_account_unlock(&mut bus, unlock, &OsKeychain).await,
-        AccountAction::Recover(_) => {
-            Err(RfError::Message("Recovery requires the exclusive ceremony client.".into()))
-        }
+        AccountAction::Recover(_) | AccountAction::Create(_) => Err(RfError::Message(
+            "Account ceremonies require the exclusive ceremony client.".into(),
+        )),
     }
 }
 
@@ -122,52 +104,6 @@ async fn handle_account_unlock(
     print_json(&response)
 }
 
-async fn handle_account_backup(
-    bus: &mut LocalBusClient,
-    backup: AccountBackupCommand,
-) -> Result<(), RfError> {
-    match backup.action {
-        AccountBackupAction::Export(export) => {
-            let passphrase = rf_required_env(
-                export.passphrase_env.as_deref(),
-                "RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE",
-            )?;
-            let request = LocalBusAccountBackupExportRequest {
-                output_path: export.out.display().to_string(),
-                passphrase,
-            };
-            print_json(
-                &bus.request(
-                    Some(export.account),
-                    "account",
-                    "account.backup.export",
-                    serde_json::to_value(request)?,
-                )
-                .await?,
-            )
-        }
-        AccountBackupAction::Import(import) => {
-            let passphrase = rf_required_env(
-                import.passphrase_env.as_deref(),
-                "RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE",
-            )?;
-            let request = LocalBusAccountBackupImportRequest {
-                input_path: import.input.display().to_string(),
-                passphrase,
-            };
-            print_json(
-                &bus.request(
-                    None,
-                    "account",
-                    "account.backup.import",
-                    serde_json::to_value(request)?,
-                )
-                .await?,
-            )
-        }
-    }
-}
-
 async fn handle_account_passphrase(
     bus: &mut LocalBusClient,
     passphrase: AccountPassphraseCommand,
@@ -194,45 +130,6 @@ async fn handle_account_passphrase(
             )
         }
     }
-}
-
-pub(crate) fn local_bus_account_create_request(
-    create: AccountCreate,
-) -> Result<LocalBusAccountCreateRequest, RfError> {
-    let root_seed = resolve_seed(create.root_seed_byte_hex.as_deref())?;
-    let principal_commitment =
-        ramflux_sdk::identity_root_public_key_commitment_for_seed(&create.principal, root_seed);
-    if let Some(expected) = create.expected_commitment.as_ref()
-        && expected != &principal_commitment
-    {
-        return Err(RfError::Message(format!(
-            "expected commitment mismatch: derived {principal_commitment}"
-        )));
-    }
-    Ok(LocalBusAccountCreateRequest {
-        label: None,
-        kind: None,
-        node_id: create.node,
-        local_account_id: create.account,
-        principal_id: create.principal.clone(),
-        principal_commitment,
-        device_id: create.device.clone(),
-        target_delivery_id: create.target.clone(),
-        account_secret: create.secret,
-        root_seed,
-        device_seed: resolve_seed(create.device_seed_byte_hex.as_deref())?,
-        client_mode: parse_client_mode(&create.client_mode)?,
-        gateway: GatewayQuicEndpointConfig {
-            bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
-            gateway_addr: create.gateway_addr.parse()?,
-            server_name: create.server_name,
-            ca_cert: create.ca_cert.unwrap_or_default(),
-            principal_id: create.principal,
-            device_id: create.device,
-            target_delivery_id: create.target,
-            prekey_http_url: create.prekey_http_url,
-        },
-    })
 }
 
 pub(crate) fn rf_required_env(

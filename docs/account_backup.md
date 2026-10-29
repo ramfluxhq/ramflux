@@ -223,3 +223,15 @@ before a restart, an earlier encrypted database can remain orphaned after its
 reclamation marker is removed with the replaced directory. Its key is discarded;
 this accepted limitation can waste disk space but does not select or resume the
 orphaned state.
+
+## Reference CLI
+
+`rf account backup export --account ACCOUNT --out ARCHIVE` creates a full-data
+archive and waits for its job to finish. `rf account backup import --in ARCHIVE`
+verifies, installs and waits for the restore job. Both read the archive password
+from `RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE` or the named `--passphrase-env` variable.
+For a new installation, explicitly provide `--new-passphrase-env VARIABLE` with
+an independent local data passphrase. Existing installations must be unlocked
+before import. The commands use the attended daemon job workflow above; they no
+longer call the old manifest/key-only backup endpoints. A completed new-install
+restore still requires explicit recovery before networking is authorized.

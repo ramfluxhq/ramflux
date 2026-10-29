@@ -7,21 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Harden experimental custody admission with prefix quotas, bounded listener deadlines, durable new-principal budgets and per-account publication writes. Identical publication is a no-op.
-- BREAKING (experimental custody): proofs/challenges commit to the operation hash and receiving node id; signed node metadata binds a separate public listener certificate. Reissue experimental profiles for this pre-default wire revision. Memory-vault builds require an explicit integration-test marker. Native DM remains explicit opt-in without forward secrecy and is being retired by ordinary v3 E2EE integration.
+- BREAKING (development identity reset): native v3 creation is enabled by default,
+  with an interactive `rf account create --display-name` recovery-phrase ceremony.
+  The seed-taking CLI create/login interface and creation opt-in option are removed.
+  There is no legacy-to-native identity migration; reset old development identities.
+- Remove the temporary custody-only DM API. Native accounts use the ordinary E2EE
+  stack; CLI account backup uses attended full-data jobs instead of key-only archives.
+- Add explicit local phrase recovery/promotion with higher-range primary replacement,
+  exact durable publication ACK checks and master-certified v3 contact cards.
 
-- Add experimental born-v3 publication, registration and channel-bound sessions, with durable node pins, one-use challenges and explicit SDK DM operations. Creation remains disabled by default; integration-only memory custody is excluded from production artifacts.
+- Harden experimental custody admission with prefix quotas, bounded listener deadlines, durable new-principal budgets and per-account publication writes. Identical publication is a no-op.
+- BREAKING (experimental custody): proofs/challenges commit to the operation hash and receiving node id; signed node metadata binds a separate public listener certificate. Reissue experimental profiles for this pre-default wire revision. Memory-vault builds require an explicit integration-test marker. Native accounts now use ordinary v3 E2EE integration.
+
+- Add experimental born-v3 publication, registration and channel-bound sessions, with durable node pins and one-use challenges. Creation is enabled by default; integration-only memory custody is excluded from production artifacts.
 
 
 ### Added
 
-- Default-off local born-v3 identity setup with a generated recovery phrase,
+- Local born-v3 identity setup with a generated recovery phrase,
   one-use backup confirmation, non-synchronizing primary vault custody and
   persisted signed v3 authority. These accounts remain `NetworkingPending`;
-  live registration is deferred and legacy-proof fallback is refused.
+  publication and registration use exact authority ACKs, and legacy-proof fallback is refused.
 - Exact v3 authority codecs, certificate/lease verification, durable mode and
   revocation floors, independent recovery/record vectors and revocation-priority
-  capacity handling. Existing legacy account and wire formats remain unchanged.
+  capacity handling. Native mode refuses legacy account/proof fallback.
 
 ### Changed
 

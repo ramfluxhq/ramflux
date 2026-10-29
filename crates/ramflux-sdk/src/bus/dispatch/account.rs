@@ -19,11 +19,8 @@ pub(crate) async fn dispatch_account_bus_request(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
-        "account.create" => {
-            let body: LocalBusAccountCreateRequest = serde_json::from_value(request.body.clone())?;
-            let response = local_bus_account_create(state, body).await?;
-            Ok(local_bus_ok(serde_json::to_value(response)?))
-        }
+        // Creation is owned by the exclusive secret ceremony on the connection.
+        "account.create" => Err(SdkError::CustodySetupInvalid),
         "account.list" => Ok(local_bus_ok(serde_json::json!({
             "active_account_id": state.active_account_id,
             "accounts": state.accounts.keys().cloned().collect::<Vec<_>>(),
@@ -129,110 +126,6 @@ fn account_status(
     })))
 }
 
-pub(crate) async fn local_bus_account_create(
-    state: &mut LocalBusDaemonState,
-    mut body: LocalBusAccountCreateRequest,
-) -> Result<LocalBusAccountCreateResponse, SdkError> {
-    if crate::custody::account_exists(&state.config.data_root, &body.local_account_id)? {
-        return Err(SdkError::NetworkingPending);
-    }
-    if let Some(label) = &body.label {
-        crate::bus::metadata::validate_label(label)
-            .map_err(|message| SdkError::LocalBus(message.to_owned()))?;
-    }
-    let data_root = state.config.data_root.clone();
-    let manifest_path = local_bus_account_manifest_path(&data_root, &body.local_account_id);
-    if crate::bus::daemon::account_manifest_available(&manifest_path) {
-        let manifest = read_local_bus_account_manifest(&manifest_path)?;
-        if body.node_id.is_some() && body.node_id != manifest.node_id {
-            return Err(crate::node::node_error("account node binding cannot be changed"));
-        }
-        if let Some(account) = state.accounts.get_mut(&manifest.local_account_id) {
-            if let Err(error) = account.ensure_gateway_live().await {
-                tracing::warn!(%error,"account restored without a live gateway session");
-            }
-            return Ok(local_bus_account_response(&manifest, account));
-        }
-        let response = restore_local_bus_account(state, &manifest).await?;
-        state.active_account_id = Some(response.local_account_id.clone());
-        return Ok(response);
-    }
-    let profile = state.nodes.selected(body.node_id.as_deref(), false)?;
-    let mut client = RamfluxClient::new();
-    client.account_index = state.account_index.clone();
-    if state.account_index.is_some() {
-        client.object_store.set_cache_capacity(8);
-    }
-    let node_relay = profile.as_ref().map(|profile| profile.relay.clone());
-    let mut node_tcp_addr = None;
-    if let Some(profile) = profile {
-        body.node_id = Some(profile.node_id.clone());
-        body.gateway = profile.gateway_config(&data_root, body.gateway).await?;
-        node_tcp_addr = Some(crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?);
-        client.node_relay_options =
-            Some(profile.relay_options(&data_root, &body.principal_id).await?);
-    }
-    if body.gateway.ca_cert.as_os_str().is_empty() {
-        return Err(crate::node::node_error(
-            "node_id, a default node, or gateway configuration is required",
-        ));
-    }
-    body.gateway.principal_id.clone_from(&body.principal_id);
-    body.gateway.device_id.clone_from(&body.device_id);
-    body.gateway.target_delivery_id.clone_from(&body.target_delivery_id);
-    initialize_created_account(&mut client, &mut body)?;
-    client.open_account_index(&data_root)?;
-    if client.account_index()?.account(&body.local_account_id).is_ok() {
-        return Err(SdkError::LocalBus(
-            "account creation requires reconciliation: index exists without a manifest".to_owned(),
-        ));
-    }
-    client.create_account(&body.local_account_id, &body.principal_commitment)?;
-    if state.account_index.is_none() {
-        client.set_active_account(&body.local_account_id)?;
-    }
-    client.unlock_account(&body.local_account_id, body.account_secret.as_bytes())?;
-    client.set_contact_request_policy(if body.client_mode == LocalBusClientMode::HeadlessAi {
-        "auto_accept"
-    } else {
-        "manual"
-    })?;
-    let mode = body.client_mode.clone();
-    let device_state = serde_json::json!({
-        "device_kind": "cli",
-        "client_mode": mode,
-        "device_id": body.device_id,
-        "target_delivery_id": body.target_delivery_id,
-    });
-    client.append_event(
-        &format!("device.branch.created:{}", body.device_id),
-        "device.branch.created",
-        &serde_json::to_vec(&device_state)?,
-    )?;
-    let mut gateway = GatewaySessionConfig::auto(body.gateway.clone()).with_owned_device(
-        client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
-    )?;
-    if let Some(addr) = node_tcp_addr {
-        gateway = gateway.with_tcp_gateway_addr(addr);
-    }
-    let mut manifest = LocalBusPersistedAccount::from_create_request(&body);
-    manifest.node_tcp_addr = node_tcp_addr;
-    manifest.node_relay = node_relay;
-    // Persist recovery credentials before any remote registration/publish can be acknowledged.
-    write_local_bus_account_manifest(&data_root, &manifest)?;
-    let id = body.local_account_id;
-    state.accounts.insert(
-        id.clone(),
-        LocalBusAccountState::disconnected(client, gateway, body.principal_commitment),
-    );
-    let account = local_bus_account_mut(state, &id)?;
-    account.activation_pending = true;
-    account.ensure_gateway_live().await?;
-    state.active_account_id = Some(id.clone());
-    Ok(local_bus_account_response(&manifest, local_bus_account(state, &id)?))
-}
-
 pub(crate) fn local_bus_account_response(
     manifest: &LocalBusPersistedAccount,
     account: &LocalBusAccountState,
@@ -253,30 +146,6 @@ pub(crate) fn local_bus_account_response(
             |engine| engine.active_transport_kind().wire_name().to_owned(),
         ),
     }
-}
-
-fn initialize_created_account(
-    client: &mut RamfluxClient,
-    body: &mut LocalBusAccountCreateRequest,
-) -> Result<(), SdkError> {
-    if body.client_mode == LocalBusClientMode::HeadlessAi
-        && body.kind == Some(ramflux_protocol::PrincipalKind::Human)
-    {
-        return Err(SdkError::InboundRejected("headless account cannot claim human kind".into()));
-    }
-    let root = client.create_identity_root(&body.principal_id, body.root_seed);
-    let root_public_key =
-        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let derived_commitment = identity_root_public_key_commitment(&root_public_key)?;
-    if body.principal_commitment.is_empty() {
-        body.principal_commitment.clone_from(&derived_commitment);
-    } else if body.principal_commitment != derived_commitment {
-        return Err(SdkError::LocalBus(format!(
-            "principal_commitment mismatch: expected {derived_commitment}"
-        )));
-    }
-    client.create_device_branch(&body.principal_id, &body.device_id, 1, body.device_seed);
-    Ok(())
 }
 
 fn local_bus_account_lock(
@@ -566,51 +435,6 @@ fn decrypt_account_backup_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn custody_option_off_keeps_byte_identical_legacy_creation_manifest() -> Result<(), SdkError> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-off-custody-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
-        let config = LocalBusConfig::new(root.join("bus.sock"), &root);
-        assert!(!config.enable_born_v3_creation);
-        let legacy = backup_manifest();
-        let mut body = LocalBusAccountCreateRequest {
-            label: None,
-            kind: None,
-            node_id: None,
-            local_account_id: legacy.local_account_id.clone(),
-            principal_id: legacy.principal_id.clone(),
-            principal_commitment: String::new(),
-            device_id: legacy.device_id.clone(),
-            target_delivery_id: legacy.target_delivery_id.clone(),
-            account_secret: legacy.account_secret.clone(),
-            root_seed: legacy.root_seed,
-            device_seed: legacy.device_seed,
-            client_mode: legacy.client_mode.clone(),
-            gateway: legacy.gateway.clone(),
-        };
-        let request = LocalBusFrame::request(
-            "legacy",
-            None,
-            "account",
-            "account.create",
-            serde_json::to_value(&body)?,
-        );
-        assert!(crate::bus::custody_setup::guard_account(&root, &request)?.is_none());
-        let mut client = RamfluxClient::new();
-        initialize_created_account(&mut client, &mut body)?;
-        let manifest = LocalBusPersistedAccount::from_create_request(&body);
-        let bytes = serde_json::to_string_pretty(&manifest)?;
-        // Frozen from the pre-custody manifest layout; public nonproduction test credentials.
-        let old = include_str!("tests/fixtures/legacy_created_account_manifest.json").trim_end();
-        assert_eq!(bytes, old);
-        assert!(client.born_v3_account.is_none());
-        assert!(GatewaySessionConfig::auto(body.gateway).with_account_identity(&client).is_ok());
-        assert!(!root.exists());
-        Ok(())
-    }
 
     fn backup_manifest() -> LocalBusPersistedAccount {
         LocalBusPersistedAccount {

@@ -26,7 +26,6 @@ fn network(
         audience: "node".into(),
         binding_mode: BindingMode::DirectExporter,
         allow_no_channel_binding: false,
-        allow_experimental_native_dm: false,
         timeout: Duration::from_secs(30),
     }
 }

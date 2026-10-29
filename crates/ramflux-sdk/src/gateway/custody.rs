@@ -54,7 +54,6 @@ pub(super) async fn prepare(
         audience: custody.node_id.clone(),
         binding_mode: BindingMode::HomeRelayReceipt,
         allow_no_channel_binding: false,
-        allow_experimental_native_dm: false,
         timeout: config.timeout,
     };
     let credentials =

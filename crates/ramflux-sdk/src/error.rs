@@ -13,8 +13,6 @@ pub enum SdkError {
     NetworkingPending,
     #[error("born-v3 cannot accept legacy authority")]
     CustodyModeDowngrade,
-    #[error("born-v3 creation is disabled")]
-    CustodyCreationDisabled,
     #[error("invalid custody setup")]
     CustodySetupInvalid,
     #[error("custody setup expired")]

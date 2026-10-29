@@ -39,9 +39,6 @@ async fn confirm(
     ceremony: &mut Option<CreationCeremony>,
     disconnected: &mut watch::Receiver<bool>,
 ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
-    if !supervisor.config.enable_born_v3_creation {
-        return Err(SdkError::CustodyCreationDisabled);
-    }
     super::requests::deadline(request)?;
     if request.kind != crate::LocalBusFrameKind::Request || request.operation_id.is_some() {
         return Err(SdkError::CustodySetupInvalid);

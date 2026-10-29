@@ -762,59 +762,6 @@ async fn daemon_stop_works_through_the_public_embedded_entrypoint() -> Result<()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn account_credentials_are_durable_before_activation_can_fail_or_be_cancelled()
--> Result<(), SdkError> {
-    let root = root("activation");
-    let gateway = GatewayQuicEndpointConfig {
-        bind_addr: "127.0.0.1:0".parse().map_err(|error| failure(&format!("{error}")))?,
-        gateway_addr: "127.0.0.1:1".parse().map_err(|error| failure(&format!("{error}")))?,
-        server_name: "missing-gateway".to_owned(),
-        ca_cert: root.join("missing-ca.pem"),
-        principal_id: "alice".to_owned(),
-        device_id: "device".to_owned(),
-        target_delivery_id: "target".to_owned(),
-        prekey_http_url: None,
-    };
-    let mut state = LocalBusDaemonState {
-        account_index: Some(AccountIndex::open(&root)?),
-        nodes: crate::node::NodeStore::default(),
-        config: LocalBusConfig::new(root.join("bus.sock"), &root),
-        accounts: BTreeMap::new(),
-        active_account_id: None,
-        attended_accounts: BTreeSet::new(),
-        subscribers: BTreeMap::new(),
-    };
-    let body = LocalBusAccountCreateRequest {
-        label: None,
-        kind: None,
-        node_id: None,
-        local_account_id: "alice".to_owned(),
-        principal_id: "alice".to_owned(),
-        principal_commitment: String::new(),
-        device_id: "device".to_owned(),
-        target_delivery_id: "target".to_owned(),
-        account_secret: "activation-secret".to_owned(),
-        root_seed: [0x71; 32],
-        device_seed: [0x72; 32],
-        client_mode: LocalBusClientMode::AttendedCli,
-        gateway,
-    };
-    assert!(local_bus_account_create(&mut state, body).await.is_err());
-    let manifest =
-        read_local_bus_account_manifest(&local_bus_account_manifest_path(&root, "alice"))?;
-    assert!(manifest.activation_pending);
-    assert_eq!(manifest.root_seed, [0x71; 32]);
-    assert_eq!(manifest.device_seed, [0x72; 32]);
-    assert!(
-        state.accounts.contains_key("alice"),
-        "the actor retains its writer for cancellation cleanup and outbox publication"
-    );
-    drop(state);
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn client_directories_progress_while_gateway_is_blocked() -> Result<(), SdkError> {
     LocalSet::new()
         .run_until(async {

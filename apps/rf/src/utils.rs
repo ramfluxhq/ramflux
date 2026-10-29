@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 use crate::RfError;
-use ramflux_sdk::LocalBusClientMode;
 use ramflux_sync::{McpCapability, RiskLevel};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -26,14 +25,6 @@ pub(crate) fn resolve_seed(hex_byte: Option<&str>) -> Result<[u8; 32], RfError> 
         Some(value) => repeated_seed(value),
         None => ramflux_crypto::random_32()
             .map_err(|error| RfError::Message(format!("failed to generate random seed: {error}"))),
-    }
-}
-
-pub(crate) fn parse_client_mode(mode: &str) -> Result<LocalBusClientMode, RfError> {
-    match mode {
-        "attended_cli" => Ok(LocalBusClientMode::AttendedCli),
-        "headless_ai" => Ok(LocalBusClientMode::HeadlessAi),
-        other => Err(RfError::Message(format!("unsupported client mode: {other}"))),
     }
 }
 

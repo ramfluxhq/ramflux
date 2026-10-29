@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Actual TLS, bus ceremony, native admission and recipient-side DM decryption.
+//! Actual TLS, bus ceremony, native admission and account-isolated sessions.
 use super::*;
 use ramflux_protocol::custody::*;
 use std::{
@@ -194,7 +194,7 @@ pub(crate) async fn start_server_with_ack_fault(
     Ok((address, ca, server))
 }
 #[tokio::test]
-async fn custody_live_bus_creation_tls_registration_session_and_bidirectional_dm() -> Result {
+async fn custody_live_bus_creation_tls_registration_sessions_and_name_conflict() -> Result {
     let root = Root(std::env::temp_dir().join(format!(
         "cv-{}",
         ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
@@ -204,13 +204,13 @@ async fn custody_live_bus_creation_tls_registration_session_and_bidirectional_dm
     let socket = root.0.join("bus.sock");
     let vault = Arc::new(super::memory_vault::MemoryPrimaryVault::default());
     let mut config = crate::LocalBusConfig::new(&socket, &root.0);
-    config.enable_born_v3_creation = true;
+
     config.custody_vault = Some(vault.clone());
     let (stop, receiver) = tokio::sync::watch::channel(false);
     let flow = async {
         let _stop = Shutdown(stop);
-        let alice_anchor = create(&socket, "alice", "Alice").await?;
-        let bob_anchor = create(&socket, "bob", "Bob").await?;
+        let _alice_anchor = create(&socket, "alice", "Alice").await?;
+        let _bob_anchor = create(&socket, "bob", "Bob").await?;
         create(&socket, "impostor", "Alice").await?;
         let network = |id: &str| CustodyNetworkConfig {
             account_root: root.0.clone(),
@@ -224,38 +224,16 @@ async fn custody_live_bus_creation_tls_registration_session_and_bidirectional_dm
             audience: "node".into(),
             binding_mode: BindingMode::DirectExporter,
             allow_no_channel_binding: false,
-            allow_experimental_native_dm: true,
             timeout: Duration::from_secs(15),
         };
-        let mut alice = CustodyConnection::connect(network("alice"), vault.clone()).await?;
-        let mut bob = CustodyConnection::connect(network("bob"), vault.clone()).await?;
+        let alice = CustodyConnection::connect(network("alice"), vault.clone()).await?;
+        let bob = CustodyConnection::connect(network("bob"), vault.clone()).await?;
         assert_eq!(alice.account().state(), CreationState::Live);
         assert_eq!(bob.account().state(), CreationState::Live);
-        bob.experimental_native_dm = false;
-        assert!(matches!(
-            bob.receive_dm(0).await,
-            Err(crate::SdkError::CustodyNetwork(CustodyRefusal::Unsupported))
-        ));
-        bob.experimental_native_dm = true;
-        let alice_ref = DeviceRef {
-            account_anchor: alice_anchor,
-            device_id: "primary".into(),
-            device_epoch: 1,
-        };
-        let bob_ref =
-            DeviceRef { account_anchor: bob_anchor, device_id: "primary".into(), device_epoch: 1 };
-        let id = alice.send_dm(&bob_ref, b"born-v3 confidential hello").await?;
-        let messages = bob.receive_dm(0).await?;
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].envelope_id, id);
-        assert_eq!(messages[0].source, alice_ref);
-        assert_eq!(messages[0].plaintext.as_slice(), b"born-v3 confidential hello");
-        bob.ack_dm(&messages[0]).await?;
-        assert!(bob.receive_dm(0).await?.is_empty());
-        bob.send_dm(&alice_ref, b"born-v3 confidential reply").await?;
-        let reply = alice.receive_dm(0).await?;
-        assert_eq!(reply.len(), 1);
-        assert_eq!(reply[0].plaintext.as_slice(), b"born-v3 confidential reply");
+        assert_ne!(
+            alice.session().map(|session| &session.session_id),
+            bob.session().map(|session| &session.session_id)
+        );
         let conflict = CustodyConnection::connect(network("impostor"), vault.clone()).await;
         assert!(matches!(
             conflict,
