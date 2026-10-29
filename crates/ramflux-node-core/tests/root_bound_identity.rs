@@ -43,7 +43,7 @@ fn one_time_prekeys_are_leased_once_and_exhaustion_is_counted_across_restart() -
     })?;
 
     let first = registry.take_prekey_bundle(&identity, "source", 1_100)?.ok_or("first")?.0;
-    let second = registry.take_prekey_bundle(&identity, "source", 1_101)?.ok_or("second")?.0;
+    let second = registry.take_prekey_bundle(&identity, "second-source", 1_101)?.ok_or("second")?.0;
     assert_ne!(first.one_time_prekey_id, second.one_time_prekey_id);
     assert_eq!(first.one_time_prekey_ids.len(), 0);
     assert_eq!(first.one_time_prekey_x25519_public.len(), 0);
@@ -55,7 +55,8 @@ fn one_time_prekeys_are_leased_once_and_exhaustion_is_counted_across_restart() -
         verify_prekey_bundle(&f.device.signing_key.verifying_key(), &unleased).is_err(),
         "a fetcher must not be able to substitute a pooled but unleased OPK"
     );
-    let exhausted = registry.take_prekey_bundle(&identity, "source", 1_102)?.ok_or("fallback")?;
+    let exhausted =
+        registry.take_prekey_bundle(&identity, "third-source", 1_102)?.ok_or("fallback")?;
     assert!(exhausted.1);
     assert!(exhausted.0.one_time_prekey_id.is_none());
     assert_eq!(registry.prekey_exhaustion_fallbacks(), 1);
@@ -68,7 +69,14 @@ fn one_time_prekeys_are_leased_once_and_exhaustion_is_counted_across_restart() -
     assert_eq!(restored.prekey_exhaustion_fallbacks(), 2);
     let _ = restored.take_prekey_bundle(&identity, "source", 1_104)?;
     let _ = restored.take_prekey_bundle(&identity, "source", 1_105)?;
-    assert!(restored.take_prekey_bundle(&identity, "source", 1_103).is_err());
+    assert!(
+        restored
+            .take_prekey_bundle(&identity, "source", 1_103)?
+            .ok_or("fallback")?
+            .0
+            .one_time_prekey_id
+            .is_none()
+    );
     Ok(())
 }
 
@@ -109,6 +117,22 @@ fn authenticated_prekey_leases_limit_each_pair_without_blocking_other_fetchers()
     let lookup = RootQualifiedDeviceRef::for_owned_device(&target.root, &target.device)?
         .storage_key()
         .to_owned();
+    for manifest in [
+        router.mvp1_device_manifest(&target.request.principal_commitment),
+        router.mvp1_principal_manifest("target"),
+    ] {
+        let wire = serde_json::to_value(manifest.ok_or("public manifest")?)?;
+        let bundle: &serde_json::Value = &wire["devices"][0]["prekey_bundle"];
+        assert!(bundle["one_time_prekey_id"].is_null());
+        assert!(bundle["one_time_prekey"].is_null());
+        for field in
+            ["one_time_prekey_ids", "one_time_prekey_x25519_public", "one_time_prekey_signatures"]
+        {
+            assert!(
+                bundle.get(field).is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
+            );
+        }
+    }
     let anonymous = router.mvp1_prekey_checked(&lookup)?;
     assert!(anonymous.bundle.as_ref().is_some_and(|bundle| {
         bundle.one_time_prekey_id.is_none() && bundle.one_time_prekey_ids.is_empty()
@@ -121,11 +145,14 @@ fn authenticated_prekey_leases_limit_each_pair_without_blocking_other_fetchers()
         fetcher_device_id: fixture.device.device_id.clone(),
         source_prefix: "203.0.113.0/24".into(),
     };
-    for now in 1_100..1_103 {
+    let (response, _) = router.mvp1_prekey_lease(&lease(&first), 1_100)?;
+    assert!(response.bundle.and_then(|bundle| bundle.one_time_prekey_id).is_some());
+    for now in [1_101, 4_700, 87_499] {
         let (response, _) = router.mvp1_prekey_lease(&lease(&first), now)?;
-        assert!(response.bundle.and_then(|bundle| bundle.one_time_prekey_id).is_some());
+        assert!(response.bundle.is_some_and(|bundle| bundle.one_time_prekey_id.is_none()));
     }
-    assert!(router.mvp1_prekey_lease(&lease(&first), 1_103).is_err());
+    let (response, _) = router.mvp1_prekey_lease(&lease(&first), 87_500)?;
+    assert!(response.bundle.and_then(|bundle| bundle.one_time_prekey_id).is_some());
     let (other, _) = router.mvp1_prekey_lease(&lease(&second), 1_104)?;
     assert!(other.bundle.and_then(|bundle| bundle.one_time_prekey_id).is_some());
 
@@ -359,10 +386,25 @@ fn legacy_registry_load_is_readable_but_key_writes_require_root_bound_migration(
         1000,
         2000,
     )?;
-    let value = serde_json::json!({"root_public_keys":{"alice":f.request.root_public_key},"root_public_keys_by_commitment":{f.request.principal_commitment.clone():f.request.root_public_key},"devices":{"alice-device":{"principal_id":"alice","principal_commitment":f.request.principal_commitment,"device_id":"alice-device","device_epoch":1,"branch_public_key":f.request.branch_public_key,"target_delivery_id":"target","branch_proof":proof}},"revoked_devices":[],"seen_proofs":[],"prekey_bundles":{"alice-device":f.bundle()?}});
+    let legacy_bundle = create_prekey_bundle(
+        &f.device,
+        &f.x,
+        "signed:1",
+        &X25519KeyPair::from_seed([15; 32]),
+        Some("legacy-opk".into()),
+        Some(X25519KeyPair::from_seed([17; 32]).public),
+    )?;
+    let value = serde_json::json!({"root_public_keys":{"alice":f.request.root_public_key},"root_public_keys_by_commitment":{f.request.principal_commitment.clone():f.request.root_public_key},"devices":{"alice-device":{"principal_id":"alice","principal_commitment":f.request.principal_commitment,"device_id":"alice-device","device_epoch":1,"branch_public_key":f.request.branch_public_key,"target_delivery_id":"target","branch_proof":proof}},"revoked_devices":[],"seen_proofs":[],"prekey_bundles":{"alice-device":legacy_bundle}});
     let mut legacy: IdentityRegistry = serde_json::from_value(value)?;
     let manifest =
         legacy.device_manifest(&f.request.principal_commitment).ok_or("legacy manifest")?;
+    assert!(manifest.devices[0].prekey_bundle.one_time_prekey_id.is_none());
+    assert!(manifest.devices[0].prekey_bundle.one_time_prekey.is_none());
+    assert_eq!(manifest.devices[0].prekey_bundle.one_time_prekey_ids, Vec::<String>::new());
+    verify_prekey_bundle(
+        &f.device.signing_key.verifying_key(),
+        &manifest.devices[0].prekey_bundle,
+    )?;
     assert!(manifest.signed_device_set.is_none());
     assert!(manifest.devices[0].branch_proof.key_binding.is_none());
     let mut old_request = f.request.clone();

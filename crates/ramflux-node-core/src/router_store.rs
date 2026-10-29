@@ -6,14 +6,15 @@
 use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, HomeNodeMigrationRecord,
     HomeNodeRouteRecord, IdentityLifecycleTombstone, IdentityLineageEventRecord, IdentityRegistry,
-    InboxEntry, NodeCoreError, NodeReplayGuardState, OpaqueDeviceInbox, PrekeyLeaseState, ROUTER_ABUSE_REPORT_KEY,
-    ROUTER_ABUSE_REPORT_TABLE, ROUTER_CURSOR_STATE_TABLE, ROUTER_DEACTIVATED_TARGET_TABLE,
-    ROUTER_DEACTIVATED_TARGETS_KEY, ROUTER_DELETED_TARGET_TABLE, ROUTER_DELETED_TARGETS_KEY,
-    ROUTER_HOME_NODE_MIGRATION_KEY, ROUTER_HOME_NODE_ROUTE_KEY, ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
-    ROUTER_IDENTITY_LINEAGE_HEADS_KEY, ROUTER_IDENTITY_REGISTRY_KEY, ROUTER_INBOX_ENTRY_TABLE,
-    ROUTER_INBOX_SLICE_KEY, ROUTER_LIFECYCLE_RECORD_TABLE, ROUTER_LIFECYCLE_STATE_KEY,
-    ROUTER_LIFECYCLE_TOMBSTONE_KEY, ROUTER_LIFECYCLE_TOMBSTONE_TABLE,
-    ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE, ROUTER_PREKEY_LEASE_TABLE, ROUTER_REPLAY_GUARD_STATE_KEY, ROUTER_REPLAY_TUPLE_TABLE,
+    InboxEntry, NodeCoreError, NodeReplayGuardState, OpaqueDeviceInbox, PrekeyLeaseState,
+    ROUTER_ABUSE_REPORT_KEY, ROUTER_ABUSE_REPORT_TABLE, ROUTER_CURSOR_STATE_TABLE,
+    ROUTER_DEACTIVATED_TARGET_TABLE, ROUTER_DEACTIVATED_TARGETS_KEY, ROUTER_DELETED_TARGET_TABLE,
+    ROUTER_DELETED_TARGETS_KEY, ROUTER_HOME_NODE_MIGRATION_KEY, ROUTER_HOME_NODE_ROUTE_KEY,
+    ROUTER_IDENTITY_LINEAGE_EVENTS_KEY, ROUTER_IDENTITY_LINEAGE_HEADS_KEY,
+    ROUTER_IDENTITY_REGISTRY_KEY, ROUTER_INBOX_ENTRY_TABLE, ROUTER_INBOX_SLICE_KEY,
+    ROUTER_LIFECYCLE_RECORD_TABLE, ROUTER_LIFECYCLE_STATE_KEY, ROUTER_LIFECYCLE_TOMBSTONE_KEY,
+    ROUTER_LIFECYCLE_TOMBSTONE_TABLE, ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE,
+    ROUTER_PREKEY_LEASE_TABLE, ROUTER_REPLAY_GUARD_STATE_KEY, ROUTER_REPLAY_TUPLE_TABLE,
     ROUTER_SESSION_CHECKPOINT_KEY, ROUTER_SESSION_ENTRY_TABLE, ROUTER_SNAPSHOT_TABLE, RouterCore,
     RouterWalLocalDelivery, RouterWalStore, SessionDescriptor, SessionRegistry, inbox_retain_until,
     load_snapshot, now_unix_seconds, save_snapshot,
@@ -887,6 +888,29 @@ impl RouterRedbStore {
         Ok(())
     }
 
+    /// Atomically persist a publication and its incremental OPK lease cursor.
+    /// # Errors
+    /// Returns serialization or durable storage errors.
+    pub(crate) fn record_prekey_publication(
+        &self,
+        registry: &IdentityRegistry,
+        state: &PrekeyLeaseState,
+    ) -> Result<(), NodeCoreError> {
+        let bytes = serialize_value(state)?;
+        let txn = self.db.begin_write().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        identity_registry::checkpoint(&txn, registry)?;
+        {
+            let mut table = txn
+                .open_table(ROUTER_PREKEY_LEASE_TABLE)
+                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            table
+                .insert(state.storage_key.as_str(), bytes.as_slice())
+                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        }
+        txn.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn fail_next_registration_admission(&self) {
         self.fail_next_registration_admission.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -897,7 +921,6 @@ impl RouterRedbStore {
     /// Returns serialization or durable storage errors.
     pub fn record_prekey_lease_state(&self, state: &PrekeyLeaseState) -> Result<(), NodeCoreError> {
         self.insert_table_value(ROUTER_PREKEY_LEASE_TABLE, &state.storage_key, state)
-    
     }
 
     pub(crate) fn observe_foreign_device_set(

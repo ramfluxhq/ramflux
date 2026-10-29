@@ -86,7 +86,8 @@ pub use key_verification::{
 pub use prekey::{
     PrekeyBundle, PrekeyBundleOptions, X25519KeyPair, create_prekey_bundle,
     create_prekey_bundle_with_lineage, create_rotating_prekey_bundle_with_lineage,
-    verify_prekey_bundle, verify_prekey_bundle_with_lineage,
+    serialize_signed_prekey_only, signed_prekey_only_bundle, verify_prekey_bundle,
+    verify_prekey_bundle_with_lineage,
 };
 pub use recovery::{
     RecoveryQuorumMemberKind, RecoveryShare, create_recovery_quorum, recover_secret_from_quorum,

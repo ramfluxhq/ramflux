@@ -979,12 +979,7 @@ fn handle_mvp1_prekey_publish(
         device_id = %request.device_id,
         "router decoded mvp1 prekey publish"
     );
-    let root_commitment = request.bundle.identity_commitment.clone();
-    let device_id = request.device_id.clone();
-    let response = state.mvp1_publish_prekey(request)?;
-    state.persist_identity_registry(store)?;
-    store
-        .record_prekey_lease_state(&state.mvp1_prekey_lease_state(&root_commitment, &device_id)?)?;
+    let response = state.mvp1_publish_prekey_durable(request, store)?;
     tracing::info!(
         device_id = %response.device_id,
         has_bundle = response.bundle.is_some(),
@@ -1021,10 +1016,11 @@ fn handle_mvp1_prekey_lease(
 ) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
     let request: ramflux_node_core::PrekeyLeaseRequest = serde_json::from_slice(body)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-    let (response, state) =
-        router.state().mvp1_prekey_lease(&request, i64::try_from(now.as_secs())?)?;
-    router.store().record_prekey_lease_state(&state)?;
-    Ok(response)
+    Ok(router.state().mvp1_prekey_lease_durable(
+        &request,
+        i64::try_from(now.as_secs())?,
+        router.store(),
+    )?)
 }
 
 fn is_identity_manifest_path(path: &str) -> bool {

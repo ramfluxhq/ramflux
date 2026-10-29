@@ -547,7 +547,7 @@ fn fresh_gateway_session_id(device_id: &str) -> anyhow::Result<String> {
     Ok(format!("s1_{}_{}_{}", device_id, ramflux_node_core::now_unix_seconds(), nonce))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "itest-inprocess"))]
 pub(crate) async fn run_gateway_session_loop(
     send: GatewaySendHandle,
     recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,

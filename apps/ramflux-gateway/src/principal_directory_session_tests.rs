@@ -217,6 +217,7 @@ async fn authenticated_prekey_fetch_forwards_fetcher_and_real_source_prefix_to_r
     let owned_root = ramflux_crypto::create_identity_root("alice", [1; 32]);
     let owned_branch = ramflux_crypto::create_device_branch("alice", "alice-device", 1, [2; 32]);
     let runtime = crate::GatewaySessionRuntime {
+        supports_forward_ack: true,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
             &owned_root,
             &owned_branch,

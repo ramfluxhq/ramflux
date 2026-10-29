@@ -73,6 +73,8 @@ tracing = "0.1"
 zeroize = { version = "1.8", features = ["serde"] }
 
 [dev-dependencies]
+ramflux-router = { path = "../../apps/ramflux-router", features = ["itest-inprocess"] }
+ramflux-gateway = { path = "../../apps/ramflux-gateway", features = ["itest-inprocess"] }
 ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }
 tokio = { version = "1.42", features = ["test-util"] }

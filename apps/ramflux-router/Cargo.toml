@@ -11,6 +11,7 @@ commercial-license = true
 
 [features]
 default = []
+itest-inprocess = []
 compio-mesh = ["dep:compio", "ramflux-transport/compio-mesh"]
 itest-http = ["ramflux-node-core/itest-http"]
 

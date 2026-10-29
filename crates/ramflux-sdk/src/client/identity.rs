@@ -9,6 +9,7 @@ const SIGNED_PREKEY_ROTATION_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SIGNED_PREKEY_VALIDITY_SECONDS: i64 = 30 * 24 * 60 * 60;
 const SIGNED_PREKEY_GRACE_SECONDS: i64 = 2 * 24 * 60 * 60;
 const ONE_TIME_PREKEY_POOL_SIZE: usize = 8;
+const ONE_TIME_PREKEY_PRIVATE_LIMIT: usize = 200;
 const ONE_TIME_PREKEY_REPLENISH_BELOW: usize = 2;
 
 struct SignedPrekeyMaterial {
@@ -167,7 +168,11 @@ impl RamfluxClient {
             )?;
             let response = sdk_publish_prekey_bundle(url, device_id, &bundle)?;
             if self.directory_requests_prekey_replenishment(device_id, &response)? {
-                let fresh = self.replace_one_time_prekey_pool(device_id, device_seed)?;
+                let fresh = self.replenish_one_time_prekeys(
+                    device_id,
+                    device_seed,
+                    response.available_one_time_prekeys,
+                )?;
                 let _ = sdk_publish_prekey_bundle(url, device_id, &fresh)?;
             }
             self.record_owned_proof_published(now_unix_timestamp())?;
@@ -198,7 +203,11 @@ impl RamfluxClient {
         .await?;
         let response = engine.publish_prekey_bundle(device_id, &bundle).await?;
         if self.directory_requests_prekey_replenishment(device_id, &response)? {
-            let fresh = self.replace_one_time_prekey_pool(device_id, device_seed)?;
+            let fresh = self.replenish_one_time_prekeys(
+                device_id,
+                device_seed,
+                response.available_one_time_prekeys,
+            )?;
             let _ = engine.publish_prekey_bundle(device_id, &fresh).await?;
         }
         self.record_owned_proof_published(now_unix_timestamp())?;
@@ -233,7 +242,11 @@ impl RamfluxClient {
         )
         .await?;
         if self.directory_requests_prekey_replenishment(device_id, &response)? {
-            let fresh = self.replace_one_time_prekey_pool(device_id, device_seed)?;
+            let fresh = self.replenish_one_time_prekeys(
+                device_id,
+                device_seed,
+                response.available_one_time_prekeys,
+            )?;
             let _: SdkPrekeyResponse = sdk_gateway_post_json(
                 gateway,
                 "/mvp1/prekey/publish",
@@ -269,22 +282,31 @@ impl RamfluxClient {
                 }),
             )?;
         }
+        let device = self.local_device_identity(device_id)?;
         Ok(response.available_one_time_prekeys
-            < u32::try_from(ONE_TIME_PREKEY_REPLENISH_BELOW).unwrap_or(u32::MAX))
+            < u32::try_from(ONE_TIME_PREKEY_REPLENISH_BELOW).unwrap_or(u32::MAX)
+            && self.load_x3dh_private_state(&device)?.one_time_prekeys.len()
+                < ONE_TIME_PREKEY_PRIVATE_LIMIT)
     }
 
-    fn replace_one_time_prekey_pool(
+    fn replenish_one_time_prekeys(
         &self,
         device_id: &str,
         device_seed: [u8; 32],
+        available: u32,
     ) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
         let device = self.local_device_identity(device_id)?;
-        let mut state = self.load_x3dh_private_state(&device)?;
-        state.one_time_prekeys.clear();
-        self.persist_owned_private_prekey(&device, &state)?;
-        self.account_db()?.persist_actor_state("secrets/retired", &true)?;
-        self.finish_pair_retirement()?;
-        self.create_and_store_prekey_bundle(device_id, device_seed)
+        let state = self.load_x3dh_private_state(&device)?;
+        let add = ONE_TIME_PREKEY_POOL_SIZE
+            .saturating_sub(usize::try_from(available).unwrap_or(usize::MAX));
+        let desired =
+            state.one_time_prekeys.len().saturating_add(add).min(ONE_TIME_PREKEY_PRIVATE_LIMIT);
+        self.create_prekey_bundle_with_pool_size(
+            device_id,
+            device_seed,
+            now_unix_timestamp(),
+            desired,
+        )
     }
 
     fn create_and_store_prekey_bundle_at(
@@ -292,6 +314,21 @@ impl RamfluxClient {
         device_id: &str,
         device_seed: [u8; 32],
         now: i64,
+    ) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
+        self.create_prekey_bundle_with_pool_size(
+            device_id,
+            device_seed,
+            now,
+            ONE_TIME_PREKEY_POOL_SIZE,
+        )
+    }
+
+    fn create_prekey_bundle_with_pool_size(
+        &self,
+        device_id: &str,
+        device_seed: [u8; 32],
+        now: i64,
+        desired: usize,
     ) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let device = self.local_device_identity(device_id)?;
@@ -302,7 +339,7 @@ impl RamfluxClient {
             && !branch_changed
             && state.signed_prekey_created_at > 0
             && now.saturating_sub(state.signed_prekey_created_at) < SIGNED_PREKEY_ROTATION_SECONDS
-            && state.one_time_prekeys.len() >= ONE_TIME_PREKEY_REPLENISH_BELOW
+            && state.one_time_prekeys.len() >= desired
             && state.previous_signed_prekeys.iter().all(|key| key.erase_after > now)
         {
             return Ok(state.bundle.clone());
@@ -316,7 +353,7 @@ impl RamfluxClient {
         let signed_prekey = X25519KeyPair::from_seed(signed.seed);
         let mut one_time_prekeys =
             existing.as_ref().map(|state| state.one_time_prekeys.clone()).unwrap_or_default();
-        while one_time_prekeys.len() < ONE_TIME_PREKEY_POOL_SIZE {
+        while one_time_prekeys.len() < desired.min(ONE_TIME_PREKEY_PRIVATE_LIMIT) {
             let key = X25519KeyPair::random()?;
             one_time_prekeys.push(crate::dm::SdkOneTimePrekeyPrivate {
                 id: format!(
@@ -503,6 +540,29 @@ mod forward_secrecy_tests {
     }
 
     #[test]
+    fn replenishment_stops_at_private_key_bound_without_erasing_outstanding_keys()
+    -> Result<(), SdkError> {
+        let (path, client) = client("private-pool-bound")?;
+        let initial = client.create_and_store_prekey_bundle_at("phone", [12; 32], 1000)?;
+        client.create_prekey_bundle_with_pool_size("phone", [12; 32], now_unix_timestamp(), 199)?;
+        let full = client.replenish_one_time_prekeys("phone", [12; 32], 0)?;
+        assert_eq!(full.one_time_prekey_ids.len(), 200);
+        assert!(initial.one_time_prekey_ids.iter().all(|id| full.one_time_prekey_ids.contains(id)));
+        let unchanged = client.replenish_one_time_prekeys("phone", [12; 32], 0)?;
+        assert_eq!(full, unchanged);
+        assert_eq!(
+            client
+                .load_x3dh_private_state(&client.owned_device_identity()?)?
+                .one_time_prekeys
+                .len(),
+            200
+        );
+        drop(client);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
     fn legacy_seed_derived_bundle_is_replaced_and_its_event_payload_is_retired()
     -> Result<(), SdkError> {
         let (path, client) = client("legacy")?;
@@ -552,36 +612,8 @@ mod forward_secrecy_tests {
         std::fs::remove_dir_all(path)?;
         Ok(())
     }
-
-    #[test]
-    fn directory_drain_replaces_the_local_pool_with_fresh_ids_on_next_sync() -> Result<(), SdkError>
-    {
-        let (path, client) = client("directory-drain")?;
-        let initial = client.create_and_store_prekey_bundle_at("phone", [12; 32], 1_000)?;
-        let response = SdkPrekeyResponse {
-            device_id: "phone".into(),
-            bundle: Some(initial.clone()),
-            principal_commitment: initial.identity_commitment.clone(),
-            target_delivery_id: Some("mailbox".into()),
-            one_time_prekey_exhausted: true,
-            available_one_time_prekeys: 0,
-        };
-        assert!(client.directory_requests_prekey_replenishment("phone", &response)?);
-        let refreshed = client.replace_one_time_prekey_pool("phone", [12; 32])?;
-        assert!(
-            refreshed
-                .one_time_prekey_ids
-                .iter()
-                .all(|id| !initial.one_time_prekey_ids.contains(id))
-        );
-        assert!(refreshed.prekey_bundle_counter > initial.prekey_bundle_counter);
-        let warning = client
-            .account_db()?
-            .load_actor_state::<serde_json::Value>("x3dh/directory-warning/phone")?
-            .ok_or_else(|| SdkError::LocalBus("missing exhaustion warning".into()))?;
-        assert_eq!(warning["type"], "x3dh.one_time_prekeys.exhausted.v1");
-        drop(client);
-        std::fs::remove_dir_all(path)?;
-        Ok(())
-    }
 }
+
+#[cfg(test)]
+#[path = "prekey_directory_tests.rs"]
+mod directory_tests;

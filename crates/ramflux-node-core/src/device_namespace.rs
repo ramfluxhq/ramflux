@@ -165,7 +165,7 @@ impl IdentityRegistry {
                 branch_public_key: device.branch_public_key.clone(),
                 target_delivery_id: device.target_delivery_id.clone(),
                 branch_proof: device.branch_proof.clone(),
-                prekey_bundle: bundle.clone(),
+                prekey_bundle: ramflux_crypto::signed_prekey_only_bundle(bundle),
                 branch_authorized_event_id: format!(
                     "device.branch_authorized:{}:{}",
                     device.device_id, device.device_epoch

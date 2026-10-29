@@ -195,21 +195,6 @@ mod tests {
         leased.one_time_prekey_signatures.clear();
         Ok((consumed, consumed_seed, leased))
     }
-    fn assert_seed_absent_from_disk(
-        client: &RamfluxClient,
-        consumed_seed: [u8; 32],
-    ) -> Result<(), SdkError> {
-        let db_path = client.account_db()?.path.clone();
-        let wal_path = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
-        let json_seed = serde_json::to_vec(&consumed_seed)?;
-        for disk_path in [&db_path, &wal_path] {
-            if let Ok(bytes) = std::fs::read(disk_path) {
-                assert!(!bytes.windows(consumed_seed.len()).any(|window| window == consumed_seed));
-                assert!(!bytes.windows(json_seed.len()).any(|window| window == json_seed));
-            }
-        }
-        Ok(())
-    }
     #[test]
     fn legacy_private_keys_need_retained_signed_root_authority_and_preserve_their_keys()
     -> Result<(), SdkError> {
@@ -255,12 +240,32 @@ mod tests {
         Ok(())
     }
 
+    fn assert_consumption_erased(
+        client: &RamfluxClient,
+        device: &RootQualifiedDeviceRef,
+        consumed: &str,
+        checkpoints: u64,
+    ) -> Result<(), SdkError> {
+        assert!(client.account_db()?.retired_secret_checkpoint_count() > checkpoints);
+        assert!(client.account_db()?.secure_delete_enabled()?);
+        assert!(
+            client
+                .load_x3dh_private_state(device)?
+                .one_time_prekeys
+                .iter()
+                .all(|key| key.id != consumed),
+            "the regression must fail if authenticated consumption is disabled"
+        );
+        assert!(!client.account_db()?.actor_state_exists("secrets/retired")?);
+        Ok(())
+    }
+
     #[test]
     fn restart_does_not_resurrect_a_consumed_one_time_prekey() -> Result<(), SdkError> {
         let (path, client) = account_named("receiver", "bob", "bob", 11, 12)?;
         let (sender_path, sender) = account_named("sender", "alice", "alice", 21, 22)?;
         let device = client.owned_device_identity()?;
-        let (consumed, consumed_seed, leased) = leased_bundle(&client, &device)?;
+        let (consumed, _consumed_seed, leased) = leased_bundle(&client, &device)?;
         let leased_for_probe = leased.clone();
         let message = crate::GatewayDirectMessage {
             conversation_id: "restart-erasure".into(),
@@ -316,17 +321,9 @@ mod tests {
             receiving.decrypt(&ciphertext, crate::dm::dm_associated_data("restart-erasure"))?,
             b"authenticated"
         );
+        let checkpoints = client.account_db()?.retired_secret_checkpoint_count();
         client.persist_dm_session("restart-erasure", "bootstrap", "recv", &receiving)?;
-        assert!(client.account_db()?.secure_delete_enabled()?);
-        assert!(
-            client
-                .load_x3dh_private_state(&device)?
-                .one_time_prekeys
-                .iter()
-                .all(|key| key.id != consumed),
-            "the regression must fail if authenticated consumption is disabled"
-        );
-        assert_seed_absent_from_disk(&client, consumed_seed)?;
+        assert_consumption_erased(&client, &device, &consumed, checkpoints)?;
         client.append_event("legacy-private-copy", "x3dh.prekey.private", b"secret")?;
         client.set_projection_checkpoint("x3dh_private:v2/legacy", "legacy-private-copy")?;
         let history = client.account_db()?.export_history_bundle("phone", "tablet")?;

@@ -35,19 +35,31 @@ impl AccountDb {
     /// # Errors
     /// Returns SQLite errors. Busy readers may retain an older encrypted WAL generation.
     pub fn checkpoint_retired_secrets(&self) -> Result<(), StorageError> {
-        self.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let busy: i64 =
+            self.connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Ok(());
+        }
+        self.secret_checkpoint_count.set(self.secret_checkpoint_count.get().saturating_add(1));
         Ok(())
+    }
+
+    /// Number of successful TRUNCATE checkpoints on this connection since opening it.
+    #[must_use]
+    pub fn retired_secret_checkpoint_count(&self) -> u64 {
+        self.secret_checkpoint_count.get()
     }
 
     /// Checkpoints retired pages only after the outer writer phase has committed.
     /// # Errors
-    /// Returns SQLite errors; returns false while a surrounding transaction remains open.
+    /// Returns SQLite errors; returns false while a transaction or busy reader prevents truncation.
     pub fn checkpoint_retired_secrets_if_committed(&self) -> Result<bool, StorageError> {
         if !self.connection.is_autocommit()? {
             return Ok(false);
         }
+        let before = self.secret_checkpoint_count.get();
         self.checkpoint_retired_secrets()?;
-        Ok(true)
+        Ok(self.secret_checkpoint_count.get() > before)
     }
 
     /// Reports whether SQLite secure deletion is active for this account connection.
@@ -74,6 +86,7 @@ impl AccountDb {
             device_signer: self.device_signer.clone(),
             clock: self.clock.clone(),
             connection,
+            secret_checkpoint_count: std::cell::Cell::new(0),
             volatile_typing: RefCell::new(BTreeMap::new()),
             volatile_presence: RefCell::new(BTreeMap::new()),
         })

@@ -17,8 +17,9 @@ signed OPK public keys. No private prekey is published.
   two-day delivery grace and is then erased, including when read. At most one current and one grace
   key are retained.
 - Each device publishes eight OPKs. Publish and sync responses report the directory's remaining
-  unleased count; when that count falls below two, the device generates and publishes a completely
-  fresh pool with fresh identifiers. The directory accepts at most 32 OPKs in one bundle. Reaching
+  unleased count; when that count falls below two, the device generates and publishes additional
+  OPKs with fresh identifiers, preserving all outstanding private keys. The local store
+  and directory accept at most 200 OPKs; at the bound no additional OPKs are uploaded. Reaching
   zero also records a typed `x3dh.one_time_prekeys.exhausted.v1` owner warning.
 - Bundle counters increase monotonically. Republishing the same bundle is idempotent and does not
   replenish directory OPKs; older counters are refused.
@@ -28,13 +29,18 @@ signed OPK public keys. No private prekey is published.
   individual signature alongside the SPK. Concurrent fetches cannot receive the same OPK, and a
   receiver cannot substitute another pooled OPK. A consumed identifier is never restored by
   restart or idempotent publication.
-- Anonymous fetches return an SPK-only bundle and never lease an OPK. In-memory hourly limits are
-  independent per fetcher principal, per fetcher-target pair (three), and per source prefix, so one
+- Anonymous fetches return an SPK-only bundle and never lease an OPK. In-memory lease limits are
+  independent per fetcher principal, per account-target pair (one per 24 hours), per target (six per
+  hour across all accounts), and per source prefix, so one
   fetcher cannot drain a target or consume another fetcher's allowance. Durable lease progress is
-  written incrementally per target device before the response; rate counters are not persisted.
+  written incrementally per target device under the selection lock before the response; rate
+  counters are not persisted.
+  Exceeding a lease limit returns a valid SPK-only fallback. Device and principal manifests and
+  publish acknowledgments also return SPK-only bundles. Signed device-set publications contain
+  key commitments, never OPKs. Only authenticated lease responses expose OPK material.
 - When the queue is empty, the directory returns the signed-prekey-only bundle and increments a
-  bounded exhaustion counter with a rate-limited warning. All availability and rate-limit maps
-  have hard account/source caps.
+  bounded exhaustion counter with a rate-limited warning. All rate-limit maps have hard
+  account/source caps.
 
 ## Erasure and migration
 
@@ -46,6 +52,11 @@ persisted ratchet snapshots cannot reproduce the bootstrap secret. Persisted sna
 only the advanced ratchet state. Expired
 signed-prekey private keys are erased during startup/publication maintenance after the delivery
 grace. Existing ratchet sessions are unchanged.
+
+Outstanding OPK private keys are removed only individually after successful bootstrap decryption.
+No expiry cleanup is performed without an authoritative lease-expiry timestamp: keys are retained
+conservatively until consumed, and replenishment stops growing the pool at 200. This preserves
+queued messages for offline recipients without guessing when a lease expired.
 
 The account database enables SQLite secure deletion. On both routed and legacy receive paths, the
 authenticated ratchet snapshot and OPK removal commit in one transaction; only after it commits is

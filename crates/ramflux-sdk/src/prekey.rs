@@ -63,6 +63,7 @@ pub(crate) struct SdkDeviceManifestEntry {
     pub(crate) branch_public_key: String,
     pub(crate) target_delivery_id: String,
     pub(crate) branch_proof: BranchProofDocument,
+    #[serde(serialize_with = "ramflux_crypto::serialize_signed_prekey_only")]
     pub(crate) prekey_bundle: ramflux_crypto::PrekeyBundle,
     pub(crate) branch_authorized_event_id: String,
 }

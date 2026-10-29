@@ -90,6 +90,29 @@ pub struct PrekeyBundle {
     pub signature: String,
 }
 
+/// Returns a public identity and signed-prekey view without any one-time prekey material.
+#[must_use]
+pub fn signed_prekey_only_bundle(bundle: &PrekeyBundle) -> PrekeyBundle {
+    let mut public = bundle.clone();
+    public.one_time_prekey_id = None;
+    public.one_time_prekey = None;
+    public.one_time_prekey_signature = None;
+    public.one_time_prekey_ids.clear();
+    public.one_time_prekey_x25519_public.clear();
+    public.one_time_prekey_signatures.clear();
+    public
+}
+
+/// Serializes a manifest bundle without disclosing any pooled or leased OPK.
+/// # Errors
+/// Returns the serializer's output error.
+pub fn serialize_signed_prekey_only<S: serde::Serializer>(
+    bundle: &PrekeyBundle,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    signed_prekey_only_bundle(bundle).serialize(serializer)
+}
+
 #[derive(Serialize)]
 struct PrekeyBundleSigningBody<'a> {
     schema: &'a str,
@@ -290,7 +313,7 @@ pub fn verify_prekey_bundle_with_lineage(
         || bundle.signed_prekey != bundle.signed_prekey_x25519_public
         || bundle.one_time_prekey_ids.len() != bundle.one_time_prekey_x25519_public.len()
         || bundle.one_time_prekey_ids.len() != bundle.one_time_prekey_signatures.len()
-        || bundle.one_time_prekey_ids.len() > 32
+        || bundle.one_time_prekey_ids.len() > 200
         || bundle.one_time_prekey_ids.iter().collect::<std::collections::BTreeSet<_>>().len()
             != bundle.one_time_prekey_ids.len()
         || ((bundle.signed_prekey_created_at == 0) != (bundle.signed_prekey_expires_at == 0))

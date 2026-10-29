@@ -178,6 +178,7 @@ pub struct DeviceManifestEntry {
     pub branch_public_key: String,
     pub target_delivery_id: String,
     pub branch_proof: ramflux_crypto::BranchProofDocument,
+    #[serde(serialize_with = "ramflux_crypto::serialize_signed_prekey_only")]
     pub prekey_bundle: ramflux_crypto::PrekeyBundle,
     pub branch_authorized_event_id: String,
 }
@@ -284,6 +285,8 @@ pub struct IdentityRegistry {
     prekey_fetch_times_by_fetcher: BTreeMap<String, Vec<i64>>,
     #[serde(skip)]
     prekey_fetch_times_by_pair: BTreeMap<String, Vec<i64>>,
+    #[serde(skip)]
+    prekey_fetch_times_by_target: BTreeMap<String, Vec<i64>>,
     #[serde(default)]
     prekey_exhaustion_fallbacks: BTreeMap<String, u64>,
     #[serde(default, deserialize_with = "load_registration_policy")]
@@ -314,26 +317,18 @@ fn normalize_registration_policy(mut policy: RegistrationPolicy) -> Registration
     policy
 }
 
-fn charge_prekey_budget(
+fn prekey_budget_available(
     budgets: &mut BTreeMap<String, Vec<i64>>,
     key: &str,
     now: i64,
     limit: usize,
-    label: &str,
-) -> Result<(), NodeCoreError> {
-    let events = budgets.entry(key.to_owned()).or_default();
-    events.retain(|seen| now.saturating_sub(*seen) < 60 * 60);
-    if events.len() >= limit {
-        return Err(NodeCoreError::ItestHttp(format!("prekey {label} rate limited")));
-    }
-    events.push(now);
-    if budgets.len() > 4096 {
-        let victim = budgets.keys().find(|candidate| candidate.as_str() != key).cloned();
-        if let Some(victim) = victim {
-            budgets.remove(&victim);
-        }
-    }
-    Ok(())
+    window: i64,
+) -> bool {
+    budgets.retain(|_, events| {
+        events.retain(|seen| now.saturating_sub(*seen) < window);
+        !events.is_empty()
+    });
+    budgets.get(key).map_or(budgets.len() < 4096, |events| events.len() < limit)
 }
 
 impl IdentityRegistry {
@@ -796,7 +791,7 @@ impl IdentityRegistry {
             request.bundle.one_time_prekey_x25519_public.clone()
         };
         if ids.len() != keys.len()
-            || ids.len() > 32
+            || ids.len() > 200
             || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
         {
             return Err(NodeCoreError::ItestHttp("invalid one-time prekey pool".into()));
@@ -822,7 +817,7 @@ impl IdentityRegistry {
 
     /// Atomically leases at most one public OPK from a root-qualified device bundle.
     /// # Errors
-    /// Rejects a source which exceeds the public lookup budget.
+    /// Returns pool integrity errors; exhausted budgets yield signed-prekey-only fallbacks.
     pub fn take_prekey_bundle(
         &mut self,
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -835,7 +830,7 @@ impl IdentityRegistry {
     /// Atomically leases at most one public OPK under independent requester, pair, and prefix
     /// budgets. The requester values have already been authenticated by the router registry.
     /// # Errors
-    /// Rejects a requester which exceeds any lease budget.
+    /// Returns pool integrity errors; exhausted budgets yield signed-prekey-only fallbacks.
     pub fn lease_prekey_bundle(
         &mut self,
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -847,27 +842,50 @@ impl IdentityRegistry {
         if !self.device_is_usable(identity) {
             return Ok(None);
         }
-        charge_prekey_budget(&mut self.prekey_fetch_times_by_fetcher, fetcher, now, 60, "fetcher")?;
-        charge_prekey_budget(&mut self.prekey_fetch_times_by_pair, pair, now, 3, "pair")?;
-        charge_prekey_budget(
-            &mut self.prekey_fetch_times_by_source,
-            source_prefix,
-            now,
-            120,
-            "source prefix",
-        )?;
         let storage_key = Self::device_storage_key(identity);
+        let allowed =
+            prekey_budget_available(
+                &mut self.prekey_fetch_times_by_fetcher,
+                fetcher,
+                now,
+                60,
+                3600,
+            ) && prekey_budget_available(&mut self.prekey_fetch_times_by_pair, pair, now, 1, 86400)
+                && prekey_budget_available(
+                    &mut self.prekey_fetch_times_by_source,
+                    source_prefix,
+                    now,
+                    120,
+                    3600,
+                )
+                && prekey_budget_available(
+                    &mut self.prekey_fetch_times_by_target,
+                    &storage_key,
+                    now,
+                    6,
+                    3600,
+                );
         let mut bundle = self
             .prekey_bundles
             .get(&storage_key)
             .or_else(|| self.legacy_prekey_bundle(identity))
             .cloned();
         let Some(bundle) = bundle.as_mut() else { return Ok(None) };
-        let selected = self
-            .available_one_time_prekeys
-            .get_mut(&storage_key)
-            .and_then(std::collections::VecDeque::pop_front);
+        let selected = if allowed {
+            self.available_one_time_prekeys
+                .get_mut(&storage_key)
+                .and_then(std::collections::VecDeque::pop_front)
+        } else {
+            None
+        };
         if let Some(id) = selected {
+            self.prekey_fetch_times_by_fetcher.entry(fetcher.to_owned()).or_default().push(now);
+            self.prekey_fetch_times_by_pair.entry(pair.to_owned()).or_default().push(now);
+            self.prekey_fetch_times_by_source
+                .entry(source_prefix.to_owned())
+                .or_default()
+                .push(now);
+            self.prekey_fetch_times_by_target.entry(storage_key.clone()).or_default().push(now);
             let index = bundle
                 .one_time_prekey_ids
                 .iter()
@@ -886,7 +904,11 @@ impl IdentityRegistry {
         bundle.one_time_prekey_id = None;
         bundle.one_time_prekey = None;
         bundle.one_time_prekey_signature = None;
-        let exhausted = !bundle.one_time_prekey_ids.is_empty();
+        let exhausted = self
+            .available_one_time_prekeys
+            .get(&storage_key)
+            .is_none_or(std::collections::VecDeque::is_empty)
+            && !bundle.one_time_prekey_ids.is_empty();
         bundle.one_time_prekey_ids.clear();
         bundle.one_time_prekey_x25519_public.clear();
         bundle.one_time_prekey_signatures.clear();
@@ -950,14 +972,7 @@ impl IdentityRegistry {
         &self,
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Option<ramflux_crypto::PrekeyBundle> {
-        let mut bundle = self.prekey_bundle(identity)?.clone();
-        bundle.one_time_prekey_ids.clear();
-        bundle.one_time_prekey_x25519_public.clear();
-        bundle.one_time_prekey_signatures.clear();
-        bundle.one_time_prekey_id = None;
-        bundle.one_time_prekey = None;
-        bundle.one_time_prekey_signature = None;
-        Some(bundle)
+        Some(ramflux_crypto::signed_prekey_only_bundle(self.prekey_bundle(identity)?))
     }
 
     #[must_use]
@@ -1046,7 +1061,7 @@ impl IdentityRegistry {
             })
             .filter_map(|device| {
                 let prekey_bundle =
-                    self.prekey_bundle(&self.device_identity_for_root(
+                    self.public_prekey_bundle(&self.device_identity_for_root(
                         &device.principal_commitment,
                         &device.device_id,
                     )?)?;
