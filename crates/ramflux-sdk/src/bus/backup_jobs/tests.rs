@@ -119,7 +119,7 @@ fn source_supervisor(root: &Path, scale: Scale) -> Result<Rc<Supervisor>, SdkErr
         Box::new(move |index| initialized_at_scale(&source, index, scale));
     Supervisor::from_initializers(&config, vec![("alice".into(), initialize)], Some("alice".into()))
 }
-async fn finished(
+pub(super) async fn finished(
     supervisor: &Supervisor,
     id: &str,
     state: BackupJobState,
@@ -277,7 +277,7 @@ fn check_restored(restored_root: &Path, scale: Scale) -> Result<RamfluxClient, S
     Ok(restored)
 }
 
-async fn call(
+pub(super) async fn call(
     supervisor: &Supervisor,
     method: &str,
     account: Option<&str>,

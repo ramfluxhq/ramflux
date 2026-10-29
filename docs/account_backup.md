@@ -44,11 +44,47 @@ staging expires after 30 minutes. Cancel, expiry, failure and daemon restart dis
 staging; the passphrase and staging key are never persisted. Unavailable-file failure diagnostics retain only their encrypted snapshot under a RAM-only key for at most 30 minutes. Restart clears the
 in-memory job history; poll again to discover the current daemon's jobs.
 
+## Native data-only archives
+
+Native backups carry public signed account evidence and historical data. They
+contain no legacy recovery manifest, root/device signing seed, account passphrase,
+primary credential, vault reference or authority-key wrapper. The snapshot removes
+local runtime work, pending recovery controls and local network selection before
+archive encryption. Public evidence from the archive is never installed as live
+authority. Authenticated native metadata and legacy manifest metadata are distinct;
+ambiguous metadata is refused after archive authentication.
+
+For an existing independently approved native installation, `account.restore.install`
+keeps the `{job_id}` request and requires that account to be unlocked first through
+ordinary `account.unlock`. The archive passphrase used by `account.restore.verify`
+cannot unlock the local installation. The authenticated account anchor selects a
+unique independently installed native identity; the archive's local account ID is
+an origin label. A colliding or changed origin ID cannot select another identity.
+Ambiguous installed matches fail closed. A private actor snapshot supplies the live
+data key through a transient RAM-only wrapper. Installation rechecks immutable
+pins before selecting a new generation. It retains the installation's data key and
+wrapped key, authority file, branch selection, network selection, pins, denial
+fences and replay floors. Native verification does not unlock the local database;
+local pin conflicts are checked again during installation. Imported history is
+merged; imported outbound sessions remain inactive. Existing live outbound sessions
+are retained. After the installation worker runs the account remains locked;
+explicitly unlock it with its local data passphrase. No secret is recovered from
+archive metadata.
+
+The fresh-install contract allocates a new branch and requires an explicit approval
+from an already-approved primary through ordinary device enrollment, or the separate
+24-word recovery ceremony when no primary is available. Restore itself cannot grant
+networking, even with a primary credential already present locally. That branch
+allocation and SAS/recovery handoff are pending integration: current native jobs
+refuse fresh installation with typed `networking_pending`, leaving the account index
+unchanged. This refusal does not establish completion of the approval workflow.
+
 ## Verification and atomic installation
 
 Verification authenticates the entire archive into a private staging directory,
-checks SQLCipher integrity, identity, epochs, immutable contact/member pins and
-every attachment. Staging is encrypted with a fresh random master key held only
+checks SQLCipher integrity, public identity and every attachment. Legacy previews
+also check epochs and immutable contact/member pins against the local database;
+native local pin checks occur at installation using the already-unlocked data key. Staging is encrypted with a fresh random master key held only
 in RAM; independently derived keys protect its database and sealed identity
 metadata. Passphrases are erased after header authentication. No plaintext history
 or private identity metadata is written to staging.
@@ -73,7 +109,7 @@ Typed failures: `wrong_passphrase`, `tampered`, `truncated`, `unsupported_versio
 `insufficient_space` (needed_bytes, available_bytes), `unreadable`, `not_writable`,
 `staging_expired`, `interrupted`, `attachment_mismatch`, `attachments_unavailable`, `identity_rollback`,
 `root_conflict`. A wrong passphrase fails immediately after header authentication,
-before staging or account installation. Any unapproved missing or mismatched attachment refuses verification and installation. Root replacement is always refused; merge accepts older epochs and keeps the live manifest. Fresh-install identity adoption still uses checked epoch advancement.
+before staging or account installation. Any unapproved missing or mismatched attachment refuses verification and installation. Root replacement is always refused; merge accepts older epochs and keeps the live manifest. Legacy fresh-install identity adoption still uses checked epoch advancement.
 
 ## Merge and outbound activation
 
@@ -88,7 +124,7 @@ The report distinguishes restored and retained values per category. Verify and i
 
 Released/deleted held contact messages have per-message erasure fences retained through their seven-day request validity window; expired fences are pruned. Merge replacement is not a user erasure and does not create a fence. Direct-message projections and deletion tombstones also prevent older held copies from returning. Block/decline decisions and explicit lifts (unblock/accept) carry durable ordered decision times. Newer consent wins in either merge direction, including same-tick changes; an older backup cannot restore a lifted denial. Requester authority floors keep the maximum epoch and retention time. Unseen held history remains private; merging never executes its controls.
 
-On an empty data root, restore preserves all history, attachment keys and inbound
+For legacy archives on an empty data root, restore preserves all history, attachment keys and inbound
 or archived sessions needed for late messages. Saved outbound DM sessions are
 inactive; saved outbound group chains stay archived. Before the first send, the
 device performs fresh root-authorized activation at an increased device epoch.

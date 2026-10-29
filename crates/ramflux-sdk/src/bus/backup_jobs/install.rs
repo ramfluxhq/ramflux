@@ -38,6 +38,16 @@ pub(super) fn existing_key(
     )?)
 }
 impl BackupJobs {
+    pub(crate) fn install_account(&self, id: &str) -> Result<String, SdkError> {
+        let state = self.state.lock().map_err(|_| refused("interrupted"))?;
+        state
+            .registry
+            .job(id)?
+            .archive
+            .as_ref()
+            .map(|archive| archive.local_account_id.clone())
+            .ok_or_else(|| refused("invalid_job_phase"))
+    }
     pub(crate) fn begin_install(
         &self,
         id: &str,
@@ -56,10 +66,14 @@ impl BackupJobs {
         &self,
         job: &BackupJob,
         staging: VerifiedBackupStaging,
+        native_key: Option<super::NativeInstallKey>,
     ) -> Result<(String, BackupCounts, BackupCounts), SdkError> {
         let mut metadata =
             format::load_metadata(&staging.directory().join("identity.sealed"), staging.key())?;
-        let id = metadata.manifest.local_account_id.clone();
+        if matches!(&metadata.identity, format::Identity::Native { .. }) {
+            return self.install_native(job, &staging, &metadata, native_key);
+        }
+        let id = metadata.identity.account_id().to_owned();
         let lease =
             self.generations.try_acquire(&id)?.ok_or_else(|| refused("install_in_progress"))?;
         let incoming = staging.directory().join("account.db");
@@ -115,7 +129,7 @@ impl BackupJobs {
                 .copy_to(&target, &installed_key)?;
             let mut merged = BackupDatabase::open(&target, &installed_key)?;
             let report = merged.merge_backup(&incoming, &incoming_key, || Ok(()))?;
-            metadata.manifest = local;
+            metadata.identity = format::Identity::Legacy { manifest: Box::new(local) };
             (report.restored, report.kept_newer)
         } else {
             prepare_fresh_restore(&incoming, &incoming_key, &target, &installed_key, &mut metadata)?
@@ -128,9 +142,9 @@ impl BackupJobs {
         let ca = generation.join("ca.pem");
         std::fs::write(&ca, &metadata.ca_pem)?;
         std::fs::File::open(&ca)?.sync_all()?;
-        metadata.manifest.gateway.ca_cert = ca;
+        metadata.identity.legacy_mut()?.gateway.ca_cert = ca;
         let wrapped = wrap_installed_key(&self.data_root, &metadata, &installed_key)?;
-        let manifest = Zeroizing::new(serde_json::to_vec(&metadata.manifest)?);
+        let manifest = Zeroizing::new(serde_json::to_vec(metadata.identity.legacy()?)?);
         std::fs::File::open(&target)?.sync_all()?;
         std::fs::File::open(&generation)?.sync_all()?;
         std::fs::File::open(&parent)?.sync_all()?;
@@ -139,7 +153,7 @@ impl BackupJobs {
         self.install_checkpoint(super::test_install::InstallPoint::BeforeCommit, &generation)?;
         self.index.install_backup_generation(&BackupIndexInstall {
             account_id: &id,
-            principal_commitment: &metadata.manifest.principal_commitment,
+            principal_commitment: &metadata.identity.legacy()?.principal_commitment,
             db_relative_path: &relative(&self.data_root, &target)?,
             object_relative_path: &relative(&self.data_root, &generation)?,
             manifest_json: &manifest,
@@ -157,7 +171,7 @@ impl BackupJobs {
 }
 
 impl BackupJobs {
-    fn cleanup_committed_generations(&self) {
+    pub(super) fn cleanup_committed_generations(&self) {
         if super::recovery::recover_generations(&self.data_root, &self.index, &self.generations)
             .is_err()
         {
@@ -166,7 +180,7 @@ impl BackupJobs {
             );
         }
     }
-    fn verify_install_contribution(
+    pub(super) fn verify_install_contribution(
         &self,
         job: &BackupJob,
         db: &BackupDatabase,
@@ -211,27 +225,24 @@ fn prepare_fresh_restore(
     db.archive_outbound()?;
     db.put_state("backup/reestablishing", &true)?;
     db.put_state("backup/fresh-outbound", &true)?;
-    metadata.manifest.activation_pending = true;
-    let previous = metadata
-        .manifest
+    let manifest = metadata.identity.legacy_mut()?;
+    manifest.activation_pending = true;
+    let previous = manifest
         .devices
         .iter()
-        .find(|device| device.device_id == metadata.manifest.device_id)
+        .find(|device| device.device_id == manifest.device_id)
         .map_or(1, |device| device.device_epoch);
     db.put_state("backup/previous-device-epoch", &previous)?;
     let next = previous.checked_add(1).ok_or_else(|| refused("identity_rollback"))?;
-    if let Some(device) = metadata
-        .manifest
-        .devices
-        .iter_mut()
-        .find(|device| device.device_id == metadata.manifest.device_id)
+    if let Some(device) =
+        manifest.devices.iter_mut().find(|device| device.device_id == manifest.device_id)
     {
         device.device_epoch = next;
     } else {
-        metadata.manifest.devices.push(crate::LocalBusDeviceRecord {
-            device_id: metadata.manifest.device_id.clone(),
+        manifest.devices.push(crate::LocalBusDeviceRecord {
+            device_id: manifest.device_id.clone(),
             device_epoch: next,
-            target_delivery_id: metadata.manifest.target_delivery_id.clone(),
+            target_delivery_id: manifest.target_delivery_id.clone(),
             capability_scope: Vec::new(),
             is_local: true,
         });
@@ -239,7 +250,7 @@ fn prepare_fresh_restore(
     Ok((db.counts()?, BackupCounts::default()))
 }
 
-fn relative(root: &Path, path: &Path) -> Result<String, SdkError> {
+pub(super) fn relative(root: &Path, path: &Path) -> Result<String, SdkError> {
     path.strip_prefix(root)
         .map_err(|_| refused("root_conflict"))?
         .to_str()
@@ -252,12 +263,13 @@ fn wrap_installed_key(
     metadata: &format::Metadata,
     key: &AccountDbKey,
 ) -> Result<WrappedAccountDbKey, SdkError> {
-    let id = &metadata.manifest.local_account_id;
+    let manifest = metadata.identity.legacy()?;
+    let id = &manifest.local_account_id;
     let vault = FileVaultSecretSource::new(root);
     let secret = Zeroizing::new(vault.vault_secret(id)?);
     let kek = Zeroizing::new(crate::client::account::account_db_key_encryption_key(
         &secret,
-        metadata.manifest.account_secret.as_bytes(),
+        manifest.account_secret.as_bytes(),
     ));
     let (nonce, wrapped_key) = wrap_with_vault_secret(&kek, key.bytes())?;
     Ok(WrappedAccountDbKey {
