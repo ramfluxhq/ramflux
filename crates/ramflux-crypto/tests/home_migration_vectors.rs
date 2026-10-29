@@ -97,21 +97,10 @@ fn authorization_vector(
     row(&signed)
 }
 fn genesis_message_vector(authority: &VerifiedRecord) -> TestResult<Value> {
-    let body: Genesis = serde_json::from_value(serde_json::Value::Object(
-        [
-            ("version".into(), serde_json::json!(1)),
-            ("account_anchor".into(), serde_json::json!(authority.envelope().body.account_anchor)),
-            ("home_epoch".into(), serde_json::json!(0)),
-            ("home_node".into(), serde_json::json!("A")),
-            ("home_node_key".into(), serde_json::json!(public(8))),
-            ("custody_record_hash".into(), serde_json::json!(hash(19))),
-            ("registered_at".into(), serde_json::json!(NOW)),
-        ]
-        .into_iter()
-        .collect(),
-    ))?;
-    let signed = sign_node(body, "A", &key(8))?;
-    row(&signed)
+    let HomeRecord::Genesis { genesis } = genesis(authority)?.record else {
+        return Err("genesis".into());
+    };
+    row(&genesis)
 }
 fn control_vector(
     branch: &ramflux_crypto::DeviceBranch,
@@ -299,6 +288,10 @@ fn vectors() -> TestResult<Value> {
     ]);
 
     let genesis = genesis(&authority)?;
+    let HomeRecord::Genesis { genesis: signed } = &genesis.record else {
+        return Err("genesis".into());
+    };
+    rows.push(row(&*signed.body.home_declaration)?);
     let committed = transition(&genesis.record, &primary, &branch, &authority, ("B", 9), NOW)?;
     Ok(json!({"messages":rows,"genesis":genesis,"genesis_hash":record_hash(&genesis.record)?,
         "committed_home":committed,"committed_home_hash":record_hash(&committed.record)?,
@@ -372,6 +365,7 @@ fn every_type_rejects_cross_schema_role_field_and_signature_substitution() -> Te
     reject_substitutions::<NoncommitFence>(&messages[9]["signed"])?;
     reject_substitutions::<PeerStatus>(&messages[10]["signed"])?;
     reject_substitutions::<PeerQuery>(&messages[11]["signed"])?;
+    reject_substitutions::<HomeDeclarationV1>(&messages[12]["signed"])?;
 
     Ok(())
 }
@@ -497,5 +491,46 @@ fn account_bound_and_client_clock_refuse_a_far_future_destination_offer() -> Tes
     assert!(authorization_bounds(&auth, NOW + 1801).is_err());
     auth.seal_until = offer.accept_until;
     assert!(authorization_bounds(&auth, NOW).is_err());
+    Ok(())
+}
+
+#[test]
+fn node_signature_cannot_replace_master_consent_in_genesis_history() -> TestResult {
+    let (primary, _, authority) = authority()?;
+    let mut home = genesis(&authority)?;
+    let HomeRecord::Genesis { genesis } = &home.record else {
+        return Err("genesis".into());
+    };
+    let mut body = genesis.body.clone();
+    let mut declaration = body.home_declaration.body.clone();
+    declaration.home_node = "C".into();
+    body.home_declaration =
+        Box::new(primary.sign_home_declaration(declaration, &authority, NOW)?);
+    home.record = HomeRecord::Genesis { genesis: Box::new(sign_node(body, "A", &key(8))?) };
+    assert!(
+        verify_home_chain(&ResolveResult { home: home.clone(), predecessors: vec![] }, &home, NOW)
+            .is_err()
+    );
+    let mut raw = serde_json::to_value(home)?;
+    raw["record"]["genesis"]["body"].as_object_mut().ok_or("body")?.remove("home_declaration");
+    assert!(serde_json::from_value::<RecordEvidence>(raw).is_err());
+    Ok(())
+}
+
+#[test]
+fn initial_declaration_survives_roster_updates_under_the_same_certified_master() -> TestResult {
+    let (primary, _, authority) = authority()?;
+    let HomeRecord::Genesis { genesis } = genesis(&authority)?.record else {
+        return Err("genesis".into());
+    };
+    let declaration = genesis.body.home_declaration;
+    let mut body = authority.envelope().body.clone();
+    body.device_set_epoch += 1;
+    body.previous_record_hash = Some(object_hash(authority.envelope())?);
+    body.issued_at = NOW + 1;
+    let record = primary.sign_record(body)?;
+    let updated = verify_record(&record, NOW + 1, None, None)?;
+    verify_home_declaration(&declaration, &updated, "A", NOW + 1)?;
+    assert!(verify_home_declaration(&declaration, &updated, "C", NOW + 1).is_err());
     Ok(())
 }

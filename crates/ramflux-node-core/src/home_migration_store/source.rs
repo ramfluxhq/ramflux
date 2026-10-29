@@ -41,7 +41,7 @@ pub enum FenceOutcome {
 impl RouterCore {
     /// Attest an existing registration, creating node-signed genesis on the first request.
     /// # Errors
-    /// Rejects absent registration, a different current home and invalid node authority.
+    /// Rejects absent registration/master declaration, a different home and invalid authority.
     pub fn attest_home_migration(
         &self,
         store: &RouterRedbStore,
@@ -78,6 +78,20 @@ impl RouterCore {
             if !registered || destination == node.node_id() {
                 return Err(refusal(Refusal::HomeGenesisRequired));
             }
+            // Verify against local authority before signing or retaining any genesis state.
+            let existing = store.migration_home(anchor)?;
+            let declaration = if existing.is_none() {
+                let declaration = request
+                    .payload
+                    .home_declaration
+                    .as_deref()
+                    .ok_or_else(|| refusal(Refusal::HomeDeclarationRequired))?;
+                crypto::verify_home_declaration(declaration, authority, node.node_id(), now)
+                    .map_err(|_| refusal(Refusal::HomeDeclarationRequired))?;
+                Some(declaration)
+            } else {
+                None
+            };
             let tx = store.migration_db().begin_write().map_err(storage)?;
             let now = clock(&tx, now)?;
             super::signer_pin::retain(&tx, node)?;
@@ -87,6 +101,11 @@ impl RouterCore {
             } else {
                 let genesis = crypto::sign_node(
                     Genesis {
+                        home_declaration: Box::new(
+                            declaration
+                                .ok_or_else(|| refusal(Refusal::HomeDeclarationRequired))?
+                                .clone(),
+                        ),
                         version: 1,
                         account_anchor: anchor.into(),
                         home_epoch: 0,

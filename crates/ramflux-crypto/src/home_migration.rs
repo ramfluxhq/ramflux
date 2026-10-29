@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Role-bound home-migration signatures. Signature validity alone grants no node admission.
+mod declaration;
+pub use declaration::*;
 mod history;
 mod time;
 use crate::{CryptoError, DeviceBranch, custody::VerifiedRecord};
@@ -97,6 +99,7 @@ pub fn verify_signatures<T: Message>(message: &Signed<T>) -> Result<(), CryptoEr
         if !matches!(
             (&signer.role, &signer.key),
             (Role::Management, SignerKey::MasterCertifiedCustody { .. })
+                | (Role::Management, SignerKey::MasterCertifiedHome { .. })
                 | (Role::Actor, SignerKey::BranchV3 { .. })
                 | (Role::Node, SignerKey::Node { .. })
         ) {

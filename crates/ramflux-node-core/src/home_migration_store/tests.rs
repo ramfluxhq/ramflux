@@ -598,6 +598,7 @@ fn attest_request(
 ) -> TestResult<ramflux_protocol::home_migration::AttestRequest> {
     use ramflux_protocol::home_migration::{AttestPayload, AttestRequest, Control};
     let payload = AttestPayload {
+        home_declaration: Some(Box::new(declaration("A", now)?)),
         account_anchor: anchor.into(),
         destination_node: destination.into(),
         nonce: nonce.into(),
@@ -661,3 +662,25 @@ mod control_admission;
 mod reads;
 
 mod discovery;
+
+fn declaration(
+    home: &str,
+    now: u64,
+) -> TestResult<Signed<ramflux_protocol::home_migration::HomeDeclarationV1>> {
+    let authority = verify_record(&publication()?.record, now, None, None)?;
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([2; 32]));
+    Ok(primary.sign_home_declaration(
+        ramflux_protocol::home_migration::HomeDeclarationV1 {
+            version: 1,
+            principal_id: authority.envelope().body.principal_id.clone(),
+            account_anchor: authority.envelope().body.account_anchor.clone(),
+            home_node: home.into(),
+            created_at: now,
+            nonce: hash(120),
+        },
+        &authority,
+        now,
+    )?)
+}
+
+mod genesis;

@@ -107,6 +107,8 @@ pub struct Response {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttestPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_declaration: Option<Box<Signed<super::HomeDeclarationV1>>>,
     pub account_anchor: String,
     pub destination_node: String,
     pub nonce: String,
