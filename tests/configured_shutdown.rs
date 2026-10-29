@@ -274,6 +274,16 @@ fn wait_for_ready(
         "ramflux-retention" => "retention mesh mTLS surface listening",
         _ => return Err(format!("unknown shutdown-test service {service}").into()),
     };
+    let extra: &[&str] = match service {
+        "ramflux-router" => &["router async QUIC ingress listening"],
+        "ramflux-retention" => &["retention async QUIC ingress listening"],
+        "ramflux-federation" => {
+            &["federation mesh mTLS surface listening", "federation mesh QUIC surface listening"]
+        }
+        _ => &[],
+    };
+    let mut pending = vec![marker];
+    pending.extend_from_slice(extra);
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -281,7 +291,8 @@ fn wait_for_ready(
             return Err("service startup exceeded test timeout".into());
         }
         let line = receiver.recv_timeout(remaining)?;
-        if line.contains(marker) {
+        pending.retain(|marker| !line.contains(marker));
+        if pending.is_empty() {
             return Ok(());
         }
     }
