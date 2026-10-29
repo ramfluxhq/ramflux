@@ -166,6 +166,23 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
+    pub(super) fn persist_message_slot_receipt(
+        &self,
+        message: &str,
+        slot: &SdkObjectKeySlot,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        db.persist_message_actor_state(message, &slot_receipt(slot)?, &true)?;
+        db.persist_message_actor_state(
+            message,
+            &super::object_watermark(
+                &slot.object_id,
+                &self.local_device_identity(&slot.recipient_device_id)?,
+            )?,
+            &slot_receipt(slot)?,
+        )?;
+        Ok(())
+    }
     pub(crate) fn commit_pair_object_slot(
         &self,
         slot: &SdkObjectKeySlot,

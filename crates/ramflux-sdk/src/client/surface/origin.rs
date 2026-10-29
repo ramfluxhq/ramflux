@@ -32,7 +32,8 @@ impl RamfluxClient {
         entry: &crate::GatewayInboxEntry,
         group_epoch: Option<u64>,
     ) -> Result<(), SdkError> {
-        self.account_db()?.persist_actor_state(
+        self.account_db()?.persist_message_actor_state(
+            message,
             &key("origin", message),
             &Origin {
                 group_epoch,

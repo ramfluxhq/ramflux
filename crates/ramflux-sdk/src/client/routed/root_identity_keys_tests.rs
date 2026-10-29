@@ -158,6 +158,9 @@ async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_r
     let db = alice.client.account_db()?;
     let receipt =
         db.load_actor_state::<serde_json::Value>(&key)?.ok_or_else(|| invalid("receipt"))?;
+    // The legacy fixture predates the identity-independent seen marker.
+    let seen = db.routed_seen_key(&ramflux_protocol::canonical_json_bytes(&entry.envelope)?)?;
+    db.remove_actor_state(&seen)?;
     db.remove_actor_state(&key)?;
     db.remove_actor_state(&format!("identity/replay-upgrade/v3/{}", source.storage_key()))?;
     db.persist_actor_state("routed/committed/old-name-digest", &receipt)?;

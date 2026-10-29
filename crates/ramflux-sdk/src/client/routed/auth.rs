@@ -56,14 +56,15 @@ impl RamfluxClient {
             }
             // Both the signature chain and the accepted root relationship precede persistence.
             self.persist_identity_directory(&manifest)?;
-            self.account_db()?.upsert_device_directory_entry(
-                remote,
-                &commitment,
-                "inbound_signature",
-                now_unix_timestamp(),
-            )?;
         }
         self.authenticated_envelope_sender(entry)?;
+        // A verified cached manifest must populate the same storage identity directory as a fetch.
+        self.account_db()?.upsert_device_directory_entry(
+            remote,
+            &commitment,
+            "inbound_signature",
+            now_unix_timestamp(),
+        )?;
         self.finish_lazy_own_group_pins(&entry.envelope.source_principal_id, &commitment, remote)?;
         Ok(())
     }

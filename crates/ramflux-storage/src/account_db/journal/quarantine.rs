@@ -19,6 +19,11 @@ impl AccountDb {
             return Err(StorageError::AuthorizationRejected);
         }
         self.write_transaction(|| {
+            if let Some(marker) = self.inbox_envelope_marker(entry)?
+                && self.actor_state_exists(&marker)?
+            {
+                return Ok(());
+            }
             let exists: i64 = self.connection.query_row(
                 "SELECT count(*) FROM runtime_unrouted WHERE envelope_id=?1",
                 params![id],

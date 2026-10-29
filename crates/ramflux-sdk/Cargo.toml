@@ -73,6 +73,7 @@ tracing = "0.1"
 zeroize = { version = "1.8", features = ["serde"] }
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }
 tokio = { version = "1.42", features = ["test-util"] }

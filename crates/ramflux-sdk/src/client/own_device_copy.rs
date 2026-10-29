@@ -378,7 +378,8 @@ impl RamfluxClient {
                 self.device_identity_for_root(&root, &entry.envelope.source_device_id)?;
             self.apply_own_device_control(entry, &source_identity, &context, &body)?;
             self.commit_inline_pair_key_slot(&slot, &key)?;
-            db.persist_actor_state(
+            db.persist_message_actor_state(
+                &context.message,
                 &receipt_key,
                 &Receipt {
                     fingerprint,

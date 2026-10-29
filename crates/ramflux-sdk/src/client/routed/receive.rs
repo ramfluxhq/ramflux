@@ -104,21 +104,25 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<Delivery>, SdkError> {
-        let Some((committed, payload_hash)) = self.routed_seen_marker(entry)? else {
-            return Ok(None);
-        };
+        let Some((_, payload_hash)) = self.routed_seen_marker(entry)? else { return Ok(None) };
         if payload_hash != entry.envelope.payload_hash {
             return Err(SdkError::ReplayMismatch);
         }
-        // The marker narrows retention; signature/authority verification still precedes ACK.
-        self.authenticated_device_identity(entry)?;
-        let db = self.account_db()?;
-        db.write_transaction(|| {
-            db.remove_inbox_retry(&committed)?;
-            db.remove_unrouted(&committed)?;
-            db.remove_unrouted(&entry.envelope.envelope_id)
-        })?;
-        Ok(Some(Delivery { routing: self.committed_routing(entry)?, plaintext: None, call_control: false }))
+        // A seen marker bypasses authentication and decryption. Live copies may still supply
+        // read-model routing; deletion removes both this index binding and the committed copy.
+        let routing = self
+            .account_db()?
+            .message_copy_actor_states::<Committed>(
+                &format!("payload:{}", entry.envelope.payload_hash),
+                "routed/committed/",
+            )?
+            .into_iter()
+            .find(|copy| {
+                copy.entry.envelope.envelope_id == entry.envelope.envelope_id
+                    && copy.entry.envelope.payload_hash == entry.envelope.payload_hash
+            })
+            .map(|copy| copy.routing);
+        Ok(Some(Delivery { routing, plaintext: None, call_control: false }))
     }
 
     fn committed_routed_delivery(
@@ -159,7 +163,6 @@ impl RamfluxClient {
         let commit = self.authenticated_committed_key(entry)?;
         if let Some(delivery) = self.committed_routed_delivery(&commit, entry)? {
             return Ok(delivery);
-
         }
         let mut opened = self.open_routed_with_recovery(engine, entry).await?;
         self.contact_route_gate(entry, &opened.routing, &opened.body)?;
@@ -239,7 +242,6 @@ impl RamfluxClient {
         #[cfg(feature = "itest-rfd-fault")]
         crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmRecv).await?;
         Ok(Delivery::opened(opened, plaintext, &body))
-
     }
 
     async fn import_accepted_attachments(
@@ -518,7 +520,7 @@ impl RamfluxClient {
             if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage)
                 && self.account_db()?.message_is_deleted(&opened.routing.message_id)?
             {
-                self.persist_routed_seen(receipt, &entry.envelope.payload_hash)?;
+                self.persist_routed_seen(entry)?;
                 return Ok(None);
             }
             if let Some(shared) = shared_group {
@@ -562,7 +564,7 @@ impl RamfluxClient {
             };
             self.commit_routed_pair_context(opened, entry, body)?;
             for slot in slots {
-                self.persist_pair_slot_receipt(slot)?;
+                self.persist_message_slot_receipt(&opened.routing.message_id,slot)?;
             }
             if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
                 self.persist_projection_owner(entry, &opened.routing.message_id)?;
@@ -571,7 +573,9 @@ impl RamfluxClient {
                     &opened.routing,
                 )?;
             }
-            self.account_db()?.persist_actor_state(
+            self.account_db()?.persist_message_watermark(
+                &opened.routing.message_id,
+                &opened.routing.conversation_id,
                 &super::conversation_watermark(&opened.routing.conversation_id),
                 &receipt,
             )?;
@@ -588,7 +592,7 @@ impl RamfluxClient {
                 receipt,
                 &Committed { routing: opened.routing.clone(), entry: retained, projected: false },
             )?;
-            self.persist_routed_seen(receipt, &entry.envelope.payload_hash)?;
+            self.persist_routed_seen(entry)?;
             Ok(plaintext)
         })
     }
