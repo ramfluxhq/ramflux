@@ -8,6 +8,9 @@ use crate::prelude::*;
 
 impl RamfluxClient {
     pub fn append_gateway_delivery(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+        if self.routed_seen_marker(entry)?.is_some() {
+            return Ok(());
+        }
         let event = format!("gateway/delivery/v2/{}", self.inbox_admission_key(entry)?);
         if self.event_body(&event)?.is_some() {
             return Ok(());

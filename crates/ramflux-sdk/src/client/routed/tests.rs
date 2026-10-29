@@ -298,7 +298,7 @@ async fn fresh_receiver_commits_first_dm_and_replays_without_ratchet_advance()
     assert!(first.plaintext.is_some());
     assert_eq!(b.client.direct_messages("unseen-conversation")?.len(), 1);
     let duplicate = b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-    assert!(duplicate.plaintext.is_some());
+    assert!(duplicate.plaintext.is_none());
     assert_eq!(b.client.direct_messages("unseen-conversation")?.len(), 1);
     Ok(())
 }
@@ -374,7 +374,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
             .map_err(|e| invalid(&e.to_string()))?,
     );
     let delivered = b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-    assert_eq!(delivered.routing.kind, Kind::GroupControl);
+    assert_eq!(delivered.routing.as_ref().map(|route| &route.kind), Some(&Kind::GroupControl));
     assert!(b.client.group_state(group)?.members.contains("bob"));
     assert!(
         b.client.account_db()?.client_record("conversation", conversation)?.is_none(),
@@ -383,7 +383,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
     let inner = a.client.encrypt_group_message(group, "alice", b"private group text")?;
     let message = seal_group(&a, &b, message("group-message", conversation), &inner)?;
     let delivered = b.client.apply_routed_entry(&mut engine, &pool, &message, false).await?;
-    assert_eq!(delivered.routing.kind, Kind::GroupMessage);
+    assert_eq!(delivered.routing.as_ref().map(|route| &route.kind), Some(&Kind::GroupMessage));
     assert_eq!(
         b.client
             .account_db()?

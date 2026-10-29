@@ -287,7 +287,10 @@ impl RamfluxClient {
                 let delivery: crate::client::routed::Delivery =
                     self.apply_routed_entry(engine, pool, &entry, auto_fetch_attachments).await?;
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
-                if delivery.routing.conversation_id == conversation_id
+                if delivery
+                    .routing
+                    .as_ref()
+                    .is_some_and(|route| route.conversation_id == conversation_id)
                     && let Some(message) = delivery.plaintext
                 {
                     plaintext.push(message);

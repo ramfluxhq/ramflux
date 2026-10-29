@@ -1213,9 +1213,10 @@ pub(crate) async fn dispatch_group_receive_request(
                 account
                     .client
                     .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
-                if delivery.routing.kind == crate::client::routed::Kind::GroupMessage
-                    && delivery.routing.conversation_id == body.conversation_id
-                    && let Some(plain) = delivery.plaintext
+                if delivery.routing.as_ref().is_some_and(|route| {
+                    route.kind == crate::client::routed::Kind::GroupMessage
+                        && route.conversation_id == body.conversation_id
+                }) && let Some(plain) = delivery.plaintext
                 {
                     decrypted.push(group_plaintext_json(
                         &body.conversation_id,

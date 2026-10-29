@@ -8,6 +8,7 @@ use fixture::{Shared, Spec, TestResult};
 use std::sync::{Arc, Mutex};
 use tokio::task::LocalSet;
 mod bindings;
+mod erasure;
 mod fixture;
 mod followups;
 mod limits;

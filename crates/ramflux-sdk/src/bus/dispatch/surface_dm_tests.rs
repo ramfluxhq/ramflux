@@ -267,7 +267,7 @@ async fn assert_deliveries(
                 );
                 let result =
                     peer.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-                assert_eq!(result.routing.message_id, timeline);
+                assert_eq!(result.routing.map(|route| route.message_id), Some(timeline.to_owned()));
                 assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 1);
                 assert_eq!(peer.client.direct_messages("thread")?.len(), 1);
                 // Exact-envelope retry also retains the committed logical projection.
@@ -276,8 +276,8 @@ async fn assert_deliveries(
                         .apply_routed_entry(&mut engine, &pool, &entry, false)
                         .await?
                         .routing
-                        .message_id,
-                    timeline
+                        .map(|route| route.message_id),
+                    Some(timeline.to_owned())
                 );
                 counts[index] += 1;
             }
