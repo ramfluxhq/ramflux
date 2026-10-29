@@ -108,11 +108,9 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
 ) -> anyhow::Result<()> {
     std::thread::Builder::new().name("ramflux-gateway-quic".to_owned()).spawn(move || {
         let worker_threads = gateway_quic_worker_threads();
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(worker_threads)
-            .enable_all()
-            .build()
-        {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        let _threads = ramflux_node_core::track_service_runtime(&mut builder);
+        let runtime = match builder.worker_threads(worker_threads).enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
                 tracing::error!(%error, "gateway QUIC runtime failed");
@@ -136,6 +134,7 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
                 },
             }
         });
+        ramflux_node_core::drain_service_runtime(runtime);
     })?;
     Ok(())
 }
@@ -162,12 +161,10 @@ fn spawn_gateway_tcp_tls_thread(
     tcp_server_config: rustls::ServerConfig,
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
-    std::thread::Builder::new().name("ramflux-gateway-tcp-tls".to_owned()).spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-        {
+    ramflux_node_core::spawn_service_worker("ramflux-gateway-tcp-tls", move |shutdown| {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        let _threads = ramflux_node_core::track_service_runtime(&mut builder);
+        let runtime = match builder.worker_threads(2).enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
                 tracing::error!(%error, "gateway TCP-TLS runtime failed");
@@ -179,6 +176,7 @@ fn spawn_gateway_tcp_tls_thread(
                 tracing::error!(%error, "gateway TCP-TLS listener stopped");
             }
         });
+        ramflux_node_core::drain_service_runtime(runtime);
     })?;
     Ok(())
 }
@@ -335,6 +333,7 @@ pub(crate) async fn serve_gateway_tcp_listener(
             }
         });
     }
+    Ok(())
 }
 
 // T22-A1 / RQ-04: v2 shared-HMAC relay service-key loading, compiled only under `itest-local-mint`.
@@ -410,8 +409,10 @@ fn run_gateway_forward_mesh_listener(
     tls: &ramflux_transport::MeshTlsConfig,
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    runtime.block_on(async move {
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    let _threads = ramflux_node_core::track_service_runtime(&mut builder);
+    let runtime = builder.enable_all().build()?;
+    let result = runtime.block_on(async move {
         let root_pems_provider = Arc::new(|| Ok(Vec::new()));
         let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
             listen_addr,
@@ -437,7 +438,10 @@ fn run_gateway_forward_mesh_listener(
                 }
             });
         }
-    })
+        Ok::<(), anyhow::Error>(())
+    });
+    ramflux_node_core::drain_service_runtime(runtime);
+    result
 }
 
 async fn gateway_forward_mesh_connection_loop(

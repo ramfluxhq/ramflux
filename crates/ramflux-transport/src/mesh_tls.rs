@@ -33,6 +33,12 @@ impl MeshTlsServer {
         Ok(Self { listener, config })
     }
 
+    /// Clone the immutable TLS configuration for a connection worker.
+    #[must_use]
+    pub fn handshake_config(&self) -> Arc<ServerConfig> {
+        Arc::clone(&self.config)
+    }
+
     /// # Errors
     /// Returns an error when the listener local address cannot be read.
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
@@ -94,8 +100,13 @@ impl MeshTlsServer {
         )
     }
 
-    fn accept_tcp_stream(&self) -> Result<TcpStream, TransportError> {
+    /// Accept TCP without performing any handshake on the listener thread.
+    ///
+    /// # Errors
+    /// Returns a TCP accept or socket-option error.
+    pub fn accept_tcp_stream(&self) -> Result<TcpStream, TransportError> {
         let (stream, _peer_addr) = self.listener.accept()?;
+        stream.set_nonblocking(false)?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         stream.set_write_timeout(Some(Duration::from_secs(30)))?;
@@ -103,16 +114,23 @@ impl MeshTlsServer {
     }
 }
 
-fn authenticate_tcp_stream(
+/// Authenticate an already accepted socket on its connection thread with a total 10 s deadline.
+///
+/// # Errors
+/// Returns TLS, certificate parsing, timeout, or socket errors.
+pub fn authenticate_tcp_stream(
     stream: TcpStream,
     config: Arc<ServerConfig>,
 ) -> Result<MeshTlsAcceptedStream, TransportError> {
     let connection =
         ServerConnection::new(config).map_err(|error| TransportError::Tls(error.to_string()))?;
     let mut stream = rustls::StreamOwned::new(connection, stream);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while stream.conn.is_handshaking() {
-        stream.conn.complete_io(&mut stream.sock)?;
+        stream.conn.complete_io(&mut HandshakeIo { socket: &mut stream.sock, deadline })?;
     }
+    stream.sock.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.sock.set_write_timeout(Some(Duration::from_secs(30)))?;
     record_mesh_server_tls_handshake();
     let peer_spiffe_uri = stream
         .conn
@@ -122,6 +140,18 @@ fn authenticate_tcp_stream(
         .transpose()?
         .flatten();
     Ok(MeshTlsAcceptedStream { stream, peer_spiffe_uri })
+}
+
+/// Authenticate an accepted connection using dynamically pinned peer roots.
+///
+/// # Errors
+/// Returns TLS configuration, handshake, timeout, or certificate errors.
+pub fn authenticate_tcp_stream_with_pem_roots(
+    stream: TcpStream,
+    tls: &MeshTlsConfig,
+    root_pems: &[String],
+) -> Result<MeshTlsAcceptedStream, TransportError> {
+    authenticate_tcp_stream(stream, Arc::new(mesh_server_config_with_pem_roots(tls, root_pems)?))
 }
 
 /// # Errors
@@ -143,4 +173,38 @@ pub fn extract_spiffe_uri_from_certificate(
         GeneralName::URI(uri) if uri.starts_with("spiffe://") => Some((*uri).to_owned()),
         _ => None,
     }))
+}
+
+struct HandshakeIo<'a> {
+    socket: &'a mut TcpStream,
+    deadline: std::time::Instant,
+}
+
+impl HandshakeIo<'_> {
+    fn remaining(&self) -> std::io::Result<Duration> {
+        let remaining = self.deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "mesh TLS handshake deadline",
+            ));
+        }
+        Ok(remaining)
+    }
+}
+
+impl std::io::Read for HandshakeIo<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.socket.set_read_timeout(Some(self.remaining()?))?;
+        std::io::Read::read(self.socket, bytes)
+    }
+}
+impl std::io::Write for HandshakeIo<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.socket.set_write_timeout(Some(self.remaining()?))?;
+        std::io::Write::write(self.socket, bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(self.socket)
+    }
 }

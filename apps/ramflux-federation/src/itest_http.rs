@@ -13,8 +13,15 @@ use crate::{ItestMvp4CanDeliverResponse, ItestMvp4TrustStatusRequest, SharedMesh
 
 #[cfg(feature = "itest-http")]
 use std::net::{Shutdown, TcpListener, TcpStream};
+
 #[cfg(feature = "itest-http")]
-use std::thread;
+struct ItestHttpContext {
+    state: Arc<SharedFederationTrustState>,
+    store: Arc<ramflux_node_core::FederationRedbStore>,
+    router: Arc<RouterMeshClient>,
+    discovery: FederationDiscoverySurface,
+    mesh_observability: SharedMeshObservability,
+}
 
 #[cfg(feature = "itest-http")]
 pub(crate) fn serve_itest_http(
@@ -31,6 +38,8 @@ pub(crate) fn serve_itest_http(
     listener
         .set_nonblocking(true)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    let connections =
+        ramflux_node_core::ConnectionSet::new(ramflux_node_core::DEFAULT_CONNECTION_LIMIT);
     tracing::info!(addr, "federation itest HTTP surface listening");
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let stream = match listener.accept().map(|(stream, _)| stream) {
@@ -44,50 +53,48 @@ pub(crate) fn serve_itest_http(
                 continue;
             }
         };
-        let state = Arc::clone(state);
-        let store = Arc::clone(store);
-        let router = Arc::clone(router);
-        let discovery = discovery.clone();
-        let mesh_observability = Arc::clone(mesh_observability);
-        thread::spawn(move || {
-            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
-                return;
-            };
-            handle_itest_connection(
+        let registration = stream
+            .try_clone()
+            .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
+        connections.spawn(
+            &registration,
+            (
                 stream,
-                &state,
-                &store,
-                &router,
-                &discovery,
-                &mesh_observability,
-            );
-        });
+                ItestHttpContext {
+                    state: Arc::clone(state),
+                    store: Arc::clone(store),
+                    router: Arc::clone(router),
+                    discovery: discovery.clone(),
+                    mesh_observability: Arc::clone(mesh_observability),
+                },
+            ),
+            |context, connection| {
+                handle_itest_connection(&mut context.0, &context.1, connection);
+            },
+        )?;
     }
     Ok(())
 }
 
 #[cfg(feature = "itest-http")]
 fn handle_itest_connection(
-    mut stream: TcpStream,
-    state: &Arc<SharedFederationTrustState>,
-    store: &ramflux_node_core::FederationRedbStore,
-    router: &RouterMeshClient,
-    discovery: &FederationDiscoverySurface,
-    mesh_observability: &SharedMeshObservability,
+    stream: &mut TcpStream,
+    context: &ItestHttpContext,
+    connection: &ramflux_node_core::ConnectionGuard,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        handle_itest_request(&mut stream, state, store, router, discovery, mesh_observability)
+        handle_itest_request(stream, context, connection)
     }));
     match result {
-        Ok(Ok(())) => shutdown_itest_stream(&mut stream),
+        Ok(Ok(())) => shutdown_itest_stream(stream),
         Ok(Err(error)) => {
             tracing::error!(%error, "federation itest request failed");
-            write_itest_500_and_close(&mut stream, &error.to_string());
+            write_itest_500_and_close(stream, &error.to_string());
         }
         Err(payload) => {
             let message = panic_payload_to_string(payload.as_ref());
             tracing::error!(panic = %message, "federation itest request panicked");
-            write_itest_500_and_close(&mut stream, &format!("federation itest panic: {message}"));
+            write_itest_500_and_close(stream, &format!("federation itest panic: {message}"));
         }
     }
 }
@@ -122,17 +129,19 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[cfg(feature = "itest-http")]
 #[allow(clippy::too_many_lines)]
-pub(crate) fn handle_itest_request(
+fn handle_itest_request(
     stream: &mut TcpStream,
-    state: &Arc<SharedFederationTrustState>,
-    store: &ramflux_node_core::FederationRedbStore,
-    router: &RouterMeshClient,
-    discovery: &FederationDiscoverySurface,
-    mesh_observability: &SharedMeshObservability,
+    context: &ItestHttpContext,
+    connection: &ramflux_node_core::ConnectionGuard,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let ItestHttpContext { state, store, router, discovery, mesh_observability } = context;
     let Some(request) = ramflux_node_core::read_itest_http_request(stream)? else {
         return Ok(());
     };
+    let Some(_request) = connection.begin_request() else {
+        return Ok(());
+    };
+
     tracing::info!(
         method = %request.method,
         path = %request.path,

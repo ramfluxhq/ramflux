@@ -313,11 +313,10 @@ fn run_router_async_mesh_quic_listener(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     let worker_threads = router_async_worker_threads();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_threads)
-        .enable_all()
-        .build()?;
-    runtime.block_on(async move {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    let _threads = ramflux_node_core::track_service_runtime(&mut builder);
+    let runtime = builder.worker_threads(worker_threads).enable_all().build()?;
+    let result = runtime.block_on(async move {
         let socket_count = router_async_ingress_socket_count();
         let servers = bind_router_async_mesh_quic_servers(listen_addr, tls, socket_count)?;
         tracing::info!(
@@ -341,7 +340,9 @@ fn run_router_async_mesh_quic_listener(
         }
         shutdown.cancelled().await;
         Ok::<(), anyhow::Error>(())
-    })
+    });
+    ramflux_node_core::drain_service_runtime(runtime);
+    result
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
@@ -779,8 +780,12 @@ async fn router_async_mesh_quic_accept_loop(
     router: Arc<crate::router_runtime::RouterHandle>,
     peer_auth: RouterAsyncMeshPeerAuth,
 ) {
+    let shutdown = ramflux_node_core::service_shutdown_token();
     loop {
-        let connection = match server.accept_connection().await {
+        let connection = match tokio::select! {
+            () = shutdown.cancelled() => return,
+            connection = server.accept_connection() => connection,
+        } {
             Ok(connection) => connection,
             Err(error) => {
                 tracing::warn!(endpoint_index, %error, "router async QUIC connection rejected");
@@ -847,6 +852,9 @@ async fn handle_router_async_mesh_quic_request(
     router: Arc<crate::router_runtime::RouterHandle>,
     peer_service_id: &str,
 ) -> anyhow::Result<()> {
+    let Some(_request) = ramflux_node_core::begin_service_request() else {
+        return Ok(());
+    };
     match accepted {
         ramflux_transport::MeshQuicAcceptedWireRequest::Json(accepted) => {
             match handle_mesh_quic_request_value(&accepted.request, &router, peer_service_id).await
@@ -1001,10 +1009,12 @@ fn serve_mesh_mtls(
     local_service_id: &str,
     allowed_service_ids: &std::collections::BTreeSet<String>,
 ) -> anyhow::Result<()> {
+    let connections =
+        ramflux_node_core::ConnectionSet::new(ramflux_node_core::DEFAULT_CONNECTION_LIMIT);
     tracing::info!("router mesh mTLS surface listening");
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
-        let accepted = match server.accept_authenticated() {
-            Ok(accepted) => accepted,
+        let socket = match server.accept_tcp_stream() {
+            Ok(socket) => socket,
             Err(ramflux_transport::TransportError::Io(error))
                 if error.kind() == std::io::ErrorKind::WouldBlock =>
             {
@@ -1012,50 +1022,66 @@ fn serve_mesh_mtls(
                 continue;
             }
             Err(error) => {
-                tracing::warn!(%error, "router mesh mTLS handshake rejected");
+                tracing::warn!(%error, "router mesh TCP accept failed");
                 continue;
             }
         };
-        let peer_spiffe_uri = accepted.peer_spiffe_uri.clone();
-        let peer = match ramflux_node_core::authorize_mesh_peer(
-            local_service_id,
-            allowed_service_ids,
-            peer_spiffe_uri.as_deref(),
-        ) {
-            Ok(peer) => peer,
-            Err(error) => {
-                tracing::warn!(%error, "router mesh peer identity rejected");
-                continue;
-            }
-        };
-        let mut stream = accepted.stream;
-        let router = Arc::clone(router);
-        let peer_service_id = peer.service_id;
-        ramflux_node_core::spawn_service_worker("ramflux-router-mesh-request", move |shutdown| {
-            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
-                return;
-            };
-            while !shutdown.is_cancelled() {
-                match handle_mesh_request(&mut stream, &router, &peer_service_id) {
-                    Ok(true) => {}
-                    Ok(false) => break,
+        let registration = socket.try_clone()?;
+        connections.spawn(
+            &registration,
+            (
+                socket,
+                server.handshake_config(),
+                Arc::clone(router),
+                local_service_id.to_owned(),
+                allowed_service_ids.clone(),
+            ),
+            |context, connection| {
+                let (socket, config, router, local_id, allowed_ids) = context;
+                let accepted = match socket
+                    .try_clone()
+                    .map_err(ramflux_transport::TransportError::Io)
+                    .and_then(|socket| {
+                        ramflux_transport::authenticate_tcp_stream(socket, Arc::clone(config))
+                    }) {
+                    Ok(accepted) => accepted,
                     Err(error) => {
-                        let body = format!("{error}");
-                        if let Err(write_error) = ramflux_transport::write_mesh_text_response(
-                            &mut stream,
-                            "500 Internal Server Error",
-                            &body,
-                        ) {
-                            tracing::warn!(%write_error, "failed to write router mesh error response");
+                        tracing::debug!(%error, "router mesh TLS handshake ended");
+                        return;
+                    }
+                };
+                let peer = match ramflux_node_core::authorize_mesh_peer(
+                    local_id,
+                    allowed_ids,
+                    accepted.peer_spiffe_uri.as_deref(),
+                ) {
+                    Ok(peer) => peer,
+                    Err(error) => {
+                        tracing::warn!(%error, "router mesh peer identity rejected");
+                        return;
+                    }
+                };
+                let mut stream = accepted.stream;
+                while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+                    match handle_mesh_request(&mut stream, router, &peer.service_id, connection) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(error) => {
+                            if !ramflux_node_core::service_shutdown_token().is_cancelled() {
+                                let _ = ramflux_transport::write_mesh_text_response(
+                                    &mut stream,
+                                    "500 Internal Server Error",
+                                    &error.to_string(),
+                                );
+                            }
+                            tracing::debug!(%error, "router mesh connection ended");
+                            break;
                         }
-                        break;
                     }
                 }
-            }
-            if let Err(error) = ramflux_transport::close_mesh_server_stream(&mut stream) {
-                tracing::debug!(%error, "router mesh close_notify failed");
-            }
-        })?;
+                let _ = ramflux_transport::close_mesh_server_stream(&mut stream);
+            },
+        )?;
     }
     Ok(())
 }

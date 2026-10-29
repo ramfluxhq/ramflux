@@ -2825,6 +2825,7 @@ dependencies = [
  "anyhow",
  "ramflux-node-core",
  "redb",
+ "serde_json",
  "stun",
  "tracing",
  "tracing-subscriber",
