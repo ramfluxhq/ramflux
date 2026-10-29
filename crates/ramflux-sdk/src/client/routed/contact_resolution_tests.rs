@@ -29,10 +29,16 @@ impl Drop for Directory {
 }
 impl Directory {
     async fn new(a: &Fixture, b: &Fixture) -> Result<Self, SdkError> {
+        Self::from_records(&a.root, vec![super::r9::manifest(a)?, super::r9::manifest(b)?]).await
+    }
+    async fn from_records(
+        root: &Path,
+        manifests: Vec<crate::prekey::SdkDeviceManifestResponse>,
+    ) -> Result<Self, SdkError> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let cert = rcgen::generate_simple_self_signed(vec!["directory.test".into()])
             .map_err(|e| invalid(&e.to_string()))?;
-        let ca = a.root.join("directory.pem");
+        let ca = root.join("directory.pem");
         std::fs::write(&ca, cert.cert.pem())?;
         let tls = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -43,8 +49,7 @@ impl Directory {
             .map_err(|e| invalid(&e.to_string()))?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let records =
-            Arc::new(std::sync::Mutex::new(vec![super::r9::manifest(a)?, super::r9::manifest(b)?]));
+        let records = Arc::new(std::sync::Mutex::new(manifests));
         let observed = records.clone();
         let unavailable = Arc::new(AtomicBool::new(false));
         let failure = unavailable.clone();
@@ -602,3 +607,6 @@ async fn two_hour_old_accounts_resolve_add_contacts_and_authorize_new_prekeys()
 
 #[path = "contact_request_tests.rs"]
 mod requests;
+
+#[path = "native_contact_transport_tests.rs"]
+mod native_transport;
