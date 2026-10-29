@@ -11,8 +11,8 @@ pub(crate) use helpers::*;
 pub use protocol::*;
 pub use push_route::*;
 
+mod custody;
 #[cfg(test)]
 #[path = "submit_tests.rs"]
 mod submit_tests;
-mod custody;
 pub use custody::GatewayCustodyConfig;

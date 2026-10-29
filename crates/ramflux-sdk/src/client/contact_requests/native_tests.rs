@@ -66,11 +66,13 @@ fn transport(sender: &Fixture, target: &Fixture) -> TestResult<(GatewayInboxEntr
     };
     Ok((
         GatewayInboxEntry {
+            forwarded: false,
             inbox_seq: 1,
             target_delivery_id: message.target_delivery_id.clone(),
             envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
         },
         Routing {
+            group_message_id: None,
             kind: Kind::Control,
             conversation_id: conversation,
             group_id: None,

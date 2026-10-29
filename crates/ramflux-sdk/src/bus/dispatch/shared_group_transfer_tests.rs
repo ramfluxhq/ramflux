@@ -416,7 +416,7 @@ async fn stale_snapshot() -> TestResult {
             .state_hash,
         head.snapshot().state_hash
     );
-    assert_stale_refusal(&mut rig, &base, &head, &stale).await?;
+    Box::pin(assert_stale_refusal(&mut rig, &base, &head, &stale)).await?;
     rig.directory.abort();
     let root = rig.root.clone();
     drop(rig);

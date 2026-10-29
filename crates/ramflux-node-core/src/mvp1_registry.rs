@@ -642,7 +642,8 @@ impl IdentityRegistry {
     }
 
     pub(crate) fn bound_principal_root(&self, principal: &str) -> Option<&str> {
-        self.principal_root_bindings.get(principal)
+        self.principal_root_bindings
+            .get(principal)
             .or_else(|| self.root_public_keys.get(principal))
             .or_else(|| self.custody.principals.get(principal))
             .map(String::as_str)
