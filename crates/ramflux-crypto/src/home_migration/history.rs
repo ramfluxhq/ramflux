@@ -179,6 +179,12 @@ fn verify_genesis(
     {
         return Err(reject("migration genesis authority mismatch"));
     }
+    super::verify_home_declaration(
+        &genesis.body.home_declaration,
+        &authority,
+        pin.0,
+        genesis.body.registered_at,
+    )?;
     verify_node(genesis, pin.0, pin.1)?;
     Ok((genesis.body.registered_at, authority.envelope().body.master_certificate.body.range_index))
 }

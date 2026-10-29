@@ -50,6 +50,21 @@ pub fn genesis(a: &VerifiedRecord) -> TestResult<RecordEvidence> {
     let record = HomeRecord::Genesis {
         genesis: Box::new(sign_node(
             Genesis {
+                home_declaration: Box::new(
+                    SelfSigningKey::from_vault_seed(&Zeroizing::new([2; 32]))
+                        .sign_home_declaration(
+                            HomeDeclarationV1 {
+                                version: 1,
+                                principal_id: a.envelope().body.principal_id.clone(),
+                                account_anchor: a.envelope().body.account_anchor.clone(),
+                                home_node: "A".into(),
+                                created_at: NOW - 10,
+                                nonce: hash(120),
+                            },
+                            a,
+                            NOW - 10,
+                        )?,
+                ),
                 version: 1,
                 account_anchor: a.envelope().body.account_anchor.clone(),
                 home_epoch: 0,

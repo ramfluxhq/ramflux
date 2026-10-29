@@ -15,6 +15,11 @@ pub enum Role {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SignerKey {
+    MasterCertifiedHome {
+        account_anchor: String,
+        master_certificate_hash: String,
+        public_key: String,
+    },
     MasterCertifiedCustody {
         account_anchor: String,
         master_certificate_hash: String,
@@ -35,7 +40,8 @@ impl SignerKey {
     #[must_use]
     pub fn public_key(&self) -> &str {
         match self {
-            Self::MasterCertifiedCustody { public_key, .. }
+            Self::MasterCertifiedHome { public_key, .. }
+            | Self::MasterCertifiedCustody { public_key, .. }
             | Self::BranchV3 { public_key, .. }
             | Self::Node { public_key, .. } => public_key,
         }
@@ -114,6 +120,7 @@ pub enum Refusal {
     CommitOutcomeUnknown,
     PreviousWindowActive,
     HomeGenesisRequired,
+    HomeDeclarationRequired,
     HomeCheckpointRequired,
     BacklogIncomplete,
     BacklogEvidenceRequired,
@@ -210,9 +217,27 @@ impl Message for Authorization {
     const ROLES: &'static [Role] = &[Role::Management, Role::Actor];
 }
 
+/// The master names the account's initial home independently of device possession.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HomeDeclarationV1 {
+    pub version: u32,
+    pub principal_id: String,
+    pub account_anchor: String,
+    pub home_node: String,
+    pub created_at: u64,
+    pub nonce: String,
+}
+impl sealed::Sealed for HomeDeclarationV1 {}
+impl Message for HomeDeclarationV1 {
+    const DOMAIN: &'static str = domain::HOME_DECLARATION;
+    const ROLES: &'static [Role] = &[Role::Management];
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Genesis {
+    pub home_declaration: Box<Signed<HomeDeclarationV1>>,
     pub version: u32,
     pub account_anchor: String,
     pub home_epoch: u64,

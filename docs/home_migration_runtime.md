@@ -17,6 +17,33 @@ HTTP origin without a path. Its token belongs to the node services, not clients.
 The destination offer binds a freshly verified signed client discovery record,
 including its gateway address, CA and migration capability.
 
+## Initial home approval
+
+A device registration alone does not establish a migration home. The first
+`AttestPayload` must carry `home_declaration`, a master-signed `HomeDeclarationV1`
+with version, principal id, root account anchor, initial home node id, creation
+time and nonce. The receiver verifies the master certification against its stored
+account authority and requires the declaration to name itself. A missing or
+invalid declaration returns `home_declaration_required` without creating a head.
+A copied publication and a stolen device branch cannot approve another home.
+
+The node signs the declaration into the genesis record. History verification
+requires it too; a node signature alone is insufficient. Declaration replay
+returns the same durable genesis, including after restart. Device roster changes
+under the same certified master do not invalidate initial consent. A replacement
+master requires consent under that current certification before initial genesis.
+
+`home_migration_v1` in node discovery describes server support, not account
+eligibility. There is no account-specific capability advertisement in the current
+custody frames. Until a declaration establishes its home, an account cannot obtain
+a migration attestation or destination offer. Clients must handle the typed
+refusal; they must not infer account eligibility from node discovery. Declaration
+production in account creation remains a separate client integration step.
+
+Existing experimental genesis records without a declaration cannot be decoded or
+verified by this schema. They are not silently upgraded with node-only consent.
+Any conversion of retained experimental state requires an explicit protocol.
+
 ## Routes and readers
 
 | Surface | Route/frame | Reader and trust boundary |

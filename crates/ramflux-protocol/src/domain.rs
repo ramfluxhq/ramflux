@@ -112,6 +112,7 @@ pub const CUSTODY_TIME_PROBE: &str = "ramflux.identity.time_probe.v1";
 pub const HOME_PREPARE: &str = "ramflux.identity.home_prepare.v1";
 pub const HOME_ROUTE_OFFER: &str = "ramflux.identity.home_route_offer.v1";
 pub const HOME_AUTHORIZATION: &str = "ramflux.identity.home_authorization.v1";
+pub const HOME_DECLARATION: &str = "ramflux.identity.home_declaration.v1";
 pub const HOME_GENESIS: &str = "ramflux.identity.home_genesis.v1";
 pub const HOME_CONTROL: &str = "ramflux.identity.home_control.v1";
 pub const HOME_RECEIPT: &str = "ramflux.identity.home_receipt.v1";
@@ -128,7 +129,7 @@ pub const HOME_PEER_STATUS: &str = "ramflux.identity.home_peer_status.v1";
 
 pub const HOME_PEER_QUERY: &str = "ramflux.identity.home_peer_query.v1";
 
-pub const ALL: [&str; 116] = [
+pub const ALL: [&str; 117] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -233,6 +234,7 @@ pub const ALL: [&str; 116] = [
     HOME_ROUTE_OFFER,
     HOME_AUTHORIZATION,
     HOME_GENESIS,
+    HOME_DECLARATION,
     HOME_CONTROL,
     HOME_RECEIPT,
     HOME_COMMIT,

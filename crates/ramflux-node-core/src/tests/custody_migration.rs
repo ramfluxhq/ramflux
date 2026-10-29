@@ -237,6 +237,7 @@ fn read_grant_cannot_execute_a_management_control_even_for_a_privileged_branch()
     control.action = Action::Attest;
     control.audience_node = "old".into();
     let payload = ramflux_protocol::home_migration::AttestPayload {
+        home_declaration: None,
         account_anchor: driver.reference.account_anchor.clone(),
         destination_node: "node".into(),
         nonce: control.nonce.clone(),
@@ -344,3 +345,6 @@ fn ordinary_native_proofs_and_existing_sessions_obey_root_cutover() -> Result {
     }
     Ok(())
 }
+
+#[path = "custody_home_declaration.rs"]
+mod home_declaration;
