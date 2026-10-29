@@ -18,7 +18,7 @@ impl AccountDb {
     /// Returns an error if WAL/FULL cannot be enabled or the outbox cannot be installed.
     pub fn enable_runtime(&self) -> Result<(), StorageError> {
         self.connection.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA secure_delete=ON;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA secure_delete=ON; PRAGMA wal_autocheckpoint=0;",
         )?;
         let journal: String =
             self.connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
@@ -28,7 +28,8 @@ impl AccountDb {
         }
         self.install_journal_schema()?;
         self.install_runtime_schema()?;
-        self.checkpoint_retired_secrets()
+        self.connection.enable_background_checkpoints();
+        Ok(())
     }
 
     /// Checkpoints deleted secret pages after the surrounding writer transaction has committed.
@@ -39,14 +40,14 @@ impl AccountDb {
         Ok(())
     }
 
-    /// Checkpoints retired pages only after the outer writer phase has committed.
+    /// Queues coalesced PASSIVE maintenance after the outer writer phase has committed.
     /// # Errors
     /// Returns SQLite errors; returns false while a surrounding transaction remains open.
     pub fn checkpoint_retired_secrets_if_committed(&self) -> Result<bool, StorageError> {
         if !self.connection.is_autocommit()? {
             return Ok(false);
         }
-        self.checkpoint_retired_secrets()?;
+        self.connection.request_background_checkpoint();
         Ok(true)
     }
 

@@ -3,6 +3,7 @@
 
 //! SQLite ownership boundary. Connections and statements never leave their DB thread.
 
+use crate::database_checkpoint::BackgroundCheckpoint;
 use rusqlite::types::{FromSql, ToSql, ToSqlOutput, Value, ValueRef};
 use rusqlite::{Error, OpenFlags, Result};
 use std::collections::BTreeMap;
@@ -22,6 +23,7 @@ struct Worker {
     id: u64,
     path: PathBuf,
     transaction_mode: Mutex<Option<TransactionMode>>,
+    checkpoints: std::sync::Arc<BackgroundCheckpoint>,
     sender: Option<SyncSender<Job>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -60,15 +62,33 @@ impl Connection {
             .name("ramflux-db".to_owned())
             .spawn(move || {
                 let opened =
-                    rusqlite::Connection::open_with_flags(worker_path, flags).and_then(|db| {
+                    rusqlite::Connection::open_with_flags(&worker_path, flags).and_then(|db| {
                         db.busy_timeout(std::time::Duration::from_secs(5))?;
                         Ok(db)
                     });
                 match opened {
                     Ok(mut db) => {
-                        if ready_tx.send(Ok(())).is_ok() {
-                            while let Ok(job) = receiver.recv() {
-                                job(&mut db);
+                        let worker_checkpoints =
+                            std::sync::Arc::new(BackgroundCheckpoint::for_path(&worker_path));
+                        if ready_tx.send(Ok(worker_checkpoints.clone())).is_ok() {
+                            loop {
+                                match receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+                                    Ok(job) => {
+                                        let changes = db.total_changes();
+                                        let transaction = !db.is_autocommit();
+                                        job(&mut db);
+                                        if worker_checkpoints.enabled()
+                                            && (db.total_changes() != changes
+                                                || transaction && db.is_autocommit())
+                                        {
+                                            worker_checkpoints.request();
+                                        }
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                }
+                                // Each job has delivered its reply before checkpoint I/O starts.
+                                worker_checkpoints.maintain(&db);
                             }
                         }
                     }
@@ -78,12 +98,13 @@ impl Connection {
                 }
             })
             .map_err(|_| Error::InvalidQuery)?;
-        ready_rx.recv().map_err(|_| Error::InvalidQuery)??;
+        let checkpoints = ready_rx.recv().map_err(|_| Error::InvalidQuery)??;
         Ok(Self {
             inner: std::sync::Arc::new(Worker {
                 id: connection_id,
                 path,
                 transaction_mode: Mutex::new(None),
+                checkpoints,
                 sender: Some(sender),
                 handle: Some(worker),
             }),
@@ -104,6 +125,14 @@ impl Connection {
             }))
             .map_err(|_| Error::InvalidQuery)?;
         receiver.recv().map_err(|_| Error::InvalidQuery)?
+    }
+
+    pub(crate) fn enable_background_checkpoints(&self) {
+        self.inner.checkpoints.enable();
+    }
+
+    pub(crate) fn request_background_checkpoint(&self) {
+        self.inner.checkpoints.request();
     }
 
     pub(crate) fn execute_batch(&self, sql: &str) -> Result<()> {
@@ -423,6 +452,39 @@ impl Drop for Transaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::Connection;
+    #[test]
+    fn checkpoint_requests_do_not_wait_for_the_owner_and_close_with_its_worker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let db = Connection::open(":memory:")?;
+        db.enable_background_checkpoints();
+        let weak = std::sync::Arc::downgrade(&db.inner.checkpoints);
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        db.inner
+            .sender
+            .as_ref()
+            .ok_or("owner channel")?
+            .send(Box::new(move |_| {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+            }))
+            .map_err(|_| "owner command")?;
+        entered_rx.recv()?;
+        let requester = db.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            requester.request_background_checkpoint();
+            let _ = done_tx.send(());
+        });
+        let scheduled = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        let _ = release_tx.send(());
+        thread.join().map_err(|_| "request thread")?;
+        scheduled?;
+        drop(db);
+        assert!(weak.upgrade().is_none(), "checkpoint state must close with its worker");
+        Ok(())
+    }
+
     #[test]
     fn sqlite_connection_and_statements_stay_on_one_dedicated_thread() -> rusqlite::Result<()> {
         let caller = std::thread::current().id();
