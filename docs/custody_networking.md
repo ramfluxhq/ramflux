@@ -251,8 +251,9 @@ enable the fixture; production artifacts must not.
 ### Temporary legacy integration fixtures
 
 The `itest-legacy-accounts` SDK/CLI feature is disabled by default. It is compiled
-only in explicitly marked integration builds (`RAMFLUX_ITEST_BUILD=1`) and is
-rejected by guarded production builds even with that marker. Production feature
+only in explicitly marked development/test integration builds (`RAMFLUX_ITEST_BUILD=1`).
+Release profiles reject it independently of that marker or debug-assertion settings;
+guarded production builds reject it in every profile. Production feature
 provenance checks forbid it alongside the memory-vault fixture.
 
 An integration daemon must also opt in with `--itest-legacy-accounts` (or
