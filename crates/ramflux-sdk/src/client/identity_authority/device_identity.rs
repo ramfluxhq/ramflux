@@ -12,6 +12,9 @@ impl RamfluxClient {
     /// Rejects missing owned root/branch state or inconsistent account ownership.
     pub fn owned_device_identity(&self) -> Result<RootQualifiedDeviceRef, SdkError> {
         if let Some(account) = &self.born_v3_account {
+            if account.branch_pending() {
+                return Err(SdkError::NetworkingPending);
+            }
             let device = self
                 .device_branch
                 .as_ref()
@@ -25,6 +28,9 @@ impl RamfluxClient {
         )?)
     }
     pub(crate) fn read_device_identity(&self) -> Result<Option<RootQualifiedDeviceRef>, SdkError> {
+        if self.born_v3_account.as_ref().is_some_and(|account| account.branch_pending()) {
+            return Ok(None);
+        }
         if self.born_v3_account.is_some()
             || (self.identity_root.is_some() && self.device_branch.is_some())
         {

@@ -112,6 +112,7 @@ pub(super) async fn handle(
     let mut requests = JoinSet::new();
     let mut inflight = BTreeSet::new();
     let mut ceremony: Option<crate::custody::CreationCeremony> = None;
+    let mut recovery: Option<crate::custody::RecoveryCeremony> = None;
     let result = loop {
         tokio::select! {
             _ = disconnected.changed() => break Ok(()),
@@ -126,7 +127,9 @@ pub(super) async fn handle(
                     },
                 };
                 if super::custody_setup::handles(&incoming.frame()?.method) {
-                    let bytes = if incoming.frame()?.method == "account.create.confirm" {
+                    let bytes = if incoming.frame()?.method.starts_with("account.recover.") {
+                        super::recovery::respond(incoming.frame()?, &supervisor, &mut recovery, &mut disconnected).await?
+                    } else if incoming.frame()?.method == "account.create.confirm" {
                         super::creation_confirm::respond(incoming.frame()?, &supervisor, &mut ceremony, &mut disconnected).await?
                     } else {
                         super::custody_setup::respond(incoming.frame()?, &supervisor.config, &mut ceremony)?

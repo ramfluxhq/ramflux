@@ -40,6 +40,27 @@ fn manifest_failure(error: SdkError) -> SdkError {
         _ => ContactReason::ManifestInvalid.into(),
     }
 }
+pub(crate) fn verify_native_card_head(
+    card: Option<&crate::ContactCardBody>,
+    manifest: &SdkDeviceManifestResponse,
+) -> Result<(), SdkError> {
+    if let Some(card) = card.filter(|card| card.version == 3) {
+        if card.root_commitment != manifest.principal_commitment {
+            return Err(ContactReason::AnchorMismatch.into());
+        }
+        let authority = manifest.custody.as_ref().ok_or(ContactReason::ManifestInvalid)?;
+        let chain = card.native_authority.as_ref().ok_or(ContactReason::ManifestInvalid)?;
+        if ramflux_protocol::custody::object_hash(&authority.publication.record)? != chain.head_hash
+            || ramflux_protocol::custody::object_hash(
+                &authority.publication.record.body.master_certificate,
+            )? != chain.master_certificate_hash
+        {
+            return Err(ContactReason::ManifestInvalid.into());
+        }
+    }
+    Ok(())
+}
+
 impl RamfluxClient {
     pub(crate) async fn resolve_contact(
         &self,
@@ -73,6 +94,7 @@ impl RamfluxClient {
             engine.fetch_principal_manifest(selector).await.map_err(lookup_failure)?
         };
         let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?;
+        verify_native_card_head(card, &manifest)?;
         let principal = &manifest.principal_id;
         if principal != selector && !(allow_commitment && manifest.principal_commitment == selector)
         {

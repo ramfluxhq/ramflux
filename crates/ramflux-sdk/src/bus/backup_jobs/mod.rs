@@ -44,3 +44,7 @@ pub(crate) struct NativeInstallKey {
     pub account_id: String,
     pub key: ramflux_storage::AccountDbKey,
 }
+pub(crate) struct NativeRestoreSetup {
+    pub vault: std::sync::Arc<dyn crate::custody::PrimaryVault>,
+    pub passphrase: zeroize::Zeroizing<String>,
+}

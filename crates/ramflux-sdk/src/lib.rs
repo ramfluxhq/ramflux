@@ -20,9 +20,11 @@ mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};
 mod constants;
 mod contact_card;
+mod contact_card_native;
 mod contact_identity;
 pub use contact_card::{
-    ContactCardBody, ContactNode, ContactReason, contact_node_fingerprint, parse_contact_card,
+    ContactCardAuthority, ContactCardBody, ContactNode, ContactReason, contact_node_fingerprint,
+    parse_contact_card,
 };
 pub use contact_identity::{ContactRootChange, ContactRootSource};
 mod dm;
@@ -85,9 +87,10 @@ pub use bus::{
     LocalBusObjectImportRequest, LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest,
     LocalBusObjectPutFinishRequest, LocalBusObjectPutRequest, LocalBusObjectPutStatusRequest,
     LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
-    LocalBusObjectTransferStatusRequest, LocalBusPendingCreation, LocalBusSubscriptionOpenRequest,
-    LocalMcpGrantSigningBody, LocalMcpStandingApprovalSigningBody, TaskApprovalBinding,
-    serve_local_bus, serve_local_bus_until,
+    LocalBusObjectTransferStatusRequest, LocalBusPendingCreation, LocalBusPendingRecovery,
+    LocalBusRecoveryClient, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
+    LocalMcpStandingApprovalSigningBody, TaskApprovalBinding, serve_local_bus,
+    serve_local_bus_until,
 };
 pub use client::RamfluxClient;
 pub use client::contact::SdkContactSafetyNumber;

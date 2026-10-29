@@ -349,7 +349,7 @@ impl BackupDatabase {
     /// # Errors
     /// Returns SQL errors without changing any live generation.
     pub fn archive_outbound(&self) -> Result<(), StorageError> {
-        self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/%'; INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/active/%' OR state_kind LIKE 'dm-pair/reset-work/%' OR state_kind LIKE 'dm-pair/bootstrap/%'; DELETE FROM projection_checkpoint WHERE last_event_id IN (SELECT event_id FROM local_event_log WHERE event_type='group.sender_key.state' AND CASE WHEN json_valid(CAST(event_body AS TEXT)) THEN json_extract(CAST(event_body AS TEXT),'$.session_snapshot.is_initiator_side') END=1); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'own-device/send/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'own-device/send/%'; DELETE FROM outbox_queue;")?;
+        super::backup_retirement::archive_outbound_state(&self.db)?;
         Ok(())
     }
 }

@@ -71,13 +71,22 @@ are retained. After the installation worker runs the account remains locked;
 explicitly unlock it with its local data passphrase. No secret is recovered from
 archive metadata.
 
-The fresh-install contract allocates a new branch and requires an explicit approval
-from an already-approved primary through ordinary device enrollment, or the separate
-24-word recovery ceremony when no primary is available. Restore itself cannot grant
-networking, even with a primary credential already present locally. That branch
-allocation and SAS/recovery handoff are pending integration: current native jobs
-refuse fresh installation with typed `networking_pending`, leaving the account index
-unchanged. This refusal does not establish completion of the approval workflow.
+For a fresh installation, send `account.restore.install` with `job_id` and a new
+local `passphrase`. This independently seals the restored data key; it is separate
+from the archive password and never comes from archive metadata. The preview names
+a fresh local account ID. Installation generates fresh branch keys in the local
+credential provider, imports history, and leaves that branch uncertified with
+`networking_pending`. No primary credential is loaded or treated as consent. Omitting
+the local passphrase refuses with typed `networking_pending` without creating an
+account. Existing-installation merge keeps its `{job_id}` request and ordinary
+unlock precondition.
+
+Complete the separate user-started [phrase recovery ceremony](local_bus_account_recovery.md)
+to certify the fresh branch and publish the replacement authority. A matching durable
+publication ACK is required before networking becomes live; an uncertain ACK leaves
+the same signed intent pending for reconciliation. Until SAS pairing is implemented,
+adding another native installation uses this recovery/promotion path and revokes the
+former branches. Restore alone never approves a branch.
 
 ## Verification and atomic installation
 

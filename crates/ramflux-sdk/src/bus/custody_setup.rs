@@ -12,6 +12,7 @@ use zeroize::Zeroizing;
 
 pub(super) fn handles(method: &str) -> bool {
     method.starts_with("account.custody.")
+        || method.starts_with("account.recover.")
         || method == "account.create"
         || method.starts_with("account.create.")
 }

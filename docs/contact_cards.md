@@ -27,7 +27,37 @@ existing root-commitment, device manifest, branch-proof and prekey checks. A kno
 cannot be silently replaced. A card supplies the expected root rather than taking the
 first root from node lookup. Safety numbers still require comparison by the users.
 
-## Card version 1
+## Card formats
+
+Native accounts emit version 3 and refuse version 1 import. Version 1 below is the
+legacy format retained only until legacy identity support is retired.
+
+## Native card version 3
+
+Text uses `ramflux-card:v3:BASE64URL`; links use
+`ramflux://contact/v3/BASE64URL`. The complete encoded input is bounded to 1 MiB.
+The payload is canonical JSON `{body, signature}`. The version-3 body contains
+`principal_id`, `account_anchor`, `master_public_key`, the master-signed
+`master_certificate`, `authority_head_hash`, the complete signed-authority device
+list `devices`, `node_url`, `node_key_fingerprint`, `display_name`, `issued_at`,
+and `expires_at`. The self-signing key signs the exact JCS transcript
+`{"domain":"ramflux.contact.card.v3","body":BODY}`. It never uses a legacy signer.
+
+Import verifies the master anchor, master certificate, self-signing signature,
+expiry, canonical encoding and safe locator/display metadata. Online resolution
+requires the current authenticated directory head hash and master-certificate hash
+to equal the card commitments. A replaced self-signing key cannot make its old
+certificate current by copying the new head hash into another card. Export a fresh
+card after authority changes. Device permission comes from the current verified
+authority and possession proofs, not from portable display metadata.
+
+First contact pins the master anchor with `root_source: card` under the existing
+TOFU model. A later native card with a different pinned anchor returns code
+`AnchorMismatch`, reason `anchor_mismatch`; a card cannot replace that pin.
+Primary replacement preserves the anchor. Contact safety comparison remains a
+separate user action.
+
+## Legacy card version 1 encoding
 
 The text form is `ramflux-card:v1:BASE64URL`; the link is
 `ramflux://contact/v1/BASE64URL`. Both are single-line strings of at most 4096 bytes.

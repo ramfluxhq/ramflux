@@ -61,6 +61,8 @@ struct Body {
     state: Option<LocalBusCreatedAccountState>,
     networking: Option<CreationState>,
     cancelled: Option<bool>,
+    account_anchor: Option<String>,
+    warning: Option<String>,
 }
 #[derive(Deserialize)]
 struct Error {
@@ -204,3 +206,72 @@ impl LocalBusCreationClient {
 
 #[derive(Serialize)]
 struct Empty {}
+
+/// Exclusive local-only recovery transport. No ordinary/network request can prompt phrase input.
+pub struct LocalBusRecoveryClient(LocalBusCreationClient);
+/// Display the anchor and warning before requesting explicit phrase confirmation.
+#[derive(Debug)]
+pub struct LocalBusPendingRecovery {
+    pub ceremony_id: String,
+    pub account_anchor: String,
+    pub expires_in_ms: u64,
+    pub warning: String,
+}
+impl LocalBusRecoveryClient {
+    /// # Errors
+    /// Returns socket/peer-policy failures.
+    pub async fn connect(socket: impl AsRef<std::path::Path>) -> Result<Self, SdkError> {
+        Ok(Self(LocalBusCreationClient::connect(socket).await?))
+    }
+    /// Begin only at the user's explicit request. This sends no recovery secret.
+    /// # Errors
+    /// Refuses unknown identity, unresolved recovery and unavailable primary vaults.
+    pub async fn begin(&mut self, account_id: &str) -> Result<LocalBusPendingRecovery, SdkError> {
+        #[derive(Serialize)]
+        struct Input<'a> {
+            account_id: &'a str,
+        }
+        let body = self.0.exchange("account.recover.begin", Input { account_id }).await?;
+        Ok(LocalBusPendingRecovery {
+            ceremony_id: body.ceremony_id.ok_or(SdkError::CustodySetupInvalid)?,
+            account_anchor: body.account_anchor.ok_or(SdkError::CustodySetupInvalid)?,
+            expires_in_ms: body.expires_in_ms.ok_or(SdkError::CustodySetupInvalid)?,
+            warning: body.warning.ok_or(SdkError::CustodySetupInvalid)?,
+        })
+    }
+    /// Confirm the fingerprint displayed by begin; phrase and passphrase erase on drop.
+    /// # Errors
+    /// Refuses wrong phrase/secret, stale authority, expiry and failed durable persistence.
+    pub async fn confirm(
+        &mut self,
+        phrase: &Zeroizing<String>,
+        passphrase: &Zeroizing<String>,
+        confirmed_anchor: &str,
+    ) -> Result<LocalBusCreatedAccount, SdkError> {
+        #[derive(Serialize)]
+        struct Input<'a> {
+            phrase: &'a Zeroizing<String>,
+            passphrase: &'a Zeroizing<String>,
+            confirmed_anchor: &'a str,
+        }
+        let body = self
+            .0
+            .exchange("account.recover.confirm", Input { phrase, passphrase, confirmed_anchor })
+            .await?;
+        Ok(LocalBusCreatedAccount {
+            account_id: body.account_id.ok_or(SdkError::CustodySetupInvalid)?,
+            display_name: body.display_name.ok_or(SdkError::CustodySetupInvalid)?,
+            state: body.state.ok_or(SdkError::CustodySetupInvalid)?,
+            networking: body.networking.ok_or(SdkError::CustodySetupInvalid)?,
+        })
+    }
+    /// # Errors
+    /// Returns transport/protocol errors. Cancellation is idempotent after consumption.
+    pub async fn cancel(&mut self) -> Result<(), SdkError> {
+        if self.0.exchange("account.recover.cancel", Empty {}).await?.cancelled == Some(true) {
+            Ok(())
+        } else {
+            Err(SdkError::CustodySetupInvalid)
+        }
+    }
+}

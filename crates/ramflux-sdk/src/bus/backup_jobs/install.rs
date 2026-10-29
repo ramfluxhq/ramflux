@@ -67,12 +67,24 @@ impl BackupJobs {
         job: &BackupJob,
         staging: VerifiedBackupStaging,
         native_key: Option<super::NativeInstallKey>,
+        native_setup: Option<super::NativeRestoreSetup>,
     ) -> Result<(String, BackupCounts, BackupCounts), SdkError> {
-        let mut metadata =
+        let metadata =
             format::load_metadata(&staging.directory().join("identity.sealed"), staging.key())?;
         if matches!(&metadata.identity, format::Identity::Native { .. }) {
-            return self.install_native(job, &staging, &metadata, native_key);
+            return self.install_native(job, &staging, &metadata, native_key, native_setup);
         }
+        if native_setup.is_some() {
+            return Err(crate::SdkError::CustodyModeDowngrade);
+        }
+        self.install_legacy_generation(job, staging, metadata)
+    }
+    fn install_legacy_generation(
+        &self,
+        job: &BackupJob,
+        staging: VerifiedBackupStaging,
+        mut metadata: format::Metadata,
+    ) -> Result<(String, BackupCounts, BackupCounts), SdkError> {
         let id = metadata.identity.account_id().to_owned();
         let lease =
             self.generations.try_acquire(&id)?.ok_or_else(|| refused("install_in_progress"))?;
