@@ -35,6 +35,8 @@ impl BackupDatabase {
         if fingerprint != key.fingerprint() {
             return Err(StorageError::AccountKeyMismatch);
         }
+        db.execute_batch(super::event_counter::SCHEMA)?;
+        super::message_footprint::install(&db)?;
         let opened = Self { db };
         opened.ensure_missing_manifest()?;
         opened.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;

@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use tokio::task::LocalSet;
 mod bindings;
 mod erasure;
+mod erasure_audit;
+mod erasure_matrix;
 mod fixture;
 mod followups;
 mod limits;

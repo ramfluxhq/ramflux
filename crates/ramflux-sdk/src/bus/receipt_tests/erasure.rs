@@ -31,11 +31,25 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
     );
     sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
     let committed = recipient.client.authenticated_committed_key(&entry)?;
-    let marker = recipient.client.account_db()?.routed_seen_key(&committed)?;
+    let marker = recipient
+        .client
+        .account_db()?
+        .routed_seen_key(&ramflux_protocol::canonical_json_bytes(&entry.envelope)?)?;
     assert_eq!(
-        recipient.client.account_db()?.load_actor_state::<String>(&marker)?,
-        Some(entry.envelope.payload_hash.clone())
+        recipient.client.account_db()?.load_actor_state::<serde_json::Value>(&marker)?,
+        Some(json!({"payload_hash":entry.envelope.payload_hash}))
     );
+    let raw = super::erasure_audit::open(&b, &recipient.client)?;
+    let identities = super::erasure_audit::identities(&raw)?;
+    let mut forbidden = super::erasure_audit::dictionary(&raw, &entry.envelope.envelope_id)?;
+    forbidden.extend([
+        a.identity()?.root_commitment().to_owned(),
+        entry.envelope.source_principal_id.clone(),
+        entry.envelope.source_device_id.clone(),
+        entry.envelope.envelope_id.clone(),
+        committed.clone(),
+    ]);
+    drop(raw);
     recipient.client.delete_direct_message(
         "thread",
         "privacy-envelope-id",
@@ -43,12 +57,20 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
         "delete-marker",
     )?;
     assert!(!recipient.client.account_db()?.actor_state_exists(&committed)?);
+    let raw = super::erasure_audit::open(&b, &recipient.client)?;
+    assert_eq!(identities, super::erasure_audit::identities(&raw)?);
+    super::erasure_audit::assert_erased(&raw, &forbidden, "privacy-envelope-id")?;
+    drop(raw);
     for restart in [false, true] {
         if restart {
             drop(recipient);
             recipient = b.account(None, mail.clone())?;
             receiver = recipient.take_live_engine().await?;
         }
+        // The replay check must not need any retained identity/authority evidence.
+        let raw = super::erasure_audit::open(&b, &recipient.client)?;
+        super::erasure_audit::assert_erased(&raw, &forbidden, "privacy-envelope-id")?;
+        drop(raw);
         sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
         recipient.client.ack_gateway_entry(&mut receiver, &entry, now_unix_timestamp()).await?;
         assert!(!recipient.client.account_db()?.has_inbox_retry(&committed)?);
@@ -63,7 +85,7 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
             .acked
             .contains(&(b.device.clone(), entry.envelope.envelope_id.clone()))
     );
-    // A changed authenticated payload is a replay mismatch before any pair decryption.
+    // Different bytes miss the marker and go through the normal authenticated/decryption path.
     let changed = source
         .client
         .send_plaintext_direct_message_without_franking(
@@ -75,16 +97,45 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
         .await?;
     let mut conflict = changed;
     conflict.envelope.envelope_id = entry.envelope.envelope_id.clone();
-    let branch = source.client.device_branch.as_ref().ok_or("source branch")?;
+    sign_conflict(&source.client, &mut conflict)?;
+    assert_conflict_quarantine(&mut recipient, &mut receiver, &pool, conflict, &committed, &marker)
+        .await?;
+    evict_identity_evidence(&recipient.client)?;
+    assert!(recipient.client.authenticated_committed_key(&entry).is_err());
+    sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
+    let raw = super::erasure_audit::open(&b, &recipient.client)?;
+    super::erasure_audit::assert_erased(&raw, &forbidden, "privacy-envelope-id")?;
+    drop(raw);
+    drop(recipient);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn evict_identity_evidence(client: &RamfluxClient) -> TestResult {
+    // This explicit fixture eviction follows the deletion invariance assertion above.
+    // Replays must work even when no signed set, manifest or directory evidence remains.
+    let db = client.account_db()?;
+    for prefix in ["identity/", "directory/device/", "directory/identity/"] {
+        loop {
+            let keys = db.actor_state_key_page(prefix, 128)?;
+            if keys.is_empty() {
+                break;
+            }
+            for key in keys {
+                db.remove_actor_state(&key)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sign_conflict(source: &RamfluxClient, conflict: &mut GatewayInboxEntry) -> TestResult {
+    let branch = source.device_branch.as_ref().ok_or("source branch")?;
     conflict.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
         &ramflux_protocol::envelope_sender_signed_bytes(&conflict.envelope)?,
         branch,
     );
-    assert_conflict_quarantine(&mut recipient, &mut receiver, &pool, conflict, &committed, &marker)
-        .await?;
-    drop(recipient);
-    drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -94,13 +145,13 @@ async fn assert_conflict_quarantine(
     pool: &ramflux_transport::RelayQuicPool,
     mut conflict: GatewayInboxEntry,
     committed: &str,
-    marker: &str,
+    _marker: &str,
 ) -> TestResult {
     let error = sync_driver::process(recipient, receiver, pool, &conflict)
         .await
         .err()
         .ok_or("replay accepted")?;
-    assert!(matches!(error, SdkError::ReplayMismatch));
+    assert!(!matches!(error, SdkError::ReplayMismatch));
     assert!(sync_driver::quarantine_failure(
         &recipient.client,
         &receiver.config.device_id,
@@ -142,6 +193,10 @@ async fn assert_conflict_quarantine(
         &SdkError::InboundRejected("current root replaced".into()),
         now_unix_timestamp(),
     )?;
+    sync_driver::process(recipient, receiver, pool, &conflict)
+        .await
+        .err()
+        .ok_or("modified entry accepted")?;
     assert_failure_journal(
         &recipient.client,
         &[
@@ -150,21 +205,21 @@ async fn assert_conflict_quarantine(
             &conflict.envelope.envelope_id,
             committed,
         ],
-        marker,
+        2,
     )?;
     Ok(())
 }
 
-fn assert_failure_journal(client: &RamfluxClient, forbidden: &[&str], marker: &str) -> TestResult {
+fn assert_failure_journal(client: &RamfluxClient, forbidden: &[&str], count: usize) -> TestResult {
     let journal = client.account_db()?.journal_after(0, 128)?;
     let failures: Vec<_> = journal.iter().filter(|e| e.topic == "message.undeliverable").collect();
-    assert_eq!(failures.len(), 1);
+    assert_eq!(failures.len(), count);
     for event in failures {
         let json = serde_json::to_string(event)?;
         for value in forbidden {
             assert!(!json.contains(value), "identity retained in failure journal: {value}");
         }
-        assert_eq!(event.body["marker"], marker);
+        assert!(event.body["marker"].as_str().is_some_and(|key| key.starts_with("routed/seen/")));
     }
     Ok(())
 }
