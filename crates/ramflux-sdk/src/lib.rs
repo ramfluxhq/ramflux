@@ -15,6 +15,8 @@ compile_error!("production builds must not enable itest-memory-vault");
 compile_error!("itest-legacy-accounts requires cfg(test) or RAMFLUX_ITEST_BUILD=1");
 #[cfg(all(feature = "itest-legacy-accounts", ramflux_production))]
 compile_error!("production builds must not enable itest-legacy-accounts");
+#[cfg(all(feature = "itest-legacy-accounts", ramflux_release_profile))]
+compile_error!("release profiles must not enable itest-legacy-accounts");
 
 mod bus;
 #[cfg(feature = "c-abi")]
