@@ -389,7 +389,6 @@ impl AccountDb {
                 delete_scope: delete_scope.to_owned(),
             })
         })?;
-        self.checkpoint_retired_secrets_if_committed()?;
         Ok(tombstone)
     }
 
