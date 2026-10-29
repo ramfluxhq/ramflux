@@ -394,6 +394,46 @@ mod tests {
         assert!(pool.issue(intent("203.0.113.1".into(), "honest".into()), 100, tick).is_ok());
     }
     #[test]
+    fn eight_attacking_prefixes_leave_fresh_challenges_available_for_ten_minutes() -> Result {
+        for ipv6 in [true, false] {
+            let mut pool = CustodyLeases::default();
+            let started = Instant::now();
+            for minute in 0..10 {
+                let tick = started + Duration::from_secs(minute * 60);
+                let mut issued = 0;
+                for share in 1..=8 {
+                    for request in 0..256 {
+                        let source = if ipv6 {
+                            format!("2001:db8:{share:x}:{:x}::{:x}", request / 128, request % 8 + 1)
+                        } else {
+                            format!("192.0.{share}.{}", request % 8 + 1)
+                        };
+                        let holder = format!("attacker-{share}-{request}");
+                        match pool.issue(intent(source, holder.clone()), 100 + minute * 60, tick) {
+                            Ok(_) => {
+                                issued += 1;
+                                pool.disconnect(&holder);
+                            }
+                            Err(code) => assert_eq!(code, CustodyRefusal::Busy),
+                        }
+                    }
+                }
+                assert_eq!(issued, 8 * 8);
+                // Three operations for native publication, registration and session opening.
+                for request in 0..3 {
+                    let holder = format!("honest-{minute}-{request}");
+                    pool.issue(
+                        intent("203.0.113.1".into(), holder.clone()),
+                        100 + minute * 60,
+                        tick,
+                    )?;
+                    pool.disconnect(&holder);
+                }
+            }
+        }
+        Ok(())
+    }
+    #[test]
     fn challenge_floor_survives_new_prefix_churn() -> Result {
         let tick = Instant::now();
         let mut pool = CustodyLeases::default();

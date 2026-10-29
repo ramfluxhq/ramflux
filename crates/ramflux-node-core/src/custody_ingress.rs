@@ -55,7 +55,7 @@ impl CustodySourceBudget {
         if keys
             .iter()
             .enumerate()
-            .any(|(n, k)| self.buckets.get(k).is_some_and(|b| b.count >= [32, 128, 256][n]))
+            .any(|(n, k)| self.buckets.get(k).is_some_and(|b| b.count >= [32, 8, 8][n]))
         {
             return None;
         }
@@ -151,7 +151,7 @@ impl CustodyIngressLimiter {
             Self::remove_holder(state, id);
         }
     }
-    /// Reserve H before TLS/read work, at most four handshakes per IP and prefix.
+    /// Reserve H on entry to the custody protocol, at most four handshakes per IP and prefix.
     /// Listener-wide source limits include both pools. IPv4-mapped addresses use IPv4 shares.
     #[must_use]
     pub fn acquire(

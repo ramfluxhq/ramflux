@@ -219,3 +219,47 @@ fn listener_outer_ipv6_limits_count_authenticated_holders_across_both_pools() ->
     assert_eq!(counts(&l), (0, 16));
     Ok(())
 }
+
+#[test]
+fn challenge_share_caps_cover_mapped_ipv4_ipv6_48_and_64_and_reset_after_one_minute() -> Result {
+    let tick = Instant::now();
+    for family in 0..3 {
+        let mut budget = CustodySourceBudget::default();
+        for n in 0..8 {
+            let source = match family {
+                0 if n % 2 == 0 => format!("::ffff:192.0.2.{}", n + 1),
+                0 => format!("192.0.2.{}", n + 1),
+                1 => format!("2001:db8:1::{:x}", n + 1),
+                _ => format!("2001:db8:1:{n:x}::1"),
+            };
+            assert!(budget.admit(source.parse()?, tick).is_some());
+        }
+        let source = if family == 0 { "192.0.2.99" } else { "2001:db8:1::99" };
+        assert!(budget.admit(source.parse()?, tick).is_none());
+        assert!(budget.admit(source.parse()?, tick + Duration::from_secs(60)).is_some());
+    }
+    Ok(())
+}
+#[test]
+fn filling_the_challenge_window_requires_at_least_128_shares() -> Result {
+    let tick = Instant::now();
+    let mut budget = CustodySourceBudget::default();
+    for share in 0..128 {
+        for _ in 0..8 {
+            assert!(budget.admit(ip(share, 1), tick).is_some());
+        }
+        if share < 127 {
+            // A new share can reserve its first two challenges until the hard bound.
+            let reserved: u32 = budget
+                .buckets
+                .iter()
+                .filter(|(key, _)| key.ends_with("/48"))
+                .map(|(_, bucket)| bucket.count.max(2))
+                .sum();
+            assert!(reserved <= 1016);
+        }
+    }
+    assert!(budget.admit(ip(999, 1), tick).is_none());
+    assert!(budget.admit(ip(999, 1), tick + Duration::from_secs(60)).is_some());
+    Ok(())
+}

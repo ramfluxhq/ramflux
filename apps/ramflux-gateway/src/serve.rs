@@ -16,6 +16,7 @@ const GATEWAY_QUIC_WORKER_THREADS_ENV: &str = "RAMFLUX_GATEWAY_QUIC_WORKER_THREA
 
 #[derive(Clone)]
 pub(crate) struct GatewayListenerContext {
+    pub(crate) custody: Option<crate::custody::Pools>,
     pub(crate) node_id: String,
     pub(crate) gateway_id: String,
     pub(crate) peers: GatewayPeerDirectory,
@@ -36,7 +37,7 @@ pub(crate) fn serve_gateway_quic(
     state: Arc<Mutex<ramflux_node_core::GatewayState>>,
     store: Arc<ramflux_node_core::GatewayRedbStore>,
 ) -> anyhow::Result<()> {
-    crate::custody::initialize()?;
+    let custody = crate::custody::initialize()?;
     let addr = gateway_quic_listen_addr(config)?;
     let addr: SocketAddr = addr.parse()?;
     let tls = ramflux_transport::MeshTlsConfig {
@@ -53,6 +54,7 @@ pub(crate) fn serve_gateway_quic(
     #[cfg(feature = "itest-local-mint")]
     let relay_service_key = gateway_relay_service_key(config)?;
     let context = GatewayListenerContext {
+        custody,
         node_id: config.node_id.clone(),
         gateway_id,
         peers,
@@ -215,10 +217,17 @@ async fn run_gateway_quic(
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
     let endpoint = quinn::Endpoint::server(server_config, addr)?;
+    serve_gateway_quic_endpoint(endpoint, context).await
+}
+
+async fn serve_gateway_quic_endpoint(
+    endpoint: quinn::Endpoint,
+    context: GatewayListenerContext,
+) -> anyhow::Result<()> {
     tracing::info!(addr = %endpoint.local_addr()?, "gateway QUIC session surface listening");
     let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     let (events, mut failures) = tokio::sync::mpsc::channel::<Option<std::io::Error>>(64);
-    let auth_timeout = ramflux_node_core::custody_auth_timeout()?;
+    let auth_timeout = crate::session::GATEWAY_FIRST_FRAME_TIMEOUT;
     loop {
         let connecting = tokio::select! {
             incoming=endpoint.accept()=>match incoming {Some(incoming)=>incoming,None=>return Ok(())},
@@ -259,21 +268,36 @@ async fn run_gateway_tcp_tls(
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_gateway_tcp_listener(listener, server_config, context).await
+}
+
+async fn serve_gateway_tcp_listener(
+    listener: tokio::net::TcpListener,
+    server_config: rustls::ServerConfig,
+    context: GatewayListenerContext,
+) -> anyhow::Result<()> {
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
     tracing::info!(addr = %listener.local_addr()?, "gateway TCP-TLS session surface listening");
     let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     loop {
-        let (stream, remote_addr, permit) = ramflux_node_core::custody_accept_tcp(
-            &listener,
-            crate::custody::capacity(false)?,
-            &mut backoff,
-        )
-        .await;
+        let (stream, remote_addr) = match listener.accept().await {
+            Ok(accepted) => {
+                backoff.success();
+                accepted
+            }
+            Err(error) => {
+                tokio::time::sleep(backoff.failure(&error)).await;
+                continue;
+            }
+        };
+        let started = std::time::Instant::now();
         let acceptor = acceptor.clone();
         let context = context.clone();
         tokio::spawn(async move {
             let tls_stream = match tokio::time::timeout_at(
-                tokio::time::Instant::from_std(permit.auth_deadline()),
+                tokio::time::Instant::from_std(
+                    started + crate::session::GATEWAY_FIRST_FRAME_TIMEOUT,
+                ),
                 acceptor.accept(stream),
             )
             .await
@@ -289,6 +313,7 @@ async fn run_gateway_tcp_tls(
                 }
             };
             let context = crate::GatewayQuicContext {
+                custody: context.custody,
                 node_id: context.node_id,
                 gateway_id: context.gateway_id,
                 peers: context.peers,
@@ -303,7 +328,7 @@ async fn run_gateway_tcp_tls(
             };
             let stream = ramflux_transport::GatewayTcpTlsStream::Server(tls_stream);
             if let Err(error) =
-                Box::pin(crate::session::handle_gateway_tcp_tls_admitted(stream, context, permit))
+                Box::pin(crate::session::handle_gateway_tcp_tls_stream(stream, context, started))
                     .await
             {
                 tracing::warn!(%error, %remote_addr, "gateway TCP-TLS stream failed");
@@ -618,3 +643,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ordinary_ingress_tests.rs"]
+mod ordinary_ingress_tests;

@@ -222,22 +222,49 @@ fn nonce(frame: &CustodyClientFrame) -> anyhow::Result<Option<[u8; 32]>> {
     Ok(Some(bytes.try_into().map_err(|_| anyhow::anyhow!("invalid challenge context"))?))
 }
 type Limiter = std::sync::Arc<ramflux_node_core::CustodyIngressLimiter>;
-static TCP_CAPACITY: std::sync::OnceLock<Limiter> = std::sync::OnceLock::new();
-static QUIC_CAPACITY: std::sync::OnceLock<Limiter> = std::sync::OnceLock::new();
-pub(crate) fn initialize() -> anyhow::Result<()> {
-    let settings = ramflux_node_core::CustodyPoolSettings::from_env()?;
-    ramflux_node_core::custody_listener_resources(settings, 2)?;
-    TCP_CAPACITY.get_or_init(|| settings.limiter());
-    QUIC_CAPACITY.get_or_init(|| settings.limiter());
-    Ok(())
+#[derive(Clone)]
+pub(crate) struct Pools {
+    pub(crate) tcp: Limiter,
+    pub(crate) quic: Limiter,
 }
-pub(crate) fn capacity(quic: bool) -> anyhow::Result<&'static Limiter> {
-    let cell = if quic { &QUIC_CAPACITY } else { &TCP_CAPACITY };
-    if let Some(limiter) = cell.get() {
-        return Ok(limiter);
+pub(crate) fn initialize() -> anyhow::Result<Option<Pools>> {
+    initialize_if_configured(std::env::var_os("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY").as_deref(), || {
+        let settings = ramflux_node_core::CustodyPoolSettings::from_env()?;
+        ramflux_node_core::custody_listener_resources(settings, 2)?;
+        Ok(Pools { tcp: settings.limiter(), quic: settings.limiter() })
+    })
+}
+fn initialize_if_configured(
+    key: Option<&std::ffi::OsStr>,
+    initialize: impl FnOnce() -> anyhow::Result<Pools>,
+) -> anyhow::Result<Option<Pools>> {
+    if key.is_none_or(std::ffi::OsStr::is_empty) {
+        return Ok(None);
     }
-    let settings = ramflux_node_core::CustodyPoolSettings::from_env()?;
-    Ok(cell.get_or_init(|| settings.limiter()))
+    initialize().map(Some)
+}
+pub(crate) fn unavailable() -> CustodyServerFrame {
+    CustodyServerFrame::Refused { code: CustodyRefusal::Unsupported }
+}
+pub(crate) async fn admit_tcp(
+    stream: &mut GatewayTcpTlsStream,
+    source: std::net::IpAddr,
+    pools: Option<&Pools>,
+) -> anyhow::Result<Option<ramflux_node_core::CustodyIngressPermit>> {
+    let response = if let Some(pools) = pools {
+        if let Some(permit) = pools.tcp.acquire(source, None, std::time::Instant::now()) {
+            return Ok(Some(permit));
+        }
+        busy()
+    } else {
+        unavailable()
+    };
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        write_custody_tcp_frame(stream, &serde_json::to_vec(&response)?),
+    )
+    .await??;
+    Ok(None)
 }
 pub(crate) async fn admit_quic(
     send: &mut quinn::SendStream,

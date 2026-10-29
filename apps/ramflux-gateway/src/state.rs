@@ -45,6 +45,7 @@ pub(crate) struct NotifyMeshClient {
 
 #[derive(Clone)]
 pub(crate) struct GatewayQuicContext {
+    pub(crate) custody: Option<crate::custody::Pools>,
     pub(crate) node_id: String,
     pub(crate) gateway_id: String,
     pub(crate) peers: GatewayPeerDirectory,

@@ -61,12 +61,12 @@ Provision its node-root signature separately from the gateway's proxy credential
 | Setting | Service | Meaning |
 | --- | --- | --- |
 | `RAMFLUX_CUSTODY_NODE_RECORD_FILE` | router | Bounded signed node identity JSON; absent/empty leaves native custody disabled. |
-| `RAMFLUX_CUSTODY_NODE_PUBLIC_KEY` | router, gateway | Independently configured receiving-node identity key; a proxy TLS certificate cannot supply it. |
+| `RAMFLUX_CUSTODY_NODE_PUBLIC_KEY` | router, gateway | Independently configured receiving-node identity key; a proxy TLS certificate cannot supply it. On the gateway, absent/empty disables custody and skips its pool/nofile initialization. |
 | `RAMFLUX_GATEWAY_ID` | gateway | Exact proxy instance identity in the signed node record; defaults to `ramflux-gateway`. Every instance needs its own authorized proxy key. |
 | `RAMFLUX_CUSTODY_PROXY_SIGNING_SEED` | gateway | Dedicated software Ed25519 proxy seed, canonical base64url; required for receipt mode. Keep it separate from node-root and relay receipt keys. |
 | `RAMFLUX_CUSTODY_TCP_ADDR` | router | Optional direct client TLS listener, disabled when unset; requires separate public TLS credentials and a signed certificate pin. |
 | `RAMFLUX_CUSTODY_TLS_CERT_FILE`, `RAMFLUX_CUSTODY_TLS_KEY_FILE` | router | Public client-facing certificate chain/key, separate from mesh TLS. The signed node record pins the leaf DER SHA-256 hash as canonical base64url in `client_tls_certificate_sha256`. Shared mesh signing keys are refused, including differently encoded certificates using the same key. |
-| `RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS` | gateway, router | Whole unauthenticated exchange deadline, default 10000 ms; accepted range 1–10000; empty selects the default. Frame activity never renews it. |
+| `RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS` | gateway, router | Whole custody exchange deadline (from CustodyOpen on shared gateway listeners; from accept on the dedicated router listener), default 10000 ms; accepted range 1–10000; empty selects the default. Frame activity never renews it. |
 | `RAMFLUX_CUSTODY_HANDSHAKE_POOL` | gateway, router | Per-listener unauthenticated ceiling H, default 256; accepted range 1–65536, empty selects default. |
 | `RAMFLUX_CUSTODY_AUTHENTICATED_POOL` | gateway, router | Per-listener authenticated ceiling A, default 1024; accepted range 1–65536, empty selects default. |
 | `RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL` | gateway, router | Authenticated sessions per account anchor per listener, default 4; accepted range 1–64. |
@@ -117,8 +117,9 @@ Challenge, consumed-proof and session maps are process-local. A challenge has
 a 300-second monotonic deadline; consumed nonce/proof markers remain for 600
 seconds. A connection may have four outstanding challenges. Sources normalize
 IPv4-mapped addresses and share IPv4 /24, IPv6 /64 and IPv6 /48 budgets; no prefix
-may hold more than 64 outstanding challenges. Issuance windows permit 32/IP,
-128/small-prefix and 256/IPv6-/48 challenges per minute, plus 1024 per node.
+may hold more than 64 outstanding challenges. Issuance windows permit 32/IP and
+at most eight per IPv4 /24, IPv6 /64 and
+IPv6 /48 per minute, plus 1024 per node. These limits include IPv4-mapped sources.
 The node-wide issuance window reserves two challenges when admitting a prefix;
 its second challenge can use that reservation even if other prefixes fill the
 remaining window. A new prefix is refused when no reservation fits. Neither
@@ -140,8 +141,13 @@ Router restart invalidates every grant. No grants are serialized, backed up or
 restored. Durable registration and `Live` survive, but reconnect authenticates again.
 Each listener has separate handshake (H) and authenticated (A) pools, defaulting
 to 256 and 1024. Neither ceiling is ever exceeded. There is no arrival-driven
-revocation. Full H closes a new TCP socket before TLS work or replies with typed
-retryable `Busy` on a QUIC stream. Full A replies `Busy` to Prove and closes the
+revocation. On the dedicated direct router listener, full H closes a new TCP
+socket before
+TLS work. Shared gateway TCP and QUIC listeners acquire H only after TLS and a
+first `CustodyOpen` frame; full H returns typed retryable `Busy` on that custody
+connection/stream. Ordinary connections and streams never touch custody pools
+and keep the existing generic ingress behavior. Full A replies `Busy` to Prove
+and closes the
 connection, releasing H. The first successful Prove (publication, registration or
 session opening) moves H to A under one limiter lock; the authenticated count,
 per-principal limit and source-share limit are checked
@@ -151,9 +157,11 @@ under that lock, so a closed or revoked holder cannot recreate a grant.
 The handshake pool permits at most four holders per IP, IPv4 /24, IPv6 /64 and
 IPv6 /48, including IPv4-mapped addresses. Across both pools, the listener-wide
 outer limits remain four per IP, eight per IPv4 /24 or IPv6 /64 and sixteen per
-IPv6 /48. A QUIC connection permits at most four streams across both pools. The entire
-exchange, starting with TCP accept (including TLS) or QUIC stream accept, has a
-single deadline of at most ten seconds. TLS and frame activity never renew it.
+IPv6 /48. A QUIC connection permits at most four custody streams across both
+pools. The entire
+custody exchange, starting with direct-listener TCP accept (including TLS) or
+the first `CustodyOpen` frame on a shared gateway listener, has a single deadline
+of at most ten seconds. TLS and frame activity never renew it.
 Authenticated holders are limited to sixteen per IPv4 /24 or IPv6 /48, and four
 per principal by default (configurable from 1 to 64). IPv4-mapped IPv6 uses the
 IPv4 share. Disconnect, the handshake deadline, explicit revoke/fence and the
@@ -163,10 +171,14 @@ creation. Cleanup removes unconsumed challenges and sessions under the same
 service admission lock used by proof execution, so queued proofs cannot recreate
 a disconnected grant.
 
-At startup each binary raises its soft `RLIMIT_NOFILE` to its hard limit and
+At startup each custody-enabled binary raises its soft `RLIMIT_NOFILE` to its
+hard limit and
 requires total H + total A + 512 descriptors, summed over its listeners. An
 insufficient limit refuses startup with all three values. Gateway TCP and QUIC
-have independent pools; the optional direct router listener has one pair. Compose
+have independent pools; the optional direct router listener has one pair.
+A gateway without a receiving-node key does not parse custody pool settings or
+apply custody nofile requirements. Shared gateway TLS and first-frame waits use
+a separate ten-second generic timeout, without allocating custody permits. Compose
 sets both soft and hard `nofile` limits to 65536. TCP accept errors are logged once
 per kind and retried with a 50 ms to one second backoff; QUIC handshake failures
 are retried as well.
@@ -174,7 +186,12 @@ are retried as well.
 ### Residual cost
 
 Filling the handshake pool requires at least ceil(H/4) distinct IPv4 /24s or IPv6
-/48s, reconnecting at least once per ten-second deadline. Filling the authenticated
+/48s, reconnecting at least once per ten-second deadline. Blocking challenges for
+fresh prefixes requires at least 128 distinct source shares (1024 / 8) per minute;
+each IPv4 /24 or IPv6 /48 can spend at most eight challenges, and IPv6 /64 has
+the same cap. Two-slot reservations for new shares also count toward the
+node-wide bound; reservations are never retired by other sources. These custody
+bounds do not gate ordinary gateway ingress. Filling the authenticated
 pool requires at least ceil(A/16) source shares and, with the default four sessions
 per principal, ceil(A/4) registered accounts. The listener-wide source caps may
 raise those minimums. Attacks beyond these bounds are network-layer DoS, outside

@@ -13,6 +13,9 @@ use crate::{
     serve::GatewayListenerContext,
 };
 
+pub(crate) const GATEWAY_FIRST_FRAME_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
 const DEFAULT_GATEWAY_RESUME_WINDOW_SECONDS: u64 = 300;
 const GATEWAY_V3_ISSUER_SEED_ENV: &str = "RAMFLUX_GATEWAY_V3_ISSUER_SEED";
 const GATEWAY_V3_ISSUER_CERT_FILE_ENV: &str = "RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE";
@@ -26,9 +29,7 @@ pub(crate) async fn handle_gateway_quic_connection(
     loop {
         let first_started = first.take();
         let accepted = if let Some(started) = first_started {
-            let deadline = started
-                + ramflux_node_core::custody_auth_timeout()
-                    .unwrap_or(std::time::Duration::from_secs(10));
+            let deadline = started + GATEWAY_FIRST_FRAME_TIMEOUT;
             if let Ok(stream) = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
                 connection.accept_bi(),
@@ -37,7 +38,7 @@ pub(crate) async fn handle_gateway_quic_connection(
             {
                 stream
             } else {
-                connection.close(0_u32.into(), b"custody handshake deadline");
+                connection.close(0_u32.into(), b"gateway first stream deadline");
                 return;
             }
         } else {
@@ -51,6 +52,7 @@ pub(crate) async fn handle_gateway_quic_connection(
                 let state = Arc::clone(&listener.state);
                 let store = Arc::clone(&listener.store);
                 let context = GatewayQuicContext {
+                    custody: listener.custody.clone(),
                     node_id: listener.node_id.clone(),
                     gateway_id: listener.gateway_id.clone(),
                     peers: listener.peers.clone(),
@@ -98,27 +100,27 @@ async fn handle_gateway_quic_stream_with_connection(
     connection: quinn::Connection,
     admitted_at: Instant,
 ) -> anyhow::Result<()> {
-    let Some(permit) = crate::custody::admit_quic(
-        &mut send,
-        &connection,
-        crate::custody::capacity(true)?,
-        admitted_at,
-    )
-    .await?
-    else {
-        return Ok(());
-    };
     let read_started = Instant::now();
     let bytes = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(permit.auth_deadline()),
+        tokio::time::Instant::from_std(admitted_at + GATEWAY_FIRST_FRAME_TIMEOUT),
         ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut recv),
     )
     .await??;
     if crate::custody::is_open(&bytes) {
+        let Some(pools) = context.custody.as_ref() else {
+            ramflux_transport::write_quic_json_frame(&mut send, &crate::custody::unavailable())
+                .await?;
+            send.finish()?;
+            return Ok(());
+        };
+        let Some(permit) =
+            crate::custody::admit_quic(&mut send, &connection, &pools.quic, Instant::now()).await?
+        else {
+            return Ok(());
+        };
         return Box::pin(crate::custody::quic(send, recv, connection, context, &bytes, permit))
             .await;
     }
-    drop(permit);
     let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
     ramflux_node_core::record_gateway_quic_request_read_us(elapsed_us(read_started));
     if let crate::ingress::Ingress::Rejected(response) = first {
@@ -149,20 +151,28 @@ pub(crate) async fn handle_gateway_session_stream(
     handle_gateway_session_transport(Box::new(send), Box::new(recv), context, first_frame).await
 }
 
-pub(crate) async fn handle_gateway_tcp_tls_admitted(
+pub(crate) async fn handle_gateway_tcp_tls_stream(
     mut stream: ramflux_transport::GatewayTcpTlsStream,
     context: GatewayQuicContext,
-    permit: ramflux_node_core::CustodyIngressPermit,
+    started: Instant,
 ) -> anyhow::Result<()> {
     let bytes = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(permit.auth_deadline()),
+        tokio::time::Instant::from_std(started + GATEWAY_FIRST_FRAME_TIMEOUT),
         ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut stream),
     )
     .await??;
     if crate::custody::is_open(&bytes) {
+        let Some(permit) = crate::custody::admit_tcp(
+            &mut stream,
+            context.remote_addr.ip(),
+            context.custody.as_ref(),
+        )
+        .await?
+        else {
+            return Ok(());
+        };
         return Box::pin(crate::custody::tcp(stream, context, &bytes, permit)).await;
     }
-    drop(permit);
     let (recv, send) = tokio::io::split(stream);
     let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
     if let crate::ingress::Ingress::Rejected(response) = first {
@@ -1705,7 +1715,7 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         attach_franking_node_tag, auth_supports_forward_ack, fresh_gateway_session_id,
         own_device_fanout_session_rejection,
@@ -2189,7 +2199,7 @@ mod tests {
         Ok(request)
     }
 
-    pub(super) fn test_gateway_context() -> anyhow::Result<crate::GatewayQuicContext> {
+    pub(crate) fn test_gateway_context() -> anyhow::Result<crate::GatewayQuicContext> {
         // A process-wide counter guarantees a unique redb path per context even when parallel tests
         // create contexts within the same clock tick (redb rejects opening the same file twice).
         static NEXT_DB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2224,6 +2234,7 @@ mod tests {
             relay: None,
         };
         Ok(crate::GatewayQuicContext {
+            custody: None,
             node_id: "node-gateway-test".to_owned(),
             gateway_id: "ramflux-gateway".to_owned(),
             peers: crate::GatewayPeerDirectory::empty(&config),

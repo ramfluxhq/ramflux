@@ -286,7 +286,8 @@ async fn gateway_proxy_receipt_uses_actual_quic_exporter_and_rejects_relay() -> 
 }
 
 #[tokio::test]
-async fn gateway_tcp_full_handshake_pool_closes_newcomer_before_tls_and_reuses_slot() -> Result {
+async fn dedicated_custody_tcp_accept_helper_closes_newcomer_before_tls_and_reuses_slot() -> Result
+{
     tokio::time::timeout(Duration::from_secs(5), async {
         let fixture = Fixture::new()?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -379,4 +380,67 @@ async fn gateway_quic_full_handshake_pool_replies_busy_without_revoking_and_reus
         Ok(())
     })
     .await?
+}
+
+#[test]
+fn custody_disabled_skips_pool_parsing_initialization_and_nofile_checks() -> anyhow::Result<()> {
+    for key in [None, Some(std::ffi::OsStr::new(""))] {
+        assert!(
+            initialize_if_configured(key, || {
+                anyhow::bail!("custody settings or nofile check must not run")
+            })?
+            .is_none()
+        );
+    }
+    assert!(
+        initialize_if_configured(Some(std::ffi::OsStr::new("configured")), || {
+            anyhow::bail!("enabled custody checks run")
+        })
+        .is_err()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn disabled_custody_starts_under_low_nofile_with_invalid_pool_settings() -> Result {
+    const CHILD: &str = "RAMFLUX_TEST_DISABLED_CUSTODY_CHILD";
+    if let Ok(mode) = std::env::var(CHILD) {
+        if mode == "enabled" {
+            let error = initialize().err().ok_or("enabled custody accepted low nofile")?;
+            assert!(error.to_string().contains("RLIMIT_NOFILE soft=256"));
+        } else {
+            assert!(initialize()?.is_none());
+        }
+        return Ok(());
+    }
+    for mode in ["absent", "empty", "enabled"] {
+        let mut child = std::process::Command::new("/bin/sh");
+        child.args(["-c", "ulimit -n 256 && exec \"$@\"", "sh"])
+            .arg(std::env::current_exe()?)
+            .args(["--exact", "custody::tests::disabled_custody_starts_under_low_nofile_with_invalid_pool_settings", "--nocapture"])
+            .env(CHILD, mode)
+            .env_remove("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY")
+            .env("RAMFLUX_CUSTODY_HANDSHAKE_POOL", "invalid")
+            .env("RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS", "invalid");
+        if mode == "empty" {
+            child.env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "");
+        }
+        if mode == "enabled" {
+            child
+                .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "configured")
+                .env("RAMFLUX_CUSTODY_HANDSHAKE_POOL", "256")
+                .env("RAMFLUX_CUSTODY_AUTHENTICATED_POOL", "1024")
+                .env("RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS", "10000");
+        }
+        let output = child.output()?;
+        assert!(
+            output.status.success(),
+            "mode={mode}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+    Ok(())
 }

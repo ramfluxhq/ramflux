@@ -513,10 +513,18 @@ fn custody_publication_quota_refusal_does_not_occupy_successful_replay_cache() -
     let service = crate::CustodyService::new(first.node.clone(), false, &store, NOW)?;
     for n in 0_u8..8 {
         let driver = Driver::new(&format!("quota-{n}"), 150 + n)?;
-        assert!(matches!(
-            driver.run(&service, &router, &store, driver.publish())?,
-            CustodyServerFrame::Published { .. }
-        ));
+        // Fill the durable publication quota independently of the stricter
+        // challenge window. The refused publication below still uses a real
+        // signed challenge/proof and must not enter successful replay storage.
+        assert_eq!(
+            router.publish_custody_record_from(
+                &driver.publication,
+                NOW,
+                &store,
+                "192.0.2.1".parse()?,
+            )?,
+            driver.publication.record
+        );
     }
     let refused = Driver::new("quota-refused", 170)?;
     let action = refused.publish();
