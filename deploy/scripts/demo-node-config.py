@@ -376,6 +376,16 @@ def normalize_history(owner, previous_snapshot):
     return versions, snapshots
 
 
+def check_pending(state):
+    marker = state / "transaction.pending"
+    if marker.exists():
+        transaction = json.loads(marker.read_text())
+        identifier = transaction["target_snapshot"]
+        print(f"pending upgrade transaction {identifier}: run `demo-node.sh recover` (or `rollback`)",
+              file=sys.stderr)
+        sys.exit(3)
+
+
 def prepare(repo, state, command):
     settings = {key: os.environ[key] for key in (
         "DEMO_PROJECT", "DEMO_HOST", "DEMO_NODE_ID", "DEMO_GATEWAY_PORT",
@@ -384,9 +394,7 @@ def prepare(repo, state, command):
     )}
     marker = state / "owner.json"
     pending_marker = state / "owner.json.pending"
-    transaction_marker = state / "transaction.pending"
-    if transaction_marker.exists():
-        sys.exit("unfinished demo transaction detected; run demo-node.sh recover with the original env")
+    check_pending(state)
     if marker.exists():
         owner = json.loads(marker.read_text())
         if owner["directory"] != str(state):
@@ -504,7 +512,9 @@ def main():
     repo, state = map(Path, sys.argv[1:3])
     action = sys.argv[3]
     try:
-        if action == "prepare":
+        if action == "check-pending":
+            check_pending(state)
+        elif action == "prepare":
             prepare(repo, state, sys.argv[4])
         elif action == "commit":
             commit(state, sys.argv[4])
@@ -512,17 +522,6 @@ def main():
             recover(state)
         elif action == "finish-recovery":
             prune_snapshots(state, json.loads((state / "owner.json").read_text()))
-            durable_unlink(state / "owner.json.pending")
-            durable_unlink(state / "transaction.pending")
-        elif action == "abort-initial":
-            transaction = json.loads((state / "transaction.pending").read_text())
-            if transaction.get("previous_snapshot") is not None:
-                sys.exit("refusing to abort a transaction with a previous snapshot")
-            pending = json.loads((state / "owner.json.pending").read_text())
-            pending.pop("current_snapshot", None)
-            pending["version_history"] = []
-            pending["snapshot_history"] = []
-            atomic_json(state / "owner.json", pending)
             durable_unlink(state / "owner.json.pending")
             durable_unlink(state / "transaction.pending")
         elif action == "set-node-id":
