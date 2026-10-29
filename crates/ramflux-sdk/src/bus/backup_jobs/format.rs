@@ -14,21 +14,65 @@ const MAX_IDENTITY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Metadata {
-    pub manifest: LocalBusPersistedAccount,
+    #[serde(flatten)]
+    pub identity: Identity,
     pub database_key: [u8; 32],
     pub ca_pem: Vec<u8>,
 }
 impl Drop for Metadata {
     fn drop(&mut self) {
         self.database_key.zeroize();
-        self.manifest.root_seed.zeroize();
-        self.manifest.device_seed.zeroize();
-        self.manifest.account_secret.zeroize();
+        if let Identity::Legacy { manifest } = &mut self.identity {
+            manifest.root_seed.zeroize();
+            manifest.device_seed.zeroize();
+            manifest.account_secret.zeroize();
+        }
     }
 }
 impl Metadata {
     pub fn validate(&self, account: &str) -> Result<(), SdkError> {
-        let manifest = &self.manifest;
+        self.identity.validate(account)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub(in crate::bus) enum Identity {
+    Native { native: Box<super::native::DataIdentity> },
+    Legacy { manifest: Box<LocalBusPersistedAccount> },
+}
+impl Identity {
+    pub fn account_id(&self) -> &str {
+        match self {
+            Self::Legacy { manifest } => &manifest.local_account_id,
+            Self::Native { native } => &native.local_account_id,
+        }
+    }
+    pub fn label(&self) -> Option<String> {
+        match self {
+            Self::Legacy { manifest } => manifest.label.clone(),
+            Self::Native { native } => {
+                Some(native.authority.publication.record.body.profile.display_name.clone())
+            }
+        }
+    }
+    pub fn legacy(&self) -> Result<&LocalBusPersistedAccount, SdkError> {
+        match self {
+            Self::Legacy { manifest } => Ok(manifest),
+            Self::Native { .. } => Err(SdkError::CustodyModeDowngrade),
+        }
+    }
+    pub fn legacy_mut(&mut self) -> Result<&mut LocalBusPersistedAccount, SdkError> {
+        match self {
+            Self::Legacy { manifest } => Ok(manifest),
+            Self::Native { .. } => Err(SdkError::CustodyModeDowngrade),
+        }
+    }
+    fn validate(&self, account: &str) -> Result<(), SdkError> {
+        if let Self::Native { native } = self {
+            return native.validate(account);
+        }
+        let manifest = self.legacy()?;
         if manifest.local_account_id != account
             || manifest.local_account_id.is_empty()
             || (Path::new(&manifest.local_account_id).components().count() != 1

@@ -368,6 +368,10 @@ async fn local_bus_account_backup_import(
     let bytes = std::fs::read(&body.input_path)?;
     let backup: LocalBusAccountBackupFile = serde_json::from_slice(&bytes)?;
     let restored = decrypt_account_backup_state(&backup, &mut body.passphrase)?;
+    if crate::custody::account_exists(&state.config.data_root, &restored.manifest.local_account_id)?
+    {
+        return Err(SdkError::CustodyModeDowngrade);
+    }
     let manifest = restored.manifest;
     if expected_account.is_some_and(|id| id != manifest.local_account_id) {
         return Err(SdkError::LocalBus("backup account changed during import".to_owned()));
@@ -736,6 +740,44 @@ mod tests {
         assert_eq!(status["principal_id"], "principal_alice");
         assert_eq!(status["target_delivery_id"], "target_alice");
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_key_import_cannot_overwrite_a_native_account_without_request_scope()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::custody::tests::Root::new()?;
+        let vault = crate::custody::tests::TestVault::default();
+        crate::custody::tests::create(&root.0, "alice", &vault, crate::custody::network_now()?)?;
+        let authority_path = root.0.join("custody_accounts/alice/authority.json");
+        let authority = std::fs::read(&authority_path)?;
+        let backup = encrypt_account_backup(
+            &backup_manifest(),
+            Vec::new(),
+            &mut "backup-passphrase-at-least-128-bit".to_owned(),
+        )?;
+        let input = root.0.join("legacy-backup.json");
+        std::fs::write(&input, serde_json::to_vec(&backup)?)?;
+        let mut state = LocalBusDaemonState {
+            config: LocalBusConfig::new(root.0.join("bus.sock"), &root.0),
+            account_index: Some(AccountIndex::open(&root.0)?),
+            nodes: crate::node::NodeStore::default(),
+            accounts: BTreeMap::new(),
+            active_account_id: None,
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        };
+        let mut request = LocalBusAccountBackupImportRequest {
+            input_path: input.to_string_lossy().into_owned(),
+            passphrase: "backup-passphrase-at-least-128-bit".into(),
+        };
+        assert!(matches!(
+            local_bus_account_backup_import(&mut state, &mut request, None).await,
+            Err(SdkError::CustodyModeDowngrade)
+        ));
+        assert_eq!(std::fs::read(authority_path)?, authority);
+        assert!(!local_bus_account_manifest_path(&root.0, "alice").exists());
+        assert!(state.accounts.is_empty());
         Ok(())
     }
 

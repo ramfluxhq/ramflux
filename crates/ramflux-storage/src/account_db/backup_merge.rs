@@ -97,7 +97,7 @@ impl BackupDatabase {
         key: &AccountDbKey,
         progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
-        self.merge_backup_with_group_actor(path, key, None, progress)
+        self.merge_backup_mode(path, key, None, false, progress)
     }
     /// Merge while rebuilding shared groups from verified snapshots and durable removal floors.
     /// # Errors
@@ -107,6 +107,16 @@ impl BackupDatabase {
         path: &Path,
         key: &AccountDbKey,
         local: Option<&ramflux_protocol::GroupStateActor>,
+        progress: impl FnMut() -> Result<(), StorageError>,
+    ) -> Result<BackupMergeReport, StorageError> {
+        self.merge_backup_mode(path, key, local, false, progress)
+    }
+    pub(super) fn merge_backup_mode(
+        &mut self,
+        path: &Path,
+        key: &AccountDbKey,
+        local: Option<&ramflux_protocol::GroupStateActor>,
+        native_data_only: bool,
         mut progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
         self.check_backup_pins(path, key)?;
@@ -127,7 +137,9 @@ impl BackupDatabase {
                     self.merge_objects(&mut report, &mut progress)?;
                     continue;
                 }
-                if skip_merge_table(&table) {
+                if skip_merge_table(&table)
+                    || (native_data_only && super::backup_native::authority_table(&table))
+                {
                     continue;
                 }
                 let incoming = columns(&self.db, "incoming", &table)?;
@@ -149,28 +161,7 @@ impl BackupDatabase {
                     .collect::<Vec<_>>()
                     .join(" AND ");
                 let newer = newer_expression(&table, &columns);
-                let filter = if table == "runtime_actor_state" {
-                    "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'"
-                } else if table == "friend_link_projection" {
-                    "NOT ((r.blocked=1 OR r.state='rejected') AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=r.link_id AND d.state='lifted'))"
-                } else if table == "contact_request_projection" {
-                    "NOT (r.state IN ('blocked','declined') AND EXISTS(SELECT 1 FROM contact_request_decision d WHERE d.root=r.contact_identity_commitment AND d.state='lifted'))"
-                } else if table == "contact_message_request" {
-                    "NOT EXISTS(SELECT 1 FROM contact_message_request_fence f WHERE f.sender_identity=r.sender_identity AND f.message_id=r.message_id) AND NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id AND d.conversation_id=r.conversation_id) AND NOT EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=r.message_id AND t.conversation_id=r.conversation_id)"
-                } else if table == "runtime_message_content" {
-                    "NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id AND d.deleted=1)"
-                } else if matches!(
-                    table.as_str(),
-                    "group_member_projection" | "group_ban_projection"
-                ) {
-                    "NOT EXISTS(SELECT 1 FROM incoming.group_projection source JOIN main.group_projection live USING(group_id) WHERE source.group_id=r.group_id AND source.group_epoch<live.group_epoch)"
-                } else if table == "projection_checkpoint" {
-                    "NOT EXISTS(SELECT 1 FROM incoming.local_event_log e WHERE e.event_id=r.last_event_id AND e.event_type='group.sender_key.state' AND CASE WHEN json_valid(CAST(e.event_body AS TEXT)) THEN json_extract(CAST(e.event_body AS TEXT),'$.session_snapshot.is_initiator_side') END=1)"
-                } else if table == "message_projection" {
-                    "NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id)"
-                } else {
-                    "1"
-                };
+                let filter = merge_filter(&table, native_data_only);
                 let kept:u64=self.db.query_row(&format!("SELECT count(*) FROM incoming.{t} r JOIN main.{t} l ON {join} WHERE {filter} AND NOT ({newer})",t=quoted(&table)),[],|row|row.get(0))?;
                 if table == "runtime_actor_state" {
                     self.count_actor_states(filter, &join, &newer, &mut report)?;
@@ -384,6 +375,29 @@ impl BackupDatabase {
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/%'; INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/active/%' OR state_kind LIKE 'dm-pair/reset-work/%' OR state_kind LIKE 'dm-pair/bootstrap/%'; DELETE FROM projection_checkpoint WHERE last_event_id IN (SELECT event_id FROM local_event_log WHERE event_type='group.sender_key.state' AND CASE WHEN json_valid(CAST(event_body AS TEXT)) THEN json_extract(CAST(event_body AS TEXT),'$.session_snapshot.is_initiator_side') END=1); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'own-device/send/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'own-device/send/%'; DELETE FROM outbox_queue;")?;
         Ok(())
+    }
+}
+fn merge_filter(table: &str, native_data_only: bool) -> &'static str {
+    if table == "runtime_actor_state" && native_data_only {
+        super::backup_native::DATA_STATE_FILTER
+    } else if table == "runtime_actor_state" {
+        "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'"
+    } else if table == "friend_link_projection" {
+        "NOT ((r.blocked=1 OR r.state='rejected') AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=r.link_id AND d.state='lifted'))"
+    } else if table == "contact_request_projection" {
+        "NOT (r.state IN ('blocked','declined') AND EXISTS(SELECT 1 FROM contact_request_decision d WHERE d.root=r.contact_identity_commitment AND d.state='lifted'))"
+    } else if table == "contact_message_request" {
+        "NOT EXISTS(SELECT 1 FROM contact_message_request_fence f WHERE f.sender_identity=r.sender_identity AND f.message_id=r.message_id) AND NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id AND d.conversation_id=r.conversation_id) AND NOT EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=r.message_id AND t.conversation_id=r.conversation_id)"
+    } else if table == "runtime_message_content" {
+        "NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id AND d.deleted=1)"
+    } else if matches!(table, "group_member_projection" | "group_ban_projection") {
+        "NOT EXISTS(SELECT 1 FROM incoming.group_projection source JOIN main.group_projection live USING(group_id) WHERE source.group_id=r.group_id AND source.group_epoch<live.group_epoch)"
+    } else if table == "projection_checkpoint" {
+        "NOT EXISTS(SELECT 1 FROM incoming.local_event_log e WHERE e.event_id=r.last_event_id AND e.event_type='group.sender_key.state' AND CASE WHEN json_valid(CAST(e.event_body AS TEXT)) THEN json_extract(CAST(e.event_body AS TEXT),'$.session_snapshot.is_initiator_side') END=1)"
+    } else if table == "message_projection" {
+        "NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id)"
+    } else {
+        "1"
     }
 }
 fn columns(

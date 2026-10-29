@@ -480,6 +480,12 @@ impl Supervisor {
     pub(super) async fn shutdown(&self) -> Result<(), SdkError> {
         self.backup_jobs.stop().await;
         self.start_event_router();
+        // A retained stopped handle must not reclaim a replacement daemon's staging.
+        let expiry = self.backup_expiry.borrow_mut().take();
+        if let Some(task) = expiry {
+            task.abort();
+            let _ = task.await;
+        }
         let actors = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
         let mut result = Ok(());
         for actor in actors {

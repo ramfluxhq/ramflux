@@ -111,6 +111,7 @@ pub struct BackupAttachmentChecks {
 #[serde(rename_all = "snake_case")]
 pub enum BackupFailureCode {
     WrongPassphrase,
+    NetworkingPending,
     Tampered,
     Truncated,
     UnsupportedVersion,

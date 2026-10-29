@@ -140,16 +140,10 @@ impl BackupJobs {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(std::path::Path::new("."));
+        let metadata = archive_metadata(captured.identity, &database, &snapshot.key)?;
         let size =
             std::fs::metadata(&database).map_err(|_| failure(BackupFailureCode::Unreadable))?.len();
         check_space(parent, size.saturating_add(20 * 1024 * 1024))?;
-        let ca_pem = std::fs::read(&captured.manifest.gateway.ca_cert)
-            .map_err(|_| failure(BackupFailureCode::Unreadable))?;
-        let metadata =
-            Metadata { manifest: captured.manifest, database_key: *snapshot.key.bytes(), ca_pem };
-        metadata
-            .validate(&metadata.manifest.local_account_id)
-            .map_err(|_| failure(BackupFailureCode::RootConflict))?;
         let temporary = parent.join(format!(".ramflux-backup-{}.partial", job.job_id));
         super::recovery::remember_partial_output(&directory, &temporary)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
@@ -181,7 +175,7 @@ impl BackupJobs {
         totals.insert("database_bytes".into(), size);
         totals.insert("missing_attachments".into(), missing_count);
         let context = BackupContext {
-            account_id: metadata.manifest.local_account_id.clone(),
+            account_id: metadata.identity.account_id().to_owned(),
             created_at: now(),
             totals,
         };
@@ -345,18 +339,12 @@ impl BackupJobs {
         }
         let checks = self.verify_files(job, &db, &cancel, &counts)?;
         drop(db);
-        let merge = self.check_existing_identity(&metadata, &path, &key)?;
+        let preview = self.archive_preview(&metadata, &path, &key, context.created_at)?;
         format::save_metadata(&directory.join("identity.sealed"), &master, &metadata)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         std::fs::File::open(&directory)
             .and_then(|file| file.sync_all())
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
-        let preview = BackupArchivePreview {
-            local_account_id: metadata.manifest.local_account_id.clone(),
-            account_label: metadata.manifest.label.clone(),
-            created_at: context.created_at,
-            merge,
-        };
         let staging = VerifiedBackupStaging::new(directory, *master, now())
             .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         guard.transferred = true;
@@ -370,25 +358,64 @@ impl BackupJobs {
         .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         Ok(())
     }
+    fn archive_preview(
+        &self,
+        metadata: &Metadata,
+        incoming: &std::path::Path,
+        key: &AccountDbKey,
+        created_at: u64,
+    ) -> Result<BackupArchivePreview, BackupFailure> {
+        let (id, merge) = if let format::Identity::Native { native } = &metadata.identity {
+            let target = self
+                .native_restore_target(native)
+                .map_err(|_| failure(BackupFailureCode::RootConflict))?;
+            let merge = target.is_some();
+            (target.unwrap_or_else(|| native.local_account_id.clone()), merge)
+        } else {
+            (
+                metadata.identity.account_id().to_owned(),
+                self.check_existing_identity(metadata, incoming, key)?,
+            )
+        };
+        Ok(BackupArchivePreview {
+            local_account_id: id,
+            account_label: metadata.identity.label(),
+            created_at,
+            merge,
+        })
+    }
     pub(super) fn check_existing_identity(
         &self,
         metadata: &Metadata,
         incoming: &std::path::Path,
         key: &AccountDbKey,
     ) -> Result<bool, BackupFailure> {
-        let id = &metadata.manifest.local_account_id;
+        if let format::Identity::Native { native } = &metadata.identity {
+            return self
+                .native_restore_target(native)
+                .map(|target| target.is_some())
+                .map_err(|_| failure(BackupFailureCode::RootConflict));
+        }
+        let manifest =
+            metadata.identity.legacy().map_err(|_| failure(BackupFailureCode::RootConflict))?;
+        let id = &manifest.local_account_id;
         match self.index.account(id) {
             Err(ramflux_storage::StorageError::AccountNotFound(_)) => Ok(false),
             Err(_) => Err(failure(BackupFailureCode::Unreadable)),
             Ok(record) => {
-                if record.principal_commitment != metadata.manifest.principal_commitment {
+                if record.principal_commitment != manifest.principal_commitment {
+                    return Err(failure(BackupFailureCode::RootConflict));
+                }
+                if crate::custody::account_exists(&self.data_root, id)
+                    .map_err(|_| failure(BackupFailureCode::RootConflict))?
+                {
                     return Err(failure(BackupFailureCode::RootConflict));
                 }
                 let local = crate::bus::daemon::read_local_bus_account_manifest(
                     &crate::bus::daemon::local_bus_account_manifest_path(&self.data_root, id),
                 )
                 .map_err(|_| failure(BackupFailureCode::Unreadable))?;
-                if local.root_seed != metadata.manifest.root_seed {
+                if local.root_seed != manifest.root_seed {
                     return Err(failure(BackupFailureCode::RootConflict));
                 }
                 let path = self.data_root.join(record.db_relative_path);
@@ -426,4 +453,27 @@ fn archive_counts(context: &BackupContext) -> Result<BackupCounts, BackupFailure
     )
     .map_err(|_| failure(BackupFailureCode::UnsupportedVersion))?;
     Ok(counts)
+}
+
+fn archive_metadata(
+    identity: format::Identity,
+    path: &std::path::Path,
+    key: &AccountDbKey,
+) -> Result<Metadata, BackupFailure> {
+    let ca_pem = match &identity {
+        format::Identity::Legacy { manifest } => std::fs::read(&manifest.gateway.ca_cert)
+            .map_err(|_| failure(BackupFailureCode::Unreadable))?,
+        format::Identity::Native { .. } => {
+            BackupDatabase::open(path, key)
+                .map_err(storage_error)?
+                .sanitize_native_backup()
+                .map_err(storage_error)?;
+            Vec::new()
+        }
+    };
+    let metadata = Metadata { identity, database_key: *key.bytes(), ca_pem };
+    metadata
+        .validate(metadata.identity.account_id())
+        .map_err(|_| failure(BackupFailureCode::RootConflict))?;
+    Ok(metadata)
 }

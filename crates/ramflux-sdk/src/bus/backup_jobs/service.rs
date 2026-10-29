@@ -105,6 +105,7 @@ impl BackupJobs {
     }
     pub(super) fn fail_install(&self, id: &str, error: &SdkError) {
         let failure = match error {
+            SdkError::NetworkingPending => BackupFailure::new(BackupFailureCode::NetworkingPending),
             SdkError::LocalBusRefused { body, .. } => body
                 .get("failure")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())

@@ -250,12 +250,12 @@ impl AccountRuntime {
                         let result = (|| {
                             let account = local_bus_account(&self.state, &self.id)?;
                             let reader = account.client.account_db()?.open_backup_reader()?;
-                            let manifest =
-                                read_local_bus_account_manifest(&local_bus_account_manifest_path(
-                                    &self.state.config.data_root,
-                                    &self.id,
-                                ))?;
-                            Ok(super::backup_jobs::CapturedAccount { reader, manifest })
+                            let identity = super::backup_jobs::capture_identity(
+                                &account.client,
+                                &self.state.config.data_root,
+                                &self.id,
+                            )?;
+                            Ok(super::backup_jobs::CapturedAccount { reader, identity })
                         })();
                         let _ = reply.send(result);
                     }
