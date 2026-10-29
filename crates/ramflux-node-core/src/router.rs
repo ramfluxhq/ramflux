@@ -1484,6 +1484,12 @@ impl RouterCore {
             }
             (authority, source)
         };
+        // Native registration already supplies the current unfenced certificate chain.
+        // Its envelope signature was checked above; a legacy signed device set is absent
+        // by design. Foreign evidence still requires the durable admission path below.
+        if local_registration && authority.custody_authority.is_some() {
+            return Ok(source);
+        }
         let record = authority.signed_device_set.as_ref().ok_or_else(reject)?;
         if local_registration {
             if let Some(fence) = control.foreign_device_heads.fences.get(root) {

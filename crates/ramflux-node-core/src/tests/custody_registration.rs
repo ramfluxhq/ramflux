@@ -367,3 +367,59 @@ fn custody_ordinary_directory_uses_native_authority_and_current_signed_prekeys()
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[test]
+fn native_registered_envelope_uses_current_custody_without_a_legacy_device_set() -> TestResult {
+    let now = crate::now_unix_seconds();
+    let seed = 60;
+    let publication = native_at("native-envelope-alice", seed, now)?;
+    let path = temp_store_path("native-envelope-authority")?;
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let router = RouterCore::new();
+    store.save_router(&router)?;
+    router.publish_custody_record(&publication, now, &store)?;
+    let branch =
+        ramflux_crypto::create_device_branch("native-envelope-alice", "primary", 1, [seed + 2; 32]);
+    let mut envelope =
+        envelope("native-envelope", "recipient", ramflux_protocol::DeliveryClass::OpaqueEvent);
+    envelope.source_principal_id = branch.principal_id.clone();
+    envelope.source_device_id = branch.device_id.clone();
+    envelope.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::json!(publication.record.body.account_anchor),
+    );
+    envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &envelope)?;
+    let expected =
+        ramflux_protocol::qualified_device_id(&publication.record.body.account_anchor, "primary")?;
+    assert_eq!(router.authenticated_envelope_source(&envelope)?.storage_key(), expected);
+    assert_eq!(
+        router.authenticated_envelope_source_durable(&envelope, &store)?.storage_key(),
+        expected
+    );
+    router.refresh_registered_envelope_authority(&mut envelope)?;
+    let authority: crate::DeviceAuthKeyResponse =
+        serde_json::from_value(envelope.ext.ext["source_device_authority"].clone())?;
+    assert!(authority.custody_authority.is_some());
+    assert!(authority.signed_device_set.is_none());
+    assert!(authority.root_public_key.is_none());
+    let mut forged = envelope.clone();
+    forged.source_principal_id = "other-principal".into();
+    assert!(router.authenticated_envelope_source(&forged).is_err());
+    forged = envelope.clone();
+    forged.signed.signature = ramflux_protocol::encode_base64url([0; 64]);
+    assert!(router.authenticated_envelope_source_durable(&forged, &store).is_err());
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
+    let verified = ramflux_crypto::custody::verify_record(&publication.record, now, None, None)?;
+    let revoked = primary.revoke_device(&verified, "primary", now + 1)?;
+    router.publish_custody_record(
+        &crate::CustodyPublication { record: revoked, compacted_ids: None },
+        now + 1,
+        &store,
+    )?;
+    assert!(router.authenticated_envelope_source(&envelope).is_err());
+    drop(router);
+    let reopened = store.load_router()?.ok_or("router missing")?;
+    assert!(reopened.authenticated_envelope_source_durable(&envelope, &store).is_err());
+    Ok(())
+}
