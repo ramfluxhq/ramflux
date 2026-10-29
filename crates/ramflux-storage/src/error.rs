@@ -74,6 +74,23 @@ pub enum StorageError {
 }
 
 impl StorageError {
+    /// Whether a background operation must stop because storage is corrupt or unkeyed.
+    #[must_use]
+    pub fn is_account_unusable(&self) -> bool {
+        match self {
+            Self::AccountKeyMismatch
+            | Self::EncryptionUnavailable { .. }
+            | Self::KeyWrappingFailed(_)
+            | Self::RekeyRollbackFailed(_)
+            | Self::MigrationChecksumMismatch { .. } => true,
+            Self::Sqlite(error) => matches!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+            ),
+            _ => false,
+        }
+    }
+
     /// Whether a storage operation exhausted its filesystem or SQLite page budget.
     #[must_use]
     pub fn is_insufficient_space(&self) -> bool {
@@ -82,5 +99,30 @@ impl StorageError {
             Self::Sqlite(error) => error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull),
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_stop_allowlist_distinguishes_corruption_from_busy_and_row_decode() {
+        for code in [rusqlite::ffi::SQLITE_CORRUPT, rusqlite::ffi::SQLITE_NOTADB] {
+            let error = StorageError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert!(error.is_account_unusable());
+        }
+        let busy = StorageError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ));
+        assert!(!busy.is_account_unusable());
+        assert!(!StorageError::Sqlite(rusqlite::Error::InvalidQuery).is_account_unusable());
+        let decode = serde_json::from_str::<u64>("{}").err();
+        assert!(decode.is_some_and(|error| !StorageError::Serde(error).is_account_unusable()));
+        assert!(StorageError::AccountKeyMismatch.is_account_unusable());
     }
 }

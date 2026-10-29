@@ -96,10 +96,11 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) task_approval_cursor: usize,
     pub(crate) task_ack_cursor: usize,
     pub(crate) task_forward_cursor: usize,
+    #[cfg(test)]
     pub(crate) task_forward_first: bool,
     pub(crate) task_courier_wake: Option<mpsc::Sender<()>>,
     pub(crate) task_prepared_manifests: BTreeMap<String, SdkDeviceManifestResponse>,
-    pub(crate) task_preparation_failure: Option<String>,
+    pub(crate) task_prepared_only: bool,
     /// T25-A3 (OBJ-IPC-01): in-flight bounded UPLOAD spools, keyed by `operation_id`.
     pub(crate) object_put_spools: BTreeMap<String, ObjectPutSpoolSession>,
     /// T25-A4 (OBJ-IPC-01): in-flight bounded DOWNLOAD spools, keyed by `operation_id`.
@@ -152,10 +153,11 @@ impl LocalBusAccountState {
             task_approval_cursor: 0,
             task_ack_cursor: 0,
             task_forward_cursor: 0,
+            #[cfg(test)]
             task_forward_first: false,
             task_courier_wake: None,
             task_prepared_manifests: BTreeMap::new(),
-            task_preparation_failure: None,
+            task_prepared_only: false,
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
         }
@@ -190,10 +192,11 @@ impl LocalBusAccountState {
             task_approval_cursor: 0,
             task_ack_cursor: 0,
             task_forward_cursor: 0,
+            #[cfg(test)]
             task_forward_first: false,
             task_courier_wake: None,
             task_prepared_manifests: BTreeMap::new(),
-            task_preparation_failure: None,
+            task_prepared_only: false,
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
         }

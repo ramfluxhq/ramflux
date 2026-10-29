@@ -17,6 +17,7 @@ pub(super) fn cleanup(account: &LocalBusAccountState) -> Result<(), SdkError> {
         "approval_decision_out",
     ] {
         let prefix = format!("task/{namespace}/");
+        validate_outbound_jobs(account, namespace, &prefix)?;
         for (storage, mut row) in db.task_record_page::<Value>(&prefix, &prefix, 101)? {
             let result = (|| {
                 let nested = row.get("packet").is_some();
@@ -24,12 +25,20 @@ pub(super) fn cleanup(account: &LocalBusAccountState) -> Result<(), SdkError> {
                 let mut packet = match serde_json::from_value::<Packet>(value) {
                     Ok(packet) => packet,
                     Err(error) => {
-                        crate::task_warnings::warn(
-                            &storage,
-                            &SdkError::from(error),
-                            "malformed approval row retired",
-                        );
-                        db.delete_task_state(&storage)?;
+                        if matches!(namespace, "approval_out" | "approval_decision_out") {
+                            crate::bus::task_courier_queue::quarantine(
+                                account,
+                                &storage,
+                                crate::bus::task_courier::Failure::UndecodableRow,
+                            )?;
+                        } else {
+                            crate::task_warnings::warn(
+                                &storage,
+                                &SdkError::from(error),
+                                "malformed approval row retired",
+                            );
+                            db.delete_task_state(&storage)?;
+                        }
                         return Ok(());
                     }
                 };
@@ -94,5 +103,20 @@ pub(super) fn cleanup(account: &LocalBusAccountState) -> Result<(), SdkError> {
         db.prune_task_diagnostics(&prefix, 128)?;
     }
     account.client.prune_task_approval_receipts()?;
+    Ok(())
+}
+
+fn validate_outbound_jobs(
+    account: &LocalBusAccountState,
+    namespace: &str,
+    prefix: &str,
+) -> Result<(), SdkError> {
+    if matches!(namespace, "approval_out" | "approval_decision_out") {
+        // Validate complete jobs before legacy packet cleanup can delete them.
+        // Reading keys first also isolates syntactically invalid JSON rows.
+        for key in account.client.account_db()?.actor_state_key_page(prefix, 101)? {
+            let _ = crate::bus::task_courier_queue::load(account, &key)?;
+        }
+    }
     Ok(())
 }

@@ -44,10 +44,12 @@ pub(super) fn decide(
     crate::client::task::require_local_human(&manifest.client_mode, Some(kind))?;
     Ok(Some(local_bus_account(state, account_id)?.client.decide_task_approval(id, approved)?))
 }
+#[cfg(test)]
 pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     drive_at(account, now_unix_timestamp()).await
 }
 
+#[cfg(test)]
 pub(super) async fn drive_at(
     account: &mut LocalBusAccountState,
     now: i64,
@@ -68,6 +70,7 @@ pub(in crate::bus) fn prepare_queue(account: &mut LocalBusAccountState) {
     }
 }
 
+#[cfg(test)]
 async fn drive_queued_at(account: &mut LocalBusAccountState, now: i64) -> Result<usize, SdkError> {
     let mut rows = account.client.account_db()?.task_record_page::<Value>(
         "task/approval_decision_out/",
@@ -243,7 +246,7 @@ use cleanup::cleanup;
 #[path = "tests/task_approval.rs"]
 mod tests;
 
-fn record_delivery(
+pub(in crate::bus) fn record_delivery(
     account: &LocalBusAccountState,
     storage: &str,
     job: &mut Job,
