@@ -79,6 +79,7 @@ impl EventStore for AccountDb {
         event_type: &str,
         body: &[u8],
     ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
         let actor_principal_id =
             self.device_signer().map_or("principal", |device| device.principal_id.as_str());
         let actor_device_id =
@@ -111,9 +112,7 @@ impl EventStore for AccountDb {
             return Err(StorageError::EventIdConflict(event_id.to_owned()));
         }
         let next_device_counter = self.connection.query_row(
-            "SELECT COALESCE(MAX(device_counter), 0) + 1
-                   FROM local_event_log
-                  WHERE actor_device_id = ?1",
+            "SELECT max(COALESCE((SELECT counter FROM local_event_counter WHERE actor_device_id=?1),0),COALESCE((SELECT MAX(device_counter) FROM local_event_log WHERE actor_device_id=?1),0))+1",
             params![actor_device_id],
             |row| row.get::<_, i64>(0),
         )?;
@@ -152,6 +151,7 @@ impl EventStore for AccountDb {
             ],
         )?;
         Ok(())
+        })
     }
 
     fn event_body(&self, event_id: &str) -> Result<Option<Vec<u8>>, StorageError> {

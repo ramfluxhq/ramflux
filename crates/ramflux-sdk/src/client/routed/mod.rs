@@ -305,7 +305,7 @@ impl RamfluxClient {
             remote_device: self.authenticated_device_identity(entry)?,
         })
     }
-
+    #[cfg(test)]
     pub(crate) fn is_call_control_entry(
         &self,
         entry: &GatewayInboxEntry,
