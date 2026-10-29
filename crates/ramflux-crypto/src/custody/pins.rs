@@ -35,6 +35,13 @@ pub enum PinOutcome {
     Fenced,
 }
 impl AuthorityPins {
+    /// Highest authenticated range, including a conflicting range that was fenced.
+    /// This is a recovery selection floor and grants no authority.
+    #[must_use]
+    pub fn maximum_observed_range(&self, anchor: &str) -> Option<u64> {
+        let pin = self.accounts.get(anchor)?;
+        pin.certificates.keys().chain(pin.fenced_ranges.iter()).copied().max()
+    }
     /// Copy one account's retained floor/evidence for an incremental durable update.
     #[must_use]
     pub fn for_account(&self, anchor: &str) -> Self {
