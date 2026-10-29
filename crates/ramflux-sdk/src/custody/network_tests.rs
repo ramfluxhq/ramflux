@@ -59,7 +59,10 @@ async fn create(socket: &Path, id: &str, principal: &str) -> Result<String> {
     assert_eq!(confirmed.state, CreationState::NetworkingPending);
     Ok(anchor)
 }
-fn node(now: u64, certificate_hash: String) -> Result<ramflux_crypto::custody::VerifiedNodeRecord> {
+pub(super) fn node(
+    now: u64,
+    certificate_hash: String,
+) -> Result<ramflux_crypto::custody::VerifiedNodeRecord> {
     let key = ramflux_crypto::fixture_signing_key();
     let body = NodeIdentityRecord {
         schema: ramflux_protocol::domain::CUSTODY_NODE_RECORD.into(),

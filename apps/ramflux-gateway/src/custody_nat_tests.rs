@@ -207,8 +207,8 @@ async fn id02_same_ip_reconnect_busy_is_challenge_issuance_not_handshake_or_auth
     );
     assert!(!b.permit.is_revoked());
     assert!(!reconnect.permit.is_revoked());
-    // A different IP in this /24 has issued zero challenges but is refused too:
-    // this distinguishes the r7 share window from a per-IP window.
+    // The same-source ninth challenge is refused, while another IP in this /24
+    // can still issue a challenge under the tiered window.
     let request = CustodyMeshRequest::Challenge {
         device_ref: alice.reference(),
         action: CustodyProofAction::OpenSession,
@@ -216,7 +216,7 @@ async fn id02_same_ip_reconnect_busy_is_challenge_issuance_not_handshake_or_auth
         client_source: "127.0.0.2".into(),
         connection_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
     };
-    assert_eq!(
+    assert!(matches!(
         service.mesh(
             &router,
             &store,
@@ -224,13 +224,16 @@ async fn id02_same_ip_reconnect_busy_is_challenge_issuance_not_handshake_or_auth
             "ramflux-gateway",
             ramflux_node_core::now_unix_seconds()
         ),
-        CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
-    );
+        CustodyServerFrame::Challenge { .. }
+    ));
     let fresh =
         limiter.acquire("127.0.0.1".parse()?, None, Instant::now()).ok_or("H unexpectedly full")?;
     assert!(fresh.mark_authenticated("independent-account"), "A unexpectedly full");
     eprintln!(
-        "id02 diagnosis: challenge #9 (reconnect Register) refused by router source window; H and A have room; fresh IP in same /24 also Busy"
+        "tiered source window: challenge #9 (reconnect Register) Busy for the same IP; H and A have room; fresh IP in same /24 admitted"
     );
     Ok(())
 }
+
+#[path = "custody_gateway_tests.rs"]
+mod gateway;

@@ -418,7 +418,7 @@ mod tests {
                         }
                     }
                 }
-                assert_eq!(issued, 8 * 8);
+                assert_eq!(issued, 8 * 32);
                 // Three operations for native publication, registration and session opening.
                 for request in 0..3 {
                     let holder = format!("honest-{minute}-{request}");

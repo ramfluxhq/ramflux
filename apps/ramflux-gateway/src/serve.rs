@@ -271,7 +271,7 @@ async fn run_gateway_tcp_tls(
     serve_gateway_tcp_listener(listener, server_config, context).await
 }
 
-async fn serve_gateway_tcp_listener(
+pub(crate) async fn serve_gateway_tcp_listener(
     listener: tokio::net::TcpListener,
     server_config: rustls::ServerConfig,
     context: GatewayListenerContext,

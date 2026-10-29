@@ -19,6 +19,15 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+struct LocalAuthority {
+    account: BornAccount,
+    device: DeviceRef,
+    credentials: BranchCredentials,
+}
+struct OpenTransport {
+    stream: GatewayTcpTlsStream,
+    pins: NodePins,
+}
 pub struct CustodyNetworkConfig {
     pub account_root: PathBuf,
     pub account_id: String,
@@ -72,8 +81,15 @@ impl CustodyConnection {
     /// Publish, register and establish a session using the current locally verified v3 record.
     /// # Errors
     /// Rejects missing custody state, keychain failure, node-pin changes, exporter failure and
-    /// every typed router refusal. It never retries with legacy or weaker binding modes.
+    /// non-Busy router refusals. Busy retries use fresh TLS/challenges, bounded jittered
+    /// backoff and one account-local flight for at most 90 seconds. No legacy or weaker mode is tried.
     pub async fn connect(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+    ) -> Result<Self, SdkError> {
+        Box::pin(Self::connect_inner(config, vault)).await
+    }
+    async fn connect_inner(
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
     ) -> Result<Self, SdkError> {
@@ -81,16 +97,49 @@ impl CustodyConnection {
         {
             return Err(CustodyRefusal::BindingRefused.into());
         }
+        let mut budget = super::retry::Budget::new();
+        let _flight =
+            super::retry::single_flight(&config.account_root, &config.account_id, &mut budget)
+                .await?;
         let root = config.account_root.clone();
         let account_id = config.account_id.clone();
         let device_id = config.device_id.clone();
-        let (account, device, credentials) = tokio::task::spawn_blocking(move || {
-            let account = super::load_account(&root, &account_id, now()?)?;
-            let (device, credentials) = account.credentials(vault.as_ref(), &device_id, now()?)?;
-            Ok::<_, SdkError>((account, device, credentials))
-        })
-        .await
-        .map_err(|_| invalid())??;
+        let authority = budget
+            .attempt(async move {
+                tokio::task::spawn_blocking(move || {
+                    let account = super::load_account(&root, &account_id, now()?)?;
+                    let (device, credentials) =
+                        account.credentials(vault.as_ref(), &device_id, now()?)?;
+                    Ok::<_, SdkError>(LocalAuthority { account, device, credentials })
+                })
+                .await
+                .map_err(|_| invalid())?
+            })
+            .await?;
+        let opened = budget.until_ready(|| Self::open_transport(&config)).await?;
+        let mut connection = Self::from_authority(authority, opened, &config);
+        let actions = connection.registration_actions()?;
+        let mut next = 0;
+        loop {
+            match budget.attempt(connection.register(&actions, &mut next)).await {
+                Ok(()) => {
+                    budget.attempt(connection.persist_live(&config.account_root)).await?;
+                    return Ok(connection);
+                }
+                Err(error) if super::retry::is_busy(&error) => {
+                    // Drop the refused stream before waiting: it can hold H or A, and
+                    // the gateway closes a Busy exchange. A new TLS exporter and a
+                    // fresh challenge/proof are mandatory even for the same action.
+                    let authority = connection.into_authority();
+                    budget.pause().await?;
+                    let opened = budget.until_ready(|| Self::open_transport(&config)).await?;
+                    connection = Self::from_authority(authority, opened, &config);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    async fn open_transport(config: &CustodyNetworkConfig) -> Result<OpenTransport, SdkError> {
         let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
             "0.0.0.0:0".parse().map_err(|_| invalid())?,
             config.gateway_address,
@@ -120,7 +169,7 @@ impl CustodyConnection {
                 .ok_or(CustodyRefusal::BindingRefused)?;
             ramflux_transport::verify_custody_peer_certificate(&stream, expected)?;
         }
-        let pins = super::discovery::authenticate(&config, &mut stream, *record).await?;
+        let pins = super::discovery::authenticate(config, &mut stream, *record).await?;
         if binding_mode == BindingMode::NoChannelBinding {
             tracing::warn!(node_id=%config.node_id,"custody connection explicitly uses no_channel_binding");
             let log_root = config.account_root.clone();
@@ -128,52 +177,68 @@ impl CustodyConnection {
                 .await
                 .map_err(|_| invalid())??;
         }
-        let mut connection = Self {
-            account,
-            device,
-            credentials,
-            stream,
-            pins,
+        Ok(OpenTransport { stream, pins })
+    }
+    fn from_authority(
+        authority: LocalAuthority,
+        opened: OpenTransport,
+        config: &CustodyNetworkConfig,
+    ) -> Self {
+        Self {
+            account: authority.account,
+            device: authority.device,
+            credentials: authority.credentials,
+            stream: opened.stream,
+            pins: opened.pins,
             session: None,
             timeout: config.timeout,
             experimental_native_dm: config.allow_experimental_native_dm,
-            mode: binding_mode,
-            audience,
-        };
-        connection.register().await?;
-        connection.persist_live(&config.account_root).await?;
-        Ok(connection)
+            mode: config.binding_mode,
+            audience: config.audience.clone(),
+        }
     }
-    async fn register(&mut self) -> Result<(), SdkError> {
-        let publication =
-            Publication { record: self.account.record().clone(), compacted_ids: None };
-        let response =
-            self.prove(CustodyProofAction::Publish { publication: Box::new(publication) }).await?;
-        if !matches!(response, CustodyServerFrame::Published { .. }) {
-            return Err(invalid());
+    fn into_authority(self) -> LocalAuthority {
+        let Self { account, device, credentials, stream, .. } = self;
+        drop(stream);
+        LocalAuthority { account, device, credentials }
+    }
+    fn registration_actions(&self) -> Result<[CustodyProofAction; 3], SdkError> {
+        Ok([
+            CustodyProofAction::Publish {
+                publication: Box::new(Publication {
+                    record: self.account.record().clone(),
+                    compacted_ids: None,
+                }),
+            },
+            CustodyProofAction::Register {
+                prekey_bundle: serde_json::to_value(self.prekey_bundle()?)?,
+            },
+            CustodyProofAction::OpenSession,
+        ])
+    }
+    async fn register(
+        &mut self,
+        actions: &[CustodyProofAction; 3],
+        next: &mut usize,
+    ) -> Result<(), SdkError> {
+        while let Some(action) = actions.get(*next) {
+            let response = self.prove(action.clone()).await?;
+            match (*next, response) {
+                (0, CustodyServerFrame::Published { .. })
+                | (1, CustodyServerFrame::Registered { .. }) => {}
+                (2, CustodyServerFrame::SessionEstablished { session }) => {
+                    if session.device_ref != self.device
+                        || session.binding_mode != self.mode
+                        || session.record_hash != object_hash(self.account.record())?
+                    {
+                        return Err(invalid());
+                    }
+                    self.session = Some(session);
+                }
+                _ => return Err(invalid()),
+            }
+            *next += 1;
         }
-        let bundle = self.prekey_bundle()?;
-        if !matches!(
-            self.prove(CustodyProofAction::Register {
-                prekey_bundle: serde_json::to_value(&bundle)?
-            })
-            .await?,
-            CustodyServerFrame::Registered { .. }
-        ) {
-            return Err(invalid());
-        }
-        let CustodyServerFrame::SessionEstablished { session } =
-            self.prove(CustodyProofAction::OpenSession).await?
-        else {
-            return Err(invalid());
-        };
-        if session.device_ref != self.device
-            || session.binding_mode != self.mode
-            || session.record_hash != object_hash(self.account.record())?
-        {
-            return Err(invalid());
-        }
-        self.session = Some(session);
         Ok(())
     }
     async fn persist_live(&mut self, root: &std::path::Path) -> Result<(), SdkError> {

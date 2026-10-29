@@ -117,8 +117,8 @@ Challenge, consumed-proof and session maps are process-local. A challenge has
 a 300-second monotonic deadline; consumed nonce/proof markers remain for 600
 seconds. A connection may have four outstanding challenges. Sources normalize
 IPv4-mapped addresses and share IPv4 /24, IPv6 /64 and IPv6 /48 budgets; no prefix
-may hold more than 64 outstanding challenges. Issuance windows permit 32/IP and
-at most eight per IPv4 /24, IPv6 /64 and
+may hold more than 64 outstanding challenges. Issuance windows permit eight per
+IP and 32 per IPv4 /24, IPv6 /64 and
 IPv6 /48 per minute, plus 1024 per node. These limits include IPv4-mapped sources.
 The node-wide issuance window reserves two challenges when admitting a prefix;
 its second challenge can use that reservation even if other prefixes fill the
@@ -187,9 +187,11 @@ are retried as well.
 
 Filling the handshake pool requires at least ceil(H/4) distinct IPv4 /24s or IPv6
 /48s, reconnecting at least once per ten-second deadline. Blocking challenges for
-fresh prefixes requires at least 128 distinct source shares (1024 / 8) per minute;
-each IPv4 /24 or IPv6 /48 can spend at most eight challenges, and IPv6 /64 has
-the same cap. Two-slot reservations for new shares also count toward the
+fresh prefixes requires at least 32 distinct source shares (1024 / 32) per minute,
+using at least four
+IPs per share to fill it. Each IP can spend only eight challenges per minute;
+an IP alone cannot consume its /24 or /48 share, and the same 32 cap applies
+to IPv6 /64. Two-slot reservations for new shares also count toward the
 node-wide bound; reservations are never retired by other sources. These custody
 bounds do not gate ordinary gateway ingress. Filling the authenticated
 pool requires at least ceil(A/16) source shares and, with the default four sessions
@@ -244,3 +246,28 @@ and the guarded production build recipes in CI. All-feature lint/test fixture bu
 set `RAMFLUX_ITEST_BUILD=1` explicitly; default consumer builds need no marker.
 Integration builds may explicitly
 enable the fixture; production artifacts must not.
+
+## Retrying custody admission
+
+The SDK retries only typed `Busy` during custody open, challenge or proof admission.
+Nominal exponential delays are 1, 2, 4, 8 and 16 seconds, with jitter in the upper
+quarter of each interval (one-second floor, sixteen-second ceiling). The whole
+connection attempt, including account-flight waits and transport setup, has a
+90-second deadline; exhaustion returns typed `Busy`. Other refusals and transport
+errors remain immediate, with no legacy, unbound-mode or trust-anchor fallback.
+
+An account-local filesystem lease serializes connection attempts even across
+daemons sharing that account directory. A refused transport is dropped before
+backoff. Each retry authenticates a new TLS connection and receiving-node record,
+then requests a fresh one-use challenge and signs a new exporter-bound proof.
+Completed publication/registration steps are retained as progress; the pending
+action is retried with the same payload. This also handles a gateway refusal after
+a durable operation: a retry does not reuse its old nonce or proof. `Live` is
+persisted only after publication, registration and session authentication complete.
+
+Sources behind one NAT share eight challenges per minute. The initial native
+bootstrap needs three; a reconnect needs three fresh challenges as well. A group
+of ten clients therefore needs four issuance windows, even when the /24 share
+has spare capacity. The per-call retry deadline does not promise that an arbitrary
+concurrent batch can all complete in ninety seconds. Durable new-principal quotas
+remain separate; reconnecting known principals does not consume that quota.

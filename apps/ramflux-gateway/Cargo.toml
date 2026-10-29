@@ -42,4 +42,5 @@ compio = { version = "=0.19.1", features = ["time"], optional = true }
 workspace = true
 
 [dev-dependencies]
+ramflux-sdk = { workspace = true }
 rcgen = { workspace = true }

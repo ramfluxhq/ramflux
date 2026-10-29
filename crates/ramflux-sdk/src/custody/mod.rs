@@ -77,6 +77,7 @@ pub use memory_vault::MemoryPrimaryVault;
 
 mod network;
 mod node_pins;
+mod retry;
 pub use network::{CustodyConnection, CustodyNetworkConfig};
 
 mod dm;

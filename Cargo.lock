@@ -2514,6 +2514,7 @@ dependencies = [
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",
+ "ramflux-sdk",
  "ramflux-transport",
  "rcgen",
  "rustls",
