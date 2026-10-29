@@ -17,6 +17,15 @@ fn runtime_wal_sqlcipher_snapshot_and_rekey() -> Result<(), StorageError> {
     assert_eq!(journal, "wal");
     assert_eq!(full, 2);
     assert_eq!(busy, 5000);
+    for (pragma, expected) in [("fullfsync", 1), ("secure_delete", 1), ("wal_autocheckpoint", 0)] {
+        assert_eq!(
+            writer
+                .connection
+                .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get::<_, i64>(0))?,
+            expected,
+            "{pragma}"
+        );
+    }
     writer.enable_runtime()?;
     assert_eq!(
         writer.connection.query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))?,
