@@ -15,7 +15,9 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod prekey_budgets;
 pub(crate) mod registration;
+use prekey_budgets::PrekeyBudgetTable;
 
 pub const IDENTITY_BIND_AUDIENCE: &str = "ramflux-node";
 pub const IDENTITY_BIND_CAPABILITY: &str = "device.delivery.bind";
@@ -159,6 +161,8 @@ pub struct PrekeyResponse {
     pub prekey_exhaustion_warning: bool,
     #[serde(default)]
     pub available_one_time_prekeys: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub one_time_prekey_leases: BTreeMap<String, ramflux_protocol::OneTimePrekeyLease>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -166,6 +170,8 @@ pub struct PrekeyLeaseState {
     pub storage_key: String,
     pub available: std::collections::VecDeque<String>,
     pub consumed: BTreeSet<String>,
+    #[serde(default)]
+    pub leased_at: BTreeMap<String, i64>,
     pub exhaustion_fallbacks: u64,
 }
 
@@ -279,14 +285,16 @@ pub struct IdentityRegistry {
     available_one_time_prekeys: BTreeMap<String, std::collections::VecDeque<String>>,
     #[serde(default)]
     consumed_one_time_prekeys: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    one_time_prekey_lease_times: BTreeMap<String, BTreeMap<String, i64>>,
     #[serde(skip)]
-    prekey_fetch_times_by_source: BTreeMap<String, Vec<i64>>,
+    prekey_fetch_times_by_source: PrekeyBudgetTable,
     #[serde(skip)]
-    prekey_fetch_times_by_fetcher: BTreeMap<String, Vec<i64>>,
+    prekey_fetch_times_by_fetcher: PrekeyBudgetTable,
     #[serde(skip)]
-    prekey_fetch_times_by_pair: BTreeMap<String, Vec<i64>>,
+    prekey_fetch_times_by_pair: PrekeyBudgetTable,
     #[serde(skip)]
-    prekey_fetch_times_by_target: BTreeMap<String, Vec<i64>>,
+    prekey_fetch_times_by_target: PrekeyBudgetTable,
     #[serde(default)]
     prekey_exhaustion_fallbacks: BTreeMap<String, u64>,
     #[serde(default, deserialize_with = "load_registration_policy")]
@@ -315,20 +323,6 @@ fn normalize_registration_policy(mut policy: RegistrationPolicy) -> Registration
         policy.registration_window_seconds = defaults.registration_window_seconds;
     }
     policy
-}
-
-fn prekey_budget_available(
-    budgets: &mut BTreeMap<String, Vec<i64>>,
-    key: &str,
-    now: i64,
-    limit: usize,
-    window: i64,
-) -> bool {
-    budgets.retain(|_, events| {
-        events.retain(|seen| now.saturating_sub(*seen) < window);
-        !events.is_empty()
-    });
-    budgets.get(key).map_or(budgets.len() < 4096, |events| events.len() < limit)
 }
 
 impl IdentityRegistry {
@@ -800,19 +794,62 @@ impl IdentityRegistry {
             if request.bundle.prekey_bundle_counter < previous.prekey_bundle_counter {
                 return Err(NodeCoreError::ItestHttp("prekey bundle counter rollback".into()));
             }
-            if request.bundle.prekey_bundle_counter == previous.prekey_bundle_counter {
-                if request.bundle != *previous {
-                    return Err(NodeCoreError::ItestHttp("prekey bundle counter conflict".into()));
-                }
-                return Ok(());
+            if request.bundle.prekey_bundle_counter == previous.prekey_bundle_counter
+                && request.bundle != *previous
+            {
+                return Err(NodeCoreError::ItestHttp("prekey bundle counter conflict".into()));
             }
         }
         let consumed = self.consumed_one_time_prekeys.entry(storage_key.clone()).or_default();
         consumed.retain(|id| ids.contains(id));
+        let leases = self.one_time_prekey_lease_times.entry(storage_key.clone()).or_default();
+        leases.retain(|id, _| ids.contains(id));
+        // Historical cursors had no clock. Start their grace now, never mislabel them unleased.
+        let now = i64::try_from(
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+        )
+        .unwrap_or(i64::MAX);
+        for id in consumed.iter() {
+            leases.entry(id.clone()).or_insert(now);
+        }
         let available = ids.into_iter().filter(|id| !consumed.contains(id)).collect();
         self.available_one_time_prekeys.insert(storage_key.clone(), available);
         self.prekey_bundles.insert(storage_key, request.bundle);
         Ok(())
+    }
+
+    /// Configures each in-memory lease budget's maximum number of tracked identities.
+    /// A zero capacity is normalized to one; new identities evict the least recently used entry.
+    pub fn set_prekey_budget_capacity(&mut self, capacity: usize) {
+        self.prekey_fetch_times_by_source.set_capacity(capacity);
+        self.prekey_fetch_times_by_fetcher.set_capacity(capacity);
+        self.prekey_fetch_times_by_pair.set_capacity(capacity);
+        self.prekey_fetch_times_by_target.set_capacity(capacity);
+    }
+
+    #[must_use]
+    pub fn owner_prekey_leases(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> BTreeMap<String, ramflux_protocol::OneTimePrekeyLease> {
+        let state = self.prekey_lease_state(identity);
+        self.prekey_bundle(identity)
+            .map(|bundle| {
+                bundle
+                    .one_time_prekey_ids
+                    .iter()
+                    .map(|id| {
+                        let status = state
+                            .leased_at
+                            .get(id)
+                            .map_or(ramflux_protocol::OneTimePrekeyLease::Unleased, |at| {
+                                ramflux_protocol::OneTimePrekeyLease::LeasedAt(*at)
+                            });
+                        (id.clone(), status)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Atomically leases at most one public OPK from a root-qualified device bundle.
@@ -843,28 +880,13 @@ impl IdentityRegistry {
             return Ok(None);
         }
         let storage_key = Self::device_storage_key(identity);
-        let allowed =
-            prekey_budget_available(
-                &mut self.prekey_fetch_times_by_fetcher,
-                fetcher,
-                now,
-                60,
-                3600,
-            ) && prekey_budget_available(&mut self.prekey_fetch_times_by_pair, pair, now, 1, 86400)
-                && prekey_budget_available(
-                    &mut self.prekey_fetch_times_by_source,
-                    source_prefix,
-                    now,
-                    120,
-                    3600,
-                )
-                && prekey_budget_available(
-                    &mut self.prekey_fetch_times_by_target,
-                    &storage_key,
-                    now,
-                    6,
-                    3600,
-                );
+        let fetcher_allowed = self.prekey_fetch_times_by_fetcher.available(fetcher, now, 60, 3600);
+        let pair_allowed = self.prekey_fetch_times_by_pair.available(pair, now, 1, 86400);
+        let source_allowed =
+            self.prekey_fetch_times_by_source.available(source_prefix, now, 120, 3600);
+        let target_allowed =
+            self.prekey_fetch_times_by_target.available(&storage_key, now, 6, 3600);
+        let allowed = fetcher_allowed && pair_allowed && source_allowed && target_allowed;
         let mut bundle = self
             .prekey_bundles
             .get(&storage_key)
@@ -879,13 +901,14 @@ impl IdentityRegistry {
             None
         };
         if let Some(id) = selected {
-            self.prekey_fetch_times_by_fetcher.entry(fetcher.to_owned()).or_default().push(now);
-            self.prekey_fetch_times_by_pair.entry(pair.to_owned()).or_default().push(now);
-            self.prekey_fetch_times_by_source
-                .entry(source_prefix.to_owned())
+            self.prekey_fetch_times_by_fetcher.record(fetcher, now, 3600);
+            self.prekey_fetch_times_by_pair.record(pair, now, 86400);
+            self.prekey_fetch_times_by_source.record(source_prefix, now, 3600);
+            self.prekey_fetch_times_by_target.record(&storage_key, now, 3600);
+            self.one_time_prekey_lease_times
+                .entry(storage_key.clone())
                 .or_default()
-                .push(now);
-            self.prekey_fetch_times_by_target.entry(storage_key.clone()).or_default().push(now);
+                .insert(id.clone(), now);
             let index = bundle
                 .one_time_prekey_ids
                 .iter()
@@ -952,6 +975,11 @@ impl IdentityRegistry {
                 .cloned()
                 .unwrap_or_default(),
             consumed: self.consumed_one_time_prekeys.get(&storage_key).cloned().unwrap_or_default(),
+            leased_at: self
+                .one_time_prekey_lease_times
+                .get(&storage_key)
+                .cloned()
+                .unwrap_or_default(),
             exhaustion_fallbacks: self
                 .prekey_exhaustion_fallbacks
                 .get(&storage_key)
@@ -962,6 +990,7 @@ impl IdentityRegistry {
     }
 
     pub(crate) fn restore_prekey_lease_state(&mut self, state: PrekeyLeaseState) {
+        self.one_time_prekey_lease_times.insert(state.storage_key.clone(), state.leased_at);
         self.available_one_time_prekeys.insert(state.storage_key.clone(), state.available);
         self.consumed_one_time_prekeys.insert(state.storage_key.clone(), state.consumed);
         self.prekey_exhaustion_fallbacks.insert(state.storage_key, state.exhaustion_fallbacks);

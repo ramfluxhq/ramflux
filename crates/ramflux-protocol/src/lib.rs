@@ -125,3 +125,6 @@ pub use identity_name::{
     DisplayNameSecurity, normalize_profile_display_name, profile_display_name_security,
 };
 pub use identity_profile::{SignedIdentityProfile, identity_profile_signing_bytes};
+
+mod prekey_lease;
+pub use prekey_lease::OneTimePrekeyLease;

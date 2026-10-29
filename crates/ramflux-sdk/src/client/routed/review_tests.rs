@@ -570,6 +570,7 @@ async fn an_object_share_and_later_messages_keep_one_device_pair_ratchet() -> Re
         target_delivery_id: Some("bob".to_owned()),
         one_time_prekey_exhausted: false,
         available_one_time_prekeys: 8,
+        one_time_prekey_leases: std::collections::BTreeMap::new(),
     };
     let inbox = Inbox {
         responses: VecDeque::from([serde_json::to_vec(&GatewayServerFrame::Prekey { response })?]),
@@ -795,6 +796,7 @@ fn a_substituted_recipient_prekey_cannot_bootstrap_a_known_device() -> Result<()
         target_delivery_id: Some("bob".to_owned()),
         one_time_prekey_exhausted: false,
         available_one_time_prekeys: 8,
+        one_time_prekey_leases: std::collections::BTreeMap::new(),
     })?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let url = format!("http://{}", listener.local_addr()?);

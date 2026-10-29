@@ -39,8 +39,11 @@ signed OPK public keys. No private prekey is published.
   publish acknowledgments also return SPK-only bundles. Signed device-set publications contain
   key commitments, never OPKs. Only authenticated lease responses expose OPK material.
 - When the queue is empty, the directory returns the signed-prekey-only bundle and increments a
-  bounded exhaustion counter with a rate-limited warning. All rate-limit maps have hard
-  account/source caps.
+  bounded exhaustion counter with a rate-limited warning. Each rate-limit table tracks up to
+  4096 identities by default (configurable with `IdentityRegistry::set_prekey_budget_capacity`).
+  Inserts sweep expired entries, then evict the least recently used identity at capacity. New
+  identities receive their own allowance; recent tracked identities retain their quotas. Eviction,
+  like a router restart, can reset an old identity's in-memory allowance.
 
 ## Erasure and migration
 
@@ -53,10 +56,16 @@ only the advanced ratchet state. Expired
 signed-prekey private keys are erased during startup/publication maintenance after the delivery
 grace. Existing ratchet sessions are unchanged.
 
-Outstanding OPK private keys are removed only individually after successful bootstrap decryption.
-No expiry cleanup is performed without an authoritative lease-expiry timestamp: keys are retained
-conservatively until consumed, and replenishment stops growing the pool at 200. This preserves
-queued messages for offline recipients without guessing when a lease expired.
+Outstanding OPK private keys are removed individually after successful bootstrap decryption or
+when the directory's lease timestamp is more than 30 days old. Publish acknowledgements carry a
+`one_time_prekey_leases` map from OPK ID to `"unleased"` or `{"leased_at": timestamp}`; anonymous
+fetches, manifests and lease responses do not carry this ledger. The SDK processes it before the
+200-key bound and republishes a freshly signed pool after deleting expired keys. Unleased keys,
+missing timestamps (including older server acknowledgements), and leases exactly 30 days old are
+retained. Historical consumed IDs without timestamps start a conservative 30-day grace on their
+next publication. The per-device lease timestamps commit with the durable lease cursor and survive
+router restart. Expired-lease deletion uses the same secure-delete transaction and post-commit WAL
+checkpoint as consumption. An offline bootstrap older than the lease grace can no longer decrypt.
 
 The account database enables SQLite secure deletion. On both routed and legacy receive paths, the
 authenticated ratchet snapshot and OPK removal commit in one transaction; only after it commits is

@@ -198,6 +198,7 @@ async fn authenticated_prekey_fetch_forwards_fetcher_and_real_source_prefix_to_r
         one_time_prekey_exhausted: false,
         prekey_exhaustion_warning: false,
         available_one_time_prekeys: 7,
+        one_time_prekey_leases: std::collections::BTreeMap::new(),
     };
     let (done, finished) = tokio::sync::oneshot::channel::<()>();
     let serving = tokio::spawn(serve_prekey_router(server, expected.clone(), finished));

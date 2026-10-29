@@ -142,6 +142,7 @@ impl DirectorySession {
                 target_delivery_id: Some(entry.target_delivery_id.clone()),
                 one_time_prekey_exhausted: false,
                 available_one_time_prekeys: 8,
+                one_time_prekey_leases: std::collections::BTreeMap::new(),
             },
         })
     }

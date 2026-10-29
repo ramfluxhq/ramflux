@@ -45,6 +45,14 @@ fn one_time_prekeys_are_leased_once_and_exhaustion_is_counted_across_restart() -
     let first = registry.take_prekey_bundle(&identity, "source", 1_100)?.ok_or("first")?.0;
     let second = registry.take_prekey_bundle(&identity, "second-source", 1_101)?.ok_or("second")?.0;
     assert_ne!(first.one_time_prekey_id, second.one_time_prekey_id);
+    assert_eq!(
+        registry.owner_prekey_leases(&identity).get("opk-1"),
+        Some(&ramflux_protocol::OneTimePrekeyLease::LeasedAt(1_100))
+    );
+    assert_eq!(
+        registry.owner_prekey_leases(&identity).get("opk-2"),
+        Some(&ramflux_protocol::OneTimePrekeyLease::LeasedAt(1_101))
+    );
     assert_eq!(first.one_time_prekey_ids.len(), 0);
     assert_eq!(first.one_time_prekey_x25519_public.len(), 0);
     verify_prekey_bundle(&f.device.signing_key.verifying_key(), &first)?;
@@ -60,6 +68,22 @@ fn one_time_prekeys_are_leased_once_and_exhaustion_is_counted_across_restart() -
     assert!(exhausted.1);
     assert!(exhausted.0.one_time_prekey_id.is_none());
     assert_eq!(registry.prekey_exhaustion_fallbacks(), 1);
+
+    // An older durable cursor knows consumption, but not its time. Republishing starts a
+    // conservative grace instead of reporting those IDs as unleased or resurrecting them.
+    let mut historical = serde_json::to_value(&registry)?;
+    historical.as_object_mut().ok_or("registry object")?.remove("one_time_prekey_lease_times");
+    let mut historical: IdentityRegistry = serde_json::from_value(historical)?;
+    let grace_started = i64::try_from(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+    )?;
+    historical.publish_prekey(PrekeyPublishRequest {
+        device_id: f.device.device_id.clone(),
+        bundle: bundle.clone(),
+    })?;
+    assert_eq!(historical.available_one_time_prekeys(&identity), 0);
+    assert!(historical.owner_prekey_leases(&identity).values().all(|status|
+        matches!(status, ramflux_protocol::OneTimePrekeyLease::LeasedAt(at) if *at >= grace_started)));
 
     registry
         .publish_prekey(PrekeyPublishRequest { device_id: f.device.device_id.clone(), bundle })?;
@@ -212,10 +236,14 @@ fn one_time_prekey_lease_persists_as_a_per_device_delta() -> TestResult {
     store.record_prekey_lease_state(&state)?;
     assert_eq!(store.identity_registry_write_count(), full_writes);
     let first_id = first.bundle.and_then(|bundle| bundle.one_time_prekey_id).ok_or("first")?;
+    assert_eq!(state.leased_at.get(&first_id), Some(&1_100));
     drop((router, store));
 
     let reopened = RouterRedbStore::open(&path)?;
     let restored = reopened.load_router()?.ok_or("router")?;
+    let restored_state = restored
+        .mvp1_prekey_lease_state(&target.request.principal_commitment, &target.device.device_id)?;
+    assert_eq!(restored_state.leased_at.get(&first_id), Some(&1_100));
     let (second, _) = restored.mvp1_prekey_lease(&request, 1_101)?;
     let second_id = second.bundle.and_then(|bundle| bundle.one_time_prekey_id).ok_or("second")?;
     assert_ne!(first_id, second_id);
@@ -716,5 +744,77 @@ fn assert_authority_unchanged_after_admission(
     );
     actual["registration_times_by_source_ip"] = previous["registration_times_by_source_ip"].clone();
     assert_eq!(actual, previous);
+    Ok(())
+}
+
+#[test]
+fn five_thousand_distinct_account_target_pairs_still_receive_opks_within_one_day() -> TestResult {
+    let mut registry = IdentityRegistry::new();
+    let signed = X25519KeyPair::from_seed([251; 32]);
+    let one_time = (0u8..52)
+        .map(|i| (format!("opk-{i}"), X25519KeyPair::from_seed([i; 32]).public))
+        .collect::<Vec<_>>();
+    let mut targets = Vec::new();
+    for i in 1u8..=100 {
+        let target = Fixture::named(&format!("target-{i}"), &format!("device-{i}"), i)?;
+        registry.register_identity(&target.request)?;
+        registry.publish_prekey(PrekeyPublishRequest {
+            device_id: target.device.device_id.clone(),
+            bundle: create_rotating_prekey_bundle_with_lineage(
+                &target.device,
+                &target.device.signing_key,
+                &target.x,
+                &PrekeyBundleOptions {
+                    signed_prekey_id: "signed",
+                    signed_prekey: &signed,
+                    signed_prekey_created_at: 1000,
+                    signed_prekey_expires_at: 2_593_000,
+                    one_time_prekeys: &one_time,
+                    prekey_bundle_counter: 1,
+                },
+            )?,
+        })?;
+        targets.push(RootQualifiedDeviceRef::for_owned_device(&target.root, &target.device)?);
+    }
+    let mut last = None;
+    for round in 0..50 {
+        let now = 1100 + round * 601; // Six target leases/hour, all 5000 pairs inside nine hours.
+        for (index, target) in targets.iter().enumerate() {
+            let account = format!("authenticated-account-{round}-{index}");
+            let pair = format!("{account}/{}", target.storage_key());
+            let leased = registry
+                .lease_prekey_bundle(
+                    target,
+                    &account,
+                    &pair,
+                    &format!("prefix-{}", index / 20),
+                    now,
+                )?
+                .ok_or("lease")?
+                .0;
+            assert!(
+                leased.one_time_prekey_id.is_some(),
+                "pair {pair} was denied by table pressure"
+            );
+            last = Some((target, account, pair, now));
+        }
+    }
+    let (target, account, pair, now) = last.ok_or("last pair")?;
+    assert!(
+        registry
+            .lease_prekey_bundle(target, &account, &pair, "prefix", now + 601)?
+            .ok_or("recent pair")?
+            .0
+            .one_time_prekey_id
+            .is_none()
+    );
+    assert!(
+        registry
+            .lease_prekey_bundle(target, "new-account", "new-pair", "prefix", now + 601)?
+            .ok_or("new pair")?
+            .0
+            .one_time_prekey_id
+            .is_some()
+    );
     Ok(())
 }

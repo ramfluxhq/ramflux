@@ -52,6 +52,9 @@ pub struct SdkPrekeyResponse {
     pub(crate) one_time_prekey_exhausted: bool,
     #[serde(default)]
     pub(crate) available_one_time_prekeys: u32,
+    #[serde(default)]
+    pub(crate) one_time_prekey_leases:
+        std::collections::BTreeMap<String, ramflux_protocol::OneTimePrekeyLease>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]

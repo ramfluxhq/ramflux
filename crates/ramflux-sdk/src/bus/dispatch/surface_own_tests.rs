@@ -604,6 +604,7 @@ async fn fresh_sibling_bootstraps_its_first_surface_copy_without_a_preseeded_pai
             bundle: Some(sibling.client.load_x3dh_private_state(&identity)?.bundle.clone()),
             one_time_prekey_exhausted: false,
             available_one_time_prekeys: 8,
+            one_time_prekey_leases: std::collections::BTreeMap::new(),
         },
     );
     source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
@@ -684,6 +685,7 @@ fn fresh_sibling_gateway(
             bundle: Some(sibling.load_x3dh_private_state(&identity)?.bundle.clone()),
             one_time_prekey_exhausted: false,
             available_one_time_prekeys: 8,
+            one_time_prekey_leases: std::collections::BTreeMap::new(),
         },
     );
     Ok(gateway)

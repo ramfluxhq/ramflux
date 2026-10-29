@@ -142,6 +142,7 @@ impl GatewaySessionFrameSource for RecordingGateway {
                             principal_commitment: String::new(),
                             one_time_prekey_exhausted: false,
                             available_one_time_prekeys: 0,
+                            one_time_prekey_leases: std::collections::BTreeMap::new(),
                         }
                     }),
                 },

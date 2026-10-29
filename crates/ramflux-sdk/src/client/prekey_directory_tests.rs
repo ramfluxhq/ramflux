@@ -301,6 +301,7 @@ async fn real_gateway_router_preserve_seven_queued_bootstraps_across_replenishme
         .await?;
     let anonymous: SdkPrekeyResponse = serde_json::from_value(anonymous.body)?;
     assert_public(anonymous.bundle.as_ref().ok_or("anonymous bundle")?);
+    assert_eq!(anonymous.one_time_prekey_leases, std::collections::BTreeMap::new());
     let initial = bob
         .load_x3dh_private_state(&own)?
         .one_time_prekeys
@@ -318,6 +319,7 @@ async fn real_gateway_router_preserve_seven_queued_bootstraps_across_replenishme
         let sender = h.client(&format!("sender-{i}"), 30 + 2 * i)?;
         h.publish(&sender).await?;
         let response = h.engine(&sender)?.fetch_prekey_bundle(own.storage_key()).await?;
+        assert_eq!(response.one_time_prekey_leases, std::collections::BTreeMap::new());
         let bundle = response.bundle.ok_or("leased bundle")?;
         assert!(ids.insert(bundle.one_time_prekey_id.clone().ok_or("leased OPK")?));
         queue_bootstrap(&h, &sender, bundle, i, &own).await?;
@@ -330,6 +332,18 @@ async fn real_gateway_router_preserve_seven_queued_bootstraps_across_replenishme
         .publish_prekey_bundle("bob", &bob.load_x3dh_private_state(&own)?.bundle)
         .await?;
     assert_eq!(response.available_one_time_prekeys, 1);
+    assert_eq!(response.one_time_prekey_leases.len(), 8);
+    for id in &ids {
+        assert!(matches!(response.one_time_prekey_leases.get(id),
+            Some(ramflux_protocol::OneTimePrekeyLease::LeasedAt(at)) if *at > 0));
+    }
+    assert!(
+        initial
+            .iter()
+            .filter(|id| !ids.contains(*id))
+            .all(|id| response.one_time_prekey_leases.get(id)
+                == Some(&ramflux_protocol::OneTimePrekeyLease::Unleased))
+    );
     assert!(bob.directory_requests_prekey_replenishment("bob", &response)?);
     let fresh =
         bob.replenish_one_time_prekeys("bob", [11; 32], response.available_one_time_prekeys)?;
