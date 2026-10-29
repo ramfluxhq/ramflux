@@ -20,6 +20,7 @@ pub struct MigrationApprovalPlan {
 /// Opaque result of the presence provider; only the journal may install it.
 pub struct MigrationApprovalResult {
     authorization: wire::Signed<wire::Authorization>,
+    control: wire::Signed<wire::Control>,
     digest: String,
     revision: u64,
 }
@@ -52,7 +53,29 @@ impl MigrationApprovalPlan {
     ) -> Result<MigrationApprovalResult, SdkError> {
         let authorization =
             self.account.sign_migration_authorization(vault, &self.draft, &self.digest, now)?;
-        Ok(MigrationApprovalResult { authorization, digest: self.digest, revision: self.revision })
+        let (_, credentials) = self.account.credentials(vault, &self.draft.actor.device_id, now)?;
+        let payload = wire::SealPayload {
+            authorization_hash: wire::message_hash(&authorization)?,
+            offer_hash: self.draft.offer_hash.clone(),
+        };
+        let control = super::resume::sign_control(
+            &self.account,
+            &credentials.signing,
+            wire::Action::Seal,
+            &self.draft.destination_node,
+            &self.draft.migration_id,
+            ramflux_protocol::custody::framed_hash(
+                ramflux_protocol::domain::HOME_CONTROL,
+                &payload,
+            )?,
+            now,
+        )?;
+        Ok(MigrationApprovalResult {
+            authorization,
+            control,
+            digest: self.digest,
+            revision: self.revision,
+        })
     }
 }
 impl HomeMigrationJournal<'_> {
@@ -68,7 +91,11 @@ impl HomeMigrationJournal<'_> {
     ) -> Result<wire::Signed<wire::Prepare>, SdkError> {
         let mut job = self.load(operation)?;
         if let Some(prior) = &job.prepare {
-            if prior == &prepare && job.target.as_ref() == Some(&target) && !job.cancel_requested {
+            if prior == &prepare
+                && job.target.as_ref() == Some(&target)
+                && !job.cancel_requested
+                && job.progress.phase == MigrationPhase::PrepareSent
+            {
                 return Ok(prior.clone());
             }
             return Err(refused(wire::Refusal::IdempotencyConflict));
@@ -136,8 +163,12 @@ impl HomeMigrationJournal<'_> {
         offer: wire::Signed<wire::Offer>,
         now: u64,
     ) -> Result<String, SdkError> {
+        self.expire_offer(operation, now)?;
         let mut job = self.load(operation)?;
-        if job.offer.as_ref() == Some(&offer) && !job.cancel_requested {
+        if job.offer.as_ref() == Some(&offer)
+            && !job.cancel_requested
+            && job.progress.phase == MigrationPhase::AwaitingCustodyUnlock
+        {
             return job.proposal_digest.ok_or_else(|| refused(wire::Refusal::StorageUnavailable));
         }
         if job.progress.phase != MigrationPhase::PrepareSent || job.cancel_requested {
@@ -152,7 +183,11 @@ impl HomeMigrationJournal<'_> {
             &target.node_id,
             &target.node_public_key,
         )?;
-        ramflux_crypto::home_migration::offer_bounds(&offer.body, now)?;
+        let expired = now > offer.body.accept_until;
+        ramflux_crypto::home_migration::offer_bounds(
+            &offer.body,
+            if expired { offer.body.issued_at } else { now },
+        )?;
         let o = &offer.body;
         let p = &prepare.body;
         if o.version != 1
@@ -173,6 +208,15 @@ impl HomeMigrationJournal<'_> {
         }
         if object_hash(self.account.record())? != job.authority_hash {
             return Err(refused(wire::Refusal::AuthorityUpdateRequired));
+        }
+        if expired {
+            let prior = job.progress.seq;
+            job.offer = Some(offer);
+            job.progress.phase = MigrationPhase::Expired;
+            job.progress.reason = Some(wire::Refusal::AdmissionExpired);
+            job.clock_floor = now;
+            self.advance(&mut job, prior)?;
+            return Err(refused(wire::Refusal::AdmissionExpired));
         }
         let draft = wire::Authorization {
             version: 1,
@@ -239,6 +283,7 @@ impl HomeMigrationJournal<'_> {
         now: u64,
     ) -> Result<wire::Signed<wire::Authorization>, SdkError> {
         let id = &result.authorization.body.migration_id;
+        self.expire_offer(id, now)?;
         let mut job = self.load(id)?;
         let now = now.max(job.clock_floor);
         if job.progress.seq != result.revision
@@ -257,6 +302,7 @@ impl HomeMigrationJournal<'_> {
         )?;
         let prior = job.progress.seq;
         job.authorization = Some(result.authorization.clone());
+        job.seal_control = Some(result.control);
         job.progress.phase = MigrationPhase::SealSent;
         job.recovery_blocked = true;
         job.clock_floor = now;

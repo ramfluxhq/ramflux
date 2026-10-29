@@ -21,6 +21,7 @@ pub enum MigrationPhase {
     Forwarding,
     Complete,
     Expired,
+    AbortPending,
     Aborted,
     Refused,
     NeedsAttention,
@@ -80,6 +81,12 @@ pub(super) struct Job {
     pub draft: Option<wire::Authorization>,
     pub proposal_digest: Option<String>,
     pub authorization: Option<wire::Signed<wire::Authorization>>,
+    #[serde(default)]
+    pub seal_control: Option<wire::Signed<wire::Control>>,
+    #[serde(default)]
+    pub seal_hash: Option<String>,
+    #[serde(default)]
+    pub abort_request: Option<wire::Request>,
     pub seal: Option<wire::Signed<wire::Receipt>>,
     pub commit: Option<wire::Signed<wire::CommitProof>>,
     pub fence: Option<wire::Signed<wire::NoncommitFence>>,

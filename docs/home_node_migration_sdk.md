@@ -165,7 +165,7 @@ scheduled; evidence_required is a subset of remaining.
 The full phase vocabulary is `intent`, `prepare_sent`, `awaiting_custody_unlock`,
 `seal_sent`, `sealed`, `commit_pending`, `activate_sent`, `backlog_transferring`,
 `reconnecting`, `manifest_switch_pending`, `forwarding`, `complete`, `expired`,
-`aborted`, `refused` and `needs_attention`. A local error is not evidence for a
+`abort_pending`, `aborted`, `refused` and `needs_attention`. A local error is not evidence for a
 terminal phase. Completion requires authenticated terminal evidence and an
 ordinary v3 reconnect, followed by an atomic, fsynced manifest switch. In
 particular, a provisional native DM channel does not establish that reconnect.
@@ -174,6 +174,38 @@ The intended CLI spelling is `rf account migrate` with `migrate-home` as an
 alias, plus status/cancel operations. Every base64url identifier positional must
 accept a leading `-`. CLI/desktop must consume the same daemon operation; they
 must not create a separate migration engine or a new trust anchor.
+
+## Recovering outbound plans and outcomes
+
+`resume(operation, vault, now)` returns the journaled Prepare at `prepare_sent`,
+or the exact Authorization and actor-signed Seal Control at `seal_sent`. Neither
+path reads the vault, re-signs a message, generates a nonce or requests OS presence.
+The caller must obtain fresh channel-bound possession for each transmission; the
+business signature and control nonce remain unchanged. Resuming after a server's
+control/admission expiry requires authenticated status/cancel handling, never
+silently extending the signed lifetime.
+
+`sealed()` verifies B's fresh reply against B's pinned key, the saved Seal
+Control hash and nonce, the Authorization hash, phase and time bounds. It stores
+both that reply and the reply's `seal_hash`. B keeps the original durable seal;
+the fresh receipt is not that seal and is not sent as `Evidence.seal_receipt`.
+`commit_payload()` uses the saved `seal_hash`, and `committed()` compares A's
+proof with it. A different seal hash is `home_fork`; a changed proof with the
+same seal is `idempotency_conflict`. An identical accepted commit is a no-op,
+including after activation has begun. A late commit after a cancellation or
+noncommit fence is refused with `idempotency_conflict`. Cancellation keeps the
+uncertainty guard until A supplies the authorization-bound noncommit fence.
+
+Before any Seal, cancellation enters `abort_pending` if a Prepare was persisted.
+`resume()` creates an actor-signed Abort addressed to B, with the operation
+payload and no Authorization. This Abort is persisted before sending and replayed
+unchanged after restart. `reservation_aborted()` accepts only B's pinned,
+control-bound signed release; then the local job becomes `aborted`, allowing a
+new operation. Cancelling an unsent intent can terminate locally. An unsealed
+Offer past `accept_until` becomes `expired`; `resume()`, `authorize()` and a new
+`begin()` reap this expiry and release the local active-job lock. A seal attempt
+never expires locally. An A-signed noncommit fence maps an uncancelled job to
+`expired` and a cancelled job to `aborted`.
 
 ## Control transport integration requirement
 
@@ -185,8 +217,10 @@ for migration even if an ordinary debug connection permits it. There is no new
 listener, WebPKI/TOFU replacement or ordinary-session fallback.
 
 A former home must still answer bounded migration status, cancellation and resolve
-operations after it refuses an ordinary session. The shared server wire must
-therefore define a migration-scoped, sessionless way to carry the typed business
-request after proof of possession. A control hash by itself does not carry its
-payload. Implementing this client transport requires that shared contract; an
-empty ordinary session identifier or an undocumented token is not a substitute.
+operations after it refuses an ordinary session. The client driver must
+therefore acquire an operation-scoped custody grant before sending the typed
+business request. The server contract carries current publication and read/manage
+purpose in the proof action, binds the grant to one Control hash, returns it via
+`SessionEstablished`, and consumes it for one request. A control hash by itself
+does not carry the payload. The journal does not yet implement that transport;
+an empty ordinary session identifier or an undocumented token is not a substitute.

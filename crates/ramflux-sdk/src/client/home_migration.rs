@@ -5,6 +5,7 @@
 mod model;
 mod outcomes;
 mod proposal;
+mod resume;
 use crate::{SdkError, custody::BornAccount};
 use model::Job;
 pub use model::{MigrationIntent, MigrationPhase, MigrationProgress};
@@ -14,6 +15,7 @@ use ramflux_protocol::{
     home_migration as wire,
 };
 use ramflux_storage::{AccountDb, HomeMigrationWrite};
+pub use resume::MigrationResumption;
 
 fn refused(reason: wire::Refusal) -> SdkError {
     SdkError::HomeMigrationRefused(reason)
@@ -88,6 +90,9 @@ impl<'a> HomeMigrationJournal<'a> {
             return Err(refused(wire::Refusal::BaseMismatch));
         }
         self.account.verified().authorize(&actor, "register", now)?;
+        if let Some(row) = self.db.active_home_migration()? {
+            self.expire_offer(&row.operation_id, now)?;
+        }
         if let Some(old) = self.load_optional(&intent.operation_id)? {
             if old.intent != intent || old.actor != actor {
                 return Err(refused(wire::Refusal::IdempotencyConflict));
@@ -135,6 +140,9 @@ impl<'a> HomeMigrationJournal<'a> {
             draft: None,
             proposal_digest: None,
             authorization: None,
+            seal_control: None,
+            seal_hash: None,
+            abort_request: None,
             seal: None,
             commit: None,
             fence: None,
@@ -166,6 +174,9 @@ impl<'a> HomeMigrationJournal<'a> {
         if job.recovery_blocked {
             job.progress.phase = MigrationPhase::NeedsAttention;
             job.progress.reason = Some(wire::Refusal::CommitOutcomeUnknown);
+        } else if job.prepare.is_some() {
+            job.progress.phase = MigrationPhase::AbortPending;
+            job.progress.reason = None;
         } else {
             job.progress.phase = MigrationPhase::Aborted;
         }
