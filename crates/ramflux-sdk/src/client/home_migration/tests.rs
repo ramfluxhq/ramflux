@@ -134,7 +134,7 @@ impl Fixture {
             ),
         })
     }
-    fn offer(&self) -> Result<String> {
+    fn prepare(&self) -> Result<wire::Signed<wire::Prepare>> {
         let journal = self.journal()?;
         journal.begin(Self::intent()?, self.actor.clone(), &self.home, NOW)?;
         let target = Self::target()?;
@@ -167,14 +167,23 @@ impl Fixture {
             self.account.verified(),
             NOW,
         )?;
-        journal.prepare(&hash(1), target.clone(), prepare.clone(), NOW)?;
+        Ok(journal.prepare(&hash(1), target, prepare, NOW)?)
+    }
+    fn offer(&self) -> Result<String> {
+        self.accept_prepare(&self.prepare()?)
+    }
+    fn accept_prepare(&self, prepare: &wire::Signed<wire::Prepare>) -> Result<String> {
+        Ok(self.journal()?.offer(&hash(1), Self::offer_reply(prepare)?, NOW)?)
+    }
+    fn offer_reply(prepare: &wire::Signed<wire::Prepare>) -> Result<wire::Signed<wire::Offer>> {
+        let target = Self::target()?;
         let p = &prepare.body;
-        let offer = crypto::sign_node(
+        Ok(crypto::sign_node(
             wire::Offer {
                 version: 1,
                 migration_id: p.migration_id.clone(),
                 account_anchor: p.account_anchor.clone(),
-                prepare_hash: wire::message_hash(&prepare)?,
+                prepare_hash: wire::message_hash(prepare)?,
                 authority_record_hash: p.authority_record_hash.clone(),
                 previous_home_hash: p.previous_home_hash.clone(),
                 next_home_epoch: 1,
@@ -195,8 +204,7 @@ impl Fixture {
             },
             "destination",
             &ramflux_crypto::fixture_signing_key(),
-        )?;
-        Ok(journal.offer(&hash(1), offer, NOW)?)
+        )?)
     }
 }
 #[test]
@@ -222,7 +230,7 @@ fn home_migration_cancel_during_presence_discards_the_returned_signature() -> Re
     f.vault.approve_next_migration_for_test();
     let result = plan.sign(&f.vault, NOW)?;
     assert!(f.journal()?.authorize(result, NOW).is_err());
-    assert_eq!(f.journal()?.status(&hash(1))?.phase, MigrationPhase::Aborted);
+    assert_eq!(f.journal()?.status(&hash(1))?.phase, MigrationPhase::AbortPending);
     f.journal()?.require_recovery_allowed()?;
     Ok(())
 }
@@ -306,3 +314,5 @@ fn home_migration_unsupported_native_provider_refuses_with_presence_code_before_
     assert_eq!(f.journal()?.status(&hash(1))?.phase, MigrationPhase::AwaitingCustodyUnlock);
     Ok(())
 }
+
+mod outcomes;
