@@ -61,14 +61,16 @@ impl MigrationApprovalPlan {
         let control = super::resume::sign_control(
             &self.account,
             &credentials.signing,
-            wire::Action::Seal,
-            &self.draft.destination_node,
-            &self.draft.migration_id,
-            ramflux_protocol::custody::framed_hash(
-                ramflux_protocol::domain::HOME_CONTROL,
-                &payload,
-            )?,
-            now,
+            super::resume::ControlPlan {
+                action: wire::Action::Seal,
+                audience: &self.draft.destination_node,
+                operation: &self.draft.migration_id,
+                payload_hash: ramflux_protocol::custody::framed_hash(
+                    ramflux_protocol::domain::HOME_CONTROL,
+                    &payload,
+                )?,
+                now,
+            },
         )?;
         Ok(MigrationApprovalResult {
             authorization,
