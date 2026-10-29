@@ -332,15 +332,15 @@ fn home_migration_preseal_cancel_resumes_destination_abort_and_requires_bound_re
         recovered
             .reservation_aborted(
                 &hash(1),
-                crypto::sign_node(wrong, "destination", &ramflux_crypto::fixture_signing_key())?,
+                &crypto::sign_node(wrong, "destination", &ramflux_crypto::fixture_signing_key())?,
                 NOW
             )
             .is_err()
     );
     let ack = f.reply(&request.control, wire::Phase::Aborted)?;
-    let progress = recovered.reservation_aborted(&hash(1), ack.clone(), NOW)?;
+    let progress = recovered.reservation_aborted(&hash(1), &ack, NOW)?;
     assert_eq!(progress.phase, MigrationPhase::Aborted);
-    assert_eq!(recovered.reservation_aborted(&hash(1), ack, NOW)?, progress);
+    assert_eq!(recovered.reservation_aborted(&hash(1), &ack, NOW)?, progress);
     recovered.begin(next, f.actor.clone(), &f.home, NOW)?;
     Ok(())
 }
@@ -379,7 +379,7 @@ fn home_migration_cancel_before_offer_still_returns_destination_reservation_abor
     assert!(request.evidence.authorization.is_none());
     f.journal()?.reservation_aborted(
         &hash(1),
-        f.reply(&request.control, wire::Phase::Aborted)?,
+        &f.reply(&request.control, wire::Phase::Aborted)?,
         NOW,
     )?;
     assert!(f.db.active_home_migration()?.is_none());
@@ -438,7 +438,7 @@ fn home_migration_expired_abort_control_is_renewed_without_a_management_approval
     body.expires_at = NOW + 601;
     recovered.reservation_aborted(
         &hash(1),
-        crypto::sign_node(body, "destination", &ramflux_crypto::fixture_signing_key())?,
+        &crypto::sign_node(body, "destination", &ramflux_crypto::fixture_signing_key())?,
         NOW + 301,
     )?;
     assert!(db.active_home_migration()?.is_none());
