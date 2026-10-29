@@ -259,6 +259,14 @@ fn output_permissions_are_private_and_symlinked_inputs_are_refused() -> Result {
     );
     let record = &fixture.values()?["RAMFLUX_CUSTODY_NODE_RECORD_FILE"];
     assert_eq!(fs::metadata(record)?.permissions().mode() & 0o777, 0o600);
+    let env = fixture.output.join("custody.env");
+    let saved = fixture.output.join("saved.env");
+    fs::rename(&env, &saved)?;
+    symlink(fixture.output.join("missing.env"), &env)?;
+    assert!(!fixture.run("custody-init", &[])?.status.success());
+    assert!(fs::symlink_metadata(&env)?.file_type().is_symlink());
+    fs::remove_file(&env)?;
+    fs::rename(saved, env)?;
     assert!(!fixture.output.join(".lock").exists());
     Ok(())
 }
