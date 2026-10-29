@@ -279,7 +279,7 @@ fn home_migration_seal_reply_checks_signature_control_nonce_bounds_and_cancel_ra
     let mut invalid = good.clone();
     invalid.body.seal_hash = Some(hash(83));
     assert!(f.journal()?.sealed(&hash(1), invalid, NOW).is_err());
-    for n in 0..9 {
+    for n in 0..8 {
         let mut r = good.body.clone();
         match n {
             0 => r.request_hash = wire::message_hash(&auth)?,
@@ -289,12 +289,18 @@ fn home_migration_seal_reply_checks_signature_control_nonce_bounds_and_cancel_ra
             4 => r.commit_deadline = Some(NOW + 601),
             5 => r.phase = wire::Phase::Prepared,
             6 => r.expires_at = NOW - 1,
-            7 => r.node_id = "other".into(),
-            _ => r.seal_hash = Some("invalid".into()),
+            _ => r.node_id = "other".into(),
         }
         let bad = crypto::sign_node(r, "destination", &ramflux_crypto::fixture_signing_key())?;
         assert!(f.journal()?.sealed(&hash(1), bad, NOW).is_err());
     }
+    // The validated signer rejects malformed bodies before producing wire data.
+    // Sign raw fixture bytes to test the receiver's rejection with a valid signature.
+    let mut malformed = good.clone();
+    malformed.body.seal_hash = Some("invalid".into());
+    malformed.signatures =
+        vec![ramflux_crypto::sign_canonical_bytes(&wire::signing_bytes(&malformed)?)];
+    assert!(f.journal()?.sealed(&hash(1), malformed, NOW).is_err());
     f.journal()?.cancel(&hash(1), NOW)?;
     let progress = f.journal()?.sealed(&hash(1), good.clone(), NOW)?;
     assert_eq!(progress.phase, MigrationPhase::NeedsAttention);
