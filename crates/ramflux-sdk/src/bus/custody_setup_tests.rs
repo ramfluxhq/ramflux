@@ -51,21 +51,32 @@ async fn custody_bus_show_once_confirm_restart_and_legacy_fallback_refusal() -> 
         assert_eq!(confirmed.state, CreationState::NetworkingPending);
         assert_eq!(confirmed.account["account_anchor"], anchor);
         assert!(bus.confirm(&words(&phrase, positions)?).await.is_err());
-        let mut ordinary = LocalBusClient::connect(&socket).await?;
+        let ordinary = LocalBusClient::connect(&socket).await?;
+        // The compatibility ceremony stores public authority, without an ordinary data key.
+        // Only account.create.confirm with a passphrase installs an unlocked data actor.
         let status = ordinary
-            .request(Some("birth".into()), "account", "account.status", serde_json::json!({}))
-            .await?;
-        assert_eq!(status["state"], "networking_pending");
-        let response = ordinary
             .request_frame_response(LocalBusFrame::request(
-                "legacy-retry",
-                None,
+                "pending-status",
+                Some("birth".into()),
                 "account",
-                "account.create",
-                serde_json::json!({"local_account_id":"birth"}),
+                "account.status",
+                serde_json::json!({}),
             ))
             .await?;
-        assert_eq!(response.error.as_ref().map(|e| e.code.as_str()), Some("NetworkingPending"));
+        assert_eq!(status.error.as_ref().map(|error| error.code.as_str()), Some("AccountNotOpen"));
+        // The generic client rejects creation before serializing secret-capable requests.
+        assert!(matches!(
+            ordinary
+                .request_frame_response(LocalBusFrame::request(
+                    "legacy-retry",
+                    None,
+                    "account",
+                    "account.create",
+                    serde_json::json!({"local_account_id":"birth"}),
+                ))
+                .await,
+            Err(SdkError::CustodySetupInvalid)
+        ));
         let response = ordinary
             .request_frame_response(LocalBusFrame::request(
                 "session",
@@ -75,7 +86,7 @@ async fn custody_bus_show_once_confirm_restart_and_legacy_fallback_refusal() -> 
                 serde_json::json!({}),
             ))
             .await?;
-        assert_eq!(response.error.as_ref().map(|e| e.code.as_str()), Some("NetworkingPending"));
+        assert_eq!(response.error.as_ref().map(|e| e.code.as_str()), Some("CustodySetupInvalid"));
         drop(bus);
         drop(ordinary);
         stop.send(true)?;
@@ -94,10 +105,18 @@ async fn custody_bus_show_once_confirm_restart_and_legacy_fallback_refusal() -> 
             Err(SdkError::CustodyCreationDisabled)
         ));
         let mut ordinary = LocalBusClient::connect(&socket).await?;
+        // The compatibility ceremony stores public authority, without an ordinary data key.
+        // Only account.create.confirm with a passphrase installs an unlocked data actor.
         let status = ordinary
-            .request(Some("birth".into()), "account", "account.status", serde_json::json!({}))
+            .request_frame_response(LocalBusFrame::request(
+                "pending-status",
+                Some("birth".into()),
+                "account",
+                "account.status",
+                serde_json::json!({}),
+            ))
             .await?;
-        assert_eq!(status["state"], "networking_pending");
+        assert_eq!(status.error.as_ref().map(|error| error.code.as_str()), Some("AccountNotOpen"));
         let daemon =
             ordinary.request(None, "daemon", "daemon.status", serde_json::json!({})).await?;
         assert_eq!(daemon["accounts"], 0);
