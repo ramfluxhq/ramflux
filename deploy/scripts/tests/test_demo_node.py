@@ -655,10 +655,14 @@ else:
     def test_health_wait_fails_immediately_on_stopped_unhealthy_or_unchecked_services(self):
         for scenario in ({"container_state": "exited"}, {"health": "unhealthy"}, {"missing_health": True}, {"duplicate": True}):
             with self.subTest(scenario=scenario):
-                self.control.write_text(json.dumps(scenario))
-                result = self.run_script("up", success=False)
+                fixture = self.__class__("test_requires_env_and_refuses_unowned_data")
+                self.addCleanup(fixture.doCleanups)
+                fixture.setUp()
+                fixture.control.write_text(json.dumps(scenario))
+                result = fixture.run_script("up", success=False)
                 self.assertIn("health wait failed", result.stderr)
-                self.assertEqual((self.root / "clock").read_text(), "0")
+                self.assertEqual((fixture.root / "clock").read_text(), "0")
+                self.assertTrue((fixture.state / "transaction.pending").exists())
                 self.assertNotIn("demo URL:", result.stdout)
 
     def test_existing_explicit_ports_override_new_defaults(self):
