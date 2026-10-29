@@ -111,8 +111,10 @@ impl Destination {
 
     pub(super) fn current_record(&self) -> Result<Option<Envelope<NodeIdentityRecord>>, RfError> {
         let env = self.root.join("custody.env");
-        if !env.try_exists()? {
-            return Ok(None);
+        match fs::symlink_metadata(&env) {
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
         }
         let bytes = read_private(&env, 16 * 1024)?;
         let text = std::str::from_utf8(&bytes).map_err(|_| invalid("invalid custody.env"))?;
