@@ -363,46 +363,67 @@ else:
         self.assertEqual(self.managed_state(), before)
         self.assertFalse((self.state / "transaction.pending").exists())
 
-    def test_failed_upgrade_auto_restores_the_last_good_snapshot(self):
+    def test_pending_transaction_refuses_maintenance_until_explicit_recovery(self):
         self.run_script("up")
         initial = self.managed_state()
         with self.env_file.open("a") as output:
             output.write("DEMO_VERSION=demo-v2\n")
         self.control.write_text(json.dumps({"fail_up_versions": ["demo-v2"]}))
-        failed = self.run_script("upgrade", success=False)
-        self.assertIn("automatically restored demo version demo-test", failed.stderr)
-        self.assertEqual(self.managed_state(), initial)
-        self.assertFalse((self.state / "transaction.pending").exists())
-        self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
-
-        self.control.write_text("{}")
-        self.run_script("upgrade")
-        good_v2 = self.managed_state()
-        self.env_file.write_text(self.env_file.read_text().replace(
-            "DEMO_VERSION=demo-v2\n", "DEMO_VERSION=demo-v3\n"))
-        self.control.write_text(json.dumps({"public_unhealthy_versions": ["demo-v3"]}))
-        failed_probe = self.run_script("upgrade", success=False)
-        self.assertIn("published discovery endpoint unhealthy", failed_probe.stderr)
-        self.assertIn("automatically restored demo version demo-v2", failed_probe.stderr)
-        self.assertEqual(self.managed_state(), good_v2)
-        self.assertFalse((self.state / "transaction.pending").exists())
-
-    def test_recover_retries_a_retained_failed_transaction(self):
-        self.run_script("up")
-        initial = self.managed_state()
-        with self.env_file.open("a") as output:
-            output.write("DEMO_VERSION=demo-v2\n")
-        self.control.write_text(json.dumps({"up_exit": "engine unavailable"}))
-        failed = self.run_script("upgrade", success=False)
-        self.assertIn("automatic demo recovery failed", failed.stderr)
-        self.assertTrue((self.state / "transaction.pending").is_file())
-        self.assertEqual(self.managed_state(), initial)
+        self.run_script("upgrade", success=False)
+        marker = self.state / "transaction.pending"
+        pending = marker.read_bytes()
+        identifier = json.loads(pending)["target_snapshot"]
+        failed_state = self.managed_state()
+        probes = self.root / "public-probes.jsonl"
+        old_probes = probes.read_bytes()
+        # No file, engine or public-probe mutation is permitted on any refused command.
+        for command, flags in (("status", ()), ("status", ("--remote",)),
+                               ("down", ()), ("down", ("--purge",)), ("logs", ()),
+                               ("up", ()), ("upgrade", ())):
+            with self.subTest(command=command, flags=flags):
+                self.journal.write_text("")
+                refused = self.run_script(command, *flags, success=False)
+                self.assertEqual(refused.returncode, 3)
+                self.assertEqual(refused.stdout, "")
+                self.assertEqual(refused.stderr, f"pending upgrade transaction {identifier}: "
+                                 "run `demo-node.sh recover` (or `rollback`)\n")
+                self.assertEqual(marker.read_bytes(), pending)
+                self.assertEqual(self.managed_state(), failed_state)
+                self.assertEqual(probes.read_bytes(), old_probes)
+                self.assertEqual(self.commands(), [])
+                self.assertFalse(Path(str(self.state) + ".lock").exists())
 
         self.control.write_text("{}")
         recovered = self.run_script("recover")
         self.assertIn("recovered demo version demo-test", recovered.stdout)
-        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertFalse(marker.exists())
         self.assertEqual(self.managed_state(), initial)
+        self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
+        self.assertEqual(len(probes.read_text().splitlines()), len(old_probes.splitlines()) + 1)
+        self.assertEqual(json.loads(probes.read_text().splitlines()[-1])["version"], "demo-test")
+
+    def test_recovery_retains_marker_until_public_probes_succeed(self):
+        self.run_script("up")
+        initial = self.managed_state()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.control.write_text(json.dumps({"public_unhealthy_versions": ["demo-v2"]}))
+        failed = self.run_script("upgrade", success=False)
+        self.assertIn("published discovery endpoint unhealthy", failed.stderr)
+        marker = self.state / "transaction.pending"
+        pending = marker.read_bytes()
+        self.control.write_text(json.dumps({"public_unhealthy_versions": ["demo-test"]}))
+        failed_recovery = self.run_script("recover", success=False)
+        self.assertIn("published discovery endpoint unhealthy", failed_recovery.stderr)
+        self.assertEqual(marker.read_bytes(), pending)
+        self.assertEqual(self.managed_state(), initial)
+        self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
+        # With a marker, rollback retries last-good recovery, rather than another version step.
+        self.control.write_text("{}")
+        self.run_script("rollback")
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.managed_state(), initial)
+        self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
 
     def test_missing_snapshot_recovery_refuses_manual_path_without_locking_commands(self):
         self.run_script("up")
@@ -414,7 +435,6 @@ else:
             "fail_up_versions": ["demo-v2"], "missing_images": [old_image],
         }))
         failed = self.run_script("upgrade", success=False)
-        self.assertIn("automatic demo recovery failed", failed.stderr)
         self.assertTrue((self.state / "transaction.pending").is_file())
         self.assertFalse(Path(str(self.state) + ".lock").exists())
 
@@ -424,7 +444,7 @@ else:
         self.assertTrue((self.state / "transaction.pending").is_file())
         self.assertFalse(Path(str(self.state) + ".lock").exists())
         refused_down = self.run_script("down", success=False)
-        self.assertIn("run demo-node.sh recover", refused_down.stderr)
+        self.assertIn("run `demo-node.sh recover`", refused_down.stderr)
         self.assertFalse(Path(str(self.state) + ".lock").exists())
 
     def test_recover_restores_config_after_interrupted_rewrite(self):
@@ -467,10 +487,12 @@ else:
         self.assertFalse(any("up" in args for args in self.compose_commands()))
 
         self.control.write_text("{}")
+        self.run_script("recover")
+        self.journal.write_text("")
         result = self.run_script("upgrade")
         self.assertIn("rollback command:", result.stdout)
         inspect_images = [args[2] for args in self.commands() if args[:2] == ["image", "inspect"]]
-        self.assertEqual(len(inspect_images), 14)
+        self.assertEqual(len(inspect_images), 7)
         self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
 
     def test_admin_opt_in_uses_saved_overlay_and_refuses_conflicting_ports(self):
