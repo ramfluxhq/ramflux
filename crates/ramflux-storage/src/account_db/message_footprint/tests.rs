@@ -329,3 +329,54 @@ fn removing_retry_work_removes_its_provisional_footprints() -> Result<(), Storag
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn deleting_a_pointer_target_preserves_unread_and_other_message_receipts()
+-> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("footprint-conversation-pointers")?;
+    let identity = ramflux_crypto::create_identity_root("reader", [0x73; 32]);
+    let reader =
+        ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&identity, "device")?;
+    for message in ["m1", "m2", "m3"] {
+        db.send_direct_message("tip", message, "peer", b"secret")?;
+    }
+    db.mark_read("tip", &reader, "m3")?;
+    db.mark_delivered("tip", &reader, "m3", 30, 300)?;
+    assert!(!db.conversation_projection("tip", Some(&reader))?.is_unread);
+
+    db.delete_direct_message("tip", "m3", "local", "delete-m3")?;
+    let projection = db.conversation_projection("tip", Some(&reader))?;
+    assert_eq!(projection.read_through_message_id.as_deref(), Some("m2"));
+    assert_eq!(projection.delivered_through_message_id.as_deref(), Some("m2"));
+    assert!(!projection.is_unread);
+    for message in ["m1", "m2"] {
+        let receipts =
+            db.direct_message_by_id(message)?.ok_or(StorageError::AuthorizationRejected)?.receipts;
+        assert_eq!(receipts.len(), 1, "receipt for {message}");
+        assert_eq!(receipts[0].state, "read");
+    }
+
+    for message in ["x1", "x2", "x3"] {
+        db.send_direct_message("middle", message, "peer", b"secret")?;
+    }
+    db.mark_read("middle", &reader, "x3")?;
+    db.mark_delivered("middle", &reader, "x3", 40, 300)?;
+    db.delete_direct_message("middle", "x2", "local", "delete-x2")?;
+    let projection = db.conversation_projection("middle", Some(&reader))?;
+    assert_eq!(projection.read_through_message_id.as_deref(), Some("x3"));
+    assert_eq!(projection.delivered_through_message_id.as_deref(), Some("x3"));
+    assert!(!projection.is_unread);
+    for message in ["x1", "x3"] {
+        assert_eq!(
+            db.direct_message_by_id(message)?
+                .ok_or(StorageError::AuthorizationRejected)?
+                .receipts
+                .len(),
+            1,
+            "receipt for {message}"
+        );
+    }
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
