@@ -5,7 +5,8 @@
 use super::*;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn ip(share: u16, host: u16) -> IpAddr {
-    std::net::Ipv6Addr::new(0x2001, 0xdb8, share, 0, 0, 0, 0, host).into()
+    std::net::Ipv6Addr::new(0x2001, 0xdb8, share, (host - 1) / 8, 0, 0, 0, (host - 1) % 8 + 1)
+        .into()
 }
 fn counts(l: &CustodyIngressLimiter) -> (usize, usize) {
     let s = l.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -138,14 +139,15 @@ fn handshake_to_authenticated_transition_is_atomic_with_revocation_and_grant() -
 fn authenticated_share_principal_and_mapped_ipv4_limits_are_independent() -> Result {
     let l = CustodyIngressLimiter::with_pools(256, 1024, 4, Duration::from_secs(10));
     let mut held = Vec::new();
-    for n in 0..16 {
-        let address = if n % 2 == 0 { "192.0.2.1" } else { "::ffff:192.0.2.1" };
+    for n in 0..8 {
+        let host = n / 4 + 1;
+        let address =
+            if n % 2 == 0 { format!("192.0.2.{host}") } else { format!("::ffff:192.0.2.{host}") };
         let p = l.acquire(address.parse()?, None, Instant::now()).ok_or("holder")?;
         assert!(p.mark_authenticated(&format!("p-{}", n / 4)));
         held.push(p);
     }
-    let full = l.acquire("192.0.2.2".parse()?, None, Instant::now()).ok_or("handshake")?;
-    assert!(!full.mark_authenticated("new"));
+    assert!(l.acquire("192.0.2.3".parse()?, None, Instant::now()).is_none());
     let other = l.acquire("198.51.100.1".parse()?, None, Instant::now()).ok_or("other")?;
     assert!(!other.mark_authenticated("p-0"));
     assert!(other.mark_authenticated("new"));
@@ -162,5 +164,58 @@ fn per_ip_prefix_and_quic_caps_release_on_disconnect() -> Result {
     assert!(l.acquire(ip(1, 1), Some(2), tick).is_none());
     drop(held);
     assert!(l.acquire(ip(1, 1), Some(1), tick).is_some());
+    Ok(())
+}
+
+#[test]
+fn fifth_handshake_in_a_prefix_is_refused_without_revoking_existing_holders() -> Result {
+    for family in 0..3 {
+        let l = CustodyIngressLimiter::new(256);
+        let tick = Instant::now();
+        let mut held = Vec::new();
+        for host in 1..=4 {
+            let address = match family {
+                0 => format!("192.0.2.{host}"),
+                1 => format!("2001:db8:1::{host}"),
+                _ => format!("2001:db8:1:{host}::1"),
+            };
+            held.push(l.acquire(address.parse()?, None, tick).ok_or("handshake")?);
+        }
+        let fifth = match family {
+            0 => "192.0.2.5",
+            1 => "2001:db8:1::5",
+            _ => "2001:db8:1:5::1",
+        };
+        assert!(l.acquire(fifth.parse()?, None, tick).is_none());
+        if family == 0 {
+            assert!(l.acquire("::ffff:192.0.2.6".parse()?, None, tick).is_none());
+        }
+        let fresh = if family == 0 { "198.51.100.1" } else { "2001:db8:2::1" };
+        let honest = l.acquire(fresh.parse()?, None, tick).ok_or("fresh share")?;
+        assert!(!honest.is_revoked());
+        assert!(held.iter().all(|p| !p.is_revoked()));
+        assert!(held[0].mark_authenticated("principal"));
+        assert!(l.acquire(fifth.parse()?, None, tick).is_some(), "H-to-A frees handshake share");
+    }
+    Ok(())
+}
+#[test]
+fn listener_outer_ipv6_limits_count_authenticated_holders_across_both_pools() -> Result {
+    let l = CustodyIngressLimiter::new(256);
+    let mut held = Vec::new();
+    for host in 1..=16 {
+        let p = l.acquire(ip(1, host), None, Instant::now()).ok_or("holder")?;
+        assert!(p.mark_authenticated(&format!("principal-{host}")));
+        held.push(p);
+        if host == 8 {
+            assert!(
+                l.acquire("2001:db8:1::9".parse()?, None, Instant::now()).is_none(),
+                "/64 outer cap"
+            );
+        }
+    }
+    assert!(l.acquire("2001:db8:1:2::1".parse()?, None, Instant::now()).is_none(), "/48 outer cap");
+    assert!(l.acquire(ip(2, 1), None, Instant::now()).is_some());
+    assert_eq!(counts(&l), (0, 16));
     Ok(())
 }

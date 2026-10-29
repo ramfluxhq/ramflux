@@ -148,8 +148,10 @@ per-principal limit and source-share limit are checked
 in that same critical section. Direct session creation also checks its holder
 under that lock, so a closed or revoked holder cannot recreate a grant.
 
-Unauthenticated holders are limited to four per IP, eight per IPv4 /24 or IPv6
-/64, sixteen per IPv6 /48, and four streams per QUIC connection. The entire
+The handshake pool permits at most four holders per IP, IPv4 /24, IPv6 /64 and
+IPv6 /48, including IPv4-mapped addresses. Across both pools, the listener-wide
+outer limits remain four per IP, eight per IPv4 /24 or IPv6 /64 and sixteen per
+IPv6 /48. A QUIC connection permits at most four streams across both pools. The entire
 exchange, starting with TCP accept (including TLS) or QUIC stream accept, has a
 single deadline of at most ten seconds. TLS and frame activity never renew it.
 Authenticated holders are limited to sixteen per IPv4 /24 or IPv6 /48, and four
@@ -168,6 +170,20 @@ have independent pools; the optional direct router listener has one pair. Compos
 sets both soft and hard `nofile` limits to 65536. TCP accept errors are logged once
 per kind and retried with a 50 ms to one second backoff; QUIC handshake failures
 are retried as well.
+
+### Residual cost
+
+Filling the handshake pool requires at least ceil(H/4) distinct IPv4 /24s or IPv6
+/48s, reconnecting at least once per ten-second deadline. Filling the authenticated
+pool requires at least ceil(A/16) source shares and, with the default four sessions
+per principal, ceil(A/4) registered accounts. The listener-wide source caps may
+raise those minimums. Attacks beyond these bounds are network-layer DoS, outside
+this profile's admission guarantees.
+
+Compose interpolation uses `RF_COMPOSE_CUSTODY_*` inputs; the container's runtime
+settings retain their `RAMFLUX_CUSTODY_*` names. The mapping in
+`deploy/compose-inputs.json` is applied by the fixture generator and integration
+harness.
 
 New principal admission is durable and atomic with its per-account publication.
 The defaults are sixteen per node per minute and 256 per node per day. Set them

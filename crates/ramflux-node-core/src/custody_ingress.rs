@@ -151,7 +151,8 @@ impl CustodyIngressLimiter {
             Self::remove_holder(state, id);
         }
     }
-    /// Reserve H before TLS/read work. IPv4-mapped addresses use the IPv4 share.
+    /// Reserve H before TLS/read work, at most four handshakes per IP and prefix.
+    /// Listener-wide source limits include both pools. IPv4-mapped addresses use IPv4 shares.
     #[must_use]
     pub fn acquire(
         self: &Arc<Self>,
@@ -167,9 +168,14 @@ impl CustodyIngressLimiter {
             return None;
         }
         let keys = custody_source_prefixes(source);
-        if keys.iter().enumerate().any(|(n, k)| {
-            state.holders.values().filter(|h| h.principal.is_none() && h.keys.contains(k)).count()
-                >= [4, 8, 16][n]
+        if keys.iter().enumerate().any(|(n, key)| {
+            let total = state.holders.values().filter(|holder| holder.keys.contains(key)).count();
+            let handshakes = state
+                .holders
+                .values()
+                .filter(|holder| holder.principal.is_none() && holder.keys.contains(key))
+                .count();
+            total >= [4, 8, 16][n] || handshakes >= 4
         }) {
             return None;
         }
