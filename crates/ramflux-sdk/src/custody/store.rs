@@ -285,8 +285,8 @@ pub(super) fn persist(
     let verified = verify_record(&record, now, None, human.as_ref())?;
     let mut pins = AuthorityPins::default();
     pins.observe(&verified)?;
-    // The existing transactional index arbitrates birth against concurrent legacy creation.
-    // A reservation left by a later failure is never retried as a legacy account.
+    // The transactional index arbitrates concurrent native creation.
+    // A reservation left by a later failure remains blocked for reconciliation.
     ramflux_storage::AccountIndex::open(root)?
         .create_account(&input.local_account_id, &record.body.account_anchor)?;
     let parent = root.join("custody_accounts");

@@ -134,7 +134,6 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::ContactInput(crate::ContactReason::AnchorMismatch) => "AnchorMismatch",
         SdkError::NetworkingPending => "NetworkingPending",
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
-        SdkError::CustodyCreationDisabled => "CustodyCreationDisabled",
         SdkError::CustodySetupInvalid => "CustodySetupInvalid",
         SdkError::CustodyExpired => "CustodyExpired",
         SdkError::CustodyConfirmationFailed => "CustodyConfirmationFailed",

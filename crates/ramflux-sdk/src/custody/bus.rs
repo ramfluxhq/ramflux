@@ -147,7 +147,6 @@ impl CustodyBusClient {
         }
         if let Response::Error { code } = &reply.result {
             return Err(match code.as_str() {
-                "CustodyCreationDisabled" => SdkError::CustodyCreationDisabled,
                 "CustodyExpired" => SdkError::CustodyExpired,
                 "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
                 "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,

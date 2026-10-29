@@ -820,7 +820,6 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         SdkError::NetworkingPending | SdkError::CustodyModeDowngrade => {
             RamfluxErrorCode::UnsupportedVersion
         }
-        SdkError::CustodyCreationDisabled => RamfluxErrorCode::CapabilityRejected,
         SdkError::CustodyRandomUnavailable => RamfluxErrorCode::CryptoFailed,
         SdkError::Crypto(_) | SdkError::SignatureVerificationFailed(_) => {
             RamfluxErrorCode::CryptoFailed

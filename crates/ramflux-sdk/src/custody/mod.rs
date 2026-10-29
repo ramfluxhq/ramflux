@@ -86,9 +86,6 @@ mod node_pins;
 pub use network::{CustodyConnection, CustodyNetworkConfig};
 pub(crate) use node_pins::verify_authority as verify_public_authority;
 
-mod dm;
-pub use dm::CustodyDm;
-
 #[cfg(test)]
 pub(crate) mod network_tests;
 

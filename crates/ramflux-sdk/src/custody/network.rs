@@ -31,8 +31,6 @@ pub struct CustodyNetworkConfig {
     pub audience: String,
     pub binding_mode: BindingMode,
     pub allow_no_channel_binding: bool,
-    /// Explicit temporary non-forward-secret DM opt-in; normal clients leave this false.
-    pub allow_experimental_native_dm: bool,
     pub timeout: Duration,
 }
 /// Owns a live TLS connection and its session; neither is serializable or backed up.
@@ -44,7 +42,6 @@ pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     pub(super) pins: NodePins,
     pub(super) session: Option<CustodySession>,
     pub(super) timeout: Duration,
-    pub(super) experimental_native_dm: bool,
     mode: BindingMode,
     audience: String,
 }
@@ -150,7 +147,6 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             pins,
             session: None,
             timeout: config.timeout,
-            experimental_native_dm: config.allow_experimental_native_dm,
             mode: binding_mode,
             audience,
         };
@@ -213,9 +209,6 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         Ok(())
     }
 
-    pub(super) fn require_experimental_dm(&self) -> Result<(), SdkError> {
-        if self.experimental_native_dm { Ok(()) } else { Err(CustodyRefusal::Unsupported.into()) }
-    }
     #[must_use]
     pub fn session(&self) -> Option<&CustodySession> {
         self.session.as_ref()
@@ -229,9 +222,6 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     pub fn security_warning(&self) -> Option<&'static str> {
         (self.mode == BindingMode::NoChannelBinding)
             .then_some("This connection does not bind account proofs to the TLS channel.")
-    }
-    pub(super) fn signed_prekey(&self) -> ramflux_crypto::X25519KeyPair {
-        ramflux_crypto::X25519KeyPair::from_seed(*self.credentials.signed_prekey_seed())
     }
     pub(super) fn prekey_bundle(&self) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
         self.credentials.prekey_bundle()

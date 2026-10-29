@@ -190,7 +190,6 @@ impl LocalBusCreationClient {
         }
         if reply.kind == "error" {
             return Err(match reply.error.as_ref().map(|error| error.code.as_str()) {
-                Some("CustodyCreationDisabled") => SdkError::CustodyCreationDisabled,
                 Some("CustodyConfirmationFailed") => SdkError::CustodyConfirmationFailed,
                 Some("CustodyVaultUnavailable") => SdkError::CustodyVaultUnavailable,
                 Some("CustodyExpired") => SdkError::CustodyExpired,

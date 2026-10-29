@@ -2,12 +2,12 @@
 
 # Root key custody wire specification
 
-Design revision 5, proposed normative stage-1 specification. This document and
-[root key custody](root_key_custody.md) describe future behaviour, not executable
-support. Independent wire review and published interoperability vectors are
-required before stage 2b. The legacy binding remains a proposal **pending owner confirmation**. The controller has approved epoch ranges with the r3 amendments below; exact wire formats and
-vectors still require independent review. No migration writer may ship on the
-assumption that the legacy-binding proposal has been approved.
+Native v3 identity authority wire specification. Implemented native records use
+`origin = "new"`, null legacy binding/migration fields and master-certified
+self-signing authority. Legacy migration and erasure protocols are unsupported;
+older development identities require a reset. Pairing, HPKE handover and other
+future integrations described here still require independent review and vectors.
+Their presence in this specification does not claim executable or audited support.
 
 ## Encoding, signatures and limits
 
@@ -80,7 +80,6 @@ one constant and spelling: `ramflux.identity.pairing_transcript.v1`.
 | `CUSTODY_DELEGATION` | `ramflux.identity.delegation.v1` | signature: public account-level delegation |
 | `CUSTODY_GROUP_DELEGATION` | `ramflux.identity.group_delegation.v1` | signature: private group restriction/delegation |
 | `CUSTODY_ERASURE_ACK` | `ramflux.identity.erasure_ack.v1` | signature: erasure acknowledgement |
-| `CUSTODY_LEGACY_BINDING` | `ramflux.identity.legacy_binding.v1` | signature: proposed legacy binding |
 | `CONTACT_REQUEST_V2` | `ramflux.identity.contact_request.v2` | signature: contact consent |
 | `CUSTODY_RELAY_ACCEPTANCE` | `ramflux.identity.relay_acceptance.v1` | signature: receiver-home relay evidence |
 | `CUSTODY_TRANSFER_BINDING` | `ramflux.identity.transfer_binding.v1` | signature: transfer sender binding |
@@ -145,10 +144,8 @@ all authority indices/root-qualified references use the anchor. A legacy-shaped
 first observation of a born-v3 anchor has no valid legacy master signature to
 substitute for custody authority; capable verifiers must request v3 evidence.
 
-Migrated account: `account_anchor = Hroot(legacy_root_public_key)`,
-`origin = "migrated"`. Every v3 record carries the same legacy binding envelope;
-the master key must equal the binding's master. The anchor, principal id and kind
-remain unchanged. Fingerprints display the full canonical anchor (with optional
+Migrated origins and non-null legacy binding/migration fields are refused.
+Fingerprints display the full canonical anchor (with optional visual grouping). Fingerprints display the full canonical anchor (with optional
 visual grouping). For custody safety-number v2, sort the two decoded 32-byte
 anchors lexicographically and compute
 `BLAKE3(frame("ramflux.identity.safety_number.v2", first_anchor || second_anchor))`.
@@ -172,8 +169,7 @@ revision = device_set_epoch modulo 4294967296
 ```
 
 Revision zero is invalid. Maximum epoch is `9007199254740991`. The certificate's
-range must equal the decoded range. First custody publication (including
-migration) uses range 1/revision 1 independently of any legacy counter. Compare
+range must equal the decoded range. Native genesis uses range 1/revision 1 independently of any legacy counter. Compare
 verified heads by `(mode_rank, epoch)`, where legacy rank is 0 and custody rank is
 1; this is an ordering rule, not another independently signed counter.
 
@@ -211,7 +207,7 @@ their certificates/delegations for new operations, regardless of remaining time.
 | `range_index` | Positive integer in the epoch range above; no wildcard/end range |
 | `issued_at` | `Time`, not more than 300 seconds in the future |
 | `cert_id` | Random `B32` |
-| `legacy_binding_hash` | `Hash` for migrated accounts; `null` for new accounts |
+| `legacy_binding_hash` | Exactly `null`; legacy migration is unsupported |
 | `previous_certificate_hash` | `Hash` or `null` if no authenticated predecessor is available at first setup/recovery; never silently clears a retained pin |
 
 No expiration of the master certificate itself: branch and delegation leases
@@ -230,18 +226,18 @@ human authority chain; missing/unsupported evidence fails closed.
 | --- | --- |
 | `schema`, `version` | Exact domain, `3` |
 | `principal_id`, `account_anchor`, `principal_kind` | `Id`, `B32`, `Kind`, equal to master certificate |
-| `origin` | `"new"` or `"migrated"`, immutable |
+| `origin` | Exactly `"new"`, immutable |
 | `custody_mode` | Exactly `"v3"` |
 | `device_set_epoch` | Epoch above |
 | `previous_record_hash` | `Hash` or `null` for first v3 publication/recovery with unavailable predecessor; retained floor/tombstones still apply |
 | `issued_at` | `Time` |
 | `master_certificate` | Complete signed master certificate envelope |
-| `legacy_binding` | Complete signed binding envelope for migrated account, else `null` |
+| `legacy_binding` | Exactly `null` |
 | `profile` | Unsigned `ProfileV3` below; never a signed v1 profile |
 | `devices` | Complete active/recent array of `DeviceV3`, sorted by `device_id` UTF-8 bytes; aged revocations covered by checkpoint |
 | `delegations` | One account-level delegation per verified secondary, sorted by `body.delegation_id`; no group-specific envelopes or group ids |
 | `revoked_delegation_ids` | Sorted account-level `B32` ids, disjoint from active ids; group-specific ids/revocations remain encrypted within their groups |
-| `migration` | `MigrationV3` or `null` for new accounts |
+| `migration` | Exactly `null` |
 | `revoked_device_checkpoint` | `Envelope<RevokedCheckpoint>` or `null` before first compaction |
 | `section_hashes` | Exact per-section hash object defined below |
 
@@ -263,7 +259,7 @@ Each `DeviceV3` has exactly:
 | `status` | `"active"` or `"revoked"` |
 | `revoked_at` | `Time` iff revoked, otherwise `null` |
 | `branch_certificate` | Complete signed certificate when active, `null` when revoked |
-| `migration_state` | `"native"`, `"pending_erasure"`, `"erased"` or `"revoked"` |
+| `migration_state` | Exactly `"native"`; revocation uses `status` |
 
 A revoked device id can never reactivate, at any device epoch. Key changes for
 active devices require a higher device epoch and new commitments; lease renewal
@@ -325,11 +321,9 @@ until at least 604800 + 900 seconds after supersession (or the latest known
 consent expiry plus skew, whichever is later). The extra 900 seconds cover the
 300-second current-head cache bound plus issue and receive skew, without changing
 the consent TTL or requiring a public consent-reference index. They
-retain permanently the initial migration record, its referenced last legacy head,
-legacy binding, checkpoint envelopes/lists and their verification material. Section
-blobs remain available for as long as any retained record references them. Migration
-and legacy evidence never expires with a consent TTL; all of it is public auth
-metadata, containing no recovery secret. Failure to fetch required evidence is a
+retain checkpoint envelopes/lists and their verification material permanently.
+Section blobs remain available while any retained record references them. This is
+public authentication metadata containing no recovery secret. Failure to fetch required evidence is a
 typed unavailable result, never permission to substitute a current head.
 
 ### Revoked-device compaction
@@ -404,17 +398,6 @@ authority changes needing that state remain blocked pending protocol review;
 re-attestation alone cannot make an oversized list valid. Last verified history
 remains readable. This finite capacity is an explicit design limit, not an
 unbounded allocation or an automatic identity reset.
-
-`MigrationV3` has exactly `migration_id: B32`, `started_at: Time`,
-`erase_deadline: Time`, `erasure_acks: Envelope<ErasureAck>[]` sorted by device id.
-Its id equals the binding migration id; deadline equals `started_at + 2592000`
-(30 days), both immutable. An ACK changes a pending entry to erased only in a
-subsequently published record containing that ACK. At the deadline, pending
-entries cannot authorize networking even if the primary has not yet published
-the default revocation. A quota-limited erasure-only endpoint is their sole
-exception; fresh enrollment is required after revocation. New records cannot
-extend the deadline. Native entries occur only on new accounts or devices added
-after migration; migration cannot relabel existing legacy devices as native.
 
 ## Branch certificate and possession proof
 
@@ -546,70 +529,6 @@ floor in the encrypted handover summary below; missing control evidence blocks
 affected group mutations until reconciled. No subdelegation or account/device management; existing creator
 fresh-head, transferee countersign and sticky-removal rules remain mandatory.
 
-## Erasure ACK and proposed legacy binding bodies
-
-`Envelope<ErasureAck>` uses `CUSTODY_ERASURE_ACK`, signed by the erased branch:
-
-| Field | Type / requirement |
-| --- | --- |
-| `schema`, `version` | Exact domain, `1` |
-| `device_ref` | `Ref` |
-| `migration_id` | `B32`, current migration |
-| `migration_record_hash` | `Hash`, the signed initial migration v3 record |
-| `branch_certificate_hash` | `Hash`, certificate authorizing the erasure endpoint |
-| `ack_id` | Random `B32`; reuse on retransmission |
-| `erased_at` | `Time` |
-| `erased_legacy_root`, `erased_unauthorized_self_signing_material` | Both exactly `true` |
-
-The primary retains only its currently authorized self-signing key; that key is
-not covered by the unauthorized-material erasure assertion. A secondary must erase
-all self-signing material. The initial migrating primary also ACKs its legacy-root
-erasure through the restricted migration endpoint; only after publication of the
-ACK may its roster state become erased. This avoids treating an existing legacy
-primary as a native device or requiring it to erase the new management key.
-
-ACK is a cooperative software claim, not attestation. Verify using the branch
-certificate/commitments at the referenced migration record and current erasure
-eligibility; reject key substitution, wrong migration and replays across epochs.
-Storing an ACK off-record does not complete erasure state. Preserve the initial
-record as public migration evidence for ACK verification after range recovery.
-
-`Envelope<LegacyBinding>` uses `CUSTODY_LEGACY_BINDING`, signed by legacy root:
-
-| Field | Type / requirement |
-| --- | --- |
-| `schema`, `version` | Exact domain, `1` |
-| `account_anchor`, `legacy_root_public_key` | `B32`, Ed25519 `Key`; `Hroot(key) == anchor` |
-| `principal_id`, `principal_kind` | `Id`, `Kind`, immutable legacy values |
-| `master_public_key` | Ed25519 `Key`, proposed permanent master |
-| `migration_id` | Random `B32` |
-| `last_legacy_record_hash`, `last_legacy_epoch` | `Hash`, positive `U53`, verified legacy head at migration |
-| `issued_at` | `Time` |
-
-The referenced legacy record must authenticate the anchor, id and kind; a known
-newer legacy head needs reconciliation before first transition. A high legacy
-epoch cannot defeat the mode-rank rule. The binding has no secrets and no recovery
-ciphertext, but must remain discoverable for phrase-only legacy recovery.
-
-Without a permanently resolved binding pin, two distinct valid binding hashes
-for one anchor mean `identity_compromised`:
-retain both, alert, suspend both alternatives and do not automatically pick the
-first or the numerically newer migration. Re-attestation requires a new
-higher-range master certificate whose `legacy_binding_hash` selects the binding,
-signed by the **already trusted** master (or independently reverified master for
-a fresh observer), plus a valid v3 record carrying it. This does not authorize a
-master change. If that trust cannot be established, remain blocked and offer new
-identity with local history. A master selected solely from one conflicting binding
-cannot certify itself as the resolution. After accepting this trusted-master
-re-attestation, persist the resolved master **and chosen binding hash** permanently
-for the anchor. Later competing legacy-root bindings are ignored for authority,
-logged as security evidence and may alert, but can never re-suspend that verifier
-or require another phrase ceremony. Invalid inputs do not establish this pin.
-Higher-range same-master recovery preserves it; backups/restarts cannot clear it.
-New observers lacking the resolved pin remain first-observer limited and need
-independent verification if conflicting evidence appears. An untrusted copied
-legacy root still calls for a new identity. Historical conflicts remain visible.
-
 ## Contact consent v2
 
 This replaces root-signed v1 request/accept/decline in
@@ -650,8 +569,8 @@ the pending consent; the primary must approve again under new authority.
 Directories retain and serve the historical record for the TTL plus skew as
 specified above. Historical consent lookup is a narrow exception to "exact head"
 for current operations; no historical record grants new enrollment, proof or
-delegation powers. Legacy accounts retain v1 until migrated; custody peers require
-v2 consent support and never obtain the legacy root for interoperability.
+delegation powers. Native peers require v2 consent support; interoperability
+never obtains or invents a legacy root.
 
 ## Relay keys and acceptance evidence
 
@@ -834,11 +753,9 @@ Every verifier (SDK, router, gateway/directory, federation, peers) performs:
 
 1. Enforce byte/count/depth limits, I-JSON, exact versions/fields and canonical
    encodings; load durable anchor/mode/epoch/certificate/binding pins and tombstones.
-2. Authenticate new anchor or legacy binding path. For migration, verify the old
-   root signature and referenced legacy head; require binding on every v3 record.
-   Compare master against the retained pin, never trust keys just because supplied.
-   Conflicting valid bindings enter compromise handling above. New anchors prohibit
-   legacy paths; no v1 master signature may be requested or accepted.
+2. Authenticate the native master anchor and require new origin with null legacy
+   binding/migration fields. Compare the master against the retained pin; supplied
+   keys are not authority by themselves. Reject every legacy record/proof path.
 3. Verify master certificate signature and all identity, scope, custodian, time,
    legacy-binding-hash and range constraints. Compute the candidate certificate
    hash; stage a pin/conflict update only after full authentication. A claimed
@@ -1017,9 +934,7 @@ Do not describe those planned vectors as already published by this document.
 
 Stage 2a produces a complete source-reviewed private-root-use appendix. Stage 2b
 cannot begin until that inventory, this wire spec and vectors pass independent
-review. It implements every verifier before enabling v3 writers. Existing legacy
-accounts retain one-hour branch proofs and current group/contact behaviour until
-opt-in migration. Capability negotiation (`custody_v3`, `contact_consent_v2`,
+review. It implements every verifier before enabling v3 writers. Legacy development identities are unsupported and require a reset. Capability negotiation (`custody_v3`, `contact_consent_v2`,
 `group_delegation_v1`) never strips v3 evidence for old federation/group peers;
 unsupported combinations block with update-required, as described in the design.
 
@@ -1072,5 +987,5 @@ These are public test keys and must never be used for real identities.
 Rust tests reconstruct this genesis and compare every canonical byte, section
 hash, nested signature and complete-envelope hash with the independent fixture.
 This vector covers native human genesis, master and branch certificates and the
-complete v3 device set; it does not claim coverage for deferred migration,
+complete v3 device set; it does not claim coverage for deferred pairing,
 delegation, pairing or recovery protocols.

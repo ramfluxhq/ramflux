@@ -38,7 +38,7 @@ async fn custody_bus_show_once_confirm_restart_and_legacy_fallback_refusal() -> 
     let root = Root::new()?;
     let socket = root.0.join("bus.sock");
     let mut config = LocalBusConfig::new(&socket, &root.0);
-    config.enable_born_v3_creation = true;
+
     config.custody_vault = Some(Arc::new(TestVault::default()));
     let (stop, receiver) = watch::channel(false);
     let flow = async {
@@ -92,18 +92,16 @@ async fn custody_bus_show_once_confirm_restart_and_legacy_fallback_refusal() -> 
         stop.send(true)?;
         Ok::<_, Box<dyn std::error::Error>>(())
     };
-    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config.clone(), receiver), flow);
     server?;
     flow?;
-    // Restart without the creation option: reads and the persisted mode guard still apply.
+    // Restart with native creation still available; persisted mode guards still apply.
     let (stop, receiver) = watch::channel(false);
     let flow = async {
         let _shutdown = Shutdown(stop.clone());
         let mut bus = connect(&socket).await?;
-        assert!(matches!(
-            bus.begin(&input("disabled")).await,
-            Err(SdkError::CustodyCreationDisabled)
-        ));
+        bus.begin(&input("after-restart")).await?;
+        bus.cancel().await?;
         let mut ordinary = LocalBusClient::connect(&socket).await?;
         // The compatibility ceremony stores public authority, without an ordinary data key.
         // Only account.create.confirm with a passphrase installs an unlocked data actor.
@@ -120,16 +118,14 @@ async fn custody_bus_show_once_confirm_restart_and_legacy_fallback_refusal() -> 
         let daemon =
             ordinary.request(None, "daemon", "daemon.status", serde_json::json!({})).await?;
         assert_eq!(daemon["accounts"], 0);
+        assert_eq!(daemon["born_v3_creation"], true);
         let listed =
             ordinary.request(None, "account", "account.list", serde_json::json!({})).await?;
         assert!(listed.to_string().contains("networking_pending"));
         stop.send(true)?;
         Ok::<_, Box<dyn std::error::Error>>(())
     };
-    let (server, flow) = tokio::join!(
-        crate::serve_local_bus_until(LocalBusConfig::new(&socket, &root.0), receiver),
-        flow
-    );
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
     server?;
     flow?;
     Ok(())
@@ -139,7 +135,7 @@ async fn custody_bus_disconnect_wrong_words_and_show_replay_publish_nothing() ->
     let root = Root::new()?;
     let socket = root.0.join("bus.sock");
     let mut config = LocalBusConfig::new(&socket, &root.0);
-    config.enable_born_v3_creation = true;
+
     config.custody_vault = Some(Arc::new(TestVault::default()));
     let (stop, receiver) = watch::channel(false);
     let flow = async {
@@ -193,7 +189,7 @@ async fn custody_bus_unavailable_provider_refuses_before_phrase_display() -> Res
     let vault = Arc::new(TestVault::default());
     vault.fail.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut config = LocalBusConfig::new(&socket, &root.0);
-    config.enable_born_v3_creation = true;
+
     config.custody_vault = Some(vault);
     let (stop, receiver) = watch::channel(false);
     let flow = async {

@@ -6,6 +6,7 @@
 pub(crate) mod a2i;
 pub(crate) mod a2ui;
 pub(crate) mod account;
+mod account_backup;
 mod account_ceremony;
 pub(crate) mod admin;
 pub(crate) mod bot;

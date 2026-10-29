@@ -51,27 +51,18 @@ impl std::fmt::Debug for CreationCeremony {
     }
 }
 impl CreationCeremony {
-    /// Prepare only when explicitly enabled; the default-off path generates no recovery material.
+    /// Prepare a native account without persisting recovery material.
     /// # Errors
-    /// Rejects disabled setup, existing account ids, invalid names and unsupported custodians.
-    pub fn begin(
-        enabled: bool,
-        root: &Path,
-        input: CreateInput,
-        now: u64,
-    ) -> Result<Self, SdkError> {
-        Self::prepare(enabled, root, input, false, now)
+    /// Rejects existing account ids, invalid names and unsupported custodians.
+    pub fn begin(root: &Path, input: CreateInput, now: u64) -> Result<Self, SdkError> {
+        Self::prepare(root, input, false, now)
     }
     pub(crate) fn begin_account(
-        enabled: bool,
         root: &Path,
         display_name: String,
         kind: PrincipalKind,
         now: u64,
     ) -> Result<Self, SdkError> {
-        if !enabled {
-            return Err(SdkError::CustodyCreationDisabled);
-        }
         if kind != PrincipalKind::Human {
             return Err(invalid());
         }
@@ -83,18 +74,14 @@ impl CreationCeremony {
             principal_kind: kind,
             custodian_account_id: None,
         };
-        Self::prepare(enabled, root, input, true, now)
+        Self::prepare(root, input, true, now)
     }
     fn prepare(
-        enabled: bool,
         root: &Path,
         mut input: CreateInput,
         allocate_principal: bool,
         now: u64,
     ) -> Result<Self, SdkError> {
-        if !enabled {
-            return Err(SdkError::CustodyCreationDisabled);
-        }
         valid_id(&input.local_account_id)?;
         ramflux_protocol::validate_device_name(&input.device_id)?;
         if !allocate_principal
@@ -109,12 +96,7 @@ impl CreationCeremony {
         {
             return Err(invalid());
         }
-        if account_exists(root, &input.local_account_id)?
-            || root
-                .join("local_bus_accounts")
-                .join(format!("{}.json", input.local_account_id))
-                .try_exists()?
-        {
+        if account_exists(root, &input.local_account_id)? {
             return Err(invalid());
         }
         if input.principal_kind == PrincipalKind::Human {
@@ -340,7 +322,7 @@ mod tests {
     fn custody_expiration_destroys_pending_phrase() -> Result<(), Box<dyn std::error::Error>> {
         let root = crate::custody::tests::Root::new()?;
         let mut ceremony =
-            CreationCeremony::begin(true, &root.0, crate::custody::tests::input("expired"), 100)?;
+            CreationCeremony::begin(&root.0, crate::custody::tests::input("expired"), 100)?;
         ceremony.deadline = Instant::now();
         assert!(matches!(ceremony.show_once(), Err(SdkError::CustodyExpired)));
         assert!(ceremony.phrase.is_none());
@@ -354,7 +336,6 @@ mod tests {
         let vault = crate::custody::tests::TestVault::default();
         let now = crate::custody::network_now()?;
         let mut pending = CreationCeremony::begin_account(
-            true,
             &root.0,
             "Ordinary Human".into(),
             PrincipalKind::Human,
@@ -393,7 +374,6 @@ mod tests {
         let root = crate::custody::tests::Root::new()?;
         let vault = crate::custody::tests::TestVault::default();
         let mut pending = CreationCeremony::begin_account(
-            true,
             &root.0,
             "Ordinary Human".into(),
             PrincipalKind::Human,
@@ -411,7 +391,6 @@ mod tests {
         assert!(!root.0.join("custody_accounts").join(id).exists());
         assert!(matches!(
             CreationCeremony::begin_account(
-                true,
                 &root.0,
                 "Machine".into(),
                 PrincipalKind::HeadlessAi,
