@@ -98,7 +98,7 @@ impl RamfluxClient {
         };
         let sender = source.device_id();
         let label = device["label"].as_str().unwrap_or(sender);
-        db.persist_actor_state(&origin_key(conversation, message)?, &json!({"sender_device_id":sender,"sender_root_commitment":root,"sender_device_display":root.as_ref().map(|root|format!("{label}@{root}"))}))?;
+        db.persist_message_actor_state(message, &origin_key(conversation, message)?, &json!({"sender_device_id":sender,"sender_root_commitment":root,"sender_device_display":root.as_ref().map(|root|format!("{label}@{root}"))}))?;
         db.persist_actor_state(&format!("{PREFIX}{key}"), &work)?;
         db.persist_receipt_state(&status_key, &json!({"state":"pending","delivered_at":at}), at)?;
         Ok(())

@@ -20,7 +20,7 @@ impl AccountDb {
             self.cleanup_inbox_policy()
         })
     }
-    /// Records terminal metadata before ACK. Raw ciphertext is retained only within source quota.
+    /// Records terminal metadata before ACK; envelope-shaped inputs retain keyed markers only.
     /// # Errors
     /// Returns SQLite or journal serialization errors.
     pub fn dead_letter_inbox(
@@ -39,8 +39,22 @@ impl AccountDb {
         metadata: &serde_json::Value,
         at: i64,
     ) -> Result<(), StorageError> {
-        if key.starts_with("routed/committed/") && self.dead_letter_seen_routed(key, at)? {
-            return Ok(());
+        if let Some(marker) = self.inbox_envelope_marker(entry)? {
+            self.connection
+                .execute("DELETE FROM runtime_inbox_retry WHERE envelope_key=?1", params![key])?;
+            self.connection
+                .execute("DELETE FROM runtime_unrouted WHERE envelope_id=?1", params![key])?;
+            if self.actor_state_exists(&marker)? {
+                return self.cleanup_inbox_policy();
+            }
+            let value = serde_json::from_slice::<serde_json::Value>(entry)?;
+            let envelope = value.get("envelope").unwrap_or(&value);
+            self.dead_letter_routed(
+                &ramflux_protocol::canonical_json_bytes(envelope)?,
+                metadata.get("error_code").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
+                at,
+            )?;
+            return self.cleanup_inbox_policy();
         }
         let admitted = self.ensure_inbox_policy(key, entry, at)?;
         let bounded = if entry.len() <= 1024 * 1024 { entry } else { &[] };
@@ -73,8 +87,10 @@ impl AccountDb {
             return Err(StorageError::AuthorizationRejected);
         }
         self.write_transaction(|| {
-            if key.starts_with("routed/committed/")
-                && self.actor_state_exists(&self.routed_seen_key(key)?)?
+            if let Some(marker) = self.inbox_envelope_marker(entry)?
+                && self.actor_state_exists(&marker)?
+                // Initial ACK failure may retain a live committed receipt. Deletion removes it.
+                && !(key.starts_with("routed/committed/") && self.actor_state_exists(key)?)
             {
                 return Ok(0);
             }

@@ -204,7 +204,15 @@ async fn contact02_decline_and_block_discard_held_messages_and_refuse_later_send
         let list = contact(&mut state, "bob", "contact.requests.list", json!({})).await?;
         contact(&mut state, "bob", action, json!({"request_id":list["requests"][0]["request_id"]}))
             .await?;
-        assert!(deliver(&mut state, "bob", &original).await.is_err());
+        let (identity_before, journal_before) = {
+            let db = account(&state, "bob")?.account_db()?;
+            (db.client_record("identity", "alice")?, db.journal_bounds()?.head_seq)
+        };
+        let duplicate = deliver(&mut state, "bob", &original).await?;
+        assert!(duplicate.plaintext.is_none());
+        let db = account(&state, "bob")?.account_db()?;
+        assert_eq!(db.client_record("identity", "alice")?, identity_before);
+        assert_eq!(db.journal_bounds()?.head_seq, journal_before);
         let root = account(&state, "alice")?.owned_device_identity()?.root_commitment().to_owned();
         assert_eq!(account(&state, "bob")?.account_db()?.held_contact_messages(&root)?.len(), 0);
         assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 0);

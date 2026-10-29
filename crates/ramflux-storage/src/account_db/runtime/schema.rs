@@ -41,6 +41,7 @@ impl AccountDb {
             "INSERT INTO runtime_account_identity VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET principal_commitment=excluded.principal_commitment WHERE principal_commitment<>excluded.principal_commitment",
             params![self.principal_commitment],
         )?;
+        self.install_event_counter_schema()?;
         self.install_group_message_retention_schema()?;
         let columns: i64 = self.connection.query_row(
             "SELECT count(*) FROM pragma_table_info('runtime_outbox') WHERE name='keys_json'",
@@ -55,6 +56,7 @@ impl AccountDb {
         self.remove_consent_bookkeeping_triggers()?;
         self.install_domain_change_triggers()?;
         self.install_inbox_recovery_schema()?;
+        self.connection.call(|db| super::super::message_footprint::install(db))?;
         transaction.commit()?;
         Ok(())
     }
@@ -62,7 +64,7 @@ impl AccountDb {
     fn install_domain_change_triggers(&self) -> Result<(), StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('runtime_account_identity','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
+             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','runtime_account_identity','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -85,8 +87,14 @@ impl AccountDb {
                 .collect::<Vec<_>>()
                 .join(" OR ");
             for (operation, source) in [("insert", "NEW"), ("update", "NEW"), ("delete", "OLD")] {
-                let guard =
-                    if operation == "update" { format!("WHEN {changed}") } else { String::new() };
+                // A privacy fence can erase an inserted/updated copy in an earlier AFTER
+                // trigger. Do not publish its original identity-bearing keys afterward.
+                let present = format!("EXISTS(SELECT 1 FROM \"{quoted}\" WHERE rowid=NEW.rowid)");
+                let guard = match operation {
+                    "insert" => format!("WHEN {present}"),
+                    "update" => format!("WHEN {present} AND ({changed})"),
+                    _ => String::new(),
+                };
                 let fields = names
                     .iter()
                     .filter(|name| {
