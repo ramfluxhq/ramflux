@@ -518,3 +518,94 @@ the next upgrade. The tooling cannot roll back to the older `sd001-2da4a6d2` sta
 which predates snapshot metadata; the retained manual backup `B` is the only rollback
 path to that version. The script validates the public connection limit before state or
 engine changes.
+
+## Demo custody provisioning
+
+Native accounts need custody to leave `networking_pending`. Public discovery and
+health probes alone do not establish account networking. Use a demo wrapper with
+custody-input support, and provision the existing demo state and discovery identity
+first. `rf node custody-init` and `rf node custody-renew` are local operator
+commands: they do not connect to a daemon or a remote node.
+
+Custody records use the **existing pinned discovery identity**, not a separate
+custody root. Its signing seed is already online because federation signs live
+discovery with it. Prefer running the tool on that server so the key needs no
+second copy. An operator machine holding an explicitly protected copy can also
+run it; securely transfer the generated record and env fragment to the server
+and set the fragment's absolute record path for that host. Never transfer the
+node seed to clients, print it, generate a replacement, or claim it is offline-only.
+The proxy key is a distinct software Ed25519 credential, not an HSM claim.
+
+Build `rf` with `cargo build -p ramflux-rf --bin rf`. On the server, load the
+trusted operator env and the already created private `identity.env`, then run:
+
+```sh
+set -a
+. /absolute/path/demo.env
+. "$DEMO_DATA_DIR/identity.env"
+set +a
+rf node custody-init \
+  --node-id "$DEMO_NODE_ID" \
+  --node-signing-seed "$DEMO_DATA_DIR/certs/node-identity/node-signing.key" \
+  --expected-public-key "$DEMO_EXPECTED_NODE_PUBLIC_KEY" \
+  --output-dir "$DEMO_DATA_DIR/custody-provisioning" \
+  --validity-days 30
+cp "$DEMO_DATA_DIR/custody-provisioning/custody.env" "$DEMO_DATA_DIR/custody.active.env"
+chmod 600 "$DEMO_DATA_DIR/custody.active.env"
+```
+
+The seed path is explicit and must already exist, with the same canonical
+base64url seed used by federation. The expected public key must equal its
+public key and the independently retained discovery pin. The command refuses
+a wrong pin or missing seed. Validity is **1–30 days**, default 30, bounded by
+the existing protocol limit; stdout reports the expiry as Unix UTC seconds and
+never prints a private seed. Output directories are 0700; records and env
+fragments are 0600. Protect their backups as credentials.
+
+The fragment has exactly `RAMFLUX_CUSTODY_NODE_PUBLIC_KEY`,
+`RAMFLUX_CUSTODY_NODE_RECORD_FILE` and `RAMFLUX_CUSTODY_PROXY_SIGNING_SEED`.
+Add `. /absolute/path/to/custody.active.env` to the trusted operator env and run
+`deploy/scripts/demo-node.sh up /absolute/path/demo.env`. Use the generated
+record together with its matching seed. The record authorizes `ramflux-gateway`
+for this node's audience in `HomeRelayReceipt` mode. No unbound mode is enabled.
+
+Give demo users the discovery origin, exact node id and the existing public pin
+through an authenticated operator channel. They confirm that same identity:
+
+```sh
+rf node add https://demo.example
+rf node confirm demo.example --pin-source operator --expected-public-key "$NODE_PUBLIC_KEY"
+rf node set-default demo.example
+```
+
+The SDK/desktop node profile uses this discovery pin for custody too; no second
+pin or trust channel is introduced.
+
+Prepare renewal **before the printed signing deadline**:
+
+```sh
+rf node custody-renew \
+  --node-id "$DEMO_NODE_ID" \
+  --node-signing-seed "$DEMO_DATA_DIR/certs/node-identity/node-signing.key" \
+  --expected-public-key "$DEMO_EXPECTED_NODE_PUBLIC_KEY" \
+  --output-dir "$DEMO_DATA_DIR/custody-provisioning" \
+  --validity-days 30 --force-new-proxy
+```
+
+Existing output is refused without `--force-new-proxy`, including on renewal.
+Using that flag with `custody-init` also prepares a successor rather than resetting
+the epoch. Renewal generates a fresh proxy seed/key id, links the predecessor
+hash, increments the epoch, retains revocations and required retiring descriptors,
+and never extends an old key's signing interval. Immutable predecessor files stay
+in `records/`; the env fragment is replaced atomically only after the new record
+is durable. Retain this entire private output directory. The protocol permits at
+most 16 concurrent/overlap descriptors; rapid repeated rotation can exhaust that
+budget and is refused until old overlap evidence can safely expire.
+
+**Applying a changed proxy seed through the demo wrapper is pending a dedicated
+coordinated rotation operation.** Preparing renewal does not deploy it. Keep the
+deployed `custody.active.env` unchanged until that operation is available; ordinary
+`up`/`upgrade` deliberately refuse proxy-seed replacement. Do not bypass this by
+editing `runtime.env`, deleting state or resetting the node identity. Arrange
+supported rotation before expiry. Router custody epochs and key pins persist in
+the data volume; restoring an older record file does not roll those pins back.
