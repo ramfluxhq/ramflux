@@ -352,7 +352,7 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
         discovery: admin.discovery.clone(),
     };
     let active = Arc::new(AtomicUsize::new(0));
-    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(8, 16, 32));
+    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(2, 16, 32));
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut first = TcpStream::connect(listener.local_addr()?)?;
     let (stream, _) = listener.accept()?;
@@ -384,6 +384,16 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
     excess.read_to_string(&mut response)?;
     assert!(response.starts_with("HTTP/1.1 503"), "{response}");
     assert_eq!(active.load(Ordering::Acquire), 1);
+    // The global-cap refusal must drop the source permit it acquired before admission.
+    let probe = source_limits
+        .acquire_connection(listener.local_addr()?.ip(), std::time::Instant::now())
+        .map_err(|error| format!("source slot leaked after global refusal: {error:?}"))?;
+    assert!(
+        source_limits
+            .acquire_connection(listener.local_addr()?.ip(), std::time::Instant::now())
+            .is_err()
+    );
+    drop(probe);
     first.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
     worker.join().map_err(|_| "worker panicked")?;
     first.read_to_string(&mut String::new())?;

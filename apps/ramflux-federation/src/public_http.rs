@@ -5,6 +5,9 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 
 use crate::http_response::HttpResponse;
+use crate::public_source_limits::{
+    PublicSourceLimitConfig, PublicSourceLimits, SourceConnectionPermit,
+};
 use crate::{FederationDiscoverySurface, RouterMeshClient, router_get_json};
 
 // Deliberately has no admin credential or mutable federation trust store.
@@ -24,6 +27,7 @@ pub(crate) fn serve_public_http(
             .ok()
             .as_deref(),
     )?;
+    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::configured(limit)?);
     let limits = crate::http_limits::configured(true)?;
     let listener = TcpListener::bind(addr).map_err(|error| {
         ramflux_node_core::NodeCoreError::ItestHttp(format!(
@@ -43,6 +47,7 @@ pub(crate) fn serve_public_http(
                             Arc::clone(&active),
                             limit,
                             limits,
+                            &source_limits,
                         );
                     }
                     Err(error) => tracing::warn!(%error, "federation public accept failed"),
@@ -58,15 +63,60 @@ pub(crate) fn serve_public_http(
 }
 
 pub(crate) fn spawn_public_connection(
-    stream: TcpStream,
+    mut stream: TcpStream,
     context: FederationPublicHttpContext,
     active: Arc<std::sync::atomic::AtomicUsize>,
     limit: usize,
     limits: ramflux_node_core::HttpRequestLimits,
+    source_limits: &Arc<PublicSourceLimits>,
 ) -> Option<std::thread::JoinHandle<()>> {
-    crate::http_connections::spawn_connection(stream, active, limit, move |stream, accepted_at| {
-        handle_public_connection_with_limits(stream, &context, limits, accepted_at);
-    })
+    let accepted_at = std::time::Instant::now();
+    let source = match stream.peer_addr() {
+        Ok(peer) => peer.ip(),
+        Err(error) => {
+            tracing::warn!(%error, "federation public peer address unavailable");
+            let _ = ramflux_node_core::write_http_response_with_deadline(
+                &mut stream,
+                "503 Service Unavailable",
+                "text/plain; charset=utf-8",
+                b"service unavailable",
+                accepted_at + std::time::Duration::from_secs(1),
+            );
+            return None;
+        }
+    };
+    tracing::debug!(%source, "federation public connection source observed");
+    if source_limits.observe_accepted_source(source) {
+        tracing::warn!(
+            "more than 90 percent of public connections share one private source; verify proxy or rootless port forwarding and RAMFLUX_FEDERATION_PER_SOURCE_LIMITS"
+        );
+    }
+    let Ok(source_permit) = source_limits.acquire_connection(source, accepted_at) else {
+        let _ = ramflux_node_core::write_http_response_with_deadline(
+            &mut stream,
+            "503 Service Unavailable",
+            "text/plain; charset=utf-8",
+            b"service unavailable",
+            accepted_at + std::time::Duration::from_secs(1),
+        );
+        return None;
+    };
+    crate::http_connections::spawn_connection(
+        stream,
+        active,
+        limit,
+        accepted_at,
+        move |stream, at| {
+            let source_permit = source_permit;
+            handle_public_connection_with_source_limits(
+                stream,
+                &context,
+                limits,
+                at,
+                Some(&source_permit),
+            );
+        },
+    )
 }
 
 #[cfg(test)]
@@ -81,13 +131,24 @@ pub(crate) fn handle_public_connection(
         std::time::Instant::now(),
     );
 }
+#[cfg(test)]
 pub(crate) fn handle_public_connection_with_limits(
     stream: &mut TcpStream,
     context: &FederationPublicHttpContext,
     limits: ramflux_node_core::HttpRequestLimits,
     accepted_at: std::time::Instant,
 ) {
-    let response = match public_response(stream, context, limits, accepted_at) {
+    handle_public_connection_with_source_limits(stream, context, limits, accepted_at, None);
+}
+
+fn handle_public_connection_with_source_limits(
+    stream: &mut TcpStream,
+    context: &FederationPublicHttpContext,
+    limits: ramflux_node_core::HttpRequestLimits,
+    accepted_at: std::time::Instant,
+    source_permit: Option<&SourceConnectionPermit>,
+) {
+    let response = match public_response(stream, context, limits, accepted_at, source_permit) {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(%error, "federation public request failed");
@@ -115,7 +176,7 @@ pub(crate) fn handle_public_request(
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let limits = crate::http_limits::defaults(true);
     let accepted_at = std::time::Instant::now();
-    if let Some(response) = public_response(stream, context, limits, accepted_at)? {
+    if let Some(response) = public_response(stream, context, limits, accepted_at, None)? {
         response.write(stream, limits, accepted_at)?;
     }
     Ok(())
@@ -126,12 +187,16 @@ fn public_response(
     context: &FederationPublicHttpContext,
     limits: ramflux_node_core::HttpRequestLimits,
     accepted_at: std::time::Instant,
+    source_permit: Option<&SourceConnectionPermit>,
 ) -> Result<Option<HttpResponse>, ramflux_node_core::NodeCoreError> {
     let Some(request) =
         ramflux_node_core::read_http_request_with_limits(stream, limits, accepted_at)?
     else {
         return Ok(None);
     };
+    if source_permit.is_some_and(|permit| !permit.allow_request(std::time::Instant::now())) {
+        return Ok(Some(HttpResponse::text("429 Too Many Requests", "too many requests")));
+    }
     let discovery = &context.discovery;
     let router = context.router.as_ref();
     let response = match (request.method.as_str(), request.path.as_str()) {

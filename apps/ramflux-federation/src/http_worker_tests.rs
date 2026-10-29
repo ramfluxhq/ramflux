@@ -145,16 +145,21 @@ fn a_nonreading_response_peer_releases_its_worker_permit() -> TestResult {
     let response = crate::http_response::HttpResponse::json(&serde_json::json!({
         "large": "x".repeat(32 * 1024 * 1024)
     }))?;
-    let worker =
-        crate::http_connections::spawn_connection(server, active.clone(), 1, move |stream, _| {
+    let worker = crate::http_connections::spawn_connection(
+        server,
+        active.clone(),
+        1,
+        Instant::now(),
+        move |stream, _| {
             let limits = ramflux_node_core::HttpRequestLimits {
                 request_timeout: Duration::from_millis(100),
                 ..crate::http_limits::defaults(true)
             };
             let result = response.write(stream, limits, Instant::now());
             let _ = tx.send(result.is_err());
-        })
-        .ok_or("connection refused")?;
+        },
+    )
+    .ok_or("connection refused")?;
     assert!(rx.recv_timeout(Duration::from_secs(5))?);
     worker.join().map_err(|_| "response worker panicked")?;
     assert_eq!(active.load(Ordering::Acquire), 0);
@@ -191,16 +196,21 @@ fn a_slow_reading_response_peer_releases_its_worker_permit_at_the_write_cap() ->
         "large": "x".repeat(32 * 1024 * 1024)
     }))?;
     let started = Instant::now();
-    let worker =
-        crate::http_connections::spawn_connection(server, active.clone(), 1, move |stream, _| {
+    let worker = crate::http_connections::spawn_connection(
+        server,
+        active.clone(),
+        1,
+        Instant::now(),
+        move |stream, _| {
             let limits = ramflux_node_core::HttpRequestLimits {
                 request_timeout: Duration::from_secs(3600),
                 ..crate::http_limits::defaults(true)
             };
             let result = response.write(stream, limits, Instant::now());
             let _ = tx.send((result.is_err(), started.elapsed()));
-        })
-        .ok_or("connection refused")?;
+        },
+    )
+    .ok_or("connection refused")?;
     let (failed, elapsed) = rx.recv_timeout(Duration::from_secs(8))?;
     worker.join().map_err(|_| "response worker panicked")?;
     stop.store(true, Ordering::Release);
