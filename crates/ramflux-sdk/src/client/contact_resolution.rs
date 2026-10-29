@@ -87,9 +87,18 @@ impl RamfluxClient {
         {
             return Err(ContactReason::RootConflict.into());
         }
+        let mut upgraded = identity.clone();
+        if upgraded["safety_number"].is_null() {
+            // An accepted link can predate its derived cache. Finish the explicit
+            // command from local authority without repeating network resolution.
+            let safety = self.contact_safety_number(root)?;
+            upgraded["safety_number"] = json!(safety.safety_number);
+            upgraded["safety_number_algorithm_version"] = json!(safety.algorithm_version);
+        }
         if let Some(card) = card {
-            let mut upgraded = identity.clone();
             self.decorate_contact_identity(&identity, &mut upgraded, Some(card), false)?;
+        }
+        if upgraded != identity {
             db.persist_client_record("identity", &principal, &upgraded)?;
         }
         self.contact_entry(&principal).map(Some)

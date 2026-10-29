@@ -21,6 +21,15 @@ record and device-set comparison as `identity.directory`. The directory exposes 
 contact fields and a cached safety number. Durable `contact.changed` events cover
 identity resolution and safety verification changes.
 
+Successful explicit `contact.add` and `contact.accept` cache the safety number before
+returning, including an accepted retry after inbound automatic acceptance. Retry
+completes a missing cache from local verified authority without network lookup or
+vault access. It preserves lookup, card and verified provenance except for an explicit
+card upgrade of lookup provenance, and never marks the contact verified. Native
+automatic acceptance already caches algorithm version 2; legacy automatic acceptance
+can leave the number absent until an explicit operation. Directory polling does not
+compute a missing number.
+
 Principal lookup is TOFU through the account's authenticated home-node session.
 The directory refuses to choose between conflicting active roots. The SDK applies its
 existing root-commitment, device manifest, branch-proof and prekey checks. A known root

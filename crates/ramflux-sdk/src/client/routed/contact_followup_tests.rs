@@ -26,6 +26,97 @@ fn card(principal: &str, seed: [u8; 32]) -> Result<String, SdkError> {
     Ok(crate::contact_card::encode_contact_card(body, seed, now)?.0)
 }
 #[tokio::test]
+async fn auto_accepted_card_retry_exposes_safety_number_without_a_network_fetch()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 31)?;
+    let mut b = Fixture::new("bob", 41)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
+    pending(&mut state, &directory).await?;
+    let root = r2::root(&state, "alice")?;
+    assert!(account(&state, "bob")?.friend_link_peer_is_accepted(&root)?);
+    let seed = account(&state, "alice")?
+        .identity_root
+        .as_ref()
+        .ok_or(SdkError::IdentityRootMissing)?
+        .signing_key
+        .to_bytes();
+    directory.unavailable.store(true, Ordering::SeqCst);
+    let before = directory.manifest_fetches.load(Ordering::SeqCst);
+    let receiver = account(&state, "bob")?;
+    assert!(receiver.observed_device_set(&root)?.is_some());
+    assert!(receiver.observed_device_set(&receiver.contact_own_commitment()?)?.is_some());
+    let row = crate::bus::read_model::row(receiver, "identity", "alice")?;
+    assert_eq!(row["safety_number_available"], false);
+    assert!(row["safety_number"].is_null(), "automatic acceptance has not computed it");
+    let started = std::time::Instant::now();
+    for retry in 0..2 {
+        let accepted =
+            contact(&mut state, "bob", "contact.accept", json!({"card":card("alice", seed)?}))
+                .await?;
+        assert_eq!(accepted["contact"]["root_source"], "card");
+        let receiver = account(&state, "bob")?;
+        let row = crate::bus::read_model::row(receiver, "identity", "alice")?;
+        assert_eq!(row["safety_number_available"], true);
+        assert_eq!(row["safety_number_algorithm_version"], 1);
+        assert_eq!(row["safety_number"].as_array().map(Vec::len), Some(12));
+        assert_eq!(
+            row["safety_number"],
+            json!(receiver.contact_safety_number(&root)?.safety_number)
+        );
+        assert_eq!(row["verified"], false, "deriving a number cannot mark it verified");
+        eprintln!(
+            "contact acceptance readiness retry={retry} elapsed_us={} safety_number_available=true remote_fetches={}",
+            started.elapsed().as_micros(),
+            directory.manifest_fetches.load(Ordering::SeqCst) - before,
+        );
+    }
+    assert_eq!(directory.manifest_fetches.load(Ordering::SeqCst), before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_accept_and_accepted_retry_cache_safety_without_changing_verification()
+-> Result<(), SdkError> {
+    for automatic in [false, true] {
+        let mut a = Fixture::new("alice", 31)?;
+        let mut b = Fixture::new("bob", 41)?;
+        let directory = Directory::new(&a, &b).await?;
+        let mut state = state(&mut a, &mut b, &directory)?;
+        if automatic {
+            account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
+        }
+        pending(&mut state, &directory).await?;
+        let root = r2::root(&state, "alice")?;
+        let receiver = account(&state, "bob")?;
+        assert_eq!(
+            crate::bus::read_model::row(receiver, "identity", "alice")?["safety_number_available"],
+            false
+        );
+        let verification = receiver.account_db()?.contact_verification(&root)?;
+        let mut fetches = directory.manifest_fetches.load(Ordering::SeqCst);
+        for retry in 0..2 {
+            contact(&mut state, "bob", "contact.accept", json!({"principal_id":"alice"})).await?;
+            let receiver = account(&state, "bob")?;
+            let row = crate::bus::read_model::row(receiver, "identity", "alice")?;
+            assert_eq!(row["safety_number_available"], true);
+            assert_eq!(row["safety_number_algorithm_version"], 1);
+            assert_eq!(row["root_source"], "lookup");
+            assert_eq!(row["verified"], false);
+            assert_eq!(receiver.account_db()?.contact_verification(&root)?, verification);
+            if retry == 0 {
+                directory.unavailable.store(true, Ordering::SeqCst);
+                fetches = directory.manifest_fetches.load(Ordering::SeqCst);
+            } else {
+                assert_eq!(directory.manifest_fetches.load(Ordering::SeqCst), fetches);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conflicting_keys()
 -> Result<(), SdkError> {
     let mut a = Fixture::new("alice", 31)?;
