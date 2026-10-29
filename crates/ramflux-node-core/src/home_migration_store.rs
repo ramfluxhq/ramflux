@@ -26,6 +26,7 @@ mod authority_evidence;
 mod courier;
 pub(crate) use courier::MigrationCourierClaim;
 mod fence;
+mod genesis;
 mod maintenance;
 mod queries;
 mod refusals;
