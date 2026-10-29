@@ -56,3 +56,30 @@ fn other_opaque_message_and_surface_selectors_accept_hyphen_prefixed_values()
     ])?;
     Ok(())
 }
+
+#[test]
+fn itest_legacy_creation_is_a_separate_feature_gated_command() -> Result<(), clap::Error> {
+    Cli::try_parse_from(["rf", "account", "create", "--display-name", "Alice"])?;
+    assert!(Cli::try_parse_from(["rf", "account", "create", "--account", "alice"]).is_err());
+    let fixture = [
+        "rf",
+        "account",
+        "itest-legacy-create",
+        "--account",
+        "alice",
+        "--principal",
+        "alice-principal",
+        "--device",
+        "alice-device",
+        "--target",
+        "alice-target",
+        "--secret",
+        "fixture-secret",
+    ];
+    if cfg!(feature = "itest-legacy-accounts") {
+        Cli::try_parse_from(fixture)?;
+    } else {
+        assert!(Cli::try_parse_from(fixture).is_err());
+    }
+    Ok(())
+}

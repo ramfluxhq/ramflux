@@ -16,8 +16,9 @@ def check(metadata):
     if not nodes:
         raise ValueError("production graph has no resolved SDK node")
     for node in nodes:
-        if "itest-memory-vault" in node["features"]:
-            raise ValueError("production graph enables forbidden SDK itest-memory-vault")
+        for feature in ("itest-memory-vault", "itest-legacy-accounts"):
+            if feature in node["features"]:
+                raise ValueError(f"production graph enables forbidden SDK {feature}")
 
 
 def main():
