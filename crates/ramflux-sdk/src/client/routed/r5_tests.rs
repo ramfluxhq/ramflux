@@ -164,6 +164,7 @@ impl ramflux_transport::GatewaySessionFrameSink for ResetWire {
                         target_delivery_id: Some("alice".to_owned()),
                         one_time_prekey_exhausted: false,
                         available_one_time_prekeys: 8,
+                        one_time_prekey_leases: std::collections::BTreeMap::new(),
                     },
                 },
                 GatewayClientFrame::Submit { submit } => {

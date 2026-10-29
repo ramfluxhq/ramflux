@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+mod prekey_lease_expiry;
 
 const SIGNED_PREKEY_ROTATION_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SIGNED_PREKEY_VALIDITY_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -282,11 +283,14 @@ impl RamfluxClient {
                 }),
             )?;
         }
+        let expired =
+            self.erase_expired_prekey_leases(device_id, response, now_unix_timestamp())?;
         let device = self.local_device_identity(device_id)?;
-        Ok(response.available_one_time_prekeys
-            < u32::try_from(ONE_TIME_PREKEY_REPLENISH_BELOW).unwrap_or(u32::MAX)
-            && self.load_x3dh_private_state(&device)?.one_time_prekeys.len()
-                < ONE_TIME_PREKEY_PRIVATE_LIMIT)
+        Ok(expired
+            || (response.available_one_time_prekeys
+                < u32::try_from(ONE_TIME_PREKEY_REPLENISH_BELOW).unwrap_or(u32::MAX)
+                && self.load_x3dh_private_state(&device)?.one_time_prekeys.len()
+                    < ONE_TIME_PREKEY_PRIVATE_LIMIT))
     }
 
     fn replenish_one_time_prekeys(
@@ -340,6 +344,7 @@ impl RamfluxClient {
             && state.signed_prekey_created_at > 0
             && now.saturating_sub(state.signed_prekey_created_at) < SIGNED_PREKEY_ROTATION_SECONDS
             && state.one_time_prekeys.len() >= desired
+            && state.bundle.one_time_prekey_ids.len() == state.one_time_prekeys.len()
             && state.previous_signed_prekeys.iter().all(|key| key.erase_after > now)
         {
             return Ok(state.bundle.clone());

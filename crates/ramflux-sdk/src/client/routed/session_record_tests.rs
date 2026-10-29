@@ -56,6 +56,7 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
                         target_delivery_id: Some(device_id),
                         one_time_prekey_exhausted: false,
                         available_one_time_prekeys: 8,
+                        one_time_prekey_leases: std::collections::BTreeMap::new(),
                     },
                 },
                 GatewayClientFrame::Submit { submit } => {

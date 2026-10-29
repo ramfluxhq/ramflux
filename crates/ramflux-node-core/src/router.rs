@@ -637,6 +637,7 @@ impl RouterCore {
             one_time_prekey_exhausted: available == 0,
             prekey_exhaustion_warning: available == 0,
             available_one_time_prekeys: u32::try_from(available).unwrap_or(u32::MAX),
+            one_time_prekey_leases: control.mvp1_identities.owner_prekey_leases(&identity),
         })
     }
 
@@ -649,10 +650,9 @@ impl RouterCore {
         device_id: &str,
     ) -> Result<PrekeyLeaseState, NodeCoreError> {
         let control = lock_unpoisoned(&self.control);
-        let lookup = IdentityRegistry::principal_device_lookup(root_commitment, device_id);
         let identity = control
             .mvp1_identities
-            .resolve_device_selector(&lookup)
+            .device_identity_for_root(root_commitment, device_id)
             .ok_or_else(|| NodeCoreError::ItestHttp("qualified device required".into()))?;
         Ok(control.mvp1_identities.prekey_lease_state(&identity))
     }
@@ -681,6 +681,7 @@ impl RouterCore {
             target_delivery_id: identities
                 .target_delivery_id_for_device(&identity)
                 .map(str::to_owned),
+            one_time_prekey_leases: std::collections::BTreeMap::new(),
             one_time_prekey_exhausted: false,
             prekey_exhaustion_warning: false,
             available_one_time_prekeys: u32::try_from(
@@ -777,6 +778,7 @@ impl RouterCore {
                 bundle,
                 principal_commitment,
                 target_delivery_id,
+                one_time_prekey_leases: std::collections::BTreeMap::new(),
                 one_time_prekey_exhausted: exhausted,
                 prekey_exhaustion_warning: warning,
                 available_one_time_prekeys: u32::try_from(available).unwrap_or(u32::MAX),
