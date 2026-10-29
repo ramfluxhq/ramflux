@@ -31,6 +31,7 @@ pub(crate) fn lookup_error(error: SdkError, context: &str) -> SdkError {
 
 pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
     match error {
+        SdkError::ReplayMismatch => Some("replay_mismatch"),
         SdkError::Crypto(
             ramflux_crypto::CryptoError::VerifyFailed
             | ramflux_crypto::CryptoError::InvalidSignatureLength(_)

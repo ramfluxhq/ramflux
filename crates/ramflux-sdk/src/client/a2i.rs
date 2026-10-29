@@ -86,7 +86,11 @@ impl RamfluxClient {
                         .map_err(|error| SdkError::LocalBus(error.to_string()))?,
                 );
                 let delivery = self.apply_routed_entry(engine, &pool, &entry, false).await?;
-                if delivery.routing.kind == crate::client::routed::Kind::Control {
+                if delivery
+                    .routing
+                    .as_ref()
+                    .is_some_and(|route| route.kind == crate::client::routed::Kind::Control)
+                {
                     let key = self
                         .authenticated_committed_key(&entry)?
                         .replace("routed/committed/", "routed/control/");

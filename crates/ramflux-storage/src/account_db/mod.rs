@@ -50,6 +50,7 @@ pub mod object;
 mod object_payload;
 pub mod read_model;
 pub mod recovery;
+mod replay_markers;
 pub mod runtime;
 mod shared_group_delivery;
 mod shared_group_floor_index;

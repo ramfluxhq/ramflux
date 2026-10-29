@@ -337,7 +337,7 @@ async fn receive_page(
         if account.client.ack_gateway_entry(engine, &entry, now).await.is_err() {
             let retained = retained_inbox_entry(&entry, strip_call_ciphertext);
             let bytes = serde_json::to_vec(&retained)?;
-            if bytes.len() <= 1024 * 1024 {
+            if bytes.len() <= 1024 * 1024 && account.client.routed_seen_marker(&entry)?.is_none() {
                 account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)?;
             }
             advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
@@ -356,7 +356,7 @@ async fn receive_page(
     Ok((applied, replies))
 }
 
-struct Processed {
+pub(super) struct Processed {
     consumed: bool,
     publish: bool,
     reply: Option<crate::client::surface::ResyncReply>,
@@ -374,7 +374,7 @@ impl Processed {
     }
 }
 
-async fn process(
+pub(super) async fn process(
     account: &mut LocalBusAccountState,
     engine: &mut GatewaySessionEngine,
     pool: &ramflux_transport::RelayQuicPool,
@@ -447,6 +447,9 @@ pub(super) fn quarantine_failure(
     error: &SdkError,
     now: i64,
 ) -> Result<bool, SdkError> {
+    if let Some((committed, _)) = client.routed_seen_marker(entry)? {
+        return Ok(client.account_db()?.dead_letter_seen_routed(&committed, now)?);
+    }
     tracing::debug!(%error, error_code = local_bus_error_code(error),
         envelope_id = %entry.envelope.envelope_id, source_device_id = %entry.envelope.source_device_id,
         target_delivery_id = %entry.target_delivery_id, inbox_seq = entry.inbox_seq,
