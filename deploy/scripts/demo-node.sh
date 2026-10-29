@@ -122,21 +122,9 @@ case "$command" in
 esac
 if [ "$command" = recover ]; then
   [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
-  DEMO_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover)
-  export DEMO_VERSION
-elif [ "$command" = up ]; then
-  python3 "$script_dir/demo-node-config.py" "$repo" "$state" prepare "$command"
 else
-  [ -f "$state/owner.json" ] || fail 'data directory is not owned by this demo tooling'
-  python3 "$script_dir/demo-node-config.py" "$repo" "$state" prepare "$command"
+  python3 "$script_dir/demo-node-config.py" "$repo" "$state" validate "$command"
 fi
-if [ "$command" = upgrade ] || [ "$command" = rollback ]; then
-  version_marker="$state/owner.json.pending"
-  [ "$command" != rollback ] || version_marker="$state/owner.json"
-  DEMO_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["settings"]["DEMO_VERSION"])' "$version_marker")
-  export DEMO_VERSION
-fi
-owner=$(cat "$state/owner.token")
 # Even a matching project name is insufficient: every existing resource must carry our owner token.
 clean_env() {
   # Rootless Podman needs the user's runtime directory; ignore inherited compose/remote overrides.
@@ -175,20 +163,9 @@ fi
 printf 'compose provider: %s (runtime: %s)\n' "$compose_provider" "$container_engine"
 runtime() { clean_env "$container_engine" "$@"; }
 check_prebuilt_images() {
-  missing=
-  for service in gateway router notify federation relay signaling retention; do
-    image="ghcr.io/ramfluxhq/ramflux-$service:$DEMO_VERSION"
-    if ! runtime image inspect "$image" >/dev/null 2>&1; then
-      missing="${missing}${missing:+
-}$image"
-    fi
-  done
-  if [ -n "$missing" ]; then
-    printf 'missing prebuilt demo images:\n%s\n' "$missing" >&2
-    printf 'load every listed image into the selected container engine before retrying\n' >&2
-    return 1
-  fi
+  clean_env python3 "$script_dir/demo-image-check.py" "$container_engine" "${1:-$DEMO_VERSION}"
 }
+
 check_resources() {
   for kind in container volume network; do
     case "$kind" in
@@ -341,6 +318,33 @@ load_applied_overlays() {
   DEMO_ADMIN_LOOPBACK_PORT=$(sed -n 's/^RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=//p' "$state/runtime.env" | tail -n 1)
   export RAMFLUX_DEMO_VOICE_UDP_PORT DEMO_ADMIN_LOOPBACK_PORT
 }
+# Inspect the intended images before prepare/recover can write any managed state.
+case "$command" in
+  rollback|recover)
+    image_version=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" image-version "$command")
+    check_prebuilt_images "$image_version"
+    ;;
+  up|upgrade)
+    [ "$DEMO_PREBUILT_IMAGES" != 1 ] || check_prebuilt_images
+    ;;
+esac
+if [ "$command" = recover ]; then
+  [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
+  DEMO_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover)
+  export DEMO_VERSION
+elif [ "$command" = up ]; then
+  python3 "$script_dir/demo-node-config.py" "$repo" "$state" prepare "$command"
+else
+  [ -f "$state/owner.json" ] || fail 'data directory is not owned by this demo tooling'
+  python3 "$script_dir/demo-node-config.py" "$repo" "$state" prepare "$command"
+fi
+if [ "$command" = upgrade ] || [ "$command" = rollback ]; then
+  version_marker="$state/owner.json.pending"
+  [ "$command" != rollback ] || version_marker="$state/owner.json"
+  DEMO_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["settings"]["DEMO_VERSION"])' "$version_marker")
+  export DEMO_VERSION
+fi
+owner=$(cat "$state/owner.token")
 if [ "$command" = rollback ] || [ "$command" = recover ]; then
   load_applied_overlays
 fi
@@ -446,7 +450,6 @@ PY
       python3 "$script_dir/compose-env.py" "$state/runtime.env"
     fi
     if [ "$command" = rollback ] || [ "$command" = recover ] || [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
-      check_prebuilt_images
       compose_up no-build
     else
       sh "$script_dir/build-prod-images.sh"
