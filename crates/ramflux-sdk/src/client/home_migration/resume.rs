@@ -121,8 +121,10 @@ impl HomeMigrationJournal<'_> {
                 })))
             }
             MigrationPhase::AbortPending => {
-                if let Some(request) = job.abort_request {
-                    return Ok(MigrationResumption::AbortPrepared(Box::new(request)));
+                if let Some(request) = &job.abort_request
+                    && request.control.body.expires_at >= now.max(job.clock_floor)
+                {
+                    return Ok(MigrationResumption::AbortPrepared(Box::new(request.clone())));
                 }
                 let target =
                     job.target.as_ref().ok_or_else(|| refused(wire::Refusal::EvidenceRequired))?;

@@ -199,7 +199,9 @@ uncertainty guard until A supplies the authorization-bound noncommit fence.
 Before any Seal, cancellation enters `abort_pending` if a Prepare was persisted.
 `resume()` creates an actor-signed Abort addressed to B, with the operation
 payload and no Authorization. This Abort is persisted before sending and replayed
-unchanged after restart. `reservation_aborted()` accepts only B's pinned,
+unchanged after restart while its Control is valid. After Control expiry, the
+same Abort payload gets a fresh branch-only Control persisted before transmission;
+this does not require management approval. `reservation_aborted()` accepts only B's pinned,
 control-bound signed release; then the local job becomes `aborted`, allowing a
 new operation. Cancelling an unsent intent can terminate locally. An unsealed
 Offer past `accept_until` becomes `expired`; `resume()`, `authorize()` and a new

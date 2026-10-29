@@ -412,3 +412,35 @@ fn home_migration_first_offer_received_after_expiry_terminates_the_prepare_job()
     assert!(f.db.active_home_migration()?.is_none());
     Ok(())
 }
+
+#[test]
+fn home_migration_expired_abort_control_is_renewed_without_a_management_approval() -> Result {
+    let f = Fixture::new()?;
+    f.prepare()?;
+    f.journal()?.cancel(&hash(1), NOW)?;
+    let MigrationResumption::AbortPrepared(original) =
+        f.journal()?.resume(&hash(1), &f.vault, NOW)?
+    else {
+        return Err("original abort".into());
+    };
+    let db = f.reopen()?;
+    let recovered = HomeMigrationJournal::new(&db, &f.index, &f.account)?;
+    let MigrationResumption::AbortPrepared(renewed) =
+        recovered.resume(&hash(1), &f.vault, NOW + 301)?
+    else {
+        return Err("renewed abort".into());
+    };
+    assert_eq!(original.payload, renewed.payload);
+    assert_ne!(original.control.body.nonce, renewed.control.body.nonce);
+    assert!(renewed.evidence.authorization.is_none());
+    let mut body = f.reply(&renewed.control, wire::Phase::Aborted)?.body;
+    body.issued_at = NOW + 301;
+    body.expires_at = NOW + 601;
+    recovered.reservation_aborted(
+        &hash(1),
+        crypto::sign_node(body, "destination", &ramflux_crypto::fixture_signing_key())?,
+        NOW + 301,
+    )?;
+    assert!(db.active_home_migration()?.is_none());
+    Ok(())
+}
