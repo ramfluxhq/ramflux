@@ -89,6 +89,37 @@ impl CustodyConnection<GatewayTcpTlsStream> {
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
     ) -> Result<Self, SdkError> {
+        let endpoint = (
+            config.gateway_address,
+            config.server_name.clone(),
+            config.ca_certificate.clone(),
+            config.timeout,
+        );
+        let ((), connection) = Box::pin(Self::connect_with(config, vault, || async {
+            let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
+                "0.0.0.0:0".parse().map_err(|_| invalid())?,
+                endpoint.0,
+                &endpoint.1,
+                &endpoint.2,
+                endpoint.3,
+            )
+            .await?;
+            Ok(((), tls.into_tls_stream()))
+        }))
+        .await?;
+        Ok(connection)
+    }
+}
+impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> {
+    pub(crate) async fn connect_with<T, F, Fut>(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+        mut open: F,
+    ) -> Result<(T, Self), SdkError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(T, S), SdkError>>,
+    {
         if config.binding_mode == BindingMode::NoChannelBinding && !config.allow_no_channel_binding
         {
             return Err(CustodyRefusal::BindingRefused.into());
@@ -112,7 +143,7 @@ impl CustodyConnection<GatewayTcpTlsStream> {
                 .map_err(|_| invalid())?
             })
             .await?;
-        let opened = budget.until_ready(|| Self::open_transport(&config)).await?;
+        let (mut transport, opened) = Self::open_admitted(&config, &mut open, &mut budget).await?;
         let mut connection = Self::from_authority(authority, opened, &config);
         let actions = connection.registration_actions()?;
         let mut next = 0;
@@ -120,67 +151,44 @@ impl CustodyConnection<GatewayTcpTlsStream> {
             match budget.attempt(connection.register(&actions, &mut next)).await {
                 Ok(()) => {
                     budget.attempt(connection.persist_live(&config.account_root)).await?;
-                    return Ok(connection);
+                    return Ok((transport, connection));
                 }
                 Err(error) if super::retry::is_busy(&error) => {
-                    // Drop the refused stream before waiting: it can hold H or A, and
-                    // the gateway closes a Busy exchange. A new TLS exporter and a
-                    // fresh challenge/proof are mandatory even for the same action.
                     let authority = connection.into_authority();
+                    // Release the refused endpoint/stream before backoff and use a fresh exporter.
+                    drop(transport);
                     budget.pause().await?;
-                    let opened = budget.until_ready(|| Self::open_transport(&config)).await?;
+                    let (replacement, opened) =
+                        Self::open_admitted(&config, &mut open, &mut budget).await?;
+                    transport = replacement;
                     connection = Self::from_authority(authority, opened, &config);
                 }
                 Err(error) => return Err(error),
             }
         }
     }
-    async fn open_transport(config: &CustodyNetworkConfig) -> Result<OpenTransport, SdkError> {
-        let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
-            "0.0.0.0:0".parse().map_err(|_| invalid())?,
-            config.gateway_address,
-            &config.server_name,
-            &config.ca_certificate,
-            config.timeout,
-        )
-        .await?;
-        Self::open_stream(config, tls.into_tls_stream()).await
-    }
-}
-impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> {
-    pub(crate) async fn prepare(
+    async fn open_admitted<T, F, Fut>(
         config: &CustodyNetworkConfig,
-        vault: Arc<dyn PrimaryVault>,
-    ) -> Result<(BornAccount, DeviceRef, BranchCredentials), SdkError> {
-        if config.binding_mode == BindingMode::NoChannelBinding && !config.allow_no_channel_binding
-        {
-            return Err(CustodyRefusal::BindingRefused.into());
+        open: &mut F,
+        budget: &mut super::retry::Budget,
+    ) -> Result<(T, OpenTransport<S>), SdkError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(T, S), SdkError>>,
+    {
+        loop {
+            let result = budget
+                .attempt(async {
+                    let (transport, stream) = open().await?;
+                    let opened = Self::open_stream(config, stream).await?;
+                    Ok((transport, opened))
+                })
+                .await;
+            match result {
+                Err(error) if super::retry::is_busy(&error) => budget.pause().await?,
+                result => return result,
+            }
         }
-        let root = config.account_root.clone();
-        let account_id = config.account_id.clone();
-        let device_id = config.device_id.clone();
-        tokio::task::spawn_blocking(move || {
-            let account = super::load_account(&root, &account_id, now()?)?;
-            let (device, credentials) = account.credentials(vault.as_ref(), &device_id, now()?)?;
-            Ok::<_, SdkError>((account, device, credentials))
-        })
-        .await
-        .map_err(|_| invalid())?
-    }
-
-    pub(crate) async fn authenticate_stream(
-        config: CustodyNetworkConfig,
-        stream: S,
-        prepared: (BornAccount, DeviceRef, BranchCredentials),
-    ) -> Result<Self, SdkError> {
-        let (account, device, credentials) = prepared;
-        let opened = Self::open_stream(&config, stream).await?;
-        let mut connection =
-            Self::from_authority(LocalAuthority { account, device, credentials }, opened, &config);
-        let actions = connection.registration_actions()?;
-        connection.register(&actions, &mut 0).await?;
-        connection.persist_live(&config.account_root).await?;
-        Ok(connection)
     }
     async fn open_stream(
         config: &CustodyNetworkConfig,

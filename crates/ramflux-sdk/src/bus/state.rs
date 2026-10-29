@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::gateway::engine::gateway_connection_timeout;
 use crate::prelude::*;
 
 pub(crate) struct LocalBusDaemonState {
@@ -301,11 +302,8 @@ impl LocalBusAccountState {
                 .max(self.client.gateway_receive_cursor(&target_delivery_id)?);
             let mut restored_resume_checkpoint = false;
             let connected = if let Some(engine) = self.engine.as_mut() {
-                gateway_session_timeout(
-                    "gateway ensure live",
-                    Box::pin(engine.ensure_live(last_seen_inbox_seq)),
-                )
-                .await
+                let ensure = Box::pin(engine.ensure_live(last_seen_inbox_seq));
+                gateway_connection_timeout(native, "gateway ensure live", ensure).await
             } else {
                 let mut config = self.gateway_config.clone();
                 config.last_seen_inbox_seq = last_seen_inbox_seq;
@@ -319,7 +317,8 @@ impl LocalBusAccountState {
                     config.device_branch = Some(std::sync::Arc::new(branch.clone()));
                 }
                 self.engine = Some(
-                    gateway_session_timeout(
+                    gateway_connection_timeout(
+                        native,
                         "gateway connect",
                         Box::pin(GatewaySessionEngine::connect(config)),
                     )

@@ -352,6 +352,11 @@ connection attempt, including account-flight waits and transport setup, has a
 90-second deadline; exhaustion returns typed `Busy`. Other refusals and transport
 errors remain immediate, with no legacy, unbound-mode or trust-anchor fallback.
 
+Ordinary native gateway sessions use this same retry path and account lease, including TCP-TLS
+and QUIC. Their outer connection deadline is ninety seconds as well; the shorter timeout used by
+legacy session operations does not truncate native admission backoff. Completed operations keep
+their exact payload and ACK checks across fresh transports.
+
 An account-local filesystem lease serializes connection attempts even across
 daemons sharing that account directory. A refused transport is dropped before
 backoff. Each retry authenticates a new TLS connection and receiving-node record,

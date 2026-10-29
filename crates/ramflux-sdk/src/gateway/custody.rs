@@ -5,11 +5,9 @@
 use super::GatewaySessionConfig;
 use crate::{
     SdkError,
-    custody::{
-        BornAccount, BranchCredentials, CustodyConnection, CustodyNetworkConfig, PrimaryVault,
-    },
+    custody::{CustodyConnection, CustodyNetworkConfig, PrimaryVault},
 };
-use ramflux_protocol::custody::{BindingMode, DeviceRef};
+use ramflux_protocol::custody::BindingMode;
 use std::{path::PathBuf, sync::Arc};
 
 type SessionStream = Box<dyn ramflux_transport::GatewaySessionTransport + Send>;
@@ -35,7 +33,7 @@ impl std::fmt::Debug for GatewayCustodyConfig {
 }
 pub(super) struct Prepared {
     network: CustodyNetworkConfig,
-    credentials: (BornAccount, DeviceRef, BranchCredentials),
+    vault: Arc<dyn PrimaryVault>,
 }
 pub(super) async fn prepare(
     config: &GatewaySessionConfig,
@@ -56,9 +54,7 @@ pub(super) async fn prepare(
         allow_no_channel_binding: false,
         timeout: config.timeout,
     };
-    let credentials =
-        CustodyConnection::<SessionStream>::prepare(&network, Arc::clone(&custody.vault)).await?;
-    Ok(Some(Box::new(Prepared { network, credentials })))
+    Ok(Some(Box::new(Prepared { network, vault: Arc::clone(&custody.vault) })))
 }
 async fn refresh_local_publication(
     config: &GatewaySessionConfig,
@@ -119,15 +115,18 @@ async fn refresh_local_publication(
     Ok(())
 }
 
-pub(super) async fn authenticate(
-    prepared: Option<Box<Prepared>>,
-    stream: SessionStream,
+pub(super) async fn authenticate<T, F, Fut>(
+    prepared: Box<Prepared>,
+    open: F,
     config: &mut GatewaySessionConfig,
-) -> Result<SessionStream, SdkError> {
-    let Some(prepared) = prepared else { return Ok(stream) };
-    let Prepared { network, credentials } = *prepared;
-    let connection =
-        Box::pin(CustodyConnection::authenticate_stream(network, stream, credentials)).await?;
+) -> Result<(T, SessionStream), SdkError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(T, SessionStream), SdkError>>,
+{
+    let Prepared { network, vault } = *prepared;
+    let (transport, connection) =
+        Box::pin(CustodyConnection::connect_with(network, vault, open)).await?;
     let (stream, account, reference, credentials) = connection.into_gateway_parts().await?;
     let source = ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
         account.verified(),
@@ -150,7 +149,7 @@ pub(super) async fn authenticate(
     config.device_branch = Some(Arc::new(credentials.signing));
     config.source_identity = Some(source);
     config.custody_networking_pending = false;
-    Ok(Box::new(NativeSessionStream(stream)))
+    Ok((transport, Box::new(NativeSessionStream(stream))))
 }
 
 // The native directory can carry checkpoint evidence beyond the ordinary frame budget.

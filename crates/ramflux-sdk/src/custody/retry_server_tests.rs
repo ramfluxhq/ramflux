@@ -37,6 +37,9 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(points: &[Point]) -> Result<Self> {
+        Self::with_mode(points, false).await
+    }
+    async fn with_mode(points: &[Point], gateway: bool) -> Result<Self> {
         let root = tempfile::tempdir()?;
         let vault = Arc::new(MemoryPrimaryVault::default());
         create(root.path(), &vault)?;
@@ -54,6 +57,8 @@ impl Fixture {
             now,
             ramflux_transport::custody_certificate_file_hash(&tls.service_cert)?,
         )?;
+        let node = if gateway { ordinary::node(&node, now)? } else { node };
+        let proxy = gateway.then(|| node.clone());
         let router = Arc::new(ramflux_node_core::RouterCore::new());
         let store =
             Arc::new(ramflux_node_core::RouterRedbStore::open(root.path().join("router.redb"))?);
@@ -68,13 +73,17 @@ impl Fixture {
             busy: points.iter().copied().collect(),
             ..Script::default()
         }));
-        let context = Arc::new(Context { router, store, service, script: Arc::clone(&script) });
+        let context =
+            Arc::new(Context { router, store, service, script: Arc::clone(&script), node: proxy });
         let server = tokio::spawn(async move {
             loop {
                 let (socket, _) = listener.accept().await?;
                 context.script.lock().map_err(|_| "script lock")?.accepted += 1;
                 let stream = acceptor.accept(socket).await?;
-                handle(stream, &context).await?;
+                if let Err(error) = handle(stream, &context).await {
+                    eprintln!("custody retry server failed: {error}");
+                    return Err(error);
+                }
             }
         });
         let config = CustodyNetworkConfig {
@@ -87,7 +96,11 @@ impl Fixture {
             node_id: "node".into(),
             node_public_key: ramflux_crypto::fixture_public_key_base64url(),
             audience: "node".into(),
-            binding_mode: BindingMode::DirectExporter,
+            binding_mode: if gateway {
+                BindingMode::HomeRelayReceipt
+            } else {
+                BindingMode::DirectExporter
+            },
             allow_no_channel_binding: false,
             timeout: Duration::from_secs(5),
         };
@@ -111,11 +124,12 @@ struct Context {
     store: Arc<ramflux_node_core::RouterRedbStore>,
     service: Arc<ramflux_node_core::CustodyService>,
     script: Arc<Mutex<Script>>,
+    node: Option<ramflux_crypto::custody::VerifiedNodeRecord>,
 }
-struct Disconnect<'a>(&'a ramflux_node_core::CustodyService, String);
+struct Disconnect<'a>(&'a ramflux_node_core::CustodyService, String, bool);
 impl Drop for Disconnect<'_> {
     fn drop(&mut self) {
-        self.0.disconnect("direct-tls", &self.1);
+        self.0.disconnect(if self.2 { "ramflux-gateway" } else { "direct-tls" }, &self.1);
     }
 }
 async fn handle(
@@ -124,7 +138,7 @@ async fn handle(
 ) -> Result {
     let mut stream = ramflux_transport::GatewayTcpTlsStream::Server(stream);
     let connection = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    let _disconnect = Disconnect(&context.service, connection.clone());
+    let _disconnect = Disconnect(&context.service, connection.clone(), context.node.is_some());
     loop {
         let bytes = match ramflux_transport::read_custody_tcp_frame(&mut stream).await {
             Ok(bytes) => bytes,
@@ -135,7 +149,13 @@ async fn handle(
             }
             Err(error) => return Err(error.into()),
         };
+        if context.node.is_some() && ordinary::public_lookup(&bytes, &mut stream).await? {
+            return Ok(());
+        }
         let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
+        if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
+            return ordinary::ordinary(&mut stream, session_id).await;
+        }
         let point = match &frame {
             CustodyClientFrame::CustodyOpen { .. } => Some(Point::Open),
             CustodyClientFrame::Challenge {
@@ -177,18 +197,22 @@ async fn handle(
         // Gateway A admission can return Busy after durable registration. Exercise
         // that uncertain result as well as refusals before open/challenge work.
         let committed = if !refused || point == Some(Point::RegisterProve) {
-            Some(context.service.tls(
-                &context.router,
-                &context.store,
-                frame,
-                ramflux_node_core::CustodyTlsContext {
-                    connection_id: &connection,
-                    remote_ip: "127.0.0.1",
-                    mode: BindingMode::DirectExporter,
-                    exporter,
-                },
-                crate::custody::network::now()?,
-            ))
+            Some(if context.node.is_some() {
+                ordinary::dispatch(context, &stream, &connection, frame)?
+            } else {
+                context.service.tls(
+                    &context.router,
+                    &context.store,
+                    frame,
+                    ramflux_node_core::CustodyTlsContext {
+                        connection_id: &connection,
+                        remote_ip: "127.0.0.1",
+                        mode: BindingMode::DirectExporter,
+                        exporter,
+                    },
+                    crate::custody::network::now()?,
+                )
+            })
         } else {
             None
         };
@@ -238,3 +262,6 @@ async fn custody_busy_open_challenge_and_prove_resume_without_republishing_or_re
     })
     .await?
 }
+
+#[path = "gateway_retry_tests.rs"]
+mod ordinary;

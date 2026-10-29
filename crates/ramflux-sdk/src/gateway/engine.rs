@@ -73,6 +73,21 @@ where
     }
 }
 
+pub(crate) async fn gateway_connection_timeout<T, F>(
+    native: bool,
+    operation: &'static str,
+    future: F,
+) -> Result<T, SdkError>
+where
+    F: Future<Output = Result<T, SdkError>>,
+{
+    if native {
+        crate::custody::retry::Budget::new().attempt(future).await
+    } else {
+        gateway_session_timeout(operation, future).await
+    }
+}
+
 /// GW-TOKEN-01-A2: build one freshly-stamped, signed gateway request.
 ///
 /// `created_at`/`expires_at` are copied from `config.{now,auth_expires_at}`, which were otherwise set
@@ -133,8 +148,12 @@ impl GatewaySessionEngine {
         if config.custody_networking_pending {
             return Err(SdkError::NetworkingPending);
         }
-        let mut engine =
-            gateway_session_timeout("gateway session connect", Self::connect_inner(config)).await?;
+        let mut engine = gateway_connection_timeout(
+            config.custody.is_some(),
+            "gateway session connect",
+            Box::pin(Self::connect_inner(config)),
+        )
+        .await?;
         // Outside the connect timeout and write-only: push registration never fails a connect.
         engine.refresh_push_route_if_due().await;
         Ok(engine)
@@ -142,12 +161,24 @@ impl GatewaySessionEngine {
 
     async fn connect_inner(mut config: GatewaySessionConfig) -> Result<Self, SdkError> {
         config.refresh_auth_window();
-        let custody = super::custody::prepare(&config).await?;
-        let (transport, stream, active_transport_kind) =
-            open_gateway_session_transport(&config).await?;
+        let (transport, mut stream, active_transport_kind) =
+            if let Some(custody) = super::custody::prepare(&config).await? {
+                let endpoint = config.clone();
+                let ((transport, kind), stream) = Box::pin(super::custody::authenticate(
+                    custody,
+                    || async {
+                        let (transport, stream, kind) =
+                            open_gateway_session_transport(&endpoint).await?;
+                        Ok(((transport, kind), stream))
+                    },
+                    &mut config,
+                ))
+                .await?;
+                (transport, stream, kind)
+            } else {
+                open_gateway_session_transport(&config).await?
+            };
         config.transport_kind = active_transport_kind;
-        let mut stream =
-            Box::pin(super::custody::authenticate(custody, stream, &mut config)).await?;
         config.refresh_auth_window();
         let open = gateway_fresh_open_frame(&config)?;
         write_gateway_client_frame(&mut *stream, &GatewayClientFrame::Open { open: open.clone() })

@@ -83,7 +83,7 @@ pub use memory_vault::MemoryPrimaryVault;
 
 mod network;
 mod node_pins;
-mod retry;
+pub(crate) mod retry;
 pub use network::{CustodyConnection, CustodyNetworkConfig};
 pub(crate) use node_pins::verify_authority as verify_public_authority;
 

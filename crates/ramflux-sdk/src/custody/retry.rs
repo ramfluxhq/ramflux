@@ -16,15 +16,15 @@ pub(super) fn busy() -> SdkError {
 pub(super) fn is_busy(error: &SdkError) -> bool {
     matches!(error, SdkError::CustodyNetwork(CustodyRefusal::Busy))
 }
-pub(super) struct Budget {
+pub(crate) struct Budget {
     deadline: Instant,
     backoff: Duration,
 }
 impl Budget {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { deadline: Instant::now() + RETRY_BUDGET, backoff: Duration::from_secs(1) }
     }
-    pub(super) async fn attempt<T>(
+    pub(crate) async fn attempt<T>(
         &self,
         operation: impl Future<Output = Result<T, SdkError>>,
     ) -> Result<T, SdkError> {
