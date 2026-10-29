@@ -307,7 +307,7 @@ def custody_inputs(state):
         sys.exit("DEMO_CUSTODY_INPUT_CHANGED: " + ", ".join(changed))
     identity_keys = keys[:3]
     if any(values[key] for key in identity_keys):
-        missing = [key for key in identity_keys[:2] if not values[key]]
+        missing = [key for key in identity_keys if not values[key]]
         if missing:
             sys.exit("DEMO_CUSTODY_INPUT_MISSING: " + ", ".join(missing))
     for key in keys:
@@ -333,6 +333,21 @@ def custody_inputs(state):
             sys.exit("DEMO_CUSTODY_INPUT_INVALID: " + keys[1])
         values[keys[1]] = "/etc/ramflux/custody/node-record.json"
     return {key: value for key, value in values.items() if value}, record
+
+
+def custody_status(state):
+    _, record = custody_inputs(state)
+    if record is None:
+        return "absent"
+    if runtime_values(state).get("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY"):
+        try:
+            with (state / "secrets/custody/node-record.json").open("rb") as stream:
+                previous_record = stream.read(512 * 1024 + 1)
+        except OSError:
+            previous_record = None
+        if previous_record != record:
+            return "record-changed"
+    return "configured"
 
 
 def append_custody_runtime(state, path):
@@ -670,6 +685,8 @@ def main():
             set_node_id(state, sys.argv[4])
         elif action == "append-custody-runtime":
             append_custody_runtime(state, Path(sys.argv[4]))
+        elif action == "custody-status":
+            print(custody_status(state))
         else:
             sys.exit("invalid demo configuration action")
     except SnapshotError as error:
