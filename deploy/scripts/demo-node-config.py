@@ -381,8 +381,10 @@ def check_pending(state):
     if marker.exists():
         transaction = json.loads(marker.read_text())
         identifier = transaction["target_snapshot"]
-        print(f"pending upgrade transaction {identifier}: run `demo-node.sh recover` (or `rollback`)",
-              file=sys.stderr)
+        instruction = "run `demo-node.sh recover` (or `rollback`)"
+        if not transaction.get("previous_snapshot"):
+            instruction = "initial setup failed: run `demo-node.sh recover` to undo it"
+        print(f"pending upgrade transaction {identifier}: {instruction}", file=sys.stderr)
         sys.exit(3)
 
 
@@ -421,7 +423,7 @@ def prepare(repo, state, command, validate_only=False):
         if not (state / "compose.yml").is_file():
             sys.exit("saved compose.yml missing; run up before maintenance")
         validate_selected_overlay_values(state)
-        return
+        return owner
 
     if command == "upgrade" and settings["DEMO_VERSION"] == owner["settings"]["DEMO_VERSION"]:
         sys.exit("upgrade requires a changed DEMO_VERSION")
@@ -459,13 +461,17 @@ def prepare(repo, state, command, validate_only=False):
                         "snapshot_history": snapshots, "current_snapshot": target_snapshot}
 
     if validate_only:
-        return
+        return owner
     if capture_legacy_snapshot:
         capture_snapshot(state, previous_snapshot)
     atomic_json(pending_marker, target_owner)
-    atomic_json(state / "transaction.pending", {
+    transaction = {
         "command": command, "previous_snapshot": previous_snapshot, "target_snapshot": target_snapshot,
-    })
+    }
+    if not previous_snapshot:
+        transaction["initial_owner"] = owner
+        transaction["initial_mode"] = stat.S_IMODE(state.stat().st_mode)
+    atomic_json(state / "transaction.pending", transaction)
     if command == "rollback":
         restore_snapshot(state, target_snapshot)
     else:
@@ -497,6 +503,45 @@ def image_version(state, command):
     source, _, _ = read_snapshot_manifest(state, reference)
     owner = json.loads((source / "owner.json").read_text())
     print(owner["settings"]["DEMO_VERSION"])
+
+
+def initial_recovery_owner(state):
+    transaction = json.loads((state / "transaction.pending").read_text())
+    if transaction.get("previous_snapshot"):
+        return None
+    owner = transaction.get("initial_owner")
+    if owner is None:
+        # Initial transactions made by older tooling retain the pending owner.
+        owner = json.loads((state / "owner.json.pending").read_text())
+    if owner["directory"] != str(state) or any(
+            os.environ.get(key) != value for key, value in owner["settings"].items()
+            if key != "DEMO_VERSION"):
+        sys.exit("demo settings changed during recovery: restore every original setting")
+    return owner
+
+
+def finish_initial_recovery(state):
+    owner = initial_recovery_owner(state)
+    if owner is None:
+        sys.exit("initial recovery requires a failed first up")
+    marker = state / "transaction.pending"
+    transaction = json.loads(marker.read_text())
+    if "initial_owner" not in transaction:
+        # Preserve recovery authority if cleanup is interrupted after deleting the pending owner.
+        transaction["initial_owner"] = owner
+        atomic_json(marker, transaction)
+    # A first up only accepts an empty directory. Keep the marker until all its
+    # generated files (including partial snapshots and temporary files) are gone.
+    for path in state.iterdir():
+        if path == marker:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        fsync_directory(state)
+    state.chmod(transaction.get("initial_mode", 0o700))
+    durable_unlink(marker)
 
 
 def recover(state):
@@ -531,7 +576,14 @@ def main():
         if action == "check-pending":
             check_pending(state)
         elif action == "validate":
-            prepare(repo, state, sys.argv[4], validate_only=True)
+            owner = prepare(repo, state, sys.argv[4], validate_only=True)
+            print(owner["token"])
+        elif action == "initial-recovery-owner":
+            owner = initial_recovery_owner(state)
+            if owner is not None:
+                print(owner["token"])
+        elif action == "finish-initial-recovery":
+            finish_initial_recovery(state)
         elif action == "image-version":
             image_version(state, sys.argv[4])
         elif action == "prepare":

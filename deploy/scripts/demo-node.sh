@@ -122,8 +122,9 @@ case "$command" in
 esac
 if [ "$command" = recover ]; then
   [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
+  initial_owner=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" initial-recovery-owner)
 else
-  python3 "$script_dir/demo-node-config.py" "$repo" "$state" validate "$command"
+  owner=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" validate "$command")
 fi
 # Even a matching project name is insufficient: every existing resource must carry our owner token.
 clean_env() {
@@ -160,7 +161,6 @@ if [ -z "$compose_provider" ]; then
     fail 'Docker Compose v2 or Podman with a compose provider is required'
   fi
 fi
-printf 'compose provider: %s (runtime: %s)\n' "$compose_provider" "$container_engine"
 runtime() { clean_env "$container_engine" "$@"; }
 check_prebuilt_images() {
   clean_env python3 "$script_dir/demo-image-check.py" "$container_engine" "${1:-$DEMO_VERSION}"
@@ -197,6 +197,26 @@ check_resources() {
     done
   done
 }
+
+# Initial setup may fail before any Compose input exists. Select only this
+# project's labelled resources, verify their owner, and remove them directly.
+if [ "$command" = recover ] && [ -n "$initial_owner" ]; then
+  owner=$initial_owner
+  check_resources
+  containers=$(runtime ps -aq --filter "label=com.docker.compose.project=$DEMO_PROJECT")
+  for container in $containers; do runtime rm -f "$container" >/dev/null; done
+  # First up cannot adopt existing volumes: these belong to the failed setup.
+  volumes=$(runtime volume ls -q --filter "label=com.docker.compose.project=$DEMO_PROJECT")
+  for volume in $volumes; do runtime volume rm "$volume" >/dev/null; done
+  networks=$(runtime network ls -q --filter "label=com.docker.compose.project=$DEMO_PROJECT")
+  for network in $networks; do runtime network rm "$network" >/dev/null; done
+  python3 "$script_dir/demo-node-config.py" "$repo" "$state" finish-initial-recovery
+  # The recovery command is literal operator guidance.
+  # shellcheck disable=SC2016
+  printf 'initial setup rolled back; run `up` again\n'
+  exit 0
+fi
+printf 'compose provider: %s (runtime: %s)\n' "$compose_provider" "$container_engine"
 compose() (
   cd "$state"
   set -- -f "$state/demo-override.json" "$@"
@@ -328,6 +348,10 @@ case "$command" in
     [ "$DEMO_PREBUILT_IMAGES" != 1 ] || check_prebuilt_images
     ;;
 esac
+if [ "$command" != recover ]; then
+  # Refused resource adoption must leave every managed file and marker untouched.
+  check_resources
+fi
 if [ "$command" = recover ]; then
   [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
   DEMO_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover)
