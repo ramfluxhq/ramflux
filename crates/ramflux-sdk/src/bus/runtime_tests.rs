@@ -116,11 +116,13 @@ fn account_with_counter(
     let mut client = RamfluxClient::new();
     client.account_index = index;
     let root_seed = ramflux_crypto::blake3_256("ramflux.test.account.root.v1", id.as_bytes());
-    client.create_identity_root(id, root_seed);
+    let identity = client.create_identity_root(id, root_seed);
+    let commitment =
+        ramflux_crypto::identity_root_commitment(&identity.signing_key.verifying_key());
     client.create_device_branch(id, &format!("device-{id}"), 1, [0x62; 32]);
     client.open_account_index(root)?;
     if matches!(client.account_index()?.account(id), Err(StorageError::AccountNotFound(_))) {
-        client.create_account(id, &format!("commitment-{id}"))?;
+        client.create_account(id, &commitment)?;
     }
     client.unlock_account(id, b"actor-test-secret")?;
     client.account_db()?.establish_friend_link("friend", id, "alice")?;
@@ -150,7 +152,7 @@ fn account_with_counter(
             schema: "ramflux.local_bus.account_manifest.v1".to_owned(),
             local_account_id: id.to_owned(),
             principal_id: id.to_owned(),
-            principal_commitment: format!("commitment-{id}"),
+            principal_commitment: commitment.clone(),
             device_id: format!("device-{id}"),
             target_delivery_id: "target".to_owned(),
             account_secret: "actor-test-secret".to_owned(),
@@ -166,7 +168,7 @@ fn account_with_counter(
         config,
         Box::new(Gateway { last: None, pending_cursor: None, blocked, cancelled, submits }),
     );
-    Ok(LocalBusAccountState::new(client, engine, format!("commitment-{id}")))
+    Ok(LocalBusAccountState::new(client, engine, commitment))
 }
 fn actor_account(
     root: &Path,

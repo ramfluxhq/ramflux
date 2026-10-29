@@ -3,6 +3,16 @@
 
 use super::*;
 
+fn commitment(principal: &str) -> String {
+    let seed = if principal == "alice" {
+        [0x31; 32]
+    } else {
+        ramflux_crypto::blake3_256("ramflux.test.read_model.root.v1", principal.as_bytes())
+    };
+    let root = ramflux_crypto::create_identity_root(principal, seed);
+    ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key())
+}
+
 struct Fixture {
     root: PathBuf,
     client: RamfluxClient,
@@ -18,14 +28,14 @@ impl Fixture {
         client.create_identity_root("alice", [0x31; 32]);
         client.create_device_branch("alice", "alice-phone", 1, [0x32; 32]);
         client.open_account_index(&root)?;
-        client.create_account("local-alice", "commit-alice")?;
+        client.create_account("local-alice", &commitment("alice"))?;
         client.unlock_account("local-alice", b"test-secret")?;
         client.account_db()?.persist_client_record(
             "self",
             "account",
             &json!({"principal_id":"alice","device_id":"alice-phone"}),
         )?;
-        client.account_db()?.persist_client_record("identity","alice",&json!({"id":"alice","principal_id":"alice","contact_identity_commitment":"commit-alice","devices":[{"id":"alice-phone"}],"kind":"human","is_self":true}))?;
+        client.account_db()?.persist_client_record("identity","alice",&json!({"id":"alice","principal_id":"alice","contact_identity_commitment":commitment("alice"),"devices":[{"id":"alice-phone"}],"kind":"human","is_self":true}))?;
         Ok(Self { root, client })
     }
     fn read(&self, method: &str, body: Value) -> Result<Value, SdkError> {
@@ -65,7 +75,7 @@ fn direct_and_distinct_group_conversation_ids_join_public_routes() -> Result<(),
     let f = Fixture::new()?;
     let db = f.client.account_db()?;
     db.send_direct_message("dm", "message", "alice-phone", b"secret-payload")?;
-    db.persist_client_record("conversation","dm",&json!({"kind":"direct","title":"Bob","participants":["alice","bob"],"direct_route":{"recipient_principal_commitment":"commit-bob","recipient_device_ids":["bob-phone","bob-laptop"],"target_delivery_id":"deliver-bob"}}))?;
+    db.persist_client_record("conversation","dm",&json!({"kind":"direct","title":"Bob","participants":["alice","bob"],"direct_route":{"recipient_principal_commitment":commitment("bob"),"recipient_device_ids":["bob-phone","bob-laptop"],"target_delivery_id":"deliver-bob"}}))?;
     f.client.create_group("group", "alice-phone")?;
     db.persist_client_record("group", "group", &json!({"conversation_id":"group-thread"}))?;
     db.persist_client_record(
@@ -125,7 +135,7 @@ fn large_metadata_pages_stop_before_frame_cap_without_losing_rows() -> Result<()
         f.client.account_db()?.persist_client_record(
             "identity",
             id,
-            &json!({"id":id,"display_name":"x".repeat(280_000)}),
+            &json!({"id":id,"principal_id":id,"contact_identity_commitment":commitment(id),"display_name":"x".repeat(280_000)}),
         )?;
     }
     let first = f.read("identity.directory", json!({"limit":100}))?;
@@ -150,7 +160,7 @@ fn large_metadata_pages_stop_before_frame_cap_without_losing_rows() -> Result<()
 fn multi_device_identity_safety_and_approval_context_are_explicit() -> Result<(), SdkError> {
     let f = Fixture::new()?;
     let db = f.client.account_db()?;
-    db.persist_client_record("identity","bob",&json!({"id":"bob","principal_id":"bob","contact_identity_commitment":"commit-bob","devices":[{"id":"phone","signing_public_key":"pk","target_delivery_id":"target"},{"id":"laptop"}],"safety_number":"123456"}))?;
+    db.persist_client_record("identity","bob",&json!({"id":"bob","principal_id":"bob","contact_identity_commitment":commitment("bob"),"devices":[{"id":"phone","signing_public_key":"pk","target_delivery_id":"target"},{"id":"laptop"}],"safety_number":"123456"}))?;
     db.persist_client_record("approval","approval",&json!({"id":"approval","approval_id":"approval","status":"pending","conversation_id":"dm","context_id":"task"}))?;
     let value = f.read("identity.directory", json!({}))?;
     assert_eq!(value["identities"][1]["devices"].as_array().map(Vec::len), Some(2));
@@ -214,21 +224,21 @@ fn remote_attachments_are_listed_with_public_fetch_status_only() -> Result<(), S
 fn identity_directory_exposes_manual_pair_recovery_without_private_state() -> Result<(), SdkError> {
     let f = Fixture::new()?;
     let db = f.client.account_db()?;
-    let reference = ramflux_protocol::qualified_device_id("bob-root", "bob-phone")?;
+    let reference = ramflux_protocol::qualified_device_id(&commitment("bob"), "bob-phone")?;
     db.persist_client_record(
         "device",
         "bob-phone",
-        &json!({"principal_id":"bob", "principal_commitment":"bob-root"}),
+        &json!({"principal_id":"bob", "principal_commitment":commitment("bob")}),
     )?;
     db.persist_client_record(
         "device",
         "bob-phone",
-        &json!({"principal_id":"mallory", "principal_commitment":"mallory-root"}),
+        &json!({"principal_id":"mallory", "principal_commitment":commitment("mallory")}),
     )?;
     db.persist_client_record(
         "identity",
         "bob",
-        &json!({"principal_id":"bob","devices":[{"id":"bob-phone"}]}),
+        &json!({"principal_id":"bob","contact_identity_commitment":commitment("bob"),"devices":[{"id":"bob-phone"}]}),
     )?;
     db.persist_actor_state("dm-pair/test/manual",&json!({"local_device_id":"alice-phone","device_id":reference,"state":"needs_manual_recovery","at":10}))?;
     // Unscoped historical work cannot acquire the sole live name's root or poison attribution.
@@ -267,7 +277,7 @@ fn ambiguous_legacy_sender_names_do_not_block_directory_reads_or_select_a_root()
 -> Result<(), SdkError> {
     let f = Fixture::new()?;
     let db = f.client.account_db()?;
-    for (root, principal) in [("mallory-root", "mallory"), ("bob-root", "bob")] {
+    for (root, principal) in [(commitment("mallory"), "mallory"), (commitment("bob"), "bob")] {
         db.persist_client_record(
             "device",
             "shared",
@@ -295,7 +305,7 @@ fn historical_sender_with_only_a_foreign_live_name_stays_unattributed() -> Resul
     let f = Fixture::new()?;
     let db = f.client.account_db()?;
     // The original sender has been removed; the sole live row belongs to a different root.
-    db.persist_client_record("device", "shared", &json!({"device_id":"shared", "principal_commitment":"mallory-root", "principal_id":"mallory"}))?;
+    db.persist_client_record("device", "shared", &json!({"device_id":"shared", "principal_commitment":commitment("mallory"), "principal_id":"mallory"}))?;
     db.send_direct_message("legacy", "old-message", "shared", b"original history")?;
     let rows = f.read("conversation.directory", json!({}))?;
     assert_eq!(rows["conversations"][0]["participants"], json!(["alice"]));
