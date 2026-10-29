@@ -248,3 +248,43 @@ fn custody_rows_do_not_grow_or_deep_clone_the_legacy_registry_snapshot() -> Test
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[test]
+fn custody_ownership_survives_scoped_legacy_admission_and_journal_replay() -> TestResult {
+    let path = temp_store_path("custody-scoped-registration-owner")?;
+    let publication = native("alice", 10)?;
+    {
+        let store = RouterRedbStore::open_without_wal(&path)?;
+        let router = RouterCore::new();
+        store.save_router(&router)?;
+        router.publish_custody_record(&publication, publication.record.body.issued_at, &store)?;
+        let conflicting = registration_request(&router, "alice", "phone", 91, None, "source-a")?;
+        let before = store.identity_registry_write_count();
+        assert!(matches!(
+            router.register_identity_durable(&conflicting, &store),
+            Err(NodeCoreError::PrincipalIdTaken)
+        ));
+        assert_eq!(store.identity_registry_write_count(), before);
+        let independent = registration_request(&router, "bob", "phone", 92, None, "source-b")?;
+        router.register_identity_durable(&independent, &store)?;
+    }
+    {
+        let store = RouterRedbStore::open_without_wal(&path)?;
+        let router = store.load_router()?.ok_or("router")?;
+        let conflicting = registration_request(&router, "alice", "phone", 93, None, "source-c")?;
+        assert!(matches!(
+            router.register_identity_durable(&conflicting, &store),
+            Err(NodeCoreError::PrincipalIdTaken)
+        ));
+        assert!(
+            router
+                .custody_record(
+                    &publication.record.body.account_anchor,
+                    publication.record.body.issued_at
+                )?
+                .is_some()
+        );
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}

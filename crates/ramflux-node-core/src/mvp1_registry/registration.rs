@@ -189,6 +189,8 @@ impl IdentityRegistry {
             }
         }
         Self {
+            // Preserve custody ownership checks without copying the account registry.
+            custody: std::sync::Arc::clone(&self.custody),
             principal_root_bindings: select(&self.principal_root_bindings, &principals),
             identity_authority_fences: select(&self.identity_authority_fences, &roots),
             signed_device_sets: select(&self.signed_device_sets, &roots),
