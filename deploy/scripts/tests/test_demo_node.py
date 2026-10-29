@@ -463,6 +463,32 @@ else:
                         finally:
                             self.env_file.write_text(original)
 
+    def test_invalid_source_budgets_refuse_before_state_or_runtime_changes(self):
+        settings = (("MAX_CONNECTIONS_PER_SOURCE", 4096), ("MAX_CONNECTIONS_PER_PREFIX", 4096),
+                    ("CONNECTION_RATE_PER_SECOND", 1000000), ("CONNECTION_BURST", 1000000),
+                    ("REQUEST_RATE_PER_SECOND", 1000000), ("REQUEST_BURST", 1000000),
+                    ("SOURCE_TABLE_CAPACITY", 65536), ("SOURCE_IDLE_SECONDS", 86400))
+        original = self.env_file.read_text()
+        for suffix, maximum in settings:
+            key = "RAMFLUX_FEDERATION_PUBLIC_" + suffix
+            for value in ("", "0", "01", "-1", "abc", "${UNRESOLVED}", str(maximum + 1), "9" * 40):
+                with self.subTest(key=key, value=value):
+                    self.env_file.write_text(original + f"{key}={shlex.quote(value)}\n")
+                    result = self.run_script("up", success=False)
+                    self.assertIn(key, result.stderr)
+                    self.assertFalse(self.state.exists())
+                    self.assertEqual(self.commands(), [])
+        self.env_file.write_text(original)
+
+    def test_enabled_source_table_must_exceed_global_capacity_before_state_changes(self):
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on\n")
+            output.write("RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY=64\n")
+        result = self.run_script("up", success=False)
+        self.assertIn("RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY", result.stderr)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.commands(), [])
+
     def test_federation_budget_boundaries_are_forwarded_without_changes(self):
         with self.env_file.open("a") as output:
             for listener in ("PUBLIC", "ADMIN"):

@@ -32,9 +32,9 @@ pub(crate) fn spawn_connection(
     mut stream: TcpStream,
     active: Arc<AtomicUsize>,
     limit: usize,
+    accepted_at: Instant,
     handler: impl FnOnce(&mut TcpStream, Instant) + Send + 'static,
 ) -> Option<std::thread::JoinHandle<()>> {
-    let accepted_at = Instant::now();
     if active
         .try_update(
             Ordering::AcqRel,
