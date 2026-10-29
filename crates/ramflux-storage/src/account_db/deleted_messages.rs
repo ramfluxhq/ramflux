@@ -11,83 +11,9 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use std::collections::{BTreeMap, BTreeSet};
 
-const SCRUB_VERSION: i64 = 3;
-const SCRUB_BATCH: i64 = 256;
 type HmacSha256 = Hmac<Sha256>;
 
 impl AccountDb {
-    /// Whether bounded post-unlock deletion work remains.
-    ///
-    /// # Errors
-    /// Returns storage errors while consulting the scrub index.
-    pub fn deleted_message_scrub_pending(&self) -> Result<bool, StorageError> {
-        Ok(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE deleted=1 AND scrub_version<?1 LIMIT 1)",
-            params![SCRUB_VERSION],
-            |row| row.get::<_, i64>(0),
-        )? != 0)
-    }
-
-    /// Completes bounded deletion upgrades after the SDK has attached its verified identity.
-    ///
-    /// # Errors
-    /// Returns storage errors without advancing rows whose scrub did not commit.
-    pub fn scrub_deleted_messages(
-        &self,
-        own_device_ids: &BTreeSet<String>,
-    ) -> Result<usize, StorageError> {
-        let mut total = 0usize;
-        loop {
-            let count = self.scrub_deleted_messages_batch(own_device_ids)?;
-            if count == 0 {
-                break;
-            }
-            total = total.saturating_add(count);
-        }
-        self.checkpoint_retired_secrets_if_committed()?;
-        Ok(total)
-    }
-
-    /// Scrubs at most one bounded legacy batch after account unlock.
-    ///
-    /// # Errors
-    /// Returns storage errors without advancing rows whose scrub did not commit.
-    pub fn scrub_deleted_messages_batch(
-        &self,
-        own_device_ids: &BTreeSet<String>,
-    ) -> Result<usize, StorageError> {
-        let rows = {
-            let mut statement = self.connection.prepare(
-                "SELECT conversation_id,message_id FROM direct_message_projection WHERE deleted=1 AND scrub_version<?1 ORDER BY rowid LIMIT ?2",
-            )?;
-            statement
-                .query_map(params![SCRUB_VERSION, SCRUB_BATCH], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        if rows.is_empty() {
-            return Ok(0);
-        }
-        self.write_transaction(|| {
-            let mut projections = BTreeMap::new();
-            for (conversation, message) in &rows {
-                if let Some(projection) = self.scrub_message_for_deletion_inner(
-                    conversation,
-                    message,
-                    None,
-                    own_device_ids,
-                    false,
-                )? {
-                    projections.insert(message.clone(), projection);
-                }
-            }
-            self.scrub_message_journal_batch(&projections)
-        })?;
-        self.checkpoint_retired_secrets_if_committed()?;
-        Ok(rows.len())
-    }
-
     pub(super) fn scrub_message_for_deletion(
         &self,
         conversation: &str,
@@ -143,8 +69,8 @@ impl AccountDb {
                 || self.message_sender_is_local(conversation, message, &sender)?,
         );
         self.connection.execute(
-            "UPDATE direct_message_projection SET sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1,is_own=?3,scrub_version=?4 WHERE conversation_id=?1 AND message_id=?2",
-            params![conversation, message, i64::from(is_own), SCRUB_VERSION],
+            "UPDATE direct_message_projection SET sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1,is_own=?3 WHERE conversation_id=?1 AND message_id=?2",
+            params![conversation, message, i64::from(is_own)],
         )?;
         self.connection
             .execute("DELETE FROM runtime_message_content WHERE message_id=?1", params![message])?;
@@ -433,12 +359,12 @@ impl AccountDb {
         Ok(())
     }
 
-    fn account_mac(&self, info: &[u8], value: &[u8]) -> Result<String, StorageError> {
-        let mut derived = [0_u8; 32];
+    pub(super) fn account_mac(&self, info: &[u8], value: &[u8]) -> Result<String, StorageError> {
+        let mut derived = zeroize::Zeroizing::new([0_u8; 32]);
         hkdf::Hkdf::<Sha256>::new(None, self.current_key.bytes())
-            .expand(info, &mut derived)
+            .expand(info, derived.as_mut())
             .map_err(|_| StorageError::AuthorizationRejected)?;
-        let mut mac = HmacSha256::new_from_slice(&derived)
+        let mut mac = HmacSha256::new_from_slice(derived.as_ref())
             .map_err(|_| StorageError::AuthorizationRejected)?;
         mac.update(value);
         Ok(ramflux_protocol::encode_base64url(mac.finalize().into_bytes()))
@@ -540,51 +466,47 @@ mod tests {
     }
 
     #[test]
-    fn startup_scrub_is_idempotent_and_preserves_only_ownness() -> Result<(), StorageError> {
-        let (root, db) = crate::tests::test_db("deleted-startup-scrub")?;
-        let key = AccountDbKey::derive("acct", b"storage-test-secret");
-        db.send_direct_message("thread", "own-message", "principal", b"secret")?;
-        db.connection.execute(
-            "UPDATE direct_message_projection SET deleted=1 WHERE message_id='own-message'",
+    fn legacy_deleted_rows_and_corrupt_journal_open_without_rewrites() -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("legacy-deletion-no-upgrade")?;
+        db.connection.execute_batch(
+            "WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<10000)
+             INSERT INTO direct_message_projection(conversation_id,message_id,sender_id,encrypted_body,metadata_json,deleted,is_own,created_at)
+             SELECT 'thread','legacy-'||n,'legacy-sender',x'01',x'7b7d',1,0,n FROM rows;
+             INSERT INTO runtime_journal(at,topic,body_json,source_key) VALUES(1,'message.received',x'ff','corrupt-legacy');
+             CREATE INDEX idx_direct_message_scrub ON direct_message_projection(deleted,scrub_version);
+             CREATE INDEX runtime_actor_receipt_message ON runtime_actor_state(state_kind);",
+        )?;
+        let before: u64 = db.connection.query_row(
+            "SELECT count(*) FROM runtime_outbox WHERE table_name='direct_message_projection'",
             [],
+            |r| r.get(0),
         )?;
         drop(db);
-
-        for pass in 0..2 {
-            let db = AccountDb::open(&AccountIndex::open(&root)?, "acct", &key)?;
-            let scrubbed = db.scrub_deleted_messages(&BTreeSet::new())?;
-            assert_eq!(scrubbed, usize::from(pass == 0));
-            let message = db
-                .direct_message_by_id("own-message")?
-                .ok_or_else(|| StorageError::MessageNotFound("own-message".to_owned()))?;
-            assert!(message.deleted);
-            assert!(message.is_own);
-            assert_eq!(message.sender_id, "");
-            assert_eq!(message.encrypted_body, Vec::<u8>::new());
-            assert_eq!(message.metadata, MessageMetadata::default());
-            assert_eq!(
-                db.client_message_metadata("own-message")?,
-                Some(deleted_projection("thread", "own-message", message.created_at, true))
-            );
-            if pass == 1 {
-                let path = root.join("deleted-snapshot.db");
-                let snapshot = db.write_backup_snapshot(&path)?;
-                let backup =
-                    super::super::backup_database::BackupDatabase::open(&path, &snapshot.key)?;
-                let stored: (String, Vec<u8>, Vec<u8>, i64) = backup.db.query_row(
-                    "SELECT sender_id,encrypted_body,metadata_json,is_own FROM direct_message_projection WHERE message_id='own-message'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )?;
-                assert_eq!(stored, (String::new(), Vec::new(), b"{}".to_vec(), 1));
-            }
-        }
+        let key = AccountDbKey::derive("acct", b"storage-test-secret");
+        let db = AccountDb::open(&AccountIndex::open(&root)?, "acct", &key)?;
+        let after: u64 = db.connection.query_row(
+            "SELECT count(*) FROM runtime_outbox WHERE table_name='direct_message_projection'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(before, after, "opening legacy rows must never run deletion work");
+        assert_eq!(db.connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_direct_message_scrub','runtime_actor_receipt_message')", [], |r| r.get::<_,u64>(0))?, 0);
+        assert_eq!(db.connection.query_row("SELECT count(*) FROM direct_message_projection WHERE sender_id='legacy-sender' AND deleted=1", [], |r| r.get::<_,u64>(0))?, 10000);
+        assert_eq!(
+            db.connection.query_row(
+                "SELECT body_json FROM runtime_journal WHERE source_key='corrupt-legacy'",
+                [],
+                |r| r.get::<_, Vec<u8>>(0)
+            )?,
+            vec![0xff]
+        );
+        drop(db);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
     #[test]
-    fn post_identity_scrub_recognizes_every_owned_sender_shape() -> Result<(), StorageError> {
+    fn deletion_recognizes_every_owned_sender_shape() -> Result<(), StorageError> {
         let (root, db) = crate::tests::test_db("deleted-owned-scrub")?;
         let db = db.with_device_signer(ramflux_crypto::create_device_branch(
             "principal-id-realistic",
@@ -689,19 +611,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_skips_ten_thousand_current_scrub_rows() -> Result<(), StorageError> {
-        let (root, db) = crate::tests::test_db("deleted-current-scrub")?;
-        db.connection.execute_batch(
-            "WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<10000)
-             INSERT INTO direct_message_projection(conversation_id,message_id,sender_id,encrypted_body,metadata_json,deleted,is_own,scrub_version,created_at)
-             SELECT 'thread','message-'||n,'',x'',x'7b7d',1,0,3,n FROM rows;",
-        )?;
-        assert_eq!(db.scrub_deleted_messages(&BTreeSet::new())?, 0);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
     fn deletion_uses_indexed_replay_and_event_lookups_at_scale() -> Result<(), StorageError> {
         let (root, db) = crate::tests::test_db("deleted-indexed-lookup")?;
         db.connection.execute_batch(
@@ -731,32 +640,6 @@ mod tests {
         let started = std::time::Instant::now();
         db.delete_direct_message("thread", "target", "local", "tombstone")?;
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn malformed_journal_row_is_quarantined_without_blocking_upgrade() -> Result<(), StorageError> {
-        let (root, db) = crate::tests::test_db("deleted-journal-quarantine")?;
-        db.send_direct_message("thread", "message", "peer", b"secret")?;
-        db.connection.execute(
-            "UPDATE direct_message_projection SET deleted=1,scrub_version=0 WHERE message_id='message'",
-            [],
-        )?;
-        db.connection.execute(
-            "INSERT INTO runtime_journal(at,topic,body_json,source_key) VALUES(1,'message.received',x'ff','corrupt-source')",
-            [],
-        )?;
-        assert_eq!(db.scrub_deleted_messages_batch(&BTreeSet::new())?, 1);
-        let quarantined: (String, Vec<u8>, String) = db.connection.query_row(
-            "SELECT topic,body_json,source_key FROM runtime_journal LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        assert_eq!(quarantined.0, "privacy.quarantined");
-        assert_eq!(quarantined.1, b"{}");
-        assert!(quarantined.2.starts_with("privacy-quarantined:"));
-        assert_eq!(db.load_actor_state::<u64>("privacy/deleted-scrub/quarantined-count")?, Some(1));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

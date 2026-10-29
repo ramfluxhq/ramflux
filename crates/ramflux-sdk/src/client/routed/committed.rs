@@ -32,6 +32,65 @@ pub(crate) fn committed_key(
 }
 
 impl RamfluxClient {
+    /// This lookup restricts retention only. A hit never authenticates or authorizes an entry.
+    /// It also handles invalid signatures so failure paths cannot restore an erased envelope.
+    pub(crate) fn routed_seen_marker(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Option<(String, String)>, SdkError> {
+        let wrapper_root = super::decode(&entry.envelope)
+            .ok()
+            .and_then(|wrapper| wrapper.source_principal_commitment);
+        let signed_root = entry
+            .envelope
+            .ext
+            .ext
+            .get("source_root_commitment")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let mut roots: Vec<_> = [wrapper_root, signed_root].into_iter().flatten().collect();
+        if roots.is_empty() {
+            let reference = match self.inbound_device_reference(entry) {
+                Ok(reference) => reference,
+                Err(error @ SdkError::Storage(_)) => return Err(error),
+                Err(_) => return Ok(None),
+            };
+            if let Some((root, _)) = ramflux_protocol::parse_qualified_device_id(&reference)? {
+                roots.push(root);
+            }
+        }
+        let db = self.account_db()?;
+        for root in roots {
+            let source =
+                match self.device_identity_for_root(&root, &entry.envelope.source_device_id) {
+                    Ok(source) => source,
+                    Err(error @ SdkError::Storage(_)) => return Err(error),
+                    Err(_) => continue,
+                };
+            // Historical root-signed evidence names the device for retention only.
+            // The current relationship and envelope signature are still required before ACK.
+            let committed = committed_key(&source, &entry.envelope.envelope_id)?;
+            let key = db.routed_seen_key(&committed)?;
+            if let Some(hash) = db.load_actor_state::<String>(&key)? {
+                return Ok(Some((committed, hash)));
+            }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn persist_routed_seen(
+        &self,
+        committed: &str,
+        payload_hash: &str,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let marker = db.routed_seen_key(committed)?;
+        if db.load_actor_state::<String>(&marker)?.is_some_and(|old| old != payload_hash) {
+            return Err(SdkError::ReplayMismatch);
+        }
+        Ok(db.persist_actor_state(&marker, &payload_hash)?)
+    }
+
     pub(crate) fn authenticated_committed_key(
         &self,
         entry: &GatewayInboxEntry,
