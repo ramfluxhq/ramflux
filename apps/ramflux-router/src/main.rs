@@ -103,7 +103,13 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
                         "store owners remain after connection drain".into(),
                     ));
                 }
-                operator::checkpoint_for_shutdown(router.state(), router.store())?;
+                operator::checkpoint_for_shutdown(router.state(), router.store()).map_err(
+                    |error| {
+                        ramflux_node_core::NodeCoreError::ServiceShutdown(format!(
+                            "identity registry checkpoint failed: {error}"
+                        ))
+                    },
+                )?;
                 tracing::info!(service, "router identity registry checkpoint completed");
                 drop(router);
                 Ok(())
@@ -117,7 +123,9 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    ramflux_node_core::ServiceShutdown::install(service)?.wait_and_finalize(|| Ok(())).map_err(Into::into)
+    ramflux_node_core::ServiceShutdown::install(service)?
+        .wait_and_finalize(|| Ok(()))
+        .map_err(Into::into)
 }
 
 fn run_mesh_health_smoke(service: &'static str) -> anyhow::Result<()> {
