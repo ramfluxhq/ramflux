@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Local born-v3 identity setup with a generated recovery phrase,
   one-use backup confirmation, non-synchronizing primary vault custody and
-  persisted signed v3 authority. These accounts remain `NetworkingPending`;
+  persisted signed v3 authority. Networking stays pending until exact remote acceptance;
   publication and registration use exact authority ACKs, and legacy-proof fallback is refused.
 - Exact v3 authority codecs, certificate/lease verification, durable mode and
   revocation floors, independent recovery/record vectors and revocation-priority

@@ -12,6 +12,7 @@ use ramflux_sdk::{
     backup::{BackupJob, BackupJobState},
 };
 use serde_json::json;
+use zeroize::Zeroizing;
 
 pub(crate) async fn handle(
     bus: &mut LocalBusClient,
@@ -47,6 +48,11 @@ pub(crate) async fn handle(
                 import.passphrase_env.as_deref(),
                 "RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE",
             )?;
+            let new_passphrase = import
+                .new_passphrase_env
+                .as_deref()
+                .map(|name| super::account::rf_required_env(Some(name), name).map(Zeroizing::new))
+                .transpose()?;
             let started = bus
                 .request(
                     None,
@@ -57,8 +63,8 @@ pub(crate) async fn handle(
                 .await?;
             let verified = wait(bus, job(started)?, BackupJobState::Verified).await?;
             let mut body = json!({"job_id":verified.job_id});
-            if let Some(name) = import.new_passphrase_env {
-                body["passphrase"] = super::account::rf_required_env(Some(&name), &name)?.into();
+            if let Some(mut secret) = new_passphrase {
+                body["passphrase"] = std::mem::take(&mut *secret).into();
             }
             let started = bus.request(None, "account", "account.restore.install", body).await?;
             wait(bus, job(started)?, BackupJobState::Done).await?
