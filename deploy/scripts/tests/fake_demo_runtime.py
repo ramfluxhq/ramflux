@@ -49,6 +49,14 @@ if args[:2] == ["image", "inspect"]:
 
 state = root / "data"
 deployed = root / "deployed"
+resource_file = root / "resources.json"
+resources = json.loads(resource_file.read_text()) if resource_file.exists() else {}
+
+
+def save_resources():
+    resource_file.write_text(json.dumps(resources))
+
+
 services = ["gateway", "router", "notify", "federation", "relay", "signaling", "retention"]
 if normalized and normalized[0] == "compose":
     if any(flag in normalized for flag in ("--project-directory", "--wait", "--wait-timeout")):
@@ -72,12 +80,39 @@ if normalized and normalized[0] == "compose":
         if control.get("up_exit"):
             sys.exit(control["up_exit"])
         deployed.touch()
+        token = (state / "owner.token").read_text().strip()
+        for service in services:
+            resources[f"id-ramflux-{service}"] = {
+                "kind": "container", "project": "demo-test", "owner": token,
+            }
+            resources[f"demo-test_{service}-redb"] = {
+                "kind": "volume", "project": "demo-test", "owner": token,
+            }
+        resources["id-demo-network"] = {"kind": "network", "project": "demo-test", "owner": token}
+        save_resources()
     elif "down" in normalized:
         deployed.unlink(missing_ok=True)
+        resources = {key: value for key, value in resources.items()
+                     if value["project"] != "demo-test"
+                     or (value["kind"] == "volume" and "--volumes" not in normalized)}
+        save_resources()
     elif "ps" in normalized and "-q" in normalized:
         sys.exit("podman-compose 1.3.0 ps -q does not support per-service selection")
     elif "logs" in normalized:
         print("mock project logs")
+    sys.exit(0)
+
+if args[:2] in (["rm", "-f"], ["network", "rm"], ["volume", "rm"]):
+    target = args[-1]
+    if control.get("remove_exit"):
+        sys.exit(control["remove_exit"])
+    if target not in resources or resources[target]["project"] != "demo-test":
+        sys.exit("refusing removal outside the selected project")
+    del resources[target]
+    save_resources()
+    if not any(value["kind"] == "container" and value["project"] == "demo-test"
+               for value in resources.values()):
+        deployed.unlink(missing_ok=True)
     sys.exit(0)
 
 service_filter = next((value.split("=", 2)[-1] for value in args
@@ -102,14 +137,25 @@ elif kind == "container" and deployed.exists():
             if control.get("duplicate"):
                 print(f"duplicate-{service_filter}")
     else:
-        for service in services:
-            print(f"id-ramflux-{service}")
+        for key, value in resources.items():
+            if value["kind"] == "container" and value["project"] == "demo-test":
+                print(key)
+elif kind in ("network", "volume"):
+    selected_project = next((value.split("=", 2)[-1] for value in args
+                             if value.startswith("label=com.docker.compose.project=")), None)
+    for key, value in resources.items():
+        if value["kind"] == kind and (selected_project is None or value["project"] == selected_project):
+            print(key)
 elif args and (args[0] == "inspect" or (len(args) > 1 and args[1] == "inspect")):
-    token = (state / "owner.token").read_text().strip()
     if "--format" in args:
         target = args[-1]
-        print("foreign-owner" if target == "foreign-resource" or "_" in target else token)
+        unlabeled_collision = (
+            control.get("unlabeled") == "volume" and target == "demo-test_gateway-redb"
+        ) or (control.get("unlabeled") == "network" and target == "demo-test_default")
+        print(resources[target]["owner"] if target in resources and not unlabeled_collision
+              else "foreign-owner")
     else:
+        token = (state / "owner.token").read_text().strip()
         health = control.get("health", "healthy")
         if int((root / "clock").read_text()) < control.get("healthy_after", 0):
             health = "starting"
