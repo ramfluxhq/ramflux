@@ -23,7 +23,7 @@ pub(super) async fn plan(
     let body: LocalBusGroupSendRequest = serde_json::from_value(
         json!({"group_id":group,"conversation_id":conversation,"message_id":message,"sender_id":local.device_id,"encrypted_body_base64":""}),
     )?;
-    let routes = if account.task_prepared_manifests.is_empty() {
+    let routes = if !account.task_prepared_only && account.task_prepared_manifests.is_empty() {
         super::super::group_delivery::resolve_current(account, &body).await?
     } else {
         super::super::group_delivery::resolve(account, &body)?
@@ -52,6 +52,8 @@ pub(super) async fn plan(
                 .ok_or_else(|| {
                     invalid("task group member is not active in the verified manifest")
                 })?
+        } else if account.task_prepared_only {
+            return Err(SdkError::TaskManifestWorkerCapacity);
         } else if let Some(federation) = &route.federation {
             let manifest = super::task_transport::fetch_federated_manifest(
                 federation

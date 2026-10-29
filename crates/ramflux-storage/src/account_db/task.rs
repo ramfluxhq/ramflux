@@ -184,6 +184,8 @@ impl AccountDb {
                 | "task/rate/"
                 | "task/ack_sent/"
                 | "task/ack_quarantine/"
+                | "task/courier_dead/"
+                | "task/courier_failure/"
                 | "task/import_skip/"
                 | "task/message/"
                 | "task/approval_applied/"

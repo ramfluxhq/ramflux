@@ -16,6 +16,7 @@ use std::sync::{
 // started courier item gets the same charged ceiling, independently of sync.
 const TASK_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
 pub(super) fn rotate_to_cursor<T>(rows: &mut [(String, T)], cursor: usize) {
     if !rows.is_empty() {
         let offset = cursor % rows.len();
@@ -24,11 +25,12 @@ pub(super) fn rotate_to_cursor<T>(rows: &mut [(String, T)], cursor: usize) {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum Preparation<T> {
+pub(in crate::bus) enum Preparation<T> {
     Ready(T),
     Deferred,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum AckQuarantineReason {
@@ -70,7 +72,7 @@ pub(super) async fn forced_preparation(
 }
 
 #[derive(Clone)]
-pub(super) struct Target {
+pub(in crate::bus) struct Target {
     pub device: String,
     pub identity: ramflux_crypto::RootQualifiedDeviceRef,
     pub delivery: String,
@@ -135,7 +137,7 @@ pub(crate) async fn send(
     )?;
     Ok(response)
 }
-pub(super) enum Mode<'a> {
+pub(in crate::bus) enum Mode<'a> {
     Event,
     Ack(&'a crate::client::task::control::Ack),
     Own,
@@ -298,7 +300,7 @@ fn own_payloads(
     }
     Ok((vec![body.to_vec()], original))
 }
-pub(super) async fn seal(
+pub(in crate::bus) async fn seal(
     account: &LocalBusAccountState,
     engine: &mut GatewaySessionEngine,
     target: &Target,
@@ -358,12 +360,7 @@ pub(super) async fn seal(
 }
 
 /// Confirmation and same-root forwarding are bounded independently of inbound processing.
-pub(crate) async fn drain_confirmations(
-    account: &mut LocalBusAccountState,
-) -> Result<usize, SdkError> {
-    drain_confirmations_at(account, now_unix_timestamp()).await
-}
-
+#[cfg(test)]
 pub(super) async fn drain_confirmations_at(
     account: &mut LocalBusAccountState,
     now: i64,
@@ -381,6 +378,7 @@ pub(super) async fn drain_confirmations_at(
     }
 }
 
+#[cfg(test)]
 async fn drain_acknowledgements(
     account: &mut LocalBusAccountState,
     now: i64,
@@ -439,6 +437,7 @@ async fn drain_acknowledgements(
     Ok(sent)
 }
 
+#[cfg(test)]
 async fn drain_forwards(account: &mut LocalBusAccountState, now: i64) -> Result<usize, SdkError> {
     use crate::client::task::control::ForwardJob;
     let mut sent = 0;
@@ -473,14 +472,11 @@ async fn drain_forwards(account: &mut LocalBusAccountState, now: i64) -> Result<
     }
     Ok(sent)
 }
-pub(super) async fn send_control(
+pub(in crate::bus) async fn send_control(
     account: &mut LocalBusAccountState,
     c: &Carrier,
     mode: Mode<'_>,
 ) -> Result<Preparation<()>, SdkError> {
-    if let Some(reason) = &account.task_preparation_failure {
-        return Err(SdkError::InboundPending(reason.clone()));
-    }
     let thread = account
         .client
         .account_db()?
@@ -568,6 +564,8 @@ async fn direct_targets_with_policy(
         .transpose()?;
     let manifest = if let Some(prepared) = account.task_prepared_manifests.get(commitment) {
         prepared.clone()
+    } else if account.task_prepared_only {
+        return Err(SdkError::TaskManifestWorkerCapacity);
     } else if let Some(route) = &federation {
         let url = route
             .recipient_prekey_url
@@ -731,6 +729,8 @@ pub(super) async fn own_targets(
         account.task_prepared_manifests.get(&account.principal_commitment)
     {
         prepared.clone()
+    } else if account.task_prepared_only {
+        return Err(SdkError::TaskManifestWorkerCapacity);
     } else {
         client
             .cache_verified_device_manifest(gateway, &account.principal_commitment, "task_own")
@@ -757,3 +757,9 @@ pub(super) async fn own_targets(
 #[cfg(test)]
 #[path = "task_transport_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::bus) fn manifest_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}

@@ -10,11 +10,6 @@ use super::*;
 use crate::bus::runtime_tests;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
-fn manifest_test_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
 #[tokio::test]
 async fn confirmation_preparation_allows_slow_verified_directory_refresh() {
     let outcome = super::await_preparation(
