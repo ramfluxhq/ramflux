@@ -86,6 +86,8 @@ const C_SMOKE_SOURCE: &str = r#"
 #include <stdlib.h>
 #include <string.h>
 
+_Static_assert(RAMFLUX_ERR_ACCOUNT_BUSY == 18, "account busy ABI must stay additive");
+
 static int contains(struct RamfluxBuffer *buffer, const char *needle) {
   if (buffer == NULL || buffer->ptr == NULL) {
     return 0;

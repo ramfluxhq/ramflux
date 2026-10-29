@@ -52,7 +52,7 @@ fn account_busy_is_retryable_and_typed_for_restore_check_and_install() -> TestRe
     index.create_account("acct", "principal")?;
     let holder = held_writer(&root)?;
 
-    let restore_check = super::workers::storage_error(busy_error(&index)?);
+    let restore_check = super::workers::storage_error(&busy_error(&index)?);
     assert_eq!(restore_check.code, crate::backup::BackupFailureCode::AccountBusy);
     assert!(restore_check.retryable);
     assert_eq!(restore_check.message.as_deref(), Some("account in use by another process"));

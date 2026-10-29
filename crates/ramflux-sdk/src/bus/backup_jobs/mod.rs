@@ -48,3 +48,6 @@ pub(crate) struct NativeRestoreSetup {
     pub vault: std::sync::Arc<dyn crate::custody::PrimaryVault>,
     pub passphrase: zeroize::Zeroizing<String>,
 }
+
+#[cfg(test)]
+mod storage_error_tests;

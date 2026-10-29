@@ -76,3 +76,6 @@ mod native_account_tests;
 
 #[cfg(test)]
 mod recovery_tests;
+
+#[cfg(test)]
+mod account_error_tests;

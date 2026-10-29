@@ -41,7 +41,13 @@ pub enum RamfluxErrorCode {
     RateLimited = 15,
     Internal = 16,
     PanicAborted = 17,
+    /// Another process owns the account writer. Retry after the owner releases it.
+    AccountBusy = 18,
 }
+
+/// Retryable account writer contention (18). Existing `StorageFailed` (8) remains
+/// the code for local lock/I/O failures and integrity failures.
+pub const RAMFLUX_ERR_ACCOUNT_BUSY: i32 = 18;
 
 impl RamfluxErrorCode {
     const fn name(self) -> &'static str {
@@ -64,6 +70,7 @@ impl RamfluxErrorCode {
             Self::RateLimited => "RateLimited",
             Self::Internal => "Internal",
             Self::PanicAborted => "PanicAborted",
+            Self::AccountBusy => "AccountBusy",
         }
     }
 }
@@ -736,7 +743,7 @@ fn error_json(error: &CAbiError) -> ErrorJson<'_> {
         code: error.code as i32,
         name: error.code.name(),
         message: &error.message,
-        retry_after_ms: None,
+        retry_after_ms: (error.code == RamfluxErrorCode::AccountBusy).then_some(1_000),
         correlation_id: format!("cabi-{}", current_millis()),
     }
 }
@@ -840,7 +847,6 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
             RamfluxErrorCode::CryptoFailed
         }
         SdkError::SurfaceCheckpointMismatch
-        | SdkError::Storage(_)
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
         SdkError::CustodyConfirmationFailed
@@ -848,6 +854,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::CustodyNetwork(_)
         | SdkError::IdentityRootMissing
         | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => RamfluxErrorCode::AuthFailed,
+        SdkError::Storage(error) => storage_error_code(error),
         SdkError::Transport(error) => match crate::error_policy::transport_code(error) {
             "Unavailable" => RamfluxErrorCode::TransportUnavailable,
             "Unauthenticated" | "TransportSecurity" => RamfluxErrorCode::AuthFailed,
@@ -900,6 +907,46 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
     CAbiError::new(code, message)
 }
 
+fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode {
+    use ramflux_storage::StorageError as E;
+    match error {
+        E::AccountWriterBusy(_) => RamfluxErrorCode::AccountBusy,
+        E::Integrity(_)
+        | E::Protocol(_)
+        | E::AmbiguousDeviceId(_)
+        | E::Core(_)
+        | E::Crypto(_)
+        | E::Sqlite(_)
+        | E::Io(_)
+        | E::AccountKeyMismatch
+        | E::EncryptionUnavailable { .. }
+        | E::MigrationChecksumMismatch { .. }
+        | E::KeyWrappingFailed(_)
+        | E::RekeyRollbackFailed(_)
+        | E::AccountNotFound(_)
+        | E::Serde(_)
+        | E::HistoryBundleHashMismatch
+        | E::AuthorizationRejected
+        | E::GroupMemberLimitExceeded
+        | E::InvalidGroupRole(_)
+        | E::GroupPermissionDenied
+        | E::GroupControlReplay(_)
+        | E::GroupControlEpochMismatch { .. }
+        | E::GroupControlSigningKeyMissing(_)
+        | E::GroupInviteMissing(_)
+        | E::GroupInviteInvalidState { .. }
+        | E::GroupInviteExpired(_)
+        | E::GroupInviteAcceptorMismatch(_)
+        | E::SenderKeyNotDistributed
+        | E::GroupEpochAccessDenied
+        | E::MessageNotFound(_)
+        | E::MessageIdConflict(_)
+        | E::EventIdConflict(_)
+        | E::IdentityLifecycleBlocked(_)
+        | E::InvalidRecoveryState { .. } => RamfluxErrorCode::StorageFailed,
+    }
+}
+
 fn map_mcp_error(error: &SdkError) -> CAbiError {
     let mut mapped = map_sdk_error(error);
     if matches!(mapped.code, RamfluxErrorCode::PermissionDenied) {
@@ -933,3 +980,6 @@ fn backup_authorization_rejection_maps_to_c_abi_permission_denied() {
     let error = SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected);
     assert_eq!(map_sdk_error(&error).code, RamfluxErrorCode::PermissionDenied);
 }
+
+#[cfg(test)]
+mod storage_error_tests;

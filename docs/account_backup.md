@@ -239,3 +239,7 @@ an independent local data passphrase. Existing installations must be unlocked
 before import. The commands use the attended daemon job workflow above; they no
 longer call the old manifest/key-only backup endpoints. A completed new-install
 restore still requires explicit recovery before networking is authorized.
+
+Writer-lock and index-read I/O failures during restore checks or installation use
+`unreadable`; only integrity verification failures use `tampered`. These failures
+follow the [account writer error mapping](account_writer_ownership.md#error-codes).

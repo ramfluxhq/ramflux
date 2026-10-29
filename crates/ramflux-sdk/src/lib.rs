@@ -156,3 +156,6 @@ mod task_warnings;
 pub use task_refusal::TaskRefusalCode;
 
 pub use client::identity_authority::profile_read::VerifiedIdentityProfile;
+
+#[cfg(test)]
+mod storage_failure_fixture;
