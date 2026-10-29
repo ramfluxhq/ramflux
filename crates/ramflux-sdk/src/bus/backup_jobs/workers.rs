@@ -339,7 +339,8 @@ impl BackupJobs {
         }
         let checks = self.verify_files(job, &db, &cancel, &counts)?;
         drop(db);
-        let preview = self.archive_preview(&metadata, &path, &key, context.created_at)?;
+        let preview =
+            self.archive_preview(&metadata, &path, &key, context.created_at, &job.job_id)?;
         format::save_metadata(&directory.join("identity.sealed"), &master, &metadata)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         std::fs::File::open(&directory)
@@ -364,13 +365,25 @@ impl BackupJobs {
         incoming: &std::path::Path,
         key: &AccountDbKey,
         created_at: u64,
+        job_id: &str,
     ) -> Result<BackupArchivePreview, BackupFailure> {
         let (id, merge) = if let format::Identity::Native { native } = &metadata.identity {
             let target = self
                 .native_restore_target(native)
                 .map_err(|_| failure(BackupFailureCode::RootConflict))?;
             let merge = target.is_some();
-            (target.unwrap_or_else(|| native.local_account_id.clone()), merge)
+            (
+                target.unwrap_or_else(|| {
+                    format!(
+                        "restore-{}",
+                        ramflux_protocol::hash_base64url(
+                            "ramflux.local.restore_install.v1",
+                            job_id.as_bytes()
+                        )
+                    )
+                }),
+                merge,
+            )
         } else {
             (
                 metadata.identity.account_id().to_owned(),

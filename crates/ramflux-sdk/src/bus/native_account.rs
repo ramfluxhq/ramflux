@@ -26,12 +26,22 @@ pub(super) async fn unlock(
     drop(passphrase);
     let native = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
     let anchor = native.record().body.account_anchor.clone();
+    if native.recovery_publication_pending(&root)? {
+        client.account_db()?.retire_outbound_for_recovery(
+            &ramflux_protocol::custody::object_hash(native.record())?,
+        )?;
+    }
     let device = native.local_device_id()?.to_owned();
-    let owned = client.owned_device_identity()?;
+    // Pending restore branches are only local data selectors until recovery certifies them.
+    let delivery = if native.branch_pending() {
+        ramflux_protocol::qualified_device_id(&anchor, &device)?
+    } else {
+        client.owned_device_identity()?.storage_key().to_owned()
+    };
     let publication = native.publication();
     let custodian_publication =
         native.custodian_publication(&root, crate::custody::network_now()?)?;
-    if !native.authority_blocked() {
+    if !native.authority_blocked() && !native.branch_pending() {
         client.observe_custody_manifest(
             &ramflux_protocol::custody::CustodyManifest {
                 publication,
@@ -56,7 +66,7 @@ pub(super) async fn unlock(
             .principal_id
             .clone(),
         device_id: device,
-        target_delivery_id: owned.storage_key().into(),
+        target_delivery_id: delivery,
         prekey_http_url: None,
     };
     let gateway = GatewaySessionConfig::auto(endpoint).with_born_v3_account(
@@ -149,6 +159,14 @@ pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Res
         crate::custody::network_now()?,
     )?));
     account.activation_pending = false;
+    if let Some(custody) = &account.gateway_config.custody {
+        crate::custody::finish_recovery(
+            &custody.account_root,
+            &custody.account_id,
+            custody.vault.as_ref(),
+            crate::custody::network_now()?,
+        )?;
+    }
     Ok(())
 }
 
@@ -158,6 +176,14 @@ pub(super) async fn refresh_public_authority(
     let root = account.client.account_index()?.root();
     let id = &account.client.account_db()?.local_account_id;
     let native = crate::custody::load_account(root, id, crate::custody::network_now()?)?;
+    if native.branch_pending() {
+        return Err(SdkError::NetworkingPending);
+    }
+    // Only an explicitly journaled master-certified replacement may precede directory publication.
+    if native.recovery_publication_pending(root)? {
+        account.client.born_v3_account = Some(Box::new(native));
+        return Ok(());
+    }
     let anchor = native.record().body.account_anchor.clone();
     if account.client.require_fresh_custody_head(&anchor, native.record()).is_err() {
         let manifest = crate::prekey::sdk_gateway_get_json::<

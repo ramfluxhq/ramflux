@@ -14,7 +14,10 @@ use std::{
 };
 use zeroize::Zeroizing;
 mod publication;
+mod recovery;
 pub(crate) use publication::accept_publication;
+pub use recovery::RecoveryCeremony;
+pub(crate) use recovery::{finish_recovery, pending_restore};
 const MAX_STORED_AUTHORITY_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +34,8 @@ pub(super) struct StoredAuthority {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     local_device_id: String,
     state: CreationState,
+    #[serde(default)]
+    pending_branch: bool,
     custody_v3_observed: bool,
     pub(super) primary_vault_ref: String,
     pub(super) branch_vault_ref: String,
@@ -51,9 +56,33 @@ pub struct BornAccount {
     authority_blocked: bool,
 }
 impl BornAccount {
+    pub(crate) fn sign_contact_card(
+        &self,
+        vault: &dyn PrimaryVault,
+        body: ramflux_protocol::custody::ContactCardV3,
+        now: u64,
+    ) -> Result<Envelope<ramflux_protocol::custody::ContactCardV3>, SdkError> {
+        if self.branch_pending() {
+            return Err(SdkError::NetworkingPending);
+        }
+        self.stored.pins.require_current(&self.verified)?;
+        Ok(vault.load_primary(&self.stored.primary_vault_ref)?.sign_contact_card_v3(
+            &self.verified,
+            body,
+            now,
+        )?)
+    }
+    #[must_use]
+    pub(crate) const fn branch_pending(&self) -> bool {
+        self.stored.pending_branch
+    }
     #[must_use]
     pub const fn state(&self) -> CreationState {
-        if self.authority_blocked { CreationState::NetworkingPending } else { self.stored.state }
+        if self.authority_blocked || self.stored.pending_branch {
+            CreationState::NetworkingPending
+        } else {
+            self.stored.state
+        }
     }
     pub(crate) const fn authority_blocked(&self) -> bool {
         self.authority_blocked
@@ -168,6 +197,7 @@ fn read_account(
     }
     let stored: StoredAuthority =
         ramflux_protocol::custody::decode(&bytes, MAX_STORED_AUTHORITY_BYTES)?;
+    let stored = recovery::selected_authority(root, id, stored)?;
     if stored.schema != "ramflux.local.custody_account.v1"
         || stored.local_account_id != id
         || !stored.custody_v3_observed
@@ -300,6 +330,7 @@ pub(super) fn persist(
             local_account_id: input.local_account_id.clone(),
             local_device_id: input.device_id.clone(),
             state: CreationState::NetworkingPending,
+            pending_branch: false,
             custody_v3_observed: true,
             primary_vault_ref: reference.clone(),
             branch_vault_ref: branch_reference.clone(),
@@ -378,6 +409,9 @@ impl BornAccount {
         device_id: &str,
         now: u64,
     ) -> Result<(ramflux_protocol::custody::DeviceRef, super::BranchCredentials), SdkError> {
+        if self.branch_pending() {
+            return Err(SdkError::NetworkingPending);
+        }
         if device_id != self.local_device_id()? {
             return Err(invalid());
         }
@@ -412,6 +446,9 @@ impl BornAccount {
     }
     pub(super) fn mark_live(&mut self, root: &Path) -> Result<(), SdkError> {
         use std::os::unix::fs::OpenOptionsExt;
+        if self.branch_pending() {
+            return Err(SdkError::NetworkingPending);
+        }
         let dir = directory(root, self.local_account_id())?;
         let lock = fs::OpenOptions::new()
             .read(true)

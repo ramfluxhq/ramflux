@@ -93,18 +93,57 @@ impl BackupJobs {
         Ok(target)
     }
 
+    fn install_target(
+        &self,
+        job: &BackupJob,
+        native: &DataIdentity,
+        local_key: Option<super::NativeInstallKey>,
+        setup: Option<super::NativeRestoreSetup>,
+    ) -> Result<(String, Option<super::NativeInstallKey>), SdkError> {
+        // Resolve only independently installed authority, never the archive's local selector.
+        let result = if let Some(id) = self.native_restore_target(native)? {
+            if setup.is_some() {
+                return Err(SdkError::CustodySetupInvalid);
+            }
+            (id, local_key)
+        } else {
+            let setup = setup.ok_or(SdkError::NetworkingPending)?;
+            let id = job
+                .archive
+                .as_ref()
+                .ok_or_else(|| refused("invalid_job_phase"))?
+                .local_account_id
+                .clone();
+            crate::custody::pending_restore(
+                &self.data_root,
+                &id,
+                &native.authority,
+                setup.vault.as_ref(),
+                setup.passphrase.as_bytes(),
+                crate::custody::network_now()?,
+            )?;
+            let key = super::install::existing_key(
+                &self.index,
+                &self.data_root,
+                &id,
+                setup.passphrase.as_bytes(),
+            )?;
+            (id.clone(), Some(super::NativeInstallKey { account_id: id, key }))
+        };
+        Ok(result)
+    }
     pub(super) fn install_native(
         &self,
         job: &BackupJob,
         staging: &VerifiedBackupStaging,
         metadata: &Metadata,
         local_key: Option<super::NativeInstallKey>,
+        setup: Option<super::NativeRestoreSetup>,
     ) -> Result<(String, BackupCounts, BackupCounts), SdkError> {
         let Identity::Native { native } = &metadata.identity else {
             return Err(refused("root_conflict"));
         };
-        // Resolve only independently installed authority, never the archive's local selector.
-        let id = self.native_restore_target(native)?.ok_or(SdkError::NetworkingPending)?;
+        let (id, local_key) = self.install_target(job, native, local_key, setup)?;
         let id = &id;
         let lease =
             self.generations.try_acquire(id)?.ok_or_else(|| refused("install_in_progress"))?;

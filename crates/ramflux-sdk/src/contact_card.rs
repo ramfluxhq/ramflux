@@ -14,6 +14,8 @@ const MAX_CARD_BYTES: usize = 4096;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum ContactReason {
+    #[error("anchor_mismatch")]
+    AnchorMismatch,
     #[error("principal_id_taken")]
     PrincipalIdTaken,
     #[error("device_id_taken")]
@@ -85,6 +87,16 @@ pub struct ContactCardBody {
     pub kind_asserted: Option<String>,
     pub issued_at: i64,
     pub expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_authority: Option<ContactCardAuthority>,
+}
+
+/// Native chain commitments retained by the verified card parser for online head checks.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContactCardAuthority {
+    pub head_hash: String,
+    pub master_certificate_hash: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -116,8 +128,9 @@ pub(crate) fn valid_principal(id: &str) -> bool {
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.:@~-".contains(&b))
 }
 
-fn validate(body: &ContactCardBody, now: i64) -> Result<(), SdkError> {
+pub(crate) fn validate(body: &ContactCardBody, now: i64) -> Result<(), SdkError> {
     if body.version != 1
+        || body.native_authority.is_some()
         || !valid_principal(&body.principal_id)
         || body.issued_at > now.saturating_add(60)
         || body.expires_at <= body.issued_at
@@ -181,6 +194,9 @@ fn http_card_host_allowed(url: &reqwest::Url) -> bool {
 /// # Errors
 /// Returns typed contact errors for size, schema, expiry or signature failures.
 pub fn parse_contact_card(input: &str, now: i64) -> Result<ContactCardBody, SdkError> {
+    if crate::contact_card_native::is_native(input) {
+        return crate::contact_card_native::parse(input, now);
+    }
     if input.len() > MAX_CARD_BYTES {
         return Err(ContactReason::InvalidCard.into());
     }
@@ -247,6 +263,7 @@ mod tests {
             kind_asserted: Some("human".into()),
             issued_at: 1000,
             expires_at: 2000,
+            native_authority: None,
         })
     }
     #[test]

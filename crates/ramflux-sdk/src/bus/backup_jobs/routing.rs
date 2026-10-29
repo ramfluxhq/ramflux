@@ -69,6 +69,16 @@ impl Supervisor {
                     .to_owned();
                 let account = self.backup_jobs.install_account(&id)?;
                 let key = self.native_install_key(&account).await?;
+                let setup = match request.body.get_mut("passphrase") {
+                    Some(value) => match value.take() {
+                        serde_json::Value::String(secret) => Some(super::NativeRestoreSetup {
+                            vault: super::super::custody_setup::primary_provider(&self.config),
+                            passphrase: zeroize::Zeroizing::new(secret),
+                        }),
+                        _ => return Err(SdkError::CustodySetupInvalid),
+                    },
+                    None => None,
+                };
                 let (row, stage) = self.backup_jobs.begin_install(&id)?;
                 self.installing.borrow_mut().insert(account.clone());
                 let supervisor = self.owned_backup_handle()?;
@@ -82,7 +92,7 @@ impl Supervisor {
                         if let Some(actor)=supervisor.account_actor(&account){actor.stop().await?;}
                         supervisor.remove_backup_actor(&account);
                         let service=supervisor.backup_jobs.clone();let work=job.clone();
-                        tokio::task::spawn_blocking(move||service.install_generation(&work,stage,key)).await.map_err(|_|refused("interrupted"))?
+                        tokio::task::spawn_blocking(move||service.install_generation(&work,stage,key,setup)).await.map_err(|_|refused("interrupted"))?
                     }.await;
                     supervisor.installing.borrow_mut().remove(&account);
                     let reopened=if supervisor.index.account(&account).is_ok(){supervisor.restart_backup_actor(&account,&context).await}else{Ok(())};

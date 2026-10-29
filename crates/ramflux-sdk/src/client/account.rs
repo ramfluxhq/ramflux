@@ -5,6 +5,20 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+pub(crate) fn verify_stored_data_secret(
+    root: &Path,
+    id: &str,
+    secret: &[u8],
+) -> Result<(), SdkError> {
+    let index = AccountIndex::open(root)?;
+    let vault = FileVaultSecretSource::new(root);
+    let vault_secret = zeroize::Zeroizing::new(vault.vault_secret(id)?);
+    let wrapping = zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret));
+    let wrapped = index.load_wrapped_db_key(id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
+    let _key = unwrap_with_vault_secret(&wrapping, &wrapped)?;
+    Ok(())
+}
+
 impl RamfluxClient {
     pub fn open_account_index(&mut self, root: impl AsRef<Path>) -> Result<(), SdkError> {
         let index = match self.account_index.take() {

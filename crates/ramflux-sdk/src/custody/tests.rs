@@ -42,6 +42,17 @@ pub(crate) struct TestVault {
     cancel_commit: Mutex<Option<std::sync::Arc<CommitGate>>>,
 }
 impl TestVault {
+    pub(crate) fn entry_count(&self) -> std::result::Result<usize, SdkError> {
+        Ok(self.secrets.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.len())
+    }
+    pub(crate) fn contains_material(&self, material: &[u8]) -> std::result::Result<bool, SdkError> {
+        Ok(self
+            .secrets
+            .lock()
+            .map_err(|_| SdkError::CustodyVaultUnavailable)?
+            .values()
+            .any(|entry| entry.windows(material.len()).any(|part| part == material)))
+    }
     pub(crate) fn primary_for_public_key(
         &self,
         public: &str,
@@ -170,6 +181,18 @@ pub(crate) fn create(
     now: u64,
 ) -> Result<BornAccount> {
     create_with_device(root, id, "primary", vault, now)
+}
+pub(crate) fn create_with_phrase(
+    root: &Path,
+    id: &str,
+    vault: &dyn PrimaryVault,
+    now: u64,
+) -> Result<(BornAccount, Zeroizing<String>)> {
+    let mut ceremony = CreationCeremony::begin(true, root, input(id), now)?;
+    let phrase = ceremony.show_once()?;
+    let positions = ceremony.hidden_challenge()?;
+    let account = ceremony.confirm(&words(&phrase, positions)?, vault, now)?;
+    Ok((account, phrase))
 }
 pub(crate) fn create_with_device(
     root: &Path,

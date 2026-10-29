@@ -11,7 +11,11 @@ mod connection;
 mod control_state;
 mod creation_client;
 mod creation_confirm;
-pub use creation_client::{LocalBusCreationClient, LocalBusPendingCreation};
+mod recovery;
+pub use creation_client::{
+    LocalBusCreationClient, LocalBusPendingCreation, LocalBusPendingRecovery,
+    LocalBusRecoveryClient,
+};
 mod custody_response;
 mod custody_setup;
 pub mod daemon;
@@ -64,3 +68,6 @@ mod custody_setup_tests;
 
 #[cfg(test)]
 mod native_account_tests;
+
+#[cfg(test)]
+mod recovery_tests;

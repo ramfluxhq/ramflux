@@ -11,6 +11,9 @@ pub(crate) async fn handle_account(
     socket: PathBuf,
     command: AccountCommand,
 ) -> Result<(), RfError> {
+    if let AccountAction::Recover(ref selector) = command.action {
+        return super::account_ceremony::recover(&socket, &selector.account).await;
+    }
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         AccountAction::Backup(backup) => handle_account_backup(&mut bus, backup).await,
@@ -75,6 +78,9 @@ pub(crate) async fn handle_account(
             .await?,
         ),
         AccountAction::Unlock(unlock) => handle_account_unlock(&mut bus, unlock, &OsKeychain).await,
+        AccountAction::Recover(_) => {
+            Err(RfError::Message("Recovery requires the exclusive ceremony client.".into()))
+        }
     }
 }
 
