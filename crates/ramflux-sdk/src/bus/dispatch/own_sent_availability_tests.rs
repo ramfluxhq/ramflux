@@ -326,6 +326,15 @@ async fn a_rejected_primary_group_send_discards_its_staged_copy() -> TestResult 
     let mut f = Fixture::new("own-copy-group-reject").await?;
     f.source.client.create_group("group", "device-sender")?;
     let peer_root = f.message("rejected")?.recipient_principal_commitment.ok_or("peer root")?;
+    let manifest = f
+        .source
+        .client
+        .account_db()?
+        .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{peer_root}"
+        ))?
+        .ok_or("peer manifest")?;
+    f.source.client.persist_identity_directory(&manifest)?;
     f.source.client.add_group_member_with_root("group", "device-peer-one", "member", &peer_root)?;
     let captured = Arc::default();
     let mut gateway = super::fixture::RecordingGateway::new(Arc::clone(&captured));
