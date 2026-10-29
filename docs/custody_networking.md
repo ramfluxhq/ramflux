@@ -117,7 +117,7 @@ Challenge, consumed-proof and session maps are process-local. A challenge has
 a 300-second monotonic deadline; consumed nonce/proof markers remain for 600
 seconds. A connection may have four outstanding challenges. Sources normalize
 IPv4-mapped addresses and share IPv4 /24, IPv6 /64 and IPv6 /48 budgets; no prefix
-may hold more than 64 outstanding challenges. Issuance windows permit eight per
+may hold more than 64 outstanding challenges. Issuance windows permit sixteen per
 IP and 32 per IPv4 /24, IPv6 /64 and
 IPv6 /48 per minute, plus 1024 per node. These limits include IPv4-mapped sources.
 The node-wide issuance window reserves two challenges when admitting a prefix;
@@ -188,8 +188,8 @@ are retried as well.
 Filling the handshake pool requires at least ceil(H/4) distinct IPv4 /24s or IPv6
 /48s, reconnecting at least once per ten-second deadline. Blocking challenges for
 fresh prefixes requires at least 32 distinct source shares (1024 / 32) per minute,
-using at least four
-IPs per share to fill it. Each IP can spend only eight challenges per minute;
+using at least two
+IPs per share to fill it. Each IP can spend only sixteen challenges per minute;
 an IP alone cannot consume its /24 or /48 share, and the same 32 cap applies
 to IPv6 /64. Two-slot reservations for new shares also count toward the
 node-wide bound; reservations are never retired by other sources. These custody
@@ -265,9 +265,10 @@ action is retried with the same payload. This also handles a gateway refusal aft
 a durable operation: a retry does not reuse its old nonce or proof. `Live` is
 persisted only after publication, registration and session authentication complete.
 
-Sources behind one NAT share eight challenges per minute. The initial native
-bootstrap needs three; a reconnect needs three fresh challenges as well. A group
-of ten clients therefore needs four issuance windows, even when the /24 share
+Sources behind one NAT share sixteen challenges per minute. The initial native
+bootstrap needs three; a reconnect needs three fresh challenges as well. The
+nine-challenge registration/reconnect sequence fits in one issuance window without
+a rate-limit retry. A group of ten clients needs two issuance windows, even when the /24 share
 has spare capacity. The per-call retry deadline does not promise that an arbitrary
 concurrent batch can all complete in ninety seconds. Durable new-principal quotas
 remain separate; reconnecting known principals does not consume that quota.

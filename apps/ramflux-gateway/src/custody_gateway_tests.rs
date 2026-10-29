@@ -201,7 +201,7 @@ async fn ten_existing_sdk_clients_behind_one_ip_register_in_waves_with_ninety_se
         let gateway=Gateway::new().await?;
         let accounts=(0..10).map(|n|gateway.provision(n)).collect::<Result<Vec<_>>>()?;
         let started=Instant::now();let mut complete=0;
-        // 30 challenges require four 8/IP minute windows. Each wave contains
+        // 30 challenges require two 16/IP minute windows. Each wave contains
         // three real concurrent SDK clients; each call retains its 90s budget.
         for wave in accounts.chunks(3){
             match wave{
@@ -211,7 +211,7 @@ async fn ten_existing_sdk_clients_behind_one_ip_register_in_waves_with_ninety_se
             }
         }
         assert_eq!(complete,10);
-        eprintln!("gateway NAT registration: {complete} SDK clients complete in {:?}; every flight <=90s; 8/IP/min, 32/share/min, unchanged H/A",started.elapsed());
+        eprintln!("gateway NAT registration: {complete} SDK clients complete in {:?}; every flight <=90s; 16/IP/min, 32/share/min, unchanged H/A",started.elapsed());
         Ok(())
     }).await?
 }
@@ -276,7 +276,7 @@ async fn id02_fresh_accounts_impostor_and_reconnect_complete_through_the_real_ga
         assert!(started.elapsed() <= Duration::from_secs(90));
         assert_eq!(alice.account().state(), CreationState::Live);
         assert_eq!(alice.session().ok_or("reconnect session")?.binding_mode, BindingMode::HomeRelayReceipt);
-        eprintln!("id02 real gateway: Alice/Bob fresh bootstrap + impostor + Alice reconnect successful; reconnect {:?}, per-IP challenge tier unchanged at 8/min", started.elapsed());
+        eprintln!("id02 real gateway: Alice/Bob fresh bootstrap + impostor + Alice reconnect successful; reconnect {:?}, per-IP challenge tier at 16/min", started.elapsed());
         Ok(())
     }).await?
 }

@@ -159,8 +159,7 @@ impl Client {
     }
 }
 #[tokio::test]
-async fn id02_same_ip_reconnect_busy_is_challenge_issuance_not_handshake_or_authenticated_capacity()
--> Result {
+async fn id02_nine_same_ip_challenges_succeed_without_a_retry_wait() -> Result {
     let fixture = Fixture::new()?;
     let router = RouterCore::new();
     let store = RouterRedbStore::open(fixture.root.join("diagnosis.redb"))?;
@@ -169,6 +168,7 @@ async fn id02_same_ip_reconnect_busy_is_challenge_issuance_not_handshake_or_auth
     let service =
         CustodyService::new(node.clone(), false, &store, ramflux_node_core::now_unix_seconds())?;
     let limiter = CustodyIngressLimiter::with_pools(256, 1024, 4, Duration::from_secs(10));
+    let started = Instant::now();
     let alice = Account::new("alice", 20)?;
     let bob = Account::new("bob", 40)?;
     // Both daemons connect concurrently from the same source, then bootstrap and
@@ -201,14 +201,15 @@ async fn id02_same_ip_reconnect_busy_is_challenge_issuance_not_handshake_or_auth
         reconnect.prove(&alice, publish, &service, &router, &store)?,
         CustodyServerFrame::Published { .. }
     ));
-    assert_eq!(
+    assert!(matches!(
         reconnect.prove(&alice, register, &service, &router, &store)?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
-    );
+        CustodyServerFrame::Registered { .. }
+    ));
+    assert!(started.elapsed() < Duration::from_secs(60));
     assert!(!b.permit.is_revoked());
     assert!(!reconnect.permit.is_revoked());
-    // The same-source ninth challenge is refused, while another IP in this /24
-    // can still issue a challenge under the tiered window.
+    // All nine same-source challenges succeeded directly, without a retry path.
+    // Another IP in this /24 retains challenge headroom as well.
     let request = CustodyMeshRequest::Challenge {
         device_ref: alice.reference(),
         action: CustodyProofAction::OpenSession,
@@ -230,7 +231,7 @@ async fn id02_same_ip_reconnect_busy_is_challenge_issuance_not_handshake_or_auth
         limiter.acquire("127.0.0.1".parse()?, None, Instant::now()).ok_or("H unexpectedly full")?;
     assert!(fresh.mark_authenticated("independent-account"), "A unexpectedly full");
     eprintln!(
-        "tiered source window: challenge #9 (reconnect Register) Busy for the same IP; H and A have room; fresh IP in same /24 admitted"
+        "tiered source window: all nine same-IP challenges succeed without retry; H and A have room; fresh IP in same /24 admitted"
     );
     Ok(())
 }

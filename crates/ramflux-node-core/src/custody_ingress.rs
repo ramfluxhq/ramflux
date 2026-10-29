@@ -55,7 +55,7 @@ impl CustodySourceBudget {
         if keys
             .iter()
             .enumerate()
-            .any(|(n, k)| self.buckets.get(k).is_some_and(|b| b.count >= [8, 32, 32][n]))
+            .any(|(n, k)| self.buckets.get(k).is_some_and(|b| b.count >= [16, 32, 32][n]))
         {
             return None;
         }

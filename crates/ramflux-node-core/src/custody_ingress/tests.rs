@@ -233,13 +233,13 @@ fn challenge_ip_and_share_tiers_cover_mapped_ipv4_and_both_ipv6_prefixes() -> Re
                 _ => format!("2001:db8:1:{host:x}::1"),
             }
         };
-        for host in 1..=4 {
-            for _ in 0..8 {
+        for host in 1..=2 {
+            for _ in 0..16 {
                 assert!(budget.admit(source(host).parse()?, tick).is_some());
             }
             assert!(budget.admit(source(host).parse()?, tick).is_none(), "IP tier");
         }
-        assert!(budget.admit(source(5).parse()?, tick).is_none(), "share tier");
+        assert!(budget.admit(source(3).parse()?, tick).is_none(), "share tier");
         let fresh = if family == 0 { "198.51.100.1" } else { "2001:db8:2::1" };
         assert!(budget.admit(fresh.parse()?, tick).is_some());
         assert!(budget.admit(source(1).parse()?, tick + Duration::from_secs(60)).is_some());
@@ -253,7 +253,7 @@ fn one_ip_cannot_spend_the_other_ips_challenge_share_and_mapped_addresses_do_not
         let tick = Instant::now();
         let mut budget = CustodySourceBudget::default();
         let attacker = if family == 0 { "192.0.2.1" } else { "2001:db8:1::1" };
-        for _ in 0..8 {
+        for _ in 0..16 {
             assert!(budget.admit(attacker.parse()?, tick).is_some());
         }
         assert!(budget.admit(attacker.parse()?, tick).is_none());
@@ -268,12 +268,12 @@ fn one_ip_cannot_spend_the_other_ips_challenge_share_and_mapped_addresses_do_not
     Ok(())
 }
 #[test]
-fn filling_the_challenge_window_requires_at_least_32_shares_and_four_ips_per_share() {
+fn filling_the_challenge_window_requires_at_least_32_shares_and_two_ips_per_share() {
     let tick = Instant::now();
     let mut budget = CustodySourceBudget::default();
     for share in 0..32 {
-        for host in 1..=4 {
-            for _ in 0..8 {
+        for host in 1..=2 {
+            for _ in 0..16 {
                 assert!(budget.admit(ip(share, host), tick).is_some());
             }
         }
@@ -295,10 +295,11 @@ fn reviewer_window_probe_records_the_32_share_threshold_for_ten_minutes() -> Res
                 let tick = started + Duration::from_secs(minute * 60);
                 for share in 0..shares {
                     for request in 0..256 {
+                        let host = request / 16 % 2 + 1;
                         let source = if ipv6 {
-                            format!("2001:db8:{share:x}:{request:x}::1")
+                            format!("2001:db8:{share:x}:{host:x}::1")
                         } else {
-                            format!("198.18.{share}.{}", request % 254 + 1)
+                            format!("198.18.{share}.{host}")
                         };
                         if budget.admit(source.parse()?, tick).is_some() {
                             issued += 1;
@@ -317,8 +318,23 @@ fn reviewer_window_probe_records_the_32_share_threshold_for_ten_minutes() -> Res
             assert_eq!(honest, if shares < 32 { 30 } else { 0 });
             assert_eq!(busy, if shares < 32 { 0 } else { 30 });
             eprintln!(
-                "challenge-window family={} attacker_shares={shares} issued_10min={issued} honest_fresh={honest} busy={busy}",
+                "challenge-window family={} attacker_shares={shares} ips_per_share=2 issued_10min={issued} honest_fresh={honest} busy={busy}",
                 if ipv6 { "v6/48" } else { "v4/24" }
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn nine_same_ip_challenges_succeed_within_one_window_without_retry_wait() -> Result {
+    let tick = Instant::now();
+    for source in ["192.0.2.1", "::ffff:192.0.2.1", "2001:db8:1::1"] {
+        let mut budget = CustodySourceBudget::default();
+        for challenge in 1..=9 {
+            assert!(
+                budget.admit(source.parse()?, tick).is_some(),
+                "challenge {challenge} must succeed at the same monotonic instant"
             );
         }
     }
