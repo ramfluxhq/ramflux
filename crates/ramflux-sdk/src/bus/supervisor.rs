@@ -266,13 +266,7 @@ impl Supervisor {
                 return self.account_list().await;
             }
             "account.switch" => {
-                let id = request_account_id(&request)?.to_owned();
-                self.require_restore_ready(&id, false)?;
-                if !self.accounts.borrow().contains_key(&id) {
-                    return Err(self.account_unavailable(&id));
-                }
-                self.set_active(&id).await?;
-                return Ok(reply(serde_json::json!({"active_account_id": id})));
+                return self.switch_account(&request).await;
             }
             "daemon.status" => {
                 return Ok(reply(
@@ -354,6 +348,16 @@ impl Supervisor {
             self.attended.borrow_mut().retain(|_, account| account != &id);
         }
         response
+    }
+
+    async fn switch_account(&self, request: &LocalBusFrame) -> Result<ActorResponse, SdkError> {
+        let id = request_account_id(request)?.to_owned();
+        self.require_restore_ready(&id, false)?;
+        if !self.accounts.borrow().contains_key(&id) {
+            return Err(self.account_unavailable(&id));
+        }
+        self.set_active(&id).await?;
+        Ok(reply(serde_json::json!({"active_account_id": id})))
     }
 
     async fn account_list(&self) -> Result<ActorResponse, SdkError> {
