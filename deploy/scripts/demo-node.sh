@@ -204,7 +204,24 @@ if [ "$command" = recover ] && [ -n "$initial_owner" ]; then
   owner=$initial_owner
   check_resources
   containers=$(runtime ps -aq --filter "label=com.docker.compose.project=$DEMO_PROJECT")
-  for container in $containers; do runtime rm -f "$container" >/dev/null; done
+  # Podman refuses a dependency until its dependent containers have been removed.
+  # Retry only the already verified project IDs, and stop if no removal succeeds.
+  while [ -n "$containers" ]; do
+    remaining=
+    progress=0
+    removal_errors=
+    for container in $containers; do
+      if removal_error=$(runtime rm -f "$container" 2>&1); then
+        progress=1
+      else
+        remaining="${remaining}${remaining:+ }$container"
+        removal_errors="${removal_errors}${removal_errors:+
+}$removal_error"
+      fi
+    done
+    containers=$remaining
+    [ -z "$containers" ] || [ "$progress" = 1 ] || fail "$removal_errors"
+  done
   # First up cannot adopt existing volumes: these belong to the failed setup.
   volumes=$(runtime volume ls -q --filter "label=com.docker.compose.project=$DEMO_PROJECT")
   for volume in $volumes; do runtime volume rm "$volume" >/dev/null; done
@@ -454,6 +471,7 @@ RAMFLUX_RELAY_VOICE_UDP_PORT=$DEMO_BIND_ADDR:$RAMFLUX_DEMO_VOICE_UDP_PORT
 RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450
 ENV
       fi
+      python3 "$script_dir/demo-node-config.py" "$repo" "$state" append-custody-runtime "$runtime_pending"
       python3 - "$runtime_pending" "$state/runtime.env" <<'PY'
 import os
 from pathlib import Path

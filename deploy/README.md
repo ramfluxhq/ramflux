@@ -136,22 +136,15 @@ for service in gateway router notify federation relay signaling retention; do
   docker build -f deploy/Dockerfile --build-arg "BIN=ramflux-$service" \
     -t "ghcr.io/ramfluxhq/ramflux-$service:$DEMO_VERSION" .
 done
-docker save \
-  $(for service in gateway router notify federation relay signaling retention; do
-      printf 'ghcr.io/ramfluxhq/ramflux-%s:%s ' "$service" "$DEMO_VERSION"
-    done) \
-  -o ramflux-demo-images.tar
+
 ```
 
-Use `podman build` and `podman save` instead when Podman is the selected engine.
-Copy the archive to the target, load it into the same engine/user context used by
-the demo wrapper, and add the matching values to the operator env file:
-
-```sh
-docker load -i ramflux-demo-images.tar  # or: podman load -i ...
-DEMO_VERSION=release-2026-10-27
-DEMO_PREBUILT_IMAGES=1
-```
+Use `podman build` instead when Podman is the selected engine. Follow the
+one-image-per-archive transfer procedure and image identity checklist in
+[Upgrading or rolling back](#upgrading-or-rolling-back-an-existing-demo-and-private-admin-access).
+Load all seven archives into the same engine/user context used by the wrapper,
+then set `DEMO_VERSION=release-2026-10-27` and `DEMO_PREBUILT_IMAGES=1` in the
+operator env file.
 
 With this explicit opt-in, `up` still runs configuration preflight but skips the
 local Cargo build and invokes Compose with `--no-build`. Before Compose starts,
@@ -359,6 +352,32 @@ retains the node identity, CA, seeds, volumes, ports and all other ownership set
 and prints the canonical rollback command. A plain `up` still refuses a version change.
 An upgrade also refuses a missing or newly selected voice/admin overlay, reporting only
 the relevant configuration key.
+
+Custody remains disabled when its identity inputs are absent, as on first install.
+To configure it, provide both `RAMFLUX_CUSTODY_NODE_PUBLIC_KEY` (the independently
+trusted receiving-node public key) and `RAMFLUX_CUSTODY_NODE_RECORD_FILE` (an
+absolute host path to its signed record). A partial configuration refuses before
+any transaction or engine action with `DEMO_CUSTODY_INPUT_MISSING: <key>`; an
+unreadable, empty, oversized, or symlinked record reports
+`DEMO_CUSTODY_INPUT_INVALID: RAMFLUX_CUSTODY_NODE_RECORD_FILE`. The same checks
+apply to first install and an upgrade from a version without custody inputs.
+No receiving-node key, record, or proxy signing seed is generated or inferred.
+`RAMFLUX_CUSTODY_PROXY_SIGNING_SEED` is forwarded only to the gateway when
+configured; receipt mode requires the dedicated node-authorized seed described in
+[custody configuration](../docs/custody_networking.md#receiving-node-configuration).
+
+The wrapper keeps a private managed copy of the signed record, mounts it read-only
+into the router, and retains the custody public key, configured proxy seed and
+`RAMFLUX_CUSTODY_{HANDSHAKE_POOL,AUTHENTICATED_POOL,AUTH_TIMEOUT_MS}` inputs in
+`runtime.env` with their Compose aliases. A version-only upgrade reuses these
+retained inputs when the operator env omits them. Replacing or clearing a retained
+custody public key or proxy seed refuses with `DEMO_CUSTODY_INPUT_CHANGED: <key>`;
+an image upgrade cannot silently replace the receiving-node pin or signing identity.
+Rollback and recovery restore
+the exact snapshot inputs and record bytes, without consulting the operator's
+current custody settings or the original record path. Service startup still
+performs signed-record and pool validation; wrapper validation is not a signature
+or authorization check.
 
 When transferring prebuilt images, use one image per archive, especially with Podman.
 On the source host, set the selected engine and exact version, then save each image:

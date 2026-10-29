@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import stat
@@ -291,6 +292,55 @@ def runtime_values(state):
     return dict(line.split("=", 1) for line in runtime.read_text().splitlines() if "=" in line)
 
 
+def custody_inputs(state):
+    """Retain configured custody inputs without generating a receiving-node trust pin."""
+    keys = (
+        "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "RAMFLUX_CUSTODY_NODE_RECORD_FILE",
+        "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", "RAMFLUX_CUSTODY_HANDSHAKE_POOL",
+        "RAMFLUX_CUSTODY_AUTHENTICATED_POOL", "RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS",
+    )
+    previous = runtime_values(state)
+    values = {key: os.environ.get(key, previous.get(key, "")) for key in keys}
+    changed = [key for key in (keys[0], keys[2])
+               if previous.get(key) and values[key] != previous[key]]
+    if changed:
+        sys.exit("DEMO_CUSTODY_INPUT_CHANGED: " + ", ".join(changed))
+    identity_keys = keys[:3]
+    if any(values[key] for key in identity_keys):
+        missing = [key for key in identity_keys[:2] if not values[key]]
+        if missing:
+            sys.exit("DEMO_CUSTODY_INPUT_MISSING: " + ", ".join(missing))
+    for key in keys:
+        value = values[key]
+        if any(char in value for char in "\n\r\x00$'\"\\"):
+            sys.exit("DEMO_CUSTODY_INPUT_INVALID: " + key)
+    for key in (keys[0], keys[2]):
+        if values[key] and not re.fullmatch(r"[A-Za-z0-9_-]+", values[key]):
+            sys.exit("DEMO_CUSTODY_INPUT_INVALID: " + key)
+    record = None
+    if values[keys[1]]:
+        source = Path(values[keys[1]])
+        if str(source) == "/etc/ramflux/custody/node-record.json":
+            source = state / "secrets/custody/node-record.json"
+        try:
+            if not source.is_absolute() or source.is_symlink():
+                raise ValueError("unsafe record path")
+            with source.open("rb") as stream:
+                record = stream.read(512 * 1024 + 1)
+            if not record or len(record) > 512 * 1024:
+                raise ValueError("record size")
+        except (OSError, ValueError):
+            sys.exit("DEMO_CUSTODY_INPUT_INVALID: " + keys[1])
+        values[keys[1]] = "/etc/ramflux/custody/node-record.json"
+    return {key: value for key, value in values.items() if value}, record
+
+
+def append_custody_runtime(state, path):
+    values, _ = custody_inputs(state)
+    with path.open("a") as output:
+        output.writelines(f"{key}={value}\n" for key, value in values.items())
+
+
 def selected_overlays():
     return {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": bool(os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT")),
@@ -340,6 +390,23 @@ def render_files(repo, state, owner):
         "volumes": {f"{name}-redb": {"labels": label} for name in SERVICES},
         "networks": {"default": {"labels": label}},
     }
+    custody, record = custody_inputs(state)
+    if record is not None:
+        directory = state / "secrets/custody"
+        ensure_directory(directory, mode=0o755)
+        directory.chmod(0o755)
+        atomic_bytes(directory / "node-record.json", record, mode=0o644)
+        override["services"]["ramflux-router"]["volumes"] = [
+            "./secrets/custody:/etc/ramflux/custody:ro",
+        ]
+    for service, keys in (
+        ("gateway", ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED")),
+        ("router", ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "RAMFLUX_CUSTODY_NODE_RECORD_FILE")),
+    ):
+        environment = {key: "${RF_COMPOSE_" + key.removeprefix("RAMFLUX_") + "}"
+                       for key in keys if key in custody}
+        if environment:
+            override["services"][f"ramflux-{service}"]["environment"] = environment
     atomic_json(state / "demo-override.json", override)
     refreshed = []
     for filename, source, enabled in (
@@ -429,6 +496,9 @@ def prepare(repo, state, command, validate_only=False):
         sys.exit("upgrade requires a changed DEMO_VERSION")
     if command == "rollback" and len(owner.get("snapshot_history", [])) < 2:
         sys.exit("no previous demo snapshot is available for rollback")
+
+    if command in ("up", "upgrade"):
+        custody_inputs(state)
 
     previous_snapshot = owner.get("current_snapshot")
     capture_legacy_snapshot = bool(
@@ -598,6 +668,8 @@ def main():
             durable_unlink(state / "transaction.pending")
         elif action == "set-node-id":
             set_node_id(state, sys.argv[4])
+        elif action == "append-custody-runtime":
+            append_custody_runtime(state, Path(sys.argv[4]))
         else:
             sys.exit("invalid demo configuration action")
     except SnapshotError as error:

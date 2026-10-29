@@ -106,6 +106,9 @@ if args[:2] in (["rm", "-f"], ["network", "rm"], ["volume", "rm"]):
     target = args[-1]
     if control.get("remove_exit"):
         sys.exit(control["remove_exit"])
+    if any(dependent in resources for dependent
+           in control.get("remove_dependencies", {}).get(target, [])):
+        sys.exit("container has dependent containers which must be removed before it")
     if target not in resources or resources[target]["project"] != "demo-test":
         sys.exit("refusing removal outside the selected project")
     del resources[target]
