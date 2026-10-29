@@ -89,7 +89,6 @@ impl Fixture {
             audience: "node".into(),
             binding_mode: BindingMode::DirectExporter,
             allow_no_channel_binding: false,
-            allow_experimental_native_dm: false,
             timeout: Duration::from_secs(5),
         };
         Ok(Self { _root: root, config, vault, script, server })
@@ -97,8 +96,7 @@ impl Fixture {
 }
 fn create(root: &Path, vault: &MemoryPrimaryVault) -> Result {
     let now = crate::custody::network::now()?;
-    let mut ceremony =
-        CreationCeremony::begin(true, root, crate::custody::tests::input("alice"), now)?;
+    let mut ceremony = CreationCeremony::begin(root, crate::custody::tests::input("alice"), now)?;
     let phrase = ceremony.show_once()?;
     let words: Vec<_> =
         phrase.split_whitespace().map(|word| Zeroizing::new(word.to_owned())).collect();

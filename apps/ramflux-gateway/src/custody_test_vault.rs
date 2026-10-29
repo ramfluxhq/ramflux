@@ -32,6 +32,10 @@ impl Vault {
     }
 }
 impl PrimaryVault for Vault {
+    fn delete(&self, reference: &str) -> Result<(), SdkError> {
+        self.0.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.remove(reference);
+        Ok(())
+    }
     fn preflight(&self) -> Result<(), SdkError> {
         Ok(())
     }

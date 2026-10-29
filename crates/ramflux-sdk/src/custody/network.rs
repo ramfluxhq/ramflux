@@ -54,7 +54,7 @@ pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     mode: BindingMode,
     audience: String,
 }
-pub(super) fn now() -> Result<u64, SdkError> {
+pub(crate) fn now() -> Result<u64, SdkError> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SdkError::CustodySetupInvalid)?
@@ -175,9 +175,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     ) -> Result<Self, SdkError> {
         let (account, device, credentials) = prepared;
         let opened = Self::open_stream(&config, stream).await?;
-        let mut connection = Self::from_authority(
-            LocalAuthority { account, device, credentials }, opened, &config,
-        );
+        let mut connection =
+            Self::from_authority(LocalAuthority { account, device, credentials }, opened, &config);
         let actions = connection.registration_actions()?;
         connection.register(&actions, &mut 0).await?;
         connection.persist_live(&config.account_root).await?;
@@ -250,9 +249,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
 
     fn registration_actions(&self) -> Result<[CustodyProofAction; 3], SdkError> {
         Ok([
-            CustodyProofAction::Publish {
-                publication: Box::new(self.account.publication()),
-            },
+            CustodyProofAction::Publish { publication: Box::new(self.account.publication()) },
             CustodyProofAction::Register {
                 prekey_bundle: serde_json::to_value(self.prekey_bundle()?)?,
             },
@@ -271,9 +268,11 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                     if record_hash == object_hash(self.account.record())? => {}
                 (1, CustodyServerFrame::Registered { device_ref, target_delivery_id })
                     if device_ref == self.device
-                        && target_delivery_id == ramflux_protocol::qualified_device_id(
-                            &self.device.account_anchor, &self.device.device_id,
-                        )? => {}
+                        && target_delivery_id
+                            == ramflux_protocol::qualified_device_id(
+                                &self.device.account_anchor,
+                                &self.device.device_id,
+                            )? => {}
                 (2, CustodyServerFrame::SessionEstablished { session }) => {
                     if session.device_ref != self.device
                         || session.binding_mode != self.mode

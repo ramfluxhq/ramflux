@@ -84,6 +84,7 @@ impl Client {
                 connection: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
                 mode: BindingMode::HomeRelayReceipt,
                 session_ids: BTreeSet::new(),
+                handoff_session: None,
                 router: None,
                 auth_deadline: tokio::time::Instant::now() + Duration::from_secs(10),
                 authenticated: false,

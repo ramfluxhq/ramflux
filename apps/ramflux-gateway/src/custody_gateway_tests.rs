@@ -89,14 +89,12 @@ impl Gateway {
             audience: "test-node".into(),
             binding_mode: BindingMode::HomeRelayReceipt,
             allow_no_channel_binding: false,
-            allow_experimental_native_dm: false,
             timeout: Duration::from_secs(10),
         }
     }
     fn create_local(&self, id: &str, principal: &str) -> Result<ramflux_sdk::custody::BornAccount> {
         let now = ramflux_node_core::now_unix_seconds();
         let mut ceremony = CreationCeremony::begin(
-            true,
             &self.accounts,
             CreateInput {
                 local_account_id: id.into(),
