@@ -143,3 +143,46 @@ fn terminal_result_summaries_are_bounded_and_reject_unsafe_text() -> Result<(), 
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn native_task_authoring_uses_signed_kind_without_a_legacy_manifest()
+-> crate::client::native_test_support::TestResult {
+    let native = crate::client::native_test_support::Fixture::new("native-task-human").await?;
+    let root = native.root.0.clone();
+    let state = LocalBusDaemonState {
+        config: LocalBusConfig::new(root.join("bus.sock"), &root),
+        account_index: None,
+        nodes: crate::node::NodeStore::default(),
+        accounts: BTreeMap::from([(
+            "native-task-human".into(),
+            LocalBusAccountState::disconnected(
+                native.client,
+                native.config,
+                native.manifest.principal_commitment,
+            ),
+        )]),
+        active_account_id: Some("native-task-human".into()),
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    };
+    assert!(!local_bus_account_manifest_path(&root, "native-task-human").exists());
+    for method in ["task.start", "task.accept", "task.decline", "task.resolve", "task.cancel"] {
+        let request = LocalBusFrame::request(
+            method,
+            Some("native-task-human".into()),
+            "task",
+            method,
+            json!({}),
+        );
+        authorize_local_task_sender(&request, &state, "native-task-human")?;
+    }
+    let request = LocalBusFrame::request(
+        "proposal",
+        Some("native-task-human".into()),
+        "task",
+        "task.propose",
+        json!({}),
+    );
+    assert!(authorize_local_task_sender(&request, &state, "native-task-human").is_err());
+    Ok(())
+}

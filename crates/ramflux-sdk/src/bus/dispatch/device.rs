@@ -271,9 +271,8 @@ async fn dispatch_device_sync_export(
     body: LocalBusDeviceSyncExportRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?.to_owned();
-    let manifest_path = local_bus_account_manifest_path(&state.config.data_root, &account_id);
-    let manifest = read_local_bus_account_manifest(&manifest_path)?;
     let account = local_bus_account_mut(state, &account_id)?;
+    let commitment = account.principal_commitment.clone();
     let mut engine = account.take_live_engine().await?;
     let pool = account.relay_quic_pool()?;
     let response = account
@@ -281,7 +280,7 @@ async fn dispatch_device_sync_export(
         .export_own_device_sync(
             &mut engine,
             &pool,
-            &manifest.principal_commitment,
+            &commitment,
             &body.target_device_id,
             &body.relay_endpoint,
             body.relay_service_key_base64,
@@ -298,9 +297,8 @@ async fn dispatch_device_sync_import(
     body: LocalBusDeviceSyncImportRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?.to_owned();
-    let manifest_path = local_bus_account_manifest_path(&state.config.data_root, &account_id);
-    let manifest = read_local_bus_account_manifest(&manifest_path)?;
     let account = local_bus_account_mut(state, &account_id)?;
+    let commitment = account.principal_commitment.clone();
     let envelope: SdkOwnDeviceSyncEnvelope = serde_json::from_value(body.envelope)?;
     let mut engine = account.take_live_engine().await?;
     let pool = account.relay_quic_pool()?;
@@ -309,7 +307,7 @@ async fn dispatch_device_sync_import(
         .import_own_device_sync(
             &mut engine,
             &pool,
-            &manifest.principal_commitment,
+            &commitment,
             &envelope,
             body.relay_service_key_base64,
         )
@@ -421,6 +419,31 @@ pub(crate) fn account_known_devices(
     account_id: &str,
     account: &LocalBusAccountState,
 ) -> Result<Vec<LocalBusDeviceRecord>, SdkError> {
+    if let Some(native) = &account.client.born_v3_account {
+        let local = native.local_device_id()?;
+        return native
+            .record()
+            .body
+            .devices
+            .iter()
+            .filter(|device| device.status == ramflux_protocol::DeviceSetStatus::Active)
+            .map(|device| {
+                Ok(LocalBusDeviceRecord {
+                    device_id: device.device_id.clone(),
+                    device_epoch: device.device_epoch,
+                    target_delivery_id: ramflux_protocol::qualified_device_id(
+                        &native.record().body.account_anchor,
+                        &device.device_id,
+                    )?,
+                    capability_scope: device
+                        .branch_certificate
+                        .as_ref()
+                        .map_or_else(Vec::new, |certificate| certificate.body.capabilities.clone()),
+                    is_local: device.device_id == local,
+                })
+            })
+            .collect();
+    }
     let manifest_path = local_bus_account_manifest_path(&state.config.data_root, account_id);
     let manifest = read_local_bus_account_manifest(&manifest_path)?;
     let current = LocalBusDeviceRecord {
@@ -457,3 +480,7 @@ fn merge_manifest_device(
     rows.sort_by(|a, b| a.device_id.cmp(&b.device_id));
     rows
 }
+
+#[cfg(test)]
+#[path = "tests/native_device.rs"]
+mod native_tests;
