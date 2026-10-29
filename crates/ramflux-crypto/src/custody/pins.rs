@@ -119,7 +119,7 @@ impl AuthorityPins {
         let hash = object_hash(record.envelope())?;
         let devices = indexed_devices(record)?;
         if let Some(pin) = self.accounts.get_mut(&body.account_anchor) {
-            return observe_existing(pin, record, previous, range, certificate, hash, devices);
+            return observe_existing(pin, record, previous, certificate, hash, devices);
         }
         self.accounts.insert(
             body.account_anchor.clone(),
@@ -165,12 +165,12 @@ fn observe_existing(
     pin: &mut AccountPin,
     record: &VerifiedRecord,
     previous: Option<&Envelope<DeviceSet>>,
-    range: u64,
     certificate: String,
     hash: String,
     devices: BTreeMap<String, (u64, String, String)>,
 ) -> Result<PinOutcome, CryptoError> {
     let body = &record.envelope().body;
+    let range = decode_epoch(body.device_set_epoch)?.0;
     if pin.principal_id != body.principal_id || pin.principal_kind != body.principal_kind {
         return Err(reject("custody immutable identity changed"));
     }
