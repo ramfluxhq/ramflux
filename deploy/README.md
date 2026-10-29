@@ -441,9 +441,21 @@ partial, recovery refuses with the manual path: restore the complete demo data
 directory from the operator backup, verify `owner.json`, and only then remove
 `transaction.pending`. The adjacent `.lock` is always released on ordinary failures.
 After SIGKILL, first verify that no demo operation remains and remove only that stale
-adjacent lock. A failed initial `up` has no prior snapshot; a kill before `owner.json`
-exists can leave a nonempty unowned directory. Inspect and preserve its private state
-before deciding whether to wipe that brand-new directory and run `up` again.
+adjacent lock.
+
+A failed first `up` has no previous version to restore. Its exit-3 diagnostic instead
+says ``initial setup failed: run `demo-node.sh recover` to undo it``. Keep the original
+operator settings and run `recover` (or `rollback`): the tool stops and removes only
+this project's containers and networks after checking their project labels and owner
+token. It also removes the project's owned volumes created by that first setup:
+retaining their old owner token would prevent a fresh `up`. It then removes the files
+created by the failed setup and clears the marker last. Other projects are preserved.
+No images or complete
+Compose files are needed for this cleanup. A removal failure retains the marker so
+the operation can be retried. Successful cleanup prints
+``initial setup rolled back; run `up` again`` and leaves the originally empty data
+directory ready for another `up`. Resource conflicts are checked before a new
+transaction is published; a refused adoption leaves no pending marker.
 
 For temporary administration, set `DEMO_ADMIN_LOOPBACK_PORT=59487` in the operator
 env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
