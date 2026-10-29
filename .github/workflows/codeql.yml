@@ -33,4 +33,4 @@ jobs:
         run: cargo build --workspace
 
       - name: Analyze
-        uses: github/codeql-action/analyze@a16f4a497336b68eeff8ef72868ea4bab1c672bb
+        uses: github/codeql-action/analyze@2d7aeadbf01df0b0a833f218ff2eccfb1b5fc291
