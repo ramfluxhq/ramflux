@@ -486,14 +486,71 @@ else:
         self.assertEqual((self.state / "owner.json").read_bytes(), owner)
         self.assertFalse(any("up" in args for args in self.compose_commands()))
 
+        self.assertFalse((self.state / "transaction.pending").exists())
         self.control.write_text("{}")
-        self.run_script("recover")
         self.journal.write_text("")
         result = self.run_script("upgrade")
         self.assertIn("rollback command:", result.stdout)
         inspect_images = [args[2] for args in self.commands() if args[:2] == ["image", "inspect"]]
         self.assertEqual(len(inspect_images), 7)
         self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
+
+    def test_prebuilt_images_require_distinct_ids_and_matching_binaries_before_writes(self):
+        services = ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
+        with self.env_file.open("a") as output:
+            output.write("DEMO_PREBUILT_IMAGES=1\n")
+        self.control.write_text(json.dumps({"image_ids": {service: "sha256:one" for service in services}}))
+        refused = self.run_script("up", success=False)
+        self.assertIn("demo images share an image ID", refused.stderr)
+        for service in services:
+            self.assertIn(service, refused.stderr)
+        self.assertEqual(list(self.state.iterdir()), [])
+        self.assertEqual(self.compose_commands(), [])
+
+        self.control.write_text("{}")
+        self.run_script("up")
+        initial = self.managed_state()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.control.write_text(json.dumps({"image_bins": {"router": "ramflux-gateway"}}))
+        self.journal.write_text("")
+        refused = self.run_script("upgrade", success=False)
+        self.assertIn("invalid demo image identity or RAMFLUX_BIN: router", refused.stderr)
+        self.assertEqual(self.managed_state(), initial)
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertEqual(self.compose_commands(), [])
+        self.control.write_text("{}")
+        self.run_script("upgrade")
+        self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
+
+    def test_rollback_and_recover_verify_target_image_identity_before_restoring(self):
+        self.run_script("up")
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\nDEMO_PREBUILT_IMAGES=1\n")
+        self.run_script("upgrade")
+        initial = self.managed_state()
+        self.control.write_text(json.dumps({"image_bins": {"retention": "ramflux-router"}}))
+        self.journal.write_text("")
+        self.run_script("rollback", success=False)
+        self.assertEqual(self.managed_state(), initial)
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertEqual(self.compose_commands(), [])
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v3\n")
+        self.control.write_text(json.dumps({"fail_up_versions": ["demo-v3"]}))
+        self.run_script("upgrade", success=False)
+        failed_state = self.managed_state()
+        pending = (self.state / "transaction.pending").read_bytes()
+        self.control.write_text(json.dumps({"image_bins": {"retention": "ramflux-router"}}))
+        self.journal.write_text("")
+        self.run_script("recover", success=False)
+        self.assertEqual(self.managed_state(), failed_state)
+        self.assertEqual((self.state / "transaction.pending").read_bytes(), pending)
+        self.assertEqual(self.compose_commands(), [])
+        self.control.write_text("{}")
+        self.run_script("recover")
+        self.assertEqual(self.managed_state(), initial)
+        self.assertFalse((self.state / "transaction.pending").exists())
 
     def test_admin_opt_in_uses_saved_overlay_and_refuses_conflicting_ports(self):
         with self.env_file.open("a") as output:
@@ -600,8 +657,11 @@ else:
             with self.subTest(kind=kind):
                 self.control.write_text(json.dumps({"unlabeled": kind}))
                 self.journal.write_text("")
-                self.run_script("up", success=False)
+                refused = self.run_script("up", success=False)
+                self.assertIn(f"refusing foreign {kind}", refused.stderr)
                 self.assertFalse(self.compose_commands())
+                self.control.write_text("{}")
+                self.run_script("recover")
 
     def test_status_fails_for_stopped_or_unhealthy_services(self):
         self.run_script("up")
