@@ -80,7 +80,7 @@ impl AccountDb {
             self.set_projection_checkpoint(&checkpoint.projection_name, &checkpoint.last_event_id)?;
         }
         self.retire_imported_ratchet_payloads()?;
-        self.checkpoint_retired_secrets()?;
+        self.connection.request_background_checkpoint();
         Ok(())
     }
 

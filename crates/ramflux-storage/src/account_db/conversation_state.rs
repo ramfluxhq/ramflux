@@ -111,7 +111,6 @@ impl AccountDb {
             }
             Ok::<Vec<MessageTombstoneRecord>, StorageError>(tombstones)
         })?;
-        self.checkpoint_retired_secrets_if_committed()?;
         Ok(tombstones)
     }
 
