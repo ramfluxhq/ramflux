@@ -39,7 +39,7 @@ async fn ordinary_native_unlock_lock_restart_needs_only_data_passphrase() -> Res
     let root = Root::new()?;
     let vault = TestVault::default();
     let now = crate::custody::network_now()?;
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("ordinary"), now)?;
+    let mut ceremony = CreationCeremony::begin(&root.0, input("ordinary"), now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     let born = ceremony.confirm_with_passphrase(
@@ -129,7 +129,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
     let root = Root::new()?;
     let socket = root.0.join("create.sock");
     let mut config = LocalBusConfig::new(&socket, &root.0);
-    config.enable_born_v3_creation = true;
+
     config.custody_vault = Some(Arc::new(TestVault::default()));
     let (stop, receiver) = watch::channel(false);
     let flow = async {

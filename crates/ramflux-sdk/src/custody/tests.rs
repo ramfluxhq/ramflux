@@ -188,7 +188,7 @@ pub(crate) fn create_with_phrase(
     vault: &dyn PrimaryVault,
     now: u64,
 ) -> Result<(BornAccount, Zeroizing<String>)> {
-    let mut ceremony = CreationCeremony::begin(true, root, input(id), now)?;
+    let mut ceremony = CreationCeremony::begin(root, input(id), now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     let account = ceremony.confirm(&words(&phrase, positions)?, vault, now)?;
@@ -203,7 +203,7 @@ pub(crate) fn create_with_device(
 ) -> Result<BornAccount> {
     let mut input = input(id);
     input.device_id = device.into();
-    let mut ceremony = CreationCeremony::begin(true, root, input, now)?;
+    let mut ceremony = CreationCeremony::begin(root, input, now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     Ok(ceremony.confirm(&words(&phrase, positions)?, vault, now)?)
@@ -214,13 +214,12 @@ pub(crate) fn mark_live(root: &Path, id: &str, now: u64) -> Result {
     Ok(())
 }
 #[test]
-fn custody_default_off_has_no_recovery_or_persistence_side_effects() -> Result {
+fn custody_preparation_does_not_persist_recovery_material() -> Result {
     let root = Root::new()?;
-    assert!(matches!(
-        CreationCeremony::begin(false, &root.0, input("off"), 100),
-        Err(SdkError::CustodyCreationDisabled)
-    ));
+    let pending = CreationCeremony::begin(&root.0, input("prepared"), 100)?;
     assert!(!root.0.join("custody_accounts").exists());
+    assert_eq!(std::fs::read_dir(&root.0)?.count(), 0);
+    drop(pending);
     assert_eq!(std::fs::read_dir(&root.0)?.count(), 0);
     Ok(())
 }
@@ -228,15 +227,15 @@ fn custody_default_off_has_no_recovery_or_persistence_side_effects() -> Result {
 fn custody_show_once_ordering_and_single_confirmation_attempt_are_enforced() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("repeat"), 100)?;
+    let mut ceremony = CreationCeremony::begin(&root.0, input("repeat"), 100)?;
     let phrase = ceremony.show_once()?;
     assert_eq!(phrase.split_whitespace().count(), 24);
     assert!(ceremony.show_once().is_err());
     assert!(ceremony.hidden_challenge().is_err());
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("wrong"), 100)?;
+    let mut ceremony = CreationCeremony::begin(&root.0, input("wrong"), 100)?;
     assert!(ceremony.hidden_challenge().is_err());
     assert!(ceremony.show_once().is_err());
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("failed"), 100)?;
+    let mut ceremony = CreationCeremony::begin(&root.0, input("failed"), 100)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     assert!(positions.iter().all(|p| (1..=24).contains(p)));
@@ -256,7 +255,7 @@ fn custody_show_once_ordering_and_single_confirmation_attempt_are_enforced() -> 
 fn custody_confirmed_authority_reloads_with_latch_and_without_phrase_or_master_on_disk() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("new"), 100)?;
+    let mut ceremony = CreationCeremony::begin(&root.0, input("new"), 100)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     let account = ceremony.confirm(&words(&phrase, positions)?, &vault, 100)?;
@@ -306,7 +305,7 @@ fn custody_vault_failure_reserves_mode_and_never_creates_a_legacy_manifest() -> 
     assert!(account_exists(&root.0, "failed")?);
     assert!(load_account(&root.0, "failed", 100).is_err());
     assert!(!root.0.join("local_bus_accounts").exists());
-    assert!(CreationCeremony::begin(true, &root.0, input("failed"), 100).is_err());
+    assert!(CreationCeremony::begin(&root.0, input("failed"), 100).is_err());
     Ok(())
 }
 #[test]
@@ -316,9 +315,9 @@ fn custody_nonhuman_genesis_requires_current_local_human_custody() -> Result {
     let human = create(&root.0, "human", &vault, 100)?;
     let mut input = input("service");
     input.principal_kind = PrincipalKind::HeadlessAi;
-    assert!(CreationCeremony::begin(true, &root.0, input.clone(), 100).is_err());
+    assert!(CreationCeremony::begin(&root.0, input.clone(), 100).is_err());
     input.custodian_account_id = Some("human".into());
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input, 100)?;
+    let mut ceremony = CreationCeremony::begin(&root.0, input, 100)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     let account = ceremony.confirm(&words(&phrase, positions)?, &vault, 100)?;
@@ -451,7 +450,7 @@ fn custody_final_publication_failure_deletes_both_new_vault_entries() -> Result 
 fn custody_cancel_during_persistence_removes_new_primary_and_branch_credentials() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
-    let mut pending = CreationCeremony::begin(true, &root.0, input("cancelled-commit"), 100)?;
+    let mut pending = CreationCeremony::begin(&root.0, input("cancelled-commit"), 100)?;
     let phrase = pending.show_once()?;
     let positions = pending.hidden_challenge()?;
     let gate = std::sync::Arc::new(CommitGate::new(pending.deadline()));

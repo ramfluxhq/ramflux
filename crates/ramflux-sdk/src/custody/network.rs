@@ -40,8 +40,6 @@ pub struct CustodyNetworkConfig {
     pub audience: String,
     pub binding_mode: BindingMode,
     pub allow_no_channel_binding: bool,
-    /// Explicit temporary non-forward-secret DM opt-in; normal clients leave this false.
-    pub allow_experimental_native_dm: bool,
     pub timeout: Duration,
 }
 /// Owns a live TLS connection and its session; neither is serializable or backed up.
@@ -53,7 +51,6 @@ pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     pub(super) pins: NodePins,
     pub(super) session: Option<CustodySession>,
     pub(super) timeout: Duration,
-    pub(super) experimental_native_dm: bool,
     mode: BindingMode,
     audience: String,
 }
@@ -233,7 +230,6 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             pins: opened.pins,
             session: None,
             timeout: config.timeout,
-            experimental_native_dm: config.allow_experimental_native_dm,
             mode: config.binding_mode,
             audience: config.audience.clone(),
         }
@@ -305,9 +301,6 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         Ok(())
     }
 
-    pub(super) fn require_experimental_dm(&self) -> Result<(), SdkError> {
-        if self.experimental_native_dm { Ok(()) } else { Err(CustodyRefusal::Unsupported.into()) }
-    }
     #[must_use]
     pub fn session(&self) -> Option<&CustodySession> {
         self.session.as_ref()
@@ -322,26 +315,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         (self.mode == BindingMode::NoChannelBinding)
             .then_some("This connection does not bind account proofs to the TLS channel.")
     }
-    pub(super) fn signed_prekey(&self) -> ramflux_crypto::X25519KeyPair {
-        // Domain-separated branch-only derivation keeps the prekey stable across reconnects
-        // without adding a portable credential file or involving the primary signer.
-        let secret = zeroize::Zeroizing::new(self.credentials.agreement.secret.to_bytes());
-        let seed = zeroize::Zeroizing::new(ramflux_crypto::blake3_keyed_derive(
-            &secret,
-            b"ramflux.identity.custody_signed_prekey.v1",
-        ));
-        ramflux_crypto::X25519KeyPair::from_seed(*seed)
-    }
     pub(super) fn prekey_bundle(&self) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
-        let signed = self.signed_prekey();
-        Ok(ramflux_crypto::create_prekey_bundle(
-            &self.credentials.signing,
-            &self.credentials.agreement,
-            "custody-prekey-v1",
-            &signed,
-            None,
-            None,
-        )?)
+        self.credentials.prekey_bundle()
     }
     async fn prove(&mut self, action: CustodyProofAction) -> Result<CustodyServerFrame, SdkError> {
         let response = exchange(

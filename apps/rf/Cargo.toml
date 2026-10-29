@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [features]
 default = []
+# Process-local credential vault for native integration fixtures only.
+itest-memory-vault = ["ramflux-sdk/itest-memory-vault"]
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = ["ramflux-sdk/itest-identity-proof"]
 # T22-A1 / RQ-04: itest LocalMint compatibility. Propagates the SDK compile gate and re-admits the

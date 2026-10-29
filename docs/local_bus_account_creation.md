@@ -9,8 +9,8 @@ creation client decodes it directly into `Zeroizing<String>` and serializes
 confirmation words and the passphrase directly from erasing buffers.
 
 Read `daemon.status.body.born_v3_creation` before offering creation. An absent
-field means false. During development, the creation option controls this field;
-it does not control unlocking an already created account.
+field means false for older daemons. Current daemons always report true; native
+creation has no enable/disable option. Vault availability is checked by begin.
 
 1. Send `account.create` with exactly
    `{"display_name":"Example Human","principal_kind":"human"}`. The daemon
@@ -67,3 +67,18 @@ data after lock or daemon restart, without loading the primary credential.
 pending, with separate `state` and `networking` fields. Account status and the
 identity directory derive native provenance from the signed master certificate
 and account anchor, without a synthetic legacy root.
+
+## Reference CLI
+
+Run `rf account create --display-name "Example Human"` from a local interactive
+terminal. The CLI uses the ordinary exclusive ceremony, displays the phrase once
+in an alternate terminal screen, clears it before selecting challenge words, and
+reads the requested words and independent local data passphrase with echo disabled.
+Only the public account result goes to stdout. There are no seed, phrase, account
+identifier or passphrase arguments for creation, and no environment-variable or
+piped-input creation flow. The old `account login` seed-taking alias is removed.
+
+Integration builds can explicitly select `rf daemon start --itest-memory-vault`
+only when compiled with the gated `itest-memory-vault` feature. Credentials then
+exist only in the daemon process; restarting that daemon loses them. Production
+builds do not expose that option or silently substitute this provider.

@@ -7,8 +7,6 @@ use crate::prelude::*;
 
 #[derive(Clone)]
 pub struct LocalBusConfig {
-    /// Explicit experimental opt-in. Created accounts remain `NetworkingPending`.
-    pub enable_born_v3_creation: bool,
     #[cfg(any(test, feature = "itest-memory-vault"))]
     pub custody_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
     pub builtin_nodes: Vec<NodeProfile>,
@@ -276,6 +274,7 @@ pub(crate) struct LocalBusPersistedAccount {
     pub(crate) devices: Vec<LocalBusDeviceRecord>,
 }
 
+#[cfg(test)]
 impl LocalBusPersistedAccount {
     pub(crate) fn from_create_request(body: &LocalBusAccountCreateRequest) -> Self {
         let devices = vec![LocalBusDeviceRecord {
@@ -1068,7 +1067,6 @@ impl LocalBusConfig {
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
         Self {
-            enable_born_v3_creation: false,
             #[cfg(any(test, feature = "itest-memory-vault"))]
             custody_vault: None,
             builtin_nodes: Vec::new(),

@@ -232,7 +232,7 @@ impl Supervisor {
             }
             "daemon.status" => {
                 return Ok(reply(
-                    serde_json::json!({"accounts": self.accounts.borrow().values().filter(|actor| actor.is_open()).count(), "socket_path": self.config.socket_path, "born_v3_creation":self.config.enable_born_v3_creation}),
+                    serde_json::json!({"accounts": self.accounts.borrow().values().filter(|actor| actor.is_open()).count(), "socket_path": self.config.socket_path, "born_v3_creation":true}),
                 ));
             }
             "daemon.stop" => {

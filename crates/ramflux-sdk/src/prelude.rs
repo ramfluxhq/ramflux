@@ -52,7 +52,7 @@ pub(crate) use tokio::task::LocalSet;
 
 pub(crate) use crate::bus::daemon::{
     LocalBusDispatchResult, dispatch_local_bus_request, local_bus_account_manifest_path,
-    read_local_bus_account_manifest, restore_local_bus_account, restore_local_bus_account_offline,
+    read_local_bus_account_manifest, restore_local_bus_account_offline,
     restore_local_bus_account_with_passphrase, set_owner_only_dir_permissions,
     set_owner_only_file_permissions, verify_local_bus_peer, write_local_bus_account_manifest,
 };
