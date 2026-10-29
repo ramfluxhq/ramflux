@@ -63,14 +63,13 @@ impl Supervisor {
                 self.backup_jobs.cancel(id).await?
             }
             "account.restore.install" => {
-                let id = request.body["job_id"].as_str().ok_or_else(|| refused("unknown_job"))?;
-                let (row, stage) = self.backup_jobs.begin_install(id)?;
-                let account = row
-                    .archive
-                    .as_ref()
-                    .ok_or_else(|| refused("invalid_job_phase"))?
-                    .local_account_id
-                    .clone();
+                let id = request.body["job_id"]
+                    .as_str()
+                    .ok_or_else(|| refused("unknown_job"))?
+                    .to_owned();
+                let account = self.backup_jobs.install_account(&id)?;
+                let key = self.native_install_key(&account).await?;
+                let (row, stage) = self.backup_jobs.begin_install(&id)?;
                 self.installing.borrow_mut().insert(account.clone());
                 let supervisor = self.owned_backup_handle()?;
                 let job = row.clone();
@@ -83,7 +82,7 @@ impl Supervisor {
                         if let Some(actor)=supervisor.account_actor(&account){actor.stop().await?;}
                         supervisor.remove_backup_actor(&account);
                         let service=supervisor.backup_jobs.clone();let work=job.clone();
-                        tokio::task::spawn_blocking(move||service.install_generation(&work,stage)).await.map_err(|_|refused("interrupted"))?
+                        tokio::task::spawn_blocking(move||service.install_generation(&work,stage,key)).await.map_err(|_|refused("interrupted"))?
                     }.await;
                     supervisor.installing.borrow_mut().remove(&account);
                     let reopened=if supervisor.index.account(&account).is_ok(){supervisor.restart_backup_actor(&account,&context).await}else{Ok(())};
@@ -101,8 +100,39 @@ impl Supervisor {
         };
         Ok(ActorResponse { body: serde_json::json!({"job":row}), events: Vec::new(), nodes: None })
     }
+    async fn native_install_key(
+        &self,
+        id: &str,
+    ) -> Result<Option<super::NativeInstallKey>, SdkError> {
+        if !crate::custody::account_exists(&self.config.data_root, id)? {
+            return Ok(None);
+        }
+        let actor = self.account_actor(id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        let captured = actor.capture_backup().await?;
+        // Transfer only the unlocked data key through existing private snapshot APIs.
+        // The random wrapping key and its ciphertext remain in RAM and are never serialized.
+        let wrapping = zeroize::Zeroizing::new(ramflux_crypto::random_32()?);
+        let wrapped = captured.reader.wrap_current_db_key(&wrapping)?;
+        Ok(Some(super::NativeInstallKey {
+            account_id: id.into(),
+            key: ramflux_storage::unwrap_with_vault_secret(&wrapping, &wrapped)?,
+        }))
+    }
     fn backup_human_scope(&self, id: Option<&str>) -> Result<(), SdkError> {
         if let Some(id) = id {
+            if crate::custody::account_exists(&self.config.data_root, id)? {
+                let native = crate::custody::load_data_account(
+                    &self.config.data_root,
+                    id,
+                    crate::custody::network_now()?,
+                )?;
+                if native.record().body.principal_kind != ramflux_protocol::PrincipalKind::Human {
+                    return Err(SdkError::CapabilityDenied(
+                        "backup jobs require a human account".into(),
+                    ));
+                }
+                return Ok(());
+            }
             let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
                 &self.config.data_root,
                 id,
@@ -141,6 +171,10 @@ impl Supervisor {
         id: &str,
         connection: &LocalBusConnectionState,
     ) -> Result<(), SdkError> {
+        if crate::custody::account_exists(&self.config.data_root, id)? {
+            // Native data passphrases are not persisted. Reopen only on an explicit unlock.
+            return Ok(());
+        }
         let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
             &self.config.data_root,
             id,

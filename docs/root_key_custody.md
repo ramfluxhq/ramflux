@@ -531,11 +531,12 @@ Use a new identity if any former root holder cannot be trusted.
 
 ## Full backup and restore
 
-The current streamed and legacy key backups both need a custody-aware logical
-sanitizer before activation. Full backups must never contain master entropy,
-master/self-signing seeds, a recovery capsule, primary vault contents or an
-ordinary-backup-decryptable wrapper for authority. This applies on primaries and
-secondaries alike, even if the outer archive itself is encrypted.
+Native streamed backups use a custody-aware snapshot sanitizer and public identity
+metadata. The legacy key and streamed formats remain root-bearing until retired;
+neither can be imported into a native installation. Full native backups must never
+contain master entropy, master/self-signing seeds, a recovery capsule, primary
+vault contents or an ordinary-backup-decryptable wrapper for authority. This
+applies on primaries and secondaries alike, even if the outer archive is encrypted.
 
 Add an authenticated `contains_legacy_root_seed` header flag and show it before
 restoration. Older archives lacking the flag are potentially root-bearing; an
@@ -551,11 +552,29 @@ a custody boundary. Keep streamed authentication, verify-then-commit, encrypted
 staging, cancellation cleanup, newer-wins merge, tombstones and monotonic floors.
 Saved primary roles and authority records cannot overwrite newer live authority.
 
-A data restore uses a fresh local branch and requires primary approval before
-networking. Recovery/promotion is a separate, user-started phrase operation.
-Old outbound ratchets remain inactive; new sessions and sender chains precede
-sending. Data backups do not restore the phrase, and phrase recovery alone does
-not recover history for which the user has no surviving data keys/backup.
+Data-only restore has two cases:
+
+- **Existing independently approved installation:** merge history into its current
+  identity and branch. Keep live authority, pins, denial fences and replay floors
+  unchanged; archive contents cannot replace them or lower them. Keep existing
+  live outbound sessions, but never resume any imported outbound ratchet or sender
+  chain. Imported sessions remain receive-only; missing outbound sessions bootstrap
+  independently before sending.
+- **New installation without an approved branch:** allocate fresh local branch
+  keys. Networking stays pending until an already-approved primary explicitly
+  approves that exact branch through device enrollment, or the user completes the
+  separate 24-word recovery ceremony when no primary is available. Installation
+  never authorizes the branch, including when a primary credential is already
+  present on the machine. Archive metadata supplies neither credentials nor the
+  installation's data passphrase.
+
+The current native job implementation supports the existing-installation merge
+using the independently unlocked local data key. Fresh-install native jobs fail
+closed with `networking_pending`; branch allocation and the SAS/recovery approval
+handoff remain pending integration. See [account_backup.md](account_backup.md).
+Recovery/promotion is a separate, user-started phrase operation. Data backups do
+not restore the phrase, and phrase recovery alone does not recover history for
+which the user has no surviving data keys/backup.
 
 ## Creator secondary signing
 

@@ -229,3 +229,86 @@ fn r2_a_known_legacy_group_chain_id_with_different_secret_is_rejected_loudly()
     bob.client.import_group_sender_key_distribution(&original)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn native_data_merge_rebootstraps_without_reusing_the_archived_outbound_ratchet()
+-> crate::client::native_test_support::TestResult {
+    use crate::client::native_test_support::Fixture as NativeFixture;
+    let alice = NativeFixture::new("native-restore-alice").await?;
+    let bob = NativeFixture::new("native-restore-bob").await?;
+    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
+    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    let local = alice.client.owned_device_identity()?;
+    let remote = bob.client.owned_device_identity()?;
+    let bundle = bob.client.load_x3dh_private_state(&remote)?.bundle;
+    let message = GatewayDirectMessage {
+        conversation_id: "native-restore-thread".into(),
+        message_id: "before".into(),
+        envelope_id: "before".into(),
+        source_principal_id: alice.manifest.principal_id.clone(),
+        sender_id: "primary".into(),
+        recipient_device_id: Some("primary".into()),
+        recipient_principal_commitment: Some(bob.manifest.principal_commitment.clone()),
+        target_delivery_id: remote.storage_key().into(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 3600,
+    };
+    let (mut saved, header, hash) = alice.client.new_send_pair(&local, &message, bundle.clone())?;
+    saved.encrypt(b"before backup", b"test archive chain")?;
+    alice.client.persist_pair(&local, &remote, &hash, &saved)?;
+    let sequence_key = crate::client::routed::bootstrap_sequence::bootstrap_sequence_key(&local);
+    let sequence_floor = header
+        .ok_or("bootstrap")?
+        .bootstrap_sequence
+        .ok_or("sequence")?
+        .checked_add(100)
+        .ok_or("floor")?;
+    let receive_floor = alice.client.bootstrap_high_water_key(&local, &remote)?;
+    alice.client.account_db()?.persist_actor_state(&receive_floor, &10_u64)?;
+    let snapshot_path = alice.root.0.join("saved.db");
+    let snapshot = alice.client.account_db()?.write_backup_snapshot(&snapshot_path)?;
+    let pair = RamfluxClient::pair_key(&local, &remote)?;
+    let db = alice.client.account_db()?;
+    db.persist_actor_state(&sequence_key, &sequence_floor)?;
+    db.persist_actor_state(&receive_floor, &20_u64)?;
+    db.remove_actor_state(&pair)?;
+    db.remove_actor_state(&format!("dm-pair/session/{}", saved.session_id))?;
+    db.remove_actor_state(&format!("dm-pair/bootstrap/{}", saved.session_id))?;
+    let vault = FileVaultSecretSource::new(&alice.root.0).vault_secret("native-restore-alice")?;
+    let kek = crate::client::account::account_db_key_encryption_key(
+        &vault,
+        b"native fixture data passphrase",
+    );
+    let key = ramflux_storage::unwrap_with_vault_secret(
+        &kek,
+        &alice
+            .client
+            .account_index()?
+            .load_wrapped_db_key("native-restore-alice")?
+            .ok_or("wrapped key")?,
+    )?;
+    // No actor or live transport runs in this test; the SDK reads the same committed DB again.
+    let mut merged = BackupDatabase::open(&db.path, &key)?;
+    merged.merge_native_backup(&snapshot_path, &snapshot.key, || Ok(()))?;
+    drop(merged);
+    assert!(db.actor_state_exists(&format!("backup/inactive-pair/{}", saved.session_id))?);
+    assert!(alice.client.sendable_pair(&local, &remote)?.is_none());
+    assert_eq!(db.load_actor_state::<u64>(&sequence_key)?, Some(sequence_floor));
+    assert_eq!(db.load_actor_state::<u64>(&receive_floor)?, Some(20));
+    let mut after = message;
+    after.message_id = "after".into();
+    after.envelope_id = "after".into();
+    let (mut fresh, header, _) = alice.client.new_send_pair(&local, &after, bundle)?;
+    assert_ne!(fresh.session_id, saved.session_id);
+    assert!(header.is_some());
+    let header = header.ok_or("fresh bootstrap")?;
+    assert!(header.bootstrap_sequence.ok_or("fresh sequence")? > sequence_floor);
+    let aad = associated_data(&after.envelope_id, "primary", "primary", &hash)?;
+    let mut recipient = bob.client.create_recv_dm_session_with_aad(&header, &aad)?;
+    let encrypted = fresh.encrypt(b"fresh native session", b"message AAD")?;
+    assert_eq!(encrypted.counter, 0);
+    assert_eq!(recipient.decrypt(&encrypted, b"message AAD")?, b"fresh native session");
+    assert!(recipient.decrypt(&encrypted, b"message AAD").is_err());
+    Ok(())
+}

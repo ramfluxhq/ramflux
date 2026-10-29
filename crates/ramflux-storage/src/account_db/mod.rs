@@ -21,6 +21,7 @@ mod backup_contact_merge;
 pub(crate) mod backup_database;
 pub(crate) mod backup_merge;
 mod backup_missing;
+mod backup_native;
 mod backup_retirement;
 mod backup_shared_groups;
 pub mod bot;

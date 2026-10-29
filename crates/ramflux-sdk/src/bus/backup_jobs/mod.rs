@@ -6,6 +6,7 @@ mod attachments;
 mod format;
 mod generation_lock;
 mod install;
+mod native;
 mod output_ownership;
 mod publication;
 mod reclamation;
@@ -17,10 +18,11 @@ mod io;
 mod service;
 mod workers;
 
+pub(super) use native::capture_identity;
 pub(super) use service::BackupJobs;
 pub(super) struct CapturedAccount {
     pub reader: ramflux_storage::AccountDb,
-    pub manifest: super::protocol::LocalBusPersistedAccount,
+    pub identity: format::Identity,
 }
 
 #[cfg(test)]
@@ -33,4 +35,12 @@ pub(super) struct MissingAttachments {
     pub account_id: String,
     pub total: u64,
     pub selectors: Vec<String>,
+}
+
+#[cfg(test)]
+mod native_tests;
+
+pub(crate) struct NativeInstallKey {
+    pub account_id: String,
+    pub key: ramflux_storage::AccountDbKey,
 }
