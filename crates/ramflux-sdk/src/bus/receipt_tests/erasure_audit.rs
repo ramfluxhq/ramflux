@@ -12,6 +12,7 @@ pub(super) fn open(
     spec: &Spec,
     client: &RamfluxClient,
 ) -> Result<Connection, Box<dyn std::error::Error>> {
+    client.account_db()?.checkpoint_retired_secrets()?;
     let vault = FileVaultSecretSource::new(&spec.root).vault_secret(&spec.principal)?;
     let wrapped = client.account_index()?.load_wrapped_db_key(&spec.principal)?.ok_or("key")?;
     let key = ramflux_storage::unwrap_with_vault_secret(

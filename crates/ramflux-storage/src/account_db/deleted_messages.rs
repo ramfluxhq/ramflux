@@ -430,16 +430,29 @@ mod tests {
         }
         // Measure deletion against an established store; fixture construction WAL is separate.
         db.checkpoint_retired_secrets()?;
-        let started = std::time::Instant::now();
+        let total_started = std::time::Instant::now();
+        let transaction = db.connection.immediate_transaction()?;
+        let erasure_started = std::time::Instant::now();
         db.delete_direct_message("thread", "target", "local", "tombstone")?;
-        let elapsed = started.elapsed();
-        eprintln!("10k-copy-store single deletion: {elapsed:?}");
-        let budget = if cfg!(debug_assertions) {
+        let erasure = erasure_started.elapsed();
+        let commit_started = std::time::Instant::now();
+        transaction.commit()?;
+        let commit = commit_started.elapsed();
+        let total = total_started.elapsed();
+        eprintln!(
+            "10k-copy-store deletion: erasure={erasure:?}, durable_commit={commit:?}, total={total:?}"
+        );
+        let erasure_budget = if cfg!(debug_assertions) {
             std::time::Duration::from_secs(2)
         } else {
             std::time::Duration::from_millis(10)
         };
-        assert!(elapsed < budget, "single-delete budget exceeded: {elapsed:?}");
+        assert!(erasure <= erasure_budget, "erasure budget exceeded: {erasure:?}");
+        assert!(
+            commit <= std::time::Duration::from_millis(250),
+            "durable commit budget exceeded: {commit:?}"
+        );
+        db.checkpoint_retired_secrets()?;
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

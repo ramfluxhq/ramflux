@@ -13,6 +13,7 @@ mod clock;
 mod constants;
 mod conversation_helpers;
 mod database;
+mod database_checkpoint;
 mod encryption;
 mod error;
 mod event_store;

@@ -197,6 +197,7 @@ fn dump(db: &AccountDb, sql: &str) -> Result<Vec<Vec<u8>>, StorageError> {
     })?)
 }
 fn assert_erased(db: &AccountDb, forbidden: &[String]) -> Result<(), StorageError> {
+    db.checkpoint_retired_secrets()?;
     let forbidden = forbidden.to_vec();
     db.connection.call(move |raw| {
     let mut q=raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
