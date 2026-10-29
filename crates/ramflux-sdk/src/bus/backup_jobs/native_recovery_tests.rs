@@ -89,6 +89,18 @@ fn assert_durable_authority(root: &Path, anchor: &str, expected: &str) -> TestRe
     assert_eq!(ramflux_protocol::custody::object_hash(&authority.record)?, expected);
     Ok(())
 }
+async fn prepare_ordinary_branch(
+    root: &Path,
+    id: &str,
+    device: &str,
+    vault: Arc<TestVault>,
+) -> TestResult {
+    let mut ordinary = RamfluxClient::new();
+    ordinary.open_account_index(root)?;
+    ordinary.unlock_account(id, LOCAL_SECRET.as_bytes())?;
+    ordinary.initialize_born_v3_branch(device, vault).await?;
+    Ok(())
+}
 #[tokio::test(flavor = "current_thread")]
 async fn native_fresh_restore_requires_phrase_recovery_and_exact_ack_before_live() -> TestResult {
     LocalSet::new()
@@ -140,11 +152,7 @@ async fn native_fresh_restore_requires_phrase_recovery_and_exact_ack_before_live
             )?;
             assert_eq!(recovered.local_device_id()?, device);
             // Ordinary activation prepares the certified branch before publishing recovery.
-            let mut ordinary = RamfluxClient::new();
-            ordinary.open_account_index(&target_root.0)?;
-            ordinary.unlock_account(&local, LOCAL_SECRET.as_bytes())?;
-            ordinary.initialize_born_v3_branch(&device, vault.clone()).await?;
-            drop(ordinary);
+            prepare_ordinary_branch(&target_root.0, &local, &device, vault.clone()).await?;
             assert!(matches!(
                 CustodyConnection::connect(
                     network(&target_root.0, &local, &device, address, &ca),
