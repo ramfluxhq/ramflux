@@ -92,15 +92,24 @@ async fn refresh_local_publication(
     let root = custody.account_root.clone();
     let id = custody.account_id.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        crate::custody::accept_publication(
-            &root,
-            &id,
-            &ramflux_protocol::custody::CustodyAuthority {
-                publication: native.publication,
-                custodian_publication: native.custodian_publication,
-            },
-            crate::custody::network_now()?,
-        )
+        let now = crate::custody::network_now()?;
+        let authority = ramflux_protocol::custody::CustodyAuthority {
+            publication: native.publication,
+            custodian_publication: native.custodian_publication,
+        };
+        let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
+        let local = crate::custody::load_account(&root, &id, now)?;
+        if verified.envelope().body.account_anchor != local.record().body.account_anchor {
+            return Err(SdkError::CustodySetupInvalid);
+        }
+        // An explicit recovery must publish its journaled successor before the directory
+        // can serve it. Authenticate the predecessor without adopting it or lowering pins.
+        if local.recovery_publication_pending(&root)?
+            && verified.envelope().body.device_set_epoch < local.record().body.device_set_epoch
+        {
+            return Ok(ramflux_crypto::custody::PinOutcome::Unchanged);
+        }
+        crate::custody::accept_publication(&root, &id, &authority, now)
     })
     .await
     .map_err(|_| SdkError::CustodySetupInvalid)??;
