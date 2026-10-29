@@ -241,5 +241,8 @@ longer call the old manifest/key-only backup endpoints. A completed new-install
 restore still requires explicit recovery before networking is authorized.
 
 Writer-lock and index-read I/O failures during restore checks or installation use
-`unreadable`; only integrity verification failures use `tampered`. These failures
-follow the [account writer error mapping](account_writer_ownership.md#error-codes).
+`unreadable`. Failure to unwrap or verify the local wrapped DB key (including a
+stale local passphrase) and a failed `PRAGMA integrity_check` also use `unreadable`.
+`tampered` is reserved for backup archive MAC, hash or signature verification
+failures. These failures follow the
+[account writer error mapping](account_writer_ownership.md#error-codes).

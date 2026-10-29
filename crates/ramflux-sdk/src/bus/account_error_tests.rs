@@ -36,7 +36,11 @@ fn assert_code(error: &SdkError, fault: Fault) {
             assert!(body.cause.as_ref().and_then(|cause| cause.raw_os_error).is_some());
             assert_eq!(body.retry_after_ms, None);
         }
-        Fault::Integrity => assert_eq!(body.retry_after_ms, None),
+        Fault::Integrity => {
+            assert_eq!(body.retry_after_ms, None);
+            assert!(body.message.contains("wrong passphrase or damaged local key"));
+            assert!(!body.message.contains("integrity verification failed"));
+        }
     }
 }
 

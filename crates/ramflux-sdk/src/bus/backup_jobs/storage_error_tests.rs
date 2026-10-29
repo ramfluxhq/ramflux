@@ -62,7 +62,7 @@ fn backup_storage_policy_reports_real_lock_io_as_unreadable_on_restore_check_and
     check(Fault::Io, BackupFailureCode::Unreadable)
 }
 #[test]
-fn backup_storage_policy_reports_corrupted_mac_as_tampered_on_restore_check_and_install()
+fn backup_storage_policy_reports_corrupted_local_key_as_unreadable_on_restore_check_and_install()
 -> TestResult {
-    check(Fault::Integrity, BackupFailureCode::Tampered)
+    check(Fault::Integrity, BackupFailureCode::Unreadable)
 }

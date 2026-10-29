@@ -8,7 +8,7 @@ pub enum StorageError {
     #[error("another process holds the account writer lock: {0}")]
     AccountWriterBusy(String),
     /// Authentication or integrity verification failed; never used for local I/O.
-    #[error("integrity verification failed: {0}")]
+    #[error("{0}")]
     Integrity(&'static str),
     #[error("protocol error: {0}")]
     Protocol(#[from] ramflux_protocol::ProtocolError),

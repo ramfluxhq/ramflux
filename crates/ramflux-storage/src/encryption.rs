@@ -237,7 +237,7 @@ pub fn unwrap_with_vault_secret(
             Nonce::from_slice(&wrapped.nonce),
             Payload { msg: wrapped.wrapped_key.as_slice(), aad: b"ramflux.account_db_key.wrap.v1" },
         )
-        .map_err(|_err| StorageError::Integrity("account DB key AEAD unwrap failed"))?;
+        .map_err(|_err| StorageError::Integrity("wrong passphrase or damaged local key"))?;
     let bytes: [u8; 32] = plaintext.try_into().map_err(|bytes: Vec<u8>| {
         StorageError::KeyWrappingFailed(format!("invalid unwrapped DB key length: {}", bytes.len()))
     })?;

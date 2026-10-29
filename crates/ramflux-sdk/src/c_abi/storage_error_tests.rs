@@ -37,6 +37,11 @@ fn check(fault: Fault, expected: RamfluxErrorCode) -> TestResult {
         body["retry_after_ms"],
         if matches!(fault, Fault::Busy) { json!(1_000) } else { Value::Null }
     );
+    if matches!(fault, Fault::Integrity) {
+        let message = body["message"].as_str().ok_or("error message")?;
+        assert!(message.contains("wrong passphrase or damaged local key"));
+        assert!(!message.contains("integrity verification failed"));
+    }
     ramflux_buffer_free(error);
     let mut close_error = ptr::null_mut();
     assert_eq!(ramflux_client_close(client, &raw mut close_error), 0);
