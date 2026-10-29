@@ -7,7 +7,7 @@ use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 const PREFIX: &str = "contact-request/send/";
 #[derive(Clone, Deserialize, Serialize)]
-pub(super) struct Intent {
+pub(in crate::client) struct Intent {
     pub(super) kind: Decision,
     pub(super) request_id: String,
     pub(super) requester_root: String,
@@ -439,7 +439,7 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
     }
     Ok(sent)
 }
-async fn deliver(
+pub(in crate::client) async fn deliver(
     client: &RamfluxClient,
     engine: &mut GatewaySessionEngine,
     intent: &mut Intent,
