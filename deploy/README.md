@@ -340,7 +340,11 @@ deploy/scripts/demo-node.sh upgrade /absolute/path/to/demo.env
 ```
 
 The command builds all seven images, or with `DEMO_PREBUILT_IMAGES=1` first verifies
-that all seven versioned images are loaded and uses `--no-build`. The first successful
+that all seven versioned images are loaded, have distinct image IDs, and each declares
+`RAMFLUX_BIN=ramflux-<service>` in its image environment or label. If both are present,
+both must match. Missing, malformed, aliased, or mismatched images are refused with the
+offending service names before snapshot/config changes or container recreation. It uses
+`--no-build` after validation. The first successful
 `up` starts the version history. Every successful `up` or `upgrade` creates a private,
 read-only snapshot under `version-snapshots/` containing `owner.json`, `runtime.env`,
 `demo-override.json`, the deploy-tree digest, the exact frozen base/voice/admin Compose
@@ -355,6 +359,42 @@ retains the node identity, CA, seeds, volumes, ports and all other ownership set
 and prints the canonical rollback command. A plain `up` still refuses a version change.
 An upgrade also refuses a missing or newly selected voice/admin overlay, reporting only
 the relevant configuration key.
+
+When transferring prebuilt images, use one image per archive, especially with Podman.
+On the source host, set the selected engine and exact version, then save each image:
+
+```sh
+engine=podman  # Or docker; use the engine that holds the built images.
+version=demo-v2
+for service in gateway router notify federation relay signaling retention; do
+  image="ghcr.io/ramfluxhq/ramflux-$service:$version"
+  "$engine" image inspect "$image" > "ramflux-$service-$version.inspect.json"
+  "$engine" save -o "ramflux-$service-$version.tar" "$image"
+done
+```
+
+Transfer the seven archives and inspection records through a trusted channel. On the
+destination host, use its selected engine to load each archive separately:
+
+```sh
+engine=podman  # Or docker on the destination.
+version=demo-v2
+for service in gateway router notify federation relay signaling retention; do
+  "$engine" load -i "ramflux-$service-$version.tar"
+  "$engine" image inspect "ghcr.io/ramfluxhq/ramflux-$service:$version" \
+    > "loaded-ramflux-$service-$version.inspect.json"
+done
+```
+
+Transfer checklist before changing `DEMO_VERSION` or running `upgrade`:
+
+- Verify seven distinct image IDs on the source host and seven on the destination.
+- Compare each service's full image ID between its source and loaded inspection records
+  (`Id` or `ID`; ignore an optional `sha256:` prefix). Each pair must match.
+- Verify each record's `Config.Env` or `Config.Labels` declares the expected
+  `RAMFLUX_BIN=ramflux-<service>`. All declarations must agree with the service name.
+- Keep the prior version's images available for rollback/recovery and check them too.
+  Do not use a single multi-name `podman save` invocation for these seven archives.
 
 Run the printed `demo-node.sh rollback ENV_FILE` command while retaining the current
 env file. Rollback selects the preceding immutable snapshot, restores every managed

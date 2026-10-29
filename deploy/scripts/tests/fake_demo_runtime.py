@@ -39,7 +39,12 @@ if args[:2] == ["image", "inspect"]:
     image = args[2]
     if image in control.get("missing_images", []):
         sys.exit(1)
-    print("[]")
+    service = image.split("/ramflux-", 1)[1].split(":", 1)[0]
+    identity = control.get("image_ids", {}).get(service, f"sha256:{service}")
+    binary = control.get("image_bins", {}).get(service, f"ramflux-{service}")
+    item = {"Id": identity, "Config": {"Env": [f"RAMFLUX_BIN={binary}"]}}
+    item = control.get("image_metadata", {}).get(service, item)
+    print(json.dumps([item]))
     sys.exit(0)
 
 state = root / "data"

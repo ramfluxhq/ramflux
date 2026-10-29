@@ -386,7 +386,7 @@ def check_pending(state):
         sys.exit(3)
 
 
-def prepare(repo, state, command):
+def prepare(repo, state, command, validate_only=False):
     settings = {key: os.environ[key] for key in (
         "DEMO_PROJECT", "DEMO_HOST", "DEMO_NODE_ID", "DEMO_GATEWAY_PORT",
         "DEMO_RELAY_PORT", "DEMO_HTTP_PORT", "DEMO_TURN_PORT", "DEMO_MESH_PORT",
@@ -458,6 +458,8 @@ def prepare(repo, state, command):
         target_owner = {**owner, "settings": settings, "version_history": versions,
                         "snapshot_history": snapshots, "current_snapshot": target_snapshot}
 
+    if validate_only:
+        return
     if capture_legacy_snapshot:
         capture_snapshot(state, previous_snapshot)
     atomic_json(pending_marker, target_owner)
@@ -481,6 +483,20 @@ def commit(state, command):
     prune_snapshots(state, json.loads((state / "owner.json").read_text()))
     durable_unlink(state / "owner.json.pending")
     durable_unlink(state / "transaction.pending")
+
+
+def image_version(state, command):
+    if command == "recover":
+        transaction = json.loads((state / "transaction.pending").read_text())
+        reference = transaction.get("previous_snapshot")
+        if not reference:
+            sys.exit("failed initial up has no previous snapshot to restore")
+    else:
+        owner = json.loads((state / "owner.json").read_text())
+        reference = owner["snapshot_history"][-2]
+    source, _, _ = read_snapshot_manifest(state, reference)
+    owner = json.loads((source / "owner.json").read_text())
+    print(owner["settings"]["DEMO_VERSION"])
 
 
 def recover(state):
@@ -514,6 +530,10 @@ def main():
     try:
         if action == "check-pending":
             check_pending(state)
+        elif action == "validate":
+            prepare(repo, state, sys.argv[4], validate_only=True)
+        elif action == "image-version":
+            image_version(state, sys.argv[4])
         elif action == "prepare":
             prepare(repo, state, sys.argv[4])
         elif action == "commit":
@@ -529,7 +549,7 @@ def main():
         else:
             sys.exit("invalid demo configuration action")
     except SnapshotError as error:
-        if action == "recover":
+        if action == "recover" or (action == "image-version" and sys.argv[4] == "recover"):
             sys.exit(f"cannot recover last-good snapshot: {error}; {MANUAL_RECOVERY}")
         sys.exit(str(error))
 
