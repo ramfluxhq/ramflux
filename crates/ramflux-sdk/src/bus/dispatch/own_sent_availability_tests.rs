@@ -336,6 +336,19 @@ async fn a_rejected_primary_group_send_discards_its_staged_copy() -> TestResult 
         .ok_or("peer manifest")?;
     f.source.client.persist_identity_directory(&manifest)?;
     f.source.client.add_group_member_with_root("group", "device-peer-one", "member", &peer_root)?;
+    let sender = f.source.client.owned_device_identity()?;
+    let canonical = ramflux_protocol::group_message_id(
+        "group",
+        sender.root_commitment(),
+        sender.device_id(),
+        "rejected",
+    )?;
+    // Direct dispatch bypasses the bus journal's pending message projection.
+    f.source.client.account_db()?.persist_client_record(
+        "message",
+        &canonical,
+        &json!({"conversation_id":"group-thread"}),
+    )?;
     let captured = Arc::default();
     let mut gateway = super::fixture::RecordingGateway::new(Arc::clone(&captured));
     gateway.fail_after = Some(0);
@@ -358,13 +371,6 @@ async fn a_rejected_primary_group_send_discards_its_staged_copy() -> TestResult 
         .err()
         .ok_or("primary group send unexpectedly succeeded")?;
     assert!(error.to_string().contains("injected submit failure"), "{error}");
-    let sender = f.source.client.owned_device_identity()?;
-    let canonical = ramflux_protocol::group_message_id(
-        "group",
-        sender.root_commitment(),
-        sender.device_id(),
-        "rejected",
-    )?;
     let db = f.source.client.account_db()?;
     assert_eq!(db.actor_state_usage("own-device/send/")?.0, 0);
     let status = db.client_record("message", &canonical)?.ok_or("copy status")?;
