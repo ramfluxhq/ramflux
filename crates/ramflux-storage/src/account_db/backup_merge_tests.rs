@@ -267,3 +267,54 @@ fn r2_merge_never_imports_restore_flags_or_marks_existing_local_sessions_inactiv
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn backup_tombstone_classifies_only_devices_under_the_local_account_root() -> TestResult {
+    let root = std::env::temp_dir().join(format!(
+        "rf-backup-own-classifier-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    ));
+    let source_index = AccountIndex::open(root.join("source"))?;
+    let local_index = AccountIndex::open(root.join("local"))?;
+    source_index.create_account("account", "own-root")?;
+    local_index.create_account("account", "own-root")?;
+    let source = AccountDb::open(&source_index, "account", &AccountDbKey::generate()?)?;
+    let local = AccountDb::open(&local_index, "account", &AccountDbKey::generate()?)?;
+    local.upsert_device_directory_entry("peer-device", "peer-root", "verified-peer", 1)?;
+    local.upsert_device_directory_entry("sibling-device", "own-root", "verified-own-device", 1)?;
+    for (id, sender) in [("peer-message", "peer-device"), ("sibling-message", "sibling-device")] {
+        local.send_direct_message("thread", id, sender, b"ciphertext")?;
+        source.send_direct_message("thread", id, "unknown-sender", b"ciphertext")?;
+        source.delete_direct_message("thread", id, "me", &format!("delete-{id}"))?;
+    }
+    let incoming = root.join("incoming.db");
+    let snapshot = source.write_backup_snapshot(&incoming)?;
+    let path = root.join("merged.db");
+    let target = local.write_backup_snapshot(&path)?;
+    let mut merged = BackupDatabase::open(&path, &target.key)?;
+    merged.merge_backup(&incoming, &snapshot.key, || Ok(()))?;
+    for (id, expected_own) in [("peer-message", 0_i64), ("sibling-message", 1_i64)] {
+        let stored: (i64, String, i64) = merged.db.query_row(
+            "SELECT is_own,sender_id,deleted FROM direct_message_projection WHERE message_id=?1",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        assert_eq!(stored, (expected_own, String::new(), 1), "{id}");
+    }
+    drop(merged);
+    let reopened = BackupDatabase::open(&path, &target.key)?;
+    assert_eq!(
+        reopened.db.query_row(
+            "SELECT is_own FROM direct_message_projection WHERE message_id='peer-message'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        0
+    );
+    drop(reopened);
+    drop(source);
+    drop(local);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

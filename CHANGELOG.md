@@ -67,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deleted-message legacy cleanup no longer runs at unlock or on a background thread.
+  Messages deleted before this Unreleased version keep residual
+  sender data; reset development data. Older deleted rows open without an upgrade scrub.
+
 - **BREAKING (operators):** Compose inputs use `RF_COMPOSE_*` names listed in
   `deploy/compose-inputs.json`. Migrate existing env files, explicitly provide all
   production security/identity inputs, and run `deploy/scripts/compose-preflight.py`

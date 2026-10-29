@@ -25,18 +25,21 @@ impl AccountDb {
              CREATE INDEX IF NOT EXISTS runtime_actor_deleted_message ON runtime_actor_state(
                  CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN json_extract(CAST(state_json AS TEXT),'$.routing.message_id') END
              ) WHERE state_kind >= 'routed/committed/' AND state_kind < 'routed/committed0';
-             CREATE INDEX IF NOT EXISTS runtime_actor_receipt_message ON runtime_actor_state(
-                 CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN COALESCE(
-                     json_extract(CAST(state_json AS TEXT),'$.message'),
-                     json_extract(CAST(state_json AS TEXT),'$.retry_work.message')
-                 ) END
-             ) WHERE (state_kind >= 'delivery-receipt/pending/' AND state_kind < 'delivery-receipt/pending0')
-                 OR (state_kind >= 'delivery-receipt/status/' AND state_kind < 'delivery-receipt/status0');
+             DROP INDEX IF EXISTS runtime_actor_receipt_message;
+             CREATE TABLE IF NOT EXISTS runtime_account_identity (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                 principal_commitment TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS runtime_operation (
                 operation_id TEXT PRIMARY KEY,
                 fingerprint TEXT NOT NULL,
                 response_json TEXT
              );",
+        )?;
+        // This value comes from the supervisor account record, never from a contact directory.
+        self.connection.execute(
+            "INSERT INTO runtime_account_identity VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET principal_commitment=excluded.principal_commitment WHERE principal_commitment<>excluded.principal_commitment",
+            params![self.principal_commitment],
         )?;
         self.install_group_message_retention_schema()?;
         let columns: i64 = self.connection.query_row(
@@ -59,7 +62,7 @@ impl AccountDb {
     fn install_domain_change_triggers(&self) -> Result<(), StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
+             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('runtime_account_identity','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?

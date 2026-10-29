@@ -11,7 +11,7 @@ use super::{
 use crate::client::dm::{decode_dm_attachment_body, franking_report_metadata_for_delivery};
 
 pub(crate) struct Delivery {
-    pub routing: Routing,
+    pub routing: Option<Routing>,
     pub plaintext: Option<GatewayPlaintextDelivery>,
     pub call_control: bool,
 }
@@ -19,12 +19,12 @@ impl Delivery {
     fn committed(receipt: Committed, plaintext: Option<GatewayPlaintextDelivery>) -> Self {
         let call_control = receipt.routing.kind == Kind::Control
             && receipt.entry.envelope.encrypted_payload.is_empty();
-        Self { routing: receipt.routing, plaintext, call_control }
+        Self { routing: Some(receipt.routing), plaintext, call_control }
     }
     fn opened(opened: Opened, plaintext: Option<GatewayPlaintextDelivery>, body: &[u8]) -> Self {
         let call_control =
             opened.routing.kind == Kind::Control && body.starts_with(crate::client::call::PREFIX);
-        Self { routing: opened.routing, plaintext, call_control }
+        Self { routing: Some(opened.routing), plaintext, call_control }
     }
 }
 
@@ -135,6 +135,46 @@ impl RamfluxClient {
         Ok(opened)
     }
 
+    fn routed_duplicate_delivery(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Option<Delivery>, SdkError> {
+        let Some((committed, payload_hash)) = self.routed_seen_marker(entry)? else {
+            return Ok(None);
+        };
+        if payload_hash != entry.envelope.payload_hash {
+            return Err(SdkError::ReplayMismatch);
+        }
+        // The marker narrows retention; signature/authority verification still precedes ACK.
+        self.authenticated_device_identity(entry)?;
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            db.remove_inbox_retry(&committed)?;
+            db.remove_unrouted(&committed)?;
+            db.remove_unrouted(&entry.envelope.envelope_id)
+        })?;
+        Ok(Some(Delivery {
+            routing: self.committed_routing(entry)?,
+            plaintext: None,
+            call_control: false,
+        }))
+    }
+
+    fn committed_routed_delivery(
+        &self,
+        commit: &str,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Option<Delivery>, SdkError> {
+        let Some(receipt) = self.account_db()?.load_actor_state::<Committed>(commit)? else {
+            return Ok(None);
+        };
+        if receipt.entry.envelope.payload_hash != entry.envelope.payload_hash {
+            return Err(invalid("envelope id reused with a different authenticated payload"));
+        }
+        let plaintext = self.routed_committed_content(&receipt.routing, &receipt.entry)?;
+        Ok(Some(Delivery::committed(receipt, plaintext)))
+    }
+
     pub(crate) async fn apply_routed_entry(
         &mut self,
         engine: &mut GatewaySessionEngine,
@@ -142,18 +182,17 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
+        if let Some(delivery) = self.routed_duplicate_delivery(entry)? {
+            return Ok(delivery);
+        }
         if decode(&entry.envelope)?.schema == crate::client::contact_requests::ENVELOPE_SCHEMA {
             return self.apply_contact_request_entry(&engine.config, entry).await;
         }
         self.ensure_inbound_device(&engine.config, entry).await?;
         self.upgrade_replay_identity(&self.authenticated_device_identity(entry)?)?;
         let commit = self.authenticated_committed_key(entry)?;
-        if let Some(receipt) = self.account_db()?.load_actor_state::<Committed>(&commit)? {
-            if receipt.entry.envelope.payload_hash != entry.envelope.payload_hash {
-                return Err(invalid("envelope id reused with a different authenticated payload"));
-            }
-            let plaintext = self.routed_committed_content(&receipt.routing, &receipt.entry)?;
-            return Ok(Delivery::committed(receipt, plaintext));
+        if let Some(delivery) = self.committed_routed_delivery(&commit, entry)? {
+            return Ok(delivery);
         }
         let mut opened = self.open_authorized_routed_entry(engine, entry).await?;
         let (body, refs) = if opened.routing.attachments {
@@ -412,7 +451,7 @@ impl RamfluxClient {
                     return Err(invalid("contact envelope id reused with another payload"));
                 }
                 return Ok(Delivery {
-                    routing: committed.routing,
+                    routing: Some(committed.routing),
                     plaintext: None,
                     call_control: false,
                 });
@@ -427,6 +466,7 @@ impl RamfluxClient {
                 // A requester's root comes from the network, never from an imported card.
                 self.mark_lookup_root(&manifest.principal_id)?;
             }
+
             let opened = self.open_routed(entry, local)?;
             let control = self.verify_contact_control(entry, &opened.routing, &opened.body)?;
             if control.body.kind != crate::client::contact_requests::Decision::Request {
@@ -445,7 +485,8 @@ impl RamfluxClient {
                 references: Vec::new(),
                 receipt: &receipt,
             })?;
-            Ok(Delivery { routing: opened.routing, plaintext: None, call_control: false })
+            Ok(Delivery { routing: Some(opened.routing), plaintext: None, call_control: false })
+
         })
     }
     fn commit_routed_pair_context(
@@ -504,6 +545,7 @@ impl RamfluxClient {
             if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage)
                 && self.account_db()?.message_is_deleted(&opened.routing.message_id)?
             {
+                self.persist_routed_seen(receipt, &entry.envelope.payload_hash)?;
                 return Ok(None);
             }
             if let Some(shared) = shared_group {
@@ -573,6 +615,7 @@ impl RamfluxClient {
                 receipt,
                 &Committed { routing: opened.routing.clone(), entry: retained, projected: false },
             )?;
+            self.persist_routed_seen(receipt, &entry.envelope.payload_hash)?;
             Ok(plaintext)
         })
     }
