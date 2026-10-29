@@ -5,6 +5,10 @@
 mod genesis;
 mod keys;
 mod management;
+mod recovery;
+pub use recovery::{RecoveryInput, recover_primary};
+mod contact_card;
+pub use contact_card::verify_contact_card_v3;
 pub use genesis::{GenesisInput, create_genesis};
 mod phrase;
 mod pins;
