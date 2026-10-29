@@ -11,7 +11,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-struct Root(PathBuf);
+pub(crate) struct Root(pub(crate) PathBuf);
 impl Drop for Root {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -89,6 +89,7 @@ async fn tls_server(
     router: Arc<ramflux_node_core::RouterCore>,
     store: Arc<ramflux_node_core::RouterRedbStore>,
     service: Arc<ramflux_node_core::CustodyService>,
+    corrupt_recovery_ack: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result {
     let mut stream = ramflux_transport::GatewayTcpTlsStream::Server(stream);
     let connection = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
@@ -111,7 +112,9 @@ async fn tls_server(
         } else {
             None
         };
-        let response = service.tls(
+        let replacement = matches!(&frame, CustodyClientFrame::Prove { action: CustodyProofAction::Publish { publication }, .. }
+            if decode_epoch(publication.record.body.device_set_epoch)?.0 > 1);
+        let mut response = service.tls(
             &router,
             &store,
             frame,
@@ -123,12 +126,26 @@ async fn tls_server(
             },
             super::network::now()?,
         );
+        if replacement
+            && matches!(response, CustodyServerFrame::Published { .. })
+            && corrupt_recovery_ack.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            response = CustodyServerFrame::Published {
+                record_hash: ramflux_protocol::encode_base64url([99; 32]),
+            };
+        }
         ramflux_transport::write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?)
             .await?;
     }
 }
 async fn start_server(
     root: &Root,
+) -> Result<(std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<Result>)> {
+    start_server_with_ack_fault(root, false).await
+}
+pub(crate) async fn start_server_with_ack_fault(
+    root: &Root,
+    corrupt_ack: bool,
 ) -> Result<(std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<Result>)> {
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
     let ca = root.0.join("ca.pem");
@@ -157,14 +174,16 @@ async fn start_server(
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move {
         let mut clients = Vec::new();
-        for _ in 0..3 {
+        let fault = Arc::new(std::sync::atomic::AtomicBool::new(corrupt_ack));
+        for _ in 0..if corrupt_ack { 4 } else { 3 } {
             let (stream, _) = listener.accept().await?;
             let acceptor = acceptor.clone();
             let router = Arc::clone(&router);
             let store = Arc::clone(&store);
             let service = Arc::clone(&service);
+            let fault = fault.clone();
             clients.push(tokio::spawn(async move {
-                tls_server(acceptor.accept(stream).await?, router, store, service).await
+                tls_server(acceptor.accept(stream).await?, router, store, service, fault).await
             }));
         }
         for client in clients {

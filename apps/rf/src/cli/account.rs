@@ -18,6 +18,7 @@ pub(crate) enum AccountAction {
     Backup(AccountBackupCommand),
     Create(Box<AccountCreate>),
     Login(Box<AccountCreate>),
+    Recover(AccountSelector),
     List,
     Lock(AccountLock),
     Passphrase(AccountPassphraseCommand),

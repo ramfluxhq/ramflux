@@ -201,6 +201,40 @@ pub(super) fn export(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account = local_bus_account(state, id)?;
     let profile = account_home(state, id)?;
+    if let Some(native) = &account.client.born_v3_account {
+        let now = crate::custody::network_now()?;
+        let current = crate::custody::load_account(&state.config.data_root, id, now)?;
+        if current.record() != native.record() || current.branch_pending() {
+            return Err(SdkError::NetworkingPending);
+        }
+        let body = ramflux_protocol::custody::ContactCardV3 {
+            version: 3,
+            principal_id: current.record().body.principal_id.clone(),
+            account_anchor: current.record().body.account_anchor.clone(),
+            master_public_key: current
+                .record()
+                .body
+                .master_certificate
+                .body
+                .master_public_key
+                .clone(),
+            master_certificate: current.record().body.master_certificate.clone(),
+            authority_head_hash: ramflux_protocol::custody::object_hash(current.record())?,
+            devices: current.record().body.devices.clone(),
+            node_url: profile.discovery_origin().map_err(|_| ContactReason::HomeProfileStale)?,
+            node_key_fingerprint: crate::contact_node_fingerprint(&profile.node_public_key)?,
+            display_name: current.record().body.profile.display_name.clone(),
+            issued_at: now,
+            expires_at: now.saturating_add(7 * 24 * 60 * 60),
+        };
+        let card = current.sign_contact_card(
+            super::super::custody_setup::primary_provider(&state.config).as_ref(),
+            body,
+            now,
+        )?;
+        let (card, link) = crate::contact_card_native::encode(&card, now_unix_timestamp())?;
+        return Ok(local_bus_ok(json!({"card":card,"link":link})));
+    }
     let root = account.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let identity = account
         .client
@@ -224,6 +258,7 @@ pub(super) fn export(
             kind_asserted: identity["kind"].as_str().map(str::to_owned),
             issued_at: now,
             expires_at: now.saturating_add(7 * 24 * 60 * 60),
+            native_authority: None,
         },
         root.signing_key.to_bytes(),
         now,
@@ -281,6 +316,20 @@ fn parse_selector(
         .and_then(|a| a.card.as_deref())
         .map(|c| crate::parse_contact_card(c, now))
         .transpose()?;
+    if let Some(card) = &card {
+        if account.client.born_v3_account.is_some() && card.version != 3 {
+            return Err(SdkError::CustodyModeDowngrade);
+        }
+        if card.version == 3
+            && let Some(pinned) =
+                account.client.account_db()?.client_record("identity", &card.principal_id)?
+            && pinned["contact_identity_commitment"]
+                .as_str()
+                .is_some_and(|anchor| anchor != card.root_commitment)
+        {
+            return Err(ContactReason::AnchorMismatch.into());
+        }
+    }
     let selector = match (&parsed, &legacy, &card) {
         (
             Some(Add {
@@ -330,3 +379,7 @@ fn account_home(state: &LocalBusDaemonState, id: &str) -> Result<crate::NodeProf
     }
     Ok(profile.clone())
 }
+
+#[cfg(test)]
+#[path = "tests/native_contact_card.rs"]
+mod native_card_tests;

@@ -57,6 +57,23 @@ the phrase/master instead requires a new identity and contact re-verification.
 A primary's ordinary data-unlock secret, vault credential or branch seed cannot
 reconstruct the phrase or master. A backup password restores data, not authority.
 
+The local phrase recovery/promotion API is `account.recover.begin/confirm` on one
+exclusive same-user connection. It confirms the account anchor before certifying a
+fresh random self-signing key and branch in a higher master-authorized range.
+Recovery revokes all other branches; it does not copy an unverified survivor roster.
+The master is erased before vault/journal writes. A public signed crash journal
+selects the exact replacement intent, including after an uncertain publication ACK;
+it contains no phrase, master seed or credential bytes. Registration becomes live
+only after the existing custody publication path acknowledges that exact head.
+Retry an uncertain intent through ordinary unlock rather than starting a competing
+recovery. Local data remains protected by its separate passphrase. See
+[the local-bus contract](local_bus_account_recovery.md).
+
+SAS pairing and cooperative HPKE transfer remain separate planned integrations.
+Until pairing is available, adding a second installation requires explicit phrase
+recovery on that installation; this promotes it and revokes the former branches.
+It does not retain two concurrently approved installations.
+
 If both primary and phrase are lost, identity management is permanently lost.
 Surviving secondaries retain local history but stop new authenticated network
 operations when their authorization leases expire. They can export data for a new
@@ -563,15 +580,16 @@ Data-only restore has two cases:
 - **New installation without an approved branch:** allocate fresh local branch
   keys. Networking stays pending until an already-approved primary explicitly
   approves that exact branch through device enrollment, or the user completes the
-  separate 24-word recovery ceremony when no primary is available. Installation
+  separate user-started 24-word recovery/promotion ceremony. Installation
   never authorizes the branch, including when a primary credential is already
   present on the machine. Archive metadata supplies neither credentials nor the
   installation's data passphrase.
 
-The current native job implementation supports the existing-installation merge
-using the independently unlocked local data key. Fresh-install native jobs fail
-closed with `networking_pending`; branch allocation and the SAS/recovery approval
-handoff remain pending integration. See [account_backup.md](account_backup.md).
+Existing-installation merge uses the independently unlocked local data key.
+Fresh-install jobs require an independent local data passphrase, allocate an
+uncertified branch, and restore data with networking pending. A local primary
+credential does not certify that branch. Explicit phrase recovery certifies it;
+SAS enrollment remains planned. See [account_backup.md](account_backup.md).
 Recovery/promotion is a separate, user-started phrase operation. Data backups do
 not restore the phrase, and phrase recovery alone does not recover history for
 which the user has no surviving data keys/backup.

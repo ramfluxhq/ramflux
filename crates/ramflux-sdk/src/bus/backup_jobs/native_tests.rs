@@ -345,3 +345,6 @@ fn native_restore_origin_id_cannot_select_a_different_installed_identity() -> Te
     );
     Ok(())
 }
+
+#[path = "native_recovery_tests.rs"]
+mod recovery_tests;
