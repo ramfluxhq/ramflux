@@ -1,7 +1,6 @@
-# Experimental born-v3 networking
+# Native v3 networking
 
-Born-v3 creation is still explicitly enabled during development with
-`LocalBusConfig.enable_born_v3_creation`. The ordinary
+Native creation is enabled by default with no creation opt-in. The ordinary
 [account creation ceremony](local_bus_account_creation.md) returns a typed
 unlocked account after its data actor opens, with networking either `live` or
 `networking_pending`. Its passphrase unlocks data independently of primary
@@ -27,31 +26,16 @@ the persistent ordinary X3DH/ratchet stack.
 Local `Live` means registration completed; it is not a restored session grant.
 Reconnect authenticates a new TLS connection with new one-use challenges.
 Sessions expire within five minutes; expiry or a changed head requires reconnect.
-The earlier explicit `CustodyConnection` experiment remains available only until
-its retirement during v3-only integration; normal clients use the ordinary stack.
+`CustodyConnection` supplies the shared native authentication transport inside
+that ordinary session engine. The temporary custody-only `send_dm`, `receive_dm`
+and `ack_dm` API, its experimental opt-in and its separate receipt store are
+removed. Normal clients send and receive through ordinary message methods.
 
-`send_dm`, `receive_dm`, and `ack_dm` are a temporary experimental path and
-require the separate explicit `allow_experimental_native_dm: true` setting.
-Leave it false for normal clients. This bootstrap **does not provide forward
-secrecy**: the recipient prekey is derived from its long-lived branch agreement
-key, has no one-time prekey, and each message starts a fresh single-message
-ratchet. Compromise of that branch agreement key can decrypt previously captured
-messages. The v3-only ordinary-client integration retires this path and uses the
-ordinary persistent E2EE ratchet and prekey stack before default creation changes.
-
-This temporary path addresses devices registered with the same router and polls
-its durable opaque inbox. Current root-qualified authority, branch signatures and
-recipient-side AEAD are verified; it does not install a legacy gateway push
-session or silently use a cross-node directory. Reception enforces the signed
-creation time and TTL (at most one day), and rejects future or expired messages.
-After the caller accepts a decrypted message, `ack_dm` fsyncs its receiver-scoped
-receipt before sending the real inbox ACK. Up to 4096 receipts are retained
-through their signed expiry, across reconnect/restart; full capacity refuses new
-ACKs rather than evicting live replay evidence. An uncertain remote ACK can be
-retried. Unacknowledged messages remain redeliverable; this receipt window is not
-an application transaction or a substitute for the ordinary ratchet replay window.
-Plaintext is zeroized on drop. Current branch leases and revocations apply;
-there is no historical-receipt exception for an expired branch.
+Those messages use the persistent ordinary X3DH/double-ratchet stack and its
+receiver replay protections. See the precise [ordinary DM security
+boundary](root_key_custody.md#ordinary-dm-security-boundary), including the remaining
+bootstrap forward-secrecy limitation on this implementation baseline. Native
+registration and channel binding do not independently provide DM forward secrecy.
 
 ## Receiving-node configuration
 
