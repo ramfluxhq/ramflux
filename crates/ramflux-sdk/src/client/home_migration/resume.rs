@@ -23,15 +23,20 @@ pub enum MigrationResumption {
     Idle(Box<MigrationProgress>),
 }
 
+pub(super) struct ControlPlan<'a> {
+    pub action: wire::Action,
+    pub audience: &'a str,
+    pub operation: &'a str,
+    pub payload_hash: String,
+    pub now: u64,
+}
+
 pub(super) fn sign_control(
     account: &BornAccount,
     branch: &DeviceBranch,
-    action: wire::Action,
-    audience: &str,
-    operation: &str,
-    payload_hash: String,
-    now: u64,
+    plan: ControlPlan<'_>,
 ) -> Result<wire::Signed<wire::Control>, SdkError> {
+    let ControlPlan { action, audience, operation, payload_hash, now } = plan;
     Ok(crypto::sign_actor(
         wire::Control {
             version: 1,
@@ -138,11 +143,16 @@ impl HomeMigrationJournal<'_> {
                 let control = sign_control(
                     self.account,
                     &credentials.signing,
-                    wire::Action::Abort,
-                    &target.node_id,
-                    operation,
-                    framed_hash(ramflux_protocol::domain::HOME_CONTROL, &payload)?,
-                    now,
+                    ControlPlan {
+                        action: wire::Action::Abort,
+                        audience: &target.node_id,
+                        operation,
+                        payload_hash: framed_hash(
+                            ramflux_protocol::domain::HOME_CONTROL,
+                            &payload,
+                        )?,
+                        now,
+                    },
                 )?;
                 let request = wire::Request {
                     control,
@@ -176,7 +186,7 @@ impl HomeMigrationJournal<'_> {
     pub fn reservation_aborted(
         &self,
         operation: &str,
-        receipt: wire::Signed<wire::Receipt>,
+        receipt: &wire::Signed<wire::Receipt>,
         now: u64,
     ) -> Result<MigrationProgress, SdkError> {
         let mut job = self.load(operation)?;
@@ -184,7 +194,7 @@ impl HomeMigrationJournal<'_> {
             return Err(refused(wire::Refusal::IdempotencyConflict));
         }
         let target = job.target.as_ref().ok_or_else(|| refused(wire::Refusal::EvidenceRequired))?;
-        crypto::verify_node(&receipt, &target.node_id, &target.node_public_key)?;
+        crypto::verify_node(receipt, &target.node_id, &target.node_public_key)?;
         let request =
             job.abort_request.as_ref().ok_or_else(|| refused(wire::Refusal::EvidenceRequired))?;
         let r = &receipt.body;
