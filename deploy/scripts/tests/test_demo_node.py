@@ -121,6 +121,83 @@ else:
         with self.env_file.open("a") as output:
             output.write("DEMO_PREBUILT_IMAGES=1\n")
 
+    def test_custody_inputs_survive_upgrade_and_snapshot_rollback(self):
+        record = self.root / "node-record.json"
+        record.write_bytes(b'{"signed-record":"version-one"}\n')
+        with self.env_file.open("a") as output:
+            output.write(f"RAMFLUX_CUSTODY_NODE_RECORD_FILE={record}\n"
+                         "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY=test-custody-public\n"
+                         "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED=test-proxy-seed\n"
+                         "RAMFLUX_CUSTODY_HANDSHAKE_POOL=128\n"
+                         "RAMFLUX_CUSTODY_AUTHENTICATED_POOL=512\n"
+                         "RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS=5000\n")
+        self.run_script("up")
+        original = self.managed_state()
+        runtime = (self.state / "runtime.env").read_text()
+        for suffix, value in (("NODE_PUBLIC_KEY", "test-custody-public"),
+                              ("PROXY_SIGNING_SEED", "test-proxy-seed"),
+                              ("NODE_RECORD_FILE", "/etc/ramflux/custody/node-record.json"),
+                              ("HANDSHAKE_POOL", "128"), ("AUTHENTICATED_POOL", "512"),
+                              ("AUTH_TIMEOUT_MS", "5000")):
+            self.assertIn(f"RAMFLUX_CUSTODY_{suffix}={value}\n", runtime)
+            self.assertIn(f"RF_COMPOSE_CUSTODY_{suffix}={value}\n", runtime)
+        override = json.loads((self.state / "demo-override.json").read_text())
+        router = override["services"]["ramflux-router"]
+        self.assertIn("./secrets/custody:/etc/ramflux/custody:ro", router["volumes"])
+        self.assertEqual(router["environment"]["RAMFLUX_CUSTODY_NODE_RECORD_FILE"],
+                         "${RF_COMPOSE_CUSTODY_NODE_RECORD_FILE}")
+        self.assertIn("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED",
+                      override["services"]["ramflux-gateway"]["environment"])
+        self.assertNotIn("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", router["environment"])
+        configured_env = self.env_file.read_text()
+        for key in ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED"):
+            with self.subTest(changed=key):
+                self.env_file.write_text(configured_env + f"DEMO_VERSION=demo-v2\n{key}=replacement\n")
+                before = self.state_tree()
+                self.journal.write_text("")
+                refused = self.run_script("upgrade", success=False)
+                self.assertEqual(refused.stderr, f"DEMO_CUSTODY_INPUT_CHANGED: {key}\n")
+                self.assertEqual(self.state_tree(), before)
+                self.assertEqual(self.commands(), [])
+        self.env_file.write_text(configured_env)
+        # Inputs need not be repeated in a version-only upgrade; use private retained copies.
+        self.env_file.write_text("\n".join(line for line in self.env_file.read_text().splitlines()
+                                          if not line.startswith("RAMFLUX_CUSTODY_")) +
+                                 "\nDEMO_VERSION=demo-v2\n")
+        record.unlink()
+        self.run_script("upgrade")
+        self.assertEqual((self.state / "runtime.env").read_text(),
+                         runtime.replace("RAMFLUX_VERSION=demo-test", "RAMFLUX_VERSION=demo-v2"))
+        (self.state / "secrets/custody/node-record.json").write_bytes(b"interrupted rewrite")
+        self.run_script("rollback")
+        self.assertEqual(self.managed_state(), original)
+        self.assertEqual((self.state / "secrets/custody/node-record.json").read_bytes(),
+                         b'{"signed-record":"version-one"}\n')
+
+    def test_incomplete_custody_inputs_refuse_initial_and_legacy_upgrade_before_writes(self):
+        self.state.mkdir(mode=0o700)
+        record = self.root / "node-record.json"
+        record.write_text("{}")
+        baseline = self.env_file.read_text()
+        for existing in (False, True):
+            if existing:
+                self.env_file.write_text(baseline)
+                self.run_script("up")
+                baseline += "DEMO_VERSION=demo-v2\n"
+            for inputs, missing in (
+                (f"RAMFLUX_CUSTODY_NODE_RECORD_FILE={record}\n", "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY"),
+                ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY=test-public\n", "RAMFLUX_CUSTODY_NODE_RECORD_FILE"),
+            ):
+                with self.subTest(existing=existing, missing=missing):
+                    self.env_file.write_text(baseline + inputs)
+                    before = self.state_tree()
+                    self.journal.write_text("")
+                    refused = self.run_script("upgrade" if existing else "up", success=False)
+                    self.assertEqual(refused.stderr, f"DEMO_CUSTODY_INPUT_MISSING: {missing}\n")
+                    self.assertEqual(self.state_tree(), before)
+                    self.assertEqual(self.commands(), [])
+                    self.assertFalse((self.state / "transaction.pending").exists())
+
     def test_default_up_builds_locally_and_uses_compose_build(self):
         self.run_script("up")
         self.assertTrue(self.cargo_journal.is_file())
@@ -153,7 +230,7 @@ else:
         result = self.run_script("up", success=False)
         for image in missing:
             self.assertIn(image, result.stderr)
-        self.assertIn("missing prebuilt demo images", result.stderr)
+        self.assertIn("missing demo images for version demo-test", result.stderr)
         self.assertFalse(self.cargo_journal.exists())
         self.assertFalse(any("up" in args for args in self.compose_commands()))
 
@@ -231,6 +308,28 @@ else:
                 self.run_script("up")
                 self.run_script("down", "--purge")
                 self.state.mkdir(mode=0o750)
+
+    def test_initial_recovery_removes_dependents_before_dependencies(self):
+        self.state.mkdir(mode=0o750)
+        before = self.state_tree()
+        self.control.write_text('{"health": "unhealthy"}')
+        self.run_script("up", success=False)
+        resources_path = self.root / "resources.json"
+        resources = json.loads(resources_path.read_text())
+        gateway = resources.pop("id-ramflux-gateway")
+        resources["id-ramflux-gateway"] = gateway
+        resources_path.write_text(json.dumps(resources))
+        self.control.write_text(json.dumps({"remove_dependencies": {
+            "id-ramflux-router": ["id-ramflux-gateway"],
+            "id-ramflux-retention": ["id-ramflux-gateway"],
+        }}))
+        recovered = self.run_script("recover")
+        self.assertEqual(recovered.stdout, "initial setup rolled back; run `up` again\n")
+        self.assertEqual(recovered.stderr, "")
+        self.assertEqual(self.state_tree(), before)
+        self.assertEqual(json.loads((self.root / "resources.json").read_text()), {})
+        removals = [args[-1] for args in self.commands() if args[:2] == ["rm", "-f"]]
+        self.assertGreater(removals.count("id-ramflux-router"), 1)
 
     def test_initial_recovery_retries_removal_and_refuses_changed_project(self):
         self.state.mkdir()
