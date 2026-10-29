@@ -115,6 +115,7 @@ impl RamfluxClient {
         local_account_id: &str,
         new_secret: &[u8],
     ) -> Result<(), SdkError> {
+        let _writer = self.account_index()?.acquire_account_writer(local_account_id)?;
         let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
         let key_encryption_key = account_db_key_encryption_key(&vault_secret, new_secret);
         let wrapped = self.account_db()?.wrap_current_db_key(&key_encryption_key)?;
@@ -400,7 +401,7 @@ mod tests {
         wrong_secret.open_account_index(&root)?;
         assert!(matches!(
             wrong_secret.unlock_account("acct_a", b"wrong-secret"),
-            Err(SdkError::Storage(StorageError::KeyWrappingFailed(_)))
+            Err(SdkError::Storage(StorageError::Integrity(_)))
         ));
 
         restored.rekey_active_account("acct_a", b"new-secret")?;
@@ -410,7 +411,7 @@ mod tests {
         old_secret_after_rekey.open_account_index(&root)?;
         assert!(matches!(
             old_secret_after_rekey.unlock_account("acct_a", b"shared-secret"),
-            Err(SdkError::Storage(StorageError::KeyWrappingFailed(_)))
+            Err(SdkError::Storage(StorageError::Integrity(_)))
         ));
         let mut new_secret_after_rekey = RamfluxClient::new();
         new_secret_after_rekey.open_account_index(&root)?;
@@ -422,7 +423,7 @@ mod tests {
         missing_vault_secret.open_account_index(&root)?;
         assert!(matches!(
             missing_vault_secret.unlock_account("acct_a", b"new-secret"),
-            Err(SdkError::Storage(StorageError::KeyWrappingFailed(_)))
+            Err(SdkError::Storage(StorageError::Integrity(_)))
         ));
 
         let _ = std::fs::remove_dir_all(root);

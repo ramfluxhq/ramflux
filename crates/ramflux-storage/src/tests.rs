@@ -690,14 +690,14 @@ fn account_db_key_generate_is_random_and_aead_wrap_rejects_tamper() -> Result<()
     tampered_key.wrapped_key[0] ^= 0x01;
     assert!(matches!(
         encryption::unwrap_with_vault_secret(&vault_secret, &tampered_key),
-        Err(StorageError::KeyWrappingFailed(_))
+        Err(StorageError::Integrity(_))
     ));
 
     let mut tampered_nonce = wrapped;
     tampered_nonce.nonce[0] ^= 0x01;
     assert!(matches!(
         encryption::unwrap_with_vault_secret(&vault_secret, &tampered_nonce),
-        Err(StorageError::KeyWrappingFailed(_))
+        Err(StorageError::Integrity(_))
     ));
     Ok(())
 }

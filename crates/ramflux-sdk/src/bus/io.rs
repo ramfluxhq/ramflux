@@ -99,6 +99,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
             _ => None,
         },
         reason_code: match error {
+            SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some("account_busy".into()),
             SdkError::ContactInput(reason) => Some(reason.to_string()),
             SdkError::ContactConfirmationRequired(_) => {
                 Some("root_replacement_confirmation_required".into())
@@ -110,12 +111,18 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
             _ => None,
         },
         code: local_bus_error_code(error).to_owned(),
-        message: error.to_string(),
+        message: if local_bus_error_code(error) == "account_busy" {
+            "account in use by another process".into()
+        } else {
+            error.to_string()
+        },
         retry_after_ms: if matches!(
             error,
             SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
         ) {
             Some(60_000)
+        } else if local_bus_error_code(error) == "account_busy" {
+            Some(1_000)
         } else {
             None
         },
@@ -154,6 +161,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         | SdkError::Crypto(CryptoError::Protocol(
             ramflux_protocol::ProtocolError::GroupStateLimit(_),
         )) => "GroupStateCapacity",
+        SdkError::Storage(error) => storage_error_code(error),
         SdkError::TaskDeliveryTooLarge { .. } => "TaskDeliveryTooLarge",
         SdkError::SurfaceDeliveryTooLarge { .. } => "too_large",
         SdkError::SurfaceRefused { reason, .. } => reason.as_str(),
@@ -172,6 +180,45 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::RemoteAppApprovalRequired => "RemoteAppApprovalRequired",
         SdkError::OwnDeviceAuthorizationRefreshFailed(_) => "OwnDeviceAuthorizationRefreshFailed",
         _ => "ValidationFailed",
+    }
+}
+
+fn storage_error_code(error: &StorageError) -> &'static str {
+    use StorageError as E;
+    match error {
+        E::AccountWriterBusy(_) => "account_busy",
+        E::Io(_) | E::Sqlite(_) => "storage_unavailable",
+        E::Integrity(_)
+        | E::Protocol(_)
+        | E::AmbiguousDeviceId(_)
+        | E::Core(_)
+        | E::Crypto(_)
+        | E::AccountKeyMismatch
+        | E::EncryptionUnavailable { .. }
+        | E::MigrationChecksumMismatch { .. }
+        | E::KeyWrappingFailed(_)
+        | E::RekeyRollbackFailed(_)
+        | E::AccountNotFound(_)
+        | E::Serde(_)
+        | E::HistoryBundleHashMismatch
+        | E::AuthorizationRejected
+        | E::GroupMemberLimitExceeded
+        | E::InvalidGroupRole(_)
+        | E::GroupPermissionDenied
+        | E::GroupControlReplay(_)
+        | E::GroupControlEpochMismatch { .. }
+        | E::GroupControlSigningKeyMissing(_)
+        | E::GroupInviteMissing(_)
+        | E::GroupInviteInvalidState { .. }
+        | E::GroupInviteExpired(_)
+        | E::GroupInviteAcceptorMismatch(_)
+        | E::SenderKeyNotDistributed
+        | E::GroupEpochAccessDenied
+        | E::MessageNotFound(_)
+        | E::MessageIdConflict(_)
+        | E::EventIdConflict(_)
+        | E::IdentityLifecycleBlocked(_)
+        | E::InvalidRecoveryState { .. } => "ValidationFailed",
     }
 }
 

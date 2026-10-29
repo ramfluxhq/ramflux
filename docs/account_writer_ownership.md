@@ -25,8 +25,8 @@ until all its clones close and its SQLite thread has finished closing the databa
 ## Expiry, lost holders and backup
 
 This is a kernel descriptor lease, with event-based expiry rather than a clock
-TTL: ownership expires on the final writer descriptor closing or process exit,
-including abnormal termination. A live but hung owner retains ownership; stop or
+TTL: the final owner explicitly unlocks before closing its descriptor; process
+exit, including abnormal termination, also releases ownership. A live but hung owner retains ownership; stop or
 terminate that process (`kill -TERM <owner-pid>` on Unix, or the service
 supervisor's stop command), wait for it to exit, then retry opening the account.
 Elapsed time, a PID file and a file's modification time never authorize takeover.
@@ -52,6 +52,31 @@ Do not copy/remove an active account directory.
 If advisory locking is unsupported or otherwise fails, account opening fails
 closed and reports both the writer-lock path and the filesystem error. Move the
 data root to a local filesystem with advisory-lock support before retrying.
+
+## Error codes
+
+Writer contention is retryable; local filesystem failures are not evidence of
+archive tampering. The storage and SDK boundaries use these classifications:
+
+| Cause | Storage | Backup job | Local bus | C ABI |
+| --- | --- | --- | --- | --- |
+| Another process holds the lock | `AccountWriterBusy` | `account_busy`, retryable | `account_busy`, retry after 1000 ms | `RAMFLUX_ERR_ACCOUNT_BUSY` (18), retryable |
+| Lock open/locking or index I/O fails | `Io` (or `Sqlite` for index queries) | `unreadable` | `storage_unavailable` | `StorageFailed` (8) |
+| MAC verification fails | `Integrity` | `tampered` | `ValidationFailed` (existing) | `StorageFailed` (8, existing) |
+
+Unsupported locking, permission failures, a full filesystem and a directory at
+the lock-file path are local I/O failures. The lock error retains the path and
+underlying filesystem cause. Only a failed integrity check yields `Integrity`;
+I/O errors never become `tampered`. SQLite page-budget exhaustion during archive
+work continues to use the backup job's `insufficient_space` code. Bus contention
+includes `reason_code: "account_busy"`, the message "account in use by another
+process" and `retry_after_ms: 1000`. Wait for ownership to be released before
+retrying; the retry hint does not expire or evict an owner.
+
+The C header is generated from the SDK's C ABI declarations. Code 18 and its
+`RAMFLUX_ERR_ACCOUNT_BUSY` constant are additive; existing numeric codes retain
+their meanings. A wrong secret and a damaged wrapped-key MAC cannot be
+distinguished cryptographically; both keep their existing bus and C ABI codes.
 
 ## Managed transactions and source guard
 

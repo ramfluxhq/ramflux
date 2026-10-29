@@ -130,3 +130,6 @@ pub use surface_refusal::SurfaceRefusalCode;
 mod task_refusal;
 mod task_warnings;
 pub use task_refusal::TaskRefusalCode;
+
+#[cfg(test)]
+mod storage_failure_fixture;

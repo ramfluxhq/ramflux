@@ -56,3 +56,6 @@ pub(crate) use readers::test_account_reader_request;
 
 #[cfg(test)]
 mod custody_setup_tests;
+
+#[cfg(test)]
+mod account_error_tests;

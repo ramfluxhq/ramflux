@@ -42,8 +42,8 @@ impl crate::AccountIndex {
 }
 
 pub(crate) struct AccountWriter {
-    // The kernel releases the lease only when the last descriptor closes or the
-    // process exits. Never unlink this inode or use file age to break ownership.
+    // Drop explicitly unlocks before close; process exit also releases ownership.
+    // Never unlink this inode or use file age to break ownership.
     file: Option<File>,
     path: PathBuf,
 }
@@ -77,6 +77,21 @@ pub(crate) fn set_drop_hook(hook: Option<DropHook>) -> Result<(), StorageError> 
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("account writer lock failed at {}: {source}", path.display())]
+struct WriterLockIo {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+fn lock_io(path: &Path, source: std::io::Error) -> StorageError {
+    StorageError::Io(std::io::Error::new(
+        source.kind(),
+        WriterLockIo { path: path.to_path_buf(), source },
+    ))
+}
+
 impl AccountWriter {
     pub(crate) fn acquire(root: &Path, account: &str) -> Result<Arc<Self>, StorageError> {
         let directory = root.join("accounts").join(account).canonicalize()?;
@@ -102,16 +117,17 @@ impl AccountWriter {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options
-            .open(&path)
-            .map_err(|source| StorageError::AccountWriterLock { path: path.clone(), source })?;
+        let file = options.open(&path).map_err(|source| lock_io(&path, source))?;
         match file.try_lock_exclusive() {
             Ok(()) => {}
-            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+            {
                 return Err(StorageError::AccountWriterBusy(account.to_owned()));
             }
             Err(error) => {
-                return Err(StorageError::AccountWriterLock { path, source: error });
+                return Err(lock_io(&path, error));
             }
         }
         let owner = Arc::new(Self { file: Some(file), path: path.clone() });

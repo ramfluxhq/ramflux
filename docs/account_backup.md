@@ -182,3 +182,7 @@ before a restart, an earlier encrypted database can remain orphaned after its
 reclamation marker is removed with the replaced directory. Its key is discarded;
 this accepted limitation can waste disk space but does not select or resume the
 orphaned state.
+
+Writer-lock and index-read I/O failures during restore checks or installation use
+`unreadable`; only integrity verification failures use `tampered`. These failures
+follow the [account writer error mapping](account_writer_ownership.md#error-codes).

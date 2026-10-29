@@ -26,14 +26,48 @@ use zeroize::Zeroizing;
 fn failure(code: BackupFailureCode) -> BackupFailure {
     BackupFailure::new(code)
 }
-pub(super) fn storage_error(error: ramflux_storage::StorageError) -> BackupFailure {
-    if matches!(error, ramflux_storage::StorageError::AccountWriterBusy(_)) {
-        return BackupFailure::account_busy();
+pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFailure {
+    use ramflux_storage::StorageError as E;
+    match error {
+        E::AccountWriterBusy(_) => BackupFailure::account_busy(),
+        E::Integrity(_) | E::HistoryBundleHashMismatch => failure(BackupFailureCode::Tampered),
+        E::Sqlite(_) if error.is_insufficient_space() => {
+            failure(BackupFailureCode::InsufficientSpace)
+        }
+        E::Protocol(_)
+        | E::AmbiguousDeviceId(_)
+        | E::Core(_)
+        | E::Crypto(_)
+        | E::Sqlite(_)
+        | E::Io(_)
+        | E::AccountKeyMismatch
+        | E::EncryptionUnavailable { .. }
+        | E::MigrationChecksumMismatch { .. }
+        | E::KeyWrappingFailed(_)
+        | E::RekeyRollbackFailed(_)
+        | E::AccountNotFound(_)
+        | E::Serde(_)
+        | E::AuthorizationRejected
+        | E::GroupMemberLimitExceeded
+        | E::InvalidGroupRole(_)
+        | E::GroupPermissionDenied
+        | E::GroupControlReplay(_)
+        | E::GroupControlEpochMismatch { .. }
+        | E::GroupControlSigningKeyMissing(_)
+        | E::GroupInviteMissing(_)
+        | E::GroupInviteInvalidState { .. }
+        | E::GroupInviteExpired(_)
+        | E::GroupInviteAcceptorMismatch(_)
+        | E::SenderKeyNotDistributed
+        | E::GroupEpochAccessDenied
+        | E::MessageNotFound(_)
+        | E::MessageIdConflict(_)
+        | E::EventIdConflict(_)
+        | E::IdentityLifecycleBlocked(_)
+        | E::InvalidRecoveryState { .. } => failure(BackupFailureCode::Unreadable),
     }
-    let full = error.is_insufficient_space();
-    drop(error);
-    failure(if full { BackupFailureCode::InsufficientSpace } else { BackupFailureCode::Tampered })
 }
+
 fn stream_error(error: BackupStreamError, header: bool) -> BackupFailure {
     match error {
         BackupStreamError::Authentication => failure(if header {
@@ -74,7 +108,7 @@ impl BackupJobs {
                 );
                 Ok(())
             })
-            .map_err(storage_error)?;
+            .map_err(|error| storage_error(&error))?;
         let checks = BackupAttachmentChecks {
             verified: checks.verified,
             mismatched: checks.mismatched,
@@ -102,7 +136,8 @@ impl BackupJobs {
         let directory =
             self.directory(&job.job_id).map_err(|_| failure(BackupFailureCode::NotWritable))?;
         let mut private = PrivateDirectory { path: directory.clone(), transferred: false };
-        let estimate = captured.reader.backup_estimated_bytes().map_err(storage_error)?;
+        let estimate =
+            captured.reader.backup_estimated_bytes().map_err(|error| storage_error(&error))?;
         check_space(&self.root, estimate.saturating_mul(2).saturating_add(20 * 1024 * 1024))?;
         let destination = std::path::Path::new(&job.path)
             .parent()
@@ -117,15 +152,16 @@ impl BackupJobs {
                 if cancel.load(Ordering::Acquire) {
                     failure(BackupFailureCode::Interrupted)
                 } else {
-                    storage_error(error)
+                    storage_error(&error)
                 }
             })?;
         drop(captured.reader);
         self.change(|registry| registry.writing(&job.job_id, snapshot.counts.clone(), now()))
             .map_err(|_| failure(BackupFailureCode::Interrupted))?;
-        let db = BackupDatabase::open(&database, &snapshot.key).map_err(storage_error)?;
-        db.clear_missing_manifest().map_err(storage_error)?;
-        if db.missing_attachment_count().map_err(storage_error)? > 0 {
+        let db = BackupDatabase::open(&database, &snapshot.key)
+            .map_err(|error| storage_error(&error))?;
+        db.clear_missing_manifest().map_err(|error| storage_error(&error))?;
+        if db.missing_attachment_count().map_err(|error| storage_error(&error))? > 0 {
             if !allow_missing_attachments {
                 let failure = self
                     .unavailable_failure(job, directory.clone(), &snapshot.key, &db)
@@ -133,16 +169,13 @@ impl BackupJobs {
                 private.transferred = true;
                 return Err(failure);
             }
-            db.allow_missing_attachments().map_err(storage_error)?;
+            db.allow_missing_attachments().map_err(|error| storage_error(&error))?;
         }
         self.verify_files(job, &db, &cancel, &snapshot.counts)?;
-        let missing_count = db.approved_missing_count().map_err(storage_error)?;
+        let missing_count = db.approved_missing_count().map_err(|error| storage_error(&error))?;
         drop(db);
         let output = PathBuf::from(&job.path);
-        let parent = output
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or(std::path::Path::new("."));
+        let parent = destination;
         let size =
             std::fs::metadata(&database).map_err(|_| failure(BackupFailureCode::Unreadable))?.len();
         check_space(parent, size.saturating_add(20 * 1024 * 1024))?;
@@ -334,14 +367,14 @@ impl BackupJobs {
             .map_err(|_| failure(BackupFailureCode::RootConflict))?;
         let (master, key) = fresh_staging_keys()?;
         let db = BackupDatabase::open(&path, &AccountDbKey::from_bytes(metadata.database_key))
-            .map_err(storage_error)?;
-        db.check_integrity().map_err(storage_error)?;
-        db.rekey(&key).map_err(storage_error)?;
+            .map_err(|error| storage_error(&error))?;
+        db.check_integrity().map_err(|error| storage_error(&error))?;
+        db.rekey(&key).map_err(|error| storage_error(&error))?;
         metadata.database_key = *key.bytes();
-        if db.counts().map_err(storage_error)? != counts {
+        if db.counts().map_err(|error| storage_error(&error))? != counts {
             return Err(failure(BackupFailureCode::Tampered));
         }
-        if db.approved_missing_count().map_err(storage_error)?
+        if db.approved_missing_count().map_err(|error| storage_error(&error))?
             != context.totals.get("missing_attachments").copied().unwrap_or(0)
         {
             return Err(failure(BackupFailureCode::Tampered));
@@ -384,8 +417,9 @@ impl BackupJobs {
             Err(ramflux_storage::StorageError::AccountNotFound(_)) => Ok(false),
             Err(_) => Err(failure(BackupFailureCode::Unreadable)),
             Ok(_) => {
-                let _writer = self.index.acquire_account_writer(id).map_err(storage_error)?;
-                let record = self.index.account(id).map_err(storage_error)?;
+                let _writer =
+                    self.index.acquire_account_writer(id).map_err(|error| storage_error(&error))?;
+                let record = self.index.account(id).map_err(|error| storage_error(&error))?;
                 if record.principal_commitment != metadata.manifest.principal_commitment {
                     return Err(failure(BackupFailureCode::RootConflict));
                 }
@@ -403,9 +437,12 @@ impl BackupJobs {
                     id,
                     local.account_secret.as_bytes(),
                 )
-                .map_err(|_| failure(BackupFailureCode::Unreadable))?;
+                .map_err(|error| match error {
+                    crate::SdkError::Storage(error) => storage_error(&error),
+                    _ => failure(BackupFailureCode::Unreadable),
+                })?;
                 BackupDatabase::open(&path, &local_key)
-                    .map_err(storage_error)?
+                    .map_err(|error| storage_error(&error))?
                     .check_backup_pins(incoming, key)
                     .map_err(|_| failure(BackupFailureCode::RootConflict))?;
                 Ok(true)

@@ -34,3 +34,6 @@ pub(super) struct MissingAttachments {
     pub total: u64,
     pub selectors: Vec<String>,
 }
+
+#[cfg(test)]
+mod storage_error_tests;
