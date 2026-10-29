@@ -116,6 +116,13 @@ Response key: `identities`. Rows contain `id`/`principal_id`, `display_name`, `k
 `principal_commitment` (also exposed as `contact_identity_commitment`), `devices`, `safety_state`, `safety_number`, and
 `safety_number_available`. The local principal is included after unlock.
 
+Contact rows also expose `root_source`: `lookup` for a root first learned from verified network
+lookup or an inbound contact request, `card` for an independently imported contact-card pin,
+and `verified` after manual safety verification. A native master-signed certificate authenticates
+network material; it does not make that material an imported card. Refreshes preserve existing
+card/verified provenance. Unknown older anchors remain immutable rather than being relabeled
+provisional by a later lookup. See [contact root provenance](contact_cards.md#correcting-a-provisional-lookup-root).
+
 Verified device rows contain `id`/`device_id`, `signing_public_key`, `target_delivery_id`, `label`,
 `last_seen`, and `verified_at`. The manifest supplies principal/device membership, signing keys,
 and delivery targets. `verified_at` is a verification observation, not a fabricated last-seen time.

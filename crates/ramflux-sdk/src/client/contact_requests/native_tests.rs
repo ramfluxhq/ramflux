@@ -275,3 +275,50 @@ async fn native_inbound_accept_persists_safety_before_the_first_directory_read()
     assert!(target.client.identity_root.is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn native_received_request_keeps_lookup_provenance_and_preserves_card_pins() -> TestResult {
+    let sender = Fixture::new("native-provenance-sender").await?;
+    let target = Fixture::new("native-provenance-target").await?;
+    let bytes = approve_request(&sender, &target).await?;
+    let (entry, route) = transport(&sender, &target)?;
+    let db = target.client.account_db()?;
+    let principal = &sender.manifest.principal_id;
+    assert!(db.client_record("identity", principal)?.is_none());
+    target
+        .client
+        .prepare_native_contact_control(
+            &target.config,
+            &entry,
+            &route,
+            &bytes,
+            Some(&sender.manifest),
+        )
+        .await?;
+    assert_eq!(
+        db.client_record("identity", principal)?.ok_or("identity")?["root_source"],
+        "lookup"
+    );
+    let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
+    target.client.apply_contact_control(&control)?;
+    let pending =
+        db.contact_request(&sender.manifest.principal_commitment, "inbound")?.ok_or("request")?;
+    target.client.decide_inbound_contact(&pending, "accepted")?;
+    assert_eq!(target.client.contact_entry(principal)?["root_source"], "lookup");
+    // A previously explicit card pin is independent of later network observations.
+    let mut identity = db.client_record("identity", principal)?.ok_or("identity")?;
+    identity["root_source"] = serde_json::json!("card");
+    db.persist_client_record("identity", principal, &identity)?;
+    target
+        .client
+        .prepare_native_contact_control(
+            &target.config,
+            &entry,
+            &route,
+            &bytes,
+            Some(&sender.manifest),
+        )
+        .await?;
+    assert_eq!(target.client.contact_entry(principal)?["root_source"], "card");
+    Ok(())
+}

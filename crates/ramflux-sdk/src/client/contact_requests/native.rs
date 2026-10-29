@@ -204,8 +204,14 @@ impl RamfluxClient {
                 })?
             };
         validate(&carrier, manifest, &historical, now)?;
+        let first_seen =
+            self.account_db()?.client_record("identity", &manifest.principal_id)?.is_none();
         self.remember_contact_request_cache(manifest)?;
         self.persist_fetched_identity_directory(manifest)?;
+        if first_seen {
+            // Verified network consent is lookup provenance, not an imported card pin.
+            self.mark_lookup_root(&manifest.principal_id)?;
+        }
         self.cache_contact_consent_authority(&historical, consent.body.expires_at, now)?;
         Ok(())
     }
