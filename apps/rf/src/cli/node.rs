@@ -19,6 +19,29 @@ pub(crate) enum NodeAction {
     SetDefault(NodeSelector),
     Enable(NodeSelector),
     Disable(NodeSelector),
+    /// Provision a gateway proxy using the existing pinned discovery identity; no daemon required.
+    CustodyInit(NodeCustody),
+    /// Prepare a successor record and fresh proxy seed; applying rotation is a separate operation.
+    CustodyRenew(NodeCustody),
+}
+
+#[derive(Args)]
+pub(crate) struct NodeCustody {
+    #[arg(long)]
+    pub(crate) node_id: String,
+    /// Existing certs/node-identity/node-signing.key, never generated or overwritten.
+    #[arg(long)]
+    pub(crate) node_signing_seed: std::path::PathBuf,
+    /// Independently retained `DEMO_EXPECTED_NODE_PUBLIC_KEY` from the demo identity.env.
+    #[arg(long)]
+    pub(crate) expected_public_key: String,
+    #[arg(long)]
+    pub(crate) output_dir: std::path::PathBuf,
+    #[arg(long, default_value_t = 30)]
+    pub(crate) validity_days: u64,
+    /// Explicitly replace custody.env with a successor; retain every signed predecessor.
+    #[arg(long)]
+    pub(crate) force_new_proxy: bool,
 }
 
 #[derive(Args)]

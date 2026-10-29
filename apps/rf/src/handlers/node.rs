@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 pub(crate) async fn handle_node(socket: PathBuf, command: NodeCommand) -> Result<(), RfError> {
     let (method, body) = match command.action {
+        NodeAction::CustodyInit(options) => return super::node_custody::provision(&options, false),
+        NodeAction::CustodyRenew(options) => return super::node_custody::provision(&options, true),
         NodeAction::Add(add) => {
             ("node.add", serde_json::json!({"url": add.url, "refresh": add.refresh}))
         }

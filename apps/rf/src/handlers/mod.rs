@@ -22,6 +22,7 @@ mod itest_legacy_account;
 pub(crate) mod keychain;
 pub(crate) mod mcp;
 pub(crate) mod node;
+mod node_custody;
 pub(crate) mod object;
 pub(crate) mod surface;
 
