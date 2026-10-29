@@ -12,6 +12,8 @@ pub struct LocalBusConfig {
     pub itest_legacy_accounts: bool,
     #[cfg(any(test, feature = "itest-memory-vault"))]
     pub custody_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
+    #[cfg(test)]
+    pub(crate) custody_confirm_completed: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
@@ -1164,6 +1166,8 @@ impl LocalBusConfig {
             #[cfg(any(test, feature = "itest-memory-vault"))]
             custody_vault: None,
             itest_legacy_accounts: false,
+            #[cfg(test)]
+            custody_confirm_completed: None,
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),

@@ -293,13 +293,20 @@ async fn confirm(
     }
     let vault = primary_provider(config);
     let confirmed_at = now()?;
+    #[cfg(test)]
+    let completed = config.custody_confirm_completed.clone();
     let account = tokio::task::spawn_blocking(move || {
         let _root_lease = lease;
-        if let Some(secret) = passphrase {
+        let result = if let Some(secret) = passphrase {
             pending.confirm_with_passphrase(&words, vault.as_ref(), confirmed_at, secret.as_bytes())
         } else {
             pending.confirm(&words, vault.as_ref(), confirmed_at)
+        };
+        #[cfg(test)]
+        if let Some(completed) = completed {
+            completed.notify_one();
         }
+        result
     })
     .await
     .map_err(|_| SdkError::CustodyVaultUnavailable)??;

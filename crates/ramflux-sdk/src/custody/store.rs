@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::{Zeroize, Zeroizing};
+mod genesis;
 mod networking;
 mod publication;
 mod recovery;
@@ -525,11 +526,10 @@ pub(super) fn persist(
         if let Some(gate) = commit_gate {
             gate.commit()?;
         }
-        write_public(
+        genesis::write_public(
             &dir.join("authority.json"),
             &ramflux_protocol::canonical_json_bytes(&stored)?,
         )?;
-        fs::File::open(&dir)?.sync_all()?;
         Ok(BornAccount { stored, verified, authority_blocked: false, networking_path: dir.clone() })
     })();
     if result.is_err() {
