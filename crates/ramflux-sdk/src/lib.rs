@@ -24,7 +24,7 @@ pub mod c_abi;
 mod client;
 pub use client::home_migration::{
     HomeMigrationJournal, MigrationApprovalPlan, MigrationApprovalResult, MigrationIntent,
-    MigrationPhase, MigrationProgress,
+    MigrationPhase, MigrationProgress, MigrationResumption,
 };
 pub mod custody;
 mod surface;
