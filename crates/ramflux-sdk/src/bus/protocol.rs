@@ -7,6 +7,9 @@ use crate::prelude::*;
 
 #[derive(Clone)]
 pub struct LocalBusConfig {
+    /// Explicit runtime opt-in for unmigrated fixture accounts. Startup refuses this
+    /// setting unless the integration-only creation implementation is compiled in.
+    pub itest_legacy_accounts: bool,
     #[cfg(any(test, feature = "itest-memory-vault"))]
     pub custody_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
     pub builtin_nodes: Vec<NodeProfile>,
@@ -248,7 +251,7 @@ pub(crate) struct LocalBusPersistedAccount {
     pub(crate) devices: Vec<LocalBusDeviceRecord>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "itest-legacy-accounts"))]
 impl LocalBusPersistedAccount {
     pub(crate) fn from_create_request(body: &LocalBusAccountCreateRequest) -> Self {
         let devices = vec![LocalBusDeviceRecord {
@@ -1038,11 +1041,20 @@ const fn is_false(value: &bool) -> bool {
     !*value
 }
 impl LocalBusConfig {
+    /// Opt into the temporary legacy integration-fixture namespace.
+    /// The daemon refuses startup when its fixture feature is absent.
+    #[must_use]
+    pub fn with_itest_legacy_accounts(mut self) -> Self {
+        self.itest_legacy_accounts = true;
+        self
+    }
+
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
         Self {
             #[cfg(any(test, feature = "itest-memory-vault"))]
             custody_vault: None,
+            itest_legacy_accounts: false,
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),

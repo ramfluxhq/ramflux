@@ -256,25 +256,17 @@ impl Supervisor {
             return Ok(response);
         }
         self.prepare_import(&mut request, connection).await?;
-        let id = if request.method == "account.create" {
-            request
-                .body
-                .get("local_account_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    SdkError::LocalBus("account.create requires local_account_id".to_owned())
-                })?
-                .to_owned()
-        } else {
-            request_account_id(&request)?.to_owned()
-        };
+        let id = account_actor_id(&request)?;
         if self.installing.borrow().contains(&id) {
             return Err(super::backup_jobs::refusal("restore_install_in_progress"));
         }
         let actor = self.accounts.borrow().get(&id).cloned();
         let creating = matches!(
             request.method.as_str(),
-            "account.create" | "account.unlock" | "account.backup.import"
+            "account.create"
+                | "account.itest_legacy.create"
+                | "account.unlock"
+                | "account.backup.import"
         );
         let actor = if let Some(actor) = actor {
             actor
@@ -612,4 +604,16 @@ fn not_open(id: &str) -> SdkError {
 }
 fn reply(body: serde_json::Value) -> ActorResponse {
     ActorResponse { body, events: Vec::new(), nodes: None }
+}
+
+fn account_actor_id(request: &LocalBusFrame) -> Result<String, SdkError> {
+    let id = if matches!(request.method.as_str(), "account.create" | "account.itest_legacy.create")
+    {
+        request.body.get("local_account_id").and_then(serde_json::Value::as_str).ok_or_else(
+            || SdkError::LocalBus("account creation requires local_account_id".into()),
+        )?
+    } else {
+        request_account_id(request)?
+    };
+    Ok(id.to_owned())
 }

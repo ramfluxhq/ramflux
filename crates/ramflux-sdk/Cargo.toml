@@ -14,6 +14,8 @@ crate-type = ["lib", "cdylib", "staticlib"]
 default = []
 # Integration fixture only; production provenance forbids this feature.
 itest-memory-vault = []
+# Seed-taking account creation for unmigrated integration fixtures only.
+itest-legacy-accounts = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
 c-abi = []

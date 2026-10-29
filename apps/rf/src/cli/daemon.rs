@@ -22,6 +22,9 @@ pub(crate) enum DaemonAction {
 
 #[derive(Args)]
 pub(crate) struct DaemonStart {
+    /// Enable the temporary legacy fixture namespace (requires the matching build feature).
+    #[arg(long, hide = true)]
+    pub(crate) itest_legacy_accounts: bool,
     /// Use a process-local credential vault for integration tests only.
     #[cfg(feature = "itest-memory-vault")]
     #[arg(long)]

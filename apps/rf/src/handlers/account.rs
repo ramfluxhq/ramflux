@@ -22,6 +22,10 @@ pub(crate) async fn handle_account(
     }
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
+        #[cfg(feature = "itest-legacy-accounts")]
+        AccountAction::ItestLegacyCreate(create) => {
+            super::itest_legacy_account::create(&mut bus, create).await
+        }
         AccountAction::Backup(backup) => super::account_backup::handle(&mut bus, backup).await,
         AccountAction::List => {
             print_json(&bus.request(None, "account", "account.list", serde_json::json!({})).await?)
@@ -213,7 +217,7 @@ fn resolve_unlock_passphrase_with_env_reader(
     Ok((passphrase, "env".to_owned(), None))
 }
 
-fn store_keychain_secret(
+pub(super) fn store_keychain_secret(
     store: &impl KeyStore,
     account_id: &str,
     secret: &KeychainSecret,
@@ -221,7 +225,7 @@ fn store_keychain_secret(
     store.store(account_id, secret).map_err(|error| error.to_string())
 }
 
-fn with_keychain_store_result(
+pub(super) fn with_keychain_store_result(
     response: serde_json::Value,
     result: Result<(), String>,
 ) -> serde_json::Value {

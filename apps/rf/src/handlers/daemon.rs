@@ -9,6 +9,7 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
     match command.action {
         DaemonAction::Start(start) => {
             let mut config = LocalBusConfig::new(socket, start.data_root);
+            config.itest_legacy_accounts = start.itest_legacy_accounts;
             #[cfg(feature = "itest-memory-vault")]
             if start.itest_memory_vault {
                 config.custody_vault =

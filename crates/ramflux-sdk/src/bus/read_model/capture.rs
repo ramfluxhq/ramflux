@@ -97,7 +97,7 @@ pub(crate) fn capture(
     let db = account.client.account_db()?;
     let body = &request.body;
     let own = &account.gateway_config.principal_id;
-    if request.method == "account.create" {
+    if matches!(request.method.as_str(), "account.create" | "account.itest_legacy.create") {
         let root = account.client.account_index()?.root();
         let path = local_bus_account_manifest_path(root, &db.local_account_id);
         let mut manifest = read_local_bus_account_manifest(&path)?;

@@ -12,6 +12,8 @@ pub(crate) mod deferred_attachment;
 pub mod device;
 pub mod grant_mcp;
 pub mod group;
+#[cfg(feature = "itest-legacy-accounts")]
+mod itest_legacy;
 pub mod message;
 pub mod node;
 pub mod object;

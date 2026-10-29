@@ -19,6 +19,12 @@ pub(crate) async fn dispatch_account_bus_request(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
+        #[cfg(feature = "itest-legacy-accounts")]
+        "account.itest_legacy.create" if state.config.itest_legacy_accounts => {
+            let body = serde_json::from_value(request.body.clone())?;
+            let response = super::itest_legacy::local_bus_account_create(state, body).await?;
+            Ok(local_bus_ok(serde_json::to_value(response)?))
+        }
         // Creation is owned by the exclusive secret ceremony on the connection.
         "account.create" => Err(SdkError::CustodySetupInvalid),
         "account.list" => Ok(local_bus_ok(serde_json::json!({
