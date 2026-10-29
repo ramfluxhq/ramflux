@@ -45,7 +45,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
@@ -80,7 +80,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
 
       - name: Test SDK
         run: cargo test -p ramflux-sdk
@@ -102,7 +102,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
 
       - name: Test workspace except SDK
         run: cargo test --workspace --exclude ramflux-sdk
