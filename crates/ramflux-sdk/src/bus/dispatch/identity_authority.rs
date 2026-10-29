@@ -47,6 +47,16 @@ pub(super) async fn dispatch_identity_authority(
         .client
         .cache_verified_device_manifest(&account.gateway_config, &commitment, "device.refresh")
         .await?;
+    if let Some(native) = &manifest.custody {
+        let record = &native.publication.record.body;
+        return Ok(local_bus_ok(json!({
+            "principal_id":record.principal_id,"device_set_epoch":record.device_set_epoch,
+            "principal_kind":record.principal_kind,"kind_asserted":record.profile.kind,
+            "kind_verified":account.client.verified_identity_profile(&record.principal_id)?.is_some(),
+            "safety_kind_verified":account.client.verified_principal_kind(&record.principal_id)?.is_some(),
+            "identity_scheme":"custody_v3","devices":record.devices,
+        })));
+    }
     let record = manifest
         .signed_device_set
         .ok_or_else(|| SdkError::InboundRejected("signed device set absent".into()))?;
