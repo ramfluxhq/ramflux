@@ -28,6 +28,13 @@ set -a
 # shellcheck disable=SC1090
 . "$env_file"
 set +a
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
+: "${DEMO_DATA_DIR:?absolute private data directory required}"
+case "$command" in
+  recover|rollback) ;;
+  *) python3 "$script_dir/demo-node-config.py" "$repo" "$DEMO_DATA_DIR" check-pending ;;
+esac
 : "${DEMO_HOST:?advertised DNS name or IPv4 address required}"
 : "${DEMO_PROJECT:?dedicated compose project required}"
 : "${DEMO_DATA_DIR:?absolute private data directory required}"
@@ -91,54 +98,28 @@ if [ "$flag" = --remote ]; then
   : "${DEMO_EXPECTED_NODE_PUBLIC_KEY:?copy the public pin from the QA identity.env over a trusted channel}"
   exec "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
 fi
-script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-repo=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 # Canonicalize before checking ownership or allowing recursive deletion.
 case "$command" in up) mkdir -p "$DEMO_DATA_DIR" ;; esac
 [ -d "$DEMO_DATA_DIR" ] || fail 'demo data directory does not exist'
 state=$(CDPATH='' cd -- "$DEMO_DATA_DIR" && pwd -P)
 [ "$state" != / ] && [ "$state" != "$HOME" ] && [ "$state" != "$repo" ] || fail 'unsafe data directory'
 mkdir "$state.lock" 2>/dev/null || fail 'demo operation already running (check adjacent .lock directory)'
-runtime_mutation_started=0
 cleanup() {
   result=$?
   trap - EXIT
   set +e
-  if [ "$result" -ne 0 ] && [ -f "$state/transaction.pending" ]; then
-    recovery_error=$(mktemp "${TMPDIR:-/tmp}/ramflux-demo-recovery.XXXXXX")
-    restored_version=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover 2>"$recovery_error")
-    recovery_result=$?
-    if [ "$recovery_result" -eq 0 ]; then
-      DEMO_VERSION=$restored_version
-      export DEMO_VERSION
-      if [ "$runtime_mutation_started" -eq 1 ]; then
-        owner=$(cat "$state/owner.token")
-        load_applied_overlays
-        (check_prebuilt_images && compose_up no-build && wait_for_services && verify_public_endpoints)
-        recovery_result=$?
-      fi
-      if [ "$recovery_result" -eq 0 ]; then
-        python3 "$script_dir/demo-node-config.py" "$repo" "$state" finish-recovery
-        printf 'failed %s automatically restored demo version %s\n' "$command" "$DEMO_VERSION" >&2
-      fi
-    fi
-    if [ "$recovery_result" -ne 0 ]; then
-      recovery_detail=$(cat "$recovery_error")
-      if [ "$command" = up ] \
-          && python3 "$script_dir/demo-node-config.py" "$repo" "$state" abort-initial >/dev/null 2>&1; then
-        printf 'initial demo up failed before a snapshot was committed; owned state retained for retry\n' >&2
-      else
-        printf 'automatic demo recovery failed; transaction marker retained: %s\n' "$recovery_detail" >&2
-      fi
-    fi
-    rm -f -- "$recovery_error"
-  fi
   [ -f "$state/transaction.pending" ] || rm -f -- "$state/owner.json.pending"
   rmdir "$state.lock" || printf 'warning: could not release demo operation lock %s.lock\n' "$state" >&2
   exit "$result"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+# Recheck under the lock: another invocation may have published a marker since entry.
+case "$command" in
+  recover) ;;
+  rollback) [ ! -f "$state/transaction.pending" ] || command=recover ;;
+  *) python3 "$script_dir/demo-node-config.py" "$repo" "$state" check-pending ;;
+esac
 if [ "$command" = recover ]; then
   [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
   DEMO_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover)
@@ -466,11 +447,9 @@ PY
     fi
     if [ "$command" = rollback ] || [ "$command" = recover ] || [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
       check_prebuilt_images
-      runtime_mutation_started=1
       compose_up no-build
     else
       sh "$script_dir/build-prod-images.sh"
-      runtime_mutation_started=1
       compose_up build
     fi
     wait_for_services

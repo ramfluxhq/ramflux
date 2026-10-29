@@ -374,24 +374,28 @@ first update the operator env to that target selection: set or unset
 `RAMFLUX_DEMO_VOICE_UDP_PORT` and `DEMO_ADMIN_LOOPBACK_PORT` exactly as they were for
 the target version, then run `rollback`. Rollback validates that explicit selection
 against the target snapshot before writing anything and derives its Compose files from
-the restored snapshot. If rollback itself fails, automatic recovery derives the source
+the restored snapshot. If rollback itself fails, explicit recovery derives the source
 selection from the restored last-good runtime state.
 
 For a state without snapshot metadata, `up` or `upgrade` first captures and fsyncs the
 complete current state and only then publishes `transaction.pending`. For an already
 adopted state, the last-good snapshot already exists before the marker is written. If image
-recreation, container health, or the public probes fail, the wrapper restores the last
-good snapshot, recreates it with `--no-build`, verifies its public endpoints, and leaves
-the version history unchanged. A failed automatic restore retains the marker and emits
-a loud error. Correct the engine or restore the retained old images, keep the same
+recreation, container health, or the public probes fail, the wrapper retains the pending
+transaction for explicit recovery. While it exists, all commands other than `recover`
+and `rollback` refuse with exit 3 and the transaction ID, without restoring files or
+calling Compose. This includes `status --remote`, `down`, `logs`, `up`, and `upgrade`.
+Correct the engine or restore the retained old images, keep the same
 operator settings (the failed target `DEMO_VERSION` may remain), then run:
 
 ```sh
 deploy/scripts/demo-node.sh recover /absolute/path/to/demo.env
 ```
 
-Recovery again restores the marker's last-good snapshot, uses `--no-build`, verifies
-the public endpoints, and removes the marker only after success. Never delete the
+Recovery restores the marker's last-good snapshot, recreates containers with
+`--no-build`, verifies container health and the public endpoints, and removes the marker
+only after success. Failed recovery keeps the marker for another explicit attempt.
+`rollback` with a pending transaction performs this same recovery to the last-good
+snapshot; without a pending transaction it selects the preceding version as usual. Never delete the
 marker or edit a snapshot to force progress. If the named snapshot is missing or
 partial, recovery refuses with the manual path: restore the complete demo data
 directory from the operator backup, verify `owner.json`, and only then remove
