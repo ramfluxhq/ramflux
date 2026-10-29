@@ -127,8 +127,8 @@ impl ServiceShutdown {
     /// joins its commit/WAL writers before the clean-shutdown log is emitted.
     ///
     /// # Errors
-    /// Returns an error if the signal monitor ends, a worker panics, resources outlive the
-    /// bounded cleanup window, or the finalizer fails.
+    /// Returns an error if the signal monitor ends, a worker panics, or the finalizer fails.
+    /// Outstanding resource owners after bounded cleanup cause process exit status 1.
     pub fn wait_and_finalize<F>(self, finalize: F) -> Result<(), NodeCoreError>
     where
         F: FnOnce() -> Result<(), NodeCoreError>,
@@ -162,9 +162,8 @@ impl ServiceShutdown {
                 "shutdown incomplete outstanding={outstanding}"
             );
             // Do not run a finalizer that might contend with surviving store owners.
-            return Err(NodeCoreError::ServiceShutdown(format!(
-                "shutdown incomplete outstanding={outstanding}"
-            )));
+            // This is a shutdown failure, independent of a binary's startup-error exit code.
+            std::process::exit(1);
         }
         finalize()?;
         tracing::info!(service = self.service, signal, "graceful shutdown complete");
@@ -329,6 +328,47 @@ pub fn service_worker_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn incomplete_shutdown_exits_one_without_running_the_finalizer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const PROBE: &str = "RAMFLUX_SHUTDOWN_EXIT_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            let shutdown = ServiceShutdown::install("shutdown-exit-probe")?;
+            let _request = begin_service_request().ok_or("request admission failed")?;
+            let signal = std::process::Command::new("kill")
+                .args(["-TERM", &std::process::id().to_string()])
+                .status()?;
+            assert!(signal.success());
+            shutdown.wait_and_finalize(|| std::process::exit(98))?;
+            return Err("incomplete shutdown returned".into());
+        }
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "shutdown::tests::incomplete_shutdown_exits_one_without_running_the_finalizer",
+            ])
+            .env(PROBE, "1")
+            .env(SHUTDOWN_GRACE_SECONDS_ENV, "0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                assert_eq!(status.code(), Some(1));
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("shutdown exit probe exceeded timeout".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
 
     #[test]
     fn shutdown_grace_is_bounded_below_container_timeout() -> Result<(), NodeCoreError> {
