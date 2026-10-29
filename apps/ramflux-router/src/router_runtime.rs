@@ -101,6 +101,12 @@ impl RouterHandle {
         }
     }
 
+    pub(crate) fn store_owner_count(&self) -> usize {
+        match self {
+            Self::Tokio(runtime) => Arc::strong_count(&runtime.store),
+        }
+    }
+
     pub(crate) fn store(&self) -> &ramflux_node_core::RouterRedbStore {
         match self {
             Self::Tokio(runtime) => runtime.store.as_ref(),

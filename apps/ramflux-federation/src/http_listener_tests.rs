@@ -343,61 +343,52 @@ fn public_failures_hide_internal_details_and_unsupported_post_is_not_proxied() -
 
 #[test]
 fn public_connection_limit_rejects_excess_and_releases_after_success_and_error() -> TestResult {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     let root = temp_cert_root("http-cap")?;
     let admin = context(&root)?;
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
     };
-    let active = Arc::new(AtomicUsize::new(0));
+    let connections = ramflux_node_core::ConnectionSet::new(1);
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut first = TcpStream::connect(listener.local_addr()?)?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    assert!(crate::public_http::spawn_public_connection(
         stream,
         public.clone(),
-        active.clone(),
-        1,
+        &connections,
         crate::http_limits::defaults(true),
-    )
-    .ok_or("first connection rejected")?;
-    assert_eq!(active.load(Ordering::Acquire), 1);
+    )?);
+    assert_eq!(connections.len(), 1);
     let mut excess = TcpStream::connect(listener.local_addr()?)?;
     excess.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    assert!(
-        crate::public_http::spawn_public_connection(
-            stream,
-            public.clone(),
-            active.clone(),
-            1,
-            crate::http_limits::defaults(true)
-        )
-        .is_none()
-    );
+    assert!(!crate::public_http::spawn_public_connection(
+        stream,
+        public.clone(),
+        &connections,
+        crate::http_limits::defaults(true)
+    )?);
     let mut response = String::new();
     excess.read_to_string(&mut response)?;
-    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-    assert_eq!(active.load(Ordering::Acquire), 1);
+    assert!(response.is_empty(), "over-cap sockets must close immediately: {response}");
+    assert_eq!(connections.len(), 1);
     first.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
-    worker.join().map_err(|_| "worker panicked")?;
+    wait_connections_empty(&connections)?;
     first.read_to_string(&mut String::new())?;
-    assert_eq!(active.load(Ordering::Acquire), 0);
+    assert_eq!(connections.len(), 0);
     let mut failed = TcpStream::connect(listener.local_addr()?)?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    assert!(crate::public_http::spawn_public_connection(
         stream,
         public,
-        active.clone(),
-        1,
+        &connections,
         crate::http_limits::defaults(true),
-    )
-    .ok_or("slot not released")?;
+    )?);
     failed.write_all(b"GET /mvp1/prekey/root HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
-    worker.join().map_err(|_| "worker panicked")?;
+    wait_connections_empty(&connections)?;
     failed.read_to_string(&mut String::new())?;
-    assert_eq!(active.load(Ordering::Acquire), 0);
+    assert_eq!(connections.len(), 0);
     drop(admin);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -415,5 +406,16 @@ fn occupied_admin_address_reports_listener_and_address() -> TestResult {
     assert!(error.contains("federation admin HTTP bind failed"), "{error}");
     assert!(error.contains(&addr), "{error}");
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+pub(crate) fn wait_connections_empty(connections: &ramflux_node_core::ConnectionSet) -> TestResult {
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while !connections.is_empty() {
+        if std::time::Instant::now() >= deadline {
+            return Err("connection resources did not drain".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     Ok(())
 }

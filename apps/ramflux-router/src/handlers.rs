@@ -293,10 +293,34 @@ pub(crate) fn handle_mesh_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
     router: &crate::router_runtime::RouterHandle,
     peer_service_id: &str,
+    connection: &ramflux_node_core::ConnectionGuard,
 ) -> anyhow::Result<bool> {
     let Some(request) = ramflux_transport::read_mesh_http_request(stream)? else {
         return Ok(false);
     };
+    let Some(_request) = connection.begin_request() else {
+        let _ = ramflux_transport::write_mesh_text_response(
+            stream,
+            "503 Service Unavailable",
+            "shutting down",
+        );
+        return Ok(false);
+    };
+    #[cfg(feature = "itest-http")]
+    if request.path == "/__itest/shutdown-connections" {
+        ramflux_transport::write_mesh_json_response(
+            stream,
+            "200 OK",
+            &serde_json::json!({
+                "other_connections": connection.other_connection_count(),
+                "root_workers": ramflux_node_core::service_worker_count(),
+            }),
+        )?;
+        return Ok(true);
+    }
+    #[cfg(feature = "itest-http")]
+    ramflux_node_core::shutdown_request_test_delay();
+
     tracing::info!(
         method = %request.method,
         path = %request.path,

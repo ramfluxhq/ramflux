@@ -91,6 +91,11 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         }
         return shutdown
             .wait_and_finalize(move || {
+                if Arc::strong_count(&router) != 1 || router.store_owner_count() != 1 {
+                    return Err(ramflux_node_core::NodeCoreError::ServiceShutdown(
+                        "store owners remain after connection drain".into(),
+                    ));
+                }
                 operator::checkpoint_for_shutdown(router.state(), router.store())?;
                 tracing::info!(service, "router identity registry checkpoint completed");
                 drop(router);

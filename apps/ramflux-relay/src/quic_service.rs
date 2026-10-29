@@ -113,7 +113,9 @@ pub(crate) fn serve_relay_client_quic(
         config: Arc::new(config.clone()),
     };
     ramflux_node_core::spawn_service_worker("ramflux-relay-client-quic", move |shutdown| {
-        let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        let _threads = ramflux_node_core::track_service_runtime(&mut builder);
+        let runtime = match builder.enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
                 tracing::error!(%error, "failed to start relay client QUIC runtime");
@@ -130,6 +132,7 @@ pub(crate) fn serve_relay_client_quic(
                 }
             }
         });
+        ramflux_node_core::drain_service_runtime(runtime);
     })?;
     Ok(())
 }
@@ -141,12 +144,13 @@ pub(crate) async fn run_relay_client_quic(
 ) -> anyhow::Result<()> {
     let endpoint = quinn::Endpoint::server(server_config, addr)?;
     tracing::info!(addr = %endpoint.local_addr()?, "relay client-facing QUIC surface listening");
-    while let Some(connecting) = endpoint.accept().await {
+    let shutdown = ramflux_node_core::service_shutdown_token();
+    while let Some(connecting) = tokio::select! {
+        () = shutdown.cancelled() => None,
+        connecting = endpoint.accept() => connecting,
+    } {
         let context = context.clone();
         tokio::spawn(async move {
-            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
-                return;
-            };
             match connecting.await {
                 Ok(connection) => handle_relay_client_quic_connection(connection, context).await,
                 Err(error) => {
@@ -173,6 +177,9 @@ pub(crate) async fn handle_relay_client_quic_connection(
                             continue;
                         }
                     };
+                let Some(_request) = ramflux_node_core::begin_service_request() else {
+                    return;
+                };
                 // Ingress gate only: metrics + fail-closed routing. Object requests run through the
                 // v3 verifier gate (non-v3 -> 401, unauthorized -> 403, verified -> 501); the pinned
                 // trust snapshot is the authority and no data plane is wired yet.

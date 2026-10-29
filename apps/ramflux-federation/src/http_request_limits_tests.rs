@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -81,13 +81,12 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
         discovery: admin.discovery.clone(),
     };
     let listener = TcpListener::bind("127.0.0.1:0")?;
-    let active = Arc::new(AtomicUsize::new(0));
+    let connections = ramflux_node_core::ConnectionSet::new(64);
     let limits = ramflux_node_core::HttpRequestLimits {
         request_timeout: Duration::from_secs(2),
         ..crate::http_limits::defaults(true)
     };
     let mut clients = Vec::new();
-    let mut workers = Vec::new();
     for index in 0..64 {
         let mut client = TcpStream::connect(listener.local_addr()?)?;
         client.set_write_timeout(Some(Duration::from_millis(100)))?;
@@ -97,10 +96,7 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
             client.write_all(b"GET /healthz HTTP/1.1\r\nContent-Length: 65536\r\n\r\n")?;
         }
         let (stream, _) = listener.accept()?;
-        workers.push(
-            spawn_public_connection(stream, context.clone(), active.clone(), 64, limits)
-                .ok_or("unexpected connection refusal")?,
-        );
+        assert!(spawn_public_connection(stream, context.clone(), &connections, limits)?);
         clients.push(client);
     }
     let stop = Arc::new(AtomicBool::new(false));
@@ -113,31 +109,19 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
             std::thread::sleep(Duration::from_millis(50));
         }
     });
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let joiner = std::thread::spawn(move || {
-        let mut success = true;
-        for worker in workers {
-            if worker.join().is_err() {
-                success = false;
-            }
-        }
-        let _ = done_tx.send(success);
-    });
-    let done = done_rx.recv_timeout(Duration::from_secs(8));
+    let drained = crate::http_listener_tests::wait_connections_empty(&connections);
     stop.store(true, Ordering::Release);
     writer.join().map_err(|_| "trickle writer panicked")?;
-    joiner.join().map_err(|_| "trickle joiner panicked")?;
-    assert_eq!(done.ok(), Some(true), "tricklers must time out while they are still sending");
-    assert_eq!(active.load(Ordering::Acquire), 0);
+    drained?;
+    assert!(connections.is_empty());
     let mut normal = TcpStream::connect(listener.local_addr()?)?;
     normal.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    let worker = spawn_public_connection(stream, context, active.clone(), 64, limits)
-        .ok_or("normal request refused after deadline")?;
+    assert!(spawn_public_connection(stream, context, &connections, limits)?);
     normal.write_all(b"GET /healthz HTTP/1.1\r\n\r\n")?;
     let mut response = String::new();
     normal.read_to_string(&mut response)?;
-    worker.join().map_err(|_| "normal worker panicked")?;
+    crate::http_listener_tests::wait_connections_empty(&connections)?;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     drop(admin);
     std::fs::remove_dir_all(root)?;

@@ -3,7 +3,6 @@
 
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::thread;
 
 use crate::SharedMeshObservability;
 use crate::{
@@ -47,10 +46,12 @@ pub(crate) fn serve_admin_http(
     listener
         .set_nonblocking(true)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    let connections =
+        ramflux_node_core::ConnectionSet::new(ramflux_node_core::DEFAULT_CONNECTION_LIMIT);
     tracing::info!(addr, "federation production admin HTTP surface listening");
     ramflux_node_core::spawn_service_worker("ramflux-federation-admin-http", move |shutdown| {
         while !shutdown.is_cancelled() {
-            let mut stream = match listener.accept().map(|(stream, _)| stream) {
+            let stream = match listener.accept().map(|(stream, _)| stream) {
                 Ok(stream) => stream,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -62,25 +63,36 @@ pub(crate) fn serve_admin_http(
                 }
             };
             let accepted_at = std::time::Instant::now();
-            let context = context.clone();
-            thread::spawn(move || {
-                let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
-                    return;
-                };
-                if let Err(error) =
-                    handle_admin_request_with_limits(&mut stream, &context, limits, accepted_at)
-                {
-                    let body = format!("{error}");
-                    if let Err(write_error) = ramflux_node_core::write_itest_text_response(
-                        &mut stream,
-                        crate::http_limits::rejection(&error)
-                            .unwrap_or("500 Internal Server Error"),
-                        &body,
-                    ) {
-                        tracing::warn!(%write_error, "failed to write federation admin error");
-                    }
+            let registration = match stream.try_clone() {
+                Ok(socket) => socket,
+                Err(error) => {
+                    tracing::warn!(%error, "admin socket clone failed");
+                    continue;
                 }
-            });
+            };
+            if let Err(error) = connections.spawn(
+                &registration,
+                (stream, context.clone()),
+                move |context, connection| {
+                    let (stream, context) = context;
+                    if let Err(error) = handle_admin_request_with_limits(
+                        stream,
+                        context,
+                        limits,
+                        accepted_at,
+                        Some(connection),
+                    ) {
+                        let _ = ramflux_node_core::write_itest_text_response(
+                            stream,
+                            crate::http_limits::rejection(&error)
+                                .unwrap_or("500 Internal Server Error"),
+                            &error.to_string(),
+                        );
+                    }
+                },
+            ) {
+                tracing::warn!(%error, "federation admin worker unavailable");
+            }
         }
     })?;
     Ok(())
@@ -96,6 +108,7 @@ pub(crate) fn handle_admin_request(
         context,
         crate::http_limits::defaults(false),
         std::time::Instant::now(),
+        None,
     )
 }
 fn handle_admin_request_with_limits(
@@ -103,12 +116,21 @@ fn handle_admin_request_with_limits(
     context: &FederationAdminHttpContext,
     limits: ramflux_node_core::HttpRequestLimits,
     accepted_at: std::time::Instant,
+    connection: Option<&ramflux_node_core::ConnectionGuard>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let Some(request) =
         ramflux_node_core::read_http_request_with_limits(stream, limits, accepted_at)?
     else {
         return Ok(());
     };
+    let Some(_request) = ramflux_node_core::begin_connection_request(connection) else {
+        return ramflux_node_core::write_itest_text_response(
+            stream,
+            "503 Service Unavailable",
+            "shutting down",
+        );
+    };
+
     let state = &context.state;
     let store = context.store.as_ref();
     let discovery = &context.discovery;

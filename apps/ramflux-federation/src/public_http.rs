@@ -31,19 +31,17 @@ pub(crate) fn serve_public_http(
     listener
         .set_nonblocking(true)
         .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
-    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let connections = ramflux_node_core::ConnectionSet::new(limit);
     tracing::info!(addr, limit, "federation public client HTTP surface listening");
     ramflux_node_core::spawn_service_worker("ramflux-federation-public-http", move |shutdown| {
         while !shutdown.is_cancelled() {
             match listener.accept().map(|(stream, _)| stream) {
                 Ok(stream) => {
-                    let _worker = spawn_public_connection(
-                        stream,
-                        context.clone(),
-                        Arc::clone(&active),
-                        limit,
-                        limits,
-                    );
+                    if let Err(error) =
+                        spawn_public_connection(stream, context.clone(), &connections, limits)
+                    {
+                        tracing::warn!(%error, "federation public worker unavailable");
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -65,50 +63,20 @@ fn public_connection_limit(value: Option<&str>) -> Result<usize, ramflux_node_co
     })
 }
 
-struct ConnectionPermit(Arc<std::sync::atomic::AtomicUsize>);
-impl Drop for ConnectionPermit {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    }
-}
-
 pub(crate) fn spawn_public_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     context: FederationPublicHttpContext,
-    active: Arc<std::sync::atomic::AtomicUsize>,
-    limit: usize,
+    connections: &Arc<ramflux_node_core::ConnectionSet>,
     limits: ramflux_node_core::HttpRequestLimits,
-) -> Option<std::thread::JoinHandle<()>> {
-    use std::sync::atomic::Ordering;
+) -> Result<bool, ramflux_node_core::NodeCoreError> {
     let accepted_at = std::time::Instant::now();
-    if active
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-            if count < limit { Some(count + 1) } else { None }
-        })
-        .is_err()
-    {
-        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
-        let _ = ramflux_node_core::write_itest_text_response(
-            &mut stream,
-            "503 Service Unavailable",
-            "service unavailable",
-        );
-        return None;
-    }
-    let permit = ConnectionPermit(active);
-    match std::thread::Builder::new().spawn(move || {
-        let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
-            return;
-        };
-        let _permit = permit;
-        handle_public_connection_with_limits(&mut stream, &context, limits, accepted_at);
-    }) {
-        Ok(worker) => Some(worker),
-        Err(error) => {
-            tracing::warn!(%error, "federation public worker unavailable");
-            None
-        }
-    }
+    let registration = stream
+        .try_clone()
+        .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
+    connections.spawn(&registration, (stream, context), move |context, connection| {
+        let (stream, context) = context;
+        handle_public_connection_with_guard(stream, context, limits, accepted_at, Some(connection));
+    })
 }
 
 #[cfg(test)]
@@ -123,13 +91,25 @@ pub(crate) fn handle_public_connection(
         std::time::Instant::now(),
     );
 }
+#[cfg(test)]
 pub(crate) fn handle_public_connection_with_limits(
     stream: &mut TcpStream,
     context: &FederationPublicHttpContext,
     limits: ramflux_node_core::HttpRequestLimits,
     accepted_at: std::time::Instant,
 ) {
-    if let Err(error) = handle_public_request_with_limits(stream, context, limits, accepted_at) {
+    handle_public_connection_with_guard(stream, context, limits, accepted_at, None);
+}
+fn handle_public_connection_with_guard(
+    stream: &mut TcpStream,
+    context: &FederationPublicHttpContext,
+    limits: ramflux_node_core::HttpRequestLimits,
+    accepted_at: std::time::Instant,
+    connection: Option<&ramflux_node_core::ConnectionGuard>,
+) {
+    if let Err(error) =
+        handle_public_request_with_limits(stream, context, limits, accepted_at, connection)
+    {
         tracing::warn!(%error, "federation public request failed");
         let status = crate::http_limits::rejection(&error).unwrap_or("500 Internal Server Error");
         let body = if crate::http_limits::rejection(&error).is_some() {
@@ -151,6 +131,7 @@ pub(crate) fn handle_public_request(
         context,
         crate::http_limits::defaults(true),
         std::time::Instant::now(),
+        None,
     )
 }
 fn handle_public_request_with_limits(
@@ -158,12 +139,21 @@ fn handle_public_request_with_limits(
     context: &FederationPublicHttpContext,
     limits: ramflux_node_core::HttpRequestLimits,
     accepted_at: std::time::Instant,
+    connection: Option<&ramflux_node_core::ConnectionGuard>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let Some(request) =
         ramflux_node_core::read_http_request_with_limits(stream, limits, accepted_at)?
     else {
         return Ok(());
     };
+    let Some(_request) = ramflux_node_core::begin_connection_request(connection) else {
+        return ramflux_node_core::write_itest_text_response(
+            stream,
+            "503 Service Unavailable",
+            "shutting down",
+        );
+    };
+
     let discovery = &context.discovery;
     let router = context.router.as_ref();
     match (request.method.as_str(), request.path.as_str()) {

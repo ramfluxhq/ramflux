@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 use std::sync::Arc;
-use std::thread;
 
 use crate::{
     FederationDiscoverySurface, MeshInboundTransport, RouterMeshClient, SharedMeshObservability,
@@ -106,7 +105,7 @@ pub(crate) fn serve_federation_mesh_mtls(
         "compio" => {
             #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
             {
-                thread::spawn(move || {
+                std::thread::spawn(move || {
                     if let Err(error) = serve_mesh_compio_quic(&quic_addr, &quic_context, &quic_tls)
                     {
                         quic_context.observability.mark_quic_listener_error(&error.to_string());
@@ -152,11 +151,13 @@ pub(crate) fn serve_mesh_quic(
             .map_err(|error| ramflux_transport::TransportError::Http(error.to_string()))?;
         Ok(state.pinned_peer_ca_cert_pems())
     });
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    let _threads = ramflux_node_core::track_service_runtime(&mut builder);
+    let runtime = builder
         .enable_all()
         .build()
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
-    runtime.block_on(async move {
+    let result = runtime.block_on(async move {
         let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
             listen_addr,
             tls,
@@ -186,7 +187,9 @@ pub(crate) fn serve_mesh_quic(
             });
         }
         Ok::<(), ramflux_node_core::NodeCoreError>(())
-    })
+    });
+    ramflux_node_core::drain_service_runtime(runtime);
+    result
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
@@ -240,16 +243,12 @@ pub(crate) fn serve_mesh_mtls(
     context: &MeshServerContext,
     tls: &ramflux_transport::MeshTlsConfig,
 ) {
+    let connections =
+        ramflux_node_core::ConnectionSet::new(ramflux_node_core::DEFAULT_CONNECTION_LIMIT);
     tracing::info!("federation mesh mTLS surface listening");
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
-        let accepted = match server.accept_authenticated_with_pem_roots_provider(tls, || {
-            let state = context
-                .state
-                .snapshot()
-                .map_err(|error| ramflux_transport::TransportError::Http(error.to_string()))?;
-            Ok(state.pinned_peer_ca_cert_pems())
-        }) {
-            Ok(accepted) => accepted,
+        let socket = match server.accept_tcp_stream() {
+            Ok(socket) => socket,
             Err(ramflux_transport::TransportError::Io(error))
                 if error.kind() == std::io::ErrorKind::WouldBlock =>
             {
@@ -257,45 +256,76 @@ pub(crate) fn serve_mesh_mtls(
                 continue;
             }
             Err(error) => {
-                tracing::warn!(%error, "federation mesh mTLS handshake rejected");
+                tracing::warn!(%error, "federation mesh TCP accept failed");
                 continue;
             }
         };
-        let mut stream = accepted.stream;
-        let peer_service_id = accepted
-            .peer_spiffe_uri
-            .as_deref()
-            .and_then(|spiffe_uri| ramflux_node_core::parse_mesh_spiffe_uri(spiffe_uri).ok())
-            .map(|peer| peer.service_id);
-        let context = context.clone();
-        thread::spawn(move || {
-            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
-                return;
-            };
-            loop {
-                match handle_mesh_request(&mut stream, &context, peer_service_id.as_deref()) {
-                    Ok(true) => {}
-                    Ok(false) => break,
+        let registration = match socket.try_clone() {
+            Ok(socket) => socket,
+            Err(error) => {
+                tracing::warn!(%error, "federation socket clone failed");
+                continue;
+            }
+        };
+        if let Err(error) = connections.spawn(
+            &registration,
+            (socket, context.clone(), tls.clone()),
+            |context, connection| {
+                let (socket, context, tls) = context;
+                let accepted = (|| {
+                    let roots = context
+                        .state
+                        .snapshot()
+                        .map_err(|error| {
+                            ramflux_transport::TransportError::Http(error.to_string())
+                        })?
+                        .pinned_peer_ca_cert_pems();
+                    ramflux_transport::authenticate_tcp_stream_with_pem_roots(
+                        socket.try_clone()?,
+                        tls,
+                        &roots,
+                    )
+                })();
+                let accepted = match accepted {
+                    Ok(accepted) => accepted,
                     Err(error) => {
-                        let body = format!("{error}");
-                        if let Err(write_error) = ramflux_transport::write_mesh_text_response(
-                            &mut stream,
-                            "500 Internal Server Error",
-                            &body,
-                        ) {
-                            tracing::warn!(
-                                %write_error,
-                                "failed to write federation mesh error response"
-                            );
+                        tracing::debug!(%error, "federation mesh TLS handshake ended");
+                        return;
+                    }
+                };
+                let peer_service_id = accepted
+                    .peer_spiffe_uri
+                    .as_deref()
+                    .and_then(|uri| ramflux_node_core::parse_mesh_spiffe_uri(uri).ok())
+                    .map(|peer| peer.service_id);
+                let mut stream = accepted.stream;
+                while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+                    match handle_mesh_request(
+                        &mut stream,
+                        context,
+                        peer_service_id.as_deref(),
+                        connection,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(error) => {
+                            if !ramflux_node_core::service_shutdown_token().is_cancelled() {
+                                let _ = ramflux_transport::write_mesh_text_response(
+                                    &mut stream,
+                                    "500 Internal Server Error",
+                                    &error.to_string(),
+                                );
+                            }
+                            tracing::debug!(%error, "federation mesh connection ended");
+                            break;
                         }
-                        break;
                     }
                 }
-            }
-            if let Err(error) = ramflux_transport::close_mesh_server_stream(&mut stream) {
-                tracing::debug!(%error, "federation mesh close_notify failed");
-            }
-        });
+                let _ = ramflux_transport::close_mesh_server_stream(&mut stream);
+            },
+        ) {
+            tracing::warn!(%error, "federation connection worker unavailable");
+        }
     }
 }
 
@@ -303,12 +333,24 @@ pub(crate) fn handle_mesh_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
     context: &MeshServerContext,
     peer_service_id: Option<&str>,
+    connection: &ramflux_node_core::ConnectionGuard,
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
     let Some(request) = ramflux_transport::read_mesh_http_request(stream)
         .map_err(|error| mesh_transport_error(&error))?
     else {
         return Ok(false);
     };
+    let Some(_request) = connection.begin_request() else {
+        let _ = ramflux_transport::write_mesh_text_response(
+            stream,
+            "503 Service Unavailable",
+            "shutting down",
+        );
+        return Ok(false);
+    };
+    #[cfg(feature = "itest-http")]
+    ramflux_node_core::shutdown_request_test_delay();
+
     if peer_service_id == Some("ramflux-retention") && request.path != RETENTION_GC_SWEEP_PATH {
         ramflux_transport::write_mesh_text_response(
             stream,
@@ -526,6 +568,9 @@ async fn handle_mesh_quic_request(
     peer_service_id: Option<&str>,
     context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let Some(_request) = ramflux_node_core::begin_service_request() else {
+        return Ok(());
+    };
     let response = handle_federation_mesh_quic_request(
         &accepted.request,
         peer_service_id,

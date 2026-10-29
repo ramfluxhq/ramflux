@@ -105,11 +105,9 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
 ) -> anyhow::Result<()> {
     ramflux_node_core::spawn_service_worker("ramflux-gateway-quic", move |shutdown| {
         let worker_threads = gateway_quic_worker_threads();
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(worker_threads)
-            .enable_all()
-            .build()
-        {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        let _threads = ramflux_node_core::track_service_runtime(&mut builder);
+        let runtime = match builder.worker_threads(worker_threads).enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
                 tracing::error!(%error, "gateway QUIC runtime failed");
@@ -134,6 +132,7 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
                 },
             }
         });
+        ramflux_node_core::drain_service_runtime(runtime);
     })?;
     Ok(())
 }
@@ -161,11 +160,9 @@ fn spawn_gateway_tcp_tls_thread(
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
     ramflux_node_core::spawn_service_worker("ramflux-gateway-tcp-tls", move |shutdown| {
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-        {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        let _threads = ramflux_node_core::track_service_runtime(&mut builder);
+        let runtime = match builder.worker_threads(2).enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
                 tracing::error!(%error, "gateway TCP-TLS runtime failed");
@@ -182,6 +179,7 @@ fn spawn_gateway_tcp_tls_thread(
                 }
             }
         });
+        ramflux_node_core::drain_service_runtime(runtime);
     })?;
     Ok(())
 }
@@ -221,12 +219,13 @@ async fn run_gateway_quic(
 ) -> anyhow::Result<()> {
     let endpoint = quinn::Endpoint::server(server_config, addr)?;
     tracing::info!(addr = %endpoint.local_addr()?, "gateway QUIC session surface listening");
-    while let Some(connecting) = endpoint.accept().await {
+    let shutdown = ramflux_node_core::service_shutdown_token();
+    while let Some(connecting) = tokio::select! {
+        () = shutdown.cancelled() => None,
+        connecting = endpoint.accept() => connecting,
+    } {
         let context = context.clone();
         tokio::spawn(async move {
-            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
-                return;
-            };
             match connecting.await {
                 Ok(connection) => {
                     handle_gateway_quic_connection(connection, context).await;
@@ -247,13 +246,14 @@ async fn run_gateway_tcp_tls(
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
     tracing::info!(addr = %listener.local_addr()?, "gateway TCP-TLS session surface listening");
     loop {
-        let (stream, remote_addr) = listener.accept().await?;
+        let shutdown = ramflux_node_core::service_shutdown_token();
+        let (stream, remote_addr) = tokio::select! {
+            () = shutdown.cancelled() => break,
+            accepted = listener.accept() => accepted?,
+        };
         let acceptor = acceptor.clone();
         let context = context.clone();
         tokio::spawn(async move {
-            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
-                return;
-            };
             let tls_stream = match acceptor.accept(stream).await {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -280,6 +280,7 @@ async fn run_gateway_tcp_tls(
             }
         });
     }
+    Ok(())
 }
 
 // T22-A1 / RQ-04: v2 shared-HMAC relay service-key loading, compiled only under `itest-local-mint`.
@@ -355,8 +356,10 @@ fn run_gateway_forward_mesh_listener(
     context: GatewayListenerContext,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    runtime.block_on(async move {
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    let _threads = ramflux_node_core::track_service_runtime(&mut builder);
+    let runtime = builder.enable_all().build()?;
+    let result = runtime.block_on(async move {
         let root_pems_provider = Arc::new(|| Ok(Vec::new()));
         let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
             listen_addr,
@@ -378,9 +381,6 @@ fn run_gateway_forward_mesh_listener(
             };
             let connection_context = context.clone();
             tokio::spawn(async move {
-                let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
-                    return;
-                };
                 if let Err(error) =
                     gateway_forward_mesh_connection_loop(connection, connection_context).await
                 {
@@ -389,7 +389,9 @@ fn run_gateway_forward_mesh_listener(
             });
         }
         Ok::<(), anyhow::Error>(())
-    })
+    });
+    ramflux_node_core::drain_service_runtime(runtime);
+    result
 }
 
 async fn gateway_forward_mesh_connection_loop(

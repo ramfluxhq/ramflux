@@ -162,6 +162,11 @@ fn finish_shutdown(
     discovery: FederationDiscoverySurface,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     shutdown.wait_and_finalize(move || {
+        if Arc::strong_count(&store) != 1 {
+            return Err(ramflux_node_core::NodeCoreError::ServiceShutdown(
+                "store owners remain after connection drain".into(),
+            ));
+        }
         drop((store, state, router, observability, discovery));
         Ok(())
     })

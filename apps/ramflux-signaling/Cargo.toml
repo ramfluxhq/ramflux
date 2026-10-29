@@ -22,6 +22,7 @@ tracing-subscriber = { workspace = true }
 turn = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 redb = { workspace = true }
 
 [lints]

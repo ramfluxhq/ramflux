@@ -3,6 +3,16 @@
 
 //! Cooperative, bounded shutdown shared by the node services.
 
+#[cfg(test)]
+mod connection_tests;
+mod connections;
+mod runtime;
+pub use connections::{
+    ConnectionGuard, ConnectionRequestGuard, ConnectionSet, DEFAULT_CONNECTION_LIMIT,
+    begin_connection_request,
+};
+pub use runtime::{RuntimeThreadTracker, drain_service_runtime, track_service_runtime};
+
 use crate::NodeCoreError;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
@@ -20,6 +30,9 @@ struct ShutdownRuntime {
     in_flight: Mutex<usize>,
     drained: Condvar,
     workers: Mutex<Vec<JoinHandle<()>>>,
+    connections: Mutex<Vec<std::sync::Weak<ConnectionSet>>>,
+    deadline: Mutex<Option<Instant>>,
+    async_runtimes: Mutex<Vec<std::sync::Weak<std::sync::atomic::AtomicUsize>>>,
 }
 
 /// Process shutdown coordinator. Install it before configuration or stores are opened.
@@ -27,7 +40,7 @@ pub struct ServiceShutdown {
     service: &'static str,
     grace: Duration,
     signal: mpsc::Receiver<i32>,
-    signal_thread: Option<JoinHandle<()>>,
+
     runtime: Arc<ShutdownRuntime>,
 }
 
@@ -61,6 +74,9 @@ impl ServiceShutdown {
             in_flight: Mutex::new(0),
             drained: Condvar::new(),
             workers: Mutex::new(Vec::new()),
+            connections: Mutex::new(Vec::new()),
+            deadline: Mutex::new(None),
+            async_runtimes: Mutex::new(Vec::new()),
         });
         RUNTIME.set(Arc::clone(&runtime)).map_err(|_| {
             NodeCoreError::ServiceShutdown("shutdown coordinator already installed".to_owned())
@@ -74,17 +90,26 @@ impl ServiceShutdown {
                 .map_err(|error| NodeCoreError::ServiceShutdown(error.to_string()))?;
             let (sender, signal) = mpsc::sync_channel(1);
             let signal_runtime = Arc::clone(&runtime);
-            let signal_thread = std::thread::Builder::new()
+            std::thread::Builder::new()
                 .name(format!("{service}-shutdown-signal"))
                 .spawn(move || {
-                    if let Some(number) = signals.forever().next() {
+                    for (index, number) in signals.forever().enumerate() {
+                        if index != 0 {
+                            tracing::error!(service, "shutdown interrupted by second signal");
+                            std::process::exit(1);
+                        }
+                        *signal_runtime
+                            .deadline
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(Instant::now() + grace);
                         signal_runtime.token.cancel();
                         signal_runtime.drained.notify_all();
                         let _ = sender.send(number);
                     }
                 })
                 .map_err(|error| NodeCoreError::ServiceShutdown(error.to_string()))?;
-            Ok(Self { service, grace, signal, signal_thread: Some(signal_thread), runtime })
+            Ok(Self { service, grace, signal, runtime })
         }
         #[cfg(not(unix))]
         {
@@ -102,8 +127,9 @@ impl ServiceShutdown {
     /// joins its commit/WAL writers before the clean-shutdown log is emitted.
     ///
     /// # Errors
-    /// Returns an error if the signal monitor ends or a service worker panics.
-    pub fn wait_and_finalize<F>(mut self, finalize: F) -> Result<(), NodeCoreError>
+    /// Returns an error if the signal monitor ends, a worker panics, resources outlive the
+    /// bounded cleanup window, or the finalizer fails.
+    pub fn wait_and_finalize<F>(self, finalize: F) -> Result<(), NodeCoreError>
     where
         F: FnOnce() -> Result<(), NodeCoreError>,
     {
@@ -111,15 +137,36 @@ impl ServiceShutdown {
             .signal
             .recv()
             .map_err(|error| NodeCoreError::ServiceShutdown(error.to_string()))?;
-        let deadline = Instant::now() + self.grace;
-        self.wait_for_drain(deadline);
-        self.join_workers(deadline)?;
-        finalize()?;
-        if let Some(thread) = self.signal_thread.take() {
-            thread.join().map_err(|_| {
-                NodeCoreError::ServiceShutdown("shutdown signal monitor panicked".to_owned())
-            })?;
+        let deadline = shutdown_deadline().unwrap_or_else(|| Instant::now() + self.grace);
+        // Cancellation closes listener loops first. No TLS handshake runs on those loops.
+        let sets = connections::registered_sets(&self.runtime);
+        for set in &sets {
+            set.stop_idle();
         }
+        self.wait_for_drain(deadline);
+        for set in &sets {
+            set.force_close();
+        }
+        let cleanup_deadline = deadline + Duration::from_secs(1);
+        let mut outstanding = 0;
+        for set in &sets {
+            outstanding += set.wait_empty(cleanup_deadline);
+        }
+        outstanding += self.join_workers(cleanup_deadline)?;
+        outstanding += runtime::wait_for_runtime_threads(&self.runtime, cleanup_deadline);
+        outstanding +=
+            *self.runtime.in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if outstanding != 0 {
+            tracing::error!(
+                service = self.service,
+                "shutdown incomplete outstanding={outstanding}"
+            );
+            // Do not run a finalizer that might contend with surviving store owners.
+            return Err(NodeCoreError::ServiceShutdown(format!(
+                "shutdown incomplete outstanding={outstanding}"
+            )));
+        }
+        finalize()?;
         tracing::info!(service = self.service, signal, "graceful shutdown complete");
         Ok(())
     }
@@ -143,7 +190,7 @@ impl ServiceShutdown {
         }
     }
 
-    fn join_workers(&self, deadline: Instant) -> Result<(), NodeCoreError> {
+    fn join_workers(&self, deadline: Instant) -> Result<usize, NodeCoreError> {
         let mut workers =
             self.runtime.workers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         while workers.iter().any(|worker| !worker.is_finished()) && Instant::now() < deadline {
@@ -152,16 +199,17 @@ impl ServiceShutdown {
             workers =
                 self.runtime.workers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+        let mut outstanding = 0;
         for worker in workers.drain(..) {
             if worker.is_finished() {
                 worker.join().map_err(|_| {
                     NodeCoreError::ServiceShutdown("service shutdown worker panicked".to_owned())
                 })?;
             } else {
-                tracing::warn!(service = self.service, "service worker exceeded shutdown grace");
+                outstanding += 1;
             }
         }
-        Ok(())
+        Ok(outstanding)
     }
 }
 
@@ -169,6 +217,14 @@ impl ServiceShutdown {
 #[must_use]
 pub fn service_shutdown_token() -> CancellationToken {
     RUNTIME.get().map_or_else(CancellationToken::new, |runtime| runtime.token.clone())
+}
+
+/// Deadline shared by socket draining and async runtimes.
+#[must_use]
+pub fn shutdown_deadline() -> Option<Instant> {
+    RUNTIME.get().and_then(|runtime| {
+        *runtime.deadline.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    })
 }
 
 /// Sleep cooperatively, returning `false` as soon as process shutdown is requested.
@@ -247,6 +303,27 @@ fn invalid_grace_error() -> NodeCoreError {
     NodeCoreError::ServiceShutdown(format!(
         "{SHUTDOWN_GRACE_SECONDS_ENV} must be an integer from 0 to {MAX_SHUTDOWN_GRACE_SECONDS}"
     ))
+}
+
+/// Deterministic request rendezvous, compiled only for explicit integration-test builds.
+#[cfg(feature = "itest-http")]
+pub fn shutdown_request_test_delay() {
+    let Ok(marker) = crate::environment::var("RAMFLUX_ITEST_SHUTDOWN_REQUEST_MARKER") else {
+        return;
+    };
+    if let Err(error) = std::fs::write(marker, b"admitted") {
+        tracing::error!(%error, "shutdown test rendezvous failed");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+/// Root handles only; connection threads must never accumulate here.
+#[cfg(feature = "itest-http")]
+#[must_use]
+pub fn service_worker_count() -> usize {
+    RUNTIME.get().map_or(0, |runtime| {
+        runtime.workers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+    })
 }
 
 #[cfg(test)]
