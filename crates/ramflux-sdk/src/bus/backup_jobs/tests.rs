@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Production job workflow against real encrypted account databases, without containers.
-use crate::backup::{BackupJob, BackupJobState};
+use crate::backup::{BackupFailureCode, BackupJob, BackupJobState};
 use crate::bus::{actor::AccountInitializer, supervisor::Supervisor};
 use crate::prelude::*;
 use serde_json::json;
@@ -360,6 +360,36 @@ async fn call(
         .await?
         .body)
 }
+#[tokio::test(flavor = "current_thread")]
+async fn backup_archive_corrupted_mac_is_tampered() -> TestResult {
+    LocalSet::new()
+        .run_until(async {
+            let root = crate::bus::runtime_tests::root("backup-archive-mac");
+            let supervisor = source_supervisor(&root, SMALL)?;
+            let archive = root.join("archive.rfb");
+            let secret = "test archive secret";
+            let mut bytes = archive_while_reading(&supervisor, &archive, secret).await?;
+            let last = bytes.last_mut().ok_or("empty archive")?;
+            *last ^= 1;
+            std::fs::write(&archive, bytes)?;
+            let verify = call(
+                &supervisor,
+                "account.restore.verify",
+                None,
+                json!({"input_path":archive,"passphrase":secret}),
+            )
+            .await?;
+            let id = verify["job"]["job_id"].as_str().ok_or("id")?;
+            let failed = finished(&supervisor, id, BackupJobState::Failed).await?;
+            assert_eq!(failed.error.ok_or("failure")?.code, BackupFailureCode::Tampered);
+            supervisor.shutdown().await?;
+            drop(supervisor);
+            std::fs::remove_dir_all(root)?;
+            Ok(())
+        })
+        .await
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn failed_verification_and_cancellation_leave_existing_accounts_and_output_untouched()
 -> TestResult {

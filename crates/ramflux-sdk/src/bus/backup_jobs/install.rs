@@ -32,10 +32,15 @@ pub(super) fn existing_key(
     let secret_key = Zeroizing::new(vault.vault_secret(id)?);
     let wrapping =
         Zeroizing::new(crate::client::account::account_db_key_encryption_key(&secret_key, secret));
-    Ok(unwrap_with_vault_secret(
+    unwrap_with_vault_secret(
         &wrapping,
         &index.load_wrapped_db_key(id)?.ok_or(SdkError::AccountDbNotUnlocked)?,
-    )?)
+    )
+    .map_err(|error| match error {
+        // This authenticates the local key, not the backup archive.
+        ramflux_storage::StorageError::Integrity(_) => refused("unreadable"),
+        error => error.into(),
+    })
 }
 impl BackupJobs {
     pub(crate) fn begin_install(

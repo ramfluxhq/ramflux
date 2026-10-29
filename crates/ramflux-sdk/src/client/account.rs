@@ -401,7 +401,8 @@ mod tests {
         wrong_secret.open_account_index(&root)?;
         assert!(matches!(
             wrong_secret.unlock_account("acct_a", b"wrong-secret"),
-            Err(SdkError::Storage(StorageError::Integrity(_)))
+            Err(SdkError::Storage(ref error @ StorageError::Integrity(_)))
+                if error.to_string() == "wrong passphrase or damaged local key"
         ));
 
         restored.rekey_active_account("acct_a", b"new-secret")?;

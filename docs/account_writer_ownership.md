@@ -62,13 +62,15 @@ archive tampering. The storage and SDK boundaries use these classifications:
 | --- | --- | --- | --- | --- |
 | Another process holds the lock | `AccountWriterBusy` | `account_busy`, retryable | `account_busy`, retry after 1000 ms | `RAMFLUX_ERR_ACCOUNT_BUSY` (18), retryable |
 | Lock open/locking or index I/O fails | `Io` (or `Sqlite` for index queries) | `unreadable` | `storage_unavailable` | `StorageFailed` (8) |
-| MAC verification fails | `Integrity` | `tampered` | `ValidationFailed` (existing) | `StorageFailed` (8, existing) |
+| Local wrapped DB key authentication fails | `Integrity` | `unreadable` | `ValidationFailed` (existing) | `StorageFailed` (8, existing) |
 
 Unsupported locking, permission failures, a full filesystem and a directory at
 the lock-file path are local I/O failures. The lock error retains the path and
-underlying filesystem cause. Only a failed integrity check yields `Integrity`;
-I/O errors never become `tampered`. SQLite page-budget exhaustion during archive
-work continues to use the backup job's `insufficient_space` code. Bus contention
+underlying filesystem cause. `tampered` is reserved for backup archive integrity
+failures (archive MAC, hash or signature). Local wrapped-key authentication failures
+and I/O errors use `unreadable` at backup surfaces. SQLite page-budget exhaustion
+during archive work continues to use the backup job's `insufficient_space` code.
+Bus contention
 includes `reason_code: "account_busy"`, the message "account in use by another
 process" and `retry_after_ms: 1000`. Wait for ownership to be released before
 retrying; the retry hint does not expire or evict an owner.
@@ -76,7 +78,8 @@ retrying; the retry hint does not expire or evict an owner.
 The C header is generated from the SDK's C ABI declarations. Code 18 and its
 `RAMFLUX_ERR_ACCOUNT_BUSY` constant are additive; existing numeric codes retain
 their meanings. A wrong secret and a damaged wrapped-key MAC cannot be
-distinguished cryptographically; both keep their existing bus and C ABI codes.
+distinguished cryptographically; both report "wrong passphrase or damaged local
+key" and keep their existing bus and C ABI codes.
 
 ## Managed transactions and source guard
 
