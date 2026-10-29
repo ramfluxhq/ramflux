@@ -18,7 +18,7 @@ impl AccountDb {
     /// Returns an error if WAL/FULL cannot be enabled or the outbox cannot be installed.
     pub fn enable_runtime(&self) -> Result<(), StorageError> {
         self.connection.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA secure_delete=ON; PRAGMA wal_autocheckpoint=0;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA secure_delete=ON; PRAGMA wal_autocheckpoint=0; PRAGMA journal_size_limit=0;",
         )?;
         let journal: String =
             self.connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
@@ -40,14 +40,28 @@ impl AccountDb {
         Ok(())
     }
 
-    /// Queues coalesced PASSIVE maintenance after the outer writer phase has committed.
+    /// Checkpoints retired pages only after the outer writer phase has committed.
     /// # Errors
     /// Returns SQLite errors; returns false while a surrounding transaction remains open.
     pub fn checkpoint_retired_secrets_if_committed(&self) -> Result<bool, StorageError> {
         if !self.connection.is_autocommit()? {
             return Ok(false);
         }
-        self.connection.request_background_checkpoint();
+        self.checkpoint_retired_secrets()?;
+        Ok(true)
+    }
+
+    /// Clears the retirement marker only after the retired secret pages are checkpointed.
+    ///
+    /// # Errors
+    /// Returns SQLite errors and leaves the marker set when the checkpoint fails.
+    pub fn finish_secret_retirement_if_committed(&self) -> Result<bool, StorageError> {
+        if !self.load_actor_state::<bool>("secrets/retired")?.unwrap_or(false)
+            || !self.checkpoint_retired_secrets_if_committed()?
+        {
+            return Ok(false);
+        }
+        self.remove_actor_state("secrets/retired")?;
         Ok(true)
     }
 

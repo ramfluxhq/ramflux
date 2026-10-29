@@ -17,7 +17,12 @@ fn runtime_wal_sqlcipher_snapshot_and_rekey() -> Result<(), StorageError> {
     assert_eq!(journal, "wal");
     assert_eq!(full, 2);
     assert_eq!(busy, 5000);
-    for (pragma, expected) in [("fullfsync", 1), ("secure_delete", 1), ("wal_autocheckpoint", 0)] {
+    for (pragma, expected) in [
+        ("fullfsync", 1),
+        ("secure_delete", 1),
+        ("wal_autocheckpoint", 0),
+        ("journal_size_limit", 0),
+    ] {
         assert_eq!(
             writer
                 .connection
@@ -57,6 +62,93 @@ fn runtime_wal_sqlcipher_snapshot_and_rekey() -> Result<(), StorageError> {
     drop(reopened);
     fs::remove_dir_all(root)?;
     Ok(())
+}
+
+#[test]
+fn erased_message_and_retired_ratchet_bytes_leave_raw_database_files() -> Result<(), StorageError> {
+    let (message_root, message_db) = test_db("wal-message-erasure")?;
+    let message_secret = b"r5-message-secret-raw-probe";
+    message_db.send_direct_message("thread", "message", "peer", message_secret)?;
+    message_db.delete_direct_message("thread", "message", "local", "delete")?;
+    wait_for_erasure_maintenance(&message_db)?;
+    assert_raw_files_exclude(&message_db.path, message_secret);
+
+    let (ratchet_root, ratchet_db) = test_db("wal-ratchet-retirement")?;
+    let ratchet_secret = b"r5-ratchet-secret-raw-probe";
+    ratchet_db.persist_actor_state(
+        "dm-pair/session/retired-probe",
+        &serde_json::json!({"secret":String::from_utf8_lossy(ratchet_secret)}),
+    )?;
+    ratchet_db.persist_actor_state("secrets/retired", &true)?;
+    ratchet_db.remove_actor_state("dm-pair/session/retired-probe")?;
+    assert!(ratchet_db.finish_secret_retirement_if_committed()?);
+    assert_raw_files_exclude(&ratchet_db.path, ratchet_secret);
+
+    drop(message_db);
+    drop(ratchet_db);
+    fs::remove_dir_all(message_root)?;
+    fs::remove_dir_all(ratchet_root)?;
+    Ok(())
+}
+
+#[test]
+fn held_reader_keeps_erasure_pending_then_releases_without_long_queue_delay()
+-> Result<(), StorageError> {
+    let (root, db) = test_db("wal-erasure-held-reader")?;
+    db.send_direct_message("thread", "message", "peer", b"held-reader-secret")?;
+    let reader = db.open_reader()?;
+    reader.connection.execute_batch(
+        "BEGIN; SELECT encrypted_body FROM direct_message_projection WHERE message_id='message';",
+    )?;
+    db.delete_direct_message("thread", "message", "local", "delete")?;
+    let queued = std::time::Instant::now();
+    let pending: i64 = db.connection.query_row(
+        "SELECT erasure_pending FROM runtime_privacy_maintenance WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    let queued_latency = queued.elapsed();
+    eprintln!("held-reader queued request latency: {queued_latency:?}");
+    assert_eq!(pending, 1);
+    assert!(queued_latency <= std::time::Duration::from_millis(250));
+    reader.connection.execute_batch("COMMIT")?;
+    drop(reader);
+    wait_for_erasure_maintenance(&db)?;
+    assert_raw_files_exclude(&db.path, b"held-reader-secret");
+    drop(db);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn wait_for_erasure_maintenance(db: &AccountDb) -> Result<(), StorageError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let pending: i64 = db.connection.query_row(
+            "SELECT erasure_pending FROM runtime_privacy_maintenance WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        let wal = std::path::PathBuf::from(format!("{}-wal", db.path.display()));
+        if pending == 0 && std::fs::metadata(wal).map_or(true, |metadata| metadata.len() == 0) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+fn assert_raw_files_exclude(path: &std::path::Path, forbidden: &[u8]) {
+    for suffix in ["", "-wal", "-shm"] {
+        let candidate = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+        let Ok(bytes) = std::fs::read(&candidate) else { continue };
+        assert!(
+            !bytes.windows(forbidden.len()).any(|window| window == forbidden),
+            "retired bytes remain in {}",
+            candidate.display()
+        );
+    }
 }
 
 #[test]

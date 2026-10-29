@@ -18,6 +18,8 @@ pub(super) fn install(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 const BODY: &str = r"
+ INSERT INTO runtime_privacy_maintenance VALUES(1,1)
+ ON CONFLICT(singleton) DO UPDATE SET erasure_pending=1;
  UPDATE runtime_actor_state SET state_json=CAST(json_object('message_id',NEW.message_id,'deleted',json('true'),'created_at',NEW.created_at,'conversation_id',NEW.conversation_id,'is_own',json(CASE WHEN NEW.is_own=1 THEN 'true' ELSE 'false' END)) AS BLOB)
  WHERE state_kind='directory/message/'||NEW.message_id;
  DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor');
@@ -40,9 +42,21 @@ const BODY: &str = r"
  DELETE FROM message_projection WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='message_projection');
  DELETE FROM receipt_projection WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='receipt_projection');
  DELETE FROM group_pending_undecrypted WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='group_pending_undecrypted');
+ DELETE FROM root_group_sender_key_counter_seen WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='root_group_sender_key_counter_seen');
+ DELETE FROM group_sender_key_counter_seen WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='group_sender_key_counter_seen');
  DELETE FROM contact_message_request WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='contact_message_request');
- DELETE FROM conversation_read_state WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='conversation_read_state');
- DELETE FROM conversation_delivery_state WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='conversation_delivery_state');
+ UPDATE conversation_read_state SET read_through_message_id=COALESCE((
+  SELECT previous.message_id FROM direct_message_projection previous
+  WHERE previous.conversation_id=conversation_read_state.conversation_id AND previous.deleted=0
+   AND (previous.created_at<NEW.created_at OR (previous.created_at=NEW.created_at AND previous.message_id<NEW.message_id))
+  ORDER BY previous.created_at DESC,previous.message_id DESC LIMIT 1),'')
+ WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='conversation_read_state');
+ UPDATE conversation_delivery_state SET delivered_through_message_id=COALESCE((
+  SELECT previous.message_id FROM direct_message_projection previous
+  WHERE previous.conversation_id=conversation_delivery_state.conversation_id AND previous.deleted=0
+   AND (previous.created_at<NEW.created_at OR (previous.created_at=NEW.created_at AND previous.message_id<NEW.message_id))
+  ORDER BY previous.created_at DESC,previous.message_id DESC LIMIT 1),'')
+ WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='conversation_delivery_state');
  DELETE FROM rejected_inbox_projection WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='rejected_inbox_projection');
  DELETE FROM conversation_unread_marker WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='conversation_unread_marker');
  UPDATE group_message_tombstone_projection SET actor_device_id='',reason='' WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='group_message_tombstone_projection');

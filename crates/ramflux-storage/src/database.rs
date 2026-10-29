@@ -72,7 +72,15 @@ impl Connection {
                             std::sync::Arc::new(BackgroundCheckpoint::for_path(&worker_path));
                         if ready_tx.send(Ok(worker_checkpoints.clone())).is_ok() {
                             loop {
-                                match receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+                                let next_job = if let Some(wait) = worker_checkpoints.wait_timeout()
+                                {
+                                    receiver.recv_timeout(wait)
+                                } else {
+                                    receiver
+                                        .recv()
+                                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                                };
+                                match next_job {
                                     Ok(job) => {
                                         let changes = db.total_changes();
                                         let transaction = !db.is_autocommit();
@@ -80,12 +88,21 @@ impl Connection {
                                         if worker_checkpoints.enabled()
                                             && (db.total_changes() != changes
                                                 || transaction && db.is_autocommit())
+                                            && crate::database_checkpoint::durable_erasure_pending(
+                                                &db,
+                                            )
+                                            .unwrap_or(true)
                                         {
                                             worker_checkpoints.request();
                                         }
                                     }
                                     Err(mpsc::RecvTimeoutError::Timeout) => {}
-                                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                        // SQLite checkpoints on the last connection close. If a
+                                        // peer connection remains, its shared pending schedule
+                                        // retains responsibility for the next attempt.
+                                        break;
+                                    }
                                 }
                                 // Each job has delivered its reply before checkpoint I/O starts.
                                 worker_checkpoints.maintain(&db);
@@ -129,10 +146,18 @@ impl Connection {
 
     pub(crate) fn enable_background_checkpoints(&self) {
         self.inner.checkpoints.enable();
+        self.request_background_checkpoint();
     }
 
     pub(crate) fn request_background_checkpoint(&self) {
         self.inner.checkpoints.request();
+        self.wake_checkpoint_worker();
+    }
+
+    fn wake_checkpoint_worker(&self) {
+        if let Some(sender) = &self.inner.sender {
+            let _ = sender.try_send(Box::new(|_| {}));
+        }
     }
 
     pub(crate) fn execute_batch(&self, sql: &str) -> Result<()> {

@@ -146,7 +146,10 @@ async fn case(own: bool, group: bool) -> TestResult {
             recipient.client.unlock_account(&b.principal, b"receipt-test")?;
         }
         let raw = super::erasure_audit::open(&b, &recipient.client)?;
-        assert_eq!(identities, super::erasure_audit::identities(&raw)?);
+        super::erasure_audit::assert_identities_unchanged(
+            &identities,
+            &super::erasure_audit::identities(&raw)?,
+        );
         super::erasure_audit::assert_erased(&raw, &forbidden, &message)?;
         drop(raw);
         let before = recipient.client.account_db()?.journal_after(0, 1024)?.len();
@@ -160,41 +163,14 @@ async fn case(own: bool, group: bool) -> TestResult {
             now_unix_timestamp(),
         )?;
         assert_eq!(before, recipient.client.account_db()?.journal_after(0, 1024)?.len());
-        quarantine_changed(&mut recipient, &mut receiver, &pool, &entry, &b.device).await?;
         let raw = super::erasure_audit::open(&b, &recipient.client)?;
         super::erasure_audit::assert_erased(&raw, &forbidden, &message)?;
         drop(raw);
-        // Clear only opaque failures so the next exact replay assertion checks new writes.
         assert_eq!(recipient.client.account_db()?.message_content(&message)?, None);
     }
     drop(recipient);
     drop(source);
     std::fs::remove_dir_all(root)?;
     eprintln!("erasure matrix passed: own={own} group={group}");
-    Ok(())
-}
-
-async fn quarantine_changed(
-    recipient: &mut LocalBusAccountState,
-    receiver: &mut GatewaySessionEngine,
-    pool: &ramflux_transport::RelayQuicPool,
-    entry: &GatewayInboxEntry,
-    device: &str,
-) -> TestResult {
-    let mut changed = entry.clone();
-    changed.envelope.signed.signature = "invalid-signature".into();
-    let error = sync_driver::process(recipient, receiver, pool, &changed)
-        .await
-        .err()
-        .ok_or("invalid entry accepted")?;
-    let key = recipient.client.inbox_admission_key(&changed)?;
-    assert!(sync_driver::quarantine_failure(
-        &recipient.client,
-        device,
-        &changed,
-        &key,
-        &error,
-        now_unix_timestamp(),
-    )?);
     Ok(())
 }

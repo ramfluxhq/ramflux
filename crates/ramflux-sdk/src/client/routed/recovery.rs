@@ -5,11 +5,7 @@
 use super::{GatewayInboxEntry, GatewaySessionEngine, RamfluxClient, SdkError, now_unix_timestamp};
 impl RamfluxClient {
     pub(crate) fn finish_pair_retirement(&self) -> Result<(), SdkError> {
-        if self.account_db()?.load_actor_state::<bool>("secrets/retired")?.unwrap_or(false)
-            && self.account_db()?.checkpoint_retired_secrets_if_committed()?
-        {
-            self.account_db()?.remove_actor_state("secrets/retired")?;
-        }
+        self.account_db()?.finish_secret_retirement_if_committed()?;
         Ok(())
     }
     pub(super) async fn open_routed_with_recovery(

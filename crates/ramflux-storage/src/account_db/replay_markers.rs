@@ -58,7 +58,7 @@ mod tests {
     use rusqlite::params;
 
     #[test]
-    fn seen_markers_are_account_private_and_dead_letters_keep_only_the_marker()
+    fn seen_markers_are_private_and_only_mismatches_keep_marker_only_dead_letters()
     -> Result<(), StorageError> {
         let (root, db) = crate::tests::test_db("seen-private-failure")?;
         let index = AccountIndex::open(root.join("second"))?;
@@ -81,10 +81,29 @@ mod tests {
             1,
         )?;
         assert!(db.latest_journal_event("message.undeliverable")?.is_none());
-        // Different envelope bytes use their own opaque failure marker.
+        // A never-seen envelope retains bounded diagnostics.
         let changed = br#"{"source_principal_id":"private-principal","source_device_id":"private-device","envelope_id":"private-envelope","payload_hash":"other","encrypted_payload":"changed"}"#;
         let marker =
             db.inbox_envelope_marker(changed)?.ok_or(StorageError::AuthorizationRejected)?;
+        db.dead_letter_inbox(
+            "never-seen",
+            changed,
+            &json!({"error_code":"authentication_failed","envelope_id":"private-envelope"}),
+            1,
+        )?;
+        let diagnostic: Vec<u8> = db.connection.query_row(
+            "SELECT entry_json FROM runtime_inbox_dead_letter WHERE envelope_key='never-seen'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(diagnostic, changed);
+        db.connection
+            .execute("DELETE FROM runtime_inbox_dead_letter WHERE envelope_key='never-seen'", [])?;
+        db.connection.execute(
+            "DELETE FROM runtime_journal WHERE source_key='undeliverable:never-seen'",
+            [],
+        )?;
+        // A replay mismatch uses only the opaque marker.
         db.dead_letter_routed(
             &ramflux_protocol::canonical_json_bytes(&serde_json::from_slice::<serde_json::Value>(
                 changed,
