@@ -328,9 +328,7 @@ impl LocalBusAccountState {
                 Ok(())
             };
             connected?;
-            if restored_resume_checkpoint {
-                self.client.set_projection_checkpoint(Self::GATEWAY_RESUME_CHECKPOINT, "")?;
-            }
+            self.finish_restored_resume_checkpoint(restored_resume_checkpoint)?;
             if native {
                 super::native_account::finish_connection(self).await?;
             }
@@ -347,6 +345,13 @@ impl LocalBusAccountState {
             }
             Ok(())
         })
+    }
+
+    fn finish_restored_resume_checkpoint(&self, restored: bool) -> Result<(), SdkError> {
+        if restored {
+            self.client.set_projection_checkpoint(Self::GATEWAY_RESUME_CHECKPOINT, "")?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn take_live_engine(&mut self) -> Result<GatewaySessionEngine, SdkError> {

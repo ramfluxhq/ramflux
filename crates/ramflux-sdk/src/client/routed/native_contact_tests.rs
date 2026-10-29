@@ -49,6 +49,7 @@ fn carrier(
     packet.schema = crate::client::contact_requests::ENVELOPE_SCHEMA.into();
     message.encrypted_body = serde_json::to_vec(&packet)?;
     Ok(GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: message.target_delivery_id.clone(),
         envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,

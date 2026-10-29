@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 type Preview = Option<(Routing, Zeroizing<Vec<u8>>)>;
 enum Rollback {
-    Ready(Preview),
+    Ready(Box<Preview>),
     Failed(SdkError),
 }
 impl From<SdkError> for Rollback {
@@ -34,16 +34,16 @@ impl RamfluxClient {
             self.persist_fetched_identity_directory(manifest)?;
             let receipt = self.authenticated_committed_key(entry)?;
             if self.account_db()?.actor_state_exists(&receipt)? {
-                return Err(Rollback::Ready(None));
+                return Err(Rollback::Ready(Box::new(None)));
             }
             let opened = self.open_routed(entry, local)?;
             // Ready is deliberately an error to the managed writer: every speculative cache,
             // journal and ratchet change is rolled back before any network await. The final
             // receive transaction decrypts again and independently rechecks all authority.
-            Err(Rollback::Ready(Some((opened.routing, opened.body))))
+            Err(Rollback::Ready(Box::new(Some((opened.routing, opened.body)))))
         });
         match result {
-            Err(Rollback::Ready(preview)) => Ok(preview),
+            Err(Rollback::Ready(preview)) => Ok(*preview),
             Err(Rollback::Failed(error)) => Err(error),
             Ok(()) => Err(super::invalid("contact preview unexpectedly committed")),
         }

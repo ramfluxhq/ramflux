@@ -287,12 +287,7 @@ impl RamfluxClient {
             expires_at: intent.expires_at,
             updated_at: now,
         };
-        db.persist_contact_request(&record).map_err(|error| match error {
-            StorageError::AuthorizationRejected => {
-                SdkError::InboundPending("pending contact capacity exhausted".into())
-            }
-            other => other.into(),
-        })?;
+        db.persist_contact_request(&record).map_err(request_storage_error)?;
         self.record_outbound_contact_state(&peer.principal_commitment, "pending", now)?;
         db.remove_actor_state(&key(&intent))?;
         enqueue(self, &intent)?;
@@ -576,4 +571,13 @@ pub(crate) fn status(client: &RamfluxClient, root: &str) -> Result<&'static str,
         }
     }
     Ok("submitted")
+}
+
+fn request_storage_error(error: StorageError) -> SdkError {
+    match error {
+        StorageError::AuthorizationRejected => {
+            SdkError::InboundPending("pending contact capacity exhausted".into())
+        }
+        other => other.into(),
+    }
 }

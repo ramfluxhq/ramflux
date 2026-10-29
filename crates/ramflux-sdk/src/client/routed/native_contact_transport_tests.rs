@@ -51,6 +51,7 @@ async fn native_contact_request_crosses_the_ordinary_transport_before_first_dire
     assert_eq!(outcome, (1, true));
     let entry = directory.captured.lock().map_err(|_| "capture poisoned")?[0].clone();
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: entry.target_delivery_id.clone(),
         envelope: entry,

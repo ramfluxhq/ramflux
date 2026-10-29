@@ -7,6 +7,7 @@ fn card(principal: &str, seed: [u8; 32]) -> Result<String, SdkError> {
     let public = ramflux_crypto::public_key_base64url_from_seed(seed);
     let now = now_unix_timestamp();
     let body = crate::ContactCardBody {
+        native_authority: None,
         version: 1,
         principal_id: principal.into(),
         root_commitment: crate::identity_root_public_key_commitment(&public)?,

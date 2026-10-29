@@ -380,13 +380,19 @@ async fn tcp_inner(
             let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
             if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
                 let grant = proxy.handoff(session_id)?;
-                let first = tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut stream)).await??;
+                let first = tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut stream))
+                    .await??;
                 let first = ramflux_protocol::parse_i_json(&first)?;
                 let (recv, send) = tokio::io::split(stream);
                 drop(proxy);
                 return Box::pin(crate::session::handle_gateway_custody_session_transport(
-                    Box::new(send), Box::new(recv), context, first, grant,
-                )).await;
+                    Box::new(send),
+                    Box::new(recv),
+                    context,
+                    first,
+                    grant,
+                ))
+                .await;
             }
             let observed = nonce(&frame)?
                 .map(|nonce| {
@@ -445,13 +451,19 @@ async fn quic_inner(
             let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
             if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
                 let grant = proxy.handoff(session_id)?;
-                let first = tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut recv)).await??;
+                let first =
+                    tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut recv)).await??;
                 let first = ramflux_protocol::parse_i_json(&first)?;
-                
+
                 drop(proxy);
                 return Box::pin(crate::session::handle_gateway_custody_session_transport(
-                    Box::new(send), Box::new(recv), context, first, grant,
-                )).await;
+                    Box::new(send),
+                    Box::new(recv),
+                    context,
+                    first,
+                    grant,
+                ))
+                .await;
             }
             let observed = nonce(&frame)?
                 .map(|nonce| {

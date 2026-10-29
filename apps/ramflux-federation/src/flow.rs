@@ -635,6 +635,7 @@ mod tests {
             },
         )?;
         let authority = ramflux_node_core::DeviceAuthKeyResponse {
+            custody_authority: None,
             root_public_key: Some(ramflux_protocol::encode_base64url(
                 root.signing_key.verifying_key().to_bytes(),
             )),
