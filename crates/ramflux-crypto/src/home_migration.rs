@@ -98,9 +98,10 @@ pub fn verify_signatures<T: Message>(message: &Signed<T>) -> Result<(), CryptoEr
     for (signer, sig) in message.signers.iter().zip(&message.signatures) {
         if !matches!(
             (&signer.role, &signer.key),
-            (Role::Management, SignerKey::MasterCertifiedCustody { .. })
-                | (Role::Management, SignerKey::MasterCertifiedHome { .. })
-                | (Role::Actor, SignerKey::BranchV3 { .. })
+            (
+                Role::Management,
+                SignerKey::MasterCertifiedCustody { .. } | SignerKey::MasterCertifiedHome { .. }
+            ) | (Role::Actor, SignerKey::BranchV3 { .. })
                 | (Role::Node, SignerKey::Node { .. })
         ) {
             return Err(reject("migration signer key kind mismatch"));

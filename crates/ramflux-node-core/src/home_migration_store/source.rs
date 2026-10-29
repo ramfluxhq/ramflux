@@ -4,7 +4,7 @@
 //! Source-node genesis, account-authorized base CAS and terminal cancellation finality.
 use super::{
     Action, BACKLOG, BUSINESS, BusinessOutcome, CommitProof, DeliveryMapEntry, FORWARD_SECONDS,
-    GUARDS, Genesis, HEADS, HomeAttestation, HomeRecord, MAX_CHAIN_RECORDS, MigrationNode,
+    GUARDS, HEADS, HomeAttestation, HomeRecord, MAX_CHAIN_RECORDS, MigrationNode,
     MigrationOperation, MigrationRole, NodeCoreError, NoncommitFence, OPS, PROOFS, Phase, RECORDS,
     RecordEvidence, Refusal, RouterCore, RouterRedbStore, Signed, VerifiedRecord, auth_error,
     business_key, clock, commit_transition, crypto, delivery_map_hash, maintenance, map_for,
@@ -99,37 +99,7 @@ impl RouterCore {
             let head = if let Some(head) = read::<RecordEvidence>(&tx, HEADS, anchor)? {
                 head
             } else {
-                let genesis = crypto::sign_node(
-                    Genesis {
-                        home_declaration: Box::new(
-                            declaration
-                                .ok_or_else(|| refusal(Refusal::HomeDeclarationRequired))?
-                                .clone(),
-                        ),
-                        version: 1,
-                        account_anchor: anchor.into(),
-                        home_epoch: 0,
-                        home_node: node.node_id().into(),
-                        home_node_key: node.public_key().into(),
-                        custody_record_hash: object_hash(authority.envelope()).map_err(storage)?,
-                        registered_at: now,
-                    },
-                    node.node_id(),
-                    &node.key,
-                )
-                .map_err(auth_error)?;
-                let head = RecordEvidence {
-                    authority: ramflux_protocol::custody::Publication {
-                        record: publication.record.clone(),
-                        compacted_ids: publication.compacted_ids.clone(),
-                    },
-                    record: HomeRecord::Genesis { genesis: Box::new(genesis) },
-                    management_certificate_chain: vec![],
-                    actor_certificate: None,
-                    node_record: node.record.clone(),
-                };
-                save_head(&tx, &head)?;
-                head
+                super::genesis::create(&tx, node, publication, authority, declaration, now)?
             };
             if head.record.home() != (node.node_id(), node.public_key()) {
                 return Err(refusal(Refusal::BaseMismatch));
