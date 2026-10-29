@@ -269,6 +269,10 @@ impl RamfluxClient {
             self.establish_friend_link(&request.link_id, &body.requester_root, &body.target_root)?;
             self.replicate_contact_acceptance(&request)?;
             self.promote_contact_request_cache(&request.contact_identity_commitment)?;
+            self.persist_native_accepted_contact_safety(
+                &request.principal_id,
+                &request.contact_identity_commitment,
+            )?;
         }
         Ok(())
     }
@@ -327,6 +331,10 @@ impl RamfluxClient {
                 )?;
                 self.replicate_contact_acceptance(request)?;
                 self.promote_contact_request_cache(&request.contact_identity_commitment)?;
+                self.persist_native_accepted_contact_safety(
+                    &request.principal_id,
+                    &request.contact_identity_commitment,
+                )?;
                 self.stage_contact_response(request, Decision::Accept)?;
                 self.release_contact_messages(&request.contact_identity_commitment)?;
             } else {

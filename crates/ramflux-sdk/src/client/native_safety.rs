@@ -5,6 +5,25 @@
 use crate::{RamfluxClient, SdkContactSafetyNumber, SdkError};
 
 impl RamfluxClient {
+    pub(super) fn persist_native_accepted_contact_safety(
+        &self,
+        principal: &str,
+        root: &str,
+    ) -> Result<(), SdkError> {
+        if self.born_v3_account.is_none() {
+            return Ok(());
+        }
+        let db = self.account_db()?;
+        let mut identity = db
+            .client_record("identity", principal)?
+            .ok_or_else(|| SdkError::LocalBus("accepted native contact identity missing".into()))?;
+        let safety = self.contact_safety_number(root)?;
+        identity["safety_number"] = serde_json::json!(safety.safety_number);
+        identity["safety_number_algorithm_version"] = serde_json::json!(safety.algorithm_version);
+        db.persist_client_record("identity", principal, &identity)?;
+        Ok(())
+    }
+
     pub(super) fn require_native_safety_link(&self, peer: &str) -> Result<(), SdkError> {
         let own = self.own_account_anchor()?;
         if self.friend_links()?.iter().any(|link| {

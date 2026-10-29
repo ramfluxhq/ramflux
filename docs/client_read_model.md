@@ -135,6 +135,8 @@ client mode as the fallback). Unknown remote kinds remain null rather than assum
 `contact.safety_number` and `contact.verify` persist their computed number for directory reads.
 A missing number has `safety_number_available:false`; fetching one remains an explicit contact
 operation. Directory lookup itself never performs a network request or changes verification state.
+For native accounts, adding a contact or accepting an inbound request also persists the computed
+safety number, so it is available immediately. Acceptance alone does not mark the contact verified.
 
 ## Object directory
 
@@ -234,6 +236,12 @@ An outgoing envelope signed by a registered device derives `source_principal_id`
 account principal. Passing the account's root commitment in the legacy submit field does not change
 wire attribution. Receivers continue to verify device ownership and the envelope signature; they
 never accept a caller-supplied unrelated principal as the signing device's owner.
+
+For received messages in native accounts, `sender_id` is the sender's authenticated principal.
+Device detail is in `sender_device_id` on `message.list` / `message.read` rows;
+`sender_root_commitment` records that device's authenticated account anchor. These origin fields
+are null when no retained authenticated origin is available, including erased/deleted messages.
+They are separate from the principal-level `sender_id` and must not be inferred from it.
 
 Message identity is `(authenticated source device, envelope_id)`. Returned projection IDs remain
 compatible in the ordinary case; cross-sender collisions receive stable sender-qualified opaque

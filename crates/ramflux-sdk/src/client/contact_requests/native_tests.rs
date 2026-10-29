@@ -231,3 +231,47 @@ async fn native_expired_primary_signature_cannot_trigger_a_history_lookup() -> T
     )?);
     Ok(())
 }
+
+#[tokio::test]
+async fn native_inbound_accept_persists_safety_before_the_first_directory_read() -> TestResult {
+    let sender = Fixture::new("native-safety-sender").await?;
+    let target = Fixture::new("native-safety-target").await?;
+    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    let bytes = approve_request(&sender, &target).await?;
+    let (entry, route) = transport(&sender, &target)?;
+    let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
+    target.client.apply_contact_control(&control)?;
+    let db = target.client.account_db()?;
+    let root = &sender.manifest.principal_commitment;
+    let request = db.contact_request(root, "inbound")?.ok_or("request")?;
+    assert_eq!(request.state, "pending");
+    assert!(db.client_record("identity", &sender.manifest.principal_id)?
+        .ok_or("identity")?["safety_number"].is_null());
+    target.vault.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    let directory = crate::bus::read_model::read(
+        &target.client,
+        &crate::LocalBusFrame::request(
+            "native-accepted-directory",
+            Some(db.local_account_id.clone()),
+            "identity",
+            "identity.directory",
+            serde_json::json!({}),
+        ),
+    )?;
+    let row = directory["identities"]
+        .as_array()
+        .ok_or("identities")?
+        .iter()
+        .find(|row| row["principal_id"] == sender.manifest.principal_id)
+        .ok_or("sender identity")?;
+    let expected =
+        ramflux_crypto::custody::safety_number(&target.manifest.principal_commitment, root)?;
+    assert_eq!(row["safety_number_available"], true);
+    assert_eq!(row["safety_number"], serde_json::json!(expected));
+    assert_eq!(row["safety_number"].as_array().map(Vec::len), Some(12));
+    assert_eq!(row["safety_number_algorithm_version"], 2);
+    assert_eq!(row["verified"], false);
+    assert!(target.client.identity_root.is_none());
+    Ok(())
+}
