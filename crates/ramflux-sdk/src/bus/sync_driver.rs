@@ -260,6 +260,7 @@ async fn receive_page(
     let mut applied = 0;
     let mut replies = Vec::new();
     for entry in entries {
+        let already_seen = account.client.routed_seen_marker(&entry)?.is_some();
         let (key, committed_retry) = retry_context(&account.client, &entry, retry_keys)?;
         if !account.client.account_db()?.inbox_retry_ready(&key, now)? {
             advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
@@ -335,11 +336,10 @@ async fn receive_page(
             project_committed_message(account, &entry)?;
         }
         if account.client.ack_gateway_entry(engine, &entry, now).await.is_err() {
-            let retained = retained_inbox_entry(&entry, strip_call_ciphertext);
-            let bytes = serde_json::to_vec(&retained)?;
-            if bytes.len() <= 1024 * 1024 && account.client.routed_seen_marker(&entry)?.is_none() {
-                account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)?;
+            if already_seen && !account.client.account_db()?.has_inbox_retry(&key)? {
+                break;
             }
+            retain_ack_retry(&account.client, &entry, strip_call_ciphertext, &key, now)?;
             advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
             continue;
         }
@@ -354,6 +354,21 @@ async fn receive_page(
         }
     }
     Ok((applied, replies))
+}
+
+fn retain_ack_retry(
+    client: &RamfluxClient,
+    entry: &GatewayInboxEntry,
+    strip: bool,
+    key: &str,
+    now: i64,
+) -> Result<(), SdkError> {
+    let retained = retained_inbox_entry(entry, strip);
+    let bytes = serde_json::to_vec(&retained)?;
+    if bytes.len() <= 1024 * 1024 {
+        client.account_db()?.defer_inbox_entry(key, &bytes, now)?;
+    }
+    Ok(())
 }
 
 pub(super) struct Processed {
@@ -380,6 +395,9 @@ pub(super) async fn process(
     pool: &ramflux_transport::RelayQuicPool,
     entry: &GatewayInboxEntry,
 ) -> Result<Processed, SdkError> {
+    if account.client.routed_seen_marker(entry)?.is_some() {
+        return Ok(Processed::control());
+    }
     if account.client.receive_own_device_message(&engine.config, entry).await? {
         return Ok(Processed::control());
     }
@@ -435,7 +453,7 @@ pub(super) async fn process(
     let db = account.client.account_db()?;
     let key = account.client.inbox_admission_key(entry)?;
     db.hold_unrouted(&key, entry.inbox_seq, &serde_json::to_vec(entry)?, now_unix_timestamp())?;
-    db.append_journal(&format!("unrouted:{key}"),"message.unrouted",&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"inbox_seq":entry.inbox_seq}),now_unix_timestamp(),None)?;
+    db.append_journal(&format!("unrouted:{key}"),"message.unrouted",&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash,"inbox_seq":entry.inbox_seq}),now_unix_timestamp(),None)?;
     Ok(Processed::held())
 }
 
@@ -447,9 +465,12 @@ pub(super) fn quarantine_failure(
     error: &SdkError,
     now: i64,
 ) -> Result<bool, SdkError> {
-    if let Some((committed, _)) = client.routed_seen_marker(entry)? {
-        return Ok(client.account_db()?.dead_letter_seen_routed(&committed, now)?);
+    if client.routed_seen_marker(entry)?.is_some() {
+        return Ok(true);
     }
+    // Immutable malformed signature bytes cannot become valid after a directory refresh.
+    let wire_error = crate::client::inbox_failure::wire_signature_error(entry);
+    let error = wire_error.as_ref().unwrap_or(error);
     tracing::debug!(%error, error_code = local_bus_error_code(error),
         envelope_id = %entry.envelope.envelope_id, source_device_id = %entry.envelope.source_device_id,
         target_delivery_id = %entry.target_delivery_id, inbox_seq = entry.inbox_seq,
@@ -466,10 +487,10 @@ pub(super) fn quarantine_failure(
         }
         "retry_exhausted"
     };
-    let call_control = client.is_call_control_entry(entry, device).unwrap_or(false);
-    let retained = retained_inbox_entry(entry, call_control);
-    let bytes = serde_json::to_vec(&retained)?;
-    client.account_db()?.dead_letter_inbox(key,&bytes,&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"error_code":code}),now)?;
+    let db = client.account_db()?;
+    db.remove_inbox_retry(key)?;
+    db.remove_unrouted(key)?;
+    db.dead_letter_routed(&ramflux_protocol::canonical_json_bytes(&entry.envelope)?, code, now)?;
     Ok(true)
 }
 

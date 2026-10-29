@@ -2690,6 +2690,7 @@ dependencies = [
  "ramflux-transport",
  "rcgen",
  "reqwest",
+ "rusqlite",
  "rustix",
  "rustls",
  "rustls-pemfile",

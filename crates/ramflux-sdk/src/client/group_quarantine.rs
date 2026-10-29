@@ -37,7 +37,7 @@ impl RamfluxClient {
         db.write_transaction(|| {
             db.hold_unrouted(&key,entry.inbox_seq,&serde_json::to_vec(entry)?,now)?;
             db.retain_legacy_inbox(&key)?;
-            db.append_journal(&format!("unrouted:{key}"),"message.unrouted",&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"inbox_seq":entry.inbox_seq,"legacy_group":true}),now,None)?;
+            db.append_journal(&format!("unrouted:{key}"),"message.unrouted",&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash,"inbox_seq":entry.inbox_seq,"legacy_group":true}),now,None)?;
             Ok::<_,SdkError>(())
         })
     }

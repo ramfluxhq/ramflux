@@ -168,6 +168,12 @@ async fn a_duplicate_cannot_replace_the_original_authenticated_attribution() -> 
     let entry = seal(&alice, &bob, message("duplicate", "thread"), b"text")?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+    let original_sender = bob
+        .client
+        .direct_message_by_id("duplicate")?
+        .ok_or_else(|| invalid("missing original projection"))?
+        .sender_id;
+    assert_ne!(original_sender, "");
     let carol = Fixture::new("carol", 141)?;
     trust(&bob, &carol)?;
     let mut msg = message("duplicate", "carol-thread");
@@ -189,10 +195,13 @@ async fn a_duplicate_cannot_replace_the_original_authenticated_attribution() -> 
     forged.envelope.source_principal_id = "carol".to_owned();
     assert!(bob.client.apply_routed_entry(&mut engine, &pool()?, &forged, false).await.is_err());
     let original = bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
-    assert_eq!(
-        original.plaintext.ok_or_else(|| invalid("missing original content"))?.sender_id,
-        "alice"
-    );
+    assert!(original.plaintext.is_none());
+    let stored = bob
+        .client
+        .direct_message_by_id("duplicate")?
+        .ok_or_else(|| invalid("missing original projection"))?;
+    assert_eq!(stored.sender_id, original_sender);
+    assert_eq!(stored.conversation_id, "thread");
     assert_eq!(
         bob.client.account_db()?.message_content("duplicate")?.as_deref(),
         Some(b"text".as_slice())

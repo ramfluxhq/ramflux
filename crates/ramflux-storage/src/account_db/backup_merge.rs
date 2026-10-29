@@ -27,7 +27,9 @@ struct RowSelection<'a> {
 fn skip_merge_table(table: &str) -> bool {
     matches!(
         table,
-        "runtime_account_identity"
+        "message_footprint"
+            | "message_copy_binding"
+            | "runtime_account_identity"
             | "shared_group_removal_floor"
             | "shared_group_floor_generation"
             | "shared_group_member_projection"
@@ -66,6 +68,11 @@ impl BackupDatabase {
         })();
         self.db.execute_batch("DETACH DATABASE incoming")?;
         result
+    }
+    fn begin_message_merge(&self) -> Result<(), StorageError> {
+        self.db.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")?;
+        self.db.execute_batch("CREATE TABLE backup_local_message_own AS SELECT p.conversation_id,p.message_id,CASE WHEN p.is_own=1 OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND p.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END AS is_own FROM direct_message_projection p WHERE p.deleted=0; CREATE UNIQUE INDEX backup_local_message_own_key ON backup_local_message_own(conversation_id,message_id);")?;
+        Ok(())
     }
     fn attach(&self, path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
         self.db.execute(
@@ -124,8 +131,7 @@ impl BackupDatabase {
         self.attach(path, key)?;
         let result = (|| {
             let tables = self.incoming_tables()?;
-            self.db.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")?;
-            self.db.execute_batch("CREATE TABLE backup_local_message_own AS SELECT p.conversation_id,p.message_id,CASE WHEN p.is_own=1 OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND p.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END AS is_own FROM direct_message_projection p WHERE p.deleted=0; CREATE UNIQUE INDEX backup_local_message_own_key ON backup_local_message_own(conversation_id,message_id);")?;
+            self.begin_message_merge()?;
             let shared_groups = self.select_backup_shared_groups(local)?;
             // A restored generation starts fresh handshakes, never archived reservations.
             self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'merge-local',state_kind,state_json FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
@@ -194,7 +200,8 @@ impl BackupDatabase {
             self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;
-            self.db.execute_batch("UPDATE direct_message_projection SET is_own=1 WHERE deleted=1 AND EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1); UPDATE direct_message_projection SET is_own=CASE WHEN is_own=1 OR EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1) OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND direct_message_projection.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END,sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DELETE FROM runtime_message_content WHERE message_id IN (SELECT message_id FROM direct_message_projection WHERE deleted=1); DROP TABLE backup_local_message_own; DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; DROP TABLE backup_local_consent; DROP TABLE backup_source_consent; DROP TABLE backup_local_link_consent; DROP TABLE backup_source_link_consent; COMMIT;")?;
+            self.link_imported_message_footprints(key)?;
+            self.db.execute_batch("UPDATE direct_message_projection SET is_own=1 WHERE deleted=1 AND EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1); UPDATE direct_message_projection SET is_own=CASE WHEN is_own=1 OR EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1) OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND direct_message_projection.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END,sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DELETE FROM runtime_message_content WHERE message_id IN (SELECT message_id FROM direct_message_projection WHERE deleted=1); UPDATE direct_message_projection SET deleted=1 WHERE deleted=1; DROP TABLE backup_local_message_own; DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; DROP TABLE backup_local_consent; DROP TABLE backup_source_consent; DROP TABLE backup_local_link_consent; DROP TABLE backup_source_link_consent; COMMIT;")?;
             Ok(report)
         })();
         if result.is_err() {
@@ -281,6 +288,7 @@ impl BackupDatabase {
     fn preserve_imported_archives(&self, key: &AccountDbKey) -> Result<(), StorageError> {
         let source = key.fingerprint();
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); CREATE TABLE IF NOT EXISTS backup_archived_local_event AS SELECT '' AS source,* FROM incoming.local_event_log WHERE 0; CREATE UNIQUE INDEX IF NOT EXISTS backup_archive_event_key ON backup_archived_local_event(source,event_id);")?;
+        super::message_footprint::install(&self.db)?;
         self.db.execute("INSERT OR IGNORE INTO backup_archived_actor_state SELECT ?1,state_kind,state_json FROM incoming.runtime_actor_state",params![source])?;
         self.db.execute("INSERT OR IGNORE INTO backup_archived_local_event SELECT ?1,* FROM incoming.local_event_log",params![source])?;
         for table in ["backup_archived_actor_state", "backup_archived_local_event"] {
@@ -374,8 +382,12 @@ impl BackupDatabase {
     /// # Errors
     /// Returns SQL errors without changing any live generation.
     pub fn archive_outbound(&self) -> Result<(), StorageError> {
+        let transaction = self.db.unchecked_transaction()?;
+        self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind));")?;
+        super::message_footprint::install(&self.db)?;
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
         super::backup_retirement::archive_outbound_state(&self.db)?;
+        transaction.commit()?;
         Ok(())
     }
 }
@@ -448,6 +460,9 @@ const ORDER_FIELDS: &[&str] = &[
     "lamport_time",
 ];
 fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
+    if table == "local_event_counter" {
+        return "r.counter>l.counter".into();
+    }
     if table == "friend_link_projection" {
         return format!(
             "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND (r.blocked>l.blocked OR (r.capability_revoked_at IS NOT NULL AND l.capability_revoked_at IS NULL) OR (r.state IN ('removed','rejected') AND l.state IN ('accepted','pending')))) OR EXISTS(SELECT 1 FROM backup_source_link_consent s LEFT JOIN backup_local_link_consent old USING(link_id) WHERE s.link_id=r.link_id AND {} AND ((s.state='lifted' AND r.state='accepted' AND r.blocked=0) OR (s.state='blocked' AND r.blocked=1) OR (s.state='declined' AND r.state='rejected')))",
