@@ -1,5 +1,9 @@
 services:
   ramflux-gateway:
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     image: ghcr.io/ramfluxhq/ramflux-gateway:${RAMFLUX_VERSION:-dev}
     build:
       context: ..
@@ -14,6 +18,9 @@ services:
     tmpfs: ["/tmp"]
     environment:
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL:?see deploy/compose-inputs.json migration}"
+      RAMFLUX_CUSTODY_HANDSHAKE_POOL: "${RF_COMPOSE_CUSTODY_HANDSHAKE_POOL:-}"
+      RAMFLUX_CUSTODY_AUTHENTICATED_POOL: "${RF_COMPOSE_CUSTODY_AUTHENTICATED_POOL:-}"
+      RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS: "${RF_COMPOSE_CUSTODY_AUTH_TIMEOUT_MS:-}"
       # v3 issuance material is operator-provided; the gateway fails closed when absent.
       RAMFLUX_GATEWAY_V3_ISSUER_SEED: "${RF_COMPOSE_GATEWAY_V3_ISSUER_SEED:?see deploy/compose-inputs.json migration}"
       RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE: "${RF_COMPOSE_GATEWAY_V3_ISSUER_CERT_FILE:?see deploy/compose-inputs.json migration}"
@@ -33,6 +40,10 @@ services:
       retries: 12
 
   ramflux-router:
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     image: ghcr.io/ramfluxhq/ramflux-router:${RAMFLUX_VERSION:-dev}
     build:
       context: ..
@@ -48,6 +59,9 @@ services:
       RAMFLUX_ROUTER_ADMIN_TOKEN: "${RF_COMPOSE_ROUTER_ADMIN_TOKEN:?see deploy/compose-inputs.json migration}"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_URL: "http://ramflux-federation:18084/internal/home-node-migration/forward"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:?see deploy/compose-inputs.json migration}"
+      RAMFLUX_CUSTODY_HANDSHAKE_POOL: "${RF_COMPOSE_CUSTODY_HANDSHAKE_POOL:-}"
+      RAMFLUX_CUSTODY_AUTHENTICATED_POOL: "${RF_COMPOSE_CUSTODY_AUTHENTICATED_POOL:-}"
+      RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS: "${RF_COMPOSE_CUSTODY_AUTH_TIMEOUT_MS:-}"
     volumes:
       - router-redb:/var/lib/ramflux/router
       - ./config/router.toml:/etc/ramflux/config/router.toml:ro

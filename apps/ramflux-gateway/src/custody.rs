@@ -27,6 +27,7 @@ struct Proxy {
     session_ids: BTreeSet<String>,
     router: Option<crate::RouterMeshClient>,
     auth_deadline: tokio::time::Instant,
+    authenticated: bool,
 }
 async fn rpc(
     context: &GatewayQuicContext,
@@ -104,6 +105,7 @@ impl Proxy {
                 session_ids: BTreeSet::new(),
                 router: Some(context.router.clone()),
                 auth_deadline,
+                authenticated: false,
             },
             response,
         ))
@@ -113,7 +115,13 @@ impl Proxy {
         context: &GatewayQuicContext,
         frame: CustodyClientFrame,
         observed: Option<&str>,
+        permit: &ramflux_node_core::CustodyIngressPermit,
     ) -> anyhow::Result<CustodyServerFrame> {
+        let principal = if let CustodyClientFrame::Prove { proof, .. } = &frame {
+            Some(proof.body.device_ref.account_anchor.clone())
+        } else {
+            None
+        };
         let request = match self.prepare(frame, observed, context.remote_addr.ip()) {
             Ok(request) => request,
             Err(error) => {
@@ -124,6 +132,18 @@ impl Proxy {
             }
         };
         let result = rpc(context, &request).await?;
+        if matches!(
+            result,
+            CustodyServerFrame::Published { .. }
+                | CustodyServerFrame::Registered { .. }
+                | CustodyServerFrame::SessionEstablished { .. }
+        ) {
+            let principal = principal.ok_or_else(|| anyhow::anyhow!("unexpected proof result"))?;
+            if !permit.mark_authenticated(&principal) {
+                return Ok(busy());
+            }
+            self.authenticated = true;
+        }
         if let CustodyServerFrame::SessionEstablished { session } = &result {
             // A connection retains only its latest session; an old id cannot become a bearer.
             self.session_ids.clear();
@@ -201,27 +221,52 @@ fn nonce(frame: &CustodyClientFrame) -> anyhow::Result<Option<[u8; 32]>> {
     let bytes = ramflux_protocol::decode_base64url(&proof.body.challenge_nonce)?;
     Ok(Some(bytes.try_into().map_err(|_| anyhow::anyhow!("invalid challenge context"))?))
 }
-fn capacity() -> anyhow::Result<&'static std::sync::Arc<ramflux_node_core::CustodyIngressLimiter>> {
-    static LIMIT: std::sync::OnceLock<
-        Result<std::sync::Arc<ramflux_node_core::CustodyIngressLimiter>, String>,
-    > = std::sync::OnceLock::new();
-    match LIMIT.get_or_init(|| {
-        ramflux_node_core::custody_authenticated_session_limit()
-            .map(|limit| {
-                ramflux_node_core::CustodyIngressLimiter::with_authenticated_limit(32, limit)
-            })
-            .map_err(|error| error.to_string())
-    }) {
-        Ok(limit) => Ok(limit),
-        Err(error) => anyhow::bail!(error.clone()),
+type Limiter = std::sync::Arc<ramflux_node_core::CustodyIngressLimiter>;
+static TCP_CAPACITY: std::sync::OnceLock<Limiter> = std::sync::OnceLock::new();
+static QUIC_CAPACITY: std::sync::OnceLock<Limiter> = std::sync::OnceLock::new();
+pub(crate) fn initialize() -> anyhow::Result<()> {
+    let settings = ramflux_node_core::CustodyPoolSettings::from_env()?;
+    ramflux_node_core::custody_listener_resources(settings, 2)?;
+    TCP_CAPACITY.get_or_init(|| settings.limiter());
+    QUIC_CAPACITY.get_or_init(|| settings.limiter());
+    Ok(())
+}
+pub(crate) fn capacity(quic: bool) -> anyhow::Result<&'static Limiter> {
+    let cell = if quic { &QUIC_CAPACITY } else { &TCP_CAPACITY };
+    if let Some(limiter) = cell.get() {
+        return Ok(limiter);
     }
+    let settings = ramflux_node_core::CustodyPoolSettings::from_env()?;
+    Ok(cell.get_or_init(|| settings.limiter()))
+}
+pub(crate) async fn admit_quic(
+    send: &mut quinn::SendStream,
+    connection: &quinn::Connection,
+    limiter: &Limiter,
+    started: std::time::Instant,
+) -> anyhow::Result<Option<ramflux_node_core::CustodyIngressPermit>> {
+    if let Some(permit) =
+        limiter.acquire(connection.remote_address().ip(), Some(connection.stable_id()), started)
+    {
+        return Ok(Some(permit));
+    }
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        write_custody_tcp_frame(send, &serde_json::to_vec(&busy())?),
+    )
+    .await??;
+    send.finish()?;
+    Ok(None)
+}
+fn busy() -> CustodyServerFrame {
+    CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
 }
 impl Proxy {
     fn deadline(&self) -> tokio::time::Instant {
-        if self.session_ids.is_empty() {
-            self.auth_deadline
-        } else {
+        if self.authenticated {
             tokio::time::Instant::now() + IO_TIMEOUT
+        } else {
+            self.auth_deadline
         }
     }
 }
@@ -245,16 +290,15 @@ async fn tcp_inner(
     mut stream: GatewayTcpTlsStream,
     context: GatewayQuicContext,
     first: &[u8],
+    capacity: ramflux_node_core::CustodyIngressPermit,
 ) -> anyhow::Result<()> {
-    let capacity = capacity()?
-        .acquire(context.remote_addr.ip(), None, std::time::Instant::now())
-        .ok_or_else(|| anyhow::anyhow!("custody source budget exhausted"))?;
     let run = async {
-        let (mut proxy, response) = tokio::time::timeout(
-            ramflux_node_core::custody_auth_timeout()?,
+        let (mut proxy, response) = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(capacity.auth_deadline()),
             Proxy::open(&context, first),
         )
         .await??;
+        proxy.auth_deadline = tokio::time::Instant::from_std(capacity.auth_deadline());
         tokio::time::timeout_at(
             proxy.deadline(),
             write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
@@ -273,19 +317,19 @@ async fn tcp_inner(
                 .transpose()?;
             let response = tokio::time::timeout_at(
                 deadline,
-                proxy.frame(&context, frame, observed.as_deref()),
+                proxy.frame(&context, frame, observed.as_deref(), &capacity),
             )
             .await??;
-            if let CustodyServerFrame::SessionEstablished { session } = &response
-                && !capacity.mark_authenticated(&session.device_ref.account_anchor)
-            {
-                anyhow::bail!("custody authenticated session capacity exhausted")
-            }
+            let saturated =
+                matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy });
             tokio::time::timeout_at(
                 deadline,
                 write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
             )
             .await??;
+            if saturated {
+                return Ok(());
+            }
         }
         Ok(())
     };
@@ -301,16 +345,15 @@ async fn quic_inner(
     connection: quinn::Connection,
     context: GatewayQuicContext,
     first: &[u8],
+    capacity: ramflux_node_core::CustodyIngressPermit,
 ) -> anyhow::Result<()> {
-    let capacity = capacity()?
-        .acquire(context.remote_addr.ip(), Some(connection.stable_id()), std::time::Instant::now())
-        .ok_or_else(|| anyhow::anyhow!("custody source or connection budget exhausted"))?;
     let run = async {
-        let (mut proxy, response) = tokio::time::timeout(
-            ramflux_node_core::custody_auth_timeout()?,
+        let (mut proxy, response) = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(capacity.auth_deadline()),
             Proxy::open(&context, first),
         )
         .await??;
+        proxy.auth_deadline = tokio::time::Instant::from_std(capacity.auth_deadline());
         tokio::time::timeout_at(
             proxy.deadline(),
             write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?),
@@ -329,19 +372,20 @@ async fn quic_inner(
                 .transpose()?;
             let response = tokio::time::timeout_at(
                 deadline,
-                proxy.frame(&context, frame, observed.as_deref()),
+                proxy.frame(&context, frame, observed.as_deref(), &capacity),
             )
             .await??;
-            if let CustodyServerFrame::SessionEstablished { session } = &response
-                && !capacity.mark_authenticated(&session.device_ref.account_anchor)
-            {
-                anyhow::bail!("custody authenticated session capacity exhausted")
-            }
+            let saturated =
+                matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy });
             tokio::time::timeout_at(
                 deadline,
                 write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?),
             )
             .await??;
+            if saturated {
+                send.finish()?;
+                return Ok(());
+            }
         }
         Ok(())
     };
@@ -356,9 +400,13 @@ pub(crate) async fn tcp(
     stream: GatewayTcpTlsStream,
     context: GatewayQuicContext,
     first: &[u8],
+    capacity: ramflux_node_core::CustodyIngressPermit,
 ) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_mins(15), Box::pin(tcp_inner(stream, context, first)))
-        .await?
+    tokio::time::timeout(
+        Duration::from_mins(15),
+        Box::pin(tcp_inner(stream, context, first, capacity)),
+    )
+    .await?
 }
 pub(crate) async fn quic(
     send: quinn::SendStream,
@@ -366,10 +414,11 @@ pub(crate) async fn quic(
     connection: quinn::Connection,
     context: GatewayQuicContext,
     first: &[u8],
+    capacity: ramflux_node_core::CustodyIngressPermit,
 ) -> anyhow::Result<()> {
     tokio::time::timeout(
         Duration::from_mins(15),
-        Box::pin(quic_inner(send, recv, connection, context, first)),
+        Box::pin(quic_inner(send, recv, connection, context, first, capacity)),
     )
     .await?
 }

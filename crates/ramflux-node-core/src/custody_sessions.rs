@@ -108,34 +108,10 @@ impl CustodyLeases {
         {
             return Err(CustodyRefusal::Capacity);
         }
-        let admission = self.sources.admit(source_ip, tick).ok_or(CustodyRefusal::Capacity)?;
-        if let crate::custody_ingress::BudgetAdmission::Evicted(prefixes) = admission {
-            for prefix in prefixes {
-                if let Some(nonce) = self
-                    .by_prefix
-                    .get(&prefix)
-                    .and_then(|entries| entries.first())
-                    .map(|(_, nonce)| nonce.clone())
-                {
-                    self.untrack(&nonce);
-                    self.challenges.remove(&nonce);
-                }
-            }
-        }
         if self.pending_count >= GLOBAL_LIMIT {
-            let oldest = self
-                .by_prefix
-                .values()
-                .max_by_key(|entries| entries.len())
-                .and_then(|entries| entries.first())
-                .map(|(_, nonce)| nonce.clone());
-            if let Some(nonce) = oldest {
-                self.untrack(&nonce);
-                self.challenges.remove(&nonce);
-            } else {
-                return Err(CustodyRefusal::Capacity);
-            }
+            return Err(CustodyRefusal::Busy);
         }
+        self.sources.admit(source_ip, tick).ok_or(CustodyRefusal::Busy)?;
         let challenge = BranchChallenge {
             challenge_nonce: random()?,
             action_hash: action_hash.clone(),
@@ -418,102 +394,46 @@ mod tests {
         assert!(pool.issue(intent("203.0.113.1".into(), "honest".into()), 100, tick).is_ok());
     }
     #[test]
-    fn full_global_windows_admit_fresh_ipv4_and_ipv6_prefixes_by_fair_share() -> Result {
+    fn challenge_floor_survives_new_prefix_churn() -> Result {
         let tick = Instant::now();
-        let mut ipv4 = CustodyLeases::default();
-        let mut sequence = 0_u32;
-        for net in 0..16_u8 {
-            for host in 1..=2_u8 {
-                for _ in 0..32 {
-                    sequence += 1;
-                    ipv4.issue(
-                        intent(format!("203.0.{net}.{host}"), format!("v4-{sequence}")),
-                        100,
-                        tick,
-                    )?;
-                }
-            }
+        let mut pool = CustodyLeases::default();
+        let first = pool.issue(intent("192.0.2.1".into(), "honest".into()), 100, tick)?;
+        for n in 0..2000 {
+            let _ =
+                pool.issue(intent(format!("2001:db8:{n:x}::1"), format!("churn-{n}")), 100, tick);
         }
-        assert_eq!(ipv4.pending_count, 1024);
-        ipv4.issue(intent("198.51.100.7".into(), "honest-v4".into()), 100, tick)?;
-        assert_eq!(ipv4.pending_count, 1023, "two slots are reserved for the fresh prefix");
-        ipv4.issue(intent("198.51.100.7".into(), "honest-v4".into()), 100, tick)?;
-        assert_eq!(ipv4.pending_count, 1024);
-
-        let mut ipv6 = CustodyLeases::default();
-        sequence = 0;
-        for site in 0..4_u16 {
-            for subnet in 0..2_u16 {
-                for host in 1..=4_u16 {
-                    for _ in 0..8 {
-                        sequence += 1;
-                        let holder = format!("v6-{sequence}");
-                        for _ in 0..4 {
-                            ipv6.issue(
-                                intent(
-                                    format!("2001:db8:{site:x}:{subnet:x}::{host:x}"),
-                                    holder.clone(),
-                                ),
-                                100,
-                                tick,
-                            )?;
-                        }
-                        ipv6.disconnect(&holder);
-                    }
-                }
-            }
-        }
-        assert_eq!(sequence, 256);
-        ipv6.issue(intent("2001:db8:ffff::1".into(), "honest-v6".into()), 100, tick)?;
+        assert!(pool.challenge(&first.challenge_nonce, tick).is_ok());
+        let second = pool.issue(intent("192.0.2.1".into(), "honest".into()), 100, tick)?;
+        assert!(pool.challenge(&second.challenge_nonce, tick).is_ok());
+        assert_eq!(pool.pending_count, 513);
         Ok(())
     }
     #[test]
-    fn full_global_window_reserves_two_challenges_for_a_fresh_prefix() -> Result {
+    fn full_pending_pool_refuses_without_retiring_challenges_or_replay() -> Result {
         let tick = Instant::now();
         let mut pool = CustodyLeases::default();
-        for prefix in 0..1024_u16 {
-            pool.issue(
-                intent(format!("2001:db8:{prefix:x}::1"), format!("attacker-{prefix}")),
-                100,
-                tick,
-            )?;
-        }
-        assert_eq!(pool.pending_count, 1024);
-        pool.issue(intent("2001:db8:ffff::1".into(), "honest".into()), 100, tick)?;
-        pool.issue(intent("2001:db8:ffff::1".into(), "honest".into()), 100, tick)?;
-        assert_eq!(pool.by_holder.get("honest").map(BTreeSet::len), Some(2));
-        assert_eq!(pool.pending_count, 1024);
-        Ok(())
-    }
-    #[test]
-    fn full_pool_evicts_unconsumed_work_but_retains_replay_markers() -> Result {
-        let tick = Instant::now();
-        let mut pool = CustodyLeases::default();
-        let first = pool.issue(intent("192.0.2.1".into(), "consumed".into()), 100, tick)?;
-        pool.consume(&first.challenge_nonce, "proof-id", tick)?;
-        for n in 1..=GLOBAL_LIMIT {
-            let source =
-                std::net::Ipv4Addr::from(0x0a00_0001_u32 + (u32::try_from(n)? << 8)).to_string();
-            pool.issue(
-                intent(source, format!("connection-{n}")),
+        let consumed = pool.issue(intent("192.0.2.1".into(), "used".into()), 100, tick)?;
+        pool.consume(&consumed.challenge_nonce, "proof-id", tick)?;
+        let mut first = None;
+        for n in 0..GLOBAL_LIMIT {
+            let c = pool.issue(
+                intent(format!("2001:db8:{:x}::1", n / 2), format!("holder-{n}")),
                 100,
                 tick + Duration::from_secs((n as u64 / 1000) * 61),
             )?;
+            first.get_or_insert(c);
         }
         assert_eq!(pool.pending_count, GLOBAL_LIMIT);
-        assert_eq!(pool.challenges.len(), GLOBAL_LIMIT + 1);
-        let honest = pool.issue(
-            intent("203.0.113.1".into(), "honest".into()),
-            100,
-            tick + Duration::from_secs(244),
-        )?;
-        assert_eq!(pool.pending_count, GLOBAL_LIMIT);
-        assert_eq!(pool.challenges.len(), GLOBAL_LIMIT + 1);
-        assert!(pool.challenge(&honest.challenge_nonce, tick + Duration::from_secs(244)).is_ok());
         assert_eq!(
-            pool.challenge(&first.challenge_nonce, tick).err(),
-            Some(CustodyRefusal::Replay)
+            pool.issue(
+                intent("203.0.113.1".into(), "new".into()),
+                100,
+                tick + Duration::from_secs(248)
+            )
+            .err(),
+            Some(CustodyRefusal::Busy)
         );
+        assert!(pool.challenge(&first.ok_or("first")?.challenge_nonce, tick).is_ok());
         assert!(pool.proofs.contains_key("proof-id"));
         Ok(())
     }

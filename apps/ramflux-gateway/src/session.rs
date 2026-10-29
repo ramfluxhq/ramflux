@@ -20,10 +20,32 @@ const GATEWAY_V3_ISSUER_CERT_FILE_ENV: &str = "RAMFLUX_GATEWAY_V3_ISSUER_CERT_FI
 pub(crate) async fn handle_gateway_quic_connection(
     connection: quinn::Connection,
     listener: GatewayListenerContext,
+    started: Instant,
 ) {
+    let mut first = Some(started);
     loop {
-        match connection.accept_bi().await {
+        let first_started = first.take();
+        let accepted = if let Some(started) = first_started {
+            let deadline = started
+                + ramflux_node_core::custody_auth_timeout()
+                    .unwrap_or(std::time::Duration::from_secs(10));
+            if let Ok(stream) = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                connection.accept_bi(),
+            )
+            .await
+            {
+                stream
+            } else {
+                connection.close(0_u32.into(), b"custody handshake deadline");
+                return;
+            }
+        } else {
+            connection.accept_bi().await
+        };
+        match accepted {
             Ok((send, recv)) => {
+                let admitted_at = first_started.unwrap_or_else(Instant::now);
                 let router = listener.router.clone();
                 let notify = listener.notify.clone();
                 let state = Arc::clone(&listener.state);
@@ -42,12 +64,14 @@ pub(crate) async fn handle_gateway_quic_connection(
                     remote_addr: connection.remote_address(),
                 };
                 let custody_connection = connection.clone();
+
                 tokio::spawn(async move {
                     if let Err(error) = handle_gateway_quic_stream_with_connection(
                         send,
                         recv,
                         context,
                         custody_connection,
+                        admitted_at,
                     )
                     .await
                     {
@@ -72,12 +96,29 @@ async fn handle_gateway_quic_stream_with_connection(
     mut recv: quinn::RecvStream,
     context: GatewayQuicContext,
     connection: quinn::Connection,
+    admitted_at: Instant,
 ) -> anyhow::Result<()> {
+    let Some(permit) = crate::custody::admit_quic(
+        &mut send,
+        &connection,
+        crate::custody::capacity(true)?,
+        admitted_at,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
     let read_started = Instant::now();
-    let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut recv).await?;
+    let bytes = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(permit.auth_deadline()),
+        ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut recv),
+    )
+    .await??;
     if crate::custody::is_open(&bytes) {
-        return Box::pin(crate::custody::quic(send, recv, connection, context, &bytes)).await;
+        return Box::pin(crate::custody::quic(send, recv, connection, context, &bytes, permit))
+            .await;
     }
+    drop(permit);
     let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
     ramflux_node_core::record_gateway_quic_request_read_us(elapsed_us(read_started));
     if let crate::ingress::Ingress::Rejected(response) = first {
@@ -108,14 +149,20 @@ pub(crate) async fn handle_gateway_session_stream(
     handle_gateway_session_transport(Box::new(send), Box::new(recv), context, first_frame).await
 }
 
-pub(crate) async fn handle_gateway_tcp_tls_stream(
+pub(crate) async fn handle_gateway_tcp_tls_admitted(
     mut stream: ramflux_transport::GatewayTcpTlsStream,
     context: GatewayQuicContext,
+    permit: ramflux_node_core::CustodyIngressPermit,
 ) -> anyhow::Result<()> {
-    let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut stream).await?;
+    let bytes = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(permit.auth_deadline()),
+        ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut stream),
+    )
+    .await??;
     if crate::custody::is_open(&bytes) {
-        return Box::pin(crate::custody::tcp(stream, context, &bytes)).await;
+        return Box::pin(crate::custody::tcp(stream, context, &bytes, permit)).await;
     }
+    drop(permit);
     let (recv, send) = tokio::io::split(stream);
     let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
     if let crate::ingress::Ingress::Rejected(response) = first {

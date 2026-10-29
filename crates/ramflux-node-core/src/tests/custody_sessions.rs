@@ -535,3 +535,126 @@ fn custody_publication_quota_refusal_does_not_occupy_successful_replay_cache() -
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+fn registered_direct_driver(
+    router: &RouterCore,
+    store: &RouterRedbStore,
+) -> Result<(Driver, crate::CustodyService)> {
+    let mut driver = Driver::new("alice", 10)?;
+    let mut body = driver.node.envelope().body.clone();
+    body.channel_binding_modes.push(BindingMode::DirectExporter);
+    body.channel_binding_modes.sort();
+    body.client_tls_certificate_sha256 = Some(ramflux_protocol::encode_base64url([21; 32]));
+    let record = sign_node_identity_record(&SigningKey::from_bytes(&[8; 32]), body)?;
+    driver.node =
+        verify_node_identity_record(&record, "node", &record.body.node_signing_public_key, NOW)?;
+    let service = crate::CustodyService::new(driver.node.clone(), false, store, NOW)?;
+    driver.run(&service, router, store, driver.publish())?;
+    driver.run(
+        &service,
+        router,
+        store,
+        CustodyProofAction::Register { prekey_bundle: driver.bundle(10)? },
+    )?;
+    Ok((driver, service))
+}
+
+#[test]
+fn custody_direct_prove_busy_and_revoked_grants_never_establish_a_session() -> Result {
+    let path = temp_store_path("custody-direct-grant-fence")?;
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let router = RouterCore::new();
+    store.save_router(&router)?;
+    let (driver, service) = registered_direct_driver(&router, &store)?;
+    let limiter =
+        crate::CustodyIngressLimiter::with_pools(1, 1, 4, std::time::Duration::from_secs(10));
+    let wall =
+        limiter.acquire("192.0.2.1".parse()?, None, std::time::Instant::now()).ok_or("wall")?;
+    assert!(wall.mark_authenticated("wall"));
+    let permit = limiter
+        .acquire("198.51.100.1".parse()?, None, std::time::Instant::now())
+        .ok_or("honest")?;
+    let context = crate::CustodyTlsContext {
+        connection_id: &driver.connection,
+        remote_ip: "198.51.100.1",
+        mode: BindingMode::DirectExporter,
+        exporter: Some([5; 32]),
+    };
+    let prove = |action: CustodyProofAction| -> Result<CustodyClientFrame> {
+        let response = service.tls(
+            &router,
+            &store,
+            CustodyClientFrame::Challenge {
+                device_ref: driver.reference.clone(),
+                action: action.clone(),
+            },
+            context,
+            NOW,
+        );
+        let CustodyServerFrame::Challenge { challenge } = response else {
+            return Err(format!("challenge: {response:?}").into());
+        };
+        Ok(CustodyClientFrame::Prove { action, proof: Box::new(driver.proof(&challenge)?) })
+    };
+    assert_eq!(
+        service.tls_with_permit(
+            &router,
+            &store,
+            prove(CustodyProofAction::OpenSession)?,
+            context,
+            (NOW, Some(&permit))
+        ),
+        CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
+    );
+    assert_eq!(
+        service.tls_with_permit(
+            &router,
+            &store,
+            prove(driver.publish())?,
+            context,
+            (NOW, Some(&permit))
+        ),
+        CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
+    );
+    assert!(!permit.is_revoked());
+    drop(wall);
+    assert!(matches!(
+        service.tls_with_permit(
+            &router,
+            &store,
+            prove(driver.publish())?,
+            context,
+            (NOW, Some(&permit))
+        ),
+        CustodyServerFrame::Published { .. }
+    ));
+    let spare = limiter
+        .acquire("203.0.113.1".parse()?, None, std::time::Instant::now())
+        .ok_or("successful publication must release H")?;
+    drop(spare);
+    assert!(matches!(
+        service.tls_with_permit(
+            &router,
+            &store,
+            prove(CustodyProofAction::OpenSession)?,
+            context,
+            (NOW, Some(&permit))
+        ),
+        CustodyServerFrame::SessionEstablished { .. }
+    ));
+    let queued = prove(CustodyProofAction::OpenSession)?;
+    permit.revoke();
+    assert_eq!(
+        service.tls_with_permit(&router, &store, queued.clone(), context, (NOW, Some(&permit))),
+        CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
+    );
+    service.disconnect("direct-tls", &driver.connection);
+    assert!(!matches!(
+        service.tls_with_permit(&router, &store, queued, context, (NOW, Some(&permit))),
+        CustodyServerFrame::SessionEstablished { .. }
+    ));
+    drop(service);
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}

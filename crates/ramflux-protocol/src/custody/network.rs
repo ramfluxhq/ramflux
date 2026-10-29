@@ -69,6 +69,8 @@ pub enum CustodyRefusal {
     SessionExpired,
     UpdateRequired,
     Capacity,
+    /// Temporary listener saturation; retry on a fresh connection after backoff.
+    Busy,
     PersistenceUnavailable,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

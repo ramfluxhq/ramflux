@@ -66,7 +66,10 @@ Provision its node-root signature separately from the gateway's proxy credential
 | `RAMFLUX_CUSTODY_PROXY_SIGNING_SEED` | gateway | Dedicated software Ed25519 proxy seed, canonical base64url; required for receipt mode. Keep it separate from node-root and relay receipt keys. |
 | `RAMFLUX_CUSTODY_TCP_ADDR` | router | Optional direct client TLS listener, disabled when unset; requires separate public TLS credentials and a signed certificate pin. |
 | `RAMFLUX_CUSTODY_TLS_CERT_FILE`, `RAMFLUX_CUSTODY_TLS_KEY_FILE` | router | Public client-facing certificate chain/key, separate from mesh TLS. The signed node record pins the leaf DER SHA-256 hash as canonical base64url in `client_tls_certificate_sha256`. Shared mesh signing keys are refused, including differently encoded certificates using the same key. |
-| `RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS` | gateway, router | Whole unauthenticated exchange deadline, default 10000 ms; accepted range 100–30000. Frame activity never renews it. |
+| `RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS` | gateway, router | Whole unauthenticated exchange deadline, default 10000 ms; accepted range 1–10000; empty selects the default. Frame activity never renews it. |
+| `RAMFLUX_CUSTODY_HANDSHAKE_POOL` | gateway, router | Per-listener unauthenticated ceiling H, default 256; accepted range 1–65536, empty selects default. |
+| `RAMFLUX_CUSTODY_AUTHENTICATED_POOL` | gateway, router | Per-listener authenticated ceiling A, default 1024; accepted range 1–65536, empty selects default. |
+| `RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL` | gateway, router | Authenticated sessions per account anchor per listener, default 4; accepted range 1–64. |
 | `RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING` | participating services | Explicit operator opt-in (`1`); the signed node record must independently advertise this mode. |
 | `RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_MINUTE` | router | Global new-principal burst budget, default 16; capped by the daily value. |
 | `RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY` | router | Global daily new-principal budget, default 256; accepted runtime value is clamped to 32–65536. |
@@ -116,13 +119,14 @@ seconds. A connection may have four outstanding challenges. Sources normalize
 IPv4-mapped addresses and share IPv4 /24, IPv6 /64 and IPv6 /48 budgets; no prefix
 may hold more than 64 outstanding challenges. Issuance windows permit 32/IP,
 128/small-prefix and 256/IPv6-/48 challenges per minute, plus 1024 per node.
-At the node-wide window, a fresh lighter /24 or /48 takes one share from the
-heaviest prefix and its oldest outstanding challenge is invalidated; a group of
-heavy prefixes therefore cannot turn the global bound into fail-closed admission.
-Under global pending-challenge pressure (4096 entries), the oldest unconsumed challenge
-from the heaviest prefix is evicted. Consumed markers are never evicted to admit
-unauthenticated work. Source tracking uses an 8192-entry idle LRU; table occupancy
-does not itself deny another source. Consumed nonce/proof tables separately retain up to 12288 entries, above the
+The node-wide issuance window reserves two challenges when admitting a prefix;
+its second challenge can use that reservation even if other prefixes fill the
+remaining window. A new prefix is refused when no reservation fits. Neither
+reserved issuance nor outstanding challenges are retired by other sources.
+The pending challenge ceiling is 4096; saturation returns a retryable `Busy`.
+Only expiry, consumption and holder disconnect release outstanding challenges.
+Expired source windows are pruned; source tracking is bounded at 8192 entries.
+Consumed nonce/proof tables separately retain up to 12288 entries, above the
 maximum eleven issuance windows across their 600-second horizon. Sessions cap
 admitted work at 4096. No live replay evidence is discarded; a holder
 replaces its previous session when it authenticates again.
@@ -134,21 +138,36 @@ markers. Gateway disconnect notification is best effort over authenticated mesh;
 missed notifications remain unusable from another holder and expire monotonically.
 Router restart invalidates every grant. No grants are serialized, backed up or
 restored. Durable registration and `Live` survive, but reconnect authenticates again.
-Listener admission permits four live connections/streams per IP, eight per /24 or
-/64, sixteen per /48, and four streams per QUIC connection. Gateway/direct global
-caps remain 32/64, with fifteen-minute authenticated lifetimes. Each listener also
-caps authenticated connections per account anchor at four by default; operators may
-set `RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL` to a value from 1 through
-64. At a full cap, a lighter prefix evicts the oldest holder from the heaviest /24
-or /48. Authenticated holders within their computed prefix share are protected;
-authenticated holders above it remain evictable. Ties use monotonic admission age,
-never prefix text. Revocation cancels the connection task and closes its transport
-immediately, so an evicted holder cannot finish authentication or process another
-frame. Source open-rate
-windows and idle LRU accounting apply before a slot is granted. The direct public
-TLS handshake has a five-second deadline; subsequent unauthenticated reads,
-processing and writes share the short whole-exchange deadline. Slow reading does
-not retain a pre-auth slot indefinitely.
+Each listener has separate handshake (H) and authenticated (A) pools, defaulting
+to 256 and 1024. Neither ceiling is ever exceeded. There is no arrival-driven
+revocation. Full H closes a new TCP socket before TLS work or replies with typed
+retryable `Busy` on a QUIC stream. Full A replies `Busy` to Prove and closes the
+connection, releasing H. The first successful Prove (publication, registration or
+session opening) moves H to A under one limiter lock; the authenticated count,
+per-principal limit and source-share limit are checked
+in that same critical section. Direct session creation also checks its holder
+under that lock, so a closed or revoked holder cannot recreate a grant.
+
+Unauthenticated holders are limited to four per IP, eight per IPv4 /24 or IPv6
+/64, sixteen per IPv6 /48, and four streams per QUIC connection. The entire
+exchange, starting with TCP accept (including TLS) or QUIC stream accept, has a
+single deadline of at most ten seconds. TLS and frame activity never renew it.
+Authenticated holders are limited to sixteen per IPv4 /24 or IPv6 /48, and four
+per principal by default (configurable from 1 to 64). IPv4-mapped IPv6 uses the
+IPv4 share. Disconnect, the handshake deadline, explicit revoke/fence and the
+fifteen-minute transport lifetime cancel the holder; a new arrival cannot.
+Gateway disconnect notices and router proof handling serialize with session
+creation. Cleanup removes unconsumed challenges and sessions under the same
+service admission lock used by proof execution, so queued proofs cannot recreate
+a disconnected grant.
+
+At startup each binary raises its soft `RLIMIT_NOFILE` to its hard limit and
+requires total H + total A + 512 descriptors, summed over its listeners. An
+insufficient limit refuses startup with all three values. Gateway TCP and QUIC
+have independent pools; the optional direct router listener has one pair. Compose
+sets both soft and hard `nofile` limits to 65536. TCP accept errors are logged once
+per kind and retried with a 50 ms to one second backoff; QUIC handshake failures
+are retried as well.
 
 New principal admission is durable and atomic with its per-account publication.
 The defaults are sixteen per node per minute and 256 per node per day. Set them
@@ -158,9 +177,9 @@ refuse node startup instead of silently selecting another limit. Each /24,
 /64 and /48 receives at most one thirty-second of the configured global daily
 budget (rounded up), additionally capped by the prior eight-per-small-prefix and
 thirty-two-per-/48 daily ceilings. Thus eight /48s cannot consume the node-wide
-budget reserved for fresh prefixes. The process-local challenge window retires
-oldest prefix work as needed to reserve two challenges for a newly active prefix,
-so registration followed by session establishment fits the same minute. A node supports at most
+budget reserved for fresh prefixes. The process-local challenge window reserves a
+prefix's first two issuance slots without cancelling another prefix's outstanding
+work. A node supports at most
 65,536 custody accounts. Clock rollback never resets a budget: correct the clock
 and retry after the retained window. Existing-account updates do not charge a
 new-principal budget; an identical re-publish performs no durable write.

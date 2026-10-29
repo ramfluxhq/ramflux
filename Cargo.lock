@@ -2540,6 +2540,7 @@ dependencies = [
  "ramflux-crypto",
  "ramflux-protocol",
  "redb",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

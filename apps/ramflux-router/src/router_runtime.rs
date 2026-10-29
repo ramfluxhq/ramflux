@@ -289,15 +289,16 @@ impl RouterHandle {
         connection: &str,
         peer: &str,
         mode: ramflux_protocol::custody::BindingMode,
-        exporter: Option<[u8; 32]>,
+        channel: (Option<[u8; 32]>, Option<&ramflux_node_core::CustodyIngressPermit>),
     ) -> ramflux_protocol::custody::CustodyServerFrame {
+        let (exporter, permit) = channel;
         let Self::Tokio(runtime) = self;
         runtime.custody.get().map_or(
             ramflux_protocol::custody::CustodyServerFrame::Refused {
                 code: ramflux_protocol::custody::CustodyRefusal::Unsupported,
             },
             |service| {
-                service.tls(
+                service.tls_with_permit(
                     self.state(),
                     self.store(),
                     frame,
@@ -307,7 +308,7 @@ impl RouterHandle {
                         mode,
                         exporter,
                     },
-                    ramflux_node_core::now_unix_seconds(),
+                    (ramflux_node_core::now_unix_seconds(), permit),
                 )
             },
         )

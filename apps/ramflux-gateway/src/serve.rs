@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use crate::session::{handle_gateway_quic_connection, handle_gateway_tcp_tls_stream};
+use crate::session::handle_gateway_quic_connection;
 use crate::{
     GatewayForwardDeliverRequest, GatewayForwardDeliverResponse, GatewayPeerDirectory,
     GatewaySessionHub, NotifyHttpClient, RouterMeshClient, gateway_instance_id_from_env,
@@ -36,6 +36,7 @@ pub(crate) fn serve_gateway_quic(
     state: Arc<Mutex<ramflux_node_core::GatewayState>>,
     store: Arc<ramflux_node_core::GatewayRedbStore>,
 ) -> anyhow::Result<()> {
+    crate::custody::initialize()?;
     let addr = gateway_quic_listen_addr(config)?;
     let addr: SocketAddr = addr.parse()?;
     let tls = ramflux_transport::MeshTlsConfig {
@@ -215,18 +216,41 @@ async fn run_gateway_quic(
 ) -> anyhow::Result<()> {
     let endpoint = quinn::Endpoint::server(server_config, addr)?;
     tracing::info!(addr = %endpoint.local_addr()?, "gateway QUIC session surface listening");
-    while let Some(connecting) = endpoint.accept().await {
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
+    let (events, mut failures) = tokio::sync::mpsc::channel::<Option<std::io::Error>>(64);
+    let auth_timeout = ramflux_node_core::custody_auth_timeout()?;
+    loop {
+        let connecting = tokio::select! {
+            incoming=endpoint.accept()=>match incoming {Some(incoming)=>incoming,None=>return Ok(())},
+            event=failures.recv()=>{
+                if let Some(Some(error))=event {tokio::time::sleep(backoff.failure(&error)).await;}else{backoff.success();}
+                continue;
+            }
+        };
+        let events = events.clone();
         let context = context.clone();
+        let started = std::time::Instant::now();
         tokio::spawn(async move {
-            match connecting.await {
-                Ok(connection) => {
-                    handle_gateway_quic_connection(connection, context).await;
+            match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(started + auth_timeout),
+                connecting,
+            )
+            .await
+            {
+                Ok(Ok(connection)) => {
+                    let _ = events.try_send(None);
+                    handle_gateway_quic_connection(connection, context, started).await;
                 }
-                Err(error) => tracing::warn!(%error, "gateway QUIC handshake rejected"),
+                Ok(Err(error)) => {
+                    let _ = events.try_send(Some(std::io::Error::other(error.to_string())));
+                }
+                Err(error) => {
+                    let _ = events
+                        .try_send(Some(std::io::Error::new(std::io::ErrorKind::TimedOut, error)));
+                }
             }
         });
     }
-    Ok(())
 }
 
 async fn run_gateway_tcp_tls(
@@ -237,13 +261,28 @@ async fn run_gateway_tcp_tls(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
     tracing::info!(addr = %listener.local_addr()?, "gateway TCP-TLS session surface listening");
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     loop {
-        let (stream, remote_addr) = listener.accept().await?;
+        let (stream, remote_addr, permit) = ramflux_node_core::custody_accept_tcp(
+            &listener,
+            crate::custody::capacity(false)?,
+            &mut backoff,
+        )
+        .await;
         let acceptor = acceptor.clone();
         let context = context.clone();
         tokio::spawn(async move {
-            let tls_stream = match acceptor.accept(stream).await {
-                Ok(stream) => stream,
+            let tls_stream = match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(permit.auth_deadline()),
+                acceptor.accept(stream),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, %remote_addr, "gateway TCP-TLS handshake rejected");
+                    return;
+                }
                 Err(error) => {
                     tracing::warn!(%error, %remote_addr, "gateway TCP-TLS handshake rejected");
                     return;
@@ -263,7 +302,10 @@ async fn run_gateway_tcp_tls(
                 remote_addr,
             };
             let stream = ramflux_transport::GatewayTcpTlsStream::Server(tls_stream);
-            if let Err(error) = Box::pin(handle_gateway_tcp_tls_stream(stream, context)).await {
+            if let Err(error) =
+                Box::pin(crate::session::handle_gateway_tcp_tls_admitted(stream, context, permit))
+                    .await
+            {
                 tracing::warn!(%error, %remote_addr, "gateway TCP-TLS stream failed");
             }
         });

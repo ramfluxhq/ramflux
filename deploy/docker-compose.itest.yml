@@ -1,5 +1,9 @@
 services:
   ramflux-gateway:
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     build:
       context: .
       dockerfile: Dockerfile.itest
@@ -8,6 +12,9 @@ services:
     command: ["--config", "/etc/ramflux/config/gateway.toml"]
     environment:
       RAMFLUX_NODE_ID: "${RF_COMPOSE_NODE_ID:-localhost}"
+      RAMFLUX_CUSTODY_HANDSHAKE_POOL: "${RF_COMPOSE_CUSTODY_HANDSHAKE_POOL:-}"
+      RAMFLUX_CUSTODY_AUTHENTICATED_POOL: "${RF_COMPOSE_CUSTODY_AUTHENTICATED_POOL:-}"
+      RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS: "${RF_COMPOSE_CUSTODY_AUTH_TIMEOUT_MS:-}"
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_PERF: "${RF_COMPOSE_ITEST_PERF:-0}"
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL:-AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA}"
@@ -53,6 +60,10 @@ services:
       retries: 12
 
   ramflux-router:
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     build:
       context: .
       dockerfile: Dockerfile.itest
@@ -61,6 +72,9 @@ services:
     command: ["--config", "/etc/ramflux/config/router.toml"]
     environment:
       RAMFLUX_NODE_ID: "${RF_COMPOSE_NODE_ID:-localhost}"
+      RAMFLUX_CUSTODY_HANDSHAKE_POOL: "${RF_COMPOSE_CUSTODY_HANDSHAKE_POOL:-}"
+      RAMFLUX_CUSTODY_AUTHENTICATED_POOL: "${RF_COMPOSE_CUSTODY_AUTHENTICATED_POOL:-}"
+      RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS: "${RF_COMPOSE_CUSTODY_AUTH_TIMEOUT_MS:-}"
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_PERF: "${RF_COMPOSE_ITEST_PERF:-0}"
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL:-AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA}"

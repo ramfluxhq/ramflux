@@ -42,6 +42,7 @@ struct Scope<'a> {
     now: u64,
     tick: Instant,
     origin: &'a Origin,
+    permit: Option<&'a crate::CustodyIngressPermit>,
 }
 
 pub struct CustodyService {
@@ -93,6 +94,7 @@ impl CustodyService {
     }
     /// Release disconnected grants without removing consumed nonce/proof markers.
     pub fn disconnect(&self, peer: &str, connection: &str) {
+        let _admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Ok(holder) = holder(peer, connection) {
             self.leases().disconnect(&holder);
         }
@@ -116,7 +118,15 @@ impl CustodyService {
         }
         match self.dispatch(
             request,
-            Scope { router, store, peer, now, tick: Instant::now(), origin: &Origin::Proxy },
+            Scope {
+                router,
+                store,
+                peer,
+                now,
+                tick: Instant::now(),
+                origin: &Origin::Proxy,
+                permit: None,
+            },
         ) {
             Ok(frame) => frame,
             Err(code) => CustodyServerFrame::Refused { code },
@@ -211,6 +221,19 @@ impl CustodyService {
         context: CustodyTlsContext<'_>,
         now: u64,
     ) -> CustodyServerFrame {
+        self.tls_with_permit(router, store, frame, context, (now, None))
+    }
+    /// Direct ingress with a listener-owned grant fence.
+    #[must_use]
+    pub fn tls_with_permit(
+        &self,
+        router: &RouterCore,
+        store: &RouterRedbStore,
+        frame: CustodyClientFrame,
+        context: CustodyTlsContext<'_>,
+        grant: (u64, Option<&crate::CustodyIngressPermit>),
+    ) -> CustodyServerFrame {
+        let (now, permit) = grant;
         let result = (|| {
             if context.mode == BindingMode::HomeRelayReceipt
                 || !self.node.envelope().body.channel_binding_modes.contains(&context.mode)
@@ -279,6 +302,7 @@ impl CustodyService {
                     now,
                     tick: Instant::now(),
                     origin: &Origin::ClientTls(observed),
+                    permit,
                 },
             )
         })();

@@ -39,11 +39,9 @@ pub(crate) fn start(
         service_key: private_key,
     })?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
-    let authenticated_per_principal = ramflux_node_core::custody_authenticated_session_limit()?;
-    let capacity = ramflux_node_core::CustodyIngressLimiter::with_authenticated_limit(
-        64,
-        authenticated_per_principal,
-    );
+    let settings = ramflux_node_core::CustodyPoolSettings::from_env()?;
+    ramflux_node_core::custody_listener_resources(settings, 1)?;
+    let capacity = settings.limiter();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     std::thread::Builder::new().name("custody-direct-tls".into()).spawn(move || {
         runtime.block_on(async move {
@@ -54,28 +52,26 @@ pub(crate) fn start(
                     return;
                 }
             };
+            let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
             loop {
-                let (socket, peer) = match listener.accept().await {
-                    Ok(v) => v,
-                    Err(error) => {
-                        tracing::error!(%error,"custody TLS accept failed");
-                        return;
-                    }
-                };
-                let Some(permit) = capacity.acquire(peer.ip(), None, std::time::Instant::now())
-                else {
-                    continue;
-                };
+                let (socket, peer, permit) =
+                    ramflux_node_core::custody_accept_tcp(&listener, &capacity, &mut backoff).await;
+                let permit = Arc::new(permit);
                 let acceptor = acceptor.clone();
                 let router = Arc::clone(&router);
                 tokio::spawn(async move {
+                    let _revoke = RevokeOnDrop(Arc::clone(&permit));
                     let connection = async {
-                        let tls = accept_tls(&acceptor, socket).await?;
+                        let tls = tokio::time::timeout_at(
+                            tokio::time::Instant::from_std(permit.auth_deadline()),
+                            accept_tls(&acceptor, socket),
+                        )
+                        .await??;
                         serve(
                             GatewayTcpTlsStream::Server(tls),
                             router,
                             &peer.ip().to_string(),
-                            &permit,
+                            Arc::clone(&permit),
                         )
                         .await
                     };
@@ -102,9 +98,9 @@ async fn serve(
     mut stream: GatewayTcpTlsStream,
     router: Arc<RouterHandle>,
     peer: &str,
-    permit: &ramflux_node_core::CustodyIngressPermit,
+    permit: Arc<ramflux_node_core::CustodyIngressPermit>,
 ) -> anyhow::Result<()> {
-    let auth_deadline = tokio::time::Instant::now() + ramflux_node_core::custody_auth_timeout()?;
+    let auth_deadline = tokio::time::Instant::from_std(permit.auth_deadline());
     let bytes =
         tokio::time::timeout_at(auth_deadline, read_custody_open_frame(&mut stream)).await??;
     let frame: CustodyClientFrame = decode(&bytes, 4096)?;
@@ -113,9 +109,13 @@ async fn serve(
     };
     let mode = *mode;
     let connection = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    let _cleanup = Disconnect { router: Arc::clone(&router), connection: connection.clone() };
+    let _cleanup = Disconnect {
+        router: Arc::clone(&router),
+        connection: connection.clone(),
+        permit: Arc::clone(&permit),
+    };
     let mut authenticated = false;
-    let response = router.custody_tls(frame, &connection, peer, mode, None);
+    let response = router.custody_tls(frame, &connection, peer, mode, (None, Some(&permit)));
     tokio::time::timeout_at(
         auth_deadline,
         write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
@@ -141,10 +141,11 @@ async fn serve(
         let shared = Arc::clone(&router);
         let connection = connection.clone();
         let peer = peer.to_owned();
+        let grant = Arc::clone(&permit);
         let response = tokio::time::timeout_at(
             deadline,
             tokio::task::spawn_blocking(move || {
-                shared.custody_tls(frame, &connection, &peer, mode, exporter)
+                shared.custody_tls(frame, &connection, &peer, mode, (exporter, Some(&grant)))
             }),
         )
         .await??;
@@ -152,25 +153,58 @@ async fn serve(
             &response
         {
             if !permit.mark_authenticated(&session.device_ref.account_anchor) {
-                anyhow::bail!("custody authenticated session capacity exhausted")
+                let busy = ramflux_protocol::custody::CustodyServerFrame::Refused {
+                    code: ramflux_protocol::custody::CustodyRefusal::Busy,
+                };
+                tokio::time::timeout_at(
+                    deadline,
+                    write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&busy)?),
+                )
+                .await??;
+                return Ok(());
             }
             authenticated = true;
         }
+        if matches!(
+            response,
+            ramflux_protocol::custody::CustodyServerFrame::Published { .. }
+                | ramflux_protocol::custody::CustodyServerFrame::Registered { .. }
+        ) {
+            authenticated = true;
+        }
+        let busy = matches!(
+            response,
+            ramflux_protocol::custody::CustodyServerFrame::Refused {
+                code: ramflux_protocol::custody::CustodyRefusal::Busy
+            }
+        );
         tokio::time::timeout_at(
             deadline,
             write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
         )
         .await??;
+        if busy {
+            return Ok(());
+        }
     }
     Ok(())
 }
 
+struct RevokeOnDrop(Arc<ramflux_node_core::CustodyIngressPermit>);
+impl Drop for RevokeOnDrop {
+    fn drop(&mut self) {
+        self.0.revoke();
+    }
+}
+
 struct Disconnect {
+    permit: Arc<ramflux_node_core::CustodyIngressPermit>,
     router: Arc<RouterHandle>,
     connection: String,
 }
 impl Drop for Disconnect {
     fn drop(&mut self) {
+        self.permit.revoke();
         self.router.custody_disconnected(&self.connection);
     }
 }

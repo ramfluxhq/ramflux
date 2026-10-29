@@ -74,7 +74,7 @@ impl CustodyService {
         attempt: ProofAttempt,
     ) -> Result<CustodyServerFrame, CustodyRefusal> {
         let ProofAttempt { ref proof, ref receipt, ref connection_id, .. } = attempt;
-        let Scope { router, store, peer, now, tick, origin } = scope;
+        let Scope { router, store, peer, now, tick, origin, .. } = scope;
         let holder = holder(peer, connection_id)?;
         let challenge = self.leases().challenge(&proof.body.challenge_nonce, tick)?;
         if challenge.device != proof.body.device_ref
@@ -165,6 +165,21 @@ impl CustodyService {
         )
     }
     fn finish_proof(
+        &self,
+        scope: Scope<'_>,
+        attempt: ProofAttempt,
+        possession: Possession<'_>,
+    ) -> Result<CustodyServerFrame, CustodyRefusal> {
+        if let Some(permit) = scope.permit {
+            let principal = attempt.proof.body.device_ref.account_anchor.clone();
+            permit
+                .try_grant(&principal, || self.finish_admitted_proof(scope, attempt, possession))
+                .ok_or(CustodyRefusal::Busy)?
+        } else {
+            self.finish_admitted_proof(scope, attempt, possession)
+        }
+    }
+    fn finish_admitted_proof(
         &self,
         scope: Scope<'_>,
         attempt: ProofAttempt,

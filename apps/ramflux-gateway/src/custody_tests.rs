@@ -133,6 +133,7 @@ fn exercise(
         session_ids: BTreeSet::new(),
         router: None,
         auth_deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+        authenticated: false,
     };
     let action = CustodyProofAction::Publish { publication: Box::new(publication.clone()) };
     let request = proxy.prepare(
@@ -280,6 +281,102 @@ async fn gateway_proxy_receipt_uses_actual_quic_exporter_and_rejects_relay() -> 
             |nonce| Ok(ramflux_transport::custody_quic_exporter(&pairs[0].1, nonce)?),
             |nonce| Ok(ramflux_transport::custody_quic_exporter(&pairs[1].1, nonce)?),
         )
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn gateway_tcp_full_handshake_pool_closes_newcomer_before_tls_and_reuses_slot() -> Result {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let fixture = Fixture::new()?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
+            ramflux_transport::tcp_gateway_server_config(&fixture.tls)?,
+        ));
+        let limiter =
+            ramflux_node_core::CustodyIngressLimiter::with_pools(1, 1, 4, Duration::from_secs(10));
+        let held = limiter
+            .acquire("192.0.2.1".parse()?, None, std::time::Instant::now())
+            .ok_or("holder")?;
+        let server = async {
+            let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
+            let (socket, _, permit) =
+                ramflux_node_core::custody_accept_tcp(&listener, &limiter, &mut backoff).await;
+            let mut tls = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(permit.auth_deadline()),
+                acceptor.accept(socket),
+            )
+            .await??;
+            tls.write_all(&[7]).await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        };
+        let client = async {
+            let mut rejected = tokio::net::TcpStream::connect(address).await?;
+            let mut byte = [0];
+            assert_eq!(rejected.read(&mut byte).await?, 0);
+            assert!(!held.is_revoked());
+            drop(held);
+            let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
+                "127.0.0.1:0".parse()?,
+                address,
+                "localhost",
+                &fixture.tls.ca_cert,
+                Duration::from_secs(2),
+            )
+            .await?;
+            let mut tls = tls.into_tls_stream();
+            tls.read_exact(&mut byte).await?;
+            assert_eq!(byte, [7]);
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        };
+        let (s, c) = tokio::join!(server, client);
+        s?;
+        c?;
+        Ok(())
+    })
+    .await?
+}
+#[tokio::test]
+async fn gateway_quic_full_handshake_pool_replies_busy_without_revoking_and_reuses_slot() -> Result
+{
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let fixture = Fixture::new()?;
+        let server = quinn::Endpoint::server(
+            ramflux_transport::quic_gateway_server_config(&fixture.tls)?,
+            "127.0.0.1:0".parse()?,
+        )?;
+        let mut client = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
+        client.set_default_client_config(ramflux_transport::quic_gateway_client_config(
+            &fixture.tls.ca_cert,
+        )?);
+        let outgoing = client.connect(server.local_addr()?, "localhost")?;
+        let incoming = async { server.accept().await.ok_or("incoming")?.await.map_err(Into::into) };
+        let (outgoing, incoming): (_, Result<quinn::Connection>) = tokio::join!(outgoing, incoming);
+        let outgoing = outgoing?;
+        let incoming = incoming?;
+        let limiter = ramflux_node_core::CustodyIngressLimiter::new(1);
+        let held = limiter
+            .acquire("192.0.2.1".parse()?, None, std::time::Instant::now())
+            .ok_or("holder")?;
+        let (mut tx, mut rx) = outgoing.open_bi().await?;
+        tx.write_all(&[1]).await?;
+        let (mut send, _recv) = incoming.accept_bi().await?;
+        assert!(
+            admit_quic(&mut send, &incoming, &limiter, std::time::Instant::now()).await?.is_none()
+        );
+        let refused: CustodyServerFrame = decode(&read_custody_tcp_frame(&mut rx).await?, 4096)?;
+        assert_eq!(refused, busy());
+        assert_eq!(rx.read(&mut [0]).await?, None);
+        assert!(!held.is_revoked());
+        drop(held);
+        let (mut tx, _rx) = outgoing.open_bi().await?;
+        tx.write_all(&[1]).await?;
+        let (mut send, _recv) = incoming.accept_bi().await?;
+        assert!(
+            admit_quic(&mut send, &incoming, &limiter, std::time::Instant::now()).await?.is_some()
+        );
+        Ok(())
     })
     .await?
 }
