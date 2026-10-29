@@ -111,6 +111,12 @@ async fn contact02_request_auto_accept_then_first_message_crosses_the_cold_recei
     pending(&mut state, &directory).await?;
     let root = account(&state, "alice")?.owned_device_identity()?.root_commitment().to_owned();
     assert!(account(&state, "bob")?.friend_link_peer_is_accepted(&root)?);
+    let safety = account(&state, "bob")?
+        .account_db()?
+        .client_record("identity", "alice")?
+        .ok_or_else(|| invalid("accepted identity"))?;
+    assert_eq!(safety["safety_number"].as_array().map(Vec::len), Some(12));
+    assert!(account(&state, "bob")?.account_db()?.contact_verification(&root)?.is_none());
     assert_eq!(flush(&mut state, "bob").await?, 1);
     for entry in frames(&directory)? {
         deliver(&mut state, "alice", &entry).await?;
@@ -156,6 +162,11 @@ async fn contact02_manual_request_holds_content_without_a_thread_then_accept_rel
     assert_eq!(list["requests"][0]["safety_number"].as_array().map(Vec::len), Some(12), "{list}");
     let id = list["requests"][0]["request_id"].clone();
     contact(&mut state, "bob", "contact.accept", json!({"request_id":id})).await?;
+    let identity = account(&state, "bob")?
+        .account_db()?
+        .client_record("identity", "alice")?
+        .ok_or_else(|| invalid("accepted contact identity"))?;
+    assert_eq!(identity["safety_number"].as_array().map(Vec::len), Some(12));
     assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 1);
     assert_eq!(
         account(&state, "bob")?.direct_messages("request-thread")?[0].created_at,

@@ -186,7 +186,7 @@ impl IdentityRegistry {
         self.storage_key_for_record(device).is_none_or(|key| self.revoked_devices.contains(&key))
             || self.legacy_record_is_revoked(device)
     }
-    fn legacy_record_is_revoked(&self, device: &IdentityDeviceRecord) -> bool {
+    pub(crate) fn legacy_record_is_revoked(&self, device: &IdentityDeviceRecord) -> bool {
         [device.device_id.clone(), format!("{}:{}", device.principal_commitment, device.device_id)]
             .iter()
             .any(|key| {

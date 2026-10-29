@@ -317,22 +317,30 @@ impl IdentityRegistry {
         self.device_record_is_usable(device)
     }
     pub(crate) fn device_record_is_usable(&self, device: &IdentityDeviceRecord) -> bool {
-        if self.record_is_revoked(device) {
-            return false;
+        self.usable_device_identity(device).is_some()
+    }
+    pub(crate) fn usable_device_identity(
+        &self,
+        device: &IdentityDeviceRecord,
+    ) -> Option<ramflux_crypto::RootQualifiedDeviceRef> {
+        // Authenticate the exact current signed set once for this read. Reuse that qualified
+        // reference for revocation, membership and key lookup; never cache authority across reads.
+        let identity =
+            self.device_identity_for_root(&device.principal_commitment, &device.device_id)?;
+        if self.revoked_devices.contains(identity.storage_key())
+            || self.legacy_record_is_revoked(device)
+        {
+            return None;
         }
-        let Some(identity) =
-            self.device_identity_for_root(&device.principal_commitment, &device.device_id)
-        else {
-            return false;
-        };
-        let Some(set) = self.signed_device_sets.get(identity.root_commitment()) else {
-            return false;
-        };
-        set.devices.iter().any(|entry| {
-            entry.device_id == device.device_id
-                && entry.status == DeviceSetStatus::Active
-                && Self::device_matches_entry(device, entry)
-        })
+        let set = self.signed_device_sets.get(identity.root_commitment())?;
+        set.devices
+            .iter()
+            .any(|entry| {
+                entry.device_id == device.device_id
+                    && entry.status == DeviceSetStatus::Active
+                    && Self::device_matches_entry(device, entry)
+            })
+            .then_some(identity)
     }
     fn device_matches_entry(
         device: &IdentityDeviceRecord,

@@ -1078,22 +1078,22 @@ impl IdentityRegistry {
         let mut devices = self
             .devices
             .values()
-            .filter(|device| {
-                device.principal_commitment == principal_commitment
-                    && self.device_record_is_usable(device)
-                    && ramflux_crypto::branch_proof_material_is_ready(
-                        device.branch_proof.issued_at,
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |time| i64::try_from(time.as_secs()).unwrap_or(i64::MAX)),
-                    )
-            })
+            .filter(|device| device.principal_commitment == principal_commitment)
             .filter_map(|device| {
-                let prekey_bundle =
-                    self.public_prekey_bundle(&self.device_identity_for_root(
-                        &device.principal_commitment,
-                        &device.device_id,
-                    )?)?;
+                let identity = self.usable_device_identity(device)?;
+                if !ramflux_crypto::branch_proof_material_is_ready(
+                    device.branch_proof.issued_at,
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |time| i64::try_from(time.as_secs()).unwrap_or(i64::MAX)),
+                ) {
+                    return None;
+                }
+                let bundle = self
+                    .prekey_bundles
+                    .get(identity.storage_key())
+                    .or_else(|| self.legacy_prekey_bundle(&identity))?;
+                let prekey_bundle = ramflux_crypto::signed_prekey_only_bundle(bundle);
                 Some(DeviceManifestEntry {
                     principal_id: device.principal_id.clone(),
                     principal_commitment: device.principal_commitment.clone(),
