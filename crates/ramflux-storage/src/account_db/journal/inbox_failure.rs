@@ -39,6 +39,9 @@ impl AccountDb {
         metadata: &serde_json::Value,
         at: i64,
     ) -> Result<(), StorageError> {
+        if key.starts_with("routed/committed/") && self.dead_letter_seen_routed(key, at)? {
+            return Ok(());
+        }
         let admitted = self.ensure_inbox_policy(key, entry, at)?;
         let bounded = if entry.len() <= 1024 * 1024 { entry } else { &[] };
         if admitted {
@@ -70,6 +73,11 @@ impl AccountDb {
             return Err(StorageError::AuthorizationRejected);
         }
         self.write_transaction(|| {
+            if key.starts_with("routed/committed/")
+                && self.actor_state_exists(&self.routed_seen_key(key)?)?
+            {
+                return Ok(0);
+            }
             if !self.ensure_inbox_policy(key,entry,at)? {return Ok(0);}
             let allowed:bool=self.connection.query_row("SELECT expires_at>?2 AND attempts<CASE WHEN trusted=1 THEN 8 ELSE 3 END FROM runtime_inbox_policy WHERE envelope_key=?1",params![key,at],|r|r.get(0))?;
             let count:i64=self.connection.query_row("SELECT count(*) FROM runtime_inbox_retry r JOIN runtime_inbox_policy p USING(envelope_key) WHERE r.envelope_key!=?1 AND p.expires_at>?2 AND r.next_at<9223372036854775807",params![key,at],|r|r.get(0))?;

@@ -948,16 +948,14 @@ fn ensure_message_legacy_columns(connection: &Connection) -> Result<(), StorageE
         "is_own",
         "is_own INTEGER NOT NULL DEFAULT 0",
     )?;
+    // Preserve snapshot column compatibility without reading or advancing this obsolete marker.
     ensure_column(
         connection,
         "direct_message_projection",
         "scrub_version",
         "scrub_version INTEGER NOT NULL DEFAULT 0",
     )?;
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_direct_message_scrub ON direct_message_projection(deleted,scrub_version)",
-        [],
-    )?;
+    connection.execute("DROP INDEX IF EXISTS idx_direct_message_scrub", [])?;
     connection.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_local_event_gateway_envelope ON local_event_log(
             CASE WHEN json_valid(CAST(event_body AS TEXT)) THEN json_extract(CAST(event_body AS TEXT),'$.envelope_id') END

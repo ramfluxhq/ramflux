@@ -49,6 +49,8 @@ pub enum SdkError {
     PairRecoveryRequired,
     #[error("inbound envelope rejected: {0}")]
     InboundRejected(String),
+    #[error("authenticated envelope replay payload mismatch")]
+    ReplayMismatch,
     #[error("inbound state not ready: {0}")]
     InboundPending(String),
     #[error("contact admission waits for capacity: {0}")]
