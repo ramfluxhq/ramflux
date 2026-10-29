@@ -444,3 +444,6 @@ fn disabled_custody_starts_under_low_nofile_with_invalid_pool_settings() -> Resu
     }
     Ok(())
 }
+
+#[path = "custody_nat_tests.rs"]
+mod nat;
