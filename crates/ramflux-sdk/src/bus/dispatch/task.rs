@@ -179,6 +179,28 @@ fn authorize_local_task_sender(
         "task.start" | "task.accept" | "task.decline" | "task.resolve" | "task.cancel"
     );
     if human || request.method == "task.propose" {
+        if let Some(native) = &local_bus_account(state, id)?.client.born_v3_account {
+            let required = if request.method == "task.propose" {
+                ramflux_protocol::PrincipalKind::HeadlessAi
+            } else {
+                ramflux_protocol::PrincipalKind::Human
+            };
+            if request.method == "task.propose" {
+                return if native.record().body.principal_kind == required {
+                    Ok(())
+                } else {
+                    Err(invalid("task proposal requires a headless AI account"))
+                };
+            }
+            return require_local_human(
+                &LocalBusClientMode::AttendedCli,
+                Some(if native.record().body.principal_kind == required {
+                    "human"
+                } else {
+                    "headless_ai"
+                }),
+            );
+        }
         let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
             &state.config.data_root,
             id,

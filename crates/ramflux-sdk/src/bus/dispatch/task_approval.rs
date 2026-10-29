@@ -30,6 +30,20 @@ pub(super) fn decide(
     else {
         return Ok(None);
     };
+    let account = local_bus_account(state, account_id)?;
+    if let Some(native) = &account.client.born_v3_account {
+        crate::client::task::require_local_human(
+            &LocalBusClientMode::AttendedCli,
+            Some(
+                if native.record().body.principal_kind == ramflux_protocol::PrincipalKind::Human {
+                    "human"
+                } else {
+                    "headless_ai"
+                },
+            ),
+        )?;
+        return Ok(Some(account.client.decide_task_approval(id, approved)?));
+    }
     let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
         &state.config.data_root,
         account_id,

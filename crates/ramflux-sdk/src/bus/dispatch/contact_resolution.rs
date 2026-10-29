@@ -279,12 +279,17 @@ fn parse_selector(
 }
 
 fn account_home(state: &LocalBusDaemonState, id: &str) -> Result<crate::NodeProfile, SdkError> {
-    let path = local_bus_account_manifest_path(&state.config.data_root, id);
-    if !path.exists() {
-        return Err(ContactReason::HomeProfileMissing.into());
-    }
-    let manifest = read_local_bus_account_manifest(&path)?;
-    let node = manifest.node_id.as_deref().ok_or(ContactReason::HomeProfileMissing)?;
+    let account = local_bus_account(state, id)?;
+    let node = if account.client.born_v3_account.is_some() {
+        account.client.account_db()?.load_actor_state::<String>("account/node-id")?
+    } else {
+        let path = local_bus_account_manifest_path(&state.config.data_root, id);
+        if !path.exists() {
+            return Err(ContactReason::HomeProfileMissing.into());
+        }
+        read_local_bus_account_manifest(&path)?.node_id
+    };
+    let node = node.as_deref().ok_or(ContactReason::HomeProfileMissing)?;
     let profile = state.nodes.profiles.get(node).ok_or(ContactReason::HomeProfileMissing)?;
     if !profile.enabled
         || profile.expires_at <= now_unix_timestamp().unsigned_abs()
