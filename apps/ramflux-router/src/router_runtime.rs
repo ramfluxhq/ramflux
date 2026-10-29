@@ -529,6 +529,53 @@ pub(crate) mod tests {
         }
     }
 
+    fn run_held_forward_responder(
+        listener: &TcpListener,
+        entered_tx: &mpsc::Sender<()>,
+        release_rx: &mpsc::Receiver<()>,
+    ) -> Result<(), String> {
+        use std::io::Write;
+
+        const PADDING: usize = 120;
+
+        let (mut stream, _) = listener.accept().map_err(|source| source.to_string())?;
+        let request = ramflux_node_core::read_itest_http_request(&mut stream)
+            .map_err(|source| source.to_string())?
+            .ok_or_else(|| "missing slow forward request".to_owned())?;
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).map_err(|source| source.to_string())?;
+        let forward: ramflux_node_core::FederatedEnvelopeForwardRequest = serde_json::from_value(
+            body.get("forward").cloned().ok_or_else(|| "missing slow forward body".to_owned())?,
+        )
+        .map_err(|source| source.to_string())?;
+        let response = rejected_migration_forward(forward);
+        let body = serde_json::to_vec(&response).map_err(|source| source.to_string())?;
+        // Keep the five-second HTTP read timeout alive without completing the body.
+        // The engine must remain pending until local submissions release this fixture.
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            PADDING + body.len()
+        )
+        .map_err(|source| source.to_string())?;
+        entered_tx.send(()).map_err(|source| source.to_string())?;
+        let mut padding_sent = 0;
+        loop {
+            match release_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(()) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) if padding_sent < PADDING => {
+                    stream.write_all(b" ").map_err(|source| source.to_string())?;
+                    padding_sent += 1;
+                }
+                Err(error) => return Err(format!("slow forward was not released: {error}")),
+            }
+        }
+        stream
+            .write_all(&[b' '; PADDING][padding_sent..])
+            .and_then(|()| stream.write_all(&body))
+            .map_err(|source| source.to_string())
+    }
+
     #[test]
     fn slow_migrated_forward_does_not_block_local_engine_submits() -> anyhow::Result<()> {
         let runtime =
@@ -539,25 +586,8 @@ pub(crate) mod tests {
                 format!("http://{}/internal/home-node-migration/forward", listener.local_addr()?);
             let (entered_tx, entered_rx) = mpsc::channel();
             let (release_tx, release_rx) = mpsc::channel();
-            let server = thread::spawn(move || -> Result<(), String> {
-                let (mut stream, _) = listener.accept().map_err(|source| source.to_string())?;
-                let request = ramflux_node_core::read_itest_http_request(&mut stream)
-                    .map_err(|source| source.to_string())?
-                    .ok_or_else(|| "missing slow forward request".to_owned())?;
-                let body: serde_json::Value =
-                    serde_json::from_slice(&request.body).map_err(|source| source.to_string())?;
-                let forward: ramflux_node_core::FederatedEnvelopeForwardRequest =
-                    serde_json::from_value(
-                        body.get("forward")
-                            .cloned()
-                            .ok_or_else(|| "missing slow forward body".to_owned())?,
-                    )
-                    .map_err(|source| source.to_string())?;
-                entered_tx.send(()).map_err(|source| source.to_string())?;
-                release_rx.recv().map_err(|source| source.to_string())?;
-                let response = rejected_migration_forward(forward);
-                ramflux_node_core::write_itest_json_response(&mut stream, "200 OK", &response)
-                    .map_err(|source| source.to_string())
+            let server = thread::spawn(move || {
+                run_held_forward_responder(&listener, &entered_tx, &release_rx)
             });
             let now =
                 i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX - 3_600);
@@ -573,7 +603,7 @@ pub(crate) mod tests {
                     )
                     .await
             });
-            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(1)))
+            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(30)))
                 .await??;
 
             let full = tokio::select! {
