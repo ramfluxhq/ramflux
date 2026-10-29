@@ -88,6 +88,9 @@ jobs:
       - name: Born-v3 memory vault regression tests
         run: RAMFLUX_ITEST_BUILD=1 cargo test -p ramflux-sdk --features itest-memory-vault custody
 
+      - name: Legacy fixture regression tests
+        run: RAMFLUX_ITEST_BUILD=1 cargo test -p ramflux-sdk --features itest-legacy-accounts itest_legacy
+
   test-rest:
     name: Rust tests (workspace except SDK)
     runs-on: ubuntu-latest
