@@ -22,6 +22,11 @@ impl AccountDb {
              CREATE TABLE IF NOT EXISTS runtime_ack (envelope_id TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS runtime_scoped_ack (receiver TEXT NOT NULL,target TEXT NOT NULL,inbox_seq INTEGER NOT NULL,PRIMARY KEY(receiver,target,inbox_seq));
              CREATE TABLE IF NOT EXISTS runtime_actor_state (state_kind TEXT PRIMARY KEY, state_json BLOB NOT NULL);
+             CREATE TABLE IF NOT EXISTS runtime_privacy_maintenance (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                erasure_pending INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT OR IGNORE INTO runtime_privacy_maintenance VALUES(1,0);
              CREATE INDEX IF NOT EXISTS runtime_actor_deleted_message ON runtime_actor_state(
                  CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN json_extract(CAST(state_json AS TEXT),'$.routing.message_id') END
              ) WHERE state_kind >= 'routed/committed/' AND state_kind < 'routed/committed0';
@@ -64,7 +69,7 @@ impl AccountDb {
     fn install_domain_change_triggers(&self) -> Result<(), StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','runtime_account_identity','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
+             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','message_footprint_actor_stage','message_footprint_outbox_stage','message_footprint_journal_stage','runtime_account_identity','runtime_privacy_maintenance','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?
