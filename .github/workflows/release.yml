@@ -93,7 +93,7 @@ jobs:
           done
 
       - name: Attest artifact provenance
-        uses: actions/attest-build-provenance@f14352a605c57b0a66e0d49bba5825967f1dbedf
+        uses: actions/attest-build-provenance@9d57eef8c06cd9d6b433effeeb7a6a77b3ff94ad
         with:
           subject-path: "dist/*.tar.gz"
 
@@ -153,7 +153,7 @@ jobs:
             dist/ramflux-sbom.cdx.tar.gz
 
       - name: Attest SBOM provenance
-        uses: actions/attest-build-provenance@f14352a605c57b0a66e0d49bba5825967f1dbedf
+        uses: actions/attest-build-provenance@9d57eef8c06cd9d6b433effeeb7a6a77b3ff94ad
         with:
           subject-path: "dist/ramflux-sbom.cdx.tar.gz"
 
