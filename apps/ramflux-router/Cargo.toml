@@ -31,11 +31,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-ramflux-crypto = { workspace = true }
 redb = { workspace = true }
+rcgen = { workspace = true }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-rcgen = { workspace = true }
