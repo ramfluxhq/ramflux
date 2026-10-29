@@ -144,6 +144,11 @@ A missing number has `safety_number_available:false`; fetching one remains an ex
 operation. Directory lookup itself never performs a network request or changes verification state.
 For native accounts, adding a contact or accepting an inbound request also persists the computed
 safety number, so it is available immediately. Acceptance alone does not mark the contact verified.
+Successful explicit `contact.add` and `contact.accept` provide this guarantee for both
+legacy and native accounts, including accepted retries whose derived cache is missing.
+Retry uses local authority and preserves the algorithm version and verification state.
+Legacy automatic acceptance alone can leave the cache absent; directory polling does
+not fill it. See [contact cards](contact_cards.md).
 
 ## Object directory
 

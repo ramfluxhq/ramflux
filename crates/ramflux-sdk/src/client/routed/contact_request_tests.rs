@@ -65,7 +65,10 @@ async fn message(state: &mut LocalBusDaemonState, text: &str) -> Result<(), SdkE
     .await?;
     Ok(())
 }
-fn account<'a>(state: &'a LocalBusDaemonState, who: &str) -> Result<&'a RamfluxClient, SdkError> {
+pub(super) fn account<'a>(
+    state: &'a LocalBusDaemonState,
+    who: &str,
+) -> Result<&'a RamfluxClient, SdkError> {
     Ok(&state.accounts.get(who).ok_or_else(|| invalid("account"))?.client)
 }
 async fn pending(
