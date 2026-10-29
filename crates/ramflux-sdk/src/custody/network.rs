@@ -169,9 +169,11 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
 
     async fn register(&mut self) -> Result<(), SdkError> {
         let publication = self.account.publication();
+        let expected_hash = object_hash(&publication.record)?;
         let response =
             self.prove(CustodyProofAction::Publish { publication: Box::new(publication) }).await?;
-        if !matches!(response, CustodyServerFrame::Published { .. }) {
+        if !matches!(response, CustodyServerFrame::Published { record_hash } if record_hash == expected_hash)
+        {
             return Err(invalid());
         }
         let bundle = self.prekey_bundle()?;
@@ -180,7 +182,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                 prekey_bundle: serde_json::to_value(&bundle)?
             })
             .await?,
-            CustodyServerFrame::Registered { .. }
+            CustodyServerFrame::Registered { device_ref, target_delivery_id }
+                if device_ref == self.device && target_delivery_id == ramflux_protocol::qualified_device_id(&self.device.account_anchor, &self.device.device_id)?
         ) {
             return Err(invalid());
         }
