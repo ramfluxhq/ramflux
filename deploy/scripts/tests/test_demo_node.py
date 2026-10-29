@@ -271,20 +271,27 @@ else:
     def test_preflight_and_up_share_all_compose_arguments(self):
         with self.env_file.open("a") as output:
             output.write("DEMO_ADMIN_LOOPBACK_PORT=59487\n")
-        self.run_script("up", "--voice-udp-port", "59449")
-        calls = [json.loads(line) for line in (self.root / "cli.jsonl").read_text().splitlines()]
-        config = next(call for call in calls if "config" in call["args"])
-        up = next(call for call in calls if "up" in call["args"])
-        config_command = config["args"].index("config")
-        up_command = up["args"].index("up")
-        config_arguments = config["args"][:config_command]
-        if config_arguments[-2:] == ["--profile", "*"]:
-            config_arguments = config_arguments[:-2]
-        self.assertEqual(config_arguments, up["args"][:up_command])
-        for overlay in ("compose.voice.yml", "compose.admin.yml", "demo-override.json"):
-            path = str(self.state / overlay)
-            self.assertIn(path, config["args"])
-            self.assertIn(path, up["args"])
+        for prebuilt in (False, True):
+            with self.subTest(prebuilt=prebuilt):
+                if prebuilt:
+                    self.enable_prebuilt_images()
+                journal = self.root / "cli.jsonl"
+                before = len(journal.read_text().splitlines()) if journal.exists() else 0
+                self.run_script("up", "--voice-udp-port", "59449")
+                calls = [json.loads(line) for line in journal.read_text().splitlines()[before:]]
+                config = next(call for call in calls if "config" in call["args"])
+                up = next(call for call in calls if "up" in call["args"])
+                config_command = config["args"].index("config")
+                up_command = up["args"].index("up")
+                config_arguments = config["args"][:config_command]
+                if config_arguments[-2:] == ["--profile", "*"]:
+                    config_arguments = config_arguments[:-2]
+                self.assertEqual(config_arguments, up["args"][:up_command])
+                self.assertEqual(up["args"][up_command:], ["up", "-d", "--no-build" if prebuilt else "--build"])
+                for overlay in ("compose.voice.yml", "compose.admin.yml", "demo-override.json"):
+                    path = str(self.state / overlay)
+                    self.assertIn(path, config["args"])
+                    self.assertIn(path, up["args"])
 
     def test_repeat_up_preserves_ca_and_named_volumes_until_explicit_purge(self):
         self.state.mkdir(mode=0o755)
