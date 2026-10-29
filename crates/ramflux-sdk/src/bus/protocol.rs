@@ -12,6 +12,8 @@ pub struct LocalBusConfig {
     #[cfg(test)]
     pub(crate) custody_vault:
         Option<std::sync::Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
+    #[cfg(test)]
+    pub(crate) custody_confirm_completed: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
@@ -1110,6 +1112,8 @@ impl LocalBusConfig {
             enable_born_v3_creation: false,
             #[cfg(test)]
             custody_vault: None,
+            #[cfg(test)]
+            custody_confirm_completed: None,
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),

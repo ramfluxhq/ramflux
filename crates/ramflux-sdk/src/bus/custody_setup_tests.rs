@@ -438,6 +438,8 @@ async fn disconnect_during_confirm_finishes_a_complete_pending_account() -> Resu
     let mut config = LocalBusConfig::new(&socket, &root.0);
     config.enable_born_v3_creation = true;
     config.custody_vault = Some(vault.clone());
+    let completed = Arc::new(tokio::sync::Notify::new());
+    config.custody_confirm_completed = Some(Arc::clone(&completed));
     let (stop, receiver) = watch::channel(false);
     let flow = async {
         let _shutdown = Shutdown(stop.clone());
@@ -451,12 +453,7 @@ async fn disconnect_during_confirm_finishes_a_complete_pending_account() -> Resu
         confirm.abort();
         let _ = confirm.await;
         vault.release();
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !root.0.join("custody_accounts/disconnect-confirm/authority.json").exists() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), completed.notified()).await?;
         assert_eq!(
             crate::custody::load_account(
                 &root.0,

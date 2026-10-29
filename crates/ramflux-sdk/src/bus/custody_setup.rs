@@ -183,14 +183,7 @@ async fn apply(
                 };
                 *target = Zeroizing::new(word);
             }
-            let vault = primary_vault(config);
-            let confirmed_at = now()?;
-            let account = tokio::task::spawn_blocking(move || {
-                let _root_lease = lease;
-                pending.confirm(&words, vault.as_ref(), confirmed_at)
-            })
-            .await
-            .map_err(|_| SdkError::CustodyVaultUnavailable)??;
+            let account = confirm_in_worker(config, pending, words, lease).await?;
             Ok(ResultBody::NetworkingPending { account: account.summary() })
         }
         "account.custody.cancel" => {
@@ -201,6 +194,29 @@ async fn apply(
         _ => Err(SdkError::CustodySetupInvalid),
     }
 }
+async fn confirm_in_worker(
+    config: &LocalBusConfig,
+    pending: CreationCeremony,
+    words: [Zeroizing<String>; 3],
+    lease: Option<Arc<super::data_root_lock::DataRootLock>>,
+) -> Result<crate::custody::BornAccount, SdkError> {
+    let vault = primary_vault(config);
+    let confirmed_at = now()?;
+    #[cfg(test)]
+    let completed = config.custody_confirm_completed.clone();
+    tokio::task::spawn_blocking(move || {
+        let _root_lease = lease;
+        let result = pending.confirm(&words, vault.as_ref(), confirmed_at);
+        #[cfg(test)]
+        if let Some(completed) = completed {
+            completed.notify_one();
+        }
+        result
+    })
+    .await
+    .map_err(|_| SdkError::CustodyVaultUnavailable)?
+}
+
 pub(crate) fn guard_account(
     root: &Path,
     request: &LocalBusFrame,

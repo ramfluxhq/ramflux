@@ -9,10 +9,12 @@ use ramflux_protocol::custody::{DeviceSet, Envelope};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
+mod publication;
+use publication::write_public;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -237,13 +239,6 @@ fn private_directory(path: &Path) -> Result<(), SdkError> {
     builder.create(path)?;
     Ok(())
 }
-fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
 fn legacy_manifest_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
     Ok(root.join("local_bus_accounts").join(format!("{id}.json")).try_exists()?)
 }
@@ -339,7 +334,6 @@ pub(super) fn persist(
     race_hooks::run(race_hooks::Stage::BeforeAuthorityPublish, root, &input.local_account_id)?;
     require_owned_reservation(root, &index, &input.local_account_id, &account_anchor, &dir)?;
     write_public(&dir.join("authority.json"), &ramflux_protocol::canonical_json_bytes(&stored)?)?;
-    fs::File::open(&dir)?.sync_all()?;
     Ok(BornAccount { stored, verified })
 }
 
