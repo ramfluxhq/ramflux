@@ -220,11 +220,15 @@ impl RamfluxClient {
             }
         }
         let now = now_unix_timestamp();
+        #[cfg(feature = "itest-identity-proof")]
+        let lifetime = super::registration::proof_lifetime_seconds()?;
+        #[cfg(not(feature = "itest-identity-proof"))]
+        let lifetime = super::registration::DEFAULT_PROOF_LIFETIME_SECONDS;
         let proof = self.bound_current_device_proof(
             "ramflux-node",
             vec!["device.delivery.bind".into()],
             now,
-            now.saturating_add(super::registration::proof_lifetime_seconds()?),
+            now.saturating_add(lifetime),
         )?;
         let local = entry_from_proof(&proof)?;
         let mut entries = previous.as_ref().map_or_else(Vec::new, |r| r.devices.clone());

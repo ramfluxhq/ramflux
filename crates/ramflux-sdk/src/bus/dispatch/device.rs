@@ -324,13 +324,15 @@ fn append_device_branch_authorized_event(
     device_epoch: u64,
     now: i64,
 ) -> Result<String, SdkError> {
+    #[cfg(feature = "itest-identity-proof")]
+    let lifetime = crate::client::identity_authority::registration::proof_lifetime_seconds()?;
+    #[cfg(not(feature = "itest-identity-proof"))]
+    let lifetime = crate::client::identity_authority::registration::DEFAULT_PROOF_LIFETIME_SECONDS;
     let proof = account.client.authorize_current_device(
         "ramflux-node",
         default_device_capability_scope(),
         now,
-        now.saturating_add(
-            crate::client::identity_authority::registration::proof_lifetime_seconds()?,
-        ),
+        now.saturating_add(lifetime),
     )?;
     let branch_authorized_event_id = format!("device.branch_authorized:{device_id}:{device_epoch}");
     let branch_proof_hash = ramflux_crypto::blake3_256_base64url(

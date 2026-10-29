@@ -7,8 +7,8 @@ use crate::prelude::*;
 use ramflux_protocol::SignedDeviceSetRecord;
 const REFRESH_AT: &str = "identity/owned_proof_refresh_at";
 pub(crate) const DEFAULT_PROOF_LIFETIME_SECONDS: i64 = 3600;
+#[cfg(feature = "itest-identity-proof")]
 pub(crate) fn proof_lifetime_seconds() -> Result<i64, SdkError> {
-    #[cfg(feature = "itest-identity-proof")]
     match std::env::var("RAMFLUX_TEST_BRANCH_PROOF_TTL_SECS") {
         Ok(value) => return parse_test_proof_lifetime(&value),
         Err(std::env::VarError::NotUnicode(_)) => return Err(invalid("invalid test proof TTL")),
@@ -58,8 +58,11 @@ impl RamfluxClient {
             .is_some())
     }
     pub(crate) fn record_owned_proof_published(&self, now: i64) -> Result<(), SdkError> {
-        self.account_db()?
-            .persist_actor_state(REFRESH_AT, &now.saturating_add(proof_lifetime_seconds()? / 2))?;
+        #[cfg(feature = "itest-identity-proof")]
+        let lifetime = proof_lifetime_seconds()?;
+        #[cfg(not(feature = "itest-identity-proof"))]
+        let lifetime = DEFAULT_PROOF_LIFETIME_SECONDS;
+        self.account_db()?.persist_actor_state(REFRESH_AT, &now.saturating_add(lifetime / 2))?;
         Ok(())
     }
     pub(crate) fn validate_registration_ack(

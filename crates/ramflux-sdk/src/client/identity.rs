@@ -243,11 +243,15 @@ impl RamfluxClient {
         self.require_legacy_networking()?;
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        #[cfg(feature = "itest-identity-proof")]
+        let lifetime = super::identity_authority::registration::proof_lifetime_seconds()?;
+        #[cfg(not(feature = "itest-identity-proof"))]
+        let lifetime = super::identity_authority::registration::DEFAULT_PROOF_LIFETIME_SECONDS;
         let proof = self.authorize_current_device(
             "ramflux-node",
             vec!["device.delivery.bind".into()],
             now,
-            now.saturating_add(super::identity_authority::registration::proof_lifetime_seconds()?),
+            now.saturating_add(lifetime),
         )?;
         let record = self
             .account_db()?
