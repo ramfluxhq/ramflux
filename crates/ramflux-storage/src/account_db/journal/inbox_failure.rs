@@ -20,7 +20,7 @@ impl AccountDb {
             self.cleanup_inbox_policy()
         })
     }
-    /// Records terminal metadata before ACK; envelope-shaped inputs retain keyed markers only.
+    /// Records terminal metadata before ACK; never-seen inputs retain bounded diagnostics.
     /// # Errors
     /// Returns SQLite or journal serialization errors.
     pub fn dead_letter_inbox(
@@ -47,14 +47,6 @@ impl AccountDb {
             if self.actor_state_exists(&marker)? {
                 return self.cleanup_inbox_policy();
             }
-            let value = serde_json::from_slice::<serde_json::Value>(entry)?;
-            let envelope = value.get("envelope").unwrap_or(&value);
-            self.dead_letter_routed(
-                &ramflux_protocol::canonical_json_bytes(envelope)?,
-                metadata.get("error_code").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
-                at,
-            )?;
-            return self.cleanup_inbox_policy();
         }
         let admitted = self.ensure_inbox_policy(key, entry, at)?;
         let bounded = if entry.len() <= 1024 * 1024 { entry } else { &[] };

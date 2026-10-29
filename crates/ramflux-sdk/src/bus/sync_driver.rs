@@ -490,7 +490,24 @@ pub(super) fn quarantine_failure(
     let db = client.account_db()?;
     db.remove_inbox_retry(key)?;
     db.remove_unrouted(key)?;
-    db.dead_letter_routed(&ramflux_protocol::canonical_json_bytes(&entry.envelope)?, code, now)?;
+    if matches!(error, SdkError::ReplayMismatch) {
+        db.dead_letter_routed(
+            &ramflux_protocol::canonical_json_bytes(&entry.envelope)?,
+            code,
+            now,
+        )?;
+    } else {
+        db.dead_letter_inbox(
+            key,
+            &serde_json::to_vec(entry)?,
+            &json!({
+                "envelope_id": entry.envelope.envelope_id,
+                "claimed_source_device_id": entry.envelope.source_device_id,
+                "error_code": code,
+            }),
+            now,
+        )?;
+    }
     Ok(true)
 }
 
