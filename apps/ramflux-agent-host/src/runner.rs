@@ -371,6 +371,7 @@ impl<E: EngineProvider> AgentHost<E> {
         .await?
         else {
             self.engine.cancel(conversation_id).await?;
+            self.state.approvals.remove(conversation_id);
             return self.save_state();
         };
         let read =
