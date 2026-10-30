@@ -4,10 +4,84 @@
 //! Single-writer authority, arbitrary lag, transfer and stale requester regressions.
 use super::*;
 use ramflux_protocol::GroupChangeStatus;
+use zeroize::Zeroizing;
 struct Person {
     root: IdentityRoot,
     branch: DeviceBranch,
     actor: GroupStateActor,
+}
+struct NativePerson {
+    primary: crate::custody::SelfSigningKey,
+    branch: DeviceBranch,
+    actor: GroupStateActor,
+}
+fn native_person(
+    principal: &str,
+    device: &str,
+    seed: u8,
+    now: u64,
+) -> Result<NativePerson, CryptoError> {
+    let phrase = crate::custody::RecoveryPhrase::from_entropy(&[seed; 32])?;
+    let master = crate::custody::MasterKey::from_phrase(&phrase)?;
+    let primary = crate::custody::SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
+    let branch = crate::create_device_branch(principal, device, 1, [seed + 2; 32]);
+    let agreement = crate::X25519KeyPair::from_seed([seed + 3; 32]);
+    let record = crate::custody::create_genesis(
+        &master,
+        &primary,
+        &branch,
+        &agreement,
+        crate::custody::GenesisInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            display_name: principal.into(),
+            issued_at: now,
+            master_cert_id: encode_base64url([seed + 4; 32]),
+            branch_cert_id: encode_base64url([seed + 5; 32]),
+            external_human_primary: None,
+        },
+    )?;
+    let verified = crate::custody::verify_record(&record, now, None, None)?;
+    let actor = certify_native_group_state_actor(
+        &verified,
+        &branch,
+        &ramflux_protocol::qualified_device_id(&record.body.account_anchor, device)?,
+        now,
+    )?;
+    Ok(NativePerson { primary, branch, actor })
+}
+fn renew_native_actor(
+    person: &NativePerson,
+    not_before: u64,
+    cert_seed: u8,
+) -> Result<GroupStateActor, CryptoError> {
+    let mut actor = person.actor.clone();
+    let authority = actor.native_authority.as_mut().ok_or_else(|| invalid("native authority"))?;
+    let mut body = authority.branch_certificate.body.clone();
+    body.not_before = not_before;
+    body.expires_at = not_before + 3600;
+    body.cert_id = encode_base64url([cert_seed; 32]);
+    authority.branch_certificate = person.primary.certify_branch(body)?;
+    verify_group_state_actor_at(&actor, Some(not_before))?;
+    Ok(actor)
+}
+fn add_native_member(
+    owner: &NativePerson,
+    state: &VerifiedGroupState,
+    member: GroupMemberIdentity,
+    role: SharedGroupRole,
+    now: i64,
+) -> Result<VerifiedGroupState, CryptoError> {
+    snapshot::advance_as_with_native_signer(
+        &owner.primary,
+        &owner.branch,
+        &owner.actor,
+        state,
+        snapshot::Apply {
+            requester: &owner.actor,
+            change: GroupStateChange::Add { member, role },
+            now,
+        },
+    )
 }
 fn person(
     principal: &str,
@@ -186,6 +260,100 @@ fn admins_request_but_never_sign_state_and_demoted_requests_cannot_undo_removal(
     )?;
     assert_eq!(duplicate.snapshot().state_hash, applied.snapshot().state_hash);
     assert!(verify_group_change_request(&request, request.expires_at).is_err());
+    Ok(())
+}
+
+#[test]
+fn native_admin_lease_authorizes_its_version_after_creation_branch_expires()
+-> Result<(), CryptoError> {
+    let owner = native_person("native-owner", "owner-device", 40, 1000)?;
+    let admin = native_person("native-admin", "admin-device", 60, 1000)?;
+    let victim = person("victim", "victim-device", 80, 81)?;
+    let mut state = create_native_group_state(
+        &owner.primary,
+        &owner.branch,
+        &owner.actor,
+        GroupStateCreateInput {
+            group_id: "native-group",
+            conversation_id: "native-thread",
+            max_members: 200,
+            new_member_history: "no_history",
+            name: None,
+            now: 1000,
+        },
+    )?;
+    state = add_native_member(
+        &owner,
+        &state,
+        admin.actor.identity.clone(),
+        SharedGroupRole::Admin,
+        1001,
+    )?;
+    state = add_native_member(
+        &owner,
+        &state,
+        victim.actor.identity.clone(),
+        SharedGroupRole::Member,
+        1002,
+    )?;
+    let creation_expiry = owner
+        .actor
+        .native_authority
+        .as_ref()
+        .ok_or_else(|| invalid("native authority"))?
+        .branch_certificate
+        .body
+        .expires_at;
+    let mutation_time = creation_expiry + 301;
+    let owner_current = renew_native_actor(&owner, mutation_time, 90)?;
+    let admin_current = renew_native_actor(&admin, mutation_time, 91)?;
+    let change = GroupStateChange::Remove {
+        root_commitment: victim.actor.identity.root_commitment.clone(),
+        device_id: victim.actor.identity.device_id.clone(),
+    };
+    assert!(
+        sign_group_change_request(
+            &admin.branch,
+            &admin.actor,
+            &state,
+            GroupChangeRequestInput {
+                request_id: "expired-admin-lease".into(),
+                change: change.clone(),
+                now: i64::try_from(mutation_time).map_err(|_| invalid("test clock"))?,
+            },
+        )
+        .is_err(),
+        "an expired admin branch must not authorize a mutation"
+    );
+    let request = sign_group_change_request(
+        &admin.branch,
+        &admin_current,
+        &state,
+        GroupChangeRequestInput {
+            request_id: "fresh-admin-lease".into(),
+            change,
+            now: i64::try_from(mutation_time).map_err(|_| invalid("test clock"))?,
+        },
+    )?;
+    let changed = apply_native_group_change_request(
+        &owner.primary,
+        &owner.branch,
+        &owner_current,
+        &state,
+        &request,
+        i64::try_from(mutation_time).map_err(|_| invalid("test clock"))?,
+    )?;
+    assert!(
+        changed
+            .view()
+            .effective_role(
+                &victim.actor.identity.root_commitment,
+                &victim.actor.identity.device_id
+            )
+            .is_none()
+    );
+    assert_eq!(changed.creator(), &owner_current);
+    assert_eq!(changed.snapshot().issuer, owner_current);
     Ok(())
 }
 #[test]

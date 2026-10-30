@@ -4,6 +4,7 @@
 //! Born-v3 selectors reach the signed shared-group path without a legacy identity root.
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
+use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn native_principal_creates_and_renames_a_signed_group() -> TestResult {
@@ -17,6 +18,12 @@ async fn native_principal_creates_and_renames_a_signed_group() -> TestResult {
         LocalBusConfig::new(owner.root.0.join("bus.sock"), owner.root.0.join("bus-data"));
     setup.custody_vault = Some(owner.vault);
     account.native_setup = Some(setup);
+    account.put_engine(GatewaySessionEngine::with_test_transport(
+        account.gateway_config.clone(),
+        Box::new(crate::bus::dispatch::surface_transport::fixture::RecordingGateway::new(
+            Arc::new(Mutex::new(Vec::new())),
+        )),
+    ));
 
     let create = LocalBusFrame::request(
         "native-group-create",
