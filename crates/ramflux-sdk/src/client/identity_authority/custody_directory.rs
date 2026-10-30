@@ -88,18 +88,7 @@ impl RamfluxClient {
             let previous_name = old.as_ref().and_then(|row| row["display_name"].as_str()).map(str::to_owned);
             let previous_fingerprint = old.as_ref().and_then(|row| row["device_set_hash"].as_str()).map(str::to_owned);
             let fingerprint = native_fingerprint(&verified)?;
-            // Authority-only observations (notably an external custodian's nested record)
-            // contain no prekeys. Retain already verified routes only while this exact
-            // roster still authorizes each device; an absent prekey list is not revocation.
-            let retained = old.as_ref().and_then(|row| row["devices"].as_array()).map(|devices| {
-                devices.iter().filter(|device| {
-                    let Some(id) = device["device_id"].as_str() else { return false; };
-                    let Some(epoch) = device["device_epoch"].as_u64() else { return false; };
-                    verified.authorize(&DeviceRef { account_anchor: expected.into(), device_id: id.into(), device_epoch: epoch }, "message", now)
-                        .is_ok_and(|cert| device["signing_public_key"] == cert.branch_signing_public_key
-                            && ramflux_protocol::qualified_device_id(expected, id).is_ok_and(|target| device["target_delivery_id"] == target))
-                }).cloned().collect::<Vec<_>>()
-            }).unwrap_or_default();
+            let retained = retained_routes(old.as_ref(), &verified, expected, now);
             let mut row = old.unwrap_or_else(|| json!({"id":body.principal_id,"principal_id":body.principal_id}));
             row["contact_identity_commitment"] = json!(expected);
             row["root_public_key"] = json!(body.master_certificate.body.master_public_key);
@@ -364,6 +353,48 @@ impl RamfluxClient {
         }
         Ok(true)
     }
+}
+
+// Authority-only observations, including a nested external custodian record, carry no
+// prekeys. Keep previously verified routes only if the current roster still authorizes
+// their exact epoch, signing key and root-qualified delivery binding.
+fn retained_routes(
+    old: Option<&serde_json::Value>,
+    verified: &VerifiedRecord,
+    expected: &str,
+    now: u64,
+) -> Vec<serde_json::Value> {
+    old.and_then(|row| row["devices"].as_array())
+        .map(|devices| {
+            devices
+                .iter()
+                .filter(|device| {
+                    let Some(id) = device["device_id"].as_str() else {
+                        return false;
+                    };
+                    let Some(epoch) = device["device_epoch"].as_u64() else {
+                        return false;
+                    };
+                    verified
+                        .authorize(
+                            &DeviceRef {
+                                account_anchor: expected.into(),
+                                device_id: id.into(),
+                                device_epoch: epoch,
+                            },
+                            "message",
+                            now,
+                        )
+                        .is_ok_and(|cert| {
+                            device["signing_public_key"] == cert.branch_signing_public_key
+                                && ramflux_protocol::qualified_device_id(expected, id)
+                                    .is_ok_and(|target| device["target_delivery_id"] == target)
+                        })
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(super) fn verify_native_authority(
