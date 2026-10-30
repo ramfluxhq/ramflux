@@ -149,93 +149,144 @@ impl<E: EngineProvider> AgentHost<E> {
         bus: &mut impl AgentBus,
         now_ms: u64,
     ) -> Result<Vec<EngineEvent>> {
-        let conversations = self.state.approvals.keys().cloned().collect::<Vec<_>>();
+        let bridges = self.state.approvals.values().cloned().collect::<Vec<_>>();
         let mut events = Vec::new();
-        for conversation_id in conversations {
-            let bridge = self.state.approvals.get(&conversation_id).ok_or(Error::State)?.clone();
-            let view = self.task_view(bus, &bridge).await?;
-            if view.is_null() {
-                if bridge.phase == ApprovalPhase::Proposed {
-                    self.ensure_proposal(bus, &conversation_id).await?;
-                    continue;
+        for bridge in bridges {
+            match self.drive_approval(bus, &bridge, now_ms).await {
+                Ok(mut ready) => events.append(&mut ready),
+                Err(error) if error.stops_host() => return Err(error),
+                Err(_) => {
+                    let failure = self
+                        .abandon_approval(
+                            &bridge.conversation_id,
+                            &bridge.message_id,
+                            &bridge.decision_id,
+                            now_ms,
+                        )
+                        .await?;
+                    self.engine.acknowledge(&failure)?;
+                    self.save_state()?;
+                    events.push(failure);
                 }
-                return Err(Error::State);
-            }
-            validate_task(&view, &bridge, &self.state.principal_id)?;
-            if bridge.phase != ApprovalPhase::Resuming && now_ms >= bridge.deadline_ms {
-                self.decline_bridge(&bridge, now_ms).await?;
-                self.fail_approval(
-                    bus,
-                    &bridge,
-                    &view,
-                    EngineFailure::ApprovalTimeout,
-                    &mut events,
-                )
-                .await?;
-                continue;
-            }
-            match bridge.phase {
-                ApprovalPhase::Proposed => {
-                    if terminal(&view) {
-                        self.retire_terminal_approval(&bridge, &view, now_ms, &mut events).await?;
-                    } else if awaiting_decision(&view, &bridge) {
-                        self.mark_awaiting_decision(&conversation_id)?;
-                    } else if view["state"] == "running" {
-                        self.open_needs_me(bus, &bridge, &view).await?;
-                    }
-                }
-                ApprovalPhase::AwaitingDecision => {
-                    if terminal(&view) {
-                        self.retire_terminal_approval(&bridge, &view, now_ms, &mut events).await?;
-                    } else if resolved(&view, &bridge) {
-                        let approved = decision(&view, &bridge)?;
-                        match self
-                            .engine
-                            .decide(
-                                &bridge.conversation_id,
-                                &bridge.message_id,
-                                &bridge.decision_id,
-                                approved,
-                                now_ms,
-                            )
-                            .await
-                        {
-                            Ok(()) if approved => {
-                                if let Some(saved) = self.state.approvals.get_mut(&conversation_id)
-                                {
-                                    saved.phase = ApprovalPhase::Resuming;
-                                }
-                                self.save_state()?;
-                            }
-                            Ok(()) => {
-                                self.fail_approval(
-                                    bus,
-                                    &bridge,
-                                    &view,
-                                    EngineFailure::ApprovalDeclined,
-                                    &mut events,
-                                )
-                                .await?;
-                            }
-                            Err(Error::EngineUnavailable | Error::EngineTimeout) => {}
-                            Err(error) if error.stops_host() => return Err(error),
-                            Err(_) => {
-                                self.fail_approval(
-                                    bus,
-                                    &bridge,
-                                    &view,
-                                    EngineFailure::ApprovalUnavailable,
-                                    &mut events,
-                                )
-                                .await?;
-                            }
-                        }
-                    }
-                }
-                ApprovalPhase::Resuming => {}
             }
         }
         Ok(events)
+    }
+
+    async fn drive_approval(
+        &mut self,
+        bus: &mut impl AgentBus,
+        bridge: &ApprovalBridge,
+        now_ms: u64,
+    ) -> Result<Vec<EngineEvent>> {
+        let conversation_id = bridge.conversation_id.clone();
+        let mut events = Vec::new();
+        let view = self.task_view(bus, bridge).await?;
+        if view.is_null() {
+            if bridge.phase == ApprovalPhase::Proposed {
+                self.ensure_proposal(bus, &conversation_id).await?;
+                return Ok(events);
+            }
+            return Err(Error::State);
+        }
+        validate_task(&view, bridge, &self.state.principal_id)?;
+        if bridge.phase != ApprovalPhase::Resuming && now_ms >= bridge.deadline_ms {
+            self.decline_bridge(bridge, now_ms).await?;
+            self.fail_approval(bus, bridge, &view, EngineFailure::ApprovalTimeout, &mut events)
+                .await?;
+            return Ok(events);
+        }
+        match bridge.phase {
+            ApprovalPhase::Proposed => {
+                if terminal(&view) {
+                    self.retire_terminal_approval(bridge, &view, now_ms, &mut events).await?;
+                } else if awaiting_decision(&view, bridge) {
+                    self.mark_awaiting_decision(&conversation_id)?;
+                } else if view["state"] == "running" {
+                    self.open_needs_me(bus, bridge, &view).await?;
+                }
+            }
+            ApprovalPhase::AwaitingDecision => {
+                if terminal(&view) {
+                    self.retire_terminal_approval(bridge, &view, now_ms, &mut events).await?;
+                } else if resolved(&view, bridge) {
+                    let approved = decision(&view, bridge)?;
+                    match self
+                        .engine
+                        .decide(
+                            &bridge.conversation_id,
+                            &bridge.message_id,
+                            &bridge.decision_id,
+                            approved,
+                            now_ms,
+                        )
+                        .await
+                    {
+                        Ok(()) if approved => {
+                            if let Some(saved) = self.state.approvals.get_mut(&conversation_id) {
+                                saved.phase = ApprovalPhase::Resuming;
+                            }
+                            self.save_state()?;
+                        }
+                        Ok(()) => {
+                            self.fail_approval(
+                                bus,
+                                bridge,
+                                &view,
+                                EngineFailure::ApprovalDeclined,
+                                &mut events,
+                            )
+                            .await?;
+                        }
+                        Err(Error::EngineUnavailable | Error::EngineTimeout) => {}
+                        Err(error) if error.stops_host() => return Err(error),
+                        Err(_) => {
+                            self.fail_approval(
+                                bus,
+                                bridge,
+                                &view,
+                                EngineFailure::ApprovalUnavailable,
+                                &mut events,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            }
+            ApprovalPhase::Resuming => {}
+        }
+        Ok(events)
+    }
+
+    pub(crate) async fn abandon_approval(
+        &mut self,
+        conversation_id: &str,
+        message_id: &str,
+        decision_id: &str,
+        now_ms: u64,
+    ) -> Result<EngineEvent> {
+        if let Err(error) =
+            self.engine.decide(conversation_id, message_id, decision_id, false, now_ms).await
+            && error.stops_host()
+        {
+            return Err(error);
+        }
+        if let Some(bridge) = self.state.approvals.remove(conversation_id)
+            && bridge.decision_id != decision_id
+        {
+            self.decline_bridge(&bridge, now_ms).await?;
+        }
+        if let Err(error) = self.engine.cancel(conversation_id).await
+            && error.stops_host()
+        {
+            return Err(error);
+        }
+        self.save_state()?;
+        Ok(EngineEvent::VisibleFailure {
+            conversation_id: conversation_id.into(),
+            message_id: message_id.into(),
+            reason: EngineFailure::ApprovalUnavailable,
+        })
     }
 
     async fn retire_terminal_approval(
@@ -553,11 +604,15 @@ mod tests {
         requests: Vec<(String, Value)>,
         replies: Vec<Value>,
         removed: bool,
+        refuse_method: Option<&'static str>,
     }
 
     impl TestBus {
         fn respond(&mut self, method: &str, body: Value) -> Result<Value> {
             self.requests.push((method.into(), body.clone()));
+            if self.refuse_method == Some(method) {
+                return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotPermitted));
+            }
             Ok(match method {
                 "mcp.server.add" => json!({"accepted":true}),
                 "mcp.tool.started" if self.standing_grant => {
@@ -622,7 +677,7 @@ mod tests {
                     json!({"conversations":[{"id":"conversation","kind":"direct","participants":["agent-principal","human-principal"]},{"id":"other","kind":"direct","participants":["agent-principal","human-principal"]}],"next_cursor":null})
                 }
                 "message.read" => {
-                    json!({"messages":[{"conversation_id":body["conversation_id"],"message_id":"message","sender_id":"human-principal","body_utf8":"hello","deleted":false}]})
+                    json!({"messages":(["message", "second", "third"].map(|id| json!({"conversation_id":body["conversation_id"],"message_id":id,"sender_id":"human-principal","body_utf8":"hello","deleted":false})))})
                 }
                 "message.receive" => json!({}),
                 "message.submit" => {
@@ -998,6 +1053,164 @@ mod tests {
         assert_eq!(host.engine.active_conversations(), Vec::<String>::new());
         assert_eq!(bus.replies, Vec::<Value>::new());
         assert!(server.seen().await.iter().any(|s| s.starts_with("DELETE ")));
+        Ok(())
+    }
+
+    fn recovery_steps() -> Vec<crate::prx_test_support::Step> {
+        use crate::prx_test_support::{accepted, approval_steps, step};
+        use hyper::{Method, StatusCode};
+        let mut steps = approval_steps("1970-01-01T00:05:00Z");
+        steps.extend([
+            step(Method::DELETE, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({})),
+            step(Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"session-2"})),
+            step(Method::POST, "/api/sessions/session-2/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+            step(Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"ok","reply":"recovered"}})),
+        ]);
+        steps
+    }
+
+    fn incoming(conversation: &str, message: &str, seq: u64) -> LocalBusFrame {
+        let mut event = LocalBusFrame::request(
+            "event",
+            Some("agent".into()),
+            "stream",
+            "message.received",
+            json!({"message":{"conversation_id":conversation,"message_id":message,"sender_id":"human-principal"}}),
+        );
+        event.kind = ramflux_sdk::LocalBusFrameKind::Event;
+        event.seq = Some(seq);
+        event
+    }
+
+    async fn assert_recovery(
+        host: &mut AgentHost<crate::PrxEngine>,
+        bus: &mut TestBus,
+        server: &crate::prx_test_support::FakePrx,
+    ) -> Result<()> {
+        assert!(!host.engine.is_busy("conversation"));
+        assert!(host.state.approvals.is_empty());
+        let state = host.engine.checkpoint()?.ok_or(Error::State)?;
+        assert_eq!(state["completed"], json!({}));
+        assert_eq!(state["pending"], json!({}));
+        assert!(host.engine.poll(5).await?.is_empty());
+        assert!(server.seen().await.iter().any(|r| r.starts_with("DELETE ")));
+        host.apply(bus, incoming("other", "message", 10), 2000).await?;
+        host.poll(bus, 2001).await?;
+        assert_eq!(bus.replies.len(), 2);
+        assert_eq!(
+            bus.replies[0]["plaintext_body_base64"],
+            ramflux_protocol::encode_base64url(
+                EngineFailure::ApprovalUnavailable.reply().as_bytes()
+            )
+        );
+        assert_eq!(
+            bus.replies[1]["plaintext_body_base64"],
+            ramflux_protocol::encode_base64url(b"recovered")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refused_approval_start_is_acknowledged_and_other_conversations_progress()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for method in ["mcp.server.add", "mcp.tool.started", "task.propose"] {
+            let server = crate::prx_test_support::FakePrx::start(recovery_steps()).await?;
+            let (_root, mut host) = prx_host(&server)?;
+            let mut bus = TestBus { refuse_method: Some(method), ..TestBus::default() };
+            host.apply(&mut bus, incoming("conversation", "message", 1), 1).await?;
+            host.poll(&mut bus, 2).await?;
+            bus.refuse_method = None;
+            assert_recovery(&mut host, &mut bus, &server).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_awaiting_task_declines_and_frees_the_conversation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let server = crate::prx_test_support::FakePrx::start(recovery_steps()).await?;
+        let (_root, mut host) = prx_host(&server)?;
+        let mut bus = TestBus::default();
+        request_approval(&mut host, &mut bus).await?;
+        bus.task = Value::Null;
+        host.poll(&mut bus, 4).await?;
+        assert_recovery(&mut host, &mut bus, &server).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mismatched_task_is_not_mutated_and_its_bridge_is_retired()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let server = crate::prx_test_support::FakePrx::start(recovery_steps()).await?;
+        let (_root, mut host) = prx_host(&server)?;
+        let mut bus = TestBus::default();
+        request_approval(&mut host, &mut bus).await?;
+        bus.task["assignee"] = json!("another-agent");
+        let before = bus.task.clone();
+        host.poll(&mut bus, 4).await?;
+        assert_eq!(bus.task, before);
+        assert_recovery(&mut host, &mut bus, &server).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn busy_hints_bypass_the_reply_interval_without_submitting_another_turn()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::prx_test_support::{FakePrx, accepted, step};
+        use hyper::{Method, StatusCode};
+        let server = FakePrx::start(vec![
+            step(
+                Method::POST,
+                "/api/sessions",
+                StatusCode::CREATED,
+                json!({"session_id":"session-1"}),
+            ),
+            step(
+                Method::POST,
+                "/api/sessions/session-1/message?mode=async",
+                StatusCode::ACCEPTED,
+                accepted("job-1"),
+            ),
+        ])
+        .await?;
+        let (_root, mut host) = prx_host(&server)?;
+        let mut bus = TestBus::default();
+        for (index, id) in ["message", "second", "third"].into_iter().enumerate() {
+            let seq = u64::try_from(index)? + 1;
+            host.apply(&mut bus, incoming("conversation", id, seq), 1000 + seq).await?;
+        }
+        assert!(host.engine.is_busy("conversation"));
+        assert!(host.state.last_refusal.is_none());
+        assert_eq!(bus.replies.len(), 2);
+        for reply in bus.replies {
+            assert_eq!(
+                reply["plaintext_body_base64"],
+                ramflux_protocol::encode_base64url(EngineFailure::Busy.reply().as_bytes())
+            );
+        }
+        assert_eq!(
+            server.seen().await.iter().filter(|r| r.ends_with("message?mode=async")).count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restored_host_bridge_deadline_is_capped_by_configuration()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let server = crate::prx_test_support::FakePrx::start(recovery_steps()).await?;
+        let (_root, mut host) = prx_host(&server)?;
+        let mut bus = TestBus::default();
+        request_approval(&mut host, &mut bus).await?;
+        host.state.approvals.get_mut("conversation").ok_or("bridge")?.deadline_ms = u64::MAX;
+        host.save_state()?;
+        let config = host.config.clone();
+        drop(host);
+        let engine = crate::PrxEngine::new(&config.engine.as_ref().ok_or("config")?.prx, 8)?;
+        let before = crate::bus::now_ms();
+        let host = AgentHost::new(config, engine)?;
+        let deadline = host.state.approvals["conversation"].deadline_ms;
+        assert!(deadline >= before + 600_000 && deadline <= crate::bus::now_ms() + 600_000);
         Ok(())
     }
 }

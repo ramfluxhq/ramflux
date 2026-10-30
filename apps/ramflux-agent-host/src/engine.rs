@@ -115,6 +115,11 @@ pub enum EngineEvent {
     },
 }
 pub trait EngineProvider {
+    /// Whether a conversation has provider work that needs a busy hint rather than a new turn.
+    #[must_use]
+    fn is_busy(&self, _conversation_id: &str) -> bool {
+        false
+    }
     /// # Errors
     /// Reports provider failures without exposing input text.
     fn intents(&mut self, input: &ConversationInput<'_>) -> Result<Vec<Intent>>;

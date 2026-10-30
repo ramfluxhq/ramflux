@@ -2453,6 +2453,7 @@ dependencies = [
  "hyper-util",
  "keyring",
  "libc",
+ "ramflux-core",
  "ramflux-protocol",
  "ramflux-sdk",
  "reqwest",
