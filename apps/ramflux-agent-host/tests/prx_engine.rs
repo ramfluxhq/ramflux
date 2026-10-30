@@ -1,127 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use bytes::Bytes;
-use http_body_util::Full;
-use hyper::{Request, Response, StatusCode, body::Incoming, service::service_fn};
-use hyper_util::rt::TokioIo;
+#[path = "support/prx.rs"]
+mod support;
+use hyper::StatusCode;
 use ramflux_agent_host::{
-    ConversationInput, EngineEvent, EngineInput, EngineProvider, Error, Intent, PrxConfig,
-    PrxEngine, PrxSessionScope,
+    ConversationInput, EngineEvent, EngineFailure, EngineInput, EngineProvider, Error, Intent,
+    PrxAuthorization, PrxConfig, PrxEngine, PrxSessionScope,
 };
-use serde_json::{Value, json};
-use std::{collections::VecDeque, os::unix::fs::PermissionsExt, sync::Arc};
-use tokio::sync::Mutex;
-
-type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-#[derive(Clone)]
-struct Step {
-    method: hyper::Method,
-    path: &'static str,
-    status: StatusCode,
-    body: Value,
-    delay_ms: u64,
-}
-
-struct FakePrx {
-    base_url: String,
-    seen: Arc<Mutex<Vec<String>>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl FakePrx {
-    async fn start(steps: Vec<Step>) -> TestResult<Self> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let steps = Arc::new(Mutex::new(VecDeque::from(steps)));
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let server_steps = Arc::clone(&steps);
-        let server_seen = Arc::clone(&seen);
-        let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let steps = Arc::clone(&server_steps);
-                let seen = Arc::clone(&server_seen);
-                tokio::spawn(async move {
-                    let service = service_fn(move |request: Request<Incoming>| {
-                        let steps = Arc::clone(&steps);
-                        let seen = Arc::clone(&seen);
-                        async move {
-                            let path = request
-                                .uri()
-                                .path_and_query()
-                                .map_or_else(String::new, ToString::to_string);
-                            let authorization = request
-                                .headers()
-                                .get("authorization")
-                                .and_then(|value| value.to_str().ok())
-                                .unwrap_or_default()
-                                .to_owned();
-                            seen.lock()
-                                .await
-                                .push(format!("{} {path} {authorization}", request.method()));
-                            let Some(step) = steps.lock().await.pop_front() else {
-                                return Ok::<_, hyper::Error>(json_response(
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    &json!({"error":"unexpected request"}),
-                                ));
-                            };
-                            if request.method() != step.method
-                                || path != step.path
-                                || authorization != "Bearer test-prx-token"
-                            {
-                                return Ok(json_response(
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    &json!({"error":"request mismatch"}),
-                                ));
-                            }
-                            if step.delay_ms > 0 {
-                                tokio::time::sleep(std::time::Duration::from_millis(step.delay_ms))
-                                    .await;
-                            }
-                            Ok(json_response(step.status, &step.body))
-                        }
-                    });
-                    let _ = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), service)
-                        .await;
-                });
-            }
-        });
-        Ok(Self { base_url: format!("http://{address}/"), seen, task })
-    }
-
-    async fn seen(&self) -> Vec<String> {
-        self.seen.lock().await.clone()
-    }
-}
-
-impl Drop for FakePrx {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-fn json_response(status: StatusCode, body: &Value) -> Response<Full<Bytes>> {
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(serde_json::to_vec(&body).unwrap_or_default())))
-        .unwrap_or_else(|_| Response::new(Full::new(Bytes::new())))
-}
-
-fn step(method: hyper::Method, path: &'static str, status: StatusCode, body: Value) -> Step {
-    Step { method, path, status, body, delay_ms: 0 }
-}
-
-fn accepted(id: &str) -> Value {
-    json!({
-        "status":"accepted",
-        "job_id":id,
-        "poll_url":format!("/api/jobs/{id}"),
-        "cancel_url":format!("/api/jobs/{id}/cancel")
-    })
-}
+use serde_json::json;
+use std::os::unix::fs::PermissionsExt;
+use support::{FakePrx, Step, TestResult, accepted, approval_steps, approval_view, step};
 
 fn engine(server: &FakePrx, timeout_s: u64) -> TestResult<(tempfile::TempDir, PrxEngine)> {
     let root = tempfile::tempdir()?;
@@ -134,6 +23,9 @@ fn engine(server: &FakePrx, timeout_s: u64) -> TestResult<(tempfile::TempDir, Pr
         session_scope: PrxSessionScope::PerConversation,
         request_timeout_s: timeout_s,
         max_in_flight_per_conversation: 1,
+        authorization: PrxAuthorization::Supervised,
+        turn_timeout_s: 120,
+        approval_timeout_s: 600,
     };
     Ok((root, PrxEngine::new(&config, 8)?))
 }
@@ -191,7 +83,9 @@ async fn ok_reply_strips_image_markers_and_checkpoint_has_no_token() -> TestResu
         if matches!(intents.as_slice(), [Intent::ReplyText(reply)] if reply == "answer  complete")));
     let checkpoint = serde_json::to_string(&engine.checkpoint()?)?;
     assert!(!checkpoint.contains("test-prx-token"));
-    assert!(server.seen().await.iter().all(|line| line.contains("Bearer test-prx-token")));
+    assert!(server.bodies().await.iter().any(|body| body["message"].as_str().is_some_and(|v| {
+        v.starts_with("[Ramflux context: sender=Human; chat_kind=direct; mentioned=yes]")
+    })));
     Ok(())
 }
 
@@ -204,6 +98,7 @@ async fn human_approval_resumes_as_another_detached_job() -> TestResult {
             "status":"succeeded","http_status":200,
             "result":{"status":"awaiting_approval","reply":"Approve tool `filesystem.write`?","decision_id":"decision-1"}
         })),
+        step(hyper::Method::GET, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, approval_view("decision-1", "1970-01-01T00:05:00Z")),
         step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({"approved":true})),
         step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1/resume?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
         step(hyper::Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({
@@ -215,11 +110,11 @@ async fn human_approval_resumes_as_another_detached_job() -> TestResult {
     submit(&mut engine).await?;
     let approval = engine.poll(2).await?;
     assert!(
-        matches!(approval.as_slice(), [EngineEvent::ApprovalRequired { decision_id, pending_tool, .. }]
-        if decision_id == "decision-1" && pending_tool == "filesystem.write")
+        matches!(approval.as_slice(), [EngineEvent::ApprovalRequired { decision_id, approval, .. }]
+        if decision_id == "decision-1" && approval.tool == "filesystem.write" && approval.deadline_ms == 300_000)
     );
     engine.acknowledge(&approval[0])?;
-    engine.decide("conversation", "message", "decision-1", true).await?;
+    engine.decide("conversation", "message", "decision-1", true, 2).await?;
     assert!(matches!(engine.poll(3).await?.as_slice(), [EngineEvent::Intents { intents, .. }]
         if matches!(intents.as_slice(), [Intent::ReplyText(reply)] if reply == "done")));
     Ok(())
@@ -234,6 +129,7 @@ async fn decline_deletes_the_pending_prx_decision() -> TestResult {
             "status":"succeeded","http_status":200,
             "result":{"status":"awaiting_approval","reply":"Approve `shell`?","decision_id":"decision-1"}
         })),
+        step(hyper::Method::GET, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, approval_view("decision-1", "1970-01-01T00:05:00Z")),
         step(hyper::Method::DELETE, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({"approved":false})),
     ])
     .await?;
@@ -241,7 +137,7 @@ async fn decline_deletes_the_pending_prx_decision() -> TestResult {
     submit(&mut engine).await?;
     let approval = engine.poll(2).await?;
     engine.acknowledge(&approval[0])?;
-    engine.decide("conversation", "message", "decision-1", false).await?;
+    engine.decide("conversation", "message", "decision-1", false, 2).await?;
     assert!(server.seen().await.iter().any(|line| line.starts_with("DELETE ")));
     Ok(())
 }
@@ -309,7 +205,7 @@ async fn missing_session_is_recreated_once() -> TestResult {
     let (_root, mut engine) = engine(&server, 2)?;
     submit(&mut engine).await?;
     assert_eq!(
-        server.seen().await.iter().filter(|line| line.contains("POST /api/sessions ")).count(),
+        server.seen().await.iter().filter(|line| line.as_str() == "POST /api/sessions").count(),
         2
     );
     Ok(())
@@ -329,5 +225,277 @@ async fn request_timeout_is_a_typed_visible_failure_without_token_text() -> Test
     assert!(matches!(submit(&mut engine).await?.as_slice(), [EngineEvent::VisibleFailure { .. }]));
     let error = Error::EngineTimeout.to_string();
     assert!(!error.contains("test-prx-token"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_job_deadline_cancels_and_frees_the_conversation() -> TestResult {
+    let server = FakePrx::start(vec![
+        step(
+            hyper::Method::POST,
+            "/api/sessions",
+            StatusCode::CREATED,
+            json!({"session_id":"session-1"}),
+        ),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/message?mode=async",
+            StatusCode::ACCEPTED,
+            accepted("job-1"),
+        ),
+        step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"running"})),
+        step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"running"})),
+        step(hyper::Method::POST, "/api/jobs/job-1/cancel", StatusCode::OK, json!({})),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/message?mode=async",
+            StatusCode::ACCEPTED,
+            accepted("job-2"),
+        ),
+    ])
+    .await?;
+    let (_root, mut engine) = engine(&server, 1)?;
+    submit(&mut engine).await?;
+    assert!(matches!(
+        submit(&mut engine).await?.as_slice(),
+        [EngineEvent::VisibleFailure { reason: EngineFailure::Busy, .. }]
+    ));
+    assert!(engine.poll(100).await?.is_empty());
+    assert!(engine.poll(120_000).await?.is_empty());
+    let events = engine.poll(120_001).await?;
+    assert!(matches!(
+        events.as_slice(),
+        [EngineEvent::VisibleFailure { reason: EngineFailure::TurnTimeout, .. }]
+    ));
+    engine.acknowledge(&events[0])?;
+    submit(&mut engine).await?;
+    assert_eq!(server.seen().await.iter().filter(|r| r.ends_with("/cancel")).count(), 1);
+    assert_eq!(server.seen().await.iter().filter(|r| r.contains("message?mode=async")).count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_restores_sessions_jobs_results_and_original_deadline() -> TestResult {
+    let server = FakePrx::start(vec![
+        step(hyper::Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"session-1"})),
+        step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-1")),
+        step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"ok","reply":"restored reply"}})),
+        step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+        step(hyper::Method::POST, "/api/jobs/job-2/cancel", StatusCode::OK, json!({})),
+    ]).await?;
+    let (_root, mut original) = engine(&server, 1)?;
+    submit(&mut original).await?;
+    let state = original.checkpoint()?;
+    let (_root2, mut restored) = engine(&server, 1)?;
+    restored.restore(state.as_ref())?;
+    assert_eq!(
+        restored.checkpoint()?.ok_or("state")?["jobs"]["conversation"]["deadline_ms"],
+        120_001
+    );
+    let events = restored.poll(2).await?;
+    let complete = restored.checkpoint()?;
+    let (_root3, mut restored_again) = engine(&server, 1)?;
+    restored_again.restore(complete.as_ref())?;
+    assert!(events == restored_again.poll(3).await?);
+    restored_again.acknowledge(&events[0])?;
+    submit(&mut restored_again).await?;
+    // A restored resume/job deadline never restarts when a process restarts.
+    let deadline = restored_again.poll(120_001).await?;
+    assert!(matches!(
+        deadline.as_slice(),
+        [EngineEvent::VisibleFailure { reason: EngineFailure::TurnTimeout, .. }]
+    ));
+    assert_eq!(
+        server.seen().await.iter().filter(|s| s.as_str() == "POST /api/sessions").count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_decision_holds_new_turns_and_removal_revokes_it() -> TestResult {
+    let mut steps = approval_steps("1970-01-01T00:05:00Z");
+    steps.push(step(
+        hyper::Method::DELETE,
+        "/api/sessions/session-1/approvals/decision-1",
+        StatusCode::OK,
+        json!({}),
+    ));
+    let server = FakePrx::start(steps).await?;
+    let (_root, mut engine) = engine(&server, 1)?;
+    submit(&mut engine).await?;
+    let events = engine.poll(2).await?;
+    assert!(
+        matches!(events.as_slice(), [EngineEvent::ApprovalRequired { approval, .. }] if approval.tool == "filesystem.write")
+    );
+    engine.acknowledge(&events[0])?;
+    let state = engine.checkpoint()?;
+    engine.restore(state.as_ref())?;
+    assert!(matches!(
+        submit(&mut engine).await?.as_slice(),
+        [EngineEvent::VisibleFailure { reason: EngineFailure::Busy, .. }]
+    ));
+    engine.cancel("conversation").await?;
+    assert_eq!(engine.active_conversations(), Vec::<String>::new());
+    assert!(server.seen().await.iter().any(|s| s.starts_with("DELETE ")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn full_authorization_declines_unexpected_approvals_without_human_task() -> TestResult {
+    let mut steps = approval_steps("1970-01-01T00:05:00Z");
+    steps.push(step(
+        hyper::Method::DELETE,
+        "/api/sessions/session-1/approvals/decision-1",
+        StatusCode::OK,
+        json!({}),
+    ));
+    let server = FakePrx::start(steps).await?;
+    let (root, _) = engine(&server, 1)?;
+    let config: PrxConfig = serde_json::from_value(
+        json!({"base_url":server.base_url,"token_file":root.path().join("prx.token"),"session_scope":"per_conversation","request_timeout_s":1,"max_in_flight_per_conversation":1,"authorization":"full"}),
+    )?;
+    assert_eq!(config.turn_timeout_s, 120);
+    assert_eq!(config.approval_timeout_s, 600);
+    let mut engine = PrxEngine::new(&config, 8)?;
+    submit(&mut engine).await?;
+    assert!(matches!(
+        engine.poll(2).await?.as_slice(),
+        [EngineEvent::VisibleFailure { reason: EngineFailure::AuthorizationMismatch, .. }]
+    ));
+    assert!(server.seen().await.iter().any(|s| s.starts_with("DELETE ")));
+    assert!(
+        !server.seen().await.iter().any(|s| s.contains("/approvals/") && s.starts_with("POST "))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_authoritative_view_never_prompts_from_the_llm_reply() -> TestResult {
+    let mut steps = approval_steps("1970-01-01T00:05:00Z");
+    if let Some(view) = steps.last_mut() {
+        view.status = StatusCode::CONFLICT;
+    }
+    steps.push(step(
+        hyper::Method::DELETE,
+        "/api/sessions/session-1/approvals/decision-1",
+        StatusCode::CONFLICT,
+        json!({}),
+    ));
+    let server = FakePrx::start(steps).await?;
+    let (_root, mut engine) = engine(&server, 1)?;
+    submit(&mut engine).await?;
+    assert!(matches!(
+        engine.poll(2).await?.as_slice(),
+        [EngineEvent::VisibleFailure { reason: EngineFailure::ApprovalUnavailable, .. }]
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_job_has_its_own_bounded_turn_deadline() -> TestResult {
+    let mut steps = approval_steps("1970-01-01T00:05:00Z");
+    steps.extend([
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/approvals/decision-1",
+            StatusCode::OK,
+            json!({}),
+        ),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/approvals/decision-1/resume?mode=async",
+            StatusCode::ACCEPTED,
+            accepted("job-2"),
+        ),
+        step(hyper::Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"running"})),
+        step(hyper::Method::POST, "/api/jobs/job-2/cancel", StatusCode::OK, json!({})),
+    ]);
+    let server = FakePrx::start(steps).await?;
+    let (_root, mut engine) = engine(&server, 1)?;
+    submit(&mut engine).await?;
+    let events = engine.poll(2).await?;
+    engine.acknowledge(&events[0])?;
+    engine.decide("conversation", "message", "decision-1", true, 100).await?;
+    assert!(engine.poll(120_099).await?.is_empty());
+    assert!(matches!(
+        engine.poll(120_100).await?.as_slice(),
+        [EngineEvent::VisibleFailure { reason: EngineFailure::TurnTimeout, .. }]
+    ));
+    assert!(server.seen().await.iter().any(|s| s.ends_with("job-2/cancel")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn absent_prx_expiry_uses_the_configured_bound() -> TestResult {
+    let mut steps = approval_steps("1970-01-01T00:05:00Z");
+    if let Some(view) = steps.last_mut() {
+        view.body.as_object_mut().ok_or("view")?.remove("pending_expires_at");
+    }
+    let server = FakePrx::start(steps).await?;
+    let (_root, mut engine) = engine(&server, 1)?;
+    submit(&mut engine).await?;
+    assert!(
+        matches!(engine.poll(2).await?.as_slice(), [EngineEvent::ApprovalRequired {approval, ..}] if approval.deadline_ms == 600_002)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_prx_is_silent_and_logs_once_without_bearer_on_stderr() -> TestResult {
+    if std::env::var_os("RAMFLUX_PRX_STDERR_CHILD").is_some() {
+        let server = FakePrx::start(Vec::new()).await?;
+        let (_root, mut engine) = engine(&server, 1)?;
+        drop(server);
+        tokio::task::yield_now().await;
+        for _ in 0..4 {
+            assert!(submit(&mut engine).await?.is_empty());
+        }
+        assert!(!serde_json::to_string(&engine.checkpoint()?)?.contains("test-prx-token"));
+        let mut steps = approval_steps("1970-01-01T00:05:00Z");
+        steps.extend([
+            step(hyper::Method::DELETE, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({})),
+            step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+            step(hyper::Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"awaiting_approval","decision_id":"decision-2","reply":"test-prx-token"}})),
+            step(hyper::Method::DELETE, "/api/sessions/session-1/approvals/decision-2", StatusCode::OK, json!({"error":"test-prx-token"})),
+        ]);
+        let server = FakePrx::start(steps).await?;
+        let (root, _) = crate::engine(&server, 1)?;
+        let config = PrxConfig {
+            base_url: server.base_url.clone(),
+            token_file: root.path().join("prx.token"),
+            session_scope: PrxSessionScope::PerConversation,
+            request_timeout_s: 1,
+            max_in_flight_per_conversation: 1,
+            authorization: PrxAuthorization::Full,
+            turn_timeout_s: 120,
+            approval_timeout_s: 600,
+        };
+        let mut full = PrxEngine::new(&config, 8)?;
+        for now in [2, 3] {
+            submit(&mut full).await?;
+            let events = full.poll(now).await?;
+            assert!(matches!(
+                events.as_slice(),
+                [EngineEvent::VisibleFailure { reason: EngineFailure::AuthorizationMismatch, .. }]
+            ));
+            full.acknowledge(&events[0])?;
+        }
+        return Ok(());
+    }
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "unavailable_prx_is_silent_and_logs_once_without_bearer_on_stderr",
+            "--nocapture",
+        ])
+        .env("RAMFLUX_PRX_STDERR_CHILD", "1")
+        .output()?;
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(stderr.matches("agent host PRX engine is unavailable").count(), 1);
+    assert_eq!(stderr.matches("agent host PRX authorization mismatch").count(), 1);
+    assert!(!stderr.contains("test-prx-token"));
+    assert!(!String::from_utf8(output.stdout)?.contains("test-prx-token"));
     Ok(())
 }

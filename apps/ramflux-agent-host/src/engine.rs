@@ -1,14 +1,61 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Typed deterministic reply planning; no approvals, tasks or external execution.
+//! Typed rule planning and detached-provider events with human approval metadata.
 use crate::{Config, Error, Result, Rule};
 use ramflux_protocol::{
     A2uiConversationCommand as Command, A2uiSurfaceAction, CreateSurfaceCommand,
     DeleteSurfaceCommand, PatchSurfaceCommand, StreamAppendCommand, SurfacePatchOp, SurfaceType,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::future::Future;
+
+#[derive(Clone, Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+/// Bounded failure classes safe to persist and show without provider diagnostics.
+pub enum EngineFailure {
+    #[default]
+    Rejected,
+    Busy,
+    RequestTimeout,
+    TurnTimeout,
+    ApprovalUnavailable,
+    ApprovalTimeout,
+    ApprovalDeclined,
+    AuthorizationMismatch,
+}
+impl EngineFailure {
+    /// Short visible status with a stable failure code and no remote response text.
+    #[must_use]
+    pub const fn reply(&self) -> &'static str {
+        match self {
+            Self::Rejected => "The agent engine could not complete this request. [engine_rejected]",
+            Self::Busy => "The agent is waiting for the current turn or approval. [engine_busy]",
+            Self::RequestTimeout => "The engine request timed out. [engine_request_timeout]",
+            Self::TurnTimeout => "The agent turn timed out. [engine_turn_timeout]",
+            Self::ApprovalUnavailable => {
+                "The approval is expired or unavailable. [approval_unavailable]"
+            }
+            Self::ApprovalTimeout => "The approval request timed out. [approval_timeout]",
+            Self::ApprovalDeclined => "The requested operation was declined. [approval_declined]",
+            Self::AuthorizationMismatch => {
+                "PRX requested approval in full authorization mode. [authorization_mismatch]"
+            }
+        }
+    }
+}
+
+/// Authoritative, redacted PRX decision metadata bound into the human grant.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EngineApproval {
+    pub tool: String,
+    pub arguments_summary: serde_json::Value,
+    pub effect: String,
+    pub call_digest: String,
+    pub deadline_ms: u64,
+}
 
 pub struct ConversationInput<'a> {
     pub conversation_id: &'a str,
@@ -59,11 +106,12 @@ pub enum EngineEvent {
         conversation_id: String,
         message_id: String,
         decision_id: String,
-        pending_tool: String,
+        approval: EngineApproval,
     },
     VisibleFailure {
         conversation_id: String,
         message_id: String,
+        reason: EngineFailure,
     },
 }
 pub trait EngineProvider {
@@ -106,6 +154,7 @@ pub trait EngineProvider {
         _message_id: &'a str,
         _decision_id: &'a str,
         _approved: bool,
+        _now_ms: u64,
     ) -> impl Future<Output = Result<()>> + 'a {
         async { Err(Error::State) }
     }

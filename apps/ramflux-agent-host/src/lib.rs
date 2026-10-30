@@ -9,6 +9,9 @@ mod engine;
 mod participant;
 mod provisioning;
 mod prx;
+#[cfg(test)]
+#[path = "../tests/support/prx.rs"]
+mod prx_test_support;
 mod runner;
 mod runner_approval;
 mod runner_deferred;
@@ -19,9 +22,12 @@ mod runner_surface;
 mod surface_plan;
 pub use bus::{AgentBus, RfdBus};
 pub use checkpoint::{Checkpoint, CheckpointStore, GroupRefusal, OutputRefusal};
-pub use config::{Choice, Config, EngineConfig, PrxConfig, PrxSessionScope, Rule, SurfaceRule};
+pub use config::{
+    Choice, Config, EngineConfig, PrxAuthorization, PrxConfig, PrxSessionScope, Rule, SurfaceRule,
+};
 pub use engine::{
-    ActionInput, ConversationInput, EngineEvent, EngineInput, EngineProvider, Intent, RuleEngine,
+    ActionInput, ConversationInput, EngineApproval, EngineEvent, EngineFailure, EngineInput,
+    EngineProvider, Intent, RuleEngine,
 };
 pub use provisioning::{CredentialVault, import_provisioning_bundle, unlock_provisioned_account};
 pub use prx::PrxEngine;
