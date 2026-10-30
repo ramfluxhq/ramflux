@@ -432,6 +432,12 @@ fn native_genesis_actor_is_bound_to_its_signed_creation_time() -> Result<(), Cry
         },
     )?;
     verify_group_state_snapshot(later.snapshot().clone())?;
+    let mut expired_genesis = later.snapshot().clone();
+    expired_genesis.genesis.issued_at = Some(now);
+    assert!(matches!(
+        verify_group_state_snapshot(expired_genesis),
+        Err(CryptoError::GroupLeaseUnavailable)
+    ));
     let skewed = snapshot::advance_as_with_native_signer(
         &owner.primary,
         &owner.branch,
