@@ -124,8 +124,30 @@ fn shared_directory(
     client: &RamfluxClient,
     state: &ramflux_crypto::VerifiedGroupState,
 ) -> Result<Vec<Value>, SdkError> {
-    client
-        .shared_group_member_routes(state)?
+    let routes = match client.shared_group_member_routes(state) {
+        Ok(routes) => routes,
+        Err(SdkError::InboundPending(_)) => {
+            // Reader clients have no process-local current-head freshness. Keep the signed
+            // roster visible, without advertising a usable route or refreshing authority.
+            // resolve() fails closed on these incomplete rows; resolve_current() must fetch
+            // current manifests before any group send can obtain complete routes.
+            return Ok(state
+                .view()
+                .members
+                .iter()
+                .map(|member| {
+                    let identity = &member.identity;
+                    json!({"member_id":identity.device_id,
+                    "principal_id":identity.principal_id,
+                    "member_principal_commitment":identity.root_commitment,
+                    "device_signing_public_key":null,"target_delivery_id":null,
+                    "federation":null,"delivery_target_known":false})
+                })
+                .collect());
+        }
+        Err(error) => return Err(error),
+    };
+    routes
         .into_iter()
         .map(|route| {
             let principal = route
@@ -151,4 +173,72 @@ fn shared_directory(
             Ok(row)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::native_test_support::{Fixture, TestResult};
+
+    #[tokio::test]
+    async fn native_group_read_projection_survives_missing_freshness_without_authorizing_routes()
+    -> TestResult {
+        let owner = Fixture::with_device("group-reader-owner", "owner-device").await?;
+        let peer = Fixture::with_device("group-reader-peer", "peer-device").await?;
+        owner.client.persist_fetched_identity_directory(&peer.manifest)?;
+        let primary = owner
+            .client
+            .born_v3_account
+            .as_ref()
+            .ok_or("native owner")?
+            .group_primary(owner.vault.as_ref())?;
+        owner.client.shared_group_create_with_primary(
+            "group",
+            "thread",
+            None,
+            &owner.config.target_delivery_id,
+            Some(&primary),
+        )?;
+        owner.client.shared_group_change_with_primary(
+            "group",
+            &owner.config.target_delivery_id,
+            ramflux_protocol::group_state::GroupStateChange::Add {
+                member: peer.client.owned_group_actor(&peer.config.target_delivery_id)?.identity,
+                role: ramflux_protocol::SharedGroupRole::Member,
+            },
+            Some(&primary),
+        )?;
+        let peer_identity = owner.client.device_identity_for_root(
+            &peer.manifest.principal_commitment,
+            &peer.config.device_id,
+        )?;
+        assert!(owner.client.trusted_device(&peer_identity).is_ok());
+        *owner.client.native_head_freshness.borrow_mut() = Default::default();
+        assert!(matches!(
+            owner.client.trusted_device(&peer_identity),
+            Err(SdkError::InboundPending(_))
+        ));
+        let view = crate::bus::read_model::row(&owner.client, "conversation", "thread")?;
+        assert_eq!(view["group_id"], "group");
+        let rows = directory(&owner.client, "group")?;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row["delivery_target_known"] == false
+            && row["target_delivery_id"].is_null()
+            && row["device_signing_public_key"].is_null()));
+        let request = serde_json::from_value(
+            json!({"group_id":"group","conversation_id":"thread",
+            "message_id":"cannot-send","sender_id":owner.config.device_id,"encrypted_body_base64":""}),
+        )?;
+        let account = LocalBusAccountState::disconnected(
+            owner.client,
+            owner.config,
+            owner.manifest.principal_commitment,
+        );
+        assert!(resolve(&account, &request).is_err(), "read projection lent send authority");
+        assert!(matches!(
+            account.client.trusted_device(&peer_identity),
+            Err(SdkError::InboundPending(_))
+        ));
+        Ok(())
+    }
 }

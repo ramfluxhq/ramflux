@@ -199,6 +199,7 @@ async fn custody_response(
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
     let frame = incoming.frame()?;
     if frame.method == "account.create.begin"
+        && frame.body["principal_kind"] == "headless_ai"
         && !frame.account_id.as_deref().is_some_and(|id| supervisor.account_is_open(id))
     {
         return super::custody_response::error(frame, &SdkError::LocalBusPermissionDenied);
