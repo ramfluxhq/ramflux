@@ -201,6 +201,10 @@ fn authenticated_lease_updates_preserve_active_state_until_the_new_expiry() -> R
     assert!(!recipient.expire_media(200)?);
     assert!(recipient.expire_media(220)?);
     assert_eq!(recipient.row.end_reason.as_deref(), Some("failed"));
+    assert_eq!(
+        recipient.row.failure_reason,
+        Some(ramflux_protocol::VoiceCallFailureReason::MediaLeaseExpired)
+    );
     assert!(recipient.receive_key.is_none());
     Ok(())
 }

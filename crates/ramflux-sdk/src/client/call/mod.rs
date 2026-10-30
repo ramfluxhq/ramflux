@@ -279,6 +279,7 @@ impl RamfluxClient {
         {
             row.state = "ended".into();
             row.end_reason = Some("failed".into());
+            row.failure_reason = Some(ramflux_protocol::VoiceCallFailureReason::DaemonRestarted);
             row.ended_at = Some(crate::time::now_unix_timestamp());
             row.seq = row.seq.checked_add(1).ok_or_else(|| invalid("sequence exhausted"))?;
             db.write_transaction(|| self.persist_call_row(&row))?;

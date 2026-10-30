@@ -4,8 +4,23 @@
 //! Voice leases require current caller registration and a signed request on the live session.
 use crate::{GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime};
 use ramflux_protocol::{
-    VoiceAllocation, VoiceLeaseFrame, VoiceLeaseRequest, VoiceLeaseResponse, VoiceLeaseStatus,
+    VoiceAllocation, VoiceCallFailureReason, VoiceLeaseFrame, VoiceLeaseRequest,
+    VoiceLeaseResponse, VoiceLeaseStatus,
 };
+#[derive(Debug)]
+struct VoiceIssueError {
+    reason: VoiceCallFailureReason,
+    source: anyhow::Error,
+}
+impl std::fmt::Display for VoiceIssueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.source)
+    }
+}
+impl std::error::Error for VoiceIssueError {}
+fn refused(reason: VoiceCallFailureReason, source: impl Into<anyhow::Error>) -> VoiceIssueError {
+    VoiceIssueError { reason, source: source.into() }
+}
 pub(crate) async fn handle(
     send: &GatewaySendHandle,
     context: &GatewayQuicContext,
@@ -17,8 +32,17 @@ pub(crate) async fn handle(
         Ok(response) => {
             ramflux_node_core::GatewayServerFrame::VoiceLease { response: Box::new(response) }
         }
-        Err(_) => {
-            ramflux_node_core::GatewayServerFrame::Nack { reason: "voice lease rejected".into() }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                failure_reason = ?error.reason,
+                principal_id = %runtime.principal_id,
+                device_id = %runtime.device_id,
+                "voice lease rejected"
+            );
+            ramflux_node_core::GatewayServerFrame::VoiceLease {
+                response: Box::new(VoiceLeaseResponse::Refused { reason: error.reason }),
+            }
         }
     };
     let mut send = send.lock().await;
@@ -29,7 +53,7 @@ async fn issue(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     request: &VoiceLeaseFrame,
-) -> anyhow::Result<VoiceLeaseResponse> {
+) -> Result<VoiceLeaseResponse, VoiceIssueError> {
     crate::session::validate_gateway_session_signed_request(
         context,
         runtime,
@@ -37,20 +61,27 @@ async fn issue(
         "POST",
         "/voice/v1/lease",
         &request.body,
-    )?;
+    )
+    .map_err(|error| refused(VoiceCallFailureReason::AuthorityRefused, error))?;
     let scope = scope(&request.body);
-    ramflux_node_core::validate_voice_scope(scope)?;
-    let caller = manifest(context, runtime, &scope.caller.principal_id).await?;
-    let recipient = manifest(context, runtime, &scope.callee.principal_id).await?;
+    ramflux_node_core::validate_voice_scope(scope)
+        .map_err(|error| refused(VoiceCallFailureReason::AuthorityRefused, error))?;
+    let caller = manifest(context, runtime, &scope.caller.principal_id)
+        .await
+        .map_err(|error| refused(VoiceCallFailureReason::AuthorityUnavailable, error))?;
+    let recipient = manifest(context, runtime, &scope.callee.principal_id)
+        .await
+        .map_err(|error| refused(VoiceCallFailureReason::AuthorityUnavailable, error))?;
     validate_authority(
         &request.body,
         runtime,
         &caller,
         &recipient,
         ramflux_node_core::now_unix_seconds(),
-    )?;
+    )
+    .map_err(|error| refused(VoiceCallFailureReason::AuthorityRefused, error))?;
     let endpoint = ramflux_node_core::environment::var("RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT")
-        .map_err(|_| anyhow::anyhow!("voice relay is not configured"))?;
+        .map_err(|error| refused(VoiceCallFailureReason::RelayUnavailable, error))?;
     let tls = context.peers.tls().clone();
     let body = request.body.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<VoiceLeaseResponse> {
@@ -65,7 +96,9 @@ async fn issue(
             Ok(VoiceLeaseResponse::Status { status })
         }
     })
-    .await?
+    .await
+    .map_err(|error| refused(VoiceCallFailureReason::RelayUnavailable, error))?
+    .map_err(|error| refused(VoiceCallFailureReason::RelayUnavailable, error))
 }
 
 fn scope(request: &VoiceLeaseRequest) -> &ramflux_protocol::VoiceAllocationRequest {
@@ -94,15 +127,54 @@ async fn manifest(
     > = crate::router_post_json_async(&context.router, "/mvp1/principal-lookup", &lookup).await?;
     response.manifest.ok_or_else(|| anyhow::anyhow!("voice endpoint authority unavailable"))
 }
-fn branch<'a>(
+struct VoiceDeviceAuthority {
+    branch_public_key: String,
+    device_epoch: u64,
+}
+fn branch(
     endpoint: &ramflux_protocol::CallEndpoint,
-    manifest: &'a ramflux_node_core::DeviceManifestResponse,
-) -> anyhow::Result<&'a ramflux_node_core::DeviceManifestEntry> {
+    manifest: &ramflux_node_core::DeviceManifestResponse,
+    now: u64,
+) -> anyhow::Result<VoiceDeviceAuthority> {
     anyhow::ensure!(
         manifest.principal_id == endpoint.principal_id
             && manifest.root_public_key == endpoint.root_public_key,
         "voice endpoint root changed"
     );
+    if let Some(custody) = &manifest.custody {
+        anyhow::ensure!(
+            manifest.signed_device_set.is_none() && manifest.devices.is_empty(),
+            "voice endpoint mixes native and legacy authority"
+        );
+        let authority = ramflux_protocol::custody::CustodyAuthority {
+            publication: custody.publication.clone(),
+            custodian_publication: custody.custodian_publication.clone(),
+        };
+        let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
+        let body = &verified.envelope().body;
+        anyhow::ensure!(
+            body.principal_kind == ramflux_protocol::PrincipalKind::Human
+                && body.principal_id == endpoint.principal_id
+                && body.account_anchor == manifest.principal_commitment
+                && body.master_certificate.body.master_public_key == endpoint.root_public_key,
+            "voice native root identity or kind mismatch"
+        );
+        let device = body
+            .devices
+            .iter()
+            .find(|device| device.device_id == endpoint.device_id)
+            .ok_or_else(|| anyhow::anyhow!("voice native endpoint device revoked"))?;
+        let reference = ramflux_protocol::custody::DeviceRef {
+            account_anchor: body.account_anchor.clone(),
+            device_id: device.device_id.clone(),
+            device_epoch: device.device_epoch,
+        };
+        let certificate = verified.authorize(&reference, "call", now)?;
+        return Ok(VoiceDeviceAuthority {
+            branch_public_key: certificate.branch_signing_public_key.clone(),
+            device_epoch: device.device_epoch,
+        });
+    }
     let public = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
     let set = manifest
         .signed_device_set
@@ -132,7 +204,10 @@ fn branch<'a>(
             && d.agreement_key_commitment == commitments.1),
         "voice device keys revoked or substituted"
     );
-    Ok(device)
+    Ok(VoiceDeviceAuthority {
+        branch_public_key: device.branch_public_key.clone(),
+        device_epoch: device.device_epoch,
+    })
 }
 fn validate_authority(
     request: &VoiceLeaseRequest,
@@ -142,9 +217,9 @@ fn validate_authority(
     now: u64,
 ) -> anyhow::Result<()> {
     let scope = scope(request);
-    let caller_entry = branch(&scope.caller, caller)?;
+    let caller_entry = branch(&scope.caller, caller, now)?;
     let caller_key = caller_entry.branch_public_key.as_str();
-    let recipient_entry = branch(&scope.callee, recipient)?;
+    let recipient_entry = branch(&scope.callee, recipient, now)?;
     let recipient_key = recipient_entry.branch_public_key.as_str();
     let actor = match request {
         VoiceLeaseRequest::Accept { .. } => &scope.callee,
