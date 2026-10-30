@@ -5,21 +5,29 @@
 use super::{BranchCredentials, PrimaryVault};
 use crate::SdkError;
 use ramflux_crypto::custody::SelfSigningKey;
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 use zeroize::Zeroizing;
 struct MigrationApproval {
     account: String,
     request_id: String,
 }
 #[derive(Default)]
+struct MigrationApprovals {
+    pending: Option<MigrationApproval>,
+    consumed: BTreeSet<(String, String)>,
+}
+#[derive(Default)]
 pub struct MemoryPrimaryVault {
     entries: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
-    migration_approval: Mutex<Option<MigrationApproval>>,
+    migration_approval: Mutex<MigrationApprovals>,
 }
 impl MemoryPrimaryVault {
     /// Grant one exact migration signature in the default-off integration fixture only.
     /// # Errors
-    /// Refuses a second approval while an earlier request-bound approval remains armed.
+    /// Refuses a pending approval or any already-consumed account/request pair.
     pub fn approve_migration_once_for_test(
         &self,
         account: &str,
@@ -27,7 +35,16 @@ impl MemoryPrimaryVault {
     ) -> Result<(), SdkError> {
         let mut approval =
             self.migration_approval.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
-        if approval.is_some() {
+        if approval.consumed.contains(&(account.into(), request_id.into())) {
+            return Err(SdkError::LocalBusRefused {
+                code: "MigrationApprovalConsumed".into(),
+                message: "this migration fixture approval was already consumed".into(),
+                body: Box::new(serde_json::json!({
+                    "reason_code": "migration_approval_consumed"
+                })),
+            });
+        }
+        if approval.pending.is_some() {
             return Err(SdkError::LocalBusRefused {
                 code: "MigrationApprovalAlreadyArmed".into(),
                 message: "a migration fixture approval is already armed".into(),
@@ -36,7 +53,7 @@ impl MemoryPrimaryVault {
                 })),
             });
         }
-        *approval =
+        approval.pending =
             Some(MigrationApproval { account: account.into(), request_id: request_id.into() });
         Ok(())
     }
@@ -85,14 +102,16 @@ impl PrimaryVault for MemoryPrimaryVault {
     > {
         let mut approval =
             self.migration_approval.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
-        let matches = approval.as_ref().is_some_and(|approval| {
+        let matches = approval.pending.as_ref().is_some_and(|approval| {
             approval.account == request.local_account_id()
                 && approval.request_id == request.request_id()
         });
         if !matches {
             return Err(super::home_authorization::unavailable());
         }
-        let _consumed = approval.take();
+        if let Some(consumed) = approval.pending.take() {
+            approval.consumed.insert((consumed.account, consumed.request_id));
+        }
         drop(approval);
         let primary = self.load_primary(request.primary_reference())?;
         let now = request.requested_at;

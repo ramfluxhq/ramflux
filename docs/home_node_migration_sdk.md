@@ -9,19 +9,33 @@ not claim that Keychain itself displays migration fields.
 
 ## macOS primary credentials
 
-New native primary credentials use a versioned `presence:v1:` Keychain reference,
-with `AccessibleWhenUnlockedThisDeviceOnly`, synchronization disabled and
-`kSecAccessControlUserPresence`. Branch credentials retain their existing
-noninteractive flags-0 policy. Provider availability/existence queries request
-attributes only with authentication UI disabled; branch reads also forbid UI.
+Native primary credentials for ordinary signing use a noninteractive flags-0
+Keychain item with `AccessibleWhenUnlockedThisDeviceOnly` and synchronization
+disabled. Account creation, recovery, contact-card sharing, consent signing and
+branch-session credentials do not request OS presence. Ordinary reads explicitly
+disable authentication UI and report `CustodyVaultUnavailable` for a locked,
+missing, corrupt or unavailable credential. Availability/existence queries read
+attributes only with UI disabled.
 
-An older flags-0 primary is copied into the versioned item without overwriting an
-existing item. A small, non-secret `upgrade:v1:` Keychain journal records each
-step. The SDK reads back the new item under OS presence, checks its certified
-public key, removes the old item, verifies its absence and marks the upgrade ready
-before allowing a signature. A failed/cancelled upgrade never authorizes a move.
-Every later signature still reads the protected item under fresh OS presence;
-ready metadata is not an authentication token. Branch items are not upgraded.
+Only `sign_home_authorization` requests OS presence. It uses a separate versioned
+`presence:v1:` item protected by `kSecAccessControlUserPresence`, copied from the
+ordinary primary without overwriting an existing protected item. A small,
+non-secret `upgrade:v1:` journal records the transition. The SDK reads the
+protected item under fresh OS presence and checks its certified public key
+before signing. The ordinary item remains available for card/consent signing;
+it is never used as a fallback for migration approval. A failed/cancelled
+presence check never authorizes a move. Every later migration signature still
+reads the protected item under fresh OS presence; ready metadata is not an
+authentication token. Branch items are not upgraded.
+
+Accounts created by the earlier protected-only provider have no ordinary item.
+Ordinary reads refuse without prompting. A successful, explicitly requested
+migration presence check restores the ordinary item before signing, so later
+card/consent signing is noninteractive. The old `delete_legacy` journal stage
+remains readable, but this provider never deletes the ordinary signing item as
+part of migration. Generic Keychain errors remain `CustodyVaultUnavailable`;
+only migration preflight/signing maps them to
+`HomeMigrationRefused(CustodyUserPresenceUnavailable)`.
 
 The provider supplies no reusable authentication context. As documented by
 [Apple](https://developer.apple.com/documentation/security/ksecuseauthenticationcontext),
@@ -29,7 +43,9 @@ Security creates a context for that request, uses it once and discards it. The
 loaded primary signs one request and is dropped; it is never stored in the job,
 event stream or data vault. Application-owned buffers zeroize. CoreFoundation,
 Keychain IPC and OS-internal copies are not claimed to be synchronously scrubbed.
-A seed copied before upgrade remains a management-compromise residual.
+The ordinary and protected items contain the same software signing seed. This
+separates operation/prompt policy, not cryptographic authority: compromise of the
+ordinary credential remains a management-compromise residual.
 
 The safe password setter can replace duplicate items. The private native provider
 therefore uses insert-only Security FFI inside one narrowly allowed unsafe module;
@@ -45,8 +61,36 @@ closed. Presence work must run off the socket/UI and account DB writer threads.
 
 The default-off `itest-memory-vault` fixture needs explicit one-use migration
 approval. It does not enforce OS presence and must never enter a production/demo
-build. Automated memory-item tests cover every upgrade I/O boundary, denied
-presence, repeat approval, mismatching items and preservation of branch items.
+build. Start a fixture daemon with `rf daemon start --itest-memory-vault`, then
+send this local bus request with the frame account set to `human`:
+
+```json
+{
+  "method": "itest.migration.approve_once",
+  "body": {"account": "human", "request_id": "<canonical base64url 32-byte migration ID>"}
+}
+```
+
+The successful body is `{account, request_id, approved_once: true}`. The account
+must match the frame account, and the request ID is the journal's migration ID,
+not the bus frame ID. The method requires the `itest-memory-vault` feature,
+`RAMFLUX_ITEST_BUILD=1` provenance, and daemon opt-in. It is absent in production
+or release-profile builds; enabling the feature in either build fails compilation.
+The daemon's process-local memory vault tracks consumed account/request pairs
+until it exits, including when signing fails after consumption. A mismatched
+account/request cannot consume the pending approval. Saved journal requests are
+resumed without another approval or signature.
+
+| Typed bus error | Meaning |
+| --- | --- |
+| `MigrationApprovalUnavailable` | Daemon did not opt into the memory vault, or the configured provider has no fixture approval operation. |
+| `MigrationApprovalAlreadyArmed` | Another approval is still pending, including another call for the pending pair. |
+| `MigrationApprovalConsumed` | This account/request pair has already consumed its approval; it cannot be re-armed in this daemon, even while another pair is pending. |
+| `CustodySetupInvalid` | Account/frame mismatch or invalid account/request identifier. |
+
+Automated memory-item tests cover every upgrade I/O boundary, denied presence,
+repeat approval, mismatching items, noninteractive card/consent access and
+preservation of branch items.
 Compiling the macOS provider is not evidence that a provisioned Keychain prompt
 has run.
 
@@ -62,8 +106,9 @@ builds and two admitted migration-capable homes:
    source messaging must continue.
 3. Retry with Touch ID or the OS login credential. Verify that one exact pending
    proposal is signed, no recovery phrase is requested, and a changed proposal
-   digest is refused. On a pre-upgrade account, verify that the old flags-0 item
-   is removed after successful protected readback; never export credential data.
+   digest is refused. On a pre-upgrade account, verify that ordinary card/consent
+   signing remains noninteractive after protected readback; never export
+   credential data.
 4. Use the controlled lost-seal-response acceptance scenario to cancel at A using
    the Authorization alone. After the signed noncommit result, prepare another
    eligible move and require a new OS prompt even immediately after the first

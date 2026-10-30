@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Provider-boundary crashes never leave migration enabled with a flags-0 primary copy.
+//! Migration presence never becomes an ordinary-signing prompt or cached approval.
 use super::*;
 use std::{
     cell::{Cell, RefCell},
@@ -26,7 +26,7 @@ impl Store {
         let call = self.calls.get() + 1;
         self.calls.set(call);
         if self.fail.get() == Some(call) {
-            return Err(unavailable());
+            return Err(SdkError::CustodyVaultUnavailable);
         }
         Ok(())
     }
@@ -60,11 +60,11 @@ impl Items for Store {
         let Some(entry) = entries.get(reference) else { return Ok(None) };
         if entry.presence {
             if !presence {
-                return Err(unavailable());
+                return Err(SdkError::CustodyVaultUnavailable);
             }
             self.prompts.set(self.prompts.get() + 1);
             if !self.approved.get() {
-                return Err(unavailable());
+                return Err(SdkError::CustodyVaultUnavailable);
             }
         }
         Ok(Some(entry.bytes.clone()))
@@ -117,7 +117,7 @@ fn home_migration_presence_upgrade_recovers_every_io_boundary_without_losing_the
         store.fail.set(None);
         let loaded = approved_primary(&store, "primary", &primary.public_key())?;
         assert_eq!(loaded.public_key(), primary.public_key());
-        assert!(!store.entries.borrow().contains_key("primary"));
+        assert!(store.entries.borrow().contains_key("primary"));
         let entries = store.entries.borrow();
         assert!(entries[&protected_reference("primary")].presence);
         assert!(!entries["branch:primary"].presence);
@@ -143,7 +143,107 @@ fn home_migration_cancelled_presence_keeps_legacy_and_never_turns_ready_metadata
     store.approved.set(false);
     assert!(approved_primary(&store, "primary", &primary.public_key()).is_err());
     assert_eq!(store.prompts.get(), prompts + 1);
+    assert!(store.entries.borrow().contains_key("primary"));
+    Ok(())
+}
+
+#[test]
+fn ordinary_creation_card_and_consent_signing_never_request_presence() -> Result {
+    let store = Store::default();
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([7; 32]));
+    super::super::primary_items::store(&store, "primary", &*primary.vault_seed())?;
+    assert!(!store.entries.borrow()["primary"].presence);
+    // Card and consent both use the ordinary load_primary provider operation.
+    for _ in 0..2 {
+        assert_eq!(
+            key(&super::super::primary_items::load(&store, "primary")?)?.public_key(),
+            primary.public_key()
+        );
+    }
+    assert_eq!(store.prompts.get(), 0);
+    store.approved.set(true);
+    approved_primary(&store, "primary", &primary.public_key())?;
+    assert_eq!(store.prompts.get(), 1);
+    store.approved.set(false);
+    for _ in 0..2 {
+        assert_eq!(
+            key(&super::super::primary_items::load(&store, "primary")?)?.public_key(),
+            primary.public_key()
+        );
+    }
+    assert_eq!(store.prompts.get(), 1);
+    assert!(approved_primary(&store, "primary", &primary.public_key()).is_err());
+    assert_eq!(store.prompts.get(), 2);
+    super::super::primary_items::delete(&store, "primary")?;
     assert!(!store.entries.borrow().contains_key("primary"));
+    assert!(!store.entries.borrow().contains_key(&protected_reference("primary")));
+    Ok(())
+}
+
+#[test]
+fn protected_only_prior_account_restores_ordinary_access_only_after_explicit_presence() -> Result {
+    let (store, primary) = Store::fixture();
+    store.insert(&protected_reference("primary"), &*primary.vault_seed(), true)?;
+    store.delete("primary")?;
+    store.approved.set(false);
+    assert!(matches!(
+        super::super::primary_items::load(&store, "primary"),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    assert_eq!(store.prompts.get(), 0);
+    assert!(approved_primary(&store, "primary", &primary.public_key()).is_err());
+    assert!(!store.entries.borrow().contains_key("primary"));
+    store.approved.set(true);
+    approved_primary(&store, "primary", &primary.public_key())?;
+    let prompts = store.prompts.get();
+    assert_eq!(
+        key(&super::super::primary_items::load(&store, "primary")?)?.public_key(),
+        primary.public_key()
+    );
+    assert_eq!(store.prompts.get(), prompts);
+    assert!(!store.entries.borrow()["primary"].presence);
+    Ok(())
+}
+
+#[test]
+fn protected_only_repair_recovers_every_io_boundary_and_reads_old_journal_stages() -> Result {
+    let fixture = || -> Result<(Store, SelfSigningKey)> {
+        let (store, primary) = Store::fixture();
+        store.insert(&protected_reference("primary"), &*primary.vault_seed(), true)?;
+        store.delete("primary")?;
+        // An interrupted earlier upgrade may have recorded this retired stage.
+        store.journal(
+            "upgrade:v1:primary",
+            &serde_json::to_vec(&Upgrade {
+                version: 1,
+                public_key: primary.public_key(),
+                stage: Stage::DeleteLegacy,
+            })?,
+        )?;
+        store.calls.set(0);
+        Ok((store, primary))
+    };
+    let (complete, primary) = fixture()?;
+    approved_primary(&complete, "primary", &primary.public_key())?;
+    for boundary in 1..=complete.calls.get() {
+        let (store, primary) = fixture()?;
+        store.fail.set(Some(boundary));
+        assert!(matches!(
+            approved_primary(&store, "primary", &primary.public_key()),
+            Err(SdkError::HomeMigrationRefused(
+                ramflux_protocol::home_migration::Refusal::CustodyUserPresenceUnavailable
+            ))
+        ));
+        assert!(store.entries.borrow()[&protected_reference("primary")].presence);
+        store.fail.set(None);
+        approved_primary(&store, "primary", &primary.public_key())?;
+        let prompts = store.prompts.get();
+        assert_eq!(
+            key(&super::super::primary_items::load(&store, "primary")?)?.public_key(),
+            primary.public_key()
+        );
+        assert_eq!(store.prompts.get(), prompts);
+    }
     Ok(())
 }
 #[test]
