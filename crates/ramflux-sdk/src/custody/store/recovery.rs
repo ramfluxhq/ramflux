@@ -452,6 +452,7 @@ pub(crate) fn pending_restore(
         custodian_publication: authority.custodian_publication.clone().map(Box::new),
         pins,
         custodian_account_id: None,
+        agent_provisioning_vault_ref: None,
     };
     vault.store_branch(&branch_ref, &seeds)?;
     let result = (|| {

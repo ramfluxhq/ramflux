@@ -7,6 +7,7 @@ mod checkpoint;
 mod config;
 mod engine;
 mod participant;
+mod provisioning;
 mod runner;
 mod runner_deferred;
 mod runner_output;
@@ -18,6 +19,7 @@ pub use bus::{AgentBus, RfdBus};
 pub use checkpoint::{Checkpoint, CheckpointStore, OutputRefusal};
 pub use config::{Choice, Config, Rule, SurfaceRule};
 pub use engine::{ActionInput, ConversationInput, EngineProvider, Intent, RuleEngine};
+pub use provisioning::{CredentialVault, import_provisioning_bundle, unlock_provisioned_account};
 pub use runner::AgentHost;
 
 pub type Result<T> = std::result::Result<T, Error>;

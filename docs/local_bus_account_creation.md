@@ -57,8 +57,44 @@ envelope string fields longer than 128 bytes before producing secret output.
 Secret output uses a fixed 8192-byte buffer that cannot reallocate after writing
 secret bytes. Creation requests cannot carry retry operation identifiers.
 
-The ordinary desktop flow currently offers human accounts. A `headless_ai` begin
-without an independently verified human custodian returns `CustodySetupInvalid`.
+## Headless participant creation
+
+A trusted frontend for an unlocked, live native human owner may create a
+`headless_ai` account. On the exclusive ceremony connection, send
+`account.create.begin` with the owner as both the envelope `account_id` and
+`custodian_account`:
+
+```json
+{
+  "display_name": "Demo Assistant",
+  "principal_kind": "headless_ai",
+  "custodian_account": "account-owner"
+}
+```
+
+Creation without a custodian, with a non-human custodian, with an authority-blocked
+or networking-pending custodian, or with different envelope/body custodians is
+refused. The owner completes the same show-once phrase and hidden-word challenge.
+Each service has its own phrase, which is shown only in this owner ceremony. For
+`headless_ai`, `account.create.confirm` contains only `words`; the daemon generates
+the independent random data passphrase. Neither the agent process nor the confirm
+response receives the phrase or passphrase.
+
+After the agent account is live, the attended owner connection sends
+`account.export_agent_credentials {"account":"account-agent","path":"/private/path"}`.
+The target must be a native `headless_ai` account governed by that exact owner. The
+daemon refuses an existing destination and creates a 0600 file containing only
+`account_id` and `data_passphrase`. The credential is exportable once. Human
+accounts are always refused.
+
+Start `ramflux-agent-host --provisioning-bundle /private/path`. It checks that the
+file is private and matches the configured account, imports the passphrase into the
+operator Mac Keychain, deletes the file after the successful import, and unlocks the
+account before processing messages. Integration builds may explicitly use
+`--itest-memory-vault`; that volatile provider is unavailable in production. Linux
+production provisioning waits for `ID-02-VAULT-LINUX-01`, so run the demo agent on
+the operator Mac until that provider exists. No environment-variable, command-line,
+or piped phrase/passphrase path is accepted.
 
 After confirmation use ordinary methods on a normal connection. `account.lock`
 closes the actor and readers. `account.unlock {"passphrase":"…"}` opens the same
