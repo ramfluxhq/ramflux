@@ -33,11 +33,14 @@ async fn all_busy_retries_stop_at_ninety_seconds_with_the_typed_refusal() {
     assert!((8..=20).contains(&calls));
 }
 #[tokio::test(start_paused = true)]
-async fn a_stalled_attempt_does_not_extend_the_busy_retry_deadline() {
-    let budget = Budget::new();
+async fn a_stalled_attempt_is_a_typed_node_timeout_at_the_retry_deadline() {
+    let mut budget = Budget::new();
     let started = Instant::now();
     let result: Result<(), SdkError> = budget.attempt(std::future::pending()).await;
-    assert!(result.is_err_and(|error| is_busy(&error)));
+    assert!(matches!(
+        result,
+        Err(SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS })
+    ));
     assert_eq!(started.elapsed(), RETRY_BUDGET);
 }
 #[tokio::test(start_paused = true)]

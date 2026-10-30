@@ -83,6 +83,29 @@ impl LocalBusCreationClient {
         &mut self,
         display_name: &str,
         principal_kind: PrincipalKind,
+    ) -> Result<LocalBusPendingCreation, SdkError> {
+        self.begin_request("account.create", display_name, principal_kind, None).await
+    }
+
+    /// Begin with a confirmed home node bound only to the new account.
+    /// # Errors
+    /// Rejects unknown or disabled nodes, unavailable custody providers, invalid names and
+    /// unsupported principal kinds.
+    pub async fn begin_with_node(
+        &mut self,
+        display_name: &str,
+        principal_kind: PrincipalKind,
+        node_id: &str,
+    ) -> Result<LocalBusPendingCreation, SdkError> {
+        self.begin_request("account.create.begin", display_name, principal_kind, Some(node_id))
+            .await
+    }
+
+    async fn begin_request(
+        &mut self,
+        method: &str,
+        display_name: &str,
+        principal_kind: PrincipalKind,
         node_id: Option<&str>,
     ) -> Result<LocalBusPendingCreation, SdkError> {
         #[derive(Serialize)]
@@ -92,9 +115,7 @@ impl LocalBusCreationClient {
             #[serde(skip_serializing_if = "Option::is_none")]
             node_id: Option<&'a str>,
         }
-        let body = self
-            .exchange("account.create.begin", Input { display_name, principal_kind, node_id })
-            .await?;
+        let body = self.exchange(method, Input { display_name, principal_kind, node_id }).await?;
         if body.ceremony.as_deref() != Some("pending") {
             return Err(SdkError::CustodySetupInvalid);
         }
@@ -198,6 +219,7 @@ impl LocalBusCreationClient {
                 Some("CustodyConfirmationFailed") => SdkError::CustodyConfirmationFailed,
                 Some("CustodyVaultUnavailable") => SdkError::CustodyVaultUnavailable,
                 Some("CustodyExpired") => SdkError::CustodyExpired,
+                Some("NoNodeSelected") => SdkError::NoNodeSelected,
                 _ => SdkError::CustodySetupInvalid,
             });
         }
@@ -205,6 +227,22 @@ impl LocalBusCreationClient {
             return Err(SdkError::CustodySetupInvalid);
         }
         reply.body.ok_or(SdkError::CustodySetupInvalid)
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    async fn original_begin_signature(
+        client: &mut LocalBusCreationClient,
+    ) -> Result<LocalBusPendingCreation, SdkError> {
+        client.begin("Compatible Human", PrincipalKind::Human).await
+    }
+
+    #[test]
+    fn original_begin_signature_compiles() {
+        let _ = original_begin_signature;
     }
 }
 

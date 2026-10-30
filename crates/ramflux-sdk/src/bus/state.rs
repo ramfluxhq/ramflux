@@ -251,7 +251,13 @@ impl LocalBusAccountState {
             let native = self.client.born_v3_account.is_some();
             let result = self.ensure_gateway_live_inner(native).await;
             if native {
-                super::native_account::record_networking(self, result.as_ref().err())?;
+                let recorded =
+                    super::native_account::record_networking(self, result.as_ref().err());
+                if result.is_ok() {
+                    recorded?;
+                } else if recorded.is_err() {
+                    tracing::debug!("native networking state persistence failed");
+                }
             }
             result
         })

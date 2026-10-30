@@ -28,7 +28,8 @@ row expose `networking` plus optional `networking_reason`. A reason is represent
 `{"kind":"registration_refused","code":"principal_id_taken"}`, or
 `{"kind":"custody_expired"}`. The daemon derives these only from typed selection,
 transport, and custody errors; it does not classify log strings. The value is null
-when no typed cause is available or networking is live.
+when no typed cause is available or networking is live. The displayed
+`retry_after_ms` intervals are SDK retry defaults; gateways do not supply them.
 
 The resumable topic `account.networking.changed` carries `account_id`, `state`, and
 `networking_reason`. It is appended only when the networking state or reason changes,
@@ -36,7 +37,12 @@ so clients can subscribe instead of polling with backoff.
 
 The trusted `account.create.begin` request accepts optional `node_id`. It must reference an
 enabled, confirmed node. That node is persisted for the new account without changing
-`node.list.default_node_id`; omitting it preserves default-node behavior.
+`node.list.default_node_id`; omitting it preserves default-node behavior. Confirmation
+revalidates that the selected node still exists and remains enabled before persistence.
+The source-compatible `LocalBusCreationClient::begin(display_name, principal_kind)`
+continues to use the legacy `account.create` request accepted by old and current
+daemons. `begin_with_node(display_name, principal_kind, node_id)` uses
+`account.create.begin` for per-account selection.
 
 ## Typed display metadata
 

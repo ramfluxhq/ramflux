@@ -16,22 +16,36 @@ pub(super) fn busy() -> SdkError {
 pub(super) fn is_busy(error: &SdkError) -> bool {
     matches!(error, SdkError::CustodyNetwork(CustodyRefusal::Busy))
 }
+fn timeout() -> SdkError {
+    SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS }
+}
 pub(crate) struct Budget {
     deadline: Instant,
     backoff: Duration,
+    busy_observed: bool,
 }
 impl Budget {
     pub(crate) fn new() -> Self {
-        Self { deadline: Instant::now() + RETRY_BUDGET, backoff: Duration::from_secs(1) }
+        Self {
+            deadline: Instant::now() + RETRY_BUDGET,
+            backoff: Duration::from_secs(1),
+            busy_observed: false,
+        }
     }
     pub(crate) async fn attempt<T>(
-        &self,
+        &mut self,
         operation: impl Future<Output = Result<T, SdkError>>,
     ) -> Result<T, SdkError> {
         if Instant::now() >= self.deadline {
-            return Err(busy());
+            return Err(if self.busy_observed { busy() } else { timeout() });
         }
-        tokio::time::timeout_at(self.deadline, operation).await.map_err(|_| busy())?
+        let result = match tokio::time::timeout_at(self.deadline, operation).await {
+            Ok(result) => result,
+            Err(_) if self.busy_observed => return Err(busy()),
+            Err(_) => return Err(timeout()),
+        };
+        self.busy_observed = result.as_ref().is_err_and(is_busy);
+        result
     }
     pub(super) async fn pause(&mut self) -> Result<(), SdkError> {
         let mut bytes = [0; 8];
