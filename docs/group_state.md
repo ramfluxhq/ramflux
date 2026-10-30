@@ -13,7 +13,8 @@ fresh signed device manifest. A forwarding member cannot alter creator authority
 
 Native genesis carries a signed `issued_at` creation time. Its master and branch
 authority must be valid at that time with the custody protocol's 300-second
-clock-skew allowance, and creation cannot be later than the snapshot version.
+clock-skew allowance, and creation cannot be later than the snapshot version
+outside that same allowance (owner devices may have skewed clocks).
 Later versions verify the genesis at its immutable creation time and the current
 owner at that version's issue time. Expiring a historical lease does not freeze
 the group. Legacy genesis has no `issued_at` field and its creator certificate

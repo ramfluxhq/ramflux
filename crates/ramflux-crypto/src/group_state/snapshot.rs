@@ -122,7 +122,9 @@ pub(super) fn verify(snapshot: &GroupStateSnapshot) -> Result<(), CryptoError> {
             .genesis
             .issued_at
             .filter(|created_at| {
-                *created_at <= ramflux_protocol::MAX_SAFE_JSON_INTEGER && *created_at <= issued_at
+                *created_at <= ramflux_protocol::MAX_SAFE_JSON_INTEGER
+                    && *created_at
+                        <= issued_at.saturating_add(ramflux_protocol::custody::CLOCK_SKEW_SECONDS)
             })
             .ok_or_else(|| invalid("native genesis creation time unavailable"))?;
         verify_group_state_actor_at(&snapshot.genesis.actor, Some(created_at))?;

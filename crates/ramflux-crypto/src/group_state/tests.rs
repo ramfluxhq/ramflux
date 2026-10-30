@@ -415,7 +415,7 @@ fn native_genesis_actor_is_bound_to_its_signed_creation_time() -> Result<(), Cry
     missing.genesis.issued_at = None;
     assert!(verify_group_state_snapshot(missing).is_err());
     let mut future = state.snapshot().clone();
-    future.genesis.issued_at = Some(1001);
+    future.genesis.issued_at = Some(1301);
     assert!(verify_group_state_snapshot(future).is_err());
     // A later version with fresh authority remains valid after the genesis lease expires.
     let now = expires + 301;
@@ -432,6 +432,18 @@ fn native_genesis_actor_is_bound_to_its_signed_creation_time() -> Result<(), Cry
         },
     )?;
     verify_group_state_snapshot(later.snapshot().clone())?;
+    let skewed = snapshot::advance_as_with_native_signer(
+        &owner.primary,
+        &owner.branch,
+        &owner.actor,
+        &state,
+        snapshot::Apply {
+            requester: &owner.actor,
+            change: GroupStateChange::SetName { name: "Skewed sibling".into() },
+            now: 700,
+        },
+    )?;
+    verify_group_state_snapshot(skewed.snapshot().clone())?;
     Ok(())
 }
 
