@@ -25,6 +25,7 @@ impl RamfluxClient {
                 for device in &manifest.devices {
                     self.rotate_verified_group_pins(manifest, device)?;
                 }
+                self.record_contact_directory_change(manifest)?;
                 self.account_db()?.persist_actor_state(
                     &format!("identity/manifest-root/{}", manifest.principal_commitment),
                     manifest,
@@ -77,6 +78,7 @@ impl RamfluxClient {
                 &format!("identity/manifest/{}", manifest.principal_id),
                 manifest,
             )?;
+            self.record_contact_directory_change(manifest)?;
             db.persist_actor_state(
                 &format!("identity/manifest-root/{}", manifest.principal_commitment),
                 manifest,

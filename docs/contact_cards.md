@@ -376,3 +376,23 @@ account's current policy to preserve it). The response includes
 without an unexpired pending request. It does not clear decline/block fences,
 request decisions, active pending floors or independently cached signed authority.
 No stored encoding or schema version changes; the optional clear action is local.
+
+
+### Missing manifests during sibling contact backfill
+
+Own and contact manifest fetches share a five-second attempt window inside the
+account's twenty-second sync-pass deadline. Each tick fetches at most one contact
+manifest and scans at most four links. Missing manifests receive five attempts,
+with 5, 10, 20, 40 and 80 second retry delays recorded before network I/O. After
+five failures the contact is parked so later links can proceed.
+
+A completed scan containing parked contacts restarts 300 seconds after completion,
+or on the next tick after a changed verified directory manifest is persisted.
+Identical directory refreshes do not restart it. A changed own-device roster also
+restarts the scan, including its restriction-first ordering. An active scan finishes
+before a directory-triggered rescan, so directory traffic cannot starve later links.
+Each new scan gives missing contacts the same bounded attempt schedule. Successful
+staging removes the parked marker; existing own-device queue deduplication avoids
+repeated copies for unchanged contact and roster state. Retry progress survives
+account restarts; older completed cursors restart once on upgrade. These intervals
+are eligibility bounds: disconnected accounts resume on their next sync tick.

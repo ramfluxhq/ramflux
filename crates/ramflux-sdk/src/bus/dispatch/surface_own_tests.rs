@@ -1012,3 +1012,6 @@ mod group_consent;
 
 #[path = "shared_group_transfer_tests.rs"]
 mod ownership;
+
+#[path = "surface_own_tests/contact_backfill_tests.rs"]
+mod contact_backfill_tests;
