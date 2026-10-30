@@ -3,8 +3,8 @@
 `ramflux-agent-host` is an ordinary headless participant using an existing unlocked
 rfd account. rfd retains its keys and performs normal authenticated message delivery.
 The host accepts no root seeds, device seeds, passphrases, human credentials or grant
-confirmations. Rules match trimmed whole messages exactly and return one text reply or one bounded
-surface batch.
+confirmations. It can use either deterministic rules or a local PRX console API. Rules match
+trimmed whole messages exactly and return one text reply or one bounded surface batch.
 
 Provision the account with `rf account create --client-mode headless_ai` using the
 normal account setup options. Add its principal as a contact and group member through
@@ -28,6 +28,77 @@ install -d -m 700 "$HOME/.local/state/ramflux-agent"
 cargo run -p ramflux-agent-host -- --config /path/to/agent.json
 ```
 
+## PRX engine
+
+PRX can provide the model and tool-execution layer while rfd remains responsible for identity,
+membership, signed delivery, and human approval evidence. Initialize PRX, then edit its active
+configuration so tool turns require supervision and the causal decision plane is enabled:
+
+```sh
+prx init --interactive
+```
+
+```toml
+[autonomy]
+level = "supervised"
+
+[causal_tree]
+enabled = true
+```
+
+Start the local PRX daemon. It prints a one-time pairing code when no client is paired. Exchange
+that code locally and write only the returned bearer to a private file:
+
+```sh
+install -d -m 700 "$HOME/.local/state/ramflux-agent"
+umask 077
+curl --fail --silent --show-error -X POST \
+  -H "X-Pairing-Code: $PAIR_CODE" \
+  http://localhost:16830/pair \
+  | jq -er .token > "$HOME/.local/state/ramflux-agent/prx.token"
+chmod 600 "$HOME/.local/state/ramflux-agent/prx.token"
+```
+
+Do not put the bearer in the agent configuration. Select PRX instead of `rules` with an
+`engine.prx` object:
+
+```json
+{
+  "socket": "/private/path/to/rfd.sock",
+  "state_file": "/private/path/to/agent-state.json",
+  "account_id": "agent-account",
+  "engine": {
+    "prx": {
+      "base_url": "http://localhost:16830/",
+      "token_file": "/private/path/to/prx.token",
+      "session_scope": "per_conversation",
+      "request_timeout_s": 30,
+      "max_in_flight_per_conversation": 1
+    }
+  }
+}
+```
+
+Provision and unlock the native headless account with the one-shot bundle flow delivered by
+AGENT-V3-01. On a build containing that delivery, first launch accepts
+`--provisioning-bundle /private/path/to/bundle`; the bundle is imported into the platform vault
+and removed. After the account is unlocked, launch with the PRX configuration above. The bundle
+and the PRX bearer are separate credentials and neither belongs in the checkpoint.
+
+Each Ramflux conversation owns one persisted PRX session and at most one detached job. Replies are
+final text, not streamed. PRX tool access is scoped in PRX configuration, including
+`[autonomy.scopes]`, `[tool_tiering]`, and `exposed_tools`; the agent host does not broaden it.
+When PRX requests approval, the host creates a conversation task with a fresh argument-bound,
+high-risk grant request. Only the human's signed task decision is sent back to PRX. Standing grants
+never approve a PRX decision. Removing conversation access, locking the account, or revoking the
+local device cancels detached work.
+
+PRX `[IMAGE:path]` markers are removed from text replies and no attachment is sent in this release.
+Attachment transfer and externally streamed turns are deferred to PRX-BRIDGE-02. PRX network
+failures are silent and rate-limited in logs; other terminal failures produce one short fixed
+reply. The owner-only token file is read at startup, is never checkpointed, and is never included
+in diagnostics.
+
 For remote rfd, supply an operator-managed authenticated Unix-socket forward, such as
 OpenSSH StreamLocal forwarding, as `socket`. The host speaks the existing local bus;
 it does not expose an unauthenticated TCP listener or manage remote credentials.
@@ -35,8 +106,9 @@ Do not run a second host with a different checkpoint against the same account.
 An exclusive lock prevents two hosts sharing one checkpoint.
 
 The checkpoint is atomically replaced, fsynced and written mode 0600. It contains an
-account/device binding, applied journal sequence, bounded rate counters and at most
-one prepared output batch. A batch includes plaintext output: protect the directory.
+account/device binding, applied journal sequence, bounded rate counters, PRX session/job/task
+metadata when enabled, and at most one prepared output batch. It never contains the PRX bearer.
+A batch includes plaintext output: protect the directory.
 The host stores the entire batch before sending with stable operation/message IDs,
 so a lost response can reuse rfd's durable receipt. Each completed step is checkpointed
 before the next begins. After successful delivery it checkpoints the cursor and
@@ -130,10 +202,10 @@ output records a typed last_refusal and advances the cursor. Lost transport repl
 retain the exact durable pending request and reconnect. Only loss of the host's own
 identity/authorization or unrecoverable checkpoint I/O stops the running host.
 Configuration rejects unsafe reply and choice-label text before connecting. Fresh/gap startup does not synthesize commands from old snapshots;
-only already prepared work resumes. This deterministic skeleton has no automatic
-executor takeover, task engine, provider networking or approval capability.
+only already prepared work resumes. The host has no automatic executor takeover. Its PRX adapter
+uses only the bounded provider and approval operations described below.
 
-Run unit/fake-bus tests with `cargo test -p ramflux-agent-host`. The companion integration
+Run unit/fake-bus and fake-HTTP tests with `cargo test -p ramflux-agent-host`. The companion integration
 suite provides `k5a_realnet_agent_replies_in_dm_and_group`, covering authenticated DM
 and group replies and host restart without duplicate replies. The QA controller runs
 that gated slice on a container host; unit tests do not claim realnet acceptance.

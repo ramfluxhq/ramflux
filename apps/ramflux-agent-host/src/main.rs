@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 use clap::Parser;
-use ramflux_agent_host::{AgentHost, Config, Error, RfdBus, RuleEngine};
+use ramflux_agent_host::{AgentHost, Config, EngineProvider, Error, PrxEngine, RfdBus, RuleEngine};
 use std::path::PathBuf;
 mod reconnect;
 #[derive(Parser)]
@@ -22,7 +22,19 @@ async fn main() -> std::process::ExitCode {
 }
 async fn run() -> ramflux_agent_host::Result<()> {
     let config = Config::load(&Args::parse().config)?;
-    let mut host = AgentHost::new(config.clone(), RuleEngine::new(&config)?)?;
+    if let Some(engine) = &config.engine {
+        let provider = PrxEngine::new(&engine.prx, config.max_conversations)?;
+        run_provider(config, provider).await
+    } else {
+        let provider = RuleEngine::new(&config)?;
+        run_provider(config, provider).await
+    }
+}
+async fn run_provider(
+    config: Config,
+    provider: impl EngineProvider,
+) -> ramflux_agent_host::Result<()> {
+    let mut host = AgentHost::new(config.clone(), provider)?;
     let mut backoff = reconnect::ReconnectBackoff::default();
     loop {
         let started = std::time::Instant::now();

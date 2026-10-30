@@ -3,8 +3,8 @@
 //! Sequential bounded event application with write-ahead output and durable cursor recovery.
 use crate::checkpoint::Pending;
 use crate::{
-    AgentBus, Checkpoint, CheckpointStore, Config, ConversationInput, EngineProvider, Error,
-    Intent, Result, participant,
+    AgentBus, Checkpoint, CheckpointStore, Config, ConversationInput, EngineEvent, EngineInput,
+    EngineProvider, Error, Intent, Result, participant,
 };
 use ramflux_sdk::{LocalBusFrame, LocalBusFrameKind};
 use serde_json::json;
@@ -15,14 +15,23 @@ pub struct AgentHost<E> {
     pub(crate) store: CheckpointStore,
     pub(crate) state: Checkpoint,
 }
+struct IntentDelivery<'a> {
+    conversation_id: &'a str,
+    message_id: &'a str,
+    intents: Vec<Intent>,
+    seq: u64,
+    now_ms: u64,
+}
 impl<E: EngineProvider> AgentHost<E> {
     /// # Errors
     /// Rejects invalid configuration, corrupt state or exhausted persisted bounds.
-    pub fn new(config: Config, engine: E) -> Result<Self> {
+    pub fn new(config: Config, mut engine: E) -> Result<Self> {
         config.validate()?;
         let store = CheckpointStore::new(config.state_file.clone())?;
         let state = store.load()?;
+        engine.restore(state.engine.as_ref())?;
         if !crate::runner_deferred::valid(&state)
+            || !crate::runner_approval::valid(&state)
             || state.handled_actions.len() > 2048
             || state.pending.as_ref().is_some_and(|p| {
                 !matches!(
@@ -39,6 +48,18 @@ impl<E: EngineProvider> AgentHost<E> {
             return Err(Error::State);
         }
         Ok(Self { config, engine, store, state })
+    }
+    pub(crate) fn save_state(&mut self) -> Result<()> {
+        self.state.engine = self.engine.checkpoint()?;
+        self.store.save(&self.state)
+    }
+    pub(crate) fn save_engine_state_if_changed(&mut self) -> Result<()> {
+        let engine = self.engine.checkpoint()?;
+        if self.state.engine != engine {
+            self.state.engine = engine;
+            self.store.save(&self.state)?;
+        }
+        Ok(())
     }
     #[must_use]
     pub const fn checkpoint(&self) -> &Checkpoint {
@@ -59,6 +80,7 @@ impl<E: EngineProvider> AgentHost<E> {
             "device.changed",
             "identity.device_branch.revoked",
             "surface.changed",
+            "task.changed",
             "account.locked"
         ]);
         let subscription = bus
@@ -79,7 +101,7 @@ impl<E: EngineProvider> AgentHost<E> {
         }
         participant::snapshot(bus, "conversation.directory", "conversations").await?;
         participant::snapshot(bus, "group.list", "groups").await?;
-        self.store.save(&self.state)?;
+        self.save_state()?;
         self.recover_pending(bus).await
     }
 
@@ -112,6 +134,11 @@ impl<E: EngineProvider> AgentHost<E> {
             || event.method == "identity.device_branch.revoked"
                 && event.body["device_id"] == self.state.device_id
         {
+            for conversation_id in self.engine.active_conversations() {
+                self.engine.cancel(&conversation_id).await?;
+            }
+            self.state.approvals.clear();
+            self.save_state()?;
             return Err(Error::IdentityLost);
         }
         self.prune_rate_history(now_ms);
@@ -140,8 +167,11 @@ impl<E: EngineProvider> AgentHost<E> {
         if event.method == "surface.changed" {
             self.surface_action(bus, event, seq, now_ms).await?;
         }
+        if matches!(event.method.as_str(), "conversation.changed" | "group.changed") {
+            self.cancel_removed_conversations(bus).await?;
+        }
         self.state.cursor = Some(seq);
-        self.store.save(&self.state)
+        self.save_state()
     }
     fn is_own_message(&self, message: &serde_json::Value) -> bool {
         message["sender_id"] == self.state.device_id
@@ -195,9 +225,163 @@ impl<E: EngineProvider> AgentHost<E> {
         else {
             return Ok(());
         };
-        let intents =
-            self.engine.intents(&ConversationInput { conversation_id, message_id, text })?;
-        if intents.is_empty() {
+        let sender_display_name = participant::sender_display_name(bus, message).await?;
+        let chat_kind = if conversation["group_id"].is_string() { "group" } else { "direct" };
+        let mentioned = message["mentioned"].as_bool().unwrap_or(false);
+        let events = self
+            .engine
+            .submit(
+                EngineInput {
+                    conversation: ConversationInput { conversation_id, message_id, text },
+                    sender_display_name: &sender_display_name,
+                    chat_kind,
+                    mentioned,
+                },
+                now_ms,
+            )
+            .await?;
+        self.save_state()?;
+        self.handle_engine_events(bus, events, seq, now_ms).await
+    }
+
+    pub(crate) async fn handle_engine_events(
+        &mut self,
+        bus: &mut impl AgentBus,
+        events: Vec<EngineEvent>,
+        seq: u64,
+        now_ms: u64,
+    ) -> Result<()> {
+        for event in events {
+            let acknowledged = event.clone();
+            match event {
+                EngineEvent::Intents { conversation_id, message_id, intents } => {
+                    if intents.is_empty() {
+                        self.state.last_reply_ms.insert(conversation_id.clone(), now_ms);
+                    } else {
+                        self.emit_intents(
+                            bus,
+                            IntentDelivery {
+                                conversation_id: &conversation_id,
+                                message_id: &message_id,
+                                intents,
+                                seq,
+                                now_ms,
+                            },
+                        )
+                        .await?;
+                    }
+                    self.complete_resumed_task(bus, &conversation_id, true).await?;
+                }
+                EngineEvent::VisibleFailure { conversation_id, message_id } => {
+                    self.emit_intents(
+                        bus,
+                        IntentDelivery {
+                            conversation_id: &conversation_id,
+                            message_id: &message_id,
+                            intents: vec![Intent::ReplyText(
+                                "The agent engine could not complete this request.".into(),
+                            )],
+                            seq,
+                            now_ms,
+                        },
+                    )
+                    .await?;
+                    self.complete_resumed_task(bus, &conversation_id, false).await?;
+                }
+                EngineEvent::ApprovalRequired {
+                    conversation_id,
+                    message_id,
+                    decision_id,
+                    pending_tool,
+                } => {
+                    self.complete_resumed_task(bus, &conversation_id, true).await?;
+                    let started = self
+                        .start_approval(
+                            bus,
+                            crate::runner_approval::ApprovalRequest {
+                                conversation_id,
+                                message_id,
+                                decision_id,
+                                pending_tool,
+                                now_ms,
+                            },
+                        )
+                        .await?;
+                    if !started {
+                        let EngineEvent::ApprovalRequired { conversation_id, message_id, .. } =
+                            &acknowledged
+                        else {
+                            return Err(Error::State);
+                        };
+                        self.emit_intents(
+                            bus,
+                            IntentDelivery {
+                                conversation_id,
+                                message_id,
+                                intents: vec![Intent::ReplyText(
+                                    "A fresh human approval is required; the operation was not run."
+                                        .into(),
+                                )],
+                                seq,
+                                now_ms,
+                            },
+                        )
+                        .await?;
+                    }
+                }
+            }
+            self.engine.acknowledge(&acknowledged)?;
+            self.save_state()?;
+        }
+        Ok(())
+    }
+
+    async fn cancel_removed_conversations(&mut self, bus: &mut impl AgentBus) -> Result<()> {
+        let conversations = self.engine.active_conversations();
+        for conversation_id in conversations {
+            if participant::conversation(
+                bus,
+                &self.state,
+                &conversation_id,
+                self.config.max_conversations,
+            )
+            .await?
+            .is_none()
+            {
+                self.engine.cancel(&conversation_id).await?;
+                self.state.approvals.remove(&conversation_id);
+            }
+        }
+        self.save_state()
+    }
+
+    async fn emit_intents(
+        &mut self,
+        bus: &mut impl AgentBus,
+        delivery: IntentDelivery<'_>,
+    ) -> Result<()> {
+        let IntentDelivery { conversation_id, message_id, intents, seq, now_ms } = delivery;
+        participant::identity(bus, &mut self.state, &self.config.account_id).await?;
+        let Some(conversation) = participant::conversation(
+            bus,
+            &self.state,
+            conversation_id,
+            self.config.max_conversations,
+        )
+        .await?
+        else {
+            self.engine.cancel(conversation_id).await?;
+            return self.save_state();
+        };
+        let read =
+            bus.request("message.read", json!({"conversation_id":conversation_id}), None).await?;
+        let Some(message) = read["messages"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|message| message["message_id"] == message_id))
+        else {
+            return Ok(());
+        };
+        if message["deleted"] == true || self.is_own_message(message) {
             return Ok(());
         }
         let plan = if matches!(intents.first(), Some(Intent::CreateSurface(_))) {
@@ -247,7 +431,7 @@ impl<E: EngineProvider> AgentHost<E> {
             needs_rederive: None,
         });
         self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
-        self.store.save(&self.state)?;
+        self.save_state()?;
         self.recover_pending(bus).await?;
         Ok(())
     }

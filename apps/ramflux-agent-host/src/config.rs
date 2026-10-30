@@ -7,6 +7,25 @@ use std::path::{Path, PathBuf};
 
 pub const MAX_TEXT_BYTES: usize = 16_384;
 pub const MAX_CONFIG_BYTES: u64 = 65_536;
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrxSessionScope {
+    PerConversation,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrxConfig {
+    pub base_url: String,
+    pub token_file: PathBuf,
+    pub session_scope: PrxSessionScope,
+    pub request_timeout_s: u64,
+    pub max_in_flight_per_conversation: usize,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EngineConfig {
+    pub prx: PrxConfig,
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
@@ -60,7 +79,10 @@ pub struct Config {
     pub socket: PathBuf,
     pub state_file: PathBuf,
     pub account_id: String,
+    #[serde(default)]
     pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub engine: Option<EngineConfig>,
     #[serde(default = "poll")]
     pub poll_interval_ms: u64,
     #[serde(default = "interval")]
@@ -94,10 +116,11 @@ impl Config {
     /// # Errors
     /// Enforces finite rule, reply, polling, identifier and state budgets.
     pub fn validate(&self) -> Result<()> {
+        let prx = self.engine.as_ref().map(|engine| &engine.prx);
         if self.account_id.is_empty()
             || self.account_id.len() > 256
             || self.socket == self.state_file
-            || self.rules.is_empty()
+            || prx.is_some() != self.rules.is_empty()
             || self.rules.len() > 64
             || !(50..=60_000).contains(&self.poll_interval_ms)
             || !(100..=3_600_000).contains(&self.per_conversation_interval_ms)
@@ -110,6 +133,15 @@ impl Config {
                     || r.reply.len() > MAX_TEXT_BYTES
                     || !ramflux_protocol::text_safety::free_text_is_safe(&r.reply)
                     || r.surface.as_ref().is_some_and(|surface| !surface.valid(&r.reply))
+            })
+            || prx.is_some_and(|config| {
+                config.base_url.is_empty()
+                    || config.base_url.len() > 2048
+                    || config.token_file.as_os_str().is_empty()
+                    || config.token_file == self.state_file
+                    || config.request_timeout_s == 0
+                    || config.request_timeout_s > 3600
+                    || config.max_in_flight_per_conversation != 1
             })
         {
             return Err(Error::Config);
