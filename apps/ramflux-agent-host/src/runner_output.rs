@@ -80,33 +80,9 @@ impl<E: EngineProvider> AgentHost<E> {
                 }
                 return Ok(());
             }
-            if pending.method == "surface.resync" {
-                participant::field(&pending.body, "surface_ref")?;
-            } else if pending.method == "surface.send" {
-                let bytes = ramflux_protocol::decode_base64url(
-                    pending.body["wire_base64"].as_str().ok_or(Error::State)?,
-                )
-                .map_err(|_| Error::State)?;
-                let event = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(&bytes)
-                    .map_err(|_| Error::State)?;
-                if event.conversation_id() != pending.conversation_id {
-                    return Err(Error::State);
-                }
-            } else {
-                let sender = if pending.method == "group.send" && self.state.native_account {
-                    &self.state.principal_id
-                } else {
-                    &self.state.device_id
-                };
-                if pending.body["sender_id"] != *sender {
-                    return Err(Error::Unauthorized);
-                }
-                if pending.method == "group.send" && current["group_id"] != pending.body["group_id"]
-                    || pending.method == "message.submit" && !current["group_id"].is_null()
-                {
-                    self.complete_pending(&pending)?;
-                    return Ok(());
-                }
+            if !output_scope_matches(&self.state, &pending, &current)? {
+                self.complete_pending(&pending)?;
+                return Ok(());
             }
             let result = bus
                 .request(&pending.method, pending.body.clone(), Some(&pending.operation_id))
@@ -182,6 +158,40 @@ impl<E: EngineProvider> AgentHost<E> {
         self.state.pending = None;
         self.store.save(&self.state)
     }
+}
+fn output_scope_matches(
+    state: &crate::Checkpoint,
+    pending: &Pending,
+    current: &serde_json::Value,
+) -> Result<bool> {
+    if pending.method == "surface.resync" {
+        participant::field(&pending.body, "surface_ref")?;
+    } else if pending.method == "surface.send" {
+        let bytes = ramflux_protocol::decode_base64url(
+            pending.body["wire_base64"].as_str().ok_or(Error::State)?,
+        )
+        .map_err(|_| Error::State)?;
+        let event = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(&bytes)
+            .map_err(|_| Error::State)?;
+        if event.conversation_id() != pending.conversation_id {
+            return Err(Error::State);
+        }
+    } else {
+        let sender = if pending.method == "group.send" && state.native_account {
+            &state.principal_id
+        } else {
+            &state.device_id
+        };
+        if pending.body["sender_id"] != *sender {
+            return Err(Error::Unauthorized);
+        }
+        if pending.method == "group.send" && current["group_id"] != pending.body["group_id"]
+            || pending.method == "message.submit" && !current["group_id"].is_null()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 pub(crate) fn action_key(reference: &str, id: &str) -> String {
     ramflux_protocol::hash_base64url(
