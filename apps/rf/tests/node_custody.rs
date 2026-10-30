@@ -371,6 +371,14 @@ fn deployed_record_requires_the_pinned_signature_before_any_preparation() -> Res
         fixture.run("custody-renew", &["--deployed-record", path.to_str().ok_or("path")?])?;
     assert!(!result.status.success());
     assert!(!fixture.output.join("custody-epoch-2.env").exists());
+    fs::write(&path, br#"{"body":"PRIVATE_CREDENTIAL_MARKER","signature":"unused"}"#)?;
+    let result =
+        fixture.run("custody-renew", &["--deployed-record", path.to_str().ok_or("path")?])?;
+    assert!(!result.status.success());
+    let diagnostics =
+        format!("{}{}", String::from_utf8(result.stdout)?, String::from_utf8(result.stderr)?);
+    assert!(diagnostics.contains("DEMO_CUSTODY_DEPLOYED_RECORD_INVALID"));
+    assert!(!diagnostics.contains("PRIVATE_CREDENTIAL_MARKER"));
     Ok(())
 }
 
