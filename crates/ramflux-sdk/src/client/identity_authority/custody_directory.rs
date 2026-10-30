@@ -182,7 +182,7 @@ impl RamfluxClient {
         Ok(())
     }
 
-    pub(super) fn custody_mode_observed(&self, anchor: &str) -> Result<bool, SdkError> {
+    pub(crate) fn custody_mode_observed(&self, anchor: &str) -> Result<bool, SdkError> {
         Ok(self
             .born_v3_account
             .as_ref()
