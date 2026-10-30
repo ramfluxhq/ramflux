@@ -473,5 +473,5 @@ pub(super) async fn exchange<S: ramflux_transport::GatewaySessionTransport + ?Si
         Ok::<_, SdkError>(response)
     })
     .await
-    .map_err(|_| SdkError::CustodyNetwork(CustodyRefusal::SessionExpired))?
+    .map_err(|_| SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS })?
 }

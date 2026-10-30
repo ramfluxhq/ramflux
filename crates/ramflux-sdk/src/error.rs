@@ -19,6 +19,8 @@ pub enum SdkError {
         #[source]
         source: Box<SdkError>,
     },
+    #[error("node operation timed out; retry after {retry_after_ms}ms")]
+    NodeTimeout { retry_after_ms: u64 },
     #[error("born-v3 cannot accept legacy authority")]
     CustodyModeDowngrade,
     #[error("invalid custody setup")]

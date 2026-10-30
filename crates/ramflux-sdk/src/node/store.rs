@@ -92,6 +92,14 @@ impl NodeStore {
         Ok(Some(profile.clone()))
     }
 
+    pub(crate) fn confirmed_for_new_account(&self, id: &str) -> Result<NodeProfile, SdkError> {
+        let profile = self.profiles.get(id).ok_or(SdkError::NoNodeSelected)?;
+        if !profile.enabled {
+            return Err(SdkError::NoNodeSelected);
+        }
+        Ok(profile.clone())
+    }
+
     pub(crate) fn observe(&mut self, record: &WellKnownClientRecord) -> bool {
         if let Some(profile) = self.profiles.get_mut(&record.node_id)
             && profile.node_public_key != record.node_public_key

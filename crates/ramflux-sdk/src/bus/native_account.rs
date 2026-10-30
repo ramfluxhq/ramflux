@@ -82,7 +82,8 @@ pub(super) async fn unlock(
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());
     if let Err(error) = account.ensure_gateway_live().await {
-        tracing::debug!(%error, "native account data unlocked; networking pending");
+        let _ = error;
+        tracing::debug!("native account data unlocked; networking pending");
     }
     let result = response(&account)?;
     state.accounts.insert(id.into(), account);
@@ -224,8 +225,11 @@ pub(super) async fn configure_pending(account: &mut LocalBusAccountState) -> Res
     let root = &setup.data_root;
     let saved = account.client.account_db()?.load_actor_state::<String>("account/node-id")?;
     let nodes = crate::node::NodeStore::load(root, &setup.builtin_nodes)?;
-    let profile =
-        nodes.selected(saved.as_deref(), saved.is_some())?.ok_or(SdkError::NoNodeSelected)?;
+    let profile = if let Some(id) = saved.as_deref() {
+        nodes.profiles.get(id).cloned().ok_or(SdkError::NoNodeSelected)?
+    } else {
+        nodes.selected(None, false)?.ok_or(SdkError::NoNodeSelected)?
+    };
     let old = &account.gateway_config;
     let endpoint = GatewayQuicEndpointConfig {
         bind_addr: old.bind_addr,
@@ -263,13 +267,14 @@ const NODE_UNREACHABLE_RETRY_AFTER_MS: u64 = 5_000;
 pub(super) fn networking_reason(error: &SdkError) -> Option<AccountNetworkingReason> {
     match error {
         SdkError::NoNodeSelected => Some(AccountNetworkingReason::NoNodeSelected),
-        SdkError::NodeUnreachable { retry_after_ms, .. } => {
+        SdkError::NodeUnreachable { retry_after_ms, .. }
+        | SdkError::NodeTimeout { retry_after_ms } => {
             Some(AccountNetworkingReason::NodeUnreachable { retry_after_ms: *retry_after_ms })
         }
         SdkError::CustodyNetwork(CustodyRefusal::Unsupported) => {
             Some(AccountNetworkingReason::NodeCustodyUnavailable)
         }
-        SdkError::CustodyNetwork(CustodyRefusal::Busy) => {
+        SdkError::CustodyNetwork(CustodyRefusal::Busy | CustodyRefusal::Capacity) => {
             Some(AccountNetworkingReason::NodeBusy { retry_after_ms: NODE_BUSY_RETRY_AFTER_MS })
         }
         SdkError::CustodyNetwork(
@@ -310,7 +315,9 @@ pub(super) fn record_networking(
     let now = crate::custody::network_now()?;
     let mut native = crate::custody::load_account(&root, &id, now)?;
     if native.state() == crate::custody::CreationState::NetworkingPending {
-        native.set_networking_reason(&root, error.and_then(networking_reason))?;
+        if let Some(error) = error {
+            native.set_networking_reason(&root, networking_reason(error))?;
+        }
         native = crate::custody::load_account(&root, &id, now)?;
     }
     let body = serde_json::json!({

@@ -175,9 +175,8 @@ fn apply(
                 .node_id
                 .map(|node_id| {
                     crate::node::NodeStore::load(&config.data_root, &config.builtin_nodes)?
-                        .selected(Some(&node_id), false)?
+                        .confirmed_for_new_account(&node_id)
                         .map(|profile| profile.node_id)
-                        .ok_or(SdkError::NoNodeSelected)
                 })
                 .transpose()?;
             primary_vault(config).preflight()?;

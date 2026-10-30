@@ -81,11 +81,7 @@ pub(crate) async fn gateway_connection_timeout<T, F>(
 where
     F: Future<Output = Result<T, SdkError>>,
 {
-    if native {
-        crate::custody::retry::Budget::new().attempt(future).await
-    } else {
-        gateway_session_timeout(operation, future).await
-    }
+    if native { future.await } else { gateway_session_timeout(operation, future).await }
 }
 
 /// GW-TOKEN-01-A2: build one freshly-stamped, signed gateway request.

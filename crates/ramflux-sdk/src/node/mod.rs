@@ -13,7 +13,7 @@ mod store;
 pub(crate) use discovery::{discovery_origin, fetch_client_record};
 pub use profile::{NodeGateway, NodePinSource, NodeProfile, NodeRelay};
 pub(crate) use store::{NodeStore, PendingNode};
-const NODE_RETRY_AFTER_MS: u64 = 5_000;
+pub(crate) const NODE_RETRY_AFTER_MS: u64 = 5_000;
 pub(crate) async fn resolve_node_addr(addr: &str) -> Result<SocketAddr, SdkError> {
     let resolved = tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host(addr))
         .await

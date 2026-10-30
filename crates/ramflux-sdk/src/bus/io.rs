@@ -133,8 +133,9 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     match error {
         SdkError::ContactInput(crate::ContactReason::AnchorMismatch) => "AnchorMismatch",
         SdkError::NetworkingPending
-        | SdkError::NoNodeSelected
-        | SdkError::NodeUnreachable { .. } => "NetworkingPending",
+        | SdkError::NodeUnreachable { .. }
+        | SdkError::NodeTimeout { .. } => "NetworkingPending",
+        SdkError::NoNodeSelected => "NoNodeSelected",
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
         SdkError::CustodySetupInvalid => "CustodySetupInvalid",
         SdkError::CustodyExpired => "CustodyExpired",

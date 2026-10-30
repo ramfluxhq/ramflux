@@ -216,17 +216,7 @@ async fn ordinary_native_gateway_busy_retries_outlive_the_legacy_timeout_with_fr
 }
 
 #[tokio::test(start_paused = true)]
-async fn native_connection_deadline_is_ninety_seconds_and_legacy_stays_fifteen() {
-    let start = tokio::time::Instant::now();
-    let native: std::result::Result<(), crate::SdkError> =
-        crate::gateway::engine::gateway_connection_timeout(
-            true,
-            "native admission",
-            std::future::pending(),
-        )
-        .await;
-    assert!(matches!(native, Err(crate::SdkError::CustodyNetwork(CustodyRefusal::Busy))));
-    assert_eq!(start.elapsed(), Duration::from_secs(90));
+async fn legacy_connection_deadline_stays_fifteen_seconds() {
     let start = tokio::time::Instant::now();
     let legacy: std::result::Result<(), crate::SdkError> =
         crate::gateway::engine::gateway_connection_timeout(

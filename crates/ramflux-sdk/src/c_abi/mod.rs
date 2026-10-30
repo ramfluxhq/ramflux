@@ -845,6 +845,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         SdkError::ContactUnavailable(_)
         | SdkError::NoNodeSelected
         | SdkError::NodeUnreachable { .. }
+        | SdkError::NodeTimeout { .. }
         | SdkError::GatewaySessionRejected(_)
         | SdkError::GatewaySessionNotEstablished => RamfluxErrorCode::TransportUnavailable,
         SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => {

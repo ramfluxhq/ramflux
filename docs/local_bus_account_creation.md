@@ -21,6 +21,11 @@ creation has no enable/disable option. Vault availability is checked by begin.
    passphrase, or caller-selected identifiers belong in this request. Its body is
    `{"ceremony":"pending","ceremony_id":"ceremony-…","expires_in_ms":300000}`;
    the remaining lifetime can be shorter than the example's five minutes.
+   `LocalBusCreationClient::begin(display_name, principal_kind)` retains its
+   original source-compatible signature and uses the legacy `account.create`
+   spelling accepted by old and current daemons. Use
+   `begin_with_node(display_name, principal_kind, node_id)` to bind a confirmed
+   node through `account.create.begin`.
 2. On that same connection, send `account.create.show_once` with `{}`. The response
    body contains only `phrase`, a 24-word BIP39 phrase. Display it once. Do not
    retain a second copy, log it, or move it into a generic JSON response model.
@@ -34,7 +39,9 @@ creation has no enable/disable option. Vault availability is checked by begin.
    passphrase and does not change identity derivation. There is one word-check
    attempt with no per-word feedback. Wrong words publish no account and discard
    the passphrase. The primary credential is stored separately in the supported
-   non-synchronizing provider; data unlock never requires that credential.
+   non-synchronizing provider; data unlock never requires that credential. The
+   daemon revalidates a ceremony's selected node immediately before persistence;
+   confirmation fails with `NoNodeSelected` if the node was removed or disabled.
 5. Successful confirmation returns
    `{"account_id":"account-…","display_name":"Example Human","state":"unlocked","networking":"networking_pending"}`
    only after the ordinary account actor has opened its data database and reader
@@ -47,7 +54,8 @@ For native accounts whose `networking` is not `live`, `account.status` and
 `account.list.account_details` include `networking_reason`. The value is a tagged
 object with `kind`: `no_node_selected`, `node_unreachable`,
 `node_custody_unavailable`, `node_busy`, `registration_refused`, or
-`custody_expired`. Unreachable and busy reasons include `retry_after_ms`; a
+`custody_expired`. Unreachable and busy reasons include `retry_after_ms`; those
+intervals are SDK retry defaults, not hints received from the gateway. A
 registration refusal includes the typed custody refusal `code`. The field is null
 when no typed cause is available and is cleared when networking becomes live.
 
