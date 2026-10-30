@@ -84,6 +84,16 @@ impl RamfluxClient {
         claimed_sender: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
+        self.verified_group_payload_principal(group, claimed_sender, entry)?;
+        Ok(())
+    }
+
+    pub(crate) fn verified_group_payload_principal(
+        &self,
+        group: &str,
+        claimed_sender: &str,
+        entry: &GatewayInboxEntry,
+    ) -> Result<String, SdkError> {
         if claimed_sender != entry.envelope.source_device_id {
             return Err(SdkError::InboundRejected(
                 "group payload sender differs from authenticated source device".into(),
@@ -94,11 +104,13 @@ impl RamfluxClient {
                 "local device is not a current group member".into(),
             ));
         }
+        let principal = self.authenticated_envelope_sender(entry)?;
         self.require_group_sender_pin(
             group,
-            &entry.envelope.source_principal_id,
+            &principal,
             &self.authenticated_device_identity(entry)?,
-        )
+        )?;
+        Ok(principal)
     }
 
     pub(crate) fn require_group_sender_pin(

@@ -278,7 +278,18 @@ impl RamfluxClient {
         envelope: &SdkGroupEncryptedEnvelope,
     ) -> Result<Vec<u8>, SdkError> {
         self.account_db()?.write_transaction(|| {
-            self.require_group_payload_sender(&envelope.group_id, &envelope.sender_id, entry)?;
+            let sender_principal = self.verified_group_payload_principal(
+                &envelope.group_id,
+                &envelope.sender_id,
+                entry,
+            )?;
+            let sender_identity = self.authenticated_device_identity(entry)?;
+            let projected_sender =
+                if self.custody_mode_observed(sender_identity.root_commitment())? {
+                    sender_principal.as_str()
+                } else {
+                    envelope.sender_id.as_str()
+                };
             if self
                 .direct_messages(conversation_id)?
                 .iter()
@@ -303,7 +314,7 @@ impl RamfluxClient {
                     self.send_direct_message(
                         conversation_id,
                         message_id,
-                        &envelope.sender_id,
+                        projected_sender,
                         encrypted_body,
                     )?;
                     self.account_db()?.store_message_content(

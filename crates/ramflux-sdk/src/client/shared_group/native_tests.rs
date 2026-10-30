@@ -57,15 +57,45 @@ async fn peer_accepts_native_owner_snapshot_and_decrypts_its_group_key() -> Test
         "owner-device",
         b"native group key works",
     )?;
-    peer.client.send_direct_message(
-        "native-thread",
-        "native-message",
-        "owner-device",
-        &encrypted,
-    )?;
+    let message = GatewayDirectMessage {
+        conversation_id: "native-thread".into(),
+        message_id: "native-message".into(),
+        envelope_id: "native-message".into(),
+        source_principal_id: owner.manifest.principal_id.clone(),
+        sender_id: owner.config.device_id.clone(),
+        recipient_device_id: Some(peer.config.device_id.clone()),
+        recipient_principal_commitment: Some(peer.manifest.principal_commitment.clone()),
+        target_delivery_id: peer.config.target_delivery_id.clone(),
+        encrypted_body: encrypted,
+        created_at: crate::time::now_unix_timestamp(),
+        ttl: 3600,
+    };
+    let entry = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: message.target_delivery_id.clone(),
+        envelope: crate::dm::gateway_direct_message_envelope(&owner.config, &message, None)?,
+    };
+    assert!(matches!(
+        peer.client.append_group_gateway_delivery_for_recipient(
+            "native-thread",
+            "native-group",
+            "native-message",
+            &entry,
+            &peer.config.device_id,
+        )?,
+        GroupGatewayDeliveryResult::Message(ref plaintext) if plaintext == b"native group key works"
+    ));
+    let projected = peer
+        .client
+        .direct_messages("native-thread")?
+        .into_iter()
+        .find(|message| message.message_id == "native-message")
+        .ok_or("projected native group message")?;
+    assert_eq!(projected.sender_id, owner.manifest.principal_id);
     assert_eq!(
-        peer.client.decrypt_group_message("native-thread", "native-message")?,
-        b"native group key works"
+        peer.client.account_db()?.message_content("native-message")?.as_deref(),
+        Some(b"native group key works".as_slice())
     );
     Ok(())
 }
