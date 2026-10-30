@@ -35,9 +35,18 @@ cargo run -p ramflux-agent-host -- \
 The first successful import stores the data passphrase in the operator Mac Keychain,
 removes the bundle, and unlocks the rfd account. Later starts need only `--config`.
 For an sd001 demo, run rfd and the agent host on the operator Mac, configure rfd with
-the signed sd001 node profile, create the human owner first, create/export the agent as
-that owner, add the two native principals as contacts, and then start the host with the
-bundle. Linux production is not supported until `ID-02-VAULT-LINUX-01`; do not copy the
+the signed sd001 node profile, create and unlock the human owner first, then run:
+
+```sh
+rf account create --display-name "Demo agent" --kind headless_ai --custodian "$OWNER_ACCOUNT"
+rf account export-agent-credentials --account "$AGENT_ACCOUNT" --out /private/path/agent.bundle
+```
+
+The owner account must remain the active unlocked account for export. Record the service
+phrase shown once by the first command. Export is one-shot: if the bundle is lost, recover
+the agent with that phrase rather than trying to export the credential again. Add the two
+native principals as contacts, and then start the host with the bundle. Linux production
+is not supported until `ID-02-VAULT-LINUX-01`; do not copy the
 bundle to the Linux service host. Integration tests compile the explicit
 `--itest-memory-vault` alternative, which is volatile and unavailable in production.
 
@@ -146,7 +155,10 @@ Configuration rejects unsafe reply and choice-label text before connecting. Fres
 only already prepared work resumes. This deterministic skeleton has no automatic
 executor takeover, task engine, provider networking or approval capability.
 
-Run unit/fake-bus tests with `cargo test -p ramflux-agent-host`. The companion integration
+Run unit/fake-bus tests with `cargo test -p ramflux-agent-host`. Native `account.status`
+requires a Live networking state (and no networking refusal reason when supplied), an
+unlocked local account, an unfenced authority, and a verified headless self identity.
+The companion integration
 suite provides `k5a_realnet_agent_replies_in_dm_and_group`, covering authenticated DM
 and group replies and host restart without duplicate replies. The QA controller runs
 that gated slice on a container host; unit tests do not claim realnet acceptance.

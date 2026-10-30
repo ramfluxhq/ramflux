@@ -40,7 +40,7 @@ async fn startup_and_reconnect_authentication_races_retry_identity_before_resumi
                         frame.ok = Some(!racing);
                         frame.body = match method {
                             "account.status" => {
-                                json!({"client_mode":"headless_ai","local_device_authorized":true,"principal_id":"agent"})
+                                json!({"account_id":"agent","local_account_id":"agent","state":"unlocked","networking":"live","display_name":"Agent","principal_id":"agent","authority_blocked":false,"principal_commitment":"commitment","device_id":"device","target_delivery_id":"target","node_id":"node","session_id":"session","active_transport_kind":"quic","pending_deliveries":0})
                             }
                             "device.list" => {
                                 json!({"principal_id":"agent","local_device_id":"device","devices":[{"device_id":"device"}]})

@@ -85,7 +85,8 @@ After the agent account is live, the attended owner connection sends
 The target must be a native `headless_ai` account governed by that exact owner. The
 daemon refuses an existing destination and creates a 0600 file containing only
 `account_id` and `data_passphrase`. The credential is exportable once. Human
-accounts are always refused.
+accounts are always refused. If the bundle is lost or an import fails, use the owner's
+saved service recovery phrase; the daemon will not export the same credential again.
 
 Start `ramflux-agent-host --provisioning-bundle /private/path`. It checks that the
 file is private and matches the configured account, imports the passphrase into the
@@ -113,6 +114,14 @@ reads the requested words and independent local data passphrase with echo disabl
 Only the public account result goes to stdout. There are no seed, phrase, account
 identifier or passphrase arguments for creation, and no environment-variable or
 piped-input creation flow. The old `account login` seed-taking alias is removed.
+
+For a headless participant, keep the native human custodian unlocked and active, then
+run `rf account create --display-name "Service" --kind headless_ai --custodian <owner>`.
+The same attended terminal displays and clears the service phrase, while rfd generates
+the data passphrase. Once registration is Live, run
+`rf account export-agent-credentials --account <agent> --out <private-path>`. The export
+uses the active owner session and is refused for a different, locked, pending, or
+non-human custodian.
 
 Integration builds can explicitly select `rf daemon start --itest-memory-vault`
 only when compiled with the gated `itest-memory-vault` feature. Credentials then

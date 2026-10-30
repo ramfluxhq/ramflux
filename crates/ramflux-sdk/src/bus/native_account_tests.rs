@@ -196,6 +196,156 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
 }
 
 #[tokio::test]
+async fn headless_creation_refuses_every_untrusted_custodian_entry() -> Result {
+    use crate::{LocalBusCreationClient, custody::CustodyBusClient};
+    use std::sync::Arc;
+    let root = Root::new()?;
+    let vault = Arc::new(TestVault::default());
+    let now = crate::custody::network_now()?;
+    let create = |id: &str, kind: ramflux_protocol::PrincipalKind, custodian: Option<&str>| {
+        let mut input = input(id);
+        input.principal_kind = kind;
+        input.custodian_account_id = custodian.map(str::to_owned);
+        let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
+        let phrase = ceremony.show_once()?;
+        let positions = ceremony.hidden_challenge()?;
+        ceremony.confirm_with_passphrase(
+            &words(&phrase, positions)?,
+            vault.as_ref(),
+            now,
+            format!("{id}-secret").as_bytes(),
+        )?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    create("owner", ramflux_protocol::PrincipalKind::Human, None)?;
+    crate::custody::tests::mark_live(&root.0, "owner", now)?;
+    create("other", ramflux_protocol::PrincipalKind::Human, None)?;
+    crate::custody::tests::mark_live(&root.0, "other", now)?;
+    create("pending", ramflux_protocol::PrincipalKind::Human, None)?;
+    create("agent", ramflux_protocol::PrincipalKind::HeadlessAi, Some("owner"))?;
+    crate::custody::tests::mark_live(&root.0, "agent", now)?;
+    drop(create);
+
+    let socket = root.0.join("headless-refusals.sock");
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.custody_vault = Some(vault);
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _stop = Stop(stop);
+        let mut ceremony = LocalBusCreationClient::connect(&socket).await?;
+        assert!(ceremony.begin_headless("Locked owner", "owner").await.is_err());
+        assert!(
+            ceremony
+                .begin_headless_with_envelope("No owner envelope", "owner", None)
+                .await
+                .is_err()
+        );
+        let mut bus = connect(&socket).await?;
+        bus.request(
+            Some("owner".into()),
+            "stream",
+            "subscription.open",
+            json!({"topics":[],"attended_frontend":true}),
+        )
+        .await?;
+        let locked_export = bus
+            .request_frame_response(LocalBusFrame::request(
+                "locked-export",
+                Some("owner".into()),
+                "account",
+                "account.export_agent_credentials",
+                json!({"account":"agent","path":root.0.join("locked.bundle")}),
+            ))
+            .await?;
+        assert!(locked_export.error.is_some());
+        for id in ["owner", "other", "pending", "agent"] {
+            bus.request(
+                Some(id.into()),
+                "account",
+                "account.unlock",
+                json!({"passphrase":format!("{id}-secret")}),
+            )
+            .await?;
+        }
+        assert!(
+            ceremony
+                .begin_headless_with_envelope("Non-owner session", "owner", Some("other"))
+                .await
+                .is_err()
+        );
+        assert!(ceremony.begin_headless("Pending owner", "pending").await.is_err());
+        assert!(ceremony.begin_headless("Non-human owner", "agent").await.is_err());
+        for owner in ["other", "pending", "agent"] {
+            bus.request(
+                Some(owner.into()),
+                "stream",
+                "subscription.open",
+                json!({"topics":[],"attended_frontend":true}),
+            )
+            .await?;
+            let refused = bus
+                .request_frame_response(LocalBusFrame::request(
+                    format!("{owner}-export"),
+                    Some(owner.into()),
+                    "account",
+                    "account.export_agent_credentials",
+                    json!({"account":"agent","path":root.0.join(format!("{owner}.bundle"))}),
+                ))
+                .await?;
+            assert!(refused.error.is_some(), "export unexpectedly accepted for {owner}");
+        }
+
+        let mut legacy = CustodyBusClient::connect(&socket).await?;
+        let mut legacy_input = input("legacy-headless");
+        legacy_input.principal_kind = ramflux_protocol::PrincipalKind::HeadlessAi;
+        legacy_input.custodian_account_id = Some("owner".into());
+        assert!(matches!(
+            legacy.begin(&legacy_input).await,
+            Err(crate::SdkError::CustodySetupInvalid)
+        ));
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    server?;
+    flow?;
+
+    let wrong_root = Root::new()?;
+    let wrong_socket = wrong_root.0.join("wrong-daemon.sock");
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _stop = Stop(stop);
+        let mut ceremony = LocalBusCreationClient::connect(&wrong_socket).await?;
+        assert!(ceremony.begin_headless("Wrong daemon", "owner").await.is_err());
+        let mut bus = connect(&wrong_socket).await?;
+        bus.request(
+            Some("owner".into()),
+            "stream",
+            "subscription.open",
+            json!({"topics":[],"attended_frontend":true}),
+        )
+        .await?;
+        let refused = bus
+            .request_frame_response(LocalBusFrame::request(
+                "wrong-daemon-export",
+                Some("owner".into()),
+                "account",
+                "account.export_agent_credentials",
+                json!({"account":"agent","path":wrong_root.0.join("agent.bundle")}),
+            ))
+            .await?;
+        assert!(refused.error.is_some());
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(
+        crate::serve_local_bus_until(LocalBusConfig::new(&wrong_socket, &wrong_root.0), receiver),
+        flow
+    );
+    server?;
+    flow?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_fenced_account_opens_data_actor_and_refuses_legacy_proof_after_restart() -> Result {
     let fixture = crate::client::native_test_support::Fixture::new("native-fenced-actor").await?;
     let id = fixture.client.account_db()?.local_account_id.clone();

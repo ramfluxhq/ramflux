@@ -202,6 +202,12 @@ fn apply(
             *ceremony = None;
             let input: CreateInput = serde_json::from_value(std::mem::take(&mut request.body))
                 .map_err(|_| SdkError::CustodySetupInvalid)?;
+            // Non-human accounts have one creation path: the owner-attended
+            // account.create.begin ceremony. The compatibility ceremony must never expose a
+            // service phrase or accept a caller-selected data passphrase for them.
+            if input.principal_kind != ramflux_protocol::PrincipalKind::Human {
+                return Err(SdkError::CustodySetupInvalid);
+            }
             // Existing index entries also reserve an id even if their legacy manifest is missing.
             let index = ramflux_storage::AccountIndex::open(&config.data_root)?;
             if index.account(&input.local_account_id).is_ok() {
@@ -245,6 +251,9 @@ fn confirm(
     ceremony: &mut Option<CreationCeremony>,
 ) -> Result<ResultBody, SdkError> {
     let pending = ceremony.take().ok_or(SdkError::CustodySetupInvalid)?;
+    if pending.principal_kind() != ramflux_protocol::PrincipalKind::Human {
+        return Err(SdkError::CustodySetupInvalid);
+    }
     let map = request
         .body
         .as_object_mut()

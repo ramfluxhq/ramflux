@@ -4,7 +4,7 @@
 #![allow(unused_imports)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -17,6 +17,7 @@ pub(crate) struct AccountCommand {
 pub(crate) enum AccountAction {
     Backup(AccountBackupCommand),
     Create(Box<AccountCreate>),
+    ExportAgentCredentials(AccountExportAgentCredentials),
     #[cfg(feature = "itest-legacy-accounts")]
     #[command(hide = true)]
     ItestLegacyCreate(Box<ItestLegacyAccountCreate>),
@@ -57,6 +58,25 @@ pub(crate) struct AccountUnlock {
 pub(crate) struct AccountCreate {
     #[arg(long)]
     pub(crate) display_name: String,
+    #[arg(long, value_enum, default_value = "human")]
+    pub(crate) kind: AccountKind,
+    #[arg(long, requires = "kind")]
+    pub(crate) custodian: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum AccountKind {
+    Human,
+    #[value(name = "headless_ai")]
+    HeadlessAi,
+}
+
+#[derive(Args)]
+pub(crate) struct AccountExportAgentCredentials {
+    #[arg(long)]
+    pub(crate) account: String,
+    #[arg(long)]
+    pub(crate) out: PathBuf,
 }
 
 #[derive(Args)]

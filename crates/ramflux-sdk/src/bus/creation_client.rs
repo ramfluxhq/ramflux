@@ -112,6 +112,15 @@ impl LocalBusCreationClient {
         display_name: &str,
         custodian_account: &str,
     ) -> Result<LocalBusPendingCreation, SdkError> {
+        self.begin_headless_for(display_name, custodian_account, Some(custodian_account)).await
+    }
+
+    async fn begin_headless_for(
+        &mut self,
+        display_name: &str,
+        custodian_account: &str,
+        envelope_account: Option<&str>,
+    ) -> Result<LocalBusPendingCreation, SdkError> {
         #[derive(Serialize)]
         struct Input<'a> {
             display_name: &'a str,
@@ -120,7 +129,7 @@ impl LocalBusCreationClient {
         }
         let body = self
             .exchange_for(
-                Some(custodian_account),
+                envelope_account,
                 "account.create.begin",
                 Input {
                     display_name,
@@ -136,6 +145,16 @@ impl LocalBusCreationClient {
             ceremony_id: body.ceremony_id.ok_or(SdkError::CustodySetupInvalid)?,
             expires_in_ms: body.expires_in_ms.ok_or(SdkError::CustodySetupInvalid)?,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn begin_headless_with_envelope(
+        &mut self,
+        display_name: &str,
+        custodian_account: &str,
+        envelope_account: Option<&str>,
+    ) -> Result<LocalBusPendingCreation, SdkError> {
+        self.begin_headless_for(display_name, custodian_account, envelope_account).await
     }
 
     /// Moves the phrase directly into an erasing buffer. Display once, then drop it before hide.

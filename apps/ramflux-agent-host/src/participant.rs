@@ -44,7 +44,7 @@ pub(crate) async fn identity(
     account: &str,
 ) -> Result<()> {
     let status = bus.request("account.status", json!({}), None).await?;
-    if status["client_mode"] != "headless_ai" || status["local_device_authorized"] != true {
+    if !status_ready(&status) {
         return Err(Error::IdentityLost);
     }
     let principal = field(&status, "principal_id").map_err(|_| Error::IdentityLost)?;
@@ -72,6 +72,46 @@ pub(crate) async fn identity(
     state.principal_id = principal.into();
     state.device_id = device.into();
     Ok(())
+}
+
+fn status_ready(status: &Value) -> bool {
+    if status.get("client_mode").is_some() {
+        return status["client_mode"] == "headless_ai" && status["local_device_authorized"] == true;
+    }
+    if status["authority_blocked"] == true {
+        return false;
+    }
+    match status.get("networking").and_then(Value::as_str) {
+        Some("live") => status.get("networking_reason").is_none_or(serde_json::Value::is_null),
+        Some(_) => false,
+        None => status["state"] == "unlocked",
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn native_status_requires_live_unfenced_authority_and_supports_legacy_shape() {
+        let native = json!({
+            "account_id":"agent", "local_account_id":"agent", "state":"unlocked",
+            "networking":"live", "networking_reason":null, "display_name":"Agent",
+            "principal_id":"principal", "authority_blocked":false,
+            "principal_commitment":"commitment", "device_id":"device",
+            "target_delivery_id":"target", "node_id":"node", "session_id":"session",
+            "active_transport_kind":"quic", "pending_deliveries":0
+        });
+        assert!(status_ready(&native));
+        let mut pending = native.clone();
+        pending["networking"] = json!("networking_pending");
+        pending["networking_reason"] = json!({"kind":"node_unreachable","retry_after_ms":100});
+        assert!(!status_ready(&pending));
+        let mut fenced = native;
+        fenced["authority_blocked"] = json!(true);
+        assert!(!status_ready(&fenced));
+        assert!(status_ready(&json!({"client_mode":"headless_ai","local_device_authorized":true})));
+    }
 }
 pub(crate) async fn conversation(
     bus: &mut impl AgentBus,
