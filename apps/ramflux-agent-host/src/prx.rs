@@ -356,19 +356,51 @@ impl PrxEngine {
             self.revoke_pending(conversation_id).await;
             return Err(HttpFailure::Rejected);
         }
-        let response = self
-            .request(Method::POST, &format!("{approval_path}/resume?mode=async"), Some(json!({})))
-            .await?;
-        if response.status != StatusCode::ACCEPTED {
+        // Approval is single-use: retry only resume after the approval POST has succeeded.
+        let Ok(response) = self.resume_approved(&approval_path).await else {
             self.revoke_pending(conversation_id).await;
             return Err(HttpFailure::Rejected);
-        }
+        };
         self.state.pending.remove(conversation_id);
         self.state.jobs.insert(
             conversation_id.to_owned(),
             parse_job(&response.body, message_id, now_ms.saturating_add(self.turn_timeout_ms))?,
         );
         Ok(())
+    }
+
+    async fn resume_approved(
+        &self,
+        approval_path: &str,
+    ) -> std::result::Result<HttpResponse, HttpFailure> {
+        use std::time::Duration;
+        let policy =
+            ramflux_core::RetryPolicy::new(3, Duration::from_millis(100), Duration::from_secs(1));
+        for attempt in 0..policy.max_attempts {
+            let result = self
+                .request(
+                    Method::POST,
+                    &format!("{approval_path}/resume?mode=async"),
+                    Some(json!({})),
+                )
+                .await;
+            match result {
+                Ok(response) if response.status == StatusCode::ACCEPTED => return Ok(response),
+                Ok(response)
+                    if response.status.is_server_error()
+                        || matches!(response.status.as_u16(), 408 | 429) => {}
+                Err(HttpFailure::Unavailable | HttpFailure::Timeout) => {}
+                Ok(_) | Err(HttpFailure::Invalid | HttpFailure::Rejected) => {
+                    return Err(HttpFailure::Rejected);
+                }
+            }
+            if attempt + 1 < policy.max_attempts
+                && let Some(delay) = policy.delay_for_attempt(attempt)
+            {
+                tokio::time::sleep(delay).await;
+            }
+        }
+        Err(HttpFailure::Rejected)
     }
 
     async fn approval_view(
@@ -434,6 +466,11 @@ impl PrxEngine {
 }
 
 impl EngineProvider for PrxEngine {
+    fn is_busy(&self, conversation_id: &str) -> bool {
+        self.state.jobs.contains_key(conversation_id)
+            || self.state.pending.contains_key(conversation_id)
+            || self.state.completed.contains_key(conversation_id)
+    }
     fn intents(&mut self, _input: &crate::ConversationInput<'_>) -> Result<Vec<Intent>> {
         Ok(Vec::new())
     }
@@ -443,10 +480,7 @@ impl EngineProvider for PrxEngine {
         input: EngineInput<'a>,
         now_ms: u64,
     ) -> Result<Vec<EngineEvent>> {
-        if self.state.jobs.contains_key(input.conversation.conversation_id)
-            || self.state.pending.contains_key(input.conversation.conversation_id)
-            || self.state.completed.contains_key(input.conversation.conversation_id)
-        {
+        if self.is_busy(input.conversation.conversation_id) {
             return Ok(vec![failure(
                 input.conversation.conversation_id,
                 input.conversation.message_id,
@@ -559,6 +593,16 @@ impl EngineProvider for PrxEngine {
             .transpose()
             .map_err(|_| Error::State)?
             .unwrap_or_default();
+        let now_ms = crate::bus::now_ms();
+        for job in self.state.jobs.values_mut() {
+            job.deadline_ms = job.deadline_ms.min(now_ms.saturating_add(self.turn_timeout_ms));
+        }
+        for completed in self.state.completed.values_mut() {
+            if let PrxCompleted::Approval { approval, .. } = completed {
+                approval.deadline_ms =
+                    approval.deadline_ms.min(now_ms.saturating_add(self.approval_timeout_ms));
+            }
+        }
         if self.state.sessions.len() > self.max_conversations
             || self.state.jobs.len() > self.max_conversations
             || self.state.completed.len() > self.max_conversations

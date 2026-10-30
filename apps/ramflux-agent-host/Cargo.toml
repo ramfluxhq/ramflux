@@ -11,6 +11,7 @@ default = []
 itest-memory-vault = ["ramflux-sdk/itest-memory-vault"]
 
 [dependencies]
+ramflux-core.workspace = true
 ramflux-sdk.workspace = true
 ramflux-protocol.workspace = true
 serde.workspace = true

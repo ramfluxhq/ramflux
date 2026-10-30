@@ -28,8 +28,16 @@ impl<E: EngineProvider> AgentHost<E> {
     pub fn new(config: Config, mut engine: E) -> Result<Self> {
         config.validate()?;
         let store = CheckpointStore::new(config.state_file.clone())?;
-        let state = store.load()?;
+        let mut state = store.load()?;
+        if let Some(engine) = &config.engine {
+            let maximum = crate::bus::now_ms()
+                .saturating_add(engine.prx.approval_timeout_s.saturating_mul(1000));
+            for bridge in state.approvals.values_mut() {
+                bridge.deadline_ms = bridge.deadline_ms.min(maximum);
+            }
+        }
         engine.restore(state.engine.as_ref())?;
+        state.engine = engine.checkpoint()?;
         if !crate::runner_deferred::valid(&state)
             || !crate::runner_approval::valid(&state)
             || state.handled_actions.len() > 2048
@@ -201,9 +209,11 @@ impl<E: EngineProvider> AgentHost<E> {
         else {
             return Ok(());
         };
-        if self.state.last_reply_ms.get(conversation_id).is_some_and(|last| {
-            now_ms < last.saturating_add(self.config.per_conversation_interval_ms)
-        }) {
+        if !self.engine.is_busy(conversation_id)
+            && self.state.last_reply_ms.get(conversation_id).is_some_and(|last| {
+                now_ms < last.saturating_add(self.config.per_conversation_interval_ms)
+            })
+        {
             return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::RateLimited));
         }
         if !self.rate_history_has_capacity(conversation_id) {
@@ -272,21 +282,8 @@ impl<E: EngineProvider> AgentHost<E> {
                     }
                     self.complete_resumed_task(bus, &conversation_id, true).await?;
                 }
-                EngineEvent::VisibleFailure { conversation_id, message_id, reason } => {
-                    self.emit_intents(
-                        bus,
-                        IntentDelivery {
-                            conversation_id: &conversation_id,
-                            message_id: &message_id,
-                            intents: vec![Intent::ReplyText(reason.reply().into())],
-                            seq,
-                            now_ms,
-                        },
-                    )
-                    .await?;
-                    if reason != crate::EngineFailure::Busy {
-                        self.complete_resumed_task(bus, &conversation_id, false).await?;
-                    }
+                EngineEvent::VisibleFailure { .. } => {
+                    self.emit_engine_failure(bus, &acknowledged, seq, now_ms).await?;
                 }
                 EngineEvent::ApprovalRequired {
                     conversation_id,
@@ -294,9 +291,9 @@ impl<E: EngineProvider> AgentHost<E> {
                     decision_id,
                     approval,
                 } => {
-                    self.complete_resumed_task(bus, &conversation_id, true).await?;
-                    let started = self
-                        .start_approval(
+                    let start = async {
+                        self.complete_resumed_task(bus, &conversation_id, true).await?;
+                        self.start_approval(
                             bus,
                             crate::runner_approval::ApprovalRequest {
                                 conversation_id,
@@ -306,7 +303,17 @@ impl<E: EngineProvider> AgentHost<E> {
                                 now_ms,
                             },
                         )
-                        .await?;
+                        .await
+                    }
+                    .await;
+                    let started = match start {
+                        Ok(started) => started,
+                        Err(error) if error.stops_host() => return Err(error),
+                        Err(_) => {
+                            self.refuse_approval_event(bus, &acknowledged, seq, now_ms).await?;
+                            continue;
+                        }
+                    };
                     if !started {
                         let EngineEvent::ApprovalRequired { conversation_id, message_id, .. } =
                             &acknowledged
@@ -332,6 +339,52 @@ impl<E: EngineProvider> AgentHost<E> {
             }
             self.engine.acknowledge(&acknowledged)?;
             self.save_state()?;
+        }
+        Ok(())
+    }
+
+    async fn refuse_approval_event(
+        &mut self,
+        bus: &mut impl AgentBus,
+        event: &EngineEvent,
+        seq: u64,
+        now_ms: u64,
+    ) -> Result<()> {
+        let EngineEvent::ApprovalRequired { conversation_id, message_id, decision_id, .. } = event
+        else {
+            return Err(Error::State);
+        };
+        let failure =
+            self.abandon_approval(conversation_id, message_id, decision_id, now_ms).await?;
+        // Persist retirement before any output RPC can fail or require reconnect.
+        self.engine.acknowledge(event)?;
+        self.save_state()?;
+        self.emit_engine_failure(bus, &failure, seq, now_ms).await
+    }
+
+    async fn emit_engine_failure(
+        &mut self,
+        bus: &mut impl AgentBus,
+        event: &EngineEvent,
+        seq: u64,
+        now_ms: u64,
+    ) -> Result<()> {
+        let EngineEvent::VisibleFailure { conversation_id, message_id, reason } = event else {
+            return Err(Error::State);
+        };
+        self.emit_intents(
+            bus,
+            IntentDelivery {
+                conversation_id,
+                message_id,
+                intents: vec![Intent::ReplyText(reason.reply().into())],
+                seq,
+                now_ms,
+            },
+        )
+        .await?;
+        if *reason != crate::EngineFailure::Busy {
+            self.complete_resumed_task(bus, conversation_id, false).await?;
         }
         Ok(())
     }
