@@ -21,10 +21,16 @@ keyring.workspace = true
 libc = "0.2"
 rustix = { version = "1.1", features = ["process"] }
 zeroize.workspace = true
+reqwest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
-
-[dev-dependencies]
-tempfile = "3"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+http-body-util = "0.1"
+hyper.workspace = true
+hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["net", "sync"] }

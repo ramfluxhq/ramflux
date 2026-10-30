@@ -37,6 +37,7 @@ impl Fixture {
                         surface: None,
                     },
                 ],
+                engine: None,
                 poll_interval_ms: 250,
                 per_conversation_interval_ms: 1000,
                 max_conversations: 128,

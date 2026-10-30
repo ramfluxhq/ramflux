@@ -27,6 +27,31 @@ pub struct Checkpoint {
     pub(crate) handled_actions: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) deferred_surfaces: BTreeMap<String, DeferredSurface>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) engine: Option<Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) approvals: BTreeMap<String, ApprovalBridge>,
+}
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ApprovalPhase {
+    Proposed,
+    AwaitingDecision,
+    Resuming,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ApprovalBridge {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub decision_id: String,
+    pub task_id: String,
+    pub step_id: String,
+    pub pending_tool: String,
+    pub grant_id: String,
+    pub approval_id: String,
+    pub deadline_ms: u64,
+    pub phase: ApprovalPhase,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

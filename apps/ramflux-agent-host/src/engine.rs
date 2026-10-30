@@ -8,11 +8,18 @@ use ramflux_protocol::{
     DeleteSurfaceCommand, PatchSurfaceCommand, StreamAppendCommand, SurfacePatchOp, SurfaceType,
 };
 use serde_json::json;
+use std::future::Future;
 
 pub struct ConversationInput<'a> {
     pub conversation_id: &'a str,
     pub message_id: &'a str,
     pub text: &'a str,
+}
+pub struct EngineInput<'a> {
+    pub conversation: ConversationInput<'a>,
+    pub sender_display_name: &'a str,
+    pub chat_kind: &'a str,
+    pub mentioned: bool,
 }
 /// An action already accepted by rfd, plus the latest explicitly read surface snapshot.
 pub struct ActionInput<'a> {
@@ -40,10 +47,107 @@ impl Intent {
         })
     }
 }
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EngineEvent {
+    Intents {
+        conversation_id: String,
+        message_id: String,
+        intents: Vec<Intent>,
+    },
+    ApprovalRequired {
+        conversation_id: String,
+        message_id: String,
+        decision_id: String,
+        pending_tool: String,
+    },
+    VisibleFailure {
+        conversation_id: String,
+        message_id: String,
+    },
+}
 pub trait EngineProvider {
     /// # Errors
     /// Reports provider failures without exposing input text.
     fn intents(&mut self, input: &ConversationInput<'_>) -> Result<Vec<Intent>>;
+    /// Submit one accepted inbound message without waiting for a remote model turn.
+    ///
+    /// # Errors
+    /// Rejects invalid provider state or exhausted bounds.
+    fn submit<'a>(
+        &'a mut self,
+        input: EngineInput<'a>,
+        _now_ms: u64,
+    ) -> impl Future<Output = Result<Vec<EngineEvent>>> + 'a {
+        async move {
+            let conversation_id = input.conversation.conversation_id.to_owned();
+            let message_id = input.conversation.message_id.to_owned();
+            let intents = self.intents(&input.conversation)?;
+            Ok((!intents.is_empty())
+                .then_some(EngineEvent::Intents { conversation_id, message_id, intents })
+                .into_iter()
+                .collect())
+        }
+    }
+    /// Poll detached provider work.
+    ///
+    /// # Errors
+    /// Rejects corrupt provider state or exhausted bounds.
+    fn poll(&mut self, _now_ms: u64) -> impl Future<Output = Result<Vec<EngineEvent>>> {
+        async { Ok(Vec::new()) }
+    }
+    /// Apply a human-authenticated approval decision.
+    ///
+    /// # Errors
+    /// Rejects unknown or stale provider decisions.
+    fn decide<'a>(
+        &'a mut self,
+        _conversation_id: &'a str,
+        _message_id: &'a str,
+        _decision_id: &'a str,
+        _approved: bool,
+    ) -> impl Future<Output = Result<()>> + 'a {
+        async { Err(Error::State) }
+    }
+    /// Cancel detached work after conversation access is removed.
+    ///
+    /// # Errors
+    /// Reports only invalid local provider state; remote cancellation is best effort.
+    fn cancel<'a>(
+        &'a mut self,
+        _conversation_id: &'a str,
+    ) -> impl Future<Output = Result<()>> + 'a {
+        async { Ok(()) }
+    }
+    /// Restore provider-owned durable state from the agent-host checkpoint.
+    ///
+    /// # Errors
+    /// Rejects state belonging to another provider or invalid bounded data.
+    fn restore(&mut self, state: Option<&serde_json::Value>) -> Result<()> {
+        if state.is_some_and(|state| !state.is_null()) {
+            return Err(Error::State);
+        }
+        Ok(())
+    }
+    /// Return provider state suitable for the token-free host checkpoint.
+    ///
+    /// # Errors
+    /// Rejects state that cannot be serialized safely.
+    fn checkpoint(&self) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
+    /// Conversations with provider sessions or detached work that require revocation cleanup.
+    #[must_use]
+    fn active_conversations(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Retire one durably handled provider event.
+    ///
+    /// # Errors
+    /// Rejects an acknowledgement that conflicts with provider state.
+    fn acknowledge(&mut self, _event: &EngineEvent) -> Result<()> {
+        Ok(())
+    }
     /// # Errors
     /// Rejects invalid plans. The default provider has no action behavior.
     fn action(&mut self, _input: &ActionInput<'_>) -> Result<Vec<Intent>> {

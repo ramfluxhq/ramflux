@@ -45,7 +45,8 @@ impl AgentBus for RfdBus {
         body: Value,
         operation: Option<&str>,
     ) -> Result<Value> {
-        // This is the complete capability surface of this host; approvals cannot pass through.
+        // This is the complete capability surface of this host. Human approval decisions are
+        // observed through task.get; the headless account cannot grant or resolve them.
         if !matches!(
             method,
             "account.status"
@@ -63,6 +64,11 @@ impl AgentBus for RfdBus {
                 | "surface.send"
                 | "surface.get"
                 | "surface.resync"
+                | "task.get"
+                | "task.propose"
+                | "task.update"
+                | "mcp.server.add"
+                | "mcp.tool.started"
         ) {
             return Err(Error::Unauthorized);
         }
