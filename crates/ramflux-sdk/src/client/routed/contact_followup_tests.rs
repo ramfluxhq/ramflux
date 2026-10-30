@@ -77,6 +77,61 @@ async fn auto_accepted_card_retry_exposes_safety_number_without_a_network_fetch(
 }
 
 #[tokio::test]
+async fn accepted_retry_without_a_verified_manifest_preserves_success_without_caching()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 32)?;
+    let mut b = Fixture::new("bob", 42)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
+    pending(&mut state, &directory).await?;
+    let root = r2::root(&state, "alice")?;
+    let (expected, request_id) = {
+        let receiver = account(&state, "bob")?;
+        let db = receiver.account_db()?;
+        let request = db.contact_request(&root, "inbound")?.ok_or_else(|| invalid("request"))?;
+        db.remove_actor_state("identity/manifest/alice")?;
+        (receiver.contact_entry("alice")?, request.request_id)
+    };
+    directory.unavailable.store(true, Ordering::SeqCst);
+    let before = directory.manifest_fetches.load(Ordering::SeqCst);
+    for selector in [json!({"principal_id":"alice"}), json!({"request_id":request_id})] {
+        let accepted = contact(&mut state, "bob", "contact.accept", selector).await?;
+        assert_eq!(accepted["contact"], expected);
+        let row = crate::bus::read_model::row(account(&state, "bob")?, "identity", "alice")?;
+        assert_eq!(row["safety_number_available"], false);
+        assert!(row["safety_number"].is_null());
+    }
+    assert_eq!(directory.manifest_fetches.load(Ordering::SeqCst), before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_legacy_retry_without_a_signed_device_set_does_not_cache_a_number()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 33)?;
+    let mut b = Fixture::new("bob", 43)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
+    pending(&mut state, &directory).await?;
+    let root = r2::root(&state, "alice")?;
+    account(&state, "bob")?
+        .account_db()?
+        .remove_actor_state(&crate::client::identity_authority::record_key(&root))?;
+    directory.unavailable.store(true, Ordering::SeqCst);
+    let before = directory.manifest_fetches.load(Ordering::SeqCst);
+    let accepted =
+        contact(&mut state, "bob", "contact.accept", json!({"principal_id":"alice"})).await?;
+    assert_eq!(accepted["contact"]["principal_id"], "alice");
+    let row = crate::bus::read_model::row(account(&state, "bob")?, "identity", "alice")?;
+    assert_eq!(row["safety_number_available"], false);
+    assert!(row["safety_number"].is_null());
+    assert_eq!(directory.manifest_fetches.load(Ordering::SeqCst), before);
+    Ok(())
+}
+
+#[tokio::test]
 async fn lookup_accept_and_accepted_retry_cache_safety_without_changing_verification()
 -> Result<(), SdkError> {
     for automatic in [false, true] {

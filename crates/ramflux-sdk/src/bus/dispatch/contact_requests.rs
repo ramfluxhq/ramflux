@@ -88,12 +88,14 @@ pub(super) async fn dispatch(
         account.client.decide_inbound_contact(&record, decision)?;
         let mut response = json!({"request_id":record.request_id,"root_commitment":record.contact_identity_commitment,"state":decision,"principal_id":record.principal_id,"direction":"inbound"});
         if decision == "accepted" {
-            // Request selectors also handle accepted retries. Complete their local
-            // safety cache in the same writer phase as an initial acceptance.
-            response["contact"] = account
-                .client
-                .accepted_contact_retry(&record.principal_id, None)?
-                .ok_or(crate::ContactReason::RequestClosed)?;
+            // A pending request keeps strict first-accept semantics. An already accepted
+            // request repairs its cache best-effort and must remain idempotent.
+            let contact = if record.state == "pending" {
+                account.client.accepted_contact_first_accept(&record.principal_id)?
+            } else {
+                account.client.accepted_contact_retry(&record.principal_id, None)?
+            };
+            response["contact"] = contact.ok_or(crate::ContactReason::RequestClosed)?;
         }
         Ok::<_, SdkError>(response)
     })?;
