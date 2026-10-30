@@ -86,6 +86,7 @@ impl Fake {
                     "state":if self.faults.contains(&Fault::Revoked){"locked"}else{"unlocked"},
                     "networking":if self.faults.contains(&Fault::Revoked){"networking_pending"}else{"live"},
                     "display_name":"Agent", "principal_id":"agent-principal",
+                    "principal_kind":if self.faults.contains(&Fault::Human){"human"}else{"headless_ai"},
                     "authority_blocked":false, "principal_commitment":"agent-commitment",
                     "device_id":"agent-device", "target_delivery_id":"agent-target",
                     "node_id":"node", "session_id":"session", "active_transport_kind":"quic",
