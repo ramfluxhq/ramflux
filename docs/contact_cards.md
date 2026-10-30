@@ -28,7 +28,8 @@ vault access. It preserves lookup, card and verified provenance except for an ex
 card upgrade of lookup provenance, and never marks the contact verified. Native
 automatic acceptance already caches algorithm version 2; legacy automatic acceptance
 can leave the number absent until an explicit operation. Directory polling does not
-compute a missing number.
+compute a missing number. Once filled, the cache is not refreshed by accepted retries;
+only an explicit safety-verification flow refreshes an existing cached number.
 
 Principal lookup is TOFU through the account's authenticated home-node session.
 The directory refuses to choose between conflicting active roots. The SDK applies its

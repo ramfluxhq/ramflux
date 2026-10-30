@@ -6,6 +6,12 @@ use crate::ContactReason;
 use crate::prelude::*;
 use serde_json::{Value, json};
 
+#[derive(Clone, Copy)]
+enum AcceptedSafetyRepair {
+    Required,
+    BestEffort,
+}
+
 pub(crate) fn lookup_failure(error: SdkError) -> SdkError {
     match error {
         SdkError::Transport(_) | SdkError::GatewaySessionRejected(_) | SdkError::Io(_) => {
@@ -67,6 +73,22 @@ impl RamfluxClient {
         selector: &str,
         card: Option<&crate::ContactCardBody>,
     ) -> Result<Option<Value>, SdkError> {
+        self.accepted_contact(selector, card, AcceptedSafetyRepair::BestEffort)
+    }
+
+    pub(crate) fn accepted_contact_first_accept(
+        &self,
+        selector: &str,
+    ) -> Result<Option<Value>, SdkError> {
+        self.accepted_contact(selector, None, AcceptedSafetyRepair::Required)
+    }
+
+    fn accepted_contact(
+        &self,
+        selector: &str,
+        card: Option<&crate::ContactCardBody>,
+        safety_repair: AcceptedSafetyRepair,
+    ) -> Result<Option<Value>, SdkError> {
         let db = self.account_db()?;
         let principal = db
             .client_record("commitment", selector)?
@@ -89,11 +111,23 @@ impl RamfluxClient {
         }
         let mut upgraded = identity.clone();
         if upgraded["safety_number"].is_null() {
-            // An accepted link can predate its derived cache. Finish the explicit
-            // command from local authority without repeating network resolution.
-            let safety = self.contact_safety_number(root)?;
-            upgraded["safety_number"] = json!(safety.safety_number);
-            upgraded["safety_number_algorithm_version"] = json!(safety.algorithm_version);
+            match self.safety_number_from_verified_local_authority(root) {
+                Ok(Some(safety)) => {
+                    upgraded["safety_number"] = json!(safety.safety_number);
+                    upgraded["safety_number_algorithm_version"] = json!(safety.algorithm_version);
+                }
+                Ok(None) | Err(_) if matches!(safety_repair, AcceptedSafetyRepair::BestEffort) => {
+                    tracing::debug!(
+                        "accepted contact safety cache repair skipped; verified local material unavailable"
+                    );
+                }
+                Ok(None) => {
+                    return Err(SdkError::LocalBus(
+                        "verified contact safety material unavailable".into(),
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
         }
         if let Some(card) = card {
             self.decorate_contact_identity(&identity, &mut upgraded, Some(card), false)?;
@@ -102,6 +136,31 @@ impl RamfluxClient {
             db.persist_client_record("identity", &principal, &upgraded)?;
         }
         self.contact_entry(&principal).map(Some)
+    }
+
+    fn safety_number_from_verified_local_authority(
+        &self,
+        contact_root: &str,
+    ) -> Result<Option<SdkContactSafetyNumber>, SdkError> {
+        if self.born_v3_account.is_some() {
+            return self.contact_safety_number(contact_root).map(Some);
+        }
+        let link = self
+            .friend_links()?
+            .into_iter()
+            .find(|link| {
+                link.state == "accepted"
+                    && (link.requester_id == contact_root || link.target_id == contact_root)
+            })
+            .ok_or_else(|| SdkError::LocalBus("accepted contact safety link unavailable".into()))?;
+        let own_root =
+            if link.requester_id == contact_root { link.target_id } else { link.requester_id };
+        if self.observed_device_set(contact_root)?.is_none()
+            || self.observed_device_set(&own_root)?.is_none()
+        {
+            return Ok(None);
+        }
+        self.contact_safety_number(contact_root).map(Some)
     }
 
     pub(crate) async fn resolve_contact(
