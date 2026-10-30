@@ -1,8 +1,12 @@
 # Signed group state
 
-A shared group has one writer: its creator account root. Any current verified
-creator device can sign a complete state snapshot with the root master key. The
-snapshot binds the group, epoch, previous hash, root-qualified roster and roles,
+A shared group has one writer: its creator account authority. A born-v3 creator
+signs a complete state snapshot with its current primary self-signing key and
+includes the master-certified self-signing certificate plus its `group`-capable
+device-branch certificate. The offline master key is never loaded for a group
+operation and no legacy identity root is synthesized. A legacy account continues
+to use its existing root signature. The snapshot binds the group, epoch, previous hash,
+root-qualified roster and roles,
 name/name epoch, exclusions and creator. A separate device signature authenticates
 the transport issuer, who must match the authenticated transport source and a
 fresh signed device manifest. A forwarding member cannot alter creator authority.
@@ -43,9 +47,24 @@ its inviter; the signature authenticates authority rather than global freshness.
 All calls select an unlocked account. The local device signs the operation or
 request; an optional `actor_id` must equal that device.
 
+For a born-v3 account, `creator_id` and the ordinary `group.send.sender_id` are
+the account `principal_id` returned by `account.status`. The SDK derives and
+authenticates the selected account's `device_id`; received message rows expose
+that value separately as `sender_device_id`. The local raw device id and exact
+anchor-qualified delivery id remain accepted as compatibility creator selectors,
+but callers should use the principal. They are not valid substitutes for the
+native sender principal.
+
+`group.member.add.member_id` accepts either a principal id from principal lookup
+or an accepted contact, an unambiguous accepted-contact device id, or an exact
+anchor-qualified device address. A principal with more than one active device
+must be replaced by an exact qualified device address. The SDK obtains signing
+and delivery data from the verified manifest; desktop and CLI callers do not pass
+private keys or manufacture `member_signing_public_key` values.
+
 ```json
-{"method":"group.create","body":{"group_id":"g","conversation_id":"thread","creator_id":"owner-device","name":"Checklist"}}
-{"method":"group.member.add","body":{"group_id":"g","member_id":"peer-device","member_principal_commitment":"ROOT","role":"member"}}
+{"method":"group.create","body":{"group_id":"g","conversation_id":"thread","creator_id":"principal-owner","name":"Checklist"}}
+{"method":"group.member.add","body":{"group_id":"g","member_id":"principal-peer","role":"member"}}
 {"method":"group.role.set","body":{"group_id":"g","member_id":"peer-device","member_principal_commitment":"ROOT","role":"admin"}}
 {"method":"group.name.set","body":{"group_id":"g","name":"Reviewed checklist","request_id":"optional-retry-id"}}
 {"method":"group.member.remove","body":{"group_id":"g","member_id":"peer-device","member_principal_commitment":"ROOT"}}
@@ -54,6 +73,14 @@ request; an optional `actor_id` must equal that device.
 {"method":"group.invitation.accept","body":{"group_id":"g"}}
 {"method":"group.invitation.decline","body":{"group_id":"g"}}
 ```
+
+The equivalent CLI forms are `rf group create --creator <principal_id>`,
+`rf group member add --member-device <principal_id>` (the compatibility option
+name accepts the same member selector as the bus), `rf group send --sender
+<principal_id>`, and `rf group rename --name <name>`. Create, add, send, rename,
+and remove refusals have distinct local-bus codes: `GroupCreateRefused`,
+`GroupMemberAddRefused`, `GroupSendRefused`, `GroupRenameRefused`, and
+`GroupMemberRemoveRefused`.
 
 An explicit root makes `member_id` literal, including address-shaped names.
 Otherwise the selector must be unambiguous. Existing owner/admin role rules apply;

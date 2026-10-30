@@ -127,6 +127,9 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     if matches!(error,SdkError::LocalBusRefused{code,..} if code == "transfer_requires_sync") {
         return "transfer_requires_sync";
     }
+    if let SdkError::GroupRefused { operation, .. } = error {
+        return operation.error_code();
+    }
     if let Some(code) = crate::error_policy::security_code(error) {
         return code;
     }

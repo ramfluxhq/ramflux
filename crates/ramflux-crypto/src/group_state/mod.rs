@@ -22,7 +22,10 @@ use ramflux_protocol::{
 };
 pub use requests::*;
 use serde_json::{Value, json};
-pub use snapshot::{GroupStateCreateInput, advance_group_state, create_group_state};
+pub use snapshot::{
+    GroupStateCreateInput, advance_group_state, advance_native_group_state, create_group_state,
+    create_native_group_state,
+};
 pub use transfer::{accept_group_transfer, verify_group_transfer_acceptance};
 #[derive(Clone)]
 pub struct VerifiedGroupState {
@@ -205,7 +208,11 @@ pub(super) fn identity_valid(identity: &GroupMemberIdentity) -> Result<(), Crypt
     Ok(())
 }
 fn actor_body(actor: &GroupStateActor) -> Value {
-    json!({"domain":GROUP_STATE_ACTOR_DOMAIN,"identity":actor.identity,"root_public_key":actor.root_public_key})
+    let mut body = json!({"domain":GROUP_STATE_ACTOR_DOMAIN,"identity":actor.identity,"root_public_key":actor.root_public_key});
+    if let Some(authority) = &actor.native_authority {
+        body["native_authority"] = json!(authority);
+    }
+    body
 }
 /// # Errors
 /// Rejects an invalid actor or mismatched root and branch.
@@ -228,6 +235,7 @@ pub fn certify_group_state_actor(
         },
         root_public_key: encode_base64url(public.to_bytes()),
         root_signature: String::new(),
+        native_authority: None,
     };
     identity_valid(&actor.identity)?;
     actor.root_signature = encode_base64url(
@@ -235,10 +243,69 @@ pub fn certify_group_state_actor(
     );
     Ok(actor)
 }
+/// Build a born-v3 group actor from the current certified branch capability.
+///
+/// # Errors
+/// Rejects a branch absent from the verified native authority, missing group capability,
+/// expired authority, or a target that is not the branch's anchor-qualified delivery id.
+pub fn certify_native_group_state_actor(
+    record: &crate::custody::VerifiedRecord,
+    branch: &DeviceBranch,
+    target: &str,
+    now: u64,
+) -> Result<GroupStateActor, CryptoError> {
+    let body = &record.envelope().body;
+    let reference = ramflux_protocol::custody::DeviceRef {
+        account_anchor: body.account_anchor.clone(),
+        device_id: branch.device_id.clone(),
+        device_epoch: branch.device_epoch,
+    };
+    record.authorize(&reference, "group", now)?;
+    let device = body
+        .devices
+        .iter()
+        .find(|device| {
+            device.device_id == branch.device_id && device.device_epoch == branch.device_epoch
+        })
+        .ok_or_else(|| invalid("native group branch unavailable"))?;
+    let branch_certificate = device
+        .branch_certificate
+        .clone()
+        .ok_or_else(|| invalid("native group branch certificate unavailable"))?;
+    let mut actor = GroupStateActor {
+        identity: GroupMemberIdentity {
+            principal_id: body.principal_id.clone(),
+            root_commitment: body.account_anchor.clone(),
+            device_id: branch.device_id.clone(),
+            signing_public_key: encode_base64url(branch.signing_key.verifying_key().to_bytes()),
+            target_delivery_id: target.into(),
+        },
+        root_public_key: body.master_certificate.body.self_signing_public_key.clone(),
+        root_signature: String::new(),
+        native_authority: Some(Box::new(ramflux_protocol::group_state::GroupNativeAuthority {
+            master_certificate: body.master_certificate.clone(),
+            branch_certificate,
+        })),
+    };
+    identity_valid(&actor.identity)?;
+    verify_group_state_actor_at(&actor, Some(now))?;
+    // Keep construction visibly distinct from the legacy root-signature path.
+    actor.root_signature.clear();
+    Ok(actor)
+}
 /// # Errors
 /// Rejects malformed identities or certificates not signed by the claimed root.
 pub fn verify_group_state_actor(actor: &GroupStateActor) -> Result<(), CryptoError> {
+    verify_group_state_actor_at(actor, None)
+}
+pub(super) fn verify_group_state_actor_at(
+    actor: &GroupStateActor,
+    issued_at: Option<u64>,
+) -> Result<(), CryptoError> {
     identity_valid(&actor.identity)?;
+    if actor.native_authority.is_some() {
+        return crate::custody::verify_group_native_authority(actor, issued_at);
+    }
     let public = crate::verifying_key_from_base64url(&actor.root_public_key)?;
     if public.is_weak()
         || encode_base64url(public.to_bytes()) != actor.root_public_key
@@ -264,7 +331,8 @@ fn branch_matches(branch: &DeviceBranch, actor: &GroupStateActor) -> Result<(), 
     Ok(())
 }
 fn root_matches(root: &IdentityRoot, actor: &GroupStateActor) -> Result<(), CryptoError> {
-    if root.principal_id != actor.identity.principal_id
+    if actor.native_authority.is_some()
+        || root.principal_id != actor.identity.principal_id
         || encode_base64url(root.signing_key.verifying_key().to_bytes()) != actor.root_public_key
     {
         return Err(invalid("creator root mismatch"));

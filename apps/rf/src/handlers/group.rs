@@ -113,6 +113,7 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
             }
             print_json(&value)
         }
+        GroupAction::Rename(rename) => handle_group_rename(&mut bus, rename).await,
         GroupAction::Send(send) => {
             let federation = rf_group_send_federation_route(&send)?;
             let request = LocalBusGroupSendRequest {
@@ -162,6 +163,15 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
         GroupAction::Member(member) => handle_group_member(&mut bus, member).await,
         GroupAction::Role(role) => handle_group_role(&mut bus, role).await,
     }
+}
+
+async fn handle_group_rename(bus: &mut LocalBusClient, rename: GroupRename) -> Result<(), RfError> {
+    let request = LocalBusGroupNameSetRequest {
+        group_id: rename.group,
+        name: rename.name,
+        request_id: rename.request_id,
+    };
+    print_json(&request_body(bus, Some(rename.account), "group", "group.name.set", request).await?)
 }
 
 async fn handle_group_member(

@@ -56,6 +56,22 @@ pub struct BornAccount {
     authority_blocked: bool,
 }
 impl BornAccount {
+    pub(crate) fn group_primary(
+        &self,
+        vault: &dyn PrimaryVault,
+    ) -> Result<ramflux_crypto::custody::SelfSigningKey, SdkError> {
+        if self.branch_pending() || self.authority_blocked {
+            return Err(SdkError::NetworkingPending);
+        }
+        self.stored.pins.require_current(&self.verified)?;
+        let primary = vault.load_primary(&self.stored.primary_vault_ref)?;
+        if primary.public_key()
+            != self.record().body.master_certificate.body.self_signing_public_key
+        {
+            return Err(SdkError::CustodyVaultUnavailable);
+        }
+        Ok(primary)
+    }
     pub(crate) fn sign_contact_card(
         &self,
         vault: &dyn PrimaryVault,
