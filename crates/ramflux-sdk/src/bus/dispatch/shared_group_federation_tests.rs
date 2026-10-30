@@ -69,6 +69,8 @@ fn serve(
     manifest: &crate::prekey::SdkDeviceManifestResponse,
     delivered: &Mutex<Vec<ramflux_protocol::Envelope>>,
 ) -> TestResult {
+    // Accepted sockets inherit the listener's nonblocking flag on macOS.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut first = String::new();
