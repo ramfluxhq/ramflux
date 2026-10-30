@@ -28,10 +28,12 @@ call ID, both root-qualified endpoints, lease ID and the hard expiry. It claims 
 own credentials over its own authenticated gateway session, after authenticating the
 caller's offer, then becomes active and returns the public signed consent. Neither
 participant receives the other's token or rebind key. Renewal includes the consent.
-The gateway verifies current root-signed device sets, active key commitments, device
-epoch, live session root/actor and callee signature. The node charges only the caller
-before consent, and the callee once after verified consent. Repeated claims are
-idempotent. A changed/expired consent or revoked key fails closed.
+The gateway verifies either current born-v3 custody publications with an active
+`call` branch capability or legacy root-signed device sets with active key
+commitments, plus device epoch, live session root/actor and callee signature. The
+node charges only the caller before consent, and the callee once after verified
+consent. Repeated claims are idempotent. A changed/expired consent or revoked key
+fails closed.
 
 This version claims both participants' leases through gateways of the same home
 node. Federated-home credential claiming/routing is not added here; a missing local
@@ -43,11 +45,15 @@ peer-supplied endpoint.
 Methods are `call.invite {conversation_id}`, `call.answer|reject|hangup {call_id}`,
 `call.list {}`, and `call.media.session {call_id}`. Mutation replies and `call.changed`
 events use whole public rows: `call_id`, `conversation_id`, `peer_id`, `direction`,
-`state`, `end_reason`, `seq`, `created_at`, `answered_at`, `ended_at`, and reserved
-`media_generation: 0`. Times are Unix seconds. Direction is `outgoing` or `incoming`.
+`state`, `end_reason`, optional `failure_reason`, `seq`, `created_at`, `answered_at`,
+`ended_at`, and reserved `media_generation: 0`. Times are Unix seconds. Direction
+is `outgoing` or `incoming`.
 States are `outgoing_ringing`, `incoming_ringing`, `connecting`, `active`, `ended`.
 End reasons are `completed`, `cancelled`, `declined`, `busy`, `timeout`,
 `answered_elsewhere`, `failed`, `missed`.
+When `end_reason` is `failed`, `failure_reason` identifies the source as
+`authority_unavailable`, `authority_refused`, `relay_unavailable`,
+`media_lease_expired`, `daemon_restarted`, or `signaling_unavailable`.
 
 `call.list` uses the account reader pool and returns at most 128 public records.
 `message.list` contains `kind: "call"` records with duration and missed status.

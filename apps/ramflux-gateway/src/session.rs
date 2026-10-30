@@ -786,13 +786,19 @@ async fn run_gateway_session_loop_until_closed(
             && let Err(error) = validate_native_frame(&context, &runtime, grant, &frame).await
         {
             tracing::debug!(%error, "native session authority no longer permits request");
-            write_gateway_handle(
-                &send,
-                &ramflux_node_core::GatewayServerFrame::Nack {
-                    reason: "native_session_authority_refused".into(),
-                },
-            )
-            .await?;
+            let response =
+                if matches!(frame, ramflux_node_core::GatewayClientFrame::VoiceLease { .. }) {
+                    ramflux_node_core::GatewayServerFrame::VoiceLease {
+                        response: Box::new(ramflux_protocol::VoiceLeaseResponse::Refused {
+                            reason: ramflux_protocol::VoiceCallFailureReason::AuthorityRefused,
+                        }),
+                    }
+                } else {
+                    ramflux_node_core::GatewayServerFrame::Nack {
+                        reason: "native_session_authority_refused".into(),
+                    }
+                };
+            write_gateway_handle(&send, &response).await?;
             return Ok(());
         }
         refresh_session_activity(&context, &runtime)?;

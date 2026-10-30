@@ -144,6 +144,7 @@ fn daemon_restart_ends_unrecoverable_calls_and_retains_a_public_timeline_record(
     let listed = list(&account.client)?;
     assert_eq!(listed["calls"][0]["state"], "ended");
     assert_eq!(listed["calls"][0]["end_reason"], "failed");
+    assert_eq!(listed["calls"][0]["failure_reason"], "daemon_restarted");
     assert_eq!(listed["calls"][0]["call_id"], id);
     let page = crate::bus::readers::read(
         &account.client,

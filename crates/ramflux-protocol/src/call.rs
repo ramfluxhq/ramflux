@@ -12,23 +12,52 @@ pub struct CallEndpoint {
     pub root_public_key: String,
     pub device_id: String,
 }
+/// Stable machine-readable source for a call that ended with `end_reason = "failed"`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceCallFailureReason {
+    AuthorityUnavailable,
+    AuthorityRefused,
+    RelayUnavailable,
+    MediaLeaseExpired,
+    DaemonRestarted,
+    #[default]
+    SignalingUnavailable,
+}
 /// Authenticated signaling action carried inside a pair-session control envelope.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CallAction {
-    Invite { base_key: String },
+    Invite {
+        base_key: String,
+    },
     Ringing,
-    Answer { base_key: String },
-    Ack { allocation: Box<VoicePeerAllocation> },
-    Ready { consent: Box<VoiceLeaseConsent> },
+    Answer {
+        base_key: String,
+    },
+    Ack {
+        allocation: Box<VoicePeerAllocation>,
+    },
+    Ready {
+        consent: Box<VoiceLeaseConsent>,
+    },
     Reject,
     Busy,
     Hangup,
     Timeout,
-    Failed,
+    Failed {
+        #[serde(default)]
+        reason: VoiceCallFailureReason,
+    },
     AnsweredElsewhere,
-    Rekey { generation: u64, base_key: String },
-    RekeyAck { generation: u64, base_key: String },
+    Rekey {
+        generation: u64,
+        base_key: String,
+    },
+    RekeyAck {
+        generation: u64,
+        base_key: String,
+    },
 }
 /// No `Debug`: actions contain media secrets and allocation bearer credentials.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -125,6 +154,8 @@ pub struct CallRow {
     pub direction: String,
     pub state: String,
     pub end_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<VoiceCallFailureReason>,
     pub seq: u64,
     pub created_at: i64,
     pub answered_at: Option<i64>,
@@ -160,6 +191,7 @@ pub struct VoiceLeaseFrame {
 pub enum VoiceLeaseResponse {
     Allocation { allocation: VoiceAllocation },
     Status { status: VoiceLeaseStatus },
+    Refused { reason: VoiceCallFailureReason },
 }
 
 impl Drop for VoiceAllocation {
@@ -179,5 +211,20 @@ impl Drop for CallAction {
             | Self::RekeyAck { base_key, .. } => base_key.zeroize(),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CallAction, VoiceCallFailureReason};
+
+    #[test]
+    fn legacy_failed_control_defaults_to_a_typed_signaling_failure() -> serde_json::Result<()> {
+        let action: CallAction = serde_json::from_value(serde_json::json!({"action":"failed"}))?;
+        assert!(matches!(
+            action,
+            CallAction::Failed { reason: VoiceCallFailureReason::SignalingUnavailable }
+        ));
+        Ok(())
     }
 }

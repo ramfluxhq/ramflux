@@ -5,7 +5,7 @@
 use super::{invalid, scope};
 use crate::client::call::state::LiveCall;
 use crate::prelude::*;
-use ramflux_protocol::{CallAction, VoiceLeaseConsent};
+use ramflux_protocol::{CallAction, VoiceCallFailureReason, VoiceLeaseConsent};
 use ramflux_protocol::{VoiceLeaseRequest, VoiceLeaseResponse};
 pub(super) async fn maintain_lease(
     account: &mut LocalBusAccountState,
@@ -38,7 +38,7 @@ pub(super) async fn maintain_lease(
             return Ok(());
         }
         Err(_) => {
-            next.fail(now)?;
+            next.fail(VoiceCallFailureReason::AuthorityUnavailable, now)?;
             return Ok(());
         }
     };
@@ -49,7 +49,7 @@ pub(super) async fn maintain_lease(
             .as_str()
             .is_some_and(|key| next.peer_key_matches(peer, key))
     {
-        next.fail(now)?;
+        next.fail(VoiceCallFailureReason::AuthorityRefused, now)?;
         return Ok(());
     }
     if next.local == next.callee {
@@ -61,7 +61,8 @@ pub(super) async fn maintain_lease(
         account.put_engine(engine);
         match result {
             Ok(VoiceLeaseResponse::Allocation { allocation }) => next.activate(allocation, now)?,
-            _ => next.fail(now)?,
+            Ok(VoiceLeaseResponse::Refused { reason }) => next.fail(reason, now)?,
+            _ => next.fail(VoiceCallFailureReason::SignalingUnavailable, now)?,
         }
     } else if next.row.state == "active" {
         let Some(consent) = next.lease_consent.clone() else {
@@ -72,20 +73,23 @@ pub(super) async fn maintain_lease(
         let result =
             engine.voice_lease(VoiceLeaseRequest::Renew { consent: Box::new(consent) }).await;
         account.put_engine(engine);
-        if let Ok(VoiceLeaseResponse::Status { status }) = result {
-            if let Some(allocation) = next.allocation.as_mut() {
-                allocation.expires_at = status.expires_at;
+        match result {
+            Ok(VoiceLeaseResponse::Status { status }) => {
+                if let Some(allocation) = next.allocation.as_mut() {
+                    allocation.expires_at = status.expires_at;
+                }
+                let allocation = next
+                    .allocation
+                    .as_ref()
+                    .ok_or_else(|| invalid("renewed lease missing"))?
+                    .for_callee();
+                let ack =
+                    next.control(CallAction::Ack { allocation: Box::new(allocation) }, now)?;
+                next.pending.push(ack);
+                next.next_lease_refresh = now.saturating_add(20);
             }
-            let allocation = next
-                .allocation
-                .as_ref()
-                .ok_or_else(|| invalid("renewed lease missing"))?
-                .for_callee();
-            let ack = next.control(CallAction::Ack { allocation: Box::new(allocation) }, now)?;
-            next.pending.push(ack);
-            next.next_lease_refresh = now.saturating_add(20);
-        } else {
-            next.next_lease_refresh = now.saturating_add(5);
+            Ok(VoiceLeaseResponse::Refused { reason }) => next.fail(reason, now)?,
+            _ => next.next_lease_refresh = now.saturating_add(5),
         }
     }
     Ok(())
@@ -122,7 +126,8 @@ async fn claim_callee(
         Ok(VoiceLeaseResponse::Allocation { allocation }) => {
             next.accept_lease(allocation, consent, now)?;
         }
-        _ => next.fail(now)?,
+        Ok(VoiceLeaseResponse::Refused { reason }) => next.fail(reason, now)?,
+        _ => next.fail(VoiceCallFailureReason::SignalingUnavailable, now)?,
     }
     Ok(())
 }

@@ -3,7 +3,9 @@
 
 //! RAM-only call secrets, endpoint selection and authenticated transition rules.
 use crate::SdkError;
-use ramflux_protocol::{CallAction, CallControl, CallEndpoint, CallRow, VoiceAllocation};
+use ramflux_protocol::{
+    CallAction, CallControl, CallEndpoint, CallRow, VoiceAllocation, VoiceCallFailureReason,
+};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
@@ -136,6 +138,7 @@ impl LiveCall {
                 direction: if outgoing { "outgoing" } else { "incoming" }.into(),
                 state: if outgoing { "outgoing_ringing" } else { "incoming_ringing" }.into(),
                 end_reason: None,
+                failure_reason: None,
                 seq: 1,
                 created_at: now,
                 answered_at: None,
@@ -275,8 +278,8 @@ impl LiveCall {
                     )?;
                 }
             }
-            CallAction::Failed => {
-                self.finish("failed", now)?;
+            CallAction::Failed { reason } => {
+                self.finish_failure(*reason, now)?;
             }
             CallAction::Hangup | CallAction::Timeout => {
                 if self.local == self.caller && c.callee != self.callee {
@@ -352,22 +355,23 @@ impl LiveCall {
             Some(if self.local == self.caller { "timeout" } else { "missed" }.into());
         Ok(true)
     }
-    pub fn fail(&mut self, now: i64) -> Result<(), SdkError> {
+    pub fn fail(&mut self, reason: VoiceCallFailureReason, now: i64) -> Result<(), SdkError> {
         if self.row.state == "ended" {
             return Ok(());
         }
         self.end(false, now)?;
         for control in &mut self.pending {
-            control.body = CallAction::Failed;
+            control.body = CallAction::Failed { reason };
         }
         self.row.end_reason = Some("failed".into());
+        self.row.failure_reason = Some(reason);
         Ok(())
     }
     pub fn expire_media(&mut self, now: i64) -> Result<bool, SdkError> {
         if self.row.state == "active"
             && self.allocation.as_ref().is_some_and(|a| a.expires_at <= now.unsigned_abs())
         {
-            self.fail(now)?;
+            self.fail(VoiceCallFailureReason::MediaLeaseExpired, now)?;
             return Ok(true);
         }
         Ok(false)
@@ -389,6 +393,7 @@ impl LiveCall {
     pub fn finish(&mut self, reason: &str, now: i64) -> Result<(), SdkError> {
         self.set_state("ended", now)?;
         self.row.end_reason = Some(reason.into());
+        self.row.failure_reason = None;
         self.row.ended_at = Some(now);
         self.pending.retain(|c| {
             matches!(
@@ -397,7 +402,7 @@ impl LiveCall {
                     | CallAction::Busy
                     | CallAction::Hangup
                     | CallAction::Timeout
-                    | CallAction::Failed
+                    | CallAction::Failed { .. }
                     | CallAction::AnsweredElsewhere
             )
         });
@@ -409,6 +414,11 @@ impl LiveCall {
         self.allocation = None;
         self.lease_offer = None;
         self.lease_consent = None;
+        Ok(())
+    }
+    fn finish_failure(&mut self, reason: VoiceCallFailureReason, now: i64) -> Result<(), SdkError> {
+        self.finish("failed", now)?;
+        self.row.failure_reason = Some(reason);
         Ok(())
     }
 }

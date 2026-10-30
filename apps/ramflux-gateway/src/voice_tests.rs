@@ -101,6 +101,127 @@ fn runtime(
         supports_forward_ack: false,
     })
 }
+fn native_identity(
+    name: &str,
+    seed: u8,
+    now: u64,
+) -> anyhow::Result<(CallEndpoint, DeviceManifestResponse, ramflux_crypto::DeviceBranch)> {
+    use ramflux_crypto::custody::{
+        GenesisInput, MasterKey, RecoveryPhrase, SelfSigningKey, create_genesis,
+    };
+    use ramflux_protocol::custody::{CustodyManifest, Publication};
+    use zeroize::Zeroizing;
+
+    let phrase = RecoveryPhrase::from_entropy(&[seed; 32])?;
+    let master = MasterKey::from_phrase(&phrase)?;
+    let self_signing = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
+    let branch = ramflux_crypto::create_device_branch(name, "primary", 1, [seed + 2; 32]);
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed([seed + 3; 32]);
+    let record = create_genesis(
+        &master,
+        &self_signing,
+        &branch,
+        &agreement,
+        GenesisInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            display_name: name.into(),
+            issued_at: now,
+            master_cert_id: ramflux_protocol::encode_base64url([seed + 4; 32]),
+            branch_cert_id: ramflux_protocol::encode_base64url([seed + 5; 32]),
+            external_human_primary: None,
+        },
+    )?;
+    let anchor = record.body.account_anchor.clone();
+    let root_public_key = record.body.master_certificate.body.master_public_key.clone();
+    let manifest = DeviceManifestResponse {
+        custody: Some(Box::new(CustodyManifest {
+            publication: Publication { record, compacted_ids: None },
+            custodian_publication: None,
+            devices: Vec::new(),
+        })),
+        signed_device_set: None,
+        principal_id: name.into(),
+        principal_commitment: anchor,
+        root_public_key: root_public_key.clone(),
+        devices: Vec::new(),
+    };
+    Ok((
+        CallEndpoint {
+            principal_id: name.into(),
+            root_public_key,
+            device_id: branch.device_id.clone(),
+        },
+        manifest,
+        branch,
+    ))
+}
+fn native_runtime(
+    endpoint: &CallEndpoint,
+    key: &ramflux_crypto::DeviceBranch,
+    manifest: &DeviceManifestResponse,
+    now: u64,
+) -> anyhow::Result<GatewaySessionRuntime> {
+    let custody = manifest.custody.as_ref().ok_or_else(|| anyhow::anyhow!("custody"))?;
+    let authority = ramflux_protocol::custody::CustodyAuthority {
+        publication: custody.publication.clone(),
+        custodian_publication: custody.custodian_publication.clone(),
+    };
+    let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
+    Ok(GatewaySessionRuntime {
+        source_identity: ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
+            &verified,
+            &endpoint.device_id,
+        )?,
+        principal_id: endpoint.principal_id.clone(),
+        device_id: endpoint.device_id.clone(),
+        branch_public_key: ramflux_protocol::encode_base64url(
+            key.signing_key.verifying_key().to_bytes(),
+        ),
+        device_epoch: 1,
+        session_id: "session".into(),
+        resume_token: "resume".into(),
+        target_delivery_id: endpoint.principal_id.clone(),
+        supports_forward_ack: false,
+    })
+}
+#[test]
+fn native_custody_authority_allocates_and_accepts_voice_leases() -> anyhow::Result<()> {
+    let now = 1_700_000_000;
+    let (caller, a, ka) = native_identity("alice", 31, now)?;
+    let (recipient, b, kb) = native_identity("bob", 41, now)?;
+    let scope = VoiceAllocationRequest {
+        call_id: ramflux_protocol::encode_base64url([1; 16]),
+        caller: caller.clone(),
+        callee: recipient.clone(),
+    };
+    let allocate = VoiceLeaseRequest::Allocate { scope: scope.clone() };
+    assert!(
+        validate_authority(&allocate, &native_runtime(&caller, &ka, &a, now)?, &a, &b, now).is_ok()
+    );
+    let mut consent = VoiceLeaseConsent {
+        scope,
+        lease_id: ramflux_protocol::encode_base64url([2; 16]),
+        expires_at: now + 300,
+        signature: String::new(),
+    };
+    consent.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &ramflux_protocol::voice_lease_consent_bytes(&consent)?,
+        &kb,
+    );
+    let accept = VoiceLeaseRequest::Accept { consent: Box::new(consent) };
+    assert!(
+        validate_authority(&accept, &native_runtime(&recipient, &kb, &b, now)?, &a, &b, now)
+            .is_ok()
+    );
+    let mut mixed = b.clone();
+    let (_, legacy, _) = identity("legacy", 51)?;
+    mixed.signed_device_set = legacy.signed_device_set;
+    assert!(
+        validate_authority(&accept, &native_runtime(&recipient, &kb, &b, now)?, &a, &mixed, now)
+            .is_err()
+    );
+    Ok(())
+}
 #[test]
 fn only_the_consented_callee_session_can_claim_callee_relay_secrets() -> anyhow::Result<()> {
     let (caller, a, ka) = identity("alice", 1)?;
