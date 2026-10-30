@@ -20,7 +20,6 @@ CREATE INDEX IF NOT EXISTS message_footprint_locator ON message_footprint(kind,l
 CREATE TABLE IF NOT EXISTS message_copy_binding(copy_id TEXT NOT NULL,message_id TEXT NOT NULL,
  PRIMARY KEY(copy_id,message_id));
 CREATE INDEX IF NOT EXISTS message_copy_binding_message ON message_copy_binding(message_id);
-DROP INDEX IF EXISTS runtime_outbox_source;
 CREATE TRIGGER IF NOT EXISTS footprint_binding AFTER INSERT ON message_copy_binding BEGIN
  INSERT INTO message_footprint SELECT NEW.message_id,kind,locator FROM message_footprint WHERE message_id='copy:'||NEW.copy_id ON CONFLICT DO NOTHING;
  DELETE FROM message_footprint WHERE message_id='copy:'||NEW.copy_id;
@@ -100,22 +99,40 @@ fn install_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
 
 fn staged_actor_copy(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS message_footprint_actor_stage(
-            state_kind TEXT NOT NULL,state_json BLOB NOT NULL);
-         DELETE FROM message_footprint_actor_stage;
+        "DROP TRIGGER IF EXISTS footprint_message_footprint_actor_stage_consume;
+         DROP TABLE IF EXISTS message_footprint_actor_stage;
+         CREATE TABLE message_footprint_actor_stage(
+            state_kind TEXT NOT NULL,
+            message_ids_json TEXT NOT NULL,
+            copy_ids_json TEXT NOT NULL,
+            bindings_json TEXT NOT NULL);
          DROP TRIGGER IF EXISTS footprint_runtime_actor_state_INSERT;
          DROP TRIGGER IF EXISTS footprint_runtime_actor_state_UPDATE;
          DROP TRIGGER IF EXISTS footprint_actor_fence_INSERT;
-         DROP TRIGGER IF EXISTS footprint_actor_fence_UPDATE;",
+         DROP TRIGGER IF EXISTS footprint_actor_fence_UPDATE;
+         CREATE TRIGGER footprint_message_footprint_actor_stage_consume
+         AFTER INSERT ON message_footprint_actor_stage BEGIN
+          DELETE FROM message_footprint WHERE kind='actor' AND locator=NEW.state_kind;
+          INSERT INTO message_copy_binding(copy_id,message_id)
+          SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]')
+          FROM json_each(NEW.bindings_json)
+          WHERE json_type(value,'$[0]')='text' AND json_type(value,'$[1]')='text'
+          ON CONFLICT DO NOTHING;
+          INSERT INTO message_footprint(message_id,kind,locator)
+          SELECT value,'actor',NEW.state_kind FROM json_each(NEW.message_ids_json)
+          WHERE type='text' ON CONFLICT DO NOTHING;
+          INSERT INTO message_footprint(message_id,kind,locator)
+          SELECT message_id,'actor',NEW.state_kind FROM message_copy_binding
+          WHERE copy_id='actor:'||NEW.state_kind ON CONFLICT DO NOTHING;
+          INSERT INTO message_footprint(message_id,kind,locator)
+          SELECT COALESCE(binding.message_id,'copy:'||copy.value),'actor',NEW.state_kind
+          FROM json_each(NEW.copy_ids_json) copy
+          LEFT JOIN message_copy_binding binding ON binding.copy_id=copy.value
+          WHERE copy.type='text' ON CONFLICT DO NOTHING;
+          DELETE FROM message_footprint_actor_stage WHERE rowid=NEW.rowid;
+         END;",
     )?;
-    staged_json_consumer(
-        db,
-        "message_footprint_actor_stage",
-        "actor",
-        "NEW.state_kind",
-        "state_json",
-        ACTOR_LINKS,
-    )
+    Ok(())
 }
 
 fn remove_outbox_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
@@ -129,30 +146,6 @@ fn remove_outbox_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn staged_json_consumer(
-    db: &Connection,
-    table: &str,
-    kind: &str,
-    locator: &str,
-    column: &str,
-    extra: &str,
-) -> rusqlite::Result<()> {
-    let extra = extra.replace("{kind}", kind).replace("{locator}", locator);
-    db.execute_batch(&format!(
-        r"
-DROP TRIGGER IF EXISTS footprint_{table}_consume;
-CREATE TRIGGER footprint_{table}_consume AFTER INSERT ON {table} BEGIN
- DELETE FROM message_footprint WHERE kind='{kind}' AND locator={locator};
- {extra}
- INSERT INTO message_footprint SELECT t.value,'{kind}',{locator} FROM json_tree(CAST(NEW.{column} AS TEXT)) t WHERE t.type='text' AND t.key IN ('message_id','own_copy_message_id','target_message_id') ON CONFLICT DO NOTHING;
- INSERT INTO message_footprint SELECT t.value,'{kind}',{locator} FROM json_tree(CAST(NEW.{column} AS TEXT)) t WHERE t.type='text' AND t.key='id' AND t.path='$.message' ON CONFLICT DO NOTHING;
- INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:payload:'||t.value),'{kind}',{locator} FROM json_tree(CAST(NEW.{column} AS TEXT)) t LEFT JOIN message_copy_binding b ON b.copy_id='payload:'||t.value WHERE t.key='payload_hash' AND t.type='text' ON CONFLICT DO NOTHING;
- INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:object:'||t.value),'{kind}',{locator} FROM json_tree(CAST(NEW.{column} AS TEXT)) t LEFT JOIN message_copy_binding b ON b.copy_id='object:'||t.value WHERE t.type='text' AND t.key='object_id' ON CONFLICT DO NOTHING;
- DELETE FROM {table} WHERE rowid=NEW.rowid;
-END;
-"
-    ))
-}
 const ACTOR_GUARD: &str = "NEW.state_kind NOT GLOB 'routed/seen/*' AND (NEW.state_kind GLOB 'routed/*' OR NEW.state_kind GLOB 'directory/message/*' OR NEW.state_kind GLOB 'directory/object/*' OR NEW.state_kind GLOB 'message/origin/*' OR NEW.state_kind GLOB 'delivery-receipt/*' OR NEW.state_kind GLOB 'attachment/*' OR NEW.state_kind GLOB 'sync/attachment/*' OR NEW.state_kind GLOB 'surface/origin/*' OR NEW.state_kind GLOB 'surface/message/*' OR NEW.state_kind GLOB 'surface/pending/*' OR NEW.state_kind GLOB 'surface/history/*' OR NEW.state_kind GLOB 'directory/surface_error/*' OR NEW.state_kind GLOB 'task/message/*' OR NEW.state_kind GLOB 'group-message/alias/*' OR NEW.state_kind GLOB 'own-copy/*' OR NEW.state_kind GLOB 'own-device/*' OR NEW.state_kind GLOB 'inbox/*' OR NEW.state_kind GLOB 'backup/staging/*')";
 const ACTOR_LINKS: &str = r"
  INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:object:'||substr(substr(NEW.state_kind,18),1,instr(substr(NEW.state_kind,18),'/')-1)),'{kind}',{locator} FROM (SELECT 1) LEFT JOIN message_copy_binding b ON b.copy_id='object:'||substr(substr(NEW.state_kind,18),1,instr(substr(NEW.state_kind,18),'/')-1) WHERE NEW.state_kind GLOB 'attachment/chunk/*/*' ON CONFLICT DO NOTHING;

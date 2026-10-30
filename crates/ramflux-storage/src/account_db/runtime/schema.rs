@@ -16,7 +16,11 @@ impl AccountDb {
                 table_name TEXT NOT NULL,
                 change_kind TEXT NOT NULL,
                 row_id INTEGER NOT NULL,
-                published INTEGER NOT NULL DEFAULT 0
+                published INTEGER NOT NULL DEFAULT 0,
+                keys_json TEXT,
+                actor_state_kind TEXT GENERATED ALWAYS AS (
+                    CASE WHEN table_name='runtime_actor_state'
+                         THEN json_extract(keys_json,'$.state_kind') END) VIRTUAL
              );
              CREATE INDEX IF NOT EXISTS runtime_outbox_pending ON runtime_outbox(sequence) WHERE published=0;
              CREATE TABLE IF NOT EXISTS runtime_ack (envelope_id TEXT PRIMARY KEY);
@@ -57,6 +61,26 @@ impl AccountDb {
             self.connection
                 .execute_batch("ALTER TABLE runtime_outbox ADD COLUMN keys_json TEXT")?;
         }
+        let actor_columns: i64 = self.connection.query_row(
+            "SELECT count(*) FROM pragma_table_xinfo('runtime_outbox')
+             WHERE name='actor_state_kind'",
+            [],
+            |row| row.get(0),
+        )?;
+        if actor_columns == 0 {
+            self.connection.execute_batch(
+                "ALTER TABLE runtime_outbox ADD COLUMN actor_state_kind TEXT
+                 GENERATED ALWAYS AS (
+                    CASE WHEN table_name='runtime_actor_state'
+                         THEN json_extract(keys_json,'$.state_kind') END) VIRTUAL",
+            )?;
+        }
+        self.connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS runtime_outbox_source
+                 ON runtime_outbox(table_name,row_id);
+             CREATE INDEX IF NOT EXISTS runtime_outbox_actor_kind
+                 ON runtime_outbox(actor_state_kind,table_name,change_kind);",
+        )?;
         self.install_receipt_retention_schema()?;
         self.remove_consent_bookkeeping_triggers()?;
         self.install_domain_change_triggers()?;

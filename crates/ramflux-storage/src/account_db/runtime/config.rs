@@ -63,6 +63,9 @@ impl AccountDb {
             return Ok(false);
         }
         self.remove_actor_state("secrets/retired")?;
+        // The marker deletion itself writes a final WAL frame. Retire it through the same
+        // product path so callers and tests never need an extra privacy checkpoint.
+        self.checkpoint_retired_secrets()?;
         Ok(true)
     }
 

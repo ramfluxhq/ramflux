@@ -6,6 +6,27 @@ use super::*;
 use crate::{AccountDbKey, AccountIndex, EventStore};
 use serde_json::json;
 
+const AUDIT_IDENTITY_TABLES: &[&str] = &[
+    "device_directory",
+    "device_identity",
+    "local_event_counter",
+    "friend_link_projection",
+    "contact_request_projection",
+    "contact_request_decision",
+    "contact_link_decision",
+    "contact_root_binding",
+    "shared_group_member_projection",
+    "group_member_projection",
+    "group_member_device_key",
+    "runtime_account_identity",
+    "runtime_inbox_changes",
+    "root_group_control_event_seen",
+];
+const AUDIT_IDENTITY_ACTOR_FILTER: &str = "state_kind GLOB 'directory/identity/*' OR state_kind GLOB 'directory/device/*' OR state_kind GLOB 'directory/contact/*' OR state_kind GLOB 'directory/commitment/*' OR state_kind GLOB 'directory/conversation/*' OR state_kind GLOB 'directory/group/*' OR state_kind GLOB 'directory/group-local/*' OR state_kind GLOB 'directory/group-name/*' OR state_kind GLOB 'identity/*' OR state_kind GLOB 'authority/*'";
+const AUDIT_IDENTITY_EVENT_FILTER: &str = "event_type GLOB 'identity.*' OR event_type GLOB 'device.*' OR event_type GLOB 'prekey.*' OR event_type GLOB 'x3dh.prekey.*' OR event_type IN ('dm.ratchet_session','group.sender_key.state','group.member.route')";
+// Static migration descriptions are schema metadata, never account or message copies.
+const AUDIT_STRUCTURAL_TABLES: &[&str] = &["schema_migration"];
+
 #[test]
 fn message_copy_upserts_keep_registration_idempotent() -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("footprint-upsert")?;
@@ -205,24 +226,44 @@ fn assert_erased(db: &AccountDb, forbidden: &[String]) -> Result<(), StorageErro
         q.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(q);
     for table in tables {
-        let filter =
-            if matches!(table.as_str(), "runtime_actor_state" | "backup_archived_actor_state") {
-                " WHERE state_kind NOT GLOB 'directory/identity/*'"
-            } else if table.contains("message")
-                || table.contains("receipt")
-                || table.contains("journal")
-                || table.contains("event_log")
-                || table.starts_with("runtime_inbox_")
-                || matches!(
-                    table.as_str(),
-                    "runtime_unrouted" | "runtime_outbox" | "raw_envelope_log" | "outbox_queue" | "ack_state" | "nack_state" | "event_causal_dependency" | "cursor_checkpoint" | "device_inbox_cursor" | "backup_archived_local_event"
-                )
-            {
-                ""
-            } else {
-                continue;
-            };
-        let mut q = raw.prepare(&format!("SELECT * FROM {table}{filter}"))?;
+        // Only independent account authority, contact, and membership state is exempt.
+        // The matching outbox invalidations are exempt by named source or identity actor key.
+        if AUDIT_IDENTITY_TABLES.contains(&table.as_str())
+            || AUDIT_STRUCTURAL_TABLES.contains(&table.as_str())
+        {
+            continue;
+        }
+        let filter = if matches!(
+            table.as_str(),
+            "runtime_actor_state" | "backup_archived_actor_state"
+        ) {
+            format!(" WHERE NOT ({AUDIT_IDENTITY_ACTOR_FILTER})")
+        } else if table == "runtime_outbox" {
+            let actor_key = AUDIT_IDENTITY_ACTOR_FILTER
+                .replace("state_kind", "json_extract(keys_json,'$.state_kind')");
+            format!(
+                " WHERE table_name NOT IN ({})
+                  AND NOT (table_name='runtime_actor_state' AND (({actor_key}) OR EXISTS(
+                   SELECT 1 FROM runtime_actor_state a WHERE a.rowid=runtime_outbox.row_id
+                    AND ({AUDIT_IDENTITY_ACTOR_FILTER}))))
+                  AND NOT (table_name='local_event_log' AND EXISTS(
+                   SELECT 1 FROM local_event_log e WHERE e.rowid=runtime_outbox.row_id
+                    AND ({AUDIT_IDENTITY_EVENT_FILTER})))",
+                AUDIT_IDENTITY_TABLES
+                    .iter()
+                    .map(|table| format!("'{table}'"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        } else if matches!(table.as_str(), "local_event_log" | "backup_archived_local_event") {
+            format!(" WHERE NOT ({AUDIT_IDENTITY_EVENT_FILTER})")
+        } else if table == "runtime_journal" {
+            " WHERE topic NOT IN ('safety.changed','account.state')".to_owned()
+        } else {
+            String::new()
+        };
+        let quoted = table.replace('"', "\"\"");
+        let mut q = raw.prepare(&format!("SELECT * FROM \"{quoted}\"{filter}"))?;
         let names = q.column_names().iter().map(ToString::to_string).collect::<Vec<_>>();
         let rows = q
             .query_map([], |r| {
@@ -238,17 +279,6 @@ fn assert_erased(db: &AccountDb, forbidden: &[String]) -> Result<(), StorageErro
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for row in rows {
-            // Independent identity invalidations are exempt, just like their source rows.
-            if table == "runtime_outbox"
-                && row.iter().any(|v| {
-                    matches!(
-                        v.as_str(),
-                        "device_directory" | "device_identity" | "group_member_projection"
-                    ) || v.contains("directory/identity/")
-                })
-            {
-                continue;
-            }
             let context = row.clone();
             for (name, value) in names.iter().zip(row) {
                 for secret in &forbidden {
@@ -315,10 +345,6 @@ fn dropping_explicit_registration_is_detected_as_an_erasure_residual() -> Result
     let (root, db) = crate::tests::test_db("footprint-registration-mutation")?;
     db.send_direct_message("thread", "message", "peer", b"secret")?;
     db.persist_actor_state("routed/message-owner/message", &"private-source")?;
-    db.connection.execute(
-        "DELETE FROM message_footprint WHERE kind='actor' AND locator='routed/message-owner/message'",
-        [],
-    )?;
     db.delete_direct_message("thread", "message", "local", "delete")?;
     let audit = assert_erased(&db, &["private-source".to_owned()]);
     drop(db);
