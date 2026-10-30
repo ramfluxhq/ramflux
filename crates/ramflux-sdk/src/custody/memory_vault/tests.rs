@@ -5,7 +5,7 @@
 use super::*;
 use crate::custody::{
     CreationCeremony, HomeAuthorizationRequest,
-    home_authorization::proposal_digest,
+    home_authorization::{HomeAuthorizationInput, proposal_digest},
     tests::{Root, TestVault, input, words},
 };
 use ramflux_protocol::{
@@ -20,7 +20,7 @@ fn home_migration_memory_fixture_requires_a_new_explicit_approval_for_each_exact
     let root = Root::new()?;
     let vault = MemoryPrimaryVault::default();
     let now = 1_700_000_000;
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("human"), now)?;
+    let mut ceremony = CreationCeremony::begin(&root.0, input("human"), now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     let account = ceremony.confirm(&words(&phrase, positions)?, &vault, now)?;
@@ -53,14 +53,15 @@ fn home_migration_memory_fixture_requires_a_new_explicit_approval_for_each_exact
     };
     let digest = proposal_digest(&body)?;
     let request = || {
-        HomeAuthorizationRequest::new(
+        HomeAuthorizationRequest::new(HomeAuthorizationInput {
+            local_account_id: "human",
             reference,
-            &body,
-            &credentials.signing,
-            account.verified(),
-            &digest,
+            body: &body,
+            branch: &credentials.signing,
+            authority: account.verified(),
+            digest: &digest,
             now,
-        )
+        })
     };
     assert!(matches!(
         vault.sign_home_authorization(request()?),
@@ -73,7 +74,30 @@ fn home_migration_memory_fixture_requires_a_new_explicit_approval_for_each_exact
         old_provider.sign_home_authorization(request()?),
         Err(SdkError::HomeMigrationRefused(Refusal::CustodyUserPresenceUnavailable))
     ));
-    vault.approve_next_migration_for_test();
+    vault.approve_migration_once_for_test("human", &hash(1))?;
+    assert!(matches!(
+        vault.approve_migration_once_for_test("human", &hash(1)),
+        Err(SdkError::LocalBusRefused { code, .. }) if code == "MigrationApprovalAlreadyArmed"
+    ));
+    assert!(matches!(
+        vault.approve_migration_once_for_test("human", &hash(7)),
+        Err(SdkError::LocalBusRefused { code, .. }) if code == "MigrationApprovalAlreadyArmed"
+    ));
+    let mut other_body = body.clone();
+    other_body.migration_id = hash(7);
+    let other_digest = proposal_digest(&other_body)?;
+    assert!(matches!(
+        vault.sign_home_authorization(HomeAuthorizationRequest::new(HomeAuthorizationInput {
+            local_account_id: "human",
+            reference,
+            body: &other_body,
+            branch: &credentials.signing,
+            authority: account.verified(),
+            digest: &other_digest,
+            now,
+        })?),
+        Err(SdkError::HomeMigrationRefused(Refusal::CustodyUserPresenceUnavailable))
+    ));
     let signed = vault.sign_home_authorization(request()?)?;
     assert_eq!(signed.body, body);
     ramflux_crypto::home_migration::verify_authorization(&signed, account.verified(), now)?;
@@ -82,14 +106,15 @@ fn home_migration_memory_fixture_requires_a_new_explicit_approval_for_each_exact
         Err(SdkError::HomeMigrationRefused(Refusal::CustodyUserPresenceUnavailable))
     ));
     assert!(
-        HomeAuthorizationRequest::new(
+        HomeAuthorizationRequest::new(HomeAuthorizationInput {
+            local_account_id: "human",
             reference,
-            &body,
-            &credentials.signing,
-            account.verified(),
-            &hash(8),
-            now
-        )
+            body: &body,
+            branch: &credentials.signing,
+            authority: account.verified(),
+            digest: &hash(8),
+            now,
+        })
         .is_err()
     );
     Ok(())
