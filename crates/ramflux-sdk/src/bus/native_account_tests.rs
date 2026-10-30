@@ -228,6 +228,34 @@ async fn connect_custody(path: &std::path::Path) -> Result<crate::custody::Custo
 }
 
 #[tokio::test]
+async fn disconnected_peer_never_stops_the_daemon_accept_loop() -> Result {
+    let root = Root::new()?;
+    let socket = root.0.join("disconnected-peer.sock");
+    let listener = tokio::net::UnixListener::bind(&socket)?;
+    let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&socket)?);
+    // Queue a closed peer before accept can query its credentials. On macOS this
+    // makes peer_cred return NotConnected; Linux may retain the credentials.
+    drop(std::os::unix::net::UnixStream::connect(&socket)?);
+    let supervisor = super::supervisor::Supervisor::new(LocalBusConfig::new(&socket, &root.0))?;
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _stop = Stop(stop);
+        let mut bus = connect(&socket).await?;
+        let response = bus.request(None, "account", "account.list", json!({})).await?;
+        assert_eq!(response["account_details"], json!([]));
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::task::LocalSet::new()
+        .run_until(async {
+            tokio::join!(super::connection::accept(listener, uid, supervisor, receiver), flow)
+        })
+        .await;
+    server?;
+    flow?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn ordinary_native_unlock_lock_restart_needs_only_data_passphrase() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
@@ -401,8 +429,8 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         Ok::<_, Box<dyn std::error::Error>>(())
     };
     let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
-    flow?;
     server?;
+    flow?;
     Ok(())
 }
 
@@ -769,9 +797,6 @@ fn accept_refusal_server(
 ) -> Result {
     match result {
         Ok(()) => Ok(()),
-        Err(crate::SdkError::Io(error)) if error.kind() == std::io::ErrorKind::NotConnected => {
-            Ok(())
-        }
         Err(error) => Err(format!("{context}: {error}").into()),
     }
 }
