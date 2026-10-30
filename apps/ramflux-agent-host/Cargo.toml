@@ -14,12 +14,14 @@ serde_json.workspace = true
 thiserror.workspace = true
 clap.workspace = true
 reqwest.workspace = true
+time = { version = "0.3", features = ["parsing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 bytes.workspace = true
 http-body-util = "0.1"
 hyper.workspace = true

@@ -272,27 +272,27 @@ impl<E: EngineProvider> AgentHost<E> {
                     }
                     self.complete_resumed_task(bus, &conversation_id, true).await?;
                 }
-                EngineEvent::VisibleFailure { conversation_id, message_id } => {
+                EngineEvent::VisibleFailure { conversation_id, message_id, reason } => {
                     self.emit_intents(
                         bus,
                         IntentDelivery {
                             conversation_id: &conversation_id,
                             message_id: &message_id,
-                            intents: vec![Intent::ReplyText(
-                                "The agent engine could not complete this request.".into(),
-                            )],
+                            intents: vec![Intent::ReplyText(reason.reply().into())],
                             seq,
                             now_ms,
                         },
                     )
                     .await?;
-                    self.complete_resumed_task(bus, &conversation_id, false).await?;
+                    if reason != crate::EngineFailure::Busy {
+                        self.complete_resumed_task(bus, &conversation_id, false).await?;
+                    }
                 }
                 EngineEvent::ApprovalRequired {
                     conversation_id,
                     message_id,
                     decision_id,
-                    pending_tool,
+                    approval,
                 } => {
                     self.complete_resumed_task(bus, &conversation_id, true).await?;
                     let started = self
@@ -302,7 +302,7 @@ impl<E: EngineProvider> AgentHost<E> {
                                 conversation_id,
                                 message_id,
                                 decision_id,
-                                pending_tool,
+                                approval,
                                 now_ms,
                             },
                         )
