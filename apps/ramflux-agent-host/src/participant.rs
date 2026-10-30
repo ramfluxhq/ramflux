@@ -114,6 +114,29 @@ pub(crate) fn field<'a>(value: &'a Value, key: &'static str) -> Result<&'a str> 
         .ok_or(Error::MalformedField(key))
 }
 
+pub(crate) async fn sender_display_name(
+    bus: &mut impl AgentBus,
+    message: &Value,
+) -> Result<String> {
+    let sender = field(message, "sender_id")?;
+    let identity = directory_find(bus, "identity.directory", "identities", |row| {
+        row["principal_id"] == sender
+            || row["devices"]
+                .as_array()
+                .is_some_and(|devices| devices.iter().any(|device| device["device_id"] == sender))
+    })
+    .await?;
+    Ok(identity
+        .as_ref()
+        .and_then(|row| row["display_name"].as_str())
+        .filter(|name| !name.is_empty() && name.len() <= 256)
+        .unwrap_or("unknown")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(128)
+        .collect())
+}
+
 pub(crate) async fn reply_outputs(
     bus: &mut impl AgentBus,
     state: &Checkpoint,
