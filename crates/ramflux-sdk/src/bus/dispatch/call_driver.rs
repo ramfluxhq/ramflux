@@ -33,8 +33,7 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
                 .write_transaction(|| account.client.persist_call_row(&next.row))?;
         }
         account.client.voice_calls.insert(id.clone(), next);
-        release_lease(account, &id, now).await?;
-        count += deliver_pending(account, &id, now).await?;
+        count += drive_controls(account, &id, now).await?;
     }
     // Public rows are persisted; finished runtime keys and bearer credentials can be destroyed.
     account.client.voice_calls.retain(|_, c| {
@@ -44,6 +43,37 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
     });
     Ok(count)
 }
+
+trait ControlDriver {
+    async fn deliver(&mut self, id: &str, now: i64) -> Result<usize, SdkError>;
+    async fn release(&mut self, id: &str, now: i64) -> Result<(), SdkError>;
+}
+impl ControlDriver for LocalBusAccountState {
+    async fn deliver(&mut self, id: &str, now: i64) -> Result<usize, SdkError> {
+        deliver_pending(self, id, now).await
+    }
+    async fn release(&mut self, id: &str, now: i64) -> Result<(), SdkError> {
+        release_lease(self, id, now).await
+    }
+}
+async fn drive_controls(
+    driver: &mut impl ControlDriver,
+    id: &str,
+    now: i64,
+) -> Result<usize, SdkError> {
+    // Even an offline peer must get a completed delivery attempt before lease release.
+    let delivered = driver.deliver(id, now).await;
+    driver.release(id, now).await?;
+    delivered
+}
+
+#[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
+#[path = "call_refresh_barrier.rs"]
+mod refresh_barrier;
+
+#[cfg(test)]
+#[path = "call_driver_tests.rs"]
+mod tests;
 async fn flush(account: &mut LocalBusAccountState, id: &str) -> Result<usize, SdkError> {
     account.client.require_native_operation(
         &account.client.owned_device_identity()?,

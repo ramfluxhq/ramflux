@@ -28,6 +28,15 @@ call ID, both root-qualified endpoints, lease ID and the hard expiry. It claims 
 own credentials over its own authenticated gateway session, after authenticating the
 caller's offer, then becomes active and returns the public signed consent. Neither
 participant receives the other's token or rebind key. Renewal includes the consent.
+
+Terminal controls, including Hangup, are attempted before releasing the shared relay
+lease. A failed delivery attempt retains the bounded signaling retry, and an offline
+peer does not prevent release. A callee that is already active and gets a relay refusal
+while claiming a renewed offer discards its media credentials and keys but keeps
+accepting authenticated call controls until its original allocation expiry. Hangup
+within that interval completes the call; absent Hangup, expiry ends it as failed with
+the original relay refusal reason. Repeated refusals and renewed offers cannot extend
+that deadline. Authority refusals and initial setup failures still end immediately.
 The gateway verifies either current born-v3 custody publications with an active
 `call` branch capability or legacy root-signed device sets with active key
 commitments, plus device epoch, live session root/actor and callee signature. The

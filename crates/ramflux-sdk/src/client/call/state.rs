@@ -27,6 +27,7 @@ pub(crate) struct LiveCall {
     pub release_until: u64,
     pub media_taken: bool,
     pub pending: Vec<CallControl>,
+    media_loss: Option<(VoiceCallFailureReason, u64)>,
     offer_keys: BTreeMap<CallEndpoint, Zeroizing<[u8; 32]>>,
     peer_keys: BTreeMap<CallEndpoint, String>,
     next_seq: u64,
@@ -161,6 +162,7 @@ impl LiveCall {
             release_until: 0,
             media_taken: false,
             pending: Vec::new(),
+            media_loss: None,
             offer_keys: BTreeMap::new(),
             peer_keys: BTreeMap::new(),
             next_seq: 1,
@@ -370,6 +372,13 @@ impl LiveCall {
         Ok(())
     }
     pub fn expire_media(&mut self, now: i64) -> Result<bool, SdkError> {
+        if let Some((reason, deadline)) = self.media_loss {
+            if now.unsigned_abs() >= deadline {
+                self.fail(reason, now)?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
         if self.row.state == "active"
             && self.allocation.as_ref().is_some_and(|a| a.expires_at <= now.unsigned_abs())
         {
@@ -377,6 +386,35 @@ impl LiveCall {
             return Ok(true);
         }
         Ok(false)
+    }
+    pub(crate) fn lease_refused(
+        &mut self,
+        reason: VoiceCallFailureReason,
+        now: i64,
+    ) -> Result<(), SdkError> {
+        if self.local == self.callee
+            && self.row.state == "active"
+            && reason == VoiceCallFailureReason::RelayUnavailable
+        {
+            if self.media_loss.is_none() {
+                let deadline =
+                    self.allocation.as_ref().map_or(now.unsigned_abs(), |a| a.expires_at);
+                self.media_loss = Some((reason, deadline));
+                self.allocation = None;
+                self.send_key = Zeroizing::new([0; 32]);
+                self.receive_key = None;
+                self.lease_offer = None;
+                self.lease_consent = None;
+                self.next_lease_refresh = i64::MAX;
+            }
+            self.expire_media(now)?;
+            Ok(())
+        } else {
+            self.fail(reason, now)
+        }
+    }
+    pub(crate) fn media_lost(&self) -> bool {
+        self.media_loss.is_some()
     }
     fn expired(&self, now: i64) -> bool {
         matches!(self.row.state.as_str(), "outgoing_ringing" | "incoming_ringing" | "connecting")
@@ -417,6 +455,7 @@ impl LiveCall {
         self.allocation = None;
         self.lease_offer = None;
         self.lease_consent = None;
+        self.media_loss = None;
         Ok(())
     }
     fn finish_peer_failure(
