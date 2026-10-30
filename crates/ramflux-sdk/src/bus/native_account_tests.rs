@@ -644,14 +644,20 @@ async fn headless_creation_refuses_every_untrusted_custodian_entry() -> Result {
         )?;
         Ok::<_, Box<dyn std::error::Error>>(())
     };
-    create("owner", ramflux_protocol::PrincipalKind::Human, None)?;
-    crate::custody::tests::mark_live(&root.0, "owner", now)?;
-    create("other", ramflux_protocol::PrincipalKind::Human, None)?;
-    crate::custody::tests::mark_live(&root.0, "other", now)?;
-    create("pending", ramflux_protocol::PrincipalKind::Human, None)?;
-    create("agent", ramflux_protocol::PrincipalKind::HeadlessAi, Some("owner"))?;
-    crate::custody::tests::mark_live(&root.0, "agent", now)?;
-    drop(create);
+    create("owner", ramflux_protocol::PrincipalKind::Human, None)
+        .map_err(|error| format!("create owner: {error}"))?;
+    crate::custody::tests::mark_live(&root.0, "owner", now)
+        .map_err(|error| format!("mark owner live: {error}"))?;
+    create("other", ramflux_protocol::PrincipalKind::Human, None)
+        .map_err(|error| format!("create other: {error}"))?;
+    crate::custody::tests::mark_live(&root.0, "other", now)
+        .map_err(|error| format!("mark other live: {error}"))?;
+    create("pending", ramflux_protocol::PrincipalKind::Human, None)
+        .map_err(|error| format!("create pending: {error}"))?;
+    create("agent", ramflux_protocol::PrincipalKind::HeadlessAi, Some("owner"))
+        .map_err(|error| format!("create agent: {error}"))?;
+    crate::custody::tests::mark_live(&root.0, "agent", now)
+        .map_err(|error| format!("mark agent live: {error}"))?;
 
     let socket = root.0.join("headless-refusals.sock");
     let mut config = LocalBusConfig::new(&socket, &root.0);
@@ -659,23 +665,23 @@ async fn headless_creation_refuses_every_untrusted_custodian_entry() -> Result {
     let (stop, receiver) = watch::channel(false);
     let flow = async {
         let _stop = Stop(stop);
-        let mut ceremony = LocalBusCreationClient::connect(&socket).await?;
-        assert!(ceremony.begin_headless("Locked owner", "owner").await.is_err());
+        drop(connect(&socket).await?);
+        let mut locked = LocalBusCreationClient::connect(&socket).await?;
+        assert!(locked.begin_headless("Locked owner", "owner").await.is_err());
+        let mut missing = LocalBusCreationClient::connect(&socket).await?;
         assert!(
-            ceremony
-                .begin_headless_with_envelope("No owner envelope", "owner", None)
-                .await
-                .is_err()
+            missing.begin_headless_with_envelope("No owner envelope", "owner", None).await.is_err()
         );
-        let mut bus = connect(&socket).await?;
-        bus.request(
-            Some("owner".into()),
-            "stream",
-            "subscription.open",
-            json!({"topics":[],"attended_frontend":true}),
-        )
-        .await?;
-        let locked_export = bus
+        let mut locked_bus = connect(&socket).await?;
+        locked_bus
+            .request(
+                Some("owner".into()),
+                "stream",
+                "subscription.open",
+                json!({"topics":[],"attended_frontend":true}),
+            )
+            .await?;
+        let locked_export = locked_bus
             .request_frame_response(LocalBusFrame::request(
                 "locked-export",
                 Some("owner".into()),
@@ -685,6 +691,8 @@ async fn headless_creation_refuses_every_untrusted_custodian_entry() -> Result {
             ))
             .await?;
         assert!(locked_export.error.is_some());
+        drop(locked_bus);
+        let mut bus = connect(&socket).await?;
         for id in ["owner", "other", "pending", "agent"] {
             bus.request(
                 Some(id.into()),
@@ -694,23 +702,29 @@ async fn headless_creation_refuses_every_untrusted_custodian_entry() -> Result {
             )
             .await?;
         }
+        let mut non_owner = LocalBusCreationClient::connect(&socket).await?;
         assert!(
-            ceremony
+            non_owner
                 .begin_headless_with_envelope("Non-owner session", "owner", Some("other"))
                 .await
                 .is_err()
         );
-        assert!(ceremony.begin_headless("Pending owner", "pending").await.is_err());
-        assert!(ceremony.begin_headless("Non-human owner", "agent").await.is_err());
+        let mut pending = LocalBusCreationClient::connect(&socket).await?;
+        assert!(pending.begin_headless("Pending owner", "pending").await.is_err());
+        let mut non_human = LocalBusCreationClient::connect(&socket).await?;
+        assert!(non_human.begin_headless("Non-human owner", "agent").await.is_err());
+        drop(bus);
         for owner in ["other", "pending", "agent"] {
-            bus.request(
-                Some(owner.into()),
-                "stream",
-                "subscription.open",
-                json!({"topics":[],"attended_frontend":true}),
-            )
-            .await?;
-            let refused = bus
+            let mut export_bus = connect(&socket).await?;
+            export_bus
+                .request(
+                    Some(owner.into()),
+                    "stream",
+                    "subscription.open",
+                    json!({"topics":[],"attended_frontend":true}),
+                )
+                .await?;
+            let refused = export_bus
                 .request_frame_response(LocalBusFrame::request(
                     format!("{owner}-export"),
                     Some(owner.into()),
@@ -733,16 +747,34 @@ async fn headless_creation_refuses_every_untrusted_custodian_entry() -> Result {
         Ok::<_, Box<dyn std::error::Error>>(())
     };
     let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
-    server?;
-    flow?;
+    server.map_err(|error| format!("headless refusal server failed: {error}"))?;
+    flow.map_err(|error| format!("headless refusal flow failed: {error}"))?;
 
     let wrong_root = Root::new()?;
     let wrong_socket = wrong_root.0.join("wrong-daemon.sock");
     let (stop, receiver) = watch::channel(false);
     let flow = async {
         let _stop = Stop(stop);
+        drop(connect(&wrong_socket).await?);
         let mut ceremony = LocalBusCreationClient::connect(&wrong_socket).await?;
         assert!(ceremony.begin_headless("Wrong daemon", "owner").await.is_err());
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(
+        crate::serve_local_bus_until(LocalBusConfig::new(&wrong_socket, &wrong_root.0), receiver),
+        flow
+    );
+    if let Err(error) = server {
+        assert!(
+            matches!(&error, crate::SdkError::Io(io) if io.kind() == std::io::ErrorKind::NotConnected),
+            "unexpected wrong-daemon creation server failure: {error}"
+        );
+    }
+    flow.map_err(|error| format!("wrong daemon creation flow failed: {error}"))?;
+
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _stop = Stop(stop);
         let mut bus = connect(&wrong_socket).await?;
         bus.request(
             Some("owner".into()),
@@ -767,8 +799,13 @@ async fn headless_creation_refuses_every_untrusted_custodian_entry() -> Result {
         crate::serve_local_bus_until(LocalBusConfig::new(&wrong_socket, &wrong_root.0), receiver),
         flow
     );
-    server?;
-    flow?;
+    if let Err(error) = server {
+        assert!(
+            matches!(&error, crate::SdkError::Io(io) if io.kind() == std::io::ErrorKind::NotConnected),
+            "unexpected wrong-daemon export server failure: {error}"
+        );
+    }
+    flow.map_err(|error| format!("wrong daemon export flow failed: {error}"))?;
     Ok(())
 }
 
