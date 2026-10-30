@@ -552,6 +552,7 @@ mod tests {
         standing_grant: bool,
         requests: Vec<(String, Value)>,
         replies: Vec<Value>,
+        removed: bool,
     }
 
     impl TestBus {
@@ -613,6 +614,9 @@ mod tests {
                 }
                 "identity.directory" => {
                     json!({"identities":[{"principal_id":"agent-principal","is_self":true,"kind":"headless_ai"},{"principal_id":"human-principal","contact_identity_commitment":"human-commitment","devices":[{"device_id":"human-device","target_delivery_id":"human-target"}]}],"next_cursor":null})
+                }
+                "conversation.directory" if self.removed => {
+                    json!({"conversations":[],"next_cursor":null})
                 }
                 "conversation.directory" => {
                     json!({"conversations":[{"id":"conversation","kind":"direct","participants":["agent-principal","human-principal"]},{"id":"other","kind":"direct","participants":["agent-principal","human-principal"]}],"next_cursor":null})
@@ -960,6 +964,40 @@ mod tests {
         );
         assert_eq!(bus.replies, Vec::<Value>::new());
         assert!(server.bodies().await.iter().any(|body| body["approved"] == true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn removal_discovered_before_output_retires_the_local_and_remote_approval()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::prx_test_support::{FakePrx, approval_steps, step};
+        let mut steps = approval_steps("1970-01-01T00:05:00Z");
+        steps.push(step(
+            hyper::Method::DELETE,
+            "/api/sessions/session-1/approvals/decision-1",
+            hyper::StatusCode::OK,
+            json!({}),
+        ));
+        let server = FakePrx::start(steps).await?;
+        let (_root, mut host) = prx_host(&server)?;
+        let mut bus = TestBus::default();
+        request_approval(&mut host, &mut bus).await?;
+        bus.removed = true;
+        host.handle_engine_events(
+            &mut bus,
+            vec![EngineEvent::VisibleFailure {
+                conversation_id: "conversation".into(),
+                message_id: "message".into(),
+                reason: EngineFailure::Rejected,
+            }],
+            2,
+            4,
+        )
+        .await?;
+        assert!(host.state.approvals.is_empty());
+        assert_eq!(host.engine.active_conversations(), Vec::<String>::new());
+        assert_eq!(bus.replies, Vec::<Value>::new());
+        assert!(server.seen().await.iter().any(|s| s.starts_with("DELETE ")));
         Ok(())
     }
 }
