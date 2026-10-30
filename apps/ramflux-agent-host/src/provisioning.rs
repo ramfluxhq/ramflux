@@ -145,8 +145,7 @@ pub fn import_provisioning_bundle(
     if bundle.account_id != expected_account || bundle.data_passphrase.is_empty() {
         return Err(Error::Config);
     }
-    vault.store(&bundle.account_id, &bundle.data_passphrase)?;
-    std::fs::remove_file(path).map_err(|_| Error::Storage)
+    vault.store(&bundle.account_id, &bundle.data_passphrase)
 }
 
 /// Unlock an imported account before the host starts consuming participant traffic.
