@@ -1,44 +1,24 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Private immutable record files and one atomic publication point for the env/seed pair.
+//! Immutable epoch fragments and signed records, never a mutable prepared-head pointer.
 
-use super::invalid;
+use super::{
+    invalid,
+    operation_lock::OperationLock,
+    private_fs::{self, PrivateDir},
+};
 use crate::RfError;
 use ramflux_crypto::custody::VerifiedNodeRecord;
 use ramflux_protocol::{
     custody::{Envelope, NodeIdentityRecord, decode, object_hash},
     encode_base64url,
 };
-use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-fn read_private(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>, RfError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file() {
-        return Err(invalid("custody input must be a regular file, never a symlink"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if !matches!(metadata.permissions().mode() & 0o777, 0o600 | 0o400 | 0o640 | 0o440) {
-            return Err(invalid("custody input permissions must be 0600, 0400, 0640 or 0440"));
-        }
-    }
-    let mut bytes = Zeroizing::new(Vec::new());
-    File::open(path)?.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(invalid("custody input exceeds its size limit"));
-    }
-    Ok(bytes)
-}
-
 pub(super) fn read_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, RfError> {
-    let bytes = read_private(path, 128)?;
+    let bytes = private_fs::read_input(path, 128, true)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| invalid("node seed must be base64url"))?;
     let decoded = Zeroizing::new(
         ramflux_protocol::decode_base64url(text.trim())
@@ -49,44 +29,9 @@ pub(super) fn read_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, RfError> {
     ))
 }
 
-fn private_directory(path: &Path) -> Result<(), RfError> {
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(path) {
-        Ok(()) => (),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
-        Err(error) => return Err(error.into()),
-    }
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() {
-        return Err(invalid("custody output must be a private directory, never a symlink"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o700 {
-            return Err(invalid("custody output directory must have mode 0700"));
-        }
-    }
-    Ok(())
-}
-
-fn write_new(path: &Path, bytes: &[u8]) -> Result<File, RfError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(file)
+pub(super) fn read_deployed(path: &Path) -> Result<Envelope<NodeIdentityRecord>, RfError> {
+    decode(&private_fs::read_input(path, 512 * 1024, false)?, 512 * 1024)
+        .map_err(|error| invalid(error.to_string()))
 }
 
 fn quote(text: &str) -> String {
@@ -95,33 +40,74 @@ fn quote(text: &str) -> String {
 
 pub(super) struct Destination {
     root: PathBuf,
-    _lock: File,
+    directory: PrivateDir,
+    records: PrivateDir,
+    _lock: OperationLock,
 }
 
 impl Destination {
-    pub(super) fn open(path: &Path) -> Result<Self, RfError> {
-        private_directory(path)?;
-        let root = path.canonicalize()?;
-        if root.to_str().is_none_or(|text| text.contains(['\n', '\r'])) {
-            return Err(invalid("custody output path must be UTF-8 without line breaks"));
-        }
-        let lock = write_new(&root.join(".lock"), b"")?;
-        Ok(Self { root, _lock: lock })
+    pub(super) fn open(path: &Path, now: u64) -> Result<Self, RfError> {
+        let directory = PrivateDir::open(path)?;
+        let root = directory.canonical_path(path)?;
+        let lock = OperationLock::acquire(&directory, now)?;
+        directory.remove_abandoned_temporaries()?;
+        let records = directory.child("records")?;
+        records.remove_abandoned_temporaries()?;
+        directory.sync()?;
+        Ok(Self { root, directory, records, _lock: lock })
     }
 
-    pub(super) fn current_record(&self) -> Result<Option<Envelope<NodeIdentityRecord>>, RfError> {
-        let env = self.root.join("custody.env");
-        match fs::symlink_metadata(&env) {
-            Ok(_) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+    /// Returns whether another preparation of the same epoch must use a hash suffix.
+    pub(super) fn check_preparation(
+        &self,
+        previous: Option<&VerifiedNodeRecord>,
+        force: bool,
+    ) -> Result<bool, RfError> {
+        let names = self.directory.names()?;
+        let Some(previous) = previous else {
+            if names.iter().any(|name| !matches!(name.as_str(), "." | ".." | ".lock" | "records")) {
+                return Err(invalid(
+                    "custody output already exists; use custody-renew --deployed-record with the installed record",
+                ));
+            }
+            return Ok(false);
+        };
+        let epoch = previous
+            .envelope()
+            .body
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| invalid("record epoch overflow"))?;
+        let primary = format!("custody-epoch-{epoch}.env");
+        let prefix = format!("custody-epoch-{epoch}-");
+        let mut prepared = names.iter().any(|name| {
+            name == &primary
+                || (name.starts_with(&prefix)
+                    && Path::new(name)
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("env")))
+        });
+        // Retain and recognize an existing r2 fragment, but never use it as the predecessor.
+        if self.directory.exists("custody.env")? {
+            let legacy = self.legacy_record()?;
+            prepared |= legacy.body.epoch == epoch
+                && legacy.body.previous_record_hash.as_deref() == Some(previous.hash());
         }
-        let bytes = read_private(&env, 16 * 1024)?;
+        if prepared && !force {
+            return Err(invalid(
+                "DEMO_CUSTODY_ALREADY_PREPARED: a successor of the deployed epoch already exists; deploy it first or use --force-new-proxy to retain another immutable preparation",
+            ));
+        }
+        Ok(prepared)
+    }
+
+    fn legacy_record(&self) -> Result<Envelope<NodeIdentityRecord>, RfError> {
+        let bytes = self.directory.read("custody.env", 16 * 1024, true)?;
         let text = std::str::from_utf8(&bytes).map_err(|_| invalid("invalid custody.env"))?;
         let raw = text
             .lines()
             .find_map(|line| line.strip_prefix("RAMFLUX_CUSTODY_NODE_RECORD_FILE="))
-            .ok_or_else(|| invalid("custody.env has no predecessor record"))?;
+            .ok_or_else(|| invalid("custody.env has no record path"))?;
         let decoded = raw
             .strip_prefix('\'')
             .and_then(|value| value.strip_suffix('\''))
@@ -130,32 +116,51 @@ impl Destination {
         if quote(&decoded) != raw {
             return Err(invalid("invalid custody.env record path"));
         }
-        let path = PathBuf::from(decoded);
-        if path.parent() != Some(self.root.join("records").as_path()) {
-            return Err(invalid("custody predecessor must be in this output directory"));
-        }
-        let record =
-            decode::<Envelope<NodeIdentityRecord>>(&read_private(&path, 512 * 1024)?, 512 * 1024)
-                .map_err(|error| invalid(error.to_string()))?;
+        let path = Path::new(&decoded);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| invalid("invalid custody.env record filename"))?;
+        let record = decode::<Envelope<NodeIdentityRecord>>(
+            &self.records.read(name, 512 * 1024, false)?,
+            512 * 1024,
+        )
+        .map_err(|error| invalid(error.to_string()))?;
         let hash = object_hash(&record).map_err(|error| invalid(error.to_string()))?;
-        if path != self.root.join("records").join(format!("{hash}.json")) {
-            return Err(invalid("custody predecessor content does not match its retained hash"));
+        if name != format!("{hash}.json") {
+            return Err(invalid("custody record content does not match its retained hash"));
         }
-        Ok(Some(record))
+        Ok(record)
+    }
+
+    fn retain_record(&self, node: &VerifiedNodeRecord) -> Result<(), RfError> {
+        let name = format!("{}.json", node.hash());
+        let bytes = ramflux_protocol::canonical_json_bytes(node.envelope())
+            .map_err(|error| invalid(error.to_string()))?;
+        if self.records.exists(&name)? {
+            if *self.records.read(&name, 512 * 1024, false)? != bytes {
+                return Err(invalid("custody retained record differs from its authenticated hash"));
+            }
+        } else {
+            self.records.write_immutable(&name, &bytes)?;
+        }
+        self.records.sync()
     }
 
     pub(super) fn publish(
         &self,
         node: &VerifiedNodeRecord,
         seed: &[u8; 32],
+        previous: Option<&VerifiedNodeRecord>,
+        repeated: bool,
     ) -> Result<PathBuf, RfError> {
-        let records = self.root.join("records");
-        private_directory(&records)?;
-        let path = records.join(format!("{}.json", node.hash()));
-        let bytes = ramflux_protocol::canonical_json_bytes(node.envelope())
-            .map_err(|error| invalid(error.to_string()))?;
-        write_new(&path, &bytes)?;
-        File::open(&records)?.sync_all()?;
+        self.directory.check_path(&self.root)?;
+        self.records.check_child(&self.directory, "records")?;
+        if let Some(previous) = previous {
+            self.retain_record(previous)?;
+        }
+        self.retain_record(node)?;
+        let path = self.root.join("records").join(format!("{}.json", node.hash()));
         let path_text = path.to_str().ok_or_else(|| invalid("invalid record path"))?;
         let seed = Zeroizing::new(encode_base64url(seed));
         let fragment = Zeroizing::new(format!(
@@ -164,17 +169,20 @@ impl Destination {
             quote(path_text),
             *seed,
         ));
-        let temporary = self.root.join(format!(".custody-env-{}", node.hash()));
-        write_new(&temporary, fragment.as_bytes())?;
-        let destination = self.root.join("custody.env");
-        fs::rename(temporary, &destination)?;
-        File::open(&self.root)?.sync_all()?;
-        Ok(destination)
-    }
-}
-
-impl Drop for Destination {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(self.root.join(".lock"));
+        let epoch = node.envelope().body.epoch;
+        let name = if repeated {
+            format!("custody-epoch-{epoch}-{}.env", node.hash())
+        } else {
+            format!("custody-epoch-{epoch}.env")
+        };
+        self.directory.check_path(&self.root)?;
+        self.directory.write_immutable(&name, fragment.as_bytes())?;
+        // Backward-compatible initial-install fragment only; renewal never rewrites it.
+        if previous.is_none() {
+            self.directory.write_immutable("custody.env", fragment.as_bytes())?;
+        }
+        self.directory.check_path(&self.root)?;
+        self.records.check_child(&self.directory, "records")?;
+        Ok(self.root.join(name))
     }
 }

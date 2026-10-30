@@ -371,7 +371,8 @@ custody root. Its signing seed is already online because federation signs live
 discovery with it. Prefer running the tool on that server so the key needs no
 second copy. An operator machine holding an explicitly protected copy can also
 run it; securely transfer the generated record and env fragment to the server
-and set the fragment's absolute record path for that host. Never transfer the
+and adapt only a separate deployment copy of the fragment for that host's record path.
+Never edit an original prepared fragment or its signed record. Never transfer the
 node seed to clients, print it, generate a replacement, or claim it is offline-only.
 The proxy key is a distinct software Ed25519 credential, not an HSM claim.
 
@@ -389,7 +390,7 @@ rf node custody-init \
   --expected-public-key "$DEMO_EXPECTED_NODE_PUBLIC_KEY" \
   --output-dir "$DEMO_DATA_DIR/custody-provisioning" \
   --validity-days 30
-cp "$DEMO_DATA_DIR/custody-provisioning/custody.env" "$DEMO_DATA_DIR/custody.active.env"
+cp "$DEMO_DATA_DIR/custody-provisioning/custody-epoch-1.env" "$DEMO_DATA_DIR/custody.active.env"
 chmod 600 "$DEMO_DATA_DIR/custody.active.env"
 ```
 
@@ -398,7 +399,8 @@ base64url seed used by federation. The expected public key must equal its
 public key and the independently retained discovery pin. The command refuses
 a wrong pin or missing seed. Validity is **1–30 days**, default 30, bounded by
 the existing protocol limit; stdout reports the expiry as Unix UTC seconds and
-never prints a private seed. Output directories are 0700; records and env
+never prints a private seed. Output directories must be owned by the invoking
+user with mode 0700; records and env
 fragments are 0600. Protect their backups as credentials.
 
 The fragment has exactly `RAMFLUX_CUSTODY_NODE_PUBLIC_KEY`,
@@ -412,15 +414,18 @@ Give demo users the discovery origin, exact node id and the existing public pin
 through an authenticated operator channel. They confirm that same identity:
 
 ```sh
-rf node add https://demo.example
-rf node confirm demo.example --pin-source operator --expected-public-key "$NODE_PUBLIC_KEY"
-rf node set-default demo.example
+rf node add "$DISCOVERY_ORIGIN"
+rf node confirm "$NODE_ID" --pin-source operator --expected-public-key "$NODE_PUBLIC_KEY"
+rf node set-default "$NODE_ID"
 ```
 
 The SDK/desktop node profile uses this discovery pin for custody too; no second
 pin or trust channel is introduced.
 
-Prepare renewal **before the printed signing deadline**:
+Prepare renewal **before the deployed proxy's printed signing deadline**. Every
+renewal requires the signed record **currently installed on the node**, not a
+record from a previous preparation. On the server, use the demo wrapper's managed
+copy:
 
 ```sh
 rf node custody-renew \
@@ -428,23 +433,66 @@ rf node custody-renew \
   --node-signing-seed "$DEMO_DATA_DIR/certs/node-identity/node-signing.key" \
   --expected-public-key "$DEMO_EXPECTED_NODE_PUBLIC_KEY" \
   --output-dir "$DEMO_DATA_DIR/custody-provisioning" \
-  --validity-days 30 --force-new-proxy
+  --deployed-record "$DEMO_DATA_DIR/secrets/custody/node-record.json" \
+  --validity-days 30
 ```
 
-Existing output is refused without `--force-new-proxy`, including on renewal.
-Using that flag with `custody-init` also prepares a successor rather than resetting
-the epoch. Renewal generates a fresh proxy seed/key id, links the predecessor
-hash, increments the epoch, retains revocations and required retiring descriptors,
-and never extends an old key's signing interval. Immutable predecessor files stay
-in `records/`; the env fragment is replaced atomically only after the new record
-is durable. Retain this entire private output directory. The protocol permits at
-most 16 concurrent/overlap descriptors; rapid repeated rotation can exhaust that
-budget and is refused until old overlap evidence can safely expire.
+On an operator machine, retrieve an authenticated copy of that installed record
+from the server and name the local copy with `--deployed-record`. The tool checks
+its signature against the retained node pin; it does not contact the server to
+attest which record is installed. Keep the node seed protected and avoid another
+copy by provisioning on the server when possible.
+
+A deployed epoch N produces epoch N+1, linked to that exact deployed record's hash.
+Output is an **immutable** `custody-epoch-<N+1>.env` plus its hash-named record in
+`records/`. Initial install also retains `custody.env` for compatibility; renewal
+never rewrites it. No prepared fragment is ever overwritten or edited. Keep the
+provisioning directory at its original path and retain the whole private tree,
+including every prepared seed and signed predecessor. Only a separate deployment
+copy, such as `custody.active.env`, may be adapted for another host's absolute
+record path. Do not move or edit the original provisioning fragments.
+
+Preparing again from the same deployed head refuses with
+`DEMO_CUSTODY_ALREADY_PREPARED`. Deploy the existing preparation before preparing
+its successor. If an alternative preparation is intentional, add
+`--force-new-proxy`: the tool writes another immutable
+`custody-epoch-<N+1>-<record-hash>.env`, keeps the original fragment/seed, and still
+builds on deployed epoch N. It never silently advances to N+2. Select exactly one
+alternative for deployment. After coordinated rotation installs that selected
+record, the managed deployed copy permits preparing the next epoch. Forced
+`custody-init` on existing output also requires an explicit `--deployed-record`
+and follows these same rules; it cannot reset the epoch or infer deployment.
+
+Renewal generates a fresh proxy seed/key id, retains cumulative revocations and
+required retiring descriptors, and never extends an old key's signing interval.
+Publication fsyncs the record before atomically linking its complete fragment
+into place without replacement. The protocol permits at most 16 concurrent/overlap
+descriptors; excess retained descriptors are refused rather than discarded.
+
+On Unix hosts (Linux and macOS), inputs are opened without following their final
+symlink and type/mode checks use the opened descriptor. Output operations are
+relative to held directory descriptors. Keep the output directory and its ancestry
+under operator control and stable while running the tool; an absolute path in an
+immutable fragment cannot track later directory renames. Platforms without this
+Unix filesystem support refuse provisioning rather than use a weaker fallback.
+
+The persistent 0600 `.lock` inode records the owning pid and operation start time
+while a kernel advisory lock is held. An idle lock has `pid: null` and is retained
+to avoid replacement races. A live owner refuses with
+`DEMO_CUSTODY_OPERATION_RUNNING`; a dead owner is reclaimed with
+`DEMO_CUSTODY_STALE_LOCK_RECLAIMED`. No process is signalled. A malformed or legacy
+lock without readable ownership refuses with `DEMO_CUSTODY_LOCK_INVALID`: only
+after independently verifying that no custody operation is running may an operator
+remove that exact stale `.lock`. Never remove a live lock. Temporary files are
+removed on ordinary error paths; after a killed process, the next exclusive
+operation removes abandoned temporary files in this tool's private namespace.
 
 **Applying a changed proxy seed through the demo wrapper is pending a dedicated
-coordinated rotation operation.** Preparing renewal does not deploy it. Keep the
-deployed `custody.active.env` unchanged until that operation is available; ordinary
-`up`/`upgrade` deliberately refuse proxy-seed replacement. Do not bypass this by
-editing `runtime.env`, deleting state or resetting the node identity. Arrange
-supported rotation before expiry. Router custody epochs and key pins persist in
-the data volume; restoring an older record file does not roll those pins back.
+coordinated rotation operation.** Preparing renewal does not deploy it or extend
+the deployed credential's deadline. Keep deployed `custody.active.env` unchanged
+until that operation is available; ordinary `up`/`upgrade` deliberately refuse
+proxy-seed replacement. Do not bypass this by editing `runtime.env`, copying a
+prepared record over the installed record to simulate deployment, deleting state,
+or resetting the node identity. Arrange supported rotation before the deployed
+credential expires. Router custody epochs and key pins persist in the data
+volume; restoring an older record file does not roll those pins back.
