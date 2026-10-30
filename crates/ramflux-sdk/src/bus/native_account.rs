@@ -102,6 +102,7 @@ pub(super) fn status(
     Ok(serde_json::json!({
         "account_id":account_id,"local_account_id":account_id,"state":"unlocked","networking":native.state(),
         "display_name":native.record().body.profile.display_name,"principal_id":native.record().body.principal_id,
+        "principal_kind":native.record().body.principal_kind,
         "authority_blocked":native.authority_blocked(),
         "principal_commitment":native.record().body.account_anchor,"device_id":account.gateway_config.device_id,
         "target_delivery_id":account.target_delivery_id,

@@ -78,7 +78,7 @@ fn status_ready(status: &Value) -> bool {
     if status.get("client_mode").is_some() {
         return status["client_mode"] == "headless_ai" && status["local_device_authorized"] == true;
     }
-    if status["authority_blocked"] == true {
+    if status["principal_kind"] != "headless_ai" || status["authority_blocked"] == true {
         return false;
     }
     match status.get("networking").and_then(Value::as_str) {
@@ -225,7 +225,7 @@ mod status_tests {
         let native = json!({
             "account_id":"agent", "local_account_id":"agent", "state":"unlocked",
             "networking":"live", "networking_reason":null, "display_name":"Agent",
-            "principal_id":"principal", "authority_blocked":false,
+            "principal_id":"principal", "principal_kind":"headless_ai", "authority_blocked":false,
             "principal_commitment":"commitment", "device_id":"device",
             "target_delivery_id":"target", "node_id":"node", "session_id":"session",
             "active_transport_kind":"quic", "pending_deliveries":0
