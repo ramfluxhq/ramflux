@@ -8,6 +8,8 @@ mod schema;
 use super::AccountDb;
 use crate::StorageError;
 use rusqlite::params;
+use serde_json::Value;
+use std::collections::BTreeSet;
 
 pub(super) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
     schema::install(db)
@@ -17,14 +19,23 @@ impl AccountDb {
     pub(super) fn register_actor_message_footprint(
         &self,
         key: &str,
-        value: &[u8],
+        value: &Value,
     ) -> Result<(), StorageError> {
         if !actor_state_may_reference_message(key) {
             return Ok(());
         }
+        if drop_actor_registration_for_mutation_test() {
+            return Ok(());
+        }
+        let registration = actor_registration(key, value);
         self.connection.execute(
-            "INSERT INTO message_footprint_actor_stage VALUES(?1,?2)",
-            params![key, value],
+            "INSERT INTO message_footprint_actor_stage VALUES(?1,?2,?3,?4)",
+            params![
+                key,
+                serde_json::to_string(&registration.message_ids)?,
+                serde_json::to_string(&registration.copy_ids)?,
+                serde_json::to_string(&registration.bindings)?,
+            ],
         )?;
         Ok(())
     }
@@ -120,6 +131,165 @@ impl AccountDb {
             Ok(())
         })
     }
+}
+
+#[derive(Default)]
+struct ActorRegistration {
+    message_ids: BTreeSet<String>,
+    copy_ids: BTreeSet<String>,
+    bindings: BTreeSet<(String, String)>,
+}
+
+fn actor_registration(key: &str, value: &Value) -> ActorRegistration {
+    let mut registration = ActorRegistration::default();
+    collect_generic_references(value, &mut registration);
+
+    if let Some(message) = key.strip_prefix("group-message/alias/") {
+        registration.message_ids.insert(message.to_owned());
+    }
+    if let Some(message) = key.strip_prefix("routed/message-owner/") {
+        registration.message_ids.insert(message.to_owned());
+    }
+    if let Some(message) = key.strip_prefix("routed/message-metadata/") {
+        registration.message_ids.insert(message.to_owned());
+    }
+    if let Some(object) =
+        key.strip_prefix("attachment/chunk/").and_then(|suffix| suffix.split('/').next())
+    {
+        registration.copy_ids.insert(format!("object:{object}"));
+    }
+    if (key.starts_with("attachment/reference-by-sender/")
+        || key.starts_with("attachment/reference-by-slot/"))
+        && let Some(object) = value.as_str()
+    {
+        registration.copy_ids.insert(format!("object:{object}"));
+    }
+    if let Some(object) = key.strip_prefix("attachment/reference/") {
+        registration.copy_ids.insert(format!("object:{object}"));
+    }
+    if (key.starts_with("routed/projection/") || key.starts_with("directory/message/"))
+        && let Some(message) = value.as_str()
+    {
+        registration.message_ids.insert(message.to_owned());
+    }
+    if key.starts_with("delivery-receipt/") {
+        collect_named_text(value, "message", &mut registration.message_ids);
+    }
+    if key.starts_with("own-device/send/")
+        && let Some(message) = value.pointer("/intent/id").and_then(Value::as_str)
+    {
+        registration.message_ids.insert(message.to_owned());
+    }
+
+    if key.starts_with("delivery-receipt/pending/")
+        && let (Some(status), Some(message)) = (
+            value.get("status_id").and_then(Value::as_str),
+            value.get("message").and_then(Value::as_str),
+        )
+    {
+        registration
+            .bindings
+            .insert((format!("actor:delivery-receipt/status/{status}"), message.to_owned()));
+    }
+    if let Some(object) = key.strip_prefix("directory/object/")
+        && let Some(message) = value.get("message_id").and_then(Value::as_str)
+    {
+        registration.bindings.insert((format!("object:{object}"), message.to_owned()));
+    }
+    if key.starts_with("routed/committed/")
+        && let Some(message) = value.pointer("/routing/message_id").and_then(Value::as_str)
+    {
+        if let Some(payload) = value.pointer("/entry/envelope/payload_hash").and_then(Value::as_str)
+        {
+            registration.bindings.insert((format!("payload:{payload}"), message.to_owned()));
+        }
+        if let Some(envelope) = value.pointer("/entry/envelope/envelope_id").and_then(Value::as_str)
+        {
+            registration.bindings.insert((format!("envelope:{envelope}"), message.to_owned()));
+        }
+    }
+    if key.starts_with("routed/message-metadata/")
+        && let (Some(group), Some(group_message), Some(message)) = (
+            value.get("group_id").and_then(Value::as_str),
+            value.get("group_message_id").and_then(Value::as_str),
+            value.get("message_id").and_then(Value::as_str),
+        )
+    {
+        registration
+            .bindings
+            .insert((format!("group:{group}:{group_message}"), message.to_owned()));
+    }
+    registration
+}
+
+fn collect_generic_references(value: &Value, registration: &mut ActorRegistration) {
+    match value {
+        Value::Object(fields) => {
+            for (name, value) in fields {
+                if matches!(
+                    name.as_str(),
+                    "message_id" | "own_copy_message_id" | "target_message_id"
+                ) && let Some(message) = value.as_str()
+                {
+                    registration.message_ids.insert(message.to_owned());
+                } else if name == "payload_hash"
+                    && let Some(payload) = value.as_str()
+                {
+                    registration.copy_ids.insert(format!("payload:{payload}"));
+                } else if name == "object_id"
+                    && let Some(object) = value.as_str()
+                {
+                    registration.copy_ids.insert(format!("object:{object}"));
+                }
+                collect_generic_references(value, registration);
+            }
+            if let Some(message) = fields
+                .get("message")
+                .and_then(Value::as_object)
+                .and_then(|message| message.get("id"))
+                .and_then(Value::as_str)
+            {
+                registration.message_ids.insert(message.to_owned());
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_generic_references(value, registration);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_named_text(value: &Value, name: &str, output: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(fields) => {
+            for (field, value) in fields {
+                if field == name
+                    && let Some(value) = value.as_str()
+                {
+                    output.insert(value.to_owned());
+                }
+                collect_named_text(value, name, output);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_named_text(value, name, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+fn drop_actor_registration_for_mutation_test() -> bool {
+    std::env::var_os("RAMFLUX_TEST_DROP_MESSAGE_REGISTRATION").is_some()
+}
+
+#[cfg(not(test))]
+const fn drop_actor_registration_for_mutation_test() -> bool {
+    false
 }
 
 pub(super) fn actor_state_may_reference_message(key: &str) -> bool {
