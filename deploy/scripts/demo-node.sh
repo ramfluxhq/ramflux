@@ -226,55 +226,6 @@ runtime() { clean_env "$container_engine" "$@"; }
 check_prebuilt_images() {
   clean_env python3 "$script_dir/demo-image-check.py" "$container_engine" "${1:-$DEMO_VERSION}"
 }
-source_address_mode=$(runtime info --format json 2>/dev/null | python3 -c '
-import json
-import sys
-data = json.load(sys.stdin)
-host = data.get("host") or data.get("Host") or {}
-security = host.get("security") or host.get("Security") or {}
-remote = host.get("serviceIsRemote", host.get("ServiceIsRemote"))
-rootless = security.get("rootless", security.get("Rootless"))
-host_os = str(host.get("os") or host.get("Os") or "").lower()
-if remote is True:
-    print("machine")
-elif rootless is True:
-    print("rootless-bridge")
-elif rootless is False and host_os == "linux":
-    print("rootful-linux")
-elif not host:
-    options = [str(value).lower() for value in data.get("SecurityOptions", [])]
-    operating_system = str(data.get("OperatingSystem", "")).lower()
-    os_type = str(data.get("OSType", "")).lower()
-    if any("rootless" in value for value in options):
-        print("rootless-bridge")
-    elif "desktop" in operating_system or "machine" in operating_system:
-        print("machine")
-    elif os_type == "linux":
-        print("rootful-linux")
-    else:
-        print("unknown")
-else:
-    print("unknown")
-') || source_address_mode=unknown
-case "$source_address_mode" in
-  rootful-linux) detected_source_limits=on ;;
-  rootless-bridge|machine) detected_source_limits=off ;;
-  *)
-    source_address_mode=unknown
-    detected_source_limits=off
-    ;;
-esac
-if [ "$source_limits_operator_set" -eq 0 ]; then
-  RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=$detected_source_limits
-  if [ "$detected_source_limits" = off ]; then
-    printf 'warning: per-source federation limits disabled because %s port publishing may collapse client source addresses\n' "$source_address_mode" >&2
-  fi
-elif [ "$RAMFLUX_FEDERATION_PER_SOURCE_LIMITS" = on ] && [ "$detected_source_limits" = off ]; then
-  printf 'warning: operator kept per-source federation limits on although %s port publishing may collapse client source addresses\n' "$source_address_mode" >&2
-fi
-if [ "${RAMFLUX_FEDERATION_PER_SOURCE_LIMITS-off}" = on ]; then
-  [ "$RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY" -gt "$RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS" ] || fail 'RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY must be greater than RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS'
-fi
 check_resources() {
   for kind in container volume network; do
     case "$kind" in
@@ -341,6 +292,55 @@ if [ "$command" = recover ] && [ -n "$initial_owner" ]; then
   # shellcheck disable=SC2016
   printf 'initial setup rolled back; run `up` again\n'
   exit 0
+fi
+source_address_mode=$(runtime info --format json 2>/dev/null | python3 -c '
+import json
+import sys
+data = json.load(sys.stdin)
+host = data.get("host") or data.get("Host") or {}
+security = host.get("security") or host.get("Security") or {}
+remote = host.get("serviceIsRemote", host.get("ServiceIsRemote"))
+rootless = security.get("rootless", security.get("Rootless"))
+host_os = str(host.get("os") or host.get("Os") or "").lower()
+if remote is True:
+    print("machine")
+elif rootless is True:
+    print("rootless-bridge")
+elif rootless is False and host_os == "linux":
+    print("rootful-linux")
+elif not host:
+    options = [str(value).lower() for value in data.get("SecurityOptions", [])]
+    operating_system = str(data.get("OperatingSystem", "")).lower()
+    os_type = str(data.get("OSType", "")).lower()
+    if any("rootless" in value for value in options):
+        print("rootless-bridge")
+    elif "desktop" in operating_system or "machine" in operating_system:
+        print("machine")
+    elif os_type == "linux":
+        print("rootful-linux")
+    else:
+        print("unknown")
+else:
+    print("unknown")
+') || source_address_mode=unknown
+case "$source_address_mode" in
+  rootful-linux) detected_source_limits=on ;;
+  rootless-bridge|machine) detected_source_limits=off ;;
+  *)
+    source_address_mode=unknown
+    detected_source_limits=off
+    ;;
+esac
+if [ "$source_limits_operator_set" -eq 0 ]; then
+  RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=$detected_source_limits
+  if [ "$detected_source_limits" = off ]; then
+    printf 'warning: per-source federation limits disabled because %s port publishing may collapse client source addresses\n' "$source_address_mode" >&2
+  fi
+elif [ "$RAMFLUX_FEDERATION_PER_SOURCE_LIMITS" = on ] && [ "$detected_source_limits" = off ]; then
+  printf 'warning: operator kept per-source federation limits on although %s port publishing may collapse client source addresses\n' "$source_address_mode" >&2
+fi
+if [ "${RAMFLUX_FEDERATION_PER_SOURCE_LIMITS-off}" = on ]; then
+  [ "$RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY" -gt "$RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS" ] || fail 'RAMFLUX_FEDERATION_PUBLIC_SOURCE_TABLE_CAPACITY must be greater than RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS'
 fi
 printf 'compose provider: %s (runtime: %s)\n' "$compose_provider" "$container_engine"
 compose() (
