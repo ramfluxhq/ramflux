@@ -42,6 +42,7 @@ pub(super) async fn accept(
     let mut stopping = supervisor.stop_requested();
     let mut connections = JoinSet::new();
     let mut next = 1_u64;
+    let mut last_peer_warning = None;
     loop {
         tokio::select! {
             _ = stopping.changed() => break,
@@ -50,7 +51,14 @@ pub(super) async fn accept(
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                verify_local_bus_peer(&stream, uid)?;
+                if let Err(error) = verify_local_bus_peer(&stream, uid) {
+                    let now = std::time::Instant::now();
+                    if last_peer_warning.is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(60)) {
+                        tracing::warn!(%error, "local bus peer verification failed; connection rejected");
+                        last_peer_warning = Some(now);
+                    }
+                    continue;
+                }
                 let supervisor = Rc::clone(&supervisor);
                 let id = next;
                 next = next.checked_add(1).ok_or_else(|| SdkError::LocalBus("connection id exhausted".to_owned()))?;
