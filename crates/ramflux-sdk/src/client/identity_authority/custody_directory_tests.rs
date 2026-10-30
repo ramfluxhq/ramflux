@@ -5,6 +5,7 @@
 use super::*;
 use crate::custody::tests::{Root, TestVault, create};
 use ramflux_protocol::custody::{CustodyManifest, CustodyManifestDevice, Publication};
+use serde_json::json;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn native_manifest(
@@ -107,6 +108,39 @@ fn authenticated_native_head_is_retained_when_prekey_signature_is_bad() -> TestR
             .account_db()?
             .client_record("identity", &native.publication.record.body.principal_id)?
             .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn authority_only_observation_retains_verified_routes_but_revocation_removes_them() -> TestResult {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let now = crate::custody::network_now()?;
+    let mut native = native_manifest(&root, "peer", &vault, now)?;
+    let anchor = native.publication.record.body.account_anchor.clone();
+    let principal = native.publication.record.body.principal_id.clone();
+    let client = receiver(&root, &vault, now)?;
+    client.observe_custody_manifest(&native, &anchor, now)?;
+    let before =
+        client.account_db()?.client_record("identity", &principal)?.ok_or("identity")?["devices"]
+            .clone();
+    assert_eq!(before.as_array().map(Vec::len), Some(1));
+    native.devices.clear();
+    client.observe_custody_manifest(&native, &anchor, now)?;
+    assert_eq!(
+        client.account_db()?.client_record("identity", &principal)?.ok_or("identity")?["devices"],
+        before
+    );
+    let primary = vault.primary_for_public_key(
+        &native.publication.record.body.master_certificate.body.self_signing_public_key,
+    )?;
+    let current = client.current_custody_authority(&anchor, now)?.ok_or("authority")?;
+    native.publication.record = primary.revoke_device(&current, "primary", now)?;
+    client.observe_custody_manifest(&native, &anchor, now)?;
+    assert_eq!(
+        client.account_db()?.client_record("identity", &principal)?.ok_or("identity")?["devices"],
+        json!([])
     );
     Ok(())
 }

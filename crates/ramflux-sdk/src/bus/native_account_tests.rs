@@ -343,6 +343,64 @@ async fn ordinary_native_unlock_lock_restart_needs_only_data_passphrase() -> Res
 }
 
 #[tokio::test]
+async fn native_status_reads_persisted_revocation_while_the_actor_is_still_unlocked() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let now = crate::custody::network_now()?;
+    let mut ceremony = CreationCeremony::begin(&root.0, input("revoked-status"), now)?;
+    let phrase = ceremony.show_once()?;
+    let positions = ceremony.hidden_challenge()?;
+    let born =
+        ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, b"data")?;
+    let primary = vault.primary_for_public_key(
+        &born.record().body.master_certificate.body.self_signing_public_key,
+    )?;
+    let revoked = primary.revoke_device(born.verified(), "primary", now)?;
+    let socket = root.0.join("revoked.sock");
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _stop = Stop(stop);
+        let mut bus = connect(&socket).await?;
+        bus.request(
+            Some("revoked-status".into()),
+            "account",
+            "account.unlock",
+            json!({"passphrase":"data"}),
+        )
+        .await?;
+        let before = bus
+            .request(Some("revoked-status".into()), "account", "account.status", json!({}))
+            .await?;
+        assert_eq!(before["local_device_authorized"], true);
+        crate::custody::accept_publication(
+            &root.0,
+            "revoked-status",
+            &ramflux_protocol::custody::CustodyAuthority {
+                publication: ramflux_protocol::custody::Publication {
+                    record: revoked,
+                    compacted_ids: None,
+                },
+                custodian_publication: None,
+            },
+            now,
+        )?;
+        let after = bus
+            .request(Some("revoked-status".into()), "account", "account.status", json!({}))
+            .await?;
+        assert_eq!(after["state"], "unlocked");
+        assert_eq!(after["local_device_authorized"], false);
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(
+        crate::serve_local_bus_until(LocalBusConfig::new(&socket, &root.0), receiver),
+        flow
+    );
+    server?;
+    flow?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attempts() -> Result {
     use crate::{LocalBusCreatedAccountState, LocalBusCreationClient, custody::CreationState};
     use std::sync::Arc;

@@ -69,6 +69,7 @@ pub enum Fault {
     SpoofKind,
     RemoveBeforeSend,
     Revoked,
+    LegacyRevoked,
     EmptyDevices,
 }
 impl Fake {
@@ -81,11 +82,16 @@ impl Fake {
         self.requests.push((method.into(), body.clone()));
         Ok(match method {
             "account.status" => {
+                if self.faults.contains(&Fault::LegacyRevoked) {
+                    return Ok(
+                        json!({"principal_id":"agent-principal","client_mode":"headless_ai","local_device_authorized":false}),
+                    );
+                }
                 // Mirrors the native account.status snapshot emitted by native_account::status.
                 json!({
                     "account_id":"agent", "local_account_id":"agent",
-                    "state":if self.faults.contains(&Fault::Revoked){"locked"}else{"unlocked"},
-                    "networking":if self.faults.contains(&Fault::Revoked){"networking_pending"}else{"live"},
+                    "state":"unlocked", "networking":"live",
+                    "local_device_authorized":!self.faults.contains(&Fault::Revoked),
                     "display_name":"Agent", "principal_id":"agent-principal",
                     "principal_kind":if self.faults.contains(&Fault::Human){"human"}else{"headless_ai"},
                     "authority_blocked":false, "principal_commitment":"agent-commitment",

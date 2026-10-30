@@ -170,9 +170,11 @@ async fn actual_rfd_client_refuses_grant_confirmation_before_sending() -> TestRe
 #[tokio::test]
 async fn revoked_local_device_is_rejected_even_if_display_directory_still_lists_it() -> TestResult {
     let f = Fixture::new()?;
-    let mut bus = Fake::with(Fault::Revoked);
-    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
-    assert!(matches!(host.start(&mut bus).await, Err(Error::IdentityLost)));
-    assert_eq!(bus.replies.len(), 0);
+    for fault in [Fault::Revoked, Fault::LegacyRevoked] {
+        let mut bus = Fake::with(fault);
+        let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
+        assert!(matches!(host.start(&mut bus).await, Err(Error::IdentityLost)));
+        assert_eq!(bus.replies.len(), 0);
+    }
     Ok(())
 }

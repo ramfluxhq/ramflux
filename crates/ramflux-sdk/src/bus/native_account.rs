@@ -106,11 +106,37 @@ pub(super) fn status(
     account_id: &str,
 ) -> Result<serde_json::Value, SdkError> {
     let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    let now = crate::custody::network_now()?;
+    let current =
+        crate::custody::load_account(account.client.account_index()?.root(), account_id, now)?;
+    let authorized = !current.authority_blocked()
+        && !current.branch_pending()
+        && current
+            .record()
+            .body
+            .devices
+            .iter()
+            .find(|entry| entry.device_id == account.gateway_config.device_id)
+            .is_some_and(|entry| {
+                current
+                    .verified()
+                    .authorize(
+                        &ramflux_protocol::custody::DeviceRef {
+                            account_anchor: current.record().body.account_anchor.clone(),
+                            device_id: entry.device_id.clone(),
+                            device_epoch: entry.device_epoch,
+                        },
+                        "message",
+                        now,
+                    )
+                    .is_ok()
+            });
     Ok(serde_json::json!({
         "account_id":account_id,"local_account_id":account_id,"state":"unlocked","networking":native.state(),
         "networking_reason":native.networking_reason(),
         "display_name":native.record().body.profile.display_name,"principal_id":native.record().body.principal_id,
         "principal_kind":native.record().body.principal_kind,
+        "local_device_authorized":authorized,
         "authority_blocked":native.authority_blocked(),
         "principal_commitment":native.record().body.account_anchor,"device_id":account.gateway_config.device_id,
         "target_delivery_id":account.target_delivery_id,
