@@ -352,6 +352,14 @@ prove that a vault provider is hardware-backed.
 | Non-creator group change request | Requesting branch plus current group role |
 | Recover data into a secondary | Fresh local branch, sanitized data, then primary approval before networking |
 
+On macOS, only home-migration authorization requests OS presence. Ordinary
+primary signing (including contact-card sharing and contact consent) and branch
+session reads disable authentication UI. The migration provider reads a separate
+`USER_PRESENCE` Keychain item; ordinary signing retains a noninteractive,
+non-synchronizing item. These software items hold the same primary seed, so
+the separation enforces SDK operation policy rather than separate cryptographic
+authority. See [the provider and fixture contract](home_node_migration_sdk.md).
+
 Primary-issued branch certificates bind account, device/key epochs, signing and
 agreement key commitments, immutable kind and capabilities for at most 30 days.
 The complete current set provides revocation. A branch proves possession for each
