@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Crash-safe replacement of an unprotected primary item, never branch credentials.
+//! Migration-only protected signing item, independent of ordinary signing access.
 use crate::SdkError;
 use crate::custody::home_authorization::unavailable;
 use ramflux_crypto::custody::SelfSigningKey;
@@ -15,6 +15,7 @@ enum Stage {
     PresencePending,
     Verified,
     DeleteLegacy,
+    RestoreOrdinary,
     Ready,
 }
 #[derive(Serialize, Deserialize)]
@@ -55,6 +56,14 @@ pub(super) fn approved_primary(
     reference: &str,
     expected: &str,
 ) -> Result<SelfSigningKey, SdkError> {
+    approved_primary_inner(items, reference, expected).map_err(|_| unavailable())
+}
+
+fn approved_primary_inner(
+    items: &impl Items,
+    reference: &str,
+    expected: &str,
+) -> Result<SelfSigningKey, SdkError> {
     if reference.is_empty() || reference.len() > 256 || reference.chars().any(char::is_control) {
         return Err(unavailable());
     }
@@ -75,7 +84,7 @@ pub(super) fn approved_primary(
         items.journal(&journal, &bytes)
     };
     if items.exists(reference)? {
-        // The legacy item is flags 0. A silent read failure must not trigger UI or fallback.
+        // Ordinary signing remains flags 0. A failed silent read never triggers UI fallback.
         let legacy = key(&items.read(reference, false)?.ok_or_else(unavailable)?)?;
         if legacy.public_key() != expected {
             return Err(unavailable());
@@ -95,12 +104,13 @@ pub(super) fn approved_primary(
         return Err(unavailable());
     }
     save(Stage::Verified)?;
-    if items.exists(reference)? {
-        save(Stage::DeleteLegacy)?;
-        items.delete(reference)?;
-    }
-    if items.exists(reference)? {
-        return Err(unavailable());
+    if !items.exists(reference)? {
+        // Earlier provider versions retired the ordinary item. Only an explicit protected
+        // read may restore it; ordinary card/consent loads themselves never request UI.
+        save(Stage::RestoreOrdinary)?;
+        if !items.insert(reference, &*primary.vault_seed(), false)? {
+            return Err(unavailable());
+        }
     }
     save(Stage::Ready)?;
     Ok(primary)

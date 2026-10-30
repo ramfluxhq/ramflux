@@ -88,6 +88,12 @@ jobs:
       - name: Born-v3 memory vault regression tests
         run: RAMFLUX_ITEST_BUILD=1 cargo test -p ramflux-sdk --features itest-memory-vault custody
 
+      - name: Migration fixture approval dispatch
+        run: RAMFLUX_ITEST_BUILD=1 cargo test -p ramflux-sdk --features itest-memory-vault --lib approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error
+
+      - name: Migration fixture absent from production
+        run: RAMFLUX_PRODUCTION_BUILD=1 cargo test -p ramflux-sdk --lib itest_migration_approve_once_method_is_absent_from_a_production_build
+
       - name: Legacy fixture regression tests
         run: RAMFLUX_ITEST_BUILD=1 cargo test -p ramflux-sdk --features itest-legacy-accounts itest_legacy
 

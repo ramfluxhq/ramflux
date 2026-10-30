@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 pub trait PrimaryVault: Send + Sync {
     /// Arm one request-bound fixture approval. Production providers never implement this surface.
     /// # Errors
-    /// Refuses unavailable fixture providers and any second approval before the first is consumed.
+    /// Refuses unavailable fixture providers, a pending approval, or a consumed account/request pair.
     #[cfg(feature = "itest-memory-vault")]
     fn approve_migration_once_for_test(
         &self,
@@ -85,6 +85,8 @@ pub struct NativePrimaryVault;
 mod native;
 #[cfg(any(target_os = "macos", test))]
 mod presence;
+#[cfg(any(target_os = "macos", test))]
+mod primary_items;
 impl PrimaryVault for NativePrimaryVault {
     fn home_authorization_preflight(&self) -> Result<(), SdkError> {
         #[cfg(target_os = "macos")]
