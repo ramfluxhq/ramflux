@@ -76,33 +76,7 @@ async fn peer_accepts_native_owner_snapshot_and_decrypts_its_group_key() -> Test
         target_delivery_id: message.target_delivery_id.clone(),
         envelope: crate::dm::gateway_direct_message_envelope(&owner.config, &message, None)?,
     };
-    // Missing retained authority must refuse rather than silently display a native device id.
-    let cache_key = format!("identity/custody/{}", owner.manifest.principal_commitment);
-    let retained = peer
-        .client
-        .account_db()?
-        .load_actor_state::<serde_json::Value>(&cache_key)?
-        .ok_or("retained sender authority")?;
-    peer.client.account_db()?.remove_actor_state(&cache_key)?;
-    assert!(
-        peer.client
-            .append_group_gateway_delivery_for_recipient(
-                "native-thread",
-                "native-group",
-                "native-message",
-                &entry,
-                &peer.config.device_id,
-            )
-            .is_err()
-    );
-    assert!(
-        !peer
-            .client
-            .direct_messages("native-thread")?
-            .iter()
-            .any(|message| message.message_id == "native-message")
-    );
-    peer.client.account_db()?.persist_actor_state(&cache_key, &retained)?;
+    assert_incomplete_authority_refuses(&peer, &owner.manifest.principal_commitment, &entry)?;
     assert!(matches!(
         peer.client.append_group_gateway_delivery_for_recipient(
             "native-thread",
@@ -124,6 +98,38 @@ async fn peer_accepts_native_owner_snapshot_and_decrypts_its_group_key() -> Test
         peer.client.account_db()?.message_content("native-message")?.as_deref(),
         Some(b"native group key works".as_slice())
     );
+    Ok(())
+}
+
+fn assert_incomplete_authority_refuses(
+    peer: &Fixture,
+    anchor: &str,
+    entry: &GatewayInboxEntry,
+) -> TestResult {
+    let db = peer.client.account_db()?;
+    let cache_key = format!("identity/custody/{anchor}");
+    let retained =
+        db.load_actor_state::<serde_json::Value>(&cache_key)?.ok_or("retained sender authority")?;
+    db.remove_actor_state(&cache_key)?;
+    assert!(
+        peer.client
+            .append_group_gateway_delivery_for_recipient(
+                "native-thread",
+                "native-group",
+                "native-message",
+                entry,
+                &peer.config.device_id,
+            )
+            .is_err()
+    );
+    assert!(
+        !peer
+            .client
+            .direct_messages("native-thread")?
+            .iter()
+            .any(|message| message.message_id == "native-message")
+    );
+    db.persist_actor_state(&cache_key, &retained)?;
     Ok(())
 }
 

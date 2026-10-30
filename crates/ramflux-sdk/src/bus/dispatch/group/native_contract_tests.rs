@@ -102,7 +102,7 @@ async fn native_group_lease_refusal_is_typed_over_bus_and_fresh_authority_clears
         &primary,
         true,
     )?;
-    let result = request(&mut state, json!({"group_id":"group","name":"Renewed"})).await;
+    let result = Box::pin(request(&mut state, json!({"group_id":"group","name":"Renewed"}))).await;
     let error = result.err().ok_or("expired lease accepted")?;
     assert!(matches!(error, SdkError::Crypto(CryptoError::GroupLeaseUnavailable)));
     let wire = crate::bus::io::local_bus_error_body(&error);
@@ -115,7 +115,9 @@ async fn native_group_lease_refusal_is_typed_over_bus_and_fresh_authority_clears
         false,
     )?;
     assert_eq!(
-        request(&mut state, json!({"group_id":"group","name":"Renewed"})).await?.response_body["name"],
+        Box::pin(request(&mut state, json!({"group_id":"group","name":"Renewed"})))
+            .await?
+            .response_body["name"],
         "Renewed"
     );
     Ok(())
@@ -166,10 +168,10 @@ async fn group_bus_generic_refusals_preserve_legacy_codes_and_type_only_native_a
     )?;
     for (account, expected) in [(legacy, "ValidationFailed"), (native, "GroupRenameRefused")] {
         let mut state = daemon(account, &root);
-        let error = request(
+        let error = Box::pin(request(
             &mut state,
             json!({"group_id":"group","name":"Denied","actor_id":"foreign-device"}),
-        )
+        ))
         .await
         .err()
         .ok_or("invalid group rename accepted")?;
