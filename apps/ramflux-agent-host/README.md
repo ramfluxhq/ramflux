@@ -21,6 +21,17 @@ from that principal's directory entry, with one logical message ID and distinct
 per-device envelope and operation IDs; device display names cannot select a different principal. Surface output uses `surface.send`, the author `surface.resync` RPC and typed protocol
 builders; the host sends no task/tool/approval operations.
 
+Native group commands use the verified principal in `sender_id`; the received
+projection retains the authenticated branch in `sender_device_id` and its root in
+`sender_root_commitment`. Before reading a command and immediately before output,
+the host requires effective local device membership and a signed roster pin matching
+its verified self principal/root and current branch key. A display name alone cannot
+authorize a reply. Removal or a changed group binding discards prepared output.
+`GroupLeaseUnavailable` retires that intent with the typed checkpoint
+`group_reason: "lease_unavailable"`; refresh branch authority through the owner's
+normal custody flow and send a fresh command. The host never obtains primary authority
+or retries a refused intent after restart.
+
 Copy `example.json` and set the socket, account and durable state paths. Create the
 state directory with mode 0700. Use persistent local storage for the state path when
 resuming across machine restarts. The example uses a runtime directory for an ephemeral
@@ -160,11 +171,15 @@ Run unit/fake-bus tests with `cargo test -p ramflux-agent-host`. Native `account
 requires a Live networking state (and no networking refusal reason when supplied), an
 unlocked local account, an unfenced authority, and a verified headless self identity.
 The companion integration
-suite provides `k5a_realnet_agent_replies_in_dm_and_group`, covering authenticated DM
-and group replies and host restart without duplicate replies. The QA controller runs
-that gated slice on a container host; unit tests do not claim realnet acceptance.
-`k5a2_realnet_agent_surface` adds a group checklist, streaming, human choice, result
-fallback and host-restart equivalence.
+suite provides five native realnet slices under `tests::agent_v3_native`: k5a DM
+reply and bundle consumption, k5a group reply/restart/removal, k5a2 agent surfaces,
+k2b receiver-side surface refusals and streaming, and k3b single-device task approval.
+The native group slice checks exact reply counts across process restart and a fresh
+post-restart command, verified principal/device attribution, and removal fences.
+Its volatile test vault restarts against the still-unlocked daemon; production restart
+uses the persistent operator Keychain. The legacy k5a/k5a2 slices retain group surface
+coverage, and legacy k3b retains second-device convergence until native pairing exists.
+Run realnet slices on a container host; unit tests do not establish realnet acceptance.
 
 Malformed read-model fields are permanent typed refusals, never transport retries.
 Connection failures, explicit Unavailable/Busy/DeadlineExceeded refusals and gateway

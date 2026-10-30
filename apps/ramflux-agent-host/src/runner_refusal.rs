@@ -14,6 +14,7 @@ impl<E: EngineProvider> AgentHost<E> {
             .map(|plan| plan.target.surface_id.clone())
             .or_else(|| pending.action.as_ref().map(|work| work.surface_ref.clone()));
         self.state.last_refusal = Some(OutputRefusal {
+            group_reason: None,
             conversation_id: pending.conversation_id.clone(),
             surface_id,
             reason,

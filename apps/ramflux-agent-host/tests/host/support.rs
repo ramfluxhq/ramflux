@@ -104,7 +104,7 @@ impl Fake {
                 json!({"principal_id":"agent-principal","local_device_id":"agent-device","devices":[{"device_id":"agent-device"}]})
             }
             "identity.directory" => {
-                json!({"identities":[{"principal_id":"agent-principal","is_self":true,"kind":if self.faults.contains(&Fault::Human) && !self.faults.contains(&Fault::SpoofKind){"human"}else{"headless_ai"}}, {"principal_id":"human-principal","contact_identity_commitment":"human-commitment","devices":if self.faults.contains(&Fault::EmptyDevices){json!([])}else{json!([{"device_id":"human-device","target_delivery_id":"human-target"}])}}],"next_cursor":null})
+                json!({"identities":[{"principal_id":"agent-principal","is_self":true,"contact_identity_commitment":"agent-commitment","devices":[{"device_id":"agent-device","signing_public_key":"agent-key"}],"kind":if self.faults.contains(&Fault::Human) && !self.faults.contains(&Fault::SpoofKind){"human"}else{"headless_ai"}}, {"principal_id":"human-principal","contact_identity_commitment":"human-commitment","devices":if self.faults.contains(&Fault::EmptyDevices){json!([])}else{json!([{"device_id":"human-device","target_delivery_id":"human-target"}])}}],"next_cursor":null})
             }
             "device.refresh" => {
                 self.faults.remove(&Fault::EmptyDevices);
@@ -115,7 +115,7 @@ impl Fake {
             }
             "group.list" => json!({"groups":[],"next_cursor":null}),
             "group.members" => {
-                json!({"group_id":"group","members":if self.faults.contains(&Fault::Removed) || self.faults.contains(&Fault::RemoveBeforeSend) && self.requests.iter().filter(|(m,_)|m=="group.members").count()>=2 {vec!["human-device"]}else{vec!["human-device","agent-device"]}})
+                json!({"group_id":"group","member_roster":[{"identity":{"principal_id":"agent-principal","root_commitment":"agent-commitment","device_id":"agent-device","signing_public_key":"agent-key"},"role":"member"}],"excluded_devices":[],"members":if self.faults.contains(&Fault::Removed) || self.faults.contains(&Fault::RemoveBeforeSend) && self.requests.iter().filter(|(m,_)|m=="group.members").count()>=2 {vec!["human-device"]}else{vec!["human-device","agent-device"]}})
             }
             "bus.subscribe" => {
                 if self.faults.contains(&Fault::Gap) && !body["since_seq"].is_null() {

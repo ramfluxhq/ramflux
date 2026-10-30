@@ -16,6 +16,8 @@ pub struct Checkpoint {
     pub account_id: String,
     pub principal_id: String,
     pub device_id: String,
+    #[serde(default)]
+    pub native_account: bool,
     pub cursor: Option<u64>,
     #[serde(default)]
     pub last_refusal: Option<OutputRefusal>,
@@ -72,6 +74,13 @@ pub struct OutputRefusal {
     pub conversation_id: String,
     pub surface_id: Option<String>,
     pub reason: ramflux_sdk::SurfaceRefusalCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_reason: Option<GroupRefusal>,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupRefusal {
+    LeaseUnavailable,
 }
 pub struct CheckpointStore {
     path: PathBuf,

@@ -16,7 +16,7 @@ mod runner_refusal;
 mod runner_surface;
 mod surface_plan;
 pub use bus::{AgentBus, RfdBus};
-pub use checkpoint::{Checkpoint, CheckpointStore, OutputRefusal};
+pub use checkpoint::{Checkpoint, CheckpointStore, GroupRefusal, OutputRefusal};
 pub use config::{Choice, Config, Rule, SurfaceRule};
 pub use engine::{ActionInput, ConversationInput, EngineProvider, Intent, RuleEngine};
 pub use provisioning::{CredentialVault, import_provisioning_bundle, unlock_provisioned_account};
@@ -26,6 +26,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors intentionally omit rfd bodies, message text, paths and credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("group output requires refreshed branch authority")]
+    GroupLeaseUnavailable,
     #[error("surface output refused: {0:?}")]
     SurfaceRefused(ramflux_sdk::SurfaceRefusalCode),
     #[error("host identity is unavailable or revoked")]

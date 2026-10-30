@@ -5,6 +5,7 @@ mod host {
     mod deferred_actions;
     mod deferred_fairness;
     mod malformed_events;
+    mod native_groups;
     mod poll_identity;
     mod principal_routing;
     mod recovery;

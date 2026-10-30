@@ -81,6 +81,7 @@ impl<E: EngineProvider> AgentHost<E> {
                 return Err(error);
             }
             let refusal = OutputRefusal {
+                group_reason: None,
                 conversation_id: String::new(),
                 surface_id: None,
                 reason: crate::runner_policy::refusal(&error),
@@ -170,6 +171,7 @@ impl<E: EngineProvider> AgentHost<E> {
             if !conversation_fits(&kept, &work.conversation) {
                 kept.remove(&key);
                 rejected = Some(OutputRefusal {
+                    group_reason: None,
                     conversation_id: work.conversation,
                     surface_id: Some(work.reference),
                     reason: ramflux_sdk::SurfaceRefusalCode::TooLarge,

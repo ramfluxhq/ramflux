@@ -84,6 +84,9 @@ impl AgentBus for RfdBus {
             if error.code == "resync_required" {
                 return Err(Error::Resync);
             }
+            if method.starts_with("group.") && error.code == "GroupLeaseUnavailable" {
+                return Err(Error::GroupLeaseUnavailable);
+            }
             if method.starts_with("surface.")
                 && let Ok(reason) = serde_json::from_value(serde_json::json!(error.code))
             {

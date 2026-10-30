@@ -352,6 +352,7 @@ mod tests {
             "Ordinary Human".into(),
             PrincipalKind::Human,
             None,
+            None,
             now,
         )?;
         let id = pending.input.local_account_id.clone();
@@ -391,6 +392,7 @@ mod tests {
             "Ordinary Human".into(),
             PrincipalKind::Human,
             None,
+            None,
             100,
         )?;
         let id = pending.input.local_account_id.clone();
@@ -408,6 +410,7 @@ mod tests {
                 &root.0,
                 "Machine".into(),
                 PrincipalKind::HeadlessAi,
+                None,
                 None,
                 100
             ),
