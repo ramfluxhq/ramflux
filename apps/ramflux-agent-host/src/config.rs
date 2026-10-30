@@ -12,6 +12,13 @@ pub const MAX_CONFIG_BYTES: u64 = 65_536;
 pub enum PrxSessionScope {
     PerConversation,
 }
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrxAuthorization {
+    #[default]
+    Supervised,
+    Full,
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrxConfig {
@@ -20,6 +27,18 @@ pub struct PrxConfig {
     pub session_scope: PrxSessionScope,
     pub request_timeout_s: u64,
     pub max_in_flight_per_conversation: usize,
+    #[serde(default)]
+    pub authorization: PrxAuthorization,
+    #[serde(default = "turn_timeout")]
+    pub turn_timeout_s: u64,
+    #[serde(default = "approval_timeout")]
+    pub approval_timeout_s: u64,
+}
+const fn turn_timeout() -> u64 {
+    120
+}
+const fn approval_timeout() -> u64 {
+    600
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +161,8 @@ impl Config {
                     || config.request_timeout_s == 0
                     || config.request_timeout_s > 3600
                     || config.max_in_flight_per_conversation != 1
+                    || !(1..=3600).contains(&config.turn_timeout_s)
+                    || !(1..=3600).contains(&config.approval_timeout_s)
             })
         {
             return Err(Error::Config);

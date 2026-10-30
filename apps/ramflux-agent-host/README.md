@@ -20,7 +20,8 @@ before every output. Direct-message replies resolve the projected sender princip
 inside that conversation and prepare one durable delivery for every current device
 from that principal's directory entry, with one logical message ID and distinct
 per-device envelope and operation IDs; device display names cannot select a different principal. Surface output uses `surface.send`, the author `surface.resync` RPC and typed protocol
-builders; the host sends no task/tool/approval operations.
+builders. The rule engine sends no task/tool/approval operations; the PRX bridge uses
+the signed task and grant flow described below.
 
 Native group commands use the verified principal in `sender_id`; the received
 projection retains the authenticated branch in `sender_device_id` and its root in
@@ -67,7 +68,8 @@ bundle to the Linux service host. Integration tests compile the explicit
 
 PRX can provide the model and tool-execution layer while rfd remains responsible for identity,
 membership, signed delivery, and human approval evidence. Initialize PRX, then edit its active
-configuration so tool turns require supervision and the causal decision plane is enabled:
+configuration for the chosen authorization mode. The default supervised mode requires
+the causal decision plane:
 
 ```sh
 prx init --interactive
@@ -108,31 +110,64 @@ Do not put the bearer in the agent configuration. Select PRX instead of `rules` 
       "token_file": "/private/path/to/prx.token",
       "session_scope": "per_conversation",
       "request_timeout_s": 30,
+      "turn_timeout_s": 120,
+      "approval_timeout_s": 600,
+      "authorization": "supervised",
       "max_in_flight_per_conversation": 1
     }
   }
 }
 ```
 
-Provision and unlock the native headless account with the one-shot bundle flow delivered by
-AGENT-V3-01. On a build containing that delivery, first launch accepts
-`--provisioning-bundle /private/path/to/bundle`; the bundle is imported into the platform vault
-and removed. After the account is unlocked, launch with the PRX configuration above. The bundle
-and the PRX bearer are separate credentials and neither belongs in the checkpoint.
+For native headless account provisioning and the one-shot bundle flow, see AGENT-V3-01.
+After the account is provisioned and unlocked, launch with the PRX configuration above.
+The bundle and the PRX bearer are separate credentials and neither belongs in the checkpoint.
 
-Each Ramflux conversation owns one persisted PRX session and at most one detached job. Replies are
+Each Ramflux conversation owns one persisted PRX session and at most one detached job. A second
+message while a job or human decision is pending receives `engine_busy`; it is not forwarded or
+queued. Replies are
 final text, not streamed. PRX tool access is scoped in PRX configuration, including
 `[autonomy.scopes]`, `[tool_tiering]`, and `exposed_tools`; the agent host does not broaden it.
-When PRX requests approval, the host creates a conversation task with a fresh argument-bound,
-high-risk grant request. Only the human's signed task decision is sent back to PRX. Standing grants
-never approve a PRX decision. Removing conversation access, locking the account, or revoking the
-local device cancels detached work.
+In `authorization: "supervised"` (the default), the host fetches the authoritative PRX approval
+view and creates a conversation task with a fresh high-risk grant request binding its tool,
+redacted arguments summary, effect, call digest and decision ID. Model-written reply text never
+supplies the consent label. Only the human's signed task decision is sent back to PRX. Standing
+grants never approve a fresh supervised PRX decision. The approval deadline is PRX's
+`pending_expires_at`, capped by `approval_timeout_s` (default 600 seconds). If PRX omits the expiry,
+that configuration bound is the fallback. An unavailable decision after a signed human resolution
+fails its task and returns a typed reply while other conversations continue. At expiry the host
+declines PRX and attempts a failed task update. The existing signed task rules prohibit an agent
+from clearing an unaccepted proposal or unresolved human step: if that update is refused, the host
+records the refusal, retires the bridge, and returns `approval_timeout` while the signed task
+remains available for human resolution. It never retries a permanently refused update in a
+host-wide loop. A resumed turn can request another fresh human decision.
+
+For full authorization, set `authorization: "full"` here and `[autonomy] level = "full"` in PRX.
+PRX must execute within its own configured scopes without asking the bridge for human approval.
+An unexpected `awaiting_approval` is declined with `authorization_mismatch` and a fixed diagnostic
+logged once per host process. This configuration setting is the interim authorization control;
+the per-account bus switch/standing grant is deferred to PRX-BRIDGE-02.
+
+Every detached job, including a resumed job, has a persisted wall-clock deadline set by
+`turn_timeout_s` (default 120 seconds). At expiry the host cancels the job, returns
+`engine_turn_timeout`, fails any resumed task, and frees the conversation after handling the
+result. `request_timeout_s` separately bounds individual HTTP requests. Removing conversation
+access, locking the account, or revoking the local device cancels jobs, best-effort revokes pending
+PRX decisions, and removes local session mappings. PRX's console API exposes no session deletion
+endpoint, so remote console history remains under PRX's retention policy.
 
 PRX `[IMAGE:path]` markers are removed from text replies and no attachment is sent in this release.
 Attachment transfer and externally streamed turns are deferred to PRX-BRIDGE-02. PRX network
-failures are silent and rate-limited in logs; other terminal failures produce one short fixed
-reply. The owner-only token file is read at startup, is never checkpointed, and is never included
-in diagnostics.
+failures are silent with one log per 60-second window. A message whose submission fails while PRX
+is unavailable is dropped after the host advances its cursor; it is not retried automatically.
+Other terminal failures produce one short typed reply. The owner-only token file is read at
+startup, is never checkpointed, and is never included in diagnostics. The bearer is an owner-wide
+PRX credential, including access to other `/api/*` controls; keep it on the agent's own operating
+system account and private volume. In groups, member-authored text reaches PRX under this single
+owner credential. Supervised human decisions or the deliberately selected full mode, together with
+PRX tool scopes, define the execution authority; a prompt header is only context and conveys no
+permission. Headers include only the bounded sender display label, chat kind and mention flag,
+never group member lists.
 
 For remote rfd, supply an operator-managed authenticated Unix-socket forward, such as
 OpenSSH StreamLocal forwarding, as `socket`. The host speaks the existing local bus;
