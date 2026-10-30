@@ -224,11 +224,15 @@ impl AccountRuntime {
     async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
         if let Some(backup) = command.private.take() {
             match backup {
-                super::actor::PrivateCommand::NativeUnlock { passphrase, reply } => {
+                super::actor::PrivateCommand::NativeUnlock { passphrase, home_node_id, reply } => {
                     if !reply.is_closed() {
-                        let result =
-                            super::native_account::unlock(&mut self.state, &self.id, passphrase)
-                                .await;
+                        let result = super::native_account::unlock(
+                            &mut self.state,
+                            &self.id,
+                            passphrase,
+                            home_node_id,
+                        )
+                        .await;
                         if reply.is_closed() {
                             self.close_readers().await;
                             self.state.accounts.remove(&self.id);

@@ -153,6 +153,18 @@ pub struct LocalBusCreatedAccount {
     pub state: LocalBusCreatedAccountState,
     pub networking: crate::custody::CreationState,
 }
+
+/// Typed explanation for a native account that has not reached live networking.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AccountNetworkingReason {
+    NoNodeSelected,
+    NodeUnreachable { retry_after_ms: u64 },
+    NodeCustodyUnavailable,
+    NodeBusy { retry_after_ms: u64 },
+    RegistrationRefused { code: ramflux_protocol::custody::CustodyRefusal },
+    CustodyExpired,
+}
 #[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalBusCreatedAccountState {

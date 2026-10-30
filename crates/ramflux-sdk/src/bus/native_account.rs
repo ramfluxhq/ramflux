@@ -4,9 +4,10 @@
 //! Ordinary unlocked account state using public native authority and independent node pins.
 use super::state::{LocalBusAccountState, LocalBusDaemonState};
 use crate::{
-    GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig, LocalBusCreatedAccount,
-    LocalBusCreatedAccountState, RamfluxClient, SdkError,
+    AccountNetworkingReason, GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig,
+    LocalBusCreatedAccount, LocalBusCreatedAccountState, RamfluxClient, SdkError,
 };
+use ramflux_protocol::custody::CustodyRefusal;
 use std::{net::SocketAddr, path::PathBuf};
 use zeroize::Zeroizing;
 
@@ -14,6 +15,7 @@ pub(super) async fn unlock(
     state: &mut LocalBusDaemonState,
     id: &str,
     passphrase: Zeroizing<String>,
+    home_node_id: Option<String>,
 ) -> Result<LocalBusCreatedAccount, SdkError> {
     if let Some(account) = state.accounts.get(id) {
         account.client.verify_active_account_secret(id, passphrase.as_bytes())?;
@@ -23,6 +25,10 @@ pub(super) async fn unlock(
     let mut client = RamfluxClient::new();
     client.open_account_index(&root)?;
     client.unlock_account(id, passphrase.as_bytes())?;
+    if let Some(node_id) = home_node_id {
+        client.account_db()?.persist_actor_state("account/node-id", &node_id)?;
+        client.account_db()?.persist_actor_state("sync/node-id", &Some(&node_id))?;
+    }
     drop(passphrase);
     let native = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
     let anchor = native.record().body.account_anchor.clone();
@@ -101,6 +107,7 @@ pub(super) fn status(
     let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
     Ok(serde_json::json!({
         "account_id":account_id,"local_account_id":account_id,"state":"unlocked","networking":native.state(),
+        "networking_reason":native.networking_reason(),
         "display_name":native.record().body.profile.display_name,"principal_id":native.record().body.principal_id,
         "authority_blocked":native.authority_blocked(),
         "principal_commitment":native.record().body.account_anchor,"device_id":account.gateway_config.device_id,
@@ -124,7 +131,7 @@ pub(super) async fn unlock_request(
         .and_then(|body| body.get("passphrase"))
         .and_then(serde_json::Value::as_str)
         .ok_or(SdkError::CustodySetupInvalid)?;
-    unlock(state, id, Zeroizing::new(passphrase.to_owned())).await
+    unlock(state, id, Zeroizing::new(passphrase.to_owned()), None).await
 }
 
 pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
@@ -218,7 +225,7 @@ pub(super) async fn configure_pending(account: &mut LocalBusAccountState) -> Res
     let saved = account.client.account_db()?.load_actor_state::<String>("account/node-id")?;
     let nodes = crate::node::NodeStore::load(root, &setup.builtin_nodes)?;
     let profile =
-        nodes.selected(saved.as_deref(), saved.is_some())?.ok_or(SdkError::NetworkingPending)?;
+        nodes.selected(saved.as_deref(), saved.is_some())?.ok_or(SdkError::NoNodeSelected)?;
     let old = &account.gateway_config;
     let endpoint = GatewayQuicEndpointConfig {
         bind_addr: old.bind_addr,
@@ -247,5 +254,74 @@ pub(super) async fn configure_pending(account: &mut LocalBusAccountState) -> Res
     account.client.account_db()?.persist_actor_state("sync/node-id", &Some(&profile.node_id))?;
     account.client.node_relay_options = Some(relay);
     account.gateway_config = gateway;
+    Ok(())
+}
+
+const NODE_BUSY_RETRY_AFTER_MS: u64 = 16_000;
+const NODE_UNREACHABLE_RETRY_AFTER_MS: u64 = 5_000;
+
+pub(super) fn networking_reason(error: &SdkError) -> Option<AccountNetworkingReason> {
+    match error {
+        SdkError::NoNodeSelected => Some(AccountNetworkingReason::NoNodeSelected),
+        SdkError::NodeUnreachable { retry_after_ms, .. } => {
+            Some(AccountNetworkingReason::NodeUnreachable { retry_after_ms: *retry_after_ms })
+        }
+        SdkError::CustodyNetwork(CustodyRefusal::Unsupported) => {
+            Some(AccountNetworkingReason::NodeCustodyUnavailable)
+        }
+        SdkError::CustodyNetwork(CustodyRefusal::Busy) => {
+            Some(AccountNetworkingReason::NodeBusy { retry_after_ms: NODE_BUSY_RETRY_AFTER_MS })
+        }
+        SdkError::CustodyNetwork(
+            CustodyRefusal::ChallengeExpired | CustodyRefusal::SessionExpired,
+        )
+        | SdkError::CustodyExpired => Some(AccountNetworkingReason::CustodyExpired),
+        SdkError::CustodyNetwork(code) => {
+            Some(AccountNetworkingReason::RegistrationRefused { code: code.clone() })
+        }
+        SdkError::Transport(error) if transport_is_unreachable(error) => {
+            Some(AccountNetworkingReason::NodeUnreachable {
+                retry_after_ms: NODE_UNREACHABLE_RETRY_AFTER_MS,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn transport_is_unreachable(error: &ramflux_transport::TransportError) -> bool {
+    match error {
+        ramflux_transport::TransportError::NotOpen
+        | ramflux_transport::TransportError::Io(_)
+        | ramflux_transport::TransportError::Quic(_)
+        | ramflux_transport::TransportError::RetryExhausted { .. } => true,
+        ramflux_transport::TransportError::HttpClient(error) => {
+            error.is_connect() || error.is_timeout()
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn record_networking(
+    account: &mut LocalBusAccountState,
+    error: Option<&SdkError>,
+) -> Result<(), SdkError> {
+    let root = account.client.account_index()?.root().to_path_buf();
+    let id = account.client.account_db()?.local_account_id.clone();
+    let now = crate::custody::network_now()?;
+    let mut native = crate::custody::load_account(&root, &id, now)?;
+    if native.state() == crate::custody::CreationState::NetworkingPending {
+        native.set_networking_reason(&root, error.and_then(networking_reason))?;
+        native = crate::custody::load_account(&root, &id, now)?;
+    }
+    let body = serde_json::json!({
+        "account_id": id,
+        "state": native.state(),
+        "networking_reason": native.networking_reason(),
+    });
+    let db = account.client.account_db()?;
+    if db.load_actor_state::<serde_json::Value>("account/networking")?.as_ref() != Some(&body) {
+        db.persist_actor_state("account/networking", &body)?;
+    }
+    account.client.born_v3_account = Some(Box::new(native));
     Ok(())
 }

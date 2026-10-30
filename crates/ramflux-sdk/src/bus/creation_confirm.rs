@@ -44,6 +44,7 @@ async fn confirm(
         return Err(SdkError::CustodySetupInvalid);
     }
     let mut pending = ceremony.take().ok_or(SdkError::CustodySetupInvalid)?;
+    let home_node_id = pending.home_node_id().map(str::to_owned);
     let (words, passphrase) = take_secrets(request)?;
     let gate = Arc::new(CommitGate::new(pending.deadline()));
     let _cancel = CancelOnDrop(Arc::clone(&gate));
@@ -56,9 +57,9 @@ async fn confirm(
             super::custody_setup::now()?,
             passphrase.as_bytes(),
         )?;
-        Ok::<_, SdkError>((account.local_account_id().to_owned(), passphrase))
+        Ok::<_, SdkError>((account.local_account_id().to_owned(), passphrase, home_node_id))
     });
-    let (id, passphrase) = tokio::select! {
+    let (id, passphrase, home_node_id) = tokio::select! {
         biased;
         _ = disconnected.changed() => return Err(SdkError::CustodySetupInvalid),
         result = worker => result.map_err(|_| SdkError::CustodySetupInvalid)??,
@@ -69,7 +70,7 @@ async fn confirm(
     tokio::select! {
         biased;
         _ = disconnected.changed() => Err(SdkError::CustodySetupInvalid),
-        result = supervisor.activate_native(&id, passphrase) => result,
+        result = supervisor.activate_native(&id, passphrase, home_node_id) => result,
     }
 }
 

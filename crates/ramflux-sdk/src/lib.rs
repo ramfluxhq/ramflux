@@ -62,8 +62,8 @@ pub use bus::io::{
     MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES,
 };
 pub use bus::{
-    LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest, LocalBusA2uiActionRequest,
-    LocalBusA2uiRenderRequest, LocalBusAccountBackupExportRequest,
+    AccountNetworkingReason, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
+    LocalBusA2uiActionRequest, LocalBusA2uiRenderRequest, LocalBusAccountBackupExportRequest,
     LocalBusAccountBackupImportRequest, LocalBusAccountCreateRequest,
     LocalBusAccountCreateResponse, LocalBusAccountPassphraseRotateRequest,
     LocalBusAccountUnlockRequest, LocalBusBackupContactRestoreReport, LocalBusBackupContactSkip,

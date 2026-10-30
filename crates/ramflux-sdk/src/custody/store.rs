@@ -34,6 +34,8 @@ pub(super) struct StoredAuthority {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     local_device_id: String,
     state: CreationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    networking_reason: Option<crate::AccountNetworkingReason>,
     #[serde(default)]
     pending_branch: bool,
     custody_v3_observed: bool,
@@ -83,6 +85,12 @@ impl BornAccount {
         } else {
             self.stored.state
         }
+    }
+    #[must_use]
+    pub fn networking_reason(&self) -> Option<&crate::AccountNetworkingReason> {
+        (self.state() == CreationState::NetworkingPending)
+            .then_some(self.stored.networking_reason.as_ref())
+            .flatten()
     }
     pub(crate) const fn authority_blocked(&self) -> bool {
         self.authority_blocked
@@ -137,7 +145,7 @@ impl BornAccount {
     pub fn summary(&self) -> serde_json::Value {
         serde_json::json!({"local_account_id":self.local_account_id(),"principal_id":self.stored.record.body.principal_id,
             "account_anchor":self.stored.record.body.account_anchor,"kind":self.stored.record.body.principal_kind,"display_name":self.stored.record.body.profile.display_name,
-            "state":self.state(),"authority_blocked":self.authority_blocked,"custody_v3_observed":true,"vault_class":self.stored.vault_class})
+            "state":self.state(),"networking_reason":self.networking_reason(),"authority_blocked":self.authority_blocked,"custody_v3_observed":true,"vault_class":self.stored.vault_class})
     }
 }
 fn directory(root: &Path, id: &str) -> Result<PathBuf, SdkError> {
@@ -330,6 +338,7 @@ pub(super) fn persist(
             local_account_id: input.local_account_id.clone(),
             local_device_id: input.device_id.clone(),
             state: CreationState::NetworkingPending,
+            networking_reason: None,
             pending_branch: false,
             custody_v3_observed: true,
             primary_vault_ref: reference.clone(),
@@ -467,6 +476,7 @@ impl BornAccount {
             return Err(invalid());
         }
         current.stored.state = CreationState::Live;
+        current.stored.networking_reason = None;
         let bytes = ramflux_protocol::canonical_json_bytes(&current.stored)?;
         if bytes.len() > MAX_STORED_AUTHORITY_BYTES {
             return Err(invalid());
@@ -479,6 +489,53 @@ impl BornAccount {
         fs::rename(temp, dir.join("authority.json"))?;
         fs::File::open(&dir)?.sync_all()?;
         self.stored.state = CreationState::Live;
+        self.stored.networking_reason = None;
+        Ok(())
+    }
+
+    pub(crate) fn set_networking_reason(
+        &mut self,
+        root: &Path,
+        reason: Option<crate::AccountNetworkingReason>,
+    ) -> Result<(), SdkError> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if self.state() == CreationState::Live {
+            return Ok(());
+        }
+        let dir = directory(root, self.local_account_id())?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join(".authority.lock"))?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid())?
+            .as_secs();
+        let mut current = load_account(root, self.local_account_id(), now)?;
+        if current.record() != self.record() || current.state() == CreationState::Live {
+            return Ok(());
+        }
+        if current.stored.networking_reason == reason {
+            self.stored.networking_reason = reason;
+            return Ok(());
+        }
+        current.stored.networking_reason.clone_from(&reason);
+        let bytes = ramflux_protocol::canonical_json_bytes(&current.stored)?;
+        if bytes.len() > MAX_STORED_AUTHORITY_BYTES {
+            return Err(invalid());
+        }
+        let temp = dir.join(format!(
+            ".authority-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        write_public(&temp, &bytes)?;
+        fs::rename(temp, dir.join("authority.json"))?;
+        fs::File::open(&dir)?.sync_all()?;
+        self.stored.networking_reason = reason;
         Ok(())
     }
 }

@@ -154,12 +154,14 @@ fn apply(
         return Err(SdkError::CustodySetupInvalid);
     }
     match request.method.as_str() {
-        "account.create" => {
+        "account.create" | "account.create.begin" => {
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Input {
                 display_name: String,
                 principal_kind: ramflux_protocol::PrincipalKind,
+                #[serde(default)]
+                node_id: Option<String>,
             }
             *ceremony = None;
             let input: Input = serde_json::from_value(std::mem::take(&mut request.body))
@@ -169,11 +171,21 @@ fn apply(
             }
             let display_name =
                 ramflux_protocol::normalize_profile_display_name(&input.display_name)?;
+            let home_node_id = input
+                .node_id
+                .map(|node_id| {
+                    crate::node::NodeStore::load(&config.data_root, &config.builtin_nodes)?
+                        .selected(Some(&node_id), false)?
+                        .map(|profile| profile.node_id)
+                        .ok_or(SdkError::NoNodeSelected)
+                })
+                .transpose()?;
             primary_vault(config).preflight()?;
             let pending = CreationCeremony::begin_account(
                 &config.data_root,
                 display_name,
                 input.principal_kind,
+                home_node_id,
                 now()?,
             )?;
             let prepared = ResultBody::Prepared {

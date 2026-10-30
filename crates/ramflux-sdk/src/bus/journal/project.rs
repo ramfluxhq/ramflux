@@ -114,6 +114,12 @@ pub(crate) fn project(
 
 fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Result<(), SdkError> {
     let db = client.account_db()?;
+    if key == "account/networking"
+        && let Some(value) = db.load_actor_state::<Value>(key)?
+    {
+        events.push(("account.networking.changed".to_owned(), value, None));
+        return Ok(());
+    }
     for prefix in ["directory/surface/", "directory/surface_error/"] {
         if let Some(id) = key.strip_prefix(prefix) {
             let directory =

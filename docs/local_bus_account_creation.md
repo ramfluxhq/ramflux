@@ -12,8 +12,11 @@ Read `daemon.status.body.born_v3_creation` before offering creation. An absent
 field means false for older daemons. Current daemons always report true; native
 creation has no enable/disable option. Vault availability is checked by begin.
 
-1. Send `account.create` with exactly
-   `{"display_name":"Example Human","principal_kind":"human"}`. The daemon
+1. Send `account.create.begin` with
+   `{"display_name":"Example Human","principal_kind":"human","node_id":"confirmed-node"}`.
+   `node_id` is optional and must name an enabled, confirmed node profile. When supplied,
+   it is bound only to the new account and does not change the daemon-wide default node.
+   When omitted, existing default-node selection behavior is unchanged. The daemon
    allocates the account, principal and device identifiers. No seeds, phrase,
    passphrase, or caller-selected identifiers belong in this request. Its body is
    `{"ceremony":"pending","ceremony_id":"ceremony-…","expires_in_ms":300000}`;
@@ -39,6 +42,19 @@ creation has no enable/disable option. Vault availability is checked by begin.
    session handoff succeed. Node absence, an unavailable branch credential or a
    network failure can leave data unlocked with networking pending. A missing
    networking session does not authorize a legacy proof fallback.
+
+For native accounts whose `networking` is not `live`, `account.status` and
+`account.list.account_details` include `networking_reason`. The value is a tagged
+object with `kind`: `no_node_selected`, `node_unreachable`,
+`node_custody_unavailable`, `node_busy`, `registration_refused`, or
+`custody_expired`. Unreachable and busy reasons include `retry_after_ms`; a
+registration refusal includes the typed custody refusal `code`. The field is null
+when no typed cause is available and is cleared when networking becomes live.
+
+Subscribe to `account.networking.changed` to observe semantic transitions without
+polling. Its body contains `account_id`, networking `state`, and
+`networking_reason`. Repeated retries with the same state and reason do not emit a
+second event, and no credential or endpoint secret is included.
 
 `account.create.cancel {}` is idempotent, including after a consumed or failed
 confirmation. Disconnect and daemon shutdown erase pending phrase/word buffers.

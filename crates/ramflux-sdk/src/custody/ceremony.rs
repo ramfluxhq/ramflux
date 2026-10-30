@@ -44,6 +44,7 @@ pub struct CreationCeremony {
     positions: Option<[u8; 3]>,
     deadline: Instant,
     commit_gate: Option<std::sync::Arc<super::CommitGate>>,
+    home_node_id: Option<String>,
 }
 impl std::fmt::Debug for CreationCeremony {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,12 +56,13 @@ impl CreationCeremony {
     /// # Errors
     /// Rejects existing account ids, invalid names and unsupported custodians.
     pub fn begin(root: &Path, input: CreateInput, now: u64) -> Result<Self, SdkError> {
-        Self::prepare(root, input, false, now)
+        Self::prepare(root, input, false, None, now)
     }
     pub(crate) fn begin_account(
         root: &Path,
         display_name: String,
         kind: PrincipalKind,
+        home_node_id: Option<String>,
         now: u64,
     ) -> Result<Self, SdkError> {
         if kind != PrincipalKind::Human {
@@ -74,12 +76,13 @@ impl CreationCeremony {
             principal_kind: kind,
             custodian_account_id: None,
         };
-        Self::prepare(root, input, true, now)
+        Self::prepare(root, input, true, home_node_id, now)
     }
     fn prepare(
         root: &Path,
         mut input: CreateInput,
         allocate_principal: bool,
+        home_node_id: Option<String>,
         now: u64,
     ) -> Result<Self, SdkError> {
         valid_id(&input.local_account_id)?;
@@ -133,6 +136,7 @@ impl CreationCeremony {
             phase: Phase::Unshown,
             positions: None,
             deadline: Instant::now() + Duration::from_secs(300),
+            home_node_id,
         })
     }
     #[must_use]
@@ -152,6 +156,9 @@ impl CreationCeremony {
     }
     pub(crate) const fn is_expired(&self) -> bool {
         self.expired
+    }
+    pub(crate) fn home_node_id(&self) -> Option<&str> {
+        self.home_node_id.as_deref()
     }
     pub(crate) fn expire(&mut self) {
         self.phrase = None;
@@ -339,6 +346,7 @@ mod tests {
             &root.0,
             "Ordinary Human".into(),
             PrincipalKind::Human,
+            None,
             now,
         )?;
         let id = pending.input.local_account_id.clone();
@@ -377,6 +385,7 @@ mod tests {
             &root.0,
             "Ordinary Human".into(),
             PrincipalKind::Human,
+            None,
             100,
         )?;
         let id = pending.input.local_account_id.clone();
@@ -394,6 +403,7 @@ mod tests {
                 &root.0,
                 "Machine".into(),
                 PrincipalKind::HeadlessAi,
+                None,
                 100
             ),
             Err(SdkError::CustodySetupInvalid)
