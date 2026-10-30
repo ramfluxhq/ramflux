@@ -10,6 +10,23 @@ use zeroize::Zeroizing;
 /// Implementations must be non-synchronizing, primary-local and independent of data unlock.
 /// No bus method exposes these credentials; public authority reads do not load them.
 pub trait PrimaryVault: Send + Sync {
+    /// Arm one request-bound fixture approval. Production providers never implement this surface.
+    /// # Errors
+    /// Refuses unavailable fixture providers and any second approval before the first is consumed.
+    #[cfg(feature = "itest-memory-vault")]
+    fn approve_migration_once_for_test(
+        &self,
+        _account: &str,
+        _request_id: &str,
+    ) -> Result<(), SdkError> {
+        Err(SdkError::LocalBusRefused {
+            code: "MigrationApprovalUnavailable".into(),
+            message: "migration fixture approval is unavailable".into(),
+            body: Box::new(serde_json::json!({
+                "reason_code": "migration_approval_unavailable"
+            })),
+        })
+    }
     /// Check provider availability before asking a user to save recovery material.
     /// # Errors
     /// Fails closed when the provider is unsupported, locked or lacks host entitlements.

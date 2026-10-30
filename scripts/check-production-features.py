@@ -32,6 +32,26 @@ def main():
         text = file.read_text()
         if "RAMFLUX_PRODUCTION_BUILD=1 cargo build" not in text:
             raise ValueError(f"production build guard absent: {file}")
+    sdk_root = (root / "crates/ramflux-sdk/src/lib.rs").read_text()
+    for guard in (
+        'all(feature = "itest-memory-vault", ramflux_production)',
+        'all(feature = "itest-memory-vault", ramflux_release_profile)',
+    ):
+        if guard not in sdk_root:
+            raise ValueError(f"memory-vault build guard absent: {guard}")
+    for file in (
+        root / "crates/ramflux-sdk/src/bus/dispatch/mod.rs",
+        root / "crates/ramflux-sdk/src/bus/daemon.rs",
+    ):
+        dispatch = file.read_text()
+        for guard in (
+            'feature = "itest-memory-vault"',
+            "ramflux_itest",
+            "not(ramflux_release_profile)",
+            "not(ramflux_production)",
+        ):
+            if guard not in dispatch:
+                raise ValueError(f"migration approval dispatch guard absent in {file}: {guard}")
     print("production feature provenance: OK")
 
 

@@ -14,6 +14,13 @@ pub mod grant_mcp;
 pub mod group;
 #[cfg(feature = "itest-legacy-accounts")]
 mod itest_legacy;
+#[cfg(all(
+    feature = "itest-memory-vault",
+    ramflux_itest,
+    not(ramflux_release_profile),
+    not(ramflux_production)
+))]
+pub(crate) mod itest_migration;
 pub mod message;
 pub mod node;
 pub mod object;
