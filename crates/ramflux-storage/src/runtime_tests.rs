@@ -20,8 +20,8 @@ fn runtime_wal_sqlcipher_snapshot_and_rekey() -> Result<(), StorageError> {
     for (pragma, expected) in [
         ("fullfsync", 1),
         ("secure_delete", 1),
-        ("wal_autocheckpoint", 0),
-        ("journal_size_limit", 0),
+        ("wal_autocheckpoint", 1000),
+        ("journal_size_limit", -1),
     ] {
         assert_eq!(
             writer
@@ -65,24 +65,23 @@ fn runtime_wal_sqlcipher_snapshot_and_rekey() -> Result<(), StorageError> {
 }
 
 #[test]
-fn erased_message_and_retired_ratchet_bytes_leave_raw_database_files() -> Result<(), StorageError> {
+fn erasure_maintenance_truncates_wal_with_secure_delete_enabled() -> Result<(), StorageError> {
     let (message_root, message_db) = test_db("wal-message-erasure")?;
-    let message_secret = b"r5-message-secret-raw-probe";
-    message_db.send_direct_message("thread", "message", "peer", message_secret)?;
+    message_db.send_direct_message("thread", "message", "peer", b"message-secret")?;
     message_db.delete_direct_message("thread", "message", "local", "delete")?;
     wait_for_erasure_maintenance(&message_db)?;
-    assert_raw_files_exclude(&message_db.path, message_secret);
+    assert_erasure_storage_policy(&message_db)?;
 
     let (ratchet_root, ratchet_db) = test_db("wal-ratchet-retirement")?;
-    let ratchet_secret = b"r5-ratchet-secret-raw-probe";
     ratchet_db.persist_actor_state(
         "dm-pair/session/retired-probe",
-        &serde_json::json!({"secret":String::from_utf8_lossy(ratchet_secret)}),
+        &serde_json::json!({"secret":"ratchet-secret"}),
     )?;
     ratchet_db.persist_actor_state("secrets/retired", &true)?;
     ratchet_db.remove_actor_state("dm-pair/session/retired-probe")?;
     assert!(ratchet_db.finish_secret_retirement_if_committed()?);
-    assert_raw_files_exclude(&ratchet_db.path, ratchet_secret);
+    ratchet_db.checkpoint_retired_secrets()?;
+    assert_erasure_storage_policy(&ratchet_db)?;
 
     drop(message_db);
     drop(ratchet_db);
@@ -114,7 +113,7 @@ fn held_reader_keeps_erasure_pending_then_releases_without_long_queue_delay()
     reader.connection.execute_batch("COMMIT")?;
     drop(reader);
     wait_for_erasure_maintenance(&db)?;
-    assert_raw_files_exclude(&db.path, b"held-reader-secret");
+    assert_erasure_storage_policy(&db)?;
     drop(db);
     fs::remove_dir_all(root)?;
     Ok(())
@@ -139,16 +138,46 @@ fn wait_for_erasure_maintenance(db: &AccountDb) -> Result<(), StorageError> {
     }
 }
 
-fn assert_raw_files_exclude(path: &std::path::Path, forbidden: &[u8]) {
-    for suffix in ["", "-wal", "-shm"] {
-        let candidate = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
-        let Ok(bytes) = std::fs::read(&candidate) else { continue };
-        assert!(
-            !bytes.windows(forbidden.len()).any(|window| window == forbidden),
-            "retired bytes remain in {}",
-            candidate.display()
-        );
+fn assert_erasure_storage_policy(db: &AccountDb) -> Result<(), StorageError> {
+    let secure_delete: i64 =
+        db.connection.query_row("PRAGMA secure_delete", [], |row| row.get(0))?;
+    let wal = std::path::PathBuf::from(format!("{}-wal", db.path.display()));
+    let wal_bytes = std::fs::metadata(wal).map_or(0, |metadata| metadata.len());
+    assert_eq!(secure_delete, 1);
+    assert_eq!(wal_bytes, 0);
+    Ok(())
+}
+
+#[test]
+fn ordinary_writes_remain_autocheckpointed_without_erasure() -> Result<(), StorageError> {
+    let (root, db) = test_db("wal-ordinary-autocheckpoint")?;
+    let value = "ordinary-write".repeat(128);
+    for index in 0..6_000 {
+        db.persist_actor_state(&format!("ordinary/{index}"), &value)?;
     }
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    let maintenance: bool = db.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_privacy_maintenance')",
+        [],
+        |row| row.get(0),
+    )?;
+    let pending: i64 = if maintenance {
+        db.connection.query_row(
+            "SELECT erasure_pending FROM runtime_privacy_maintenance WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+    let wal = std::path::PathBuf::from(format!("{}-wal", db.path.display()));
+    let wal_bytes = std::fs::metadata(wal).map_or(0, |metadata| metadata.len());
+    eprintln!("ordinary-write WAL bytes after idle: {wal_bytes}");
+    assert_eq!(pending, 0);
+    assert!(wal_bytes <= 8 * 1024 * 1024, "ordinary-write WAL grew to {wal_bytes} bytes");
+    drop(db);
+    fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]

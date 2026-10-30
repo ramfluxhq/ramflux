@@ -71,6 +71,7 @@ impl AccountDb {
             let cutoff=at.saturating_sub(7*86400);
             let condition="topic IN ('group.state.conflict','group.state.delivery_failed') AND (at<?1 OR seq<=?2 OR (topic=?3 AND subject=?4 AND seq<=?5))";
             let floor:Option<u64>=self.connection.query_row(&format!("SELECT max(seq) FROM runtime_journal WHERE {condition}"),params![cutoff,global_floor.unwrap_or(0),topic,subject,subject_floor.unwrap_or(0)],|row|row.get(0))?;
+            self.connection.execute(&format!("DELETE FROM message_footprint WHERE kind='journal' AND CAST(locator AS INTEGER) IN (SELECT seq FROM runtime_journal WHERE {condition})"),params![cutoff,global_floor.unwrap_or(0),topic,subject,subject_floor.unwrap_or(0)])?;
             self.connection.execute(&format!("DELETE FROM runtime_journal WHERE {condition}"),params![cutoff,global_floor.unwrap_or(0),topic,subject,subject_floor.unwrap_or(0)])?;
             if let Some(floor)=floor {self.connection.execute("UPDATE runtime_journal_bounds SET pruned_through=max(pruned_through,?1) WHERE singleton=1",params![floor])?;}
             Ok(())

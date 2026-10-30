@@ -35,7 +35,7 @@ impl BackupDatabase {
     pub fn sanitize_native_backup(&self) -> Result<(), StorageError> {
         self.db.execute_batch("PRAGMA secure_delete=ON; BEGIN IMMEDIATE;
             DELETE FROM runtime_actor_state WHERE state_kind LIKE 'account/%' OR state_kind LIKE 'identity/owned_%' OR state_kind LIKE 'sync/%' OR state_kind LIKE 'gateway/%';
-            DELETE FROM runtime_operation; DELETE FROM runtime_journal; DELETE FROM runtime_outbox;
+            DELETE FROM runtime_operation; DELETE FROM message_footprint WHERE kind='journal'; DELETE FROM runtime_journal; DELETE FROM runtime_outbox;
             DELETE FROM outbox_queue; DELETE FROM session_capability_cache;
             DELETE FROM pending_recovery_projection; DELETE FROM pending_recovery_approval_projection;
             DELETE FROM guardian_recovery_share_projection; COMMIT; VACUUM;")?;

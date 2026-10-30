@@ -93,12 +93,15 @@ impl AccountDb {
         if bytes.len() > 512 * 1024 {
             return Err(StorageError::AuthorizationRejected);
         }
-        self.connection.execute("INSERT OR IGNORE INTO runtime_journal(at,topic,body_json,source_key,sticky,subject) VALUES(?1,?2,?3,?4,?5,?6)",params![at,topic,bytes,source,i64::from(matches!(topic,"safety.changed"|"mcp.approval.request")),subject])?;
+        let inserted = self.connection.execute("INSERT OR IGNORE INTO runtime_journal(at,topic,body_json,source_key,sticky,subject) VALUES(?1,?2,?3,?4,?5,?6)",params![at,topic,&bytes,source,i64::from(matches!(topic,"safety.changed"|"mcp.approval.request")),subject])?;
         let event = self.connection.query_row(
             "SELECT seq,at,topic,body_json FROM runtime_journal WHERE source_key=?1",
             params![source],
             row,
         )?;
+        if inserted != 0 && topic.contains("message") {
+            self.register_journal_message_footprint(event.seq, topic, &bytes)?;
+        }
         self.connection.execute(
             "UPDATE runtime_journal_bounds SET head_seq=max(head_seq,?1) WHERE singleton=1",
             params![event.seq],

@@ -1228,6 +1228,8 @@ fn test_recovery_quorum() -> ramflux_protocol::RecoveryQuorumConfigured {
 
 #[path = "runtime_tests.rs"]
 mod runtime_tests;
+#[path = "write_benchmark_tests.rs"]
+mod write_benchmark_tests;
 
 #[test]
 fn optional_friend_lookup_distinguishes_absent_links_from_real_sql_failures()

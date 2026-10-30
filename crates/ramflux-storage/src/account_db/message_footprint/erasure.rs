@@ -22,8 +22,18 @@ const BODY: &str = r"
  ON CONFLICT(singleton) DO UPDATE SET erasure_pending=1;
  UPDATE runtime_actor_state SET state_json=CAST(json_object('message_id',NEW.message_id,'deleted',json('true'),'created_at',NEW.created_at,'conversation_id',NEW.conversation_id,'is_own',json(CASE WHEN NEW.is_own=1 THEN 'true' ELSE 'false' END)) AS BLOB)
  WHERE state_kind='directory/message/'||NEW.message_id;
+ DELETE FROM runtime_outbox WHERE
+  (table_name='runtime_actor_state' AND (
+   row_id IN (SELECT a.rowid FROM runtime_actor_state a JOIN message_footprint f ON f.kind='actor' AND f.locator=a.state_kind WHERE f.message_id=NEW.message_id)
+   OR json_extract(keys_json,'$.state_kind') IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor')))
+  OR (table_name,row_id) IN (
+   SELECT CASE WHEN instr(kind,':')>0 THEN substr(kind,1,instr(kind,':')-1) ELSE kind END,
+    CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id)
+  OR (table_name='direct_message_projection' AND row_id=NEW.rowid);
  DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor');
  DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor') AND state_kind<>'directory/message/'||NEW.message_id;
+ DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND change_kind='delete'
+  AND json_extract(keys_json,'$.state_kind') IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor');
  DELETE FROM event_causal_dependency WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind IN ('event_causal_dependency:event_id','event_causal_dependency:depends_on_event_id'));
  DELETE FROM projection_checkpoint WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='projection_checkpoint:last_event_id');
  DELETE FROM raw_envelope_log WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='raw_envelope_log:envelope_id');
@@ -60,6 +70,12 @@ const BODY: &str = r"
  DELETE FROM rejected_inbox_projection WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='rejected_inbox_projection');
  DELETE FROM conversation_unread_marker WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='conversation_unread_marker');
  UPDATE group_message_tombstone_projection SET actor_device_id='',reason='' WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='group_message_tombstone_projection');
+ DELETE FROM runtime_outbox WHERE change_kind='delete' AND (
+  (table_name='runtime_actor_state' AND json_extract(keys_json,'$.state_kind') IN
+   (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor'))
+  OR (table_name,row_id) IN (
+   SELECT CASE WHEN instr(kind,':')>0 THEN substr(kind,1,instr(kind,':')-1) ELSE kind END,
+    CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id));
  DELETE FROM runtime_outbox WHERE sequence IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='outbox');
  DELETE FROM message_copy_binding WHERE message_id=NEW.message_id;
  DELETE FROM message_footprint WHERE message_id=NEW.message_id;
