@@ -4,7 +4,7 @@
 //! State, replay and device-selection regressions independent of transport timing.
 use super::state::LiveCall;
 use super::*;
-use ramflux_protocol::{CallAction, VoiceAllocation};
+use ramflux_protocol::{CallAction, VoiceAllocation, VoiceCallFailureReason};
 fn endpoint(principal: &str, device: &str) -> CallEndpoint {
     CallEndpoint {
         principal_id: principal.into(),
@@ -301,4 +301,67 @@ fn claim(call: &mut LiveCall, caller: &VoiceAllocation, now: i64) -> Result<(), 
         signature: "gateway-verified-unit".into(),
     };
     call.accept_lease(private, consent, now)
+}
+
+fn active_pair() -> Result<(LiveCall, LiveCall), SdkError> {
+    let mut origin = outgoing()?;
+    let mut callee = LiveCall::incoming(&origin.pending[0], origin.callee.clone(), 100)?;
+    callee.pending.clear();
+    callee.answer(101)?;
+    origin.apply(&callee.pending[0], 101)?;
+    origin.activate(allocation(), 102)?;
+    callee.apply(origin.pending.last().ok_or_else(|| invalid("ack"))?, 102)?;
+    claim(&mut callee, &allocation(), 102)?;
+    Ok((origin, callee))
+}
+
+#[test]
+fn active_callee_waits_for_pending_hangup_after_relay_refusal() -> Result<(), SdkError> {
+    let (mut origin, mut callee) = active_pair()?;
+    origin.end(false, 120)?;
+    callee.lease_refused(VoiceCallFailureReason::RelayUnavailable, 121)?;
+    assert_eq!(callee.row.state, "active");
+    assert!(callee.media_lost());
+    assert!(callee.allocation.is_none());
+    assert!(callee.receive_key.is_none());
+    assert_eq!(callee.send_key.as_ref(), &[0; 32]);
+    assert!(!callee.expire_media(199)?);
+    callee.apply(&origin.pending[0], 199)?;
+    assert_eq!(callee.row.end_reason.as_deref(), Some("completed"));
+    assert_eq!(callee.row.failure_reason, None);
+    assert!(!callee.expire_media(201)?);
+    Ok(())
+}
+
+#[test]
+fn refused_callee_without_hangup_fails_at_original_lease_expiry() -> Result<(), SdkError> {
+    let (mut origin, mut callee) = active_pair()?;
+    callee.lease_refused(VoiceCallFailureReason::RelayUnavailable, 121)?;
+    // Repeated refusals or newer offers cannot restart the original timeout.
+    callee.lease_refused(VoiceCallFailureReason::RelayUnavailable, 190)?;
+    let mut renewed = allocation().for_callee();
+    renewed.expires_at = 290;
+    let ack = origin.control(CallAction::Ack { allocation: Box::new(renewed) }, 190)?;
+    callee.apply(&ack, 190)?;
+    assert!(callee.media_lost());
+    assert!(!callee.expire_media(199)?);
+    assert!(callee.expire_media(200)?);
+    assert_eq!(callee.row.end_reason.as_deref(), Some("failed"));
+    assert_eq!(callee.row.failure_reason, Some(VoiceCallFailureReason::RelayUnavailable));
+    assert!(callee.pending.iter().any(|c| matches!(c.body, CallAction::Failed)));
+    Ok(())
+}
+
+#[test]
+fn caller_and_connecting_callee_still_fail_immediately_on_refusal() -> Result<(), SdkError> {
+    let (mut origin, mut callee) = active_pair()?;
+    origin.lease_refused(VoiceCallFailureReason::RelayUnavailable, 121)?;
+    assert_eq!(origin.row.end_reason.as_deref(), Some("failed"));
+    callee.row.state = "connecting".into();
+    callee.lease_refused(VoiceCallFailureReason::RelayUnavailable, 121)?;
+    assert_eq!(callee.row.end_reason.as_deref(), Some("failed"));
+    let (_, mut callee) = active_pair()?;
+    callee.lease_refused(VoiceCallFailureReason::AuthorityRefused, 121)?;
+    assert_eq!(callee.row.end_reason.as_deref(), Some("failed"));
+    Ok(())
 }
