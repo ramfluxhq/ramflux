@@ -108,7 +108,7 @@ pub(super) fn status(
     let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
     let now = crate::custody::network_now()?;
     let current =
-        crate::custody::load_account(account.client.account_index()?.root(), account_id, now)?;
+        crate::custody::load_data_account(account.client.account_index()?.root(), account_id, now)?;
     let authorized = !current.authority_blocked()
         && !current.branch_pending()
         && current
