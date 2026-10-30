@@ -15,8 +15,9 @@ mod group_sender;
 mod group_state;
 pub use group_state::{
     GroupChangeRequestInput, GroupStateCreateInput, GroupStateRelation, VerifiedGroupState,
-    accept_group_transfer, advance_group_state, apply_group_change_request,
-    certify_group_state_actor, change_already_applied, create_group_state,
+    accept_group_transfer, advance_group_state, advance_native_group_state,
+    apply_group_change_request, certify_group_state_actor, certify_native_group_state_actor,
+    change_already_applied, create_group_state, create_native_group_state,
     group_change_request_hash, resign_group_state_snapshot, sign_group_change_request,
     sign_group_change_result, validate_group_change_request, verify_group_change_request,
     verify_group_change_result, verify_group_state_actor, verify_group_state_snapshot,

@@ -122,6 +122,57 @@ impl VerifiedRecord {
         }
     }
 }
+
+/// Verify the compact custody chain carried by a born-v3 group actor.
+pub(crate) fn verify_group_native_authority(
+    actor: &ramflux_protocol::group_state::GroupStateActor,
+    issued_at: Option<u64>,
+) -> Result<(), CryptoError> {
+    let authority = actor
+        .native_authority
+        .as_ref()
+        .ok_or_else(|| reject("native group authority unavailable"))?;
+    let master = &authority.master_certificate.body;
+    let branch = &authority.branch_certificate.body;
+    super::validate::master_body(master)?;
+    super::validate::branch_body(branch)?;
+    signature(
+        &key(&master.master_public_key)?,
+        domain::CUSTODY_MASTER_CERTIFICATE,
+        &authority.master_certificate,
+    )?;
+    signature(
+        &key(&master.self_signing_public_key)?,
+        domain::CUSTODY_BRANCH_CERTIFICATE,
+        &authority.branch_certificate,
+    )?;
+    if actor.identity.root_commitment != master.account_anchor
+        || actor.identity.principal_id != master.principal_id
+        || actor.identity.device_id != branch.device_id
+        || actor.identity.signing_public_key != branch.branch_signing_public_key
+        || actor.root_public_key != master.self_signing_public_key
+        || branch.account_anchor != master.account_anchor
+        || branch.principal_kind != master.principal_kind
+        || branch.master_certificate_hash != object_hash(&authority.master_certificate)?
+        || !branch.capabilities.iter().any(|capability| capability == "group")
+        || !actor.root_signature.is_empty()
+        || actor.identity.target_delivery_id
+            != ramflux_protocol::qualified_device_id(
+                &actor.identity.root_commitment,
+                &actor.identity.device_id,
+            )?
+    {
+        return Err(reject("native group actor authority mismatch"));
+    }
+    if let Some(now) = issued_at
+        && (master.issued_at > now.saturating_add(CLOCK_SKEW_SECONDS)
+            || branch.not_before > now.saturating_add(CLOCK_SKEW_SECONDS)
+            || now > branch.expires_at.saturating_add(CLOCK_SKEW_SECONDS))
+    {
+        return Err(reject("native group actor lease unavailable"));
+    }
+    Ok(())
+}
 /// Verify exact native v3 authority, including every nested signature and key commitment.
 /// The caller must obtain the external human's current verified authority independently.
 /// # Errors

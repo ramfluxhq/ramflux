@@ -5,6 +5,39 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GroupOperation {
+    Create,
+    MemberAdd,
+    Send,
+    Rename,
+    MemberRemove,
+}
+
+impl GroupOperation {
+    #[must_use]
+    pub const fn error_code(self) -> &'static str {
+        match self {
+            Self::Create => "GroupCreateRefused",
+            Self::MemberAdd => "GroupMemberAddRefused",
+            Self::Send => "GroupSendRefused",
+            Self::Rename => "GroupRenameRefused",
+            Self::MemberRemove => "GroupMemberRemoveRefused",
+        }
+    }
+
+    pub(crate) fn for_method(method: &str) -> Option<Self> {
+        match method {
+            "group.create" => Some(Self::Create),
+            "group.member.add" => Some(Self::MemberAdd),
+            "group.send" => Some(Self::Send),
+            "group.name.set" => Some(Self::Rename),
+            "group.member.remove" => Some(Self::MemberRemove),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
     #[error("custody networking refused: {0}")]
@@ -43,6 +76,12 @@ pub enum SdkError {
     TaskDeliveryTooLarge { bytes: usize, limit: usize },
     #[error("{message}")]
     SurfaceRefused { reason: crate::SurfaceRefusalCode, message: String },
+    #[error("{operation:?} refused: {source}")]
+    GroupRefused {
+        operation: GroupOperation,
+        #[source]
+        source: Box<SdkError>,
+    },
     #[error("surface delivery too large: {bytes} bytes exceeds {limit}")]
     SurfaceDeliveryTooLarge { bytes: usize, limit: usize },
     #[error("surface checkpoint does not match its owning row")]

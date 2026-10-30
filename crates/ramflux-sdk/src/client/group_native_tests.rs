@@ -3,6 +3,7 @@
 
 //! Native authority runs the ordinary group invitation, sender-key and removal paths.
 use crate::client::native_test_support::{Fixture, TestResult};
+use ramflux_protocol::group_state::GroupStateChange;
 #[tokio::test]
 async fn native_group_invite_accept_message_replay_and_kick_use_real_authority() -> TestResult {
     let alice = Fixture::with_device("native-group-owner", "owner-device").await?;
@@ -60,5 +61,61 @@ async fn native_group_invite_accept_message_replay_and_kick_use_real_authority()
     assert!(!state.members.contains(member.device_id()));
     assert!(alice.client.identity_root.is_none());
     assert!(bob.client.identity_root.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_shared_group_create_add_rename_and_remove_use_custody_authority() -> TestResult {
+    let alice = Fixture::with_device("native-shared-owner", "owner-device").await?;
+    let bob = Fixture::with_device("native-shared-member", "member-device").await?;
+    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
+    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    let owner = alice.client.owned_device_identity()?;
+    let member = bob.client.owned_device_identity()?;
+    let primary = alice
+        .client
+        .born_v3_account
+        .as_deref()
+        .ok_or("native owner")?
+        .group_primary(alice.vault.as_ref())?;
+    let initial = alice.client.shared_group_create_with_primary(
+        "native-shared-group",
+        "native-shared-thread",
+        Some("Native group".into()),
+        owner.storage_key(),
+        Some(&primary),
+    )?;
+    assert_eq!(initial.creator().identity.root_commitment, owner.root_commitment());
+    assert!(initial.creator().native_authority.is_some());
+    assert!(alice.client.identity_root.is_none());
+    let member_identity = bob.client.owned_group_actor(member.storage_key())?.identity;
+    let added = alice.client.shared_group_change_with_primary(
+        "native-shared-group",
+        owner.storage_key(),
+        GroupStateChange::Add {
+            member: member_identity,
+            role: ramflux_protocol::group_state::SharedGroupRole::Member,
+        },
+        Some(&primary),
+    )?;
+    assert!(added.view().effective_role(member.root_commitment(), member.device_id()).is_some());
+    let renamed = alice.client.shared_group_change_with_primary(
+        "native-shared-group",
+        owner.storage_key(),
+        GroupStateChange::SetName { name: "Renamed native group".into() },
+        Some(&primary),
+    )?;
+    assert_eq!(renamed.view().name.as_deref(), Some("Renamed native group"));
+    let removed = alice.client.shared_group_change_with_primary(
+        "native-shared-group",
+        owner.storage_key(),
+        GroupStateChange::Remove {
+            root_commitment: member.root_commitment().into(),
+            device_id: member.device_id().into(),
+        },
+        Some(&primary),
+    )?;
+    assert!(removed.view().effective_role(member.root_commitment(), member.device_id()).is_none());
+    assert!(alice.client.identity_root.is_none());
     Ok(())
 }

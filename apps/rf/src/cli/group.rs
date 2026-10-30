@@ -16,6 +16,7 @@ pub(crate) struct GroupCommand {
 #[derive(Subcommand)]
 pub(crate) enum GroupAction {
     Create(GroupCreate),
+    Rename(GroupRename),
     Send(GroupSend),
     Read(GroupRead),
     Message(GroupMessageCommand),
@@ -26,6 +27,18 @@ pub(crate) enum GroupAction {
     Role(GroupRoleCommand),
     Disappearing(GroupDisappearingCommand),
     Mute(GroupMute),
+}
+
+#[derive(Args)]
+pub(crate) struct GroupRename {
+    #[arg(long)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) group: String,
+    #[arg(long)]
+    pub(crate) name: String,
+    #[arg(long)]
+    pub(crate) request_id: Option<String>,
 }
 
 #[derive(Args)]
