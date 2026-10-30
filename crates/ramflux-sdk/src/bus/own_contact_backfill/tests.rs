@@ -69,7 +69,7 @@ async fn slow_own_manifest_refresh_persists_sibling_and_expands_group_without_ep
     Ok(())
 }
 
-async fn slow_directory(
+pub(crate) async fn slow_directory(
     root: &Path,
     mut config: GatewaySessionConfig,
     manifest: crate::prekey::SdkDeviceManifestResponse,

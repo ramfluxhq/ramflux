@@ -6,8 +6,12 @@ use crate::bus::protocol::{LocalBusBackupContactSkip, LocalBusBackupContactSkipR
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
+mod backfill_retry;
 #[cfg(test)]
 mod native_tests;
+#[cfg(test)]
+#[path = "own_contact/retry_tests.rs"]
+mod retry_tests;
 mod tombstone;
 const PREFIX: &[u8] = b"ramflux.own_contact.v1\n";
 #[derive(Serialize, Deserialize)]
@@ -21,6 +25,14 @@ struct Backfill {
     #[serde(default)]
     schema_version: u32,
     epoch: u64,
+    #[serde(default)]
+    roster_tag: String,
+    #[serde(default)]
+    directory_generation: u64,
+    #[serde(default)]
+    has_parked: bool,
+    #[serde(default)]
+    retry_at: i64,
     cursor: String,
     complete: bool,
     #[serde(default)]
@@ -253,7 +265,7 @@ impl RamfluxClient {
     }
     fn stage_contact_backfill_batch_at(&self, now: i64) -> Result<usize, SdkError> {
         let own = self.owned_device_identity()?;
-        let Some((epoch, active, _)) = self.own_contact_roster()? else {
+        let Some((epoch, active, roster_tag)) = self.own_contact_roster()? else {
             return Ok(0);
         };
         if active < 2 {
@@ -262,8 +274,22 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let mut progress =
             db.load_actor_state::<Backfill>("own-contact/backfill")?.unwrap_or_default();
-        if progress.epoch != epoch || progress.schema_version != 1 {
-            progress = Backfill { schema_version: 1, epoch, ..Backfill::default() };
+        let generation =
+            db.load_actor_state::<u64>("own-contact/directory-generation")?.unwrap_or(0);
+        if progress.epoch != epoch
+            || progress.schema_version != 2
+            || progress.roster_tag != roster_tag
+            || (progress.complete
+                && progress.has_parked
+                && (now >= progress.retry_at || progress.directory_generation != generation))
+        {
+            progress = Backfill {
+                schema_version: 2,
+                epoch,
+                roster_tag,
+                directory_generation: generation,
+                ..Backfill::default()
+            };
         }
         if progress.complete {
             return Ok(0);
@@ -289,12 +315,13 @@ impl RamfluxClient {
                             .as_ref()
                             .is_some_and(|m| m.link == link.link_id && m.attempts >= 5)
                         {
-                            let key = ramflux_protocol::hash_base64url(
-                                "ramflux.own_contact.parked.v1",
-                                link.link_id.as_bytes(),
+                            db.persist_actor_state(&backfill_retry::parked_key(&link.link_id), &serde_json::json!({"link_id":link.link_id,"peer_root":peer,"reason":"manifest_retry_exhausted","attempts":5,"parked_at":now}))?;
+                            progress.has_parked = true;
+                            tracing::warn!(
+                                attempts = 5,
+                                retry_after_secs = backfill_retry::PARKED_RETRY_SECS,
+                                "contact backfill parked: manifest retry exhausted"
                             );
-                            db.persist_actor_state(&format!("own-contact/parked/{key}"), &serde_json::json!({"link_id":link.link_id,"peer_root":peer,"reason":"manifest_retry_exhausted","attempts":5,"parked_at":now}))?;
-                            tracing::warn!(link_id = %link.link_id, "contact backfill parked: manifest retry exhausted");
                             progress.missing = None;
                             progress.cursor.clone_from(&link.link_id);
                             db.persist_actor_state("own-contact/backfill", &progress)?;
@@ -315,12 +342,14 @@ impl RamfluxClient {
                     count += 1;
                 }
             }
+            db.remove_actor_state(&backfill_retry::parked_key(&link.link_id))?;
             progress.cursor.clone_from(&link.link_id);
             db.persist_actor_state("own-contact/backfill", &progress)?;
         }
         if links.len() < 4 {
             if progress.restrictions_done {
                 progress.complete = true;
+                progress.retry_at = now.saturating_add(backfill_retry::PARKED_RETRY_SECS);
             } else {
                 progress.restrictions_done = true;
                 progress.cursor.clear();

@@ -4,12 +4,16 @@
 //! Detect new active siblings and backfill accepted contacts through the bounded own-device queue.
 use crate::prelude::*;
 
+const MANIFEST_REFRESH_WINDOW: Duration = Duration::from_secs(5);
+
 pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkError> {
     let client = &account.client;
     let db = client.account_db()?;
     let now = now_unix_timestamp();
     let last = db.load_actor_state::<i64>("own-contact/last-refresh")?.unwrap_or(0);
-    if now.saturating_sub(last) >= 5 {
+    if now.saturating_sub(last)
+        >= i64::try_from(MANIFEST_REFRESH_WINDOW.as_secs()).unwrap_or(i64::MAX)
+    {
         // Record attempts too, so a network outage cannot create an unbounded retry loop.
         db.persist_actor_state("own-contact/last-refresh", &now)?;
         let root = client.owned_device_identity()?.root_commitment().to_owned();
@@ -19,7 +23,7 @@ pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkEr
         // A fresh authenticated directory request must have the full attempt interval to
         // finish; cancelling it every 250ms can prevent sibling discovery on a slow gateway.
         let refreshed = tokio::time::timeout(
-            Duration::from_secs(5),
+            MANIFEST_REFRESH_WINDOW,
             client.cache_verified_device_manifest(gateway, &root, "own-contact-backfill"),
         )
         .await
@@ -30,7 +34,7 @@ pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkEr
         if let Err(error) = &refreshed {
             // The persisted attempt timestamp limits this warning to once per five seconds.
             tracing::warn!(
-                %error,
+                error_code = local_bus_error_code(error),
                 elapsed_ms = started.elapsed().as_millis(),
                 "own-device manifest refresh deferred"
             );
@@ -40,15 +44,24 @@ pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkEr
     if let Some(root) = client.claim_contact_backfill_refresh(now)? {
         let gateway =
             account.engine.as_ref().map_or(&account.gateway_config, |engine| &engine.config);
+        let started = std::time::Instant::now();
         match tokio::time::timeout(
-            Duration::from_millis(250),
+            MANIFEST_REFRESH_WINDOW,
             client.cache_verified_device_manifest(gateway, &root, "own-contact-peer-backfill"),
         )
         .await
         {
             Ok(Ok(_)) => {}
-            Ok(Err(error)) => tracing::debug!(%error, "contact peer manifest refresh deferred"),
-            Err(_) => tracing::debug!("contact peer manifest refresh tick budget exhausted"),
+            Ok(Err(error)) => tracing::warn!(
+                error_code = local_bus_error_code(&error),
+                elapsed_ms = started.elapsed().as_millis(),
+                "contact peer manifest refresh deferred"
+            ),
+            Err(_) => tracing::warn!(
+                error_code = "ManifestRefreshTimeout",
+                elapsed_ms = started.elapsed().as_millis(),
+                "contact peer manifest refresh deferred"
+            ),
         }
     }
     client.stage_contact_backfill_batch()
@@ -56,4 +69,4 @@ pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkEr
 
 #[cfg(test)]
 #[path = "own_contact_backfill/tests.rs"]
-mod tests;
+pub(crate) mod tests;
