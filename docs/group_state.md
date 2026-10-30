@@ -45,15 +45,18 @@ its inviter; the signature authenticates authority rather than global freshness.
 ## Bus contract
 
 All calls select an unlocked account. The local device signs the operation or
-request; an optional `actor_id` must equal that device.
+request. For born-v3 accounts, an optional `actor_id` may be the account
+principal, local device id, or exact anchor-qualified local device; legacy
+accounts require the local device id.
 
 For a born-v3 account, `creator_id` and the ordinary `group.send.sender_id` are
 the account `principal_id` returned by `account.status`. The SDK derives and
 authenticates the selected account's `device_id`; received message rows expose
 that value separately as `sender_device_id`. The local raw device id and exact
-anchor-qualified delivery id remain accepted as compatibility creator selectors,
-but callers should use the principal. They are not valid substitutes for the
-native sender principal.
+anchor-qualified delivery id remain accepted as compatibility creator and sender
+selectors. The SDK normalizes native senders to the selected local device before
+sender-key operations, so existing desktop callers may continue to send their
+own device id.
 
 `group.member.add.member_id` accepts either a principal id from principal lookup
 or an accepted contact, an unambiguous accepted-contact device id, or an exact
@@ -61,6 +64,12 @@ anchor-qualified device address. A principal with more than one active device
 must be replaced by an exact qualified device address. The SDK obtains signing
 and delivery data from the verified manifest; desktop and CLI callers do not pass
 private keys or manufacture `member_signing_public_key` values.
+
+Native state mutations currently require the primary device because it alone can
+load the account's self-signing key from the non-synchronizing vault. A linked
+non-primary device can send messages and sign change requests, but direct create,
+rename, add, remove, and owner-state certification return
+`CustodyVaultUnavailable` until the primary processes the request.
 
 ```json
 {"method":"group.create","body":{"group_id":"g","conversation_id":"thread","creator_id":"principal-owner","name":"Checklist"}}

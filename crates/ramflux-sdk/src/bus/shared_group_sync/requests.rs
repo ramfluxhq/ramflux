@@ -506,9 +506,12 @@ async fn process_incoming(account: &LocalBusAccountState, now: i64) -> Result<()
             continue;
         };
         client.persist_identity_directory(&manifest)?;
-        if let Err(error) =
-            client.process_group_request(&record.request, &account.target_delivery_id)
-        {
+        let primary = super::native_group_primary(account).await?;
+        if let Err(error) = client.process_group_request_with_primary(
+            &record.request,
+            &account.target_delivery_id,
+            primary.as_ref(),
+        ) {
             tracing::debug!(%error,"group request processing deferred");
         }
     }

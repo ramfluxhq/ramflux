@@ -224,7 +224,7 @@ fn peer_commitments(
 
 #[cfg(test)]
 #[path = "surface_text_fixture.rs"]
-pub(super) mod fixture;
+pub(in crate::bus) mod fixture;
 #[cfg(test)]
 #[path = "surface_text_tests.rs"]
 pub(super) mod tests;

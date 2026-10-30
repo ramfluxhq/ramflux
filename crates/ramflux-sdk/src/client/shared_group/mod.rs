@@ -256,7 +256,7 @@ impl RamfluxClient {
         )
         .await?;
         if manifest.principal_id != issuer.identity.principal_id
-            || manifest.root_public_key != issuer.root_public_key
+            || !group_actor_matches_manifest(&manifest, issuer)
             || !manifest.devices.iter().any(|device| {
                 device.device_id == issuer.identity.device_id
                     && device.branch_public_key == issuer.identity.signing_public_key
@@ -308,5 +308,23 @@ impl RamfluxClient {
     }
 }
 
+fn group_actor_matches_manifest(
+    manifest: &crate::prekey::SdkDeviceManifestResponse,
+    issuer: &GroupStateActor,
+) -> bool {
+    match (&manifest.custody, &issuer.native_authority) {
+        (Some(custody), Some(authority)) => {
+            let current = &custody.publication.record.body.master_certificate;
+            authority.master_certificate == *current
+                && issuer.root_public_key == current.body.self_signing_public_key
+                && manifest.root_public_key == current.body.master_public_key
+        }
+        (None, None) => manifest.root_public_key == issuer.root_public_key,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+#[cfg(test)]
+mod native_tests;
 #[cfg(test)]
 mod tests;

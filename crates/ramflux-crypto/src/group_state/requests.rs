@@ -7,6 +7,7 @@ use super::{
     GROUP_REQUEST_TTL_SECONDS, GroupStateActor, GroupStateChange, IdentityRoot, SharedGroupRole,
     SharedGroupState, Signer, Value, VerifiedGroupState, branch_matches, canonical_json_bytes,
     encode_base64url, invalid, root_matches, snapshot, transition, verify_group_state_actor,
+    verify_group_state_actor_at,
 };
 use ramflux_protocol::group_state::{GroupChangeRequest, GroupChangeResult, GroupChangeStatus};
 fn request_body(request: &GroupChangeRequest) -> Result<Value, CryptoError> {
@@ -70,7 +71,8 @@ pub fn verify_group_change_request(
     {
         return Err(invalid("invalid or expired group change request"));
     }
-    verify_group_state_actor(&request.actor)?;
+    let issued_at = u64::try_from(request.issued_at).map_err(|_| invalid("group request clock"))?;
+    verify_group_state_actor_at(&request.actor, Some(issued_at))?;
     crate::verify_device_branch_signature(
         &request.actor.identity.signing_public_key,
         &request_body(request)?,
@@ -158,6 +160,30 @@ pub fn apply_group_change_request(
         snapshot::Apply { requester: &request.actor, change: request.change.clone(), now },
     )
 }
+/// Apply an authorized request under the current born-v3 owner authority.
+///
+/// # Errors
+/// Rejects an invalid requester, creator authority, stale state, or state transition.
+pub fn apply_native_group_change_request(
+    primary: &crate::custody::SelfSigningKey,
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    state: &VerifiedGroupState,
+    request: &GroupChangeRequest,
+    now: i64,
+) -> Result<VerifiedGroupState, CryptoError> {
+    validate_group_change_request(state, request, now)?;
+    if change_already_applied(state.view(), &request.change) {
+        return Ok(state.clone());
+    }
+    snapshot::advance_as_with_native_signer(
+        primary,
+        branch,
+        actor,
+        state,
+        snapshot::Apply { requester: &request.actor, change: request.change.clone(), now },
+    )
+}
 /// # Errors
 /// Rejects an invalid creator signer or request serialization.
 pub fn sign_group_change_result(
@@ -172,7 +198,20 @@ pub fn sign_group_change_result(
     if actor.identity.root_commitment != state.creator().identity.root_commitment {
         return Err(invalid("result signer is not creator"));
     }
-    let mut result = GroupChangeResult {
+    let mut result = unsigned_group_change_result(actor, request, state, status, now)?;
+    result.signature = encode_base64url(
+        root.signing_key.sign(&canonical_json_bytes(&result_body(&result)?)?).to_bytes(),
+    );
+    Ok(result)
+}
+fn unsigned_group_change_result(
+    actor: &GroupStateActor,
+    request: &GroupChangeRequest,
+    state: &VerifiedGroupState,
+    status: GroupChangeStatus,
+    now: i64,
+) -> Result<GroupChangeResult, CryptoError> {
+    Ok(GroupChangeResult {
         schema: GROUP_CHANGE_RESULT_DOMAIN.into(),
         group_id: request.group_id.clone(),
         request_id: request.request_id.clone(),
@@ -185,10 +224,29 @@ pub fn sign_group_change_result(
         issued_at: now,
         expires_at: request.expires_at,
         signature: String::new(),
-    };
-    result.signature = encode_base64url(
-        root.signing_key.sign(&canonical_json_bytes(&result_body(&result)?)?).to_bytes(),
-    );
+    })
+}
+/// Sign a terminal request result with the current born-v3 owner authority.
+///
+/// # Errors
+/// Rejects a mismatched native signer, non-owner actor, or invalid serialization.
+pub fn sign_native_group_change_result(
+    primary: &crate::custody::SelfSigningKey,
+    actor: &GroupStateActor,
+    request: &GroupChangeRequest,
+    state: &VerifiedGroupState,
+    status: GroupChangeStatus,
+    now: i64,
+) -> Result<GroupChangeResult, CryptoError> {
+    if actor.native_authority.is_none() || primary.public_key() != actor.root_public_key {
+        return Err(invalid("native result signer authority mismatch"));
+    }
+    if actor.identity.root_commitment != state.creator().identity.root_commitment {
+        return Err(invalid("result signer is not creator"));
+    }
+    let mut result = unsigned_group_change_result(actor, request, state, status, now)?;
+    result.signature =
+        primary.sign_group_state_bytes(&canonical_json_bytes(&result_body(&result)?)?);
     Ok(result)
 }
 /// # Errors

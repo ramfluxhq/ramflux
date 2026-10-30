@@ -11,17 +11,17 @@ pub(crate) async fn dispatch_group_bus_request(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let result = dispatch_group_bus_request_inner(request, state).await;
-    result.map_err(|error| {
-        if let Some(operation) = crate::GroupOperation::for_method(&request.method) {
-            if matches!(&error, SdkError::GroupRefused { .. }) {
-                error
-            } else {
-                SdkError::GroupRefused { operation, source: Box::new(error) }
-            }
-        } else {
-            error
-        }
-    })
+    result.map_err(|error| group_operation_error(&request.method, error))
+}
+
+fn group_operation_error(method: &str, error: SdkError) -> SdkError {
+    let Some(operation) = crate::GroupOperation::for_method(method) else { return error };
+    if matches!(&error, SdkError::GroupRefused { .. })
+        || crate::bus::io::local_bus_error_code(&error) != "ValidationFailed"
+    {
+        return error;
+    }
+    SdkError::GroupRefused { operation, source: Box::new(error) }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -691,10 +691,7 @@ pub(crate) async fn dispatch_group_send_request(
         && body.source_principal_id.is_some()
         && body.target_delivery_id.is_some();
     if account.client.born_v3_account.is_some() && !directed_transport {
-        if body.sender_id != account.gateway_config.principal_id {
-            return Err(StorageError::GroupPermissionDenied.into());
-        }
-        body.sender_id.clone_from(&account.gateway_config.device_id);
+        normalize_native_group_sender(&mut body, &account.gateway_config)?;
     }
     account.client.assert_shared_group_send_capacity(&body.group_id, &body.sender_id)?;
     let mut fanout_routes = if directed_transport {
@@ -1008,6 +1005,20 @@ pub(crate) async fn dispatch_group_send_request(
         response["sender_key_distribution"] = serde_json::Value::Array(sender_key_distribution);
     }
     Ok(local_bus_ok(response))
+}
+
+fn normalize_native_group_sender(
+    body: &mut LocalBusGroupSendRequest,
+    gateway: &GatewaySessionConfig,
+) -> Result<(), SdkError> {
+    if body.sender_id != gateway.principal_id
+        && body.sender_id != gateway.device_id
+        && body.sender_id != gateway.target_delivery_id
+    {
+        return Err(StorageError::GroupPermissionDenied.into());
+    }
+    body.sender_id.clone_from(&gateway.device_id);
+    Ok(())
 }
 
 pub(crate) async fn dispatch_group_sender_key_distribution(
@@ -1446,6 +1457,63 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn group_wrapper_preserves_existing_typed_error_contracts() {
+        let cases = [
+            (SdkError::NetworkingPending, "NetworkingPending"),
+            (SdkError::CustodyVaultUnavailable, "CustodyVaultUnavailable"),
+            (
+                SdkError::Protocol(ramflux_protocol::ProtocolError::GroupTransferRequiresSync),
+                "transfer_requires_sync",
+            ),
+            (
+                SdkError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(
+                    ramflux_protocol::GroupStateLimit::Members,
+                )),
+                "GroupStateCapacity",
+            ),
+            (SdkError::CapabilityDenied("group".into()), "CapabilityDenied"),
+        ];
+        for (error, expected) in cases {
+            let wrapped = group_operation_error("group.send", error);
+            assert_eq!(crate::bus::io::local_bus_error_code(&wrapped), expected);
+        }
+        let transfer = group_operation_error(
+            "group.member.remove",
+            SdkError::Protocol(ramflux_protocol::ProtocolError::GroupTransferRequiresSync),
+        );
+        assert_eq!(
+            crate::bus::io::local_bus_error_body(&transfer).reason_code.as_deref(),
+            Some("head_or_removal_floor_mismatch")
+        );
+        let generic = group_operation_error("group.send", SdkError::LocalBus("denied".into()));
+        assert_eq!(crate::bus::io::local_bus_error_code(&generic), "GroupSendRefused");
+    }
+
+    #[test]
+    fn native_group_send_bus_accepts_own_device_id() -> Result<(), SdkError> {
+        let gateway = gateway_config("native-principal", "native-device", "native-target");
+        let mut body = LocalBusGroupSendRequest {
+            group_id: "group".into(),
+            conversation_id: "thread".into(),
+            message_id: "message".into(),
+            sender_id: "native-device".into(),
+            encrypted_body_base64: String::new(),
+            plaintext_body_base64: None,
+            envelope_id: None,
+            source_principal_id: None,
+            target_delivery_id: None,
+            federation: None,
+            ttl: None,
+        };
+        normalize_native_group_sender(&mut body, &gateway)?;
+        assert_eq!(body.sender_id, "native-device");
+        body.sender_id = "native-principal".into();
+        normalize_native_group_sender(&mut body, &gateway)?;
+        assert_eq!(body.sender_id, "native-device");
+        Ok(())
+    }
 
     fn temp_root(test_name: &str) -> PathBuf {
         let nanos =
