@@ -28,36 +28,19 @@ pub enum VoiceCallFailureReason {
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CallAction {
-    Invite {
-        base_key: String,
-    },
+    Invite { base_key: String },
     Ringing,
-    Answer {
-        base_key: String,
-    },
-    Ack {
-        allocation: Box<VoicePeerAllocation>,
-    },
-    Ready {
-        consent: Box<VoiceLeaseConsent>,
-    },
+    Answer { base_key: String },
+    Ack { allocation: Box<VoicePeerAllocation> },
+    Ready { consent: Box<VoiceLeaseConsent> },
     Reject,
     Busy,
     Hangup,
     Timeout,
-    Failed {
-        #[serde(default)]
-        reason: VoiceCallFailureReason,
-    },
+    Failed,
     AnsweredElsewhere,
-    Rekey {
-        generation: u64,
-        base_key: String,
-    },
-    RekeyAck {
-        generation: u64,
-        base_key: String,
-    },
+    Rekey { generation: u64, base_key: String },
+    RekeyAck { generation: u64, base_key: String },
 }
 /// No `Debug`: actions contain media secrets and allocation bearer credentials.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -156,6 +139,8 @@ pub struct CallRow {
     pub end_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<VoiceCallFailureReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_reason: Option<VoiceCallFailureReason>,
     pub seq: u64,
     pub created_at: i64,
     pub answered_at: Option<i64>,
@@ -216,15 +201,13 @@ impl Drop for CallAction {
 
 #[cfg(test)]
 mod tests {
-    use super::{CallAction, VoiceCallFailureReason};
+    use super::CallAction;
 
     #[test]
-    fn legacy_failed_control_defaults_to_a_typed_signaling_failure() -> serde_json::Result<()> {
+    fn failed_control_keeps_the_legacy_wire_shape() -> serde_json::Result<()> {
         let action: CallAction = serde_json::from_value(serde_json::json!({"action":"failed"}))?;
-        assert!(matches!(
-            action,
-            CallAction::Failed { reason: VoiceCallFailureReason::SignalingUnavailable }
-        ));
+        assert!(matches!(action, CallAction::Failed));
+        assert_eq!(serde_json::to_value(&action)?, serde_json::json!({"action":"failed"}));
         Ok(())
     }
 }
