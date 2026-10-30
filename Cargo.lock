@@ -2447,6 +2447,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "clap",
+ "ed25519-dalek",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2457,6 +2458,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "time",
  "tokio",
 ]
 
