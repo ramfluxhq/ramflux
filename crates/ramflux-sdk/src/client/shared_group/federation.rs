@@ -56,7 +56,7 @@ impl RamfluxClient {
         } else {
             crate::client::contact::fetch_verified_device_manifest(gateway, root).await?
         };
-        self.persist_identity_directory(&manifest)?;
+        self.persist_fetched_identity_directory(&manifest)?;
         Ok(manifest)
     }
 }
