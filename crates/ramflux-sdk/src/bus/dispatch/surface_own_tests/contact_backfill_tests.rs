@@ -6,12 +6,12 @@ use super::*;
 
 #[tokio::test]
 async fn slow_contact_manifest_persists_and_is_delivered_to_sibling() -> TestResult {
-    slow_contact(false).await
+    Box::pin(slow_contact(false)).await
 }
 
 #[tokio::test]
 async fn parked_contact_is_retried_after_schedule_and_delivered_from_slow_gateway() -> TestResult {
-    slow_contact(true).await
+    Box::pin(slow_contact(true)).await
 }
 
 async fn slow_contact(park: bool) -> TestResult {
