@@ -130,6 +130,7 @@ async fn group_message_before_membership_update_retries_then_delivers_without_ac
         alice.client.encrypt_group_message("ordered", "alice", b"membership arrives later")?;
     let mut msg = from(&alice, &bob, "before-membership", "ordered-thread");
     let entry = seal_as(&alice, &bob, msg.clone(), &body, Route::group_message("ordered"))?;
+    let retry_key = bob.client.inbox_admission_key(&entry)?;
     let (engine, writes) = Inbox::engine(bob.config()?, vec![entry.clone()])?;
     let mut account = crate::bus::state::LocalBusAccountState::new(
         std::mem::take(&mut bob.client),
@@ -138,18 +139,57 @@ async fn group_message_before_membership_update_retries_then_delivers_without_ac
     );
     crate::bus::sync_driver::run(&mut account).await?;
     assert!(!writes.lock().map_err(|_| invalid("mutex"))?.iter().any(|v| v["frame_type"] == "ack"));
+    assert!(account.client.direct_messages("ordered-thread")?.is_empty());
+    assert!(account.client.account_db()?.has_inbox_retry(&retry_key)?);
     fixture_member(&account.client, "ordered", &alice)?;
     account.client.import_group_sender_key_distribution(
         &alice.client.export_group_sender_key_distribution("ordered", "alice")?,
     )?;
-    let (engine, _) = Inbox::engine(account.gateway_config.clone(), vec![entry])?;
-    account.engine = Some(engine);
-    crate::bus::sync_driver::run(&mut account).await?;
+    // The receive clock and dependency redrive can straddle a wall-clock second.
+    // Drive synchronization until delivery, using only the durable retry after redelivery.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut redelivery = vec![entry];
+    loop {
+        let (engine, retry_writes) = Inbox::engine_with_acknowledgements(
+            account.gateway_config.clone(),
+            std::mem::take(&mut redelivery),
+            1,
+        )?;
+        account.engine = Some(engine);
+        crate::bus::sync_driver::run(&mut account).await?;
+        let acknowledgements = retry_writes
+            .lock()
+            .map_err(|_| invalid("mutex"))?
+            .iter()
+            .filter(|value| value["frame_type"] == "ack")
+            .count();
+        if !account.client.direct_messages("ordered-thread")?.is_empty() {
+            assert_eq!(acknowledgements, 1);
+            break;
+        }
+        assert_eq!(acknowledgements, 0);
+        assert!(account.client.account_db()?.has_inbox_retry(&retry_key)?);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "group message did not retry after membership update"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let messages = account.client.direct_messages("ordered-thread")?;
     assert_eq!(messages.len(), 1);
     assert_eq!(
         account.client.account_db()?.message_content(&messages[0].message_id)?,
         Some(b"membership arrives later".to_vec())
+    );
+    assert!(!account.client.account_db()?.has_inbox_retry(&retry_key)?);
+    assert_eq!(account.client.gateway_receive_cursor("bob")?, 1);
+    assert!(
+        !account
+            .client
+            .account_db()?
+            .journal_after(0, 100)?
+            .iter()
+            .any(|event| event.topic == "message.undeliverable")
     );
     // A later malformed packet remains isolated from the successfully retried message.
     msg.envelope_id = "later".to_owned();
