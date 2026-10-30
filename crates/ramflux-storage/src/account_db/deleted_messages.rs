@@ -402,7 +402,23 @@ mod tests {
 
     #[test]
     fn deletion_uses_indexed_replay_and_event_lookups_at_scale() -> Result<(), StorageError> {
-        let (root, db) = crate::tests::test_db("deleted-indexed-lookup")?;
+        deletion_uses_indexed_lookups_at_scale(0)
+    }
+
+    fn deletion_uses_indexed_lookups_at_scale(extra_outbox_rows: i64) -> Result<(), StorageError> {
+        let (root, db) =
+            crate::tests::test_db(&format!("deleted-indexed-lookup-{extra_outbox_rows}"))?;
+        populate_index_scale_fixture(&db, extra_outbox_rows)?;
+        assert_indexed_erasure_plans(&db)?;
+        measure_indexed_erasure(&db, extra_outbox_rows)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn populate_index_scale_fixture(
+        db: &AccountDb,
+        extra_outbox_rows: i64,
+    ) -> Result<(), StorageError> {
         db.connection.execute_batch(
             "WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<10000)
              INSERT INTO runtime_actor_state(state_kind,state_json)
@@ -429,6 +445,20 @@ mod tests {
             "gateway.deliver.opaque",
             &serde_json::to_vec(&json!({"message_id":"target","sender":"peer"}))?,
         )?;
+        if extra_outbox_rows > 0 {
+            db.connection.execute(
+                "WITH RECURSIVE rows(n) AS (
+                    VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<?1)
+                 INSERT INTO runtime_outbox(table_name,change_kind,row_id,published,keys_json)
+                 SELECT 'runtime_actor_state','update',-n,0,
+                        json_object('state_kind','unrelated/outbox/'||n) FROM rows",
+                params![extra_outbox_rows],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn assert_indexed_erasure_plans(db: &AccountDb) -> Result<(), StorageError> {
         for (query, index) in [
             (
                 "SELECT locator FROM message_footprint WHERE message_id='target' AND kind='journal'",
@@ -446,6 +476,57 @@ mod tests {
                 "SELECT event_id FROM local_event_log WHERE event_id IN (SELECT locator FROM message_footprint WHERE message_id='target' AND kind='event')",
                 "sqlite_autoindex_local_event_log",
             ),
+            (
+                "DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND row_id IN
+                 (SELECT a.rowid FROM runtime_actor_state a JOIN message_footprint f
+                  ON f.kind='actor' AND f.locator=a.state_kind WHERE f.message_id='target')",
+                "runtime_outbox_source",
+            ),
+            (
+                "DELETE FROM runtime_outbox WHERE sequence IN (
+                  SELECT outbox.sequence FROM message_footprint footprint
+                  CROSS JOIN runtime_outbox outbox INDEXED BY runtime_outbox_actor_kind
+                  WHERE footprint.message_id='target' AND footprint.kind='actor'
+                   AND outbox.actor_state_kind=footprint.locator
+                   AND outbox.table_name='runtime_actor_state')",
+                "runtime_outbox_actor_kind",
+            ),
+            (
+                "DELETE FROM runtime_outbox WHERE (table_name,row_id) IN (
+                  SELECT CASE WHEN instr(kind,':')>0 THEN substr(kind,1,instr(kind,':')-1)
+                              ELSE kind END,
+                         CAST(locator AS INTEGER)
+                  FROM message_footprint WHERE message_id='target')",
+                "runtime_outbox_source",
+            ),
+            (
+                "DELETE FROM runtime_outbox WHERE table_name='direct_message_projection'
+                  AND row_id=(SELECT rowid FROM direct_message_projection WHERE message_id='target')",
+                "runtime_outbox_source",
+            ),
+            (
+                "DELETE FROM runtime_outbox WHERE sequence IN (
+                  SELECT outbox.sequence FROM message_footprint footprint
+                  CROSS JOIN runtime_outbox outbox INDEXED BY runtime_outbox_actor_kind
+                  WHERE footprint.message_id='target' AND footprint.kind='actor'
+                   AND outbox.actor_state_kind=footprint.locator
+                   AND outbox.table_name='runtime_actor_state' AND outbox.change_kind='delete')",
+                "runtime_outbox_actor_kind",
+            ),
+            (
+                "DELETE FROM runtime_outbox WHERE change_kind='delete' AND (table_name,row_id) IN (
+                  SELECT CASE WHEN instr(kind,':')>0 THEN substr(kind,1,instr(kind,':')-1)
+                              ELSE kind END,
+                         CAST(locator AS INTEGER)
+                  FROM message_footprint WHERE message_id='target')",
+                "runtime_outbox_source",
+            ),
+            (
+                "DELETE FROM runtime_outbox WHERE sequence IN (
+                  SELECT CAST(locator AS INTEGER) FROM message_footprint
+                  WHERE message_id='target' AND kind='outbox')",
+                "INTEGER PRIMARY KEY",
+            ),
         ] {
             let mut statement = db.connection.prepare(&format!("EXPLAIN QUERY PLAN {query}"))?;
             let plans = statement
@@ -457,11 +538,16 @@ mod tests {
             );
             assert!(
                 plans.iter().all(|detail| !detail.contains("SCAN runtime_")
+                    && !detail.contains("SCAN outbox")
                     && !detail.contains("SCAN local_event_log")),
                 "{plans:?}"
             );
             eprintln!("indexed erasure plan: {plans:?}");
         }
+        Ok(())
+    }
+
+    fn measure_indexed_erasure(db: &AccountDb, extra_outbox_rows: i64) -> Result<(), StorageError> {
         // Measure deletion against an established store; fixture construction WAL is separate.
         db.checkpoint_retired_secrets()?;
         let total_started = std::time::Instant::now();
@@ -474,7 +560,8 @@ mod tests {
         let commit = commit_started.elapsed();
         let total = total_started.elapsed();
         eprintln!(
-            "10k-copy-store deletion: erasure={erasure:?}, durable_commit={commit:?}, total={total:?}"
+            "10k-copy-store deletion (extra_outbox_rows={extra_outbox_rows}): \
+             erasure={erasure:?}, durable_commit={commit:?}, total={total:?}"
         );
         let erasure_budget = if cfg!(debug_assertions) {
             std::time::Duration::from_secs(2)
@@ -487,8 +574,13 @@ mod tests {
             "durable commit budget exceeded: {commit:?}"
         );
         db.checkpoint_retired_secrets()?;
-        std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn deletion_uses_indexed_outbox_lookups_with_twenty_thousand_rows() -> Result<(), StorageError>
+    {
+        deletion_uses_indexed_lookups_at_scale(20_000)
     }
 
     #[test]

@@ -80,7 +80,6 @@ fn erasure_maintenance_truncates_wal_with_secure_delete_enabled() -> Result<(), 
     ratchet_db.persist_actor_state("secrets/retired", &true)?;
     ratchet_db.remove_actor_state("dm-pair/session/retired-probe")?;
     assert!(ratchet_db.finish_secret_retirement_if_committed()?);
-    ratchet_db.checkpoint_retired_secrets()?;
     assert_erasure_storage_policy(&ratchet_db)?;
 
     drop(message_db);

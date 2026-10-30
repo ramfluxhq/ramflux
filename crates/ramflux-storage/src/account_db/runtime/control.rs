@@ -26,13 +26,15 @@ impl AccountDb {
         kind: &str,
         state: &T,
     ) -> Result<(), StorageError> {
-        let bytes = serde_json::to_vec(state)?;
         if !super::super::message_footprint::actor_state_may_reference_message(kind) {
+            let bytes = serde_json::to_vec(state)?;
             self.connection.execute("INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json WHERE state_json<>excluded.state_json", params![kind,&bytes])?;
             return Ok(());
         }
+        let value = serde_json::to_value(state)?;
+        let bytes = serde_json::to_vec(&value)?;
         let write = || {
-            self.register_actor_message_footprint(kind, &bytes)?;
+            self.register_actor_message_footprint(kind, &value)?;
             self.connection.execute("INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json WHERE state_json<>excluded.state_json", params![kind,&bytes])?;
             self.fence_actor_message_footprint(kind)
         };

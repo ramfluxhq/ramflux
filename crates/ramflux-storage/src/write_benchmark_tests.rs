@@ -11,6 +11,7 @@ const WRITES: i64 = 1_000;
 #[derive(Clone, Copy, Debug)]
 enum WriteKind {
     ActorState,
+    MessageActorState,
     Journal,
     DirectMessage,
 }
@@ -18,7 +19,12 @@ enum WriteKind {
 #[test]
 #[ignore = "manual branch-versus-main comparative microbenchmark"]
 fn write_cost_microbenchmark() -> Result<(), StorageError> {
-    for kind in [WriteKind::ActorState, WriteKind::Journal, WriteKind::DirectMessage] {
+    for kind in [
+        WriteKind::ActorState,
+        WriteKind::MessageActorState,
+        WriteKind::Journal,
+        WriteKind::DirectMessage,
+    ] {
         for batched in [true, false] {
             let elapsed = measure(kind, batched)?;
             eprintln!(
@@ -54,6 +60,36 @@ fn write_rows(db: &AccountDb, kind: WriteKind) -> Result<(), StorageError> {
             WriteKind::ActorState => {
                 db.persist_actor_state(&format!("probe/state/{index}"), &actor_value)?;
             }
+            WriteKind::MessageActorState => {
+                let message = format!("benchmark-message-{index}");
+                match index % 4 {
+                    0 => db.persist_actor_state(
+                        &format!("routed/committed/benchmark-{index}"),
+                        &serde_json::json!({
+                            "routing":{"message_id":message},
+                            "entry":{"envelope":{
+                                "envelope_id":format!("benchmark-envelope-{index}"),
+                                "payload_hash":format!("benchmark-payload-{index}")
+                            }}
+                        }),
+                    )?,
+                    1 => db.persist_actor_state(
+                        &format!("routed/message-owner/{message}"),
+                        &"benchmark-sender",
+                    )?,
+                    2 => db.persist_actor_state(
+                        &format!("delivery-receipt/pending/benchmark-{index}"),
+                        &serde_json::json!({
+                            "message":message,
+                            "status_id":format!("benchmark-status-{index}")
+                        }),
+                    )?,
+                    _ => db.persist_actor_state(
+                        &format!("task/message/benchmark-{index}"),
+                        &serde_json::json!({"message_id":message,"state":"pending"}),
+                    )?,
+                }
+            }
             WriteKind::Journal => {
                 db.append_journal(
                     &format!("benchmark:{index}"),
@@ -82,6 +118,13 @@ fn stored_rows(db: &AccountDb, kind: WriteKind) -> Result<i64, StorageError> {
     let sql = match kind {
         WriteKind::ActorState => {
             "SELECT count(*) FROM runtime_actor_state WHERE state_kind GLOB 'probe/state/*'"
+        }
+        WriteKind::MessageActorState => {
+            "SELECT count(*) FROM runtime_actor_state WHERE
+              state_kind GLOB 'routed/committed/benchmark-*'
+              OR state_kind GLOB 'routed/message-owner/benchmark-message-*'
+              OR state_kind GLOB 'delivery-receipt/pending/benchmark-*'
+              OR state_kind GLOB 'task/message/benchmark-*'"
         }
         WriteKind::Journal => "SELECT count(*) FROM runtime_journal WHERE topic='benchmark.event'",
         WriteKind::DirectMessage => {
