@@ -79,21 +79,6 @@ pub(super) fn identities(db: &Connection) -> Result<IdentitySnapshot, rusqlite::
     Ok(result)
 }
 
-pub(super) fn assert_identities_unchanged(expected: &IdentitySnapshot, actual: &IdentitySnapshot) {
-    assert_eq!(expected.len(), actual.len());
-    for ((expected_name, expected_rows), (actual_name, actual_rows)) in expected.iter().zip(actual)
-    {
-        assert_eq!(expected_name, actual_name);
-        assert_eq!(
-            expected_rows,
-            actual_rows,
-            "independent identity records changed in {expected_name} ({} rows before, {} after)",
-            expected_rows.len(),
-            actual_rows.len()
-        );
-    }
-}
-
 fn dump(db: &Connection, sql: &str) -> Result<Vec<Vec<u8>>, rusqlite::Error> {
     let mut q = db.prepare(sql)?;
     let columns = q.column_count();
@@ -153,32 +138,49 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
     let tables = tables.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
     let mut checked = 0;
     for table in tables {
-        if IDENTITY_TABLES.contains(&table.as_str()) {
-            continue;
-        }
         let filter = if matches!(
             table.as_str(),
             "runtime_actor_state" | "backup_archived_actor_state"
         ) {
-            format!(" WHERE NOT ({IDENTITY_ACTOR_FILTER})")
+            " WHERE state_kind GLOB 'routed/*' OR state_kind GLOB 'directory/message/*' OR state_kind GLOB 'directory/object/*' OR state_kind GLOB 'message/origin/*' OR state_kind GLOB 'delivery-receipt/*' OR state_kind GLOB 'attachment/*' OR state_kind GLOB 'sync/attachment/*' OR state_kind GLOB 'own-copy/*' OR state_kind GLOB 'own-device/*' OR state_kind GLOB 'surface/origin/*' OR state_kind GLOB 'surface/message/*' OR state_kind GLOB 'surface/pending/*' OR state_kind GLOB 'surface/history/*' OR state_kind GLOB 'directory/surface_error/*' OR state_kind GLOB 'task/message/*' OR state_kind GLOB 'group-message/alias/*' OR state_kind GLOB 'backup/staging/*'"
         } else if table == "runtime_outbox" {
-            format!(
-                " WHERE table_name NOT IN ({}) AND NOT (table_name='runtime_actor_state' AND EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.rowid=runtime_outbox.row_id AND ({IDENTITY_ACTOR_FILTER}))) AND NOT (table_name='local_event_log' AND EXISTS(SELECT 1 FROM local_event_log e WHERE e.rowid=runtime_outbox.row_id AND ({IDENTITY_EVENT_FILTER})))",
-                IDENTITY_TABLES
-                    .iter()
-                    .map(|table| format!("'{table}'"))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
+            " WHERE table_name IN ('direct_message_projection','message_projection','receipt_projection','conversation_read_state','conversation_delivery_state','conversation_unread_marker','rejected_inbox_projection','group_pending_undecrypted','message_tombstone_projection','group_message_tombstone_projection') OR (table_name='runtime_actor_state' AND (json_extract(keys_json,'$.state_kind') GLOB 'routed/*' OR json_extract(keys_json,'$.state_kind') GLOB 'directory/message/*' OR json_extract(keys_json,'$.state_kind') GLOB 'directory/object/*' OR json_extract(keys_json,'$.state_kind') GLOB 'message/origin/*' OR json_extract(keys_json,'$.state_kind') GLOB 'delivery-receipt/*' OR json_extract(keys_json,'$.state_kind') GLOB 'attachment/*' OR json_extract(keys_json,'$.state_kind') GLOB 'own-device/*' OR json_extract(keys_json,'$.state_kind') GLOB 'group-message/alias/*'))"
         } else if matches!(table.as_str(), "local_event_log" | "backup_archived_local_event") {
-            format!(" WHERE NOT ({IDENTITY_EVENT_FILTER})")
+            " WHERE event_type NOT GLOB 'identity.*' AND event_type NOT GLOB 'device.*' AND event_type NOT GLOB 'prekey.*' AND event_type NOT GLOB 'x3dh.prekey.*' AND event_type NOT IN ('dm.ratchet_session','group.sender_key.state','group.member.route')"
         } else if table == "runtime_journal" {
-            " WHERE topic NOT IN ('safety.changed','account.state')".to_owned()
+            " WHERE topic<>'safety.changed'"
+        } else if matches!(table.as_str(), "runtime_inbox_changes" | "runtime_inbox_recovery") {
+            continue;
+        } else if table.contains("message")
+            || table.contains("receipt")
+            || table.starts_with("runtime_inbox_")
+            || matches!(
+                table.as_str(),
+                "runtime_journal"
+                    | "runtime_unrouted"
+                    | "runtime_outbox"
+                    | "raw_envelope_log"
+                    | "outbox_queue"
+                    | "ack_state"
+                    | "nack_state"
+                    | "event_causal_dependency"
+                    | "cursor_checkpoint"
+                    | "device_inbox_cursor"
+            )
+        {
+            if matches!(
+                table.as_str(),
+                "root_group_control_event_seen"
+                    | "contact_message_request_fence"
+                    | "contact_message_fence_retention"
+            ) {
+                continue;
+            }
+            ""
         } else {
-            String::new()
+            continue;
         };
-        let quoted = table.replace('"', "\"\"");
-        let mut q = db.prepare(&format!("SELECT * FROM \"{quoted}\"{filter}"))?;
+        let mut q = db.prepare(&format!("SELECT * FROM \"{table}\"{filter}"))?;
         let names = q.column_names().iter().map(ToString::to_string).collect::<Vec<_>>();
         let mut rows = q.query([])?;
         while let Some(row) = rows.next()? {

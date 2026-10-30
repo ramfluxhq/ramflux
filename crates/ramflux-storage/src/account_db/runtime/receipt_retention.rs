@@ -88,6 +88,7 @@ impl AccountDb {
             self.connection.execute("DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT state_kind FROM runtime_receipt_retention WHERE at<=?1 AND (state_kind >= 'delivery-receipt/status/' AND state_kind < 'delivery-receipt/status0' OR state_kind >= 'delivery-receipt/outbound/' AND state_kind < 'delivery-receipt/outbound0') ORDER BY at,state_kind LIMIT ?2)", params![cutoff,batch])?;
             let max_seq: Option<u64> = self.connection.query_row("SELECT max(seq) FROM (SELECT seq FROM runtime_journal WHERE topic='message.delivery_receipt.failed' AND at<=?1 ORDER BY seq LIMIT ?2)",params![cutoff,batch], |row|row.get(0))?;
             if let Some(seq)=max_seq {
+                self.connection.execute("DELETE FROM message_footprint WHERE kind='journal' AND CAST(locator AS INTEGER) IN (SELECT seq FROM runtime_journal WHERE topic='message.delivery_receipt.failed' AND at<=?1 AND seq<=?2)",params![cutoff,seq])?;
                 self.connection.execute("DELETE FROM runtime_journal WHERE topic='message.delivery_receipt.failed' AND at<=?1 AND seq<=?2",params![cutoff,seq])?;
                 self.connection.execute("UPDATE runtime_journal_bounds SET pruned_through=max(pruned_through,?1) WHERE singleton=1",params![seq])?;
             }
