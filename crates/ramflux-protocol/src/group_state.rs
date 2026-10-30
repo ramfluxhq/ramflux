@@ -76,6 +76,14 @@ pub struct GroupMemberIdentity {
     pub signing_public_key: String,
     pub target_delivery_id: String,
 }
+/// Born-v3 authority for a group actor. The master certificate authenticates the current
+/// self-signing key, while the branch certificate grants the exact device the `group` capability.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupNativeAuthority {
+    pub master_certificate: crate::custody::Envelope<crate::custody::MasterCertificate>,
+    pub branch_certificate: crate::custody::Envelope<crate::custody::BranchCertificate>,
+}
 /// The root authenticates the exact branch key. No role is asserted by this certificate.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +91,8 @@ pub struct GroupStateActor {
     pub identity: GroupMemberIdentity,
     pub root_public_key: String,
     pub root_signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_authority: Option<Box<GroupNativeAuthority>>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]

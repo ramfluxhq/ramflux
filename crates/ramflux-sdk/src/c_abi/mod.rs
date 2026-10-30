@@ -861,6 +861,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         SdkError::CustodySetupInvalid
         | SdkError::CustodyExpired
         | SdkError::SurfaceRefused { .. }
+        | SdkError::GroupRefused { .. }
         | SdkError::TaskRefused { .. }
         | SdkError::TaskDeliveryTooLarge { .. }
         | SdkError::SurfaceDeliveryTooLarge { .. }

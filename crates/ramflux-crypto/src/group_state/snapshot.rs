@@ -9,11 +9,37 @@ use super::{
     MAX_GROUP_STATE_BYTES, MAX_GROUP_STATE_EXCLUSIONS, SharedGroupRole, Signer, Value,
     VerifiedGroupState, branch_matches, canonical_json_bytes, encode_base64url, identity_valid,
     invalid, json, root_matches, transition, transport_body, verify_group_state_actor,
-    verify_group_state_snapshot,
+    verify_group_state_actor_at, verify_group_state_snapshot,
 };
 use std::collections::{BTreeMap, BTreeSet};
 const GENESIS_DOMAIN: &str = "ramflux.group_state.genesis.v2";
 const TRANSFER_DOMAIN: &str = "ramflux.group_state.creator_transfer.v2";
+
+#[derive(Clone, Copy)]
+enum CreatorSigner<'a> {
+    Legacy(&'a IdentityRoot),
+    Native(&'a crate::custody::SelfSigningKey),
+}
+impl CreatorSigner<'_> {
+    fn sign(&self, bytes: &[u8]) -> String {
+        match self {
+            Self::Legacy(root) => encode_base64url(root.signing_key.sign(bytes).to_bytes()),
+            Self::Native(primary) => primary.sign_group_state_bytes(bytes),
+        }
+    }
+    fn matches(&self, actor: &GroupStateActor) -> Result<(), CryptoError> {
+        match self {
+            Self::Legacy(root) => root_matches(root, actor),
+            Self::Native(primary) => {
+                if actor.native_authority.is_none() || primary.public_key() != actor.root_public_key
+                {
+                    return Err(invalid("native creator authority mismatch"));
+                }
+                Ok(())
+            }
+        }
+    }
+}
 fn without_signature<T: serde::Serialize>(value: &T, domain: &str) -> Result<Value, CryptoError> {
     let mut value = serde_json::to_value(value).map_err(|_| invalid("group JSON encoding"))?;
     let object = value.as_object_mut().ok_or_else(|| invalid("group object"))?;
@@ -88,8 +114,9 @@ pub(super) fn verify(snapshot: &GroupStateSnapshot) -> Result<(), CryptoError> {
     if let Some(previous) = &snapshot.previous_hash {
         hash_valid(previous)?;
     }
-    verify_group_state_actor(&snapshot.genesis.actor)?;
-    verify_group_state_actor(&snapshot.creator)?;
+    let issued_at = u64::try_from(snapshot.issued_at).map_err(|_| invalid("group clock"))?;
+    verify_group_state_actor_at(&snapshot.genesis.actor, Some(issued_at))?;
+    verify_group_state_actor_at(&snapshot.creator, Some(issued_at))?;
     crate::verify_canonical_signature(
         &canonical_json_bytes(&without_signature(&snapshot.genesis, GENESIS_DOMAIN)?)?,
         &snapshot.genesis.signature,
@@ -201,8 +228,29 @@ pub fn create_group_state(
     actor: &GroupStateActor,
     input: GroupStateCreateInput<'_>,
 ) -> Result<VerifiedGroupState, CryptoError> {
+    create_with_signer(CreatorSigner::Legacy(root), branch, actor, input)
+}
+/// Create a born-v3 group state using the certified primary group authority and branch transport
+/// signer.
+///
+/// # Errors
+/// Rejects mismatched custody authority, branch identity, creation parameters, or state budgets.
+pub fn create_native_group_state(
+    primary: &crate::custody::SelfSigningKey,
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    input: GroupStateCreateInput<'_>,
+) -> Result<VerifiedGroupState, CryptoError> {
+    create_with_signer(CreatorSigner::Native(primary), branch, actor, input)
+}
+fn create_with_signer(
+    signer: CreatorSigner<'_>,
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    input: GroupStateCreateInput<'_>,
+) -> Result<VerifiedGroupState, CryptoError> {
     branch_matches(branch, actor)?;
-    root_matches(root, actor)?;
+    signer.matches(actor)?;
     let mut genesis = GroupStateGenesis {
         group_id: input.group_id.into(),
         conversation_id: input.conversation_id.into(),
@@ -211,11 +259,8 @@ pub fn create_group_state(
         new_member_history: input.new_member_history.into(),
         signature: String::new(),
     };
-    genesis.signature = encode_base64url(
-        root.signing_key
-            .sign(&canonical_json_bytes(&without_signature(&genesis, GENESIS_DOMAIN)?)?)
-            .to_bytes(),
-    );
+    genesis.signature =
+        signer.sign(&canonical_json_bytes(&without_signature(&genesis, GENESIS_DOMAIN)?)?);
     let state = transition::initial(&genesis, input.name)?;
     let snapshot = GroupStateSnapshot {
         schema: GROUP_STATE_SNAPSHOT_DOMAIN.into(),
@@ -232,10 +277,10 @@ pub fn create_group_state(
         issuer: actor.clone(),
         signature: String::new(),
     };
-    sign(root, branch, actor, snapshot)
+    sign_with_signer(signer, branch, actor, snapshot)
 }
-pub(super) fn sign(
-    root: &IdentityRoot,
+fn sign_with_signer(
+    signer: CreatorSigner<'_>,
     branch: &DeviceBranch,
     actor: &GroupStateActor,
     mut snapshot: GroupStateSnapshot,
@@ -253,12 +298,19 @@ pub(super) fn sign(
     );
     snapshot.state.head_hash.clone_from(&snapshot.state_hash);
     snapshot.epoch = snapshot.state.epoch;
-    snapshot.root_signature = encode_base64url(
-        root.signing_key.sign(&canonical_json_bytes(&root_body(&snapshot))?).to_bytes(),
-    );
+    snapshot.root_signature = signer.sign(&canonical_json_bytes(&root_body(&snapshot))?);
     snapshot.issuer = actor.clone();
     snapshot.signature = crate::sign_with_device_branch(branch, &transport_body(&snapshot)?)?;
     verify_group_state_snapshot(snapshot)
+}
+#[cfg(test)]
+pub(super) fn sign(
+    root: &IdentityRoot,
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    snapshot: GroupStateSnapshot,
+) -> Result<VerifiedGroupState, CryptoError> {
+    sign_with_signer(CreatorSigner::Legacy(root), branch, actor, snapshot)
 }
 /// # Errors
 /// Only the current creator root may certify a replacement state. Role requests use `apply_group_change_request`.
@@ -278,6 +330,32 @@ pub fn advance_group_state(
     .map_err(|_| invalid("group clock"))?;
     advance_as(root, branch, actor, previous, Apply { requester: actor, change, now })
 }
+/// Advance creator state under born-v3 primary authority.
+///
+/// # Errors
+/// Rejects stale state, unauthorized changes, invalid custody authority, or state limits.
+pub fn advance_native_group_state(
+    primary: &crate::custody::SelfSigningKey,
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    previous: &VerifiedGroupState,
+    change: GroupStateChange,
+) -> Result<VerifiedGroupState, CryptoError> {
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid("group clock"))?
+            .as_secs(),
+    )
+    .map_err(|_| invalid("group clock"))?;
+    advance_as_with_signer(
+        CreatorSigner::Native(primary),
+        branch,
+        actor,
+        previous,
+        Apply { requester: actor, change, now },
+    )
+}
 pub(super) struct Apply<'a> {
     pub requester: &'a GroupStateActor,
     pub change: GroupStateChange,
@@ -290,9 +368,18 @@ pub(super) fn advance_as(
     previous: &VerifiedGroupState,
     input: Apply<'_>,
 ) -> Result<VerifiedGroupState, CryptoError> {
+    advance_as_with_signer(CreatorSigner::Legacy(root), branch, actor, previous, input)
+}
+fn advance_as_with_signer(
+    signer: CreatorSigner<'_>,
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    previous: &VerifiedGroupState,
+    input: Apply<'_>,
+) -> Result<VerifiedGroupState, CryptoError> {
     let Apply { requester, change, now } = input;
     branch_matches(branch, actor)?;
-    root_matches(root, actor)?;
+    signer.matches(actor)?;
     if actor.identity.root_commitment != previous.creator().identity.root_commitment {
         return Err(invalid("only the creator root can sign group state"));
     }
@@ -350,16 +437,13 @@ pub(super) fn advance_as(
             previous_hash: previous.snapshot.state_hash.clone(),
             signature: String::new(),
         };
-        transfer.signature = encode_base64url(
-            root.signing_key
-                .sign(&canonical_json_bytes(&without_signature(&transfer, TRANSFER_DOMAIN)?)?)
-                .to_bytes(),
-        );
+        transfer.signature =
+            signer.sign(&canonical_json_bytes(&without_signature(&transfer, TRANSFER_DOMAIN)?)?);
         snapshot.creator = creator.clone();
         snapshot.transfers.push(transfer);
         snapshot.state.epoch = epoch;
     } else {
         transition::apply(&mut snapshot.state, requester, &change, epoch, now)?;
     }
-    sign(root, branch, actor, snapshot)
+    sign_with_signer(signer, branch, actor, snapshot)
 }
