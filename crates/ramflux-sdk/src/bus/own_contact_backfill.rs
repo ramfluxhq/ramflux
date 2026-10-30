@@ -15,14 +15,27 @@ pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkEr
         let root = client.owned_device_identity()?.root_commitment().to_owned();
         let gateway =
             account.engine.as_ref().map_or(&account.gateway_config, |engine| &engine.config);
-        tokio::time::timeout(
-            Duration::from_millis(250),
+        let started = std::time::Instant::now();
+        // A fresh authenticated directory request must have the full attempt interval to
+        // finish; cancelling it every 250ms can prevent sibling discovery on a slow gateway.
+        let refreshed = tokio::time::timeout(
+            Duration::from_secs(5),
             client.cache_verified_device_manifest(gateway, &root, "own-contact-backfill"),
         )
         .await
         .map_err(|_| {
-            SdkError::InboundPending("own contact refresh tick budget exhausted".into())
-        })??;
+            SdkError::InboundPending("own manifest refresh attempt budget exhausted".into())
+        })
+        .and_then(std::convert::identity);
+        if let Err(error) = &refreshed {
+            // The persisted attempt timestamp limits this warning to once per five seconds.
+            tracing::warn!(
+                %error,
+                elapsed_ms = started.elapsed().as_millis(),
+                "own-device manifest refresh deferred"
+            );
+        }
+        refreshed?;
     }
     if let Some(root) = client.claim_contact_backfill_refresh(now)? {
         let gateway =
@@ -40,3 +53,7 @@ pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkEr
     }
     client.stage_contact_backfill_batch()
 }
+
+#[cfg(test)]
+#[path = "own_contact_backfill/tests.rs"]
+mod tests;
