@@ -50,6 +50,7 @@ impl AgentBus for RfdBus {
             method,
             "account.status"
                 | "device.list"
+                | "device.refresh"
                 | "identity.directory"
                 | "conversation.directory"
                 | "group.members"
