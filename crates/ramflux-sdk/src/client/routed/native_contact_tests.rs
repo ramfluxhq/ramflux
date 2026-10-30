@@ -113,7 +113,7 @@ async fn ordinary_native_contact_preview_rolls_back_and_commit_consumes_replay_s
         .await?;
     let delivery =
         target.client.commit_contact_request_bootstrap(&entry, &sender.manifest, "primary")?;
-    assert_eq!(delivery.routing.kind, Kind::Control);
+    assert!(delivery.routing.as_ref().is_some_and(|routing| routing.kind == Kind::Control));
     assert!(delivery.plaintext.is_none());
     let request = db
         .contact_request(&sender.manifest.principal_commitment, "inbound")?

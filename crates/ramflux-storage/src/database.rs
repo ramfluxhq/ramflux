@@ -168,7 +168,10 @@ impl Connection {
     pub(crate) fn execute(&self, sql: &str, params: impl Parameters) -> Result<usize> {
         let sql = sql.to_owned();
         let values = params.values()?;
-        self.call(move |db| db.execute(&sql, rusqlite::params_from_iter(values)))
+        self.call(move |db| {
+            let mut statement = db.prepare_cached(&sql)?;
+            statement.execute(rusqlite::params_from_iter(values))
+        })
     }
 
     fn rows(&self, sql: &str, params: impl Parameters) -> Result<Vec<Row>> {

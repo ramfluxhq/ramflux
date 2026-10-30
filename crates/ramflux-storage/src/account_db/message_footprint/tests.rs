@@ -249,9 +249,13 @@ fn assert_erased(db: &AccountDb, forbidden: &[String]) -> Result<(), StorageErro
             {
                 continue;
             }
+            let context = row.clone();
             for (name, value) in names.iter().zip(row) {
                 for secret in &forbidden {
-                    assert!(!value.contains(secret), "residual in {table}.{name}: {secret}");
+                    assert!(
+                        !value.contains(secret),
+                        "residual in {table}.{name}: {secret}; row={context:?}"
+                    );
                 }
             }
         }
@@ -290,6 +294,36 @@ fn footprint_registration_rolls_back_and_late_copies_cannot_recreate_deleted_con
     assert!(!db.actor_state_exists("delivery-receipt/pending/late")?);
     drop(db);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn dropping_explicit_registration_is_detected_as_an_erasure_residual() -> Result<(), StorageError> {
+    const MUTATION: &str = "RAMFLUX_TEST_DROP_MESSAGE_REGISTRATION";
+    if std::env::var_os(MUTATION).is_none() {
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "account_db::message_footprint::tests::dropping_explicit_registration_is_detected_as_an_erasure_residual",
+                "--nocapture",
+            ])
+            .env(MUTATION, "1")
+            .status()?;
+        assert!(!status.success(), "the erasure audit accepted a missing registration");
+        return Ok(());
+    }
+    let (root, db) = crate::tests::test_db("footprint-registration-mutation")?;
+    db.send_direct_message("thread", "message", "peer", b"secret")?;
+    db.persist_actor_state("routed/message-owner/message", &"private-source")?;
+    db.connection.execute(
+        "DELETE FROM message_footprint WHERE kind='actor' AND locator='routed/message-owner/message'",
+        [],
+    )?;
+    db.delete_direct_message("thread", "message", "local", "delete")?;
+    let audit = assert_erased(&db, &["private-source".to_owned()]);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    audit?;
     Ok(())
 }
 

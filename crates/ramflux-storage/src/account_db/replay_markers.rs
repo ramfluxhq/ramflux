@@ -5,7 +5,18 @@
 
 use super::AccountDb;
 use crate::StorageError;
-use serde_json::json;
+
+fn canonical_envelope(entry: &[u8]) -> Result<Option<(String, Vec<u8>)>, StorageError> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(entry) else { return Ok(None) };
+    let envelope = value.get("envelope").unwrap_or(&value);
+    if envelope.get("encrypted_payload").is_none() || envelope.get("payload_hash").is_none() {
+        return Ok(None);
+    }
+    let Some(envelope_id) = envelope.get("envelope_id").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    Ok(Some((envelope_id.to_owned(), ramflux_protocol::canonical_json_bytes(envelope)?)))
+}
 
 impl AccountDb {
     /// Derives a private marker from the SHA-256 digest of canonical envelope bytes.
@@ -23,12 +34,21 @@ impl AccountDb {
     /// # Errors
     /// Returns canonical encoding or key derivation errors.
     pub fn inbox_envelope_marker(&self, entry: &[u8]) -> Result<Option<String>, StorageError> {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(entry) else { return Ok(None) };
-        let envelope = value.get("envelope").unwrap_or(&value);
-        if envelope.get("encrypted_payload").is_none() || envelope.get("payload_hash").is_none() {
+        canonical_envelope(entry)?.map(|(_, envelope)| self.routed_seen_key(&envelope)).transpose()
+    }
+
+    /// Returns canonical bytes only when the entry names a deleted message.
+    ///
+    /// # Errors
+    /// Returns storage or canonical encoding errors.
+    pub(crate) fn deleted_inbox_envelope(
+        &self,
+        entry: &[u8],
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let Some((envelope_id, canonical)) = canonical_envelope(entry)? else {
             return Ok(None);
-        }
-        Ok(Some(self.routed_seen_key(&ramflux_protocol::canonical_json_bytes(envelope)?)?))
+        };
+        Ok(self.envelope_refers_to_deleted_message(&envelope_id)?.then_some(canonical))
     }
 
     /// Retains only an envelope's keyed marker when routed processing fails.
@@ -41,21 +61,16 @@ impl AccountDb {
         code: &str,
         at: i64,
     ) -> Result<(), StorageError> {
-        let marker = self.routed_seen_key(canonical_envelope)?;
-        self.dead_letter_inbox(
-            &marker,
-            &serde_json::to_vec(&json!({"marker":marker}))?,
-            &json!({"marker":marker,"error_code":code}),
-            at,
-        )
+        self.write_transaction(|| self.insert_routed_dead_letter(canonical_envelope, code, at))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AccountDbKey, AccountIndex};
+    use crate::{AccountDbKey, AccountIndex, DirectMessageWrite, MessageMetadata};
     use rusqlite::params;
+    use serde_json::json;
 
     #[test]
     fn seen_markers_are_private_and_only_mismatches_keep_marker_only_dead_letters()
@@ -149,6 +164,71 @@ mod tests {
         });
         assert!(result.is_err());
         assert!(!db.actor_state_exists(&marker)?);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn deleted_envelope_reuse_keeps_only_keyed_markers_for_any_bytes() -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("deleted-envelope-marker-only")?;
+        let metadata = MessageMetadata::default();
+        db.import_direct_message_projection(DirectMessageWrite {
+            conversation_id: "thread",
+            message_id: "deleted-projection",
+            sender_id: "private-sender",
+            encrypted_body: b"private-body",
+            metadata: &metadata,
+            created_at: 1,
+        })?;
+        db.connection.execute(
+            "INSERT INTO message_copy_binding VALUES('envelope:deleted-envelope','deleted-projection')",
+            [],
+        )?;
+        db.delete_direct_message("thread", "deleted-projection", "local", "delete")?;
+        let entries = [
+            br#"{"source_principal_id":"private-principal","source_device_id":"private-device","envelope_id":"deleted-envelope","payload_hash":"signed-hash","encrypted_payload":"signed-ciphertext","signed":{"signature":"valid-looking"}}"#.as_slice(),
+            br#"{"source_principal_id":"forged-principal","source_device_id":"forged-device","envelope_id":"deleted-envelope","payload_hash":"forged-hash","encrypted_payload":"forged-ciphertext","signed":{"signature":"invalid"}}"#.as_slice(),
+        ];
+        for (at, entry) in [0_i64, 1].into_iter().zip(entries) {
+            db.dead_letter_inbox(
+                "routed/committed/public-unkeyed",
+                entry,
+                &json!({
+                    "error_code":"authentication_failed",
+                    "envelope_id":"deleted-envelope",
+                    "claimed_source_device_id":format!("source-{at}"),
+                }),
+                at,
+            )?;
+        }
+        let mut query = db.connection.prepare(
+            "SELECT envelope_key,entry_json FROM runtime_inbox_dead_letter ORDER BY envelope_key",
+        )?;
+        let rows = query
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows.len(), 2);
+        for (marker, entry) in rows {
+            assert!(marker.starts_with("routed/seen/"));
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&entry)?,
+                json!({"marker":marker})
+            );
+        }
+        assert!(!db.actor_state_exists("routed/committed/public-unkeyed")?);
+        let retained = serde_json::to_string(&db.journal_after(0, 128)?)?;
+        for forbidden in [
+            "private-principal",
+            "private-device",
+            "forged-principal",
+            "forged-device",
+            "deleted-envelope",
+            "public-unkeyed",
+        ] {
+            assert!(!retained.contains(forbidden), "retained {forbidden}");
+        }
+        drop(query);
         drop(db);
         std::fs::remove_dir_all(root)?;
         Ok(())

@@ -18,7 +18,7 @@ impl AccountDb {
     /// Returns an error if WAL/FULL cannot be enabled or the outbox cannot be installed.
     pub fn enable_runtime(&self) -> Result<(), StorageError> {
         self.connection.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA secure_delete=ON; PRAGMA wal_autocheckpoint=0; PRAGMA journal_size_limit=0;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA secure_delete=ON;",
         )?;
         let journal: String =
             self.connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
@@ -28,6 +28,7 @@ impl AccountDb {
         }
         self.install_journal_schema()?;
         self.install_runtime_schema()?;
+        self.checkpoint_retired_secrets()?;
         self.connection.enable_background_checkpoints();
         Ok(())
     }

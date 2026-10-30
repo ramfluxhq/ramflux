@@ -352,6 +352,12 @@ Unattributable group ratchet checkpoints and name-only sender counters remain in
 legacy storage. Receivers require a fresh authenticated sender-key distribution.
 Counters additionally include the ratchet session ID, so restarting a distribution
 under the same root and group epoch cannot suppress its first message.
+When a group message is deleted, its message-indexed sender-key replay-counter row
+is erased with the other message attribution. Replay safety for that deleted item
+then comes from the retained message tombstone and the account-keyed routed replay
+marker: replay may not recreate content or sender attribution. Counter rows for
+other messages and the sender-key session state remain intact, so deletion does
+not reset the session's replay history or permit a fresh counter sequence.
 Unscoped membership pins require a root-bound remove/re-add operation; importing a
 snapshot cannot supply missing root authority by selecting the first directory row.
 

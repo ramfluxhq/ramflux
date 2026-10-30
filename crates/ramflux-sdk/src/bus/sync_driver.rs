@@ -490,7 +490,9 @@ pub(super) fn quarantine_failure(
     let db = client.account_db()?;
     db.remove_inbox_retry(key)?;
     db.remove_unrouted(key)?;
-    if matches!(error, SdkError::ReplayMismatch) {
+    if matches!(error, SdkError::ReplayMismatch)
+        || db.message_is_deleted(&entry.envelope.envelope_id)?
+    {
         db.dead_letter_routed(
             &ramflux_protocol::canonical_json_bytes(&entry.envelope)?,
             code,
