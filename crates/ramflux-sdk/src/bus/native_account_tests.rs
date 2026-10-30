@@ -245,11 +245,10 @@ async fn disconnected_peer_never_stops_the_daemon_accept_loop() -> Result {
         assert_eq!(response["account_details"], json!([]));
         Ok::<_, Box<dyn std::error::Error>>(())
     };
-    let (server, flow) = tokio::task::LocalSet::new()
-        .run_until(async {
-            tokio::join!(super::connection::accept(listener, uid, supervisor, receiver), flow)
-        })
-        .await;
+    let (server, flow) = Box::pin(tokio::task::LocalSet::new().run_until(async {
+        tokio::join!(super::connection::accept(listener, uid, supervisor, receiver), flow)
+    }))
+    .await;
     server?;
     flow?;
     Ok(())
