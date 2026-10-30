@@ -2645,6 +2645,7 @@ dependencies = [
  "ramflux-protocol",
  "ramflux-sdk",
  "ramflux-sync",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

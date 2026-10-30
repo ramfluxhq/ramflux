@@ -22,7 +22,16 @@ mod itest_legacy_account;
 pub(crate) mod keychain;
 pub(crate) mod mcp;
 pub(crate) mod node;
+#[cfg(unix)]
 mod node_custody;
+#[cfg(not(unix))]
+mod node_custody {
+    pub(crate) fn provision(_: &crate::cli::NodeCustody, _: bool) -> Result<(), crate::RfError> {
+        Err(crate::RfError::Message(
+            "custody provisioning requires Unix descriptor-relative filesystem support".into(),
+        ))
+    }
+}
 pub(crate) mod object;
 pub(crate) mod surface;
 

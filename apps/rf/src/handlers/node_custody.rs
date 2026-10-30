@@ -3,7 +3,9 @@
 
 //! Local provisioning under the same node identity used by signed discovery.
 
+mod operation_lock;
 mod output;
+mod private_fs;
 
 use crate::{RfError, cli::NodeCustody};
 use ed25519_dalek::SigningKey;
@@ -41,25 +43,26 @@ pub(crate) fn provision(options: &NodeCustody, renew: bool) -> Result<(), RfErro
     if public != options.expected_public_key {
         return Err(invalid("node signing seed does not match the pinned discovery public key"));
     }
-    let destination = output::Destination::open(&options.output_dir)?;
-    let previous = destination.current_record()?;
-    if previous.is_some() && !options.force_new_proxy {
+    if renew && options.deployed_record.is_none() {
         return Err(invalid(
-            "custody output already exists; use --force-new-proxy for explicit renewal",
+            "custody-renew requires --deployed-record naming the installed node record",
         ));
     }
-    if renew && previous.is_none() {
+    if !renew && options.deployed_record.is_some() && !options.force_new_proxy {
         return Err(invalid(
-            "custody-renew requires existing custody.env and its signed predecessor",
+            "custody-init with --deployed-record requires --force-new-proxy; use custody-renew for normal renewal",
         ));
     }
-    let previous = previous
+    let deployed = options.deployed_record.as_deref().map(output::read_deployed).transpose()?;
+    let previous = deployed
         .as_ref()
         .map(|record| {
             verify_node_identity_record(record, &options.node_id, &public, now)
                 .map_err(|error| invalid(error.to_string()))
         })
         .transpose()?;
+    let destination = output::Destination::open(&options.output_dir, now)?;
+    let repeated = destination.check_preparation(previous.as_ref(), options.force_new_proxy)?;
     let proxy_seed =
         Zeroizing::new(ramflux_crypto::random_32().map_err(|error| invalid(error.to_string()))?);
     let record = make_record(options, &node_key, &proxy_seed, previous.as_ref(), now)?;
@@ -81,7 +84,7 @@ pub(crate) fn provision(options: &NodeCustody, renew: bool) -> Result<(), RfErro
             )
             .map_err(|error| invalid(error.to_string()))?;
     }
-    let env_path = destination.publish(&verified, &proxy_seed)?;
+    let env_path = destination.publish(&verified, &proxy_seed, previous.as_ref(), repeated)?;
     println!("custody env: {}", env_path.display());
     println!("node id: {}", options.node_id);
     println!("node public key: {public}");

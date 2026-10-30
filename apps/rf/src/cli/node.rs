@@ -22,6 +22,7 @@ pub(crate) enum NodeAction {
     /// Provision a gateway proxy using the existing pinned discovery identity; no daemon required.
     CustodyInit(NodeCustody),
     /// Prepare a successor record and fresh proxy seed; applying rotation is a separate operation.
+    #[command(mut_arg("deployed_record", |arg| arg.required(true)))]
     CustodyRenew(NodeCustody),
 }
 
@@ -39,7 +40,10 @@ pub(crate) struct NodeCustody {
     pub(crate) output_dir: std::path::PathBuf,
     #[arg(long, default_value_t = 30)]
     pub(crate) validity_days: u64,
-    /// Explicitly replace custody.env with a successor; retain every signed predecessor.
+    /// Signed record currently installed on the node, required for every renewal.
+    #[arg(long)]
+    pub(crate) deployed_record: Option<std::path::PathBuf>,
+    /// Prepare another immutable fragment for an already prepared epoch; preserve all prior output.
     #[arg(long)]
     pub(crate) force_new_proxy: bool,
 }
