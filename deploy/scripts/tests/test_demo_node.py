@@ -213,7 +213,11 @@ else:
                              ["WARNING: custody is not configured; accounts remain networking_pending"])
             self.assertIn("mock discovery and QUIC verification", result.stdout)
         result = self.run_script("status")
-        self.assertEqual(result.stderr, "")
+        expected_warning = "" if self.PROVIDER == "docker" else (
+            "warning: per-source federation limits disabled because rootless-bridge "
+            "port publishing may collapse client source addresses\n"
+        )
+        self.assertEqual(result.stderr, expected_warning)
 
     def test_same_version_record_renewal_restarts_only_the_router(self):
         record = self.root / "node-record.json"
