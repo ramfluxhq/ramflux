@@ -213,7 +213,8 @@ mod tests {
             &peer.config.device_id,
         )?;
         assert!(owner.client.trusted_device(&peer_identity).is_ok());
-        *owner.client.native_head_freshness.borrow_mut() = Default::default();
+        *owner.client.native_head_freshness.borrow_mut() =
+            crate::client::identity_authority::NativeHeadFreshness::default();
         assert!(matches!(
             owner.client.trusted_device(&peer_identity),
             Err(SdkError::InboundPending(_))
