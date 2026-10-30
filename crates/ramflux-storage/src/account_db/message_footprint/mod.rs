@@ -14,6 +14,56 @@ pub(super) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
 }
 
 impl AccountDb {
+    pub(super) fn register_actor_message_footprint(
+        &self,
+        key: &str,
+        value: &[u8],
+    ) -> Result<(), StorageError> {
+        if !actor_state_may_reference_message(key) {
+            return Ok(());
+        }
+        self.connection.execute(
+            "INSERT INTO message_footprint_actor_stage VALUES(?1,?2)",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn fence_actor_message_footprint(&self, key: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO message_footprint
+             SELECT f.message_id,'outbox',CAST(o.sequence AS TEXT)
+             FROM runtime_outbox o
+             JOIN runtime_actor_state a ON a.rowid=o.row_id
+             JOIN message_footprint f ON f.kind='actor' AND f.locator=a.state_kind
+             WHERE o.table_name='runtime_actor_state' AND o.change_kind<>'delete'
+              AND a.state_kind=?1 ON CONFLICT DO NOTHING",
+            params![key],
+        )?;
+        self.connection.execute(
+            "UPDATE direct_message_projection SET deleted=1 WHERE deleted=1 AND message_id IN
+             (SELECT message_id FROM message_footprint WHERE kind='actor' AND locator=?1)",
+            params![key],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn register_journal_message_footprint(
+        &self,
+        sequence: u64,
+        topic: &str,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        if !topic.contains("message") {
+            return Ok(());
+        }
+        self.connection.execute(
+            "INSERT INTO message_footprint_journal_stage VALUES(?1,?2)",
+            params![sequence, body],
+        )?;
+        Ok(())
+    }
+
     /// Reads live actor copies reached by an erasure alias; this grants no admission authority.
     ///
     /// # Errors
@@ -70,6 +120,32 @@ impl AccountDb {
             Ok(())
         })
     }
+}
+
+pub(super) fn actor_state_may_reference_message(key: &str) -> bool {
+    !key.starts_with("routed/seen/")
+        && [
+            "routed/",
+            "directory/message/",
+            "directory/object/",
+            "message/origin/",
+            "delivery-receipt/",
+            "attachment/",
+            "sync/attachment/",
+            "surface/origin/",
+            "surface/message/",
+            "surface/pending/",
+            "surface/history/",
+            "directory/surface_error/",
+            "task/message/",
+            "group-message/alias/",
+            "own-copy/",
+            "own-device/",
+            "inbox/",
+            "backup/staging/",
+        ]
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
 }
 
 impl AccountDb {

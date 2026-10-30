@@ -32,6 +32,7 @@ impl AccountDb {
                     || self.message_sender_is_local(conversation, message, &sender)?
             }
         };
+        self.persist_deleted_envelope_markers(message)?;
         // The update trigger drains only locators owned by this message, in this transaction.
         self.connection.execute("UPDATE direct_message_projection SET sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1,is_own=?3 WHERE conversation_id=?1 AND message_id=?2",params![conversation,message,i64::from(is_own)])?;
         self.persist_deletion_marker(message)?;
@@ -77,6 +78,32 @@ impl AccountDb {
         }
         Ok(self.actor_state_exists(&self.deletion_marker_key(message)?)?
             || self.actor_state_exists(&legacy_deletion_marker_key(message))?)
+    }
+
+    pub(crate) fn envelope_refers_to_deleted_message(
+        &self,
+        envelope: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self.message_is_deleted(envelope)?
+            || self.actor_state_exists(&self.deleted_envelope_marker_key(envelope)?)?)
+    }
+
+    fn persist_deleted_envelope_markers(&self, message: &str) -> Result<(), StorageError> {
+        let mut query = self.connection.prepare(
+            "SELECT substr(copy_id,10) FROM message_copy_binding
+             WHERE message_id=?1 AND copy_id GLOB 'envelope:*'",
+        )?;
+        let envelopes = query
+            .query_map(params![message], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(query);
+        for envelope in envelopes {
+            self.persist_actor_state(
+                &self.deleted_envelope_marker_key(&envelope)?,
+                &json!({"version":1}),
+            )?;
+        }
+        Ok(())
     }
 
     fn persist_deletion_marker(&self, message: &str) -> Result<(), StorageError> {
@@ -138,6 +165,13 @@ impl AccountDb {
 
     fn deletion_marker_key(&self, message: &str) -> Result<String, StorageError> {
         Ok(format!("message/deleted/{}", self.deletion_hash(message)?))
+    }
+
+    fn deleted_envelope_marker_key(&self, envelope: &str) -> Result<String, StorageError> {
+        Ok(format!(
+            "message/deleted-envelope/{}",
+            self.account_mac(b"ramflux/deleted-envelope/v1", envelope.as_bytes())?
+        ))
     }
 }
 

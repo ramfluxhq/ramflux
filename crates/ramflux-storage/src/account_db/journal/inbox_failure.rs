@@ -47,6 +47,16 @@ impl AccountDb {
             if self.actor_state_exists(&marker)? {
                 return self.cleanup_inbox_policy();
             }
+            if let Some(canonical) = self.deleted_inbox_envelope(entry)? {
+                return self.insert_routed_dead_letter(
+                    &canonical,
+                    metadata
+                        .get("error_code")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown"),
+                    at,
+                );
+            }
         }
         let admitted = self.ensure_inbox_policy(key, entry, at)?;
         let bounded = if entry.len() <= 1024 * 1024 { entry } else { &[] };
@@ -70,6 +80,20 @@ impl AccountDb {
         self.connection
             .execute("DELETE FROM runtime_inbox_retry WHERE envelope_key=?1", params![key])?;
         self.cleanup_inbox_policy()
+    }
+    pub(crate) fn insert_routed_dead_letter(
+        &self,
+        canonical_envelope: &[u8],
+        code: &str,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        let marker = self.routed_seen_key(canonical_envelope)?;
+        self.insert_inbox_dead_letter(
+            &marker,
+            &serde_json::to_vec(&serde_json::json!({"marker":marker}))?,
+            &serde_json::json!({"marker":marker,"error_code":code}),
+            at,
+        )
     }
     /// Defers transient work; zero means its quota, lifetime, or attempt budget was exhausted.
     /// # Errors

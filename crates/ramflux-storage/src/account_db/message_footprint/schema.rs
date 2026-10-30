@@ -20,6 +20,7 @@ CREATE INDEX IF NOT EXISTS message_footprint_locator ON message_footprint(kind,l
 CREATE TABLE IF NOT EXISTS message_copy_binding(copy_id TEXT NOT NULL,message_id TEXT NOT NULL,
  PRIMARY KEY(copy_id,message_id));
 CREATE INDEX IF NOT EXISTS message_copy_binding_message ON message_copy_binding(message_id);
+DROP INDEX IF EXISTS runtime_outbox_source;
 CREATE TRIGGER IF NOT EXISTS footprint_binding AFTER INSERT ON message_copy_binding BEGIN
  INSERT INTO message_footprint SELECT NEW.message_id,kind,locator FROM message_footprint WHERE message_id='copy:'||NEW.copy_id ON CONFLICT DO NOTHING;
  DELETE FROM message_footprint WHERE message_id='copy:'||NEW.copy_id;
@@ -39,7 +40,7 @@ pub(super) fn exists(db: &Connection, table: &str) -> rusqlite::Result<bool> {
 
 fn install_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
     staged_actor_copy(db)?;
-    staged_outbox_copy(db)?;
+    remove_outbox_copy_triggers(db)?;
     for (table, kind, key, column, guard, extra) in [
         (
             "backup_archived_actor_state",
@@ -107,24 +108,6 @@ fn staged_actor_copy(db: &Connection) -> rusqlite::Result<()> {
          DROP TRIGGER IF EXISTS footprint_actor_fence_INSERT;
          DROP TRIGGER IF EXISTS footprint_actor_fence_UPDATE;",
     )?;
-    for operation in ["INSERT", "UPDATE"] {
-        let insert_guard = if operation == "INSERT" {
-            "AND NOT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=NEW.state_kind)"
-        } else {
-            ""
-        };
-        db.execute_batch(&format!(
-            "CREATE TRIGGER footprint_runtime_actor_state_{operation} BEFORE {operation} ON runtime_actor_state
-             WHEN ({ACTOR_GUARD}) {insert_guard} BEGIN
-              INSERT INTO message_footprint_actor_stage VALUES(NEW.state_kind,NEW.state_json);
-             END;
-             CREATE TRIGGER footprint_actor_fence_{operation} AFTER {operation} ON runtime_actor_state
-             WHEN ({ACTOR_GUARD}) BEGIN
-              UPDATE direct_message_projection SET deleted=1 WHERE deleted=1 AND message_id IN
-               (SELECT message_id FROM message_footprint WHERE kind='actor' AND locator=NEW.state_kind);
-             END;"
-        ))?;
-    }
     staged_json_consumer(
         db,
         "message_footprint_actor_stage",
@@ -135,7 +118,7 @@ fn staged_actor_copy(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn staged_outbox_copy(db: &Connection) -> rusqlite::Result<()> {
+fn remove_outbox_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS message_footprint_outbox_stage(
             sequence INTEGER NOT NULL,table_name TEXT NOT NULL,change_kind TEXT NOT NULL,
@@ -143,23 +126,6 @@ fn staged_outbox_copy(db: &Connection) -> rusqlite::Result<()> {
          DELETE FROM message_footprint_outbox_stage;
          DROP TRIGGER IF EXISTS footprint_runtime_outbox_INSERT;
          DROP TRIGGER IF EXISTS footprint_runtime_outbox_UPDATE;",
-    )?;
-    for operation in ["INSERT", "UPDATE"] {
-        db.execute_batch(&format!(
-            "CREATE TRIGGER footprint_runtime_outbox_{operation} AFTER {operation} ON runtime_outbox
-             WHEN ({OUTBOX_GUARD}) BEGIN
-              INSERT INTO message_footprint_outbox_stage
-              VALUES(NEW.sequence,NEW.table_name,NEW.change_kind,NEW.row_id,NEW.keys_json);
-             END;"
-        ))?;
-    }
-    staged_json_consumer(
-        db,
-        "message_footprint_outbox_stage",
-        "outbox",
-        "CAST(NEW.sequence AS TEXT)",
-        "keys_json",
-        OUTBOX_LINKS,
     )
 }
 
@@ -188,14 +154,6 @@ END;
     ))
 }
 const ACTOR_GUARD: &str = "NEW.state_kind NOT GLOB 'routed/seen/*' AND (NEW.state_kind GLOB 'routed/*' OR NEW.state_kind GLOB 'directory/message/*' OR NEW.state_kind GLOB 'directory/object/*' OR NEW.state_kind GLOB 'message/origin/*' OR NEW.state_kind GLOB 'delivery-receipt/*' OR NEW.state_kind GLOB 'attachment/*' OR NEW.state_kind GLOB 'sync/attachment/*' OR NEW.state_kind GLOB 'surface/origin/*' OR NEW.state_kind GLOB 'surface/message/*' OR NEW.state_kind GLOB 'surface/pending/*' OR NEW.state_kind GLOB 'surface/history/*' OR NEW.state_kind GLOB 'directory/surface_error/*' OR NEW.state_kind GLOB 'task/message/*' OR NEW.state_kind GLOB 'group-message/alias/*' OR NEW.state_kind GLOB 'own-copy/*' OR NEW.state_kind GLOB 'own-device/*' OR NEW.state_kind GLOB 'inbox/*' OR NEW.state_kind GLOB 'backup/staging/*')";
-const OUTBOX_GUARD: &str = r"NEW.table_name NOT IN ('message_tombstone_projection','group_message_tombstone_projection')
- AND NOT (NEW.table_name='direct_message_projection' AND COALESCE(json_extract(NEW.keys_json,'$.sender_id'),'')='')
- AND (NEW.table_name<>'runtime_actor_state'
- OR EXISTS(SELECT 1 FROM runtime_actor_state a JOIN message_footprint f
-  ON f.kind='actor' AND f.locator=a.state_kind WHERE a.rowid=NEW.row_id)
- OR (NEW.change_kind='delete' AND json_extract(NEW.keys_json,'$.state_kind') GLOB 'routed/*')
- OR (NEW.change_kind='delete' AND json_extract(NEW.keys_json,'$.state_kind') GLOB 'directory/message/*')
- OR (NEW.change_kind='delete' AND json_extract(NEW.keys_json,'$.state_kind') GLOB 'delivery-receipt/*'))";
 const ACTOR_LINKS: &str = r"
  INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:object:'||substr(substr(NEW.state_kind,18),1,instr(substr(NEW.state_kind,18),'/')-1)),'{kind}',{locator} FROM (SELECT 1) LEFT JOIN message_copy_binding b ON b.copy_id='object:'||substr(substr(NEW.state_kind,18),1,instr(substr(NEW.state_kind,18),'/')-1) WHERE NEW.state_kind GLOB 'attachment/chunk/*/*' ON CONFLICT DO NOTHING;
 
@@ -214,16 +172,6 @@ const ACTOR_LINKS: &str = r"
  INSERT INTO message_footprint SELECT substr(NEW.state_kind,25),'{kind}',{locator} WHERE NEW.state_kind GLOB 'routed/message-metadata/*' ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:object:'||json_extract(CAST(NEW.state_json AS TEXT),'$')),'{kind}',{locator} FROM (SELECT 1) LEFT JOIN message_copy_binding b ON b.copy_id='object:'||json_extract(CAST(NEW.state_json AS TEXT),'$') WHERE json_type(CAST(NEW.state_json AS TEXT),'$')='text' AND (NEW.state_kind GLOB 'attachment/reference-by-sender/*' OR NEW.state_kind GLOB 'attachment/reference-by-slot/*') ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:object:'||substr(NEW.state_kind,22)),'{kind}',{locator} FROM (SELECT 1) LEFT JOIN message_copy_binding b ON b.copy_id='object:'||substr(NEW.state_kind,22) WHERE NEW.state_kind GLOB 'attachment/reference/*' ON CONFLICT DO NOTHING;
-";
-const OUTBOX_LINKS: &str = r"
- INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:envelope:'||json_extract(NEW.keys_json,'$.envelope_id')),'{kind}',{locator} FROM (SELECT 1) LEFT JOIN message_copy_binding b ON b.copy_id='envelope:'||json_extract(NEW.keys_json,'$.envelope_id') WHERE NEW.table_name IN ('raw_envelope_log','outbox_queue','ack_state','nack_state') AND json_type(NEW.keys_json,'$.envelope_id')='text' ON CONFLICT DO NOTHING;
-
- INSERT INTO message_footprint SELECT f.message_id,'{kind}',{locator}
- FROM runtime_actor_state a JOIN message_footprint f ON f.kind='actor' AND f.locator=a.state_kind
- WHERE NEW.table_name='runtime_actor_state' AND a.rowid=NEW.row_id ON CONFLICT DO NOTHING;
- INSERT INTO message_footprint SELECT message_id,'{kind}',{locator} FROM message_footprint
- WHERE NEW.table_name='runtime_actor_state' AND NEW.change_kind='delete'
-  AND kind='actor' AND locator=json_extract(NEW.keys_json,'$.state_kind') ON CONFLICT DO NOTHING;
 ";
 #[derive(Clone, Copy)]
 struct CopyStore<'a> {
@@ -309,8 +257,7 @@ fn journal_copy(db: &Connection) -> rusqlite::Result<()> {
         "CREATE TABLE IF NOT EXISTS message_footprint_journal_stage(
             seq INTEGER NOT NULL,body_json BLOB NOT NULL);
          DELETE FROM message_footprint_journal_stage;
-         CREATE TRIGGER IF NOT EXISTS footprint_runtime_journal_removed AFTER DELETE ON runtime_journal
-         BEGIN DELETE FROM message_footprint WHERE kind='journal' AND locator=CAST(OLD.seq AS TEXT); END;
+         DROP TRIGGER IF EXISTS footprint_runtime_journal_removed;
          DROP TRIGGER IF EXISTS footprint_message_footprint_journal_stage_consume;
          CREATE TRIGGER footprint_message_footprint_journal_stage_consume
          AFTER INSERT ON message_footprint_journal_stage BEGIN
@@ -337,11 +284,7 @@ fn journal_copy(db: &Connection) -> rusqlite::Result<()> {
     )?;
     for operation in ["INSERT", "UPDATE"] {
         db.execute_batch(&format!(
-            "DROP TRIGGER IF EXISTS footprint_runtime_journal_{operation};
-             CREATE TRIGGER footprint_runtime_journal_{operation} AFTER {operation} ON runtime_journal
-             WHEN NEW.topic GLOB '*message*' AND json_valid(CAST(NEW.body_json AS TEXT)) BEGIN
-              INSERT INTO message_footprint_journal_stage VALUES(NEW.seq,NEW.body_json);
-             END;"
+            "DROP TRIGGER IF EXISTS footprint_runtime_journal_{operation};"
         ))?;
     }
     Ok(())

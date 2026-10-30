@@ -103,7 +103,9 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
     evict_identity_evidence(&recipient.client)?;
     assert!(recipient.client.authenticated_committed_key(&entry).is_err());
     sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
-    assert_eq!(recipient.client.account_db()?.message_content("privacy-envelope-id")?, None);
+    let raw = super::erasure_audit::open(&b, &recipient.client)?;
+    super::erasure_audit::assert_erased(&raw, &forbidden, "privacy-envelope-id")?;
+    drop(raw);
     drop(recipient);
     drop(source);
     std::fs::remove_dir_all(root)?;
@@ -162,7 +164,8 @@ async fn assert_conflict_quarantine(
         recipient.client.account_db()?.latest_journal_event("message.undeliverable")?.is_some()
     );
     assert!(!recipient.client.account_db()?.has_inbox_retry(committed)?);
-    // A never-seen invalid envelope retains bounded diagnostics.
+    assert!(!recipient.client.account_db()?.actor_state_exists(committed)?);
+    // No source or envelope is written to the failure journal even for an invalid signature.
     conflict.envelope.signed.signature = "invalid".into();
     let unverified = recipient.client.inbox_admission_key(&conflict)?;
     assert!(unverified.starts_with("inbox/unverified/"));
@@ -195,22 +198,29 @@ async fn assert_conflict_quarantine(
         .await
         .err()
         .ok_or("modified entry accepted")?;
-    assert_failure_journal_retains_diagnostics(&recipient.client, &conflict, 2)?;
+    assert_failure_journal(
+        &recipient.client,
+        &[
+            &conflict.envelope.source_principal_id,
+            &conflict.envelope.source_device_id,
+            &conflict.envelope.envelope_id,
+            committed,
+        ],
+        2,
+    )?;
     Ok(())
 }
 
-fn assert_failure_journal_retains_diagnostics(
-    client: &RamfluxClient,
-    conflict: &GatewayInboxEntry,
-    count: usize,
-) -> TestResult {
+fn assert_failure_journal(client: &RamfluxClient, forbidden: &[&str], count: usize) -> TestResult {
     let journal = client.account_db()?.journal_after(0, 128)?;
     let failures: Vec<_> = journal.iter().filter(|e| e.topic == "message.undeliverable").collect();
     assert_eq!(failures.len(), count);
-    assert!(failures.iter().any(|event| {
-        event.body["envelope_id"].as_str() == Some(&conflict.envelope.envelope_id)
-            && event.body["claimed_source_device_id"].as_str()
-                == Some(&conflict.envelope.source_device_id)
-    }));
+    for event in failures {
+        let json = serde_json::to_string(event)?;
+        for value in forbidden {
+            assert!(!json.contains(value), "identity retained in failure journal: {value}");
+        }
+        assert!(event.body["marker"].as_str().is_some_and(|key| key.starts_with("routed/seen/")));
+    }
     Ok(())
 }
