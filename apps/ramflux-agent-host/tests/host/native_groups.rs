@@ -30,19 +30,20 @@ impl AgentBus for GroupBus {
                     value.as_object_mut().ok_or(Error::State)?.remove("member_roster");
                 }
                 Some("root") => {
-                    value["member_roster"][0]["identity"]["root_commitment"] = json!("foreign-root")
+                    value["member_roster"][0]["identity"]["root_commitment"] =
+                        json!("foreign-root");
                 }
                 Some("principal") => {
                     value["member_roster"][0]["identity"]["principal_id"] =
-                        json!("foreign-principal")
+                        json!("foreign-principal");
                 }
                 Some("key") => {
                     value["member_roster"][0]["identity"]["signing_public_key"] =
-                        json!("foreign-key")
+                        json!("foreign-key");
                 }
                 Some("excluded") => {
                     value["excluded_devices"] =
-                        json!([{"root_commitment":"agent-commitment","device_id":"agent-device"}])
+                        json!([{"root_commitment":"agent-commitment","device_id":"agent-device"}]);
                 }
                 _ => {}
             }
@@ -85,7 +86,7 @@ async fn native_group_lease_refusal_retires_the_intent_and_preserves_its_typed_r
         host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.group_reason,
         Some(GroupRefusal::LeaseUnavailable)
     );
-    assert!(bus.inner.replies.is_empty());
+    assert_eq!(bus.inner.replies.len(), 0);
     drop(host);
     bus.lease_missing = false;
     let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
