@@ -115,7 +115,9 @@ pub(super) fn verify(snapshot: &GroupStateSnapshot) -> Result<(), CryptoError> {
         hash_valid(previous)?;
     }
     let issued_at = u64::try_from(snapshot.issued_at).map_err(|_| invalid("group clock"))?;
-    verify_group_state_actor_at(&snapshot.genesis.actor, Some(issued_at))?;
+    // Genesis is immutable historical evidence. Its branch lease only had to be valid when the
+    // group was created; requiring that lease at every later epoch would freeze the group.
+    verify_group_state_actor(&snapshot.genesis.actor)?;
     verify_group_state_actor_at(&snapshot.creator, Some(issued_at))?;
     crate::verify_canonical_signature(
         &canonical_json_bytes(&without_signature(&snapshot.genesis, GENESIS_DOMAIN)?)?,
@@ -444,6 +446,18 @@ fn advance_as_with_signer(
         snapshot.state.epoch = epoch;
     } else {
         transition::apply(&mut snapshot.state, requester, &change, epoch, now)?;
+        // Carry the current owner's authority for this version, not the branch lease captured at
+        // group creation. The requester remains the member that authorized the mutation.
+        snapshot.creator = actor.clone();
     }
     sign_with_signer(signer, branch, actor, snapshot)
+}
+pub(super) fn advance_as_with_native_signer(
+    primary: &crate::custody::SelfSigningKey,
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    previous: &VerifiedGroupState,
+    input: Apply<'_>,
+) -> Result<VerifiedGroupState, CryptoError> {
+    advance_as_with_signer(CreatorSigner::Native(primary), branch, actor, previous, input)
 }

@@ -45,12 +45,15 @@ pub(super) async fn dispatch(
     {
         return Ok(None);
     }
+    if method == "group.create" && account.client.born_v3_account.is_some() {
+        account.ensure_gateway_live().await?;
+    }
     let group = required(body, "group_id")?;
     let previous = account.client.account_db()?.shared_group_state(group)?;
     if method != "group.create" && previous.is_none() {
         return Ok(None);
     }
-    if body["actor_id"].as_str().is_some_and(|actor| actor != account.gateway_config.device_id) {
+    if body["actor_id"].as_str().is_some_and(|actor| !local_actor_matches(account, actor)) {
         return Err(StorageError::GroupPermissionDenied.into());
     }
     let target = account.gateway_config.target_delivery_id.clone();
@@ -122,6 +125,13 @@ pub(super) async fn dispatch(
         account.client.shared_group_metadata(group)?.ok_or(StorageError::GroupPermissionDenied)?;
     result["accepted"] = json!(true);
     Ok(Some(result))
+}
+
+fn local_actor_matches(account: &LocalBusAccountState, actor: &str) -> bool {
+    actor == account.gateway_config.device_id
+        || (account.client.born_v3_account.is_some()
+            && (actor == account.gateway_config.principal_id
+                || actor == account.gateway_config.target_delivery_id))
 }
 
 async fn requested_change(
