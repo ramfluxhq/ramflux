@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Span Brain
 use clap::Parser;
 use ramflux_agent_host::{
-    AgentHost, Config, CredentialVault, Error, RfdBus, RuleEngine, import_provisioning_bundle,
-    unlock_provisioned_account,
+    AgentHost, Config, CredentialVault, EngineProvider, Error, PrxEngine, RfdBus, RuleEngine,
+    import_provisioning_bundle, unlock_provisioned_account,
 };
 use std::path::PathBuf;
 mod reconnect;
@@ -43,7 +43,19 @@ async fn run() -> ramflux_agent_host::Result<()> {
         import_provisioning_bundle(&vault, path, &config.account_id)?;
     }
     unlock_provisioned_account(&vault, &config.socket, &config.account_id).await?;
-    let mut host = AgentHost::new(config.clone(), RuleEngine::new(&config)?)?;
+    if let Some(engine) = &config.engine {
+        let provider = PrxEngine::new(&engine.prx, config.max_conversations)?;
+        run_provider(config, provider).await
+    } else {
+        let provider = RuleEngine::new(&config)?;
+        run_provider(config, provider).await
+    }
+}
+async fn run_provider(
+    config: Config,
+    provider: impl EngineProvider,
+) -> ramflux_agent_host::Result<()> {
+    let mut host = AgentHost::new(config.clone(), provider)?;
     let mut backoff = reconnect::ReconnectBackoff::default();
     loop {
         let started = std::time::Instant::now();

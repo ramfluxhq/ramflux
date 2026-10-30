@@ -8,7 +8,9 @@ mod config;
 mod engine;
 mod participant;
 mod provisioning;
+mod prx;
 mod runner;
+mod runner_approval;
 mod runner_deferred;
 mod runner_output;
 mod runner_policy;
@@ -17,9 +19,12 @@ mod runner_surface;
 mod surface_plan;
 pub use bus::{AgentBus, RfdBus};
 pub use checkpoint::{Checkpoint, CheckpointStore, GroupRefusal, OutputRefusal};
-pub use config::{Choice, Config, Rule, SurfaceRule};
-pub use engine::{ActionInput, ConversationInput, EngineProvider, Intent, RuleEngine};
+pub use config::{Choice, Config, EngineConfig, PrxConfig, PrxSessionScope, Rule, SurfaceRule};
+pub use engine::{
+    ActionInput, ConversationInput, EngineEvent, EngineInput, EngineProvider, Intent, RuleEngine,
+};
 pub use provisioning::{CredentialVault, import_provisioning_bundle, unlock_provisioned_account};
+pub use prx::PrxEngine;
 pub use runner::AgentHost;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -48,6 +53,12 @@ pub enum Error {
     Limit,
     #[error("event stream requires reconnect and snapshot reload")]
     Resync,
+    #[error("engine endpoint is unavailable")]
+    EngineUnavailable,
+    #[error("engine request timed out")]
+    EngineTimeout,
+    #[error("engine rejected or returned an invalid response")]
+    EngineRejected,
 }
 
 impl Error {
