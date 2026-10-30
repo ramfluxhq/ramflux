@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+itest-memory-vault = ["ramflux-sdk/itest-memory-vault"]
+
 [dependencies]
 ramflux-sdk.workspace = true
 ramflux-protocol.workspace = true
@@ -13,7 +17,12 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 clap.workspace = true
+keyring.workspace = true
+zeroize.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

@@ -150,6 +150,20 @@ impl PrimaryVault for TestVault {
         }
         Ok(())
     }
+    fn store_provisioning_secret(
+        &self,
+        reference: &str,
+        secret: &[u8],
+    ) -> std::result::Result<(), SdkError> {
+        self.put(reference, secret)
+    }
+    fn load_provisioning_secret(
+        &self,
+        reference: &str,
+    ) -> std::result::Result<Zeroizing<Vec<u8>>, SdkError> {
+        let secrets = self.secrets.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        secrets.get(reference).cloned().ok_or(SdkError::CustodyVaultUnavailable)
+    }
 }
 pub(crate) fn input(id: &str) -> CreateInput {
     CreateInput {
@@ -312,20 +326,77 @@ fn custody_vault_failure_reserves_mode_and_never_creates_a_legacy_manifest() -> 
 fn custody_nonhuman_genesis_requires_current_local_human_custody() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
-    let human = create(&root.0, "human", &vault, 100)?;
+    let now = super::network_now()?;
+    let human = create(&root.0, "human", &vault, now)?;
+    mark_live(&root.0, "human", now)?;
     let mut input = input("service");
     input.principal_kind = PrincipalKind::HeadlessAi;
-    assert!(CreationCeremony::begin(&root.0, input.clone(), 100).is_err());
+    assert!(CreationCeremony::begin(&root.0, input.clone(), now).is_err());
     input.custodian_account_id = Some("human".into());
-    let mut ceremony = CreationCeremony::begin(&root.0, input, 100)?;
+    let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
-    let account = ceremony.confirm(&words(&phrase, positions)?, &vault, 100)?;
+    let account = ceremony.confirm_with_passphrase(
+        &words(&phrase, positions)?,
+        &vault,
+        now,
+        b"headless data passphrase",
+    )?;
     assert_eq!(
         account.record().body.master_certificate.body.primary_device_ref.account_anchor,
         human.record().body.account_anchor
     );
-    load_account(&root.0, "service", 100)?;
+    load_account(&root.0, "service", now)?;
+    Ok(())
+}
+
+#[test]
+fn agent_bundle_is_private_custodian_bound_and_one_shot() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let now = super::network_now()?;
+    create(&root.0, "human", &vault, now)?;
+    mark_live(&root.0, "human", now)?;
+    let mut input = input("agent");
+    input.principal_kind = PrincipalKind::HeadlessAi;
+    input.custodian_account_id = Some("human".into());
+    let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
+    let phrase = ceremony.show_once()?;
+    let positions = ceremony.hidden_challenge()?;
+    let secret = b"daemon-generated-agent-data-passphrase";
+    ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, secret)?;
+    mark_live(&root.0, "agent", now)?;
+    let path = root.0.join("agent.bundle");
+    super::store::export_agent_credentials(&root.0, "human", "agent", &path, &vault, now)?;
+    assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+    let bytes = std::fs::read(&path)?;
+    let bundle: super::store::AgentProvisioningBundle = serde_json::from_slice(&bytes)?;
+    assert_eq!(bundle.account_id, "agent");
+    assert_eq!(bundle.data_passphrase.as_bytes(), secret);
+    assert!(!std::str::from_utf8(&bytes)?.contains(phrase.as_str()));
+    assert!(
+        super::store::export_agent_credentials(
+            &root.0,
+            "human",
+            "agent",
+            &root.0.join("second.bundle"),
+            &vault,
+            now,
+        )
+        .is_err()
+    );
+    assert!(
+        super::store::export_agent_credentials(
+            &root.0,
+            "agent",
+            "agent",
+            &root.0.join("invalid.bundle"),
+            &vault,
+            now,
+        )
+        .is_err()
+    );
     Ok(())
 }
 #[tokio::test]

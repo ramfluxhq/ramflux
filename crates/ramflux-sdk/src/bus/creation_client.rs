@@ -34,6 +34,8 @@ struct SetupFrame<'a, T> {
     kind: &'static str,
     request_id: &'a str,
     sdk_api: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<&'a str>,
     method: &'a str,
     body: T,
 }
@@ -125,6 +127,41 @@ impl LocalBusCreationClient {
         })
     }
 
+    /// Begin a custodian-authorized native headless participant ceremony. The daemon generates
+    /// its data passphrase; the owner receives only the normal one-time recovery phrase here.
+    /// # Errors
+    /// Rejects a non-live or non-human custodian and unsupported participant kinds.
+    pub async fn begin_headless(
+        &mut self,
+        display_name: &str,
+        custodian_account: &str,
+    ) -> Result<LocalBusPendingCreation, SdkError> {
+        #[derive(Serialize)]
+        struct Input<'a> {
+            display_name: &'a str,
+            principal_kind: PrincipalKind,
+            custodian_account: &'a str,
+        }
+        let body = self
+            .exchange_for(
+                Some(custodian_account),
+                "account.create.begin",
+                Input {
+                    display_name,
+                    principal_kind: PrincipalKind::HeadlessAi,
+                    custodian_account,
+                },
+            )
+            .await?;
+        if body.ceremony.as_deref() != Some("pending") {
+            return Err(SdkError::CustodySetupInvalid);
+        }
+        Ok(LocalBusPendingCreation {
+            ceremony_id: body.ceremony_id.ok_or(SdkError::CustodySetupInvalid)?,
+            expires_in_ms: body.expires_in_ms.ok_or(SdkError::CustodySetupInvalid)?,
+        })
+    }
+
     /// Moves the phrase directly into an erasing buffer. Display once, then drop it before hide.
     /// # Errors
     /// Rejects missing, expired or previously displayed ceremonies.
@@ -169,6 +206,26 @@ impl LocalBusCreationClient {
         })
     }
 
+    /// Confirm a headless participant ceremony without accepting a caller-chosen data passphrase.
+    /// # Errors
+    /// Rejects wrong words, expiry, persistence or account-opening failures.
+    pub async fn confirm_headless(
+        &mut self,
+        words: &[Zeroizing<String>; 3],
+    ) -> Result<LocalBusCreatedAccount, SdkError> {
+        #[derive(Serialize)]
+        struct Confirmation<'a> {
+            words: &'a [Zeroizing<String>; 3],
+        }
+        let body = self.exchange("account.create.confirm", Confirmation { words }).await?;
+        Ok(LocalBusCreatedAccount {
+            account_id: body.account_id.ok_or(SdkError::CustodySetupInvalid)?,
+            display_name: body.display_name.ok_or(SdkError::CustodySetupInvalid)?,
+            state: body.state.ok_or(SdkError::CustodySetupInvalid)?,
+            networking: body.networking.ok_or(SdkError::CustodySetupInvalid)?,
+        })
+    }
+
     /// Cancel pending setup; succeeds after a consumed or failed confirmation as well.
     /// # Errors
     /// Returns transport or protocol errors.
@@ -181,6 +238,15 @@ impl LocalBusCreationClient {
     }
 
     async fn exchange<T: Serialize>(&mut self, method: &str, body: T) -> Result<Body, SdkError> {
+        self.exchange_for(None, method, body).await
+    }
+
+    async fn exchange_for<T: Serialize>(
+        &mut self,
+        account_id: Option<&str>,
+        method: &str,
+        body: T,
+    ) -> Result<Body, SdkError> {
         self.sequence = self.sequence.checked_add(1).ok_or(SdkError::CustodySetupInvalid)?;
         let id = format!("creation-{}", self.sequence);
         let bytes = crate::custody::serialize_secret(
@@ -190,6 +256,7 @@ impl LocalBusCreationClient {
                 kind: "request",
                 request_id: &id,
                 sdk_api: "account",
+                account_id,
                 method,
                 body,
             },

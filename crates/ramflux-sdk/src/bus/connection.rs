@@ -127,7 +127,18 @@ pub(super) async fn handle(
                     },
                 };
                 if super::custody_setup::handles(&incoming.frame()?.method) {
-                    let bytes = if incoming.frame()?.method.starts_with("account.recover.") {
+                    let bytes = if incoming.frame()?.method == "account.create.begin"
+                        && !incoming
+                            .frame()?
+                            .account_id
+                            .as_deref()
+                            .is_some_and(|id| supervisor.account_is_open(id))
+                    {
+                        super::custody_response::error(
+                            incoming.frame()?,
+                            &SdkError::LocalBusPermissionDenied,
+                        )?
+                    } else if incoming.frame()?.method.starts_with("account.recover.") {
                         super::recovery::respond(incoming.frame()?, &supervisor, &mut recovery, &mut disconnected).await?
                     } else if incoming.frame()?.method == "account.create.confirm" {
                         super::creation_confirm::respond(incoming.frame()?, &supervisor, &mut ceremony, &mut disconnected).await?

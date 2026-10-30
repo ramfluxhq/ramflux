@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 mod publication;
 mod recovery;
 pub(crate) use publication::accept_publication;
@@ -49,6 +50,26 @@ pub(super) struct StoredAuthority {
     custodian_publication: Option<Box<ramflux_protocol::custody::Publication>>,
     pins: AuthorityPins,
     custodian_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_provisioning_vault_ref: Option<String>,
+}
+
+/// One-use headless participant material. It deliberately contains no phrase or authority key.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProvisioningBundle {
+    pub account_id: String,
+    pub data_passphrase: String,
+}
+impl std::fmt::Debug for AgentProvisioningBundle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentProvisioningBundle(<redacted>)")
+    }
+}
+impl Drop for AgentProvisioningBundle {
+    fn drop(&mut self) {
+        self.data_passphrase.zeroize();
+    }
 }
 /// An authenticated local account, with no legacy root signer or active session.
 #[derive(Clone, Debug)]
@@ -334,12 +355,21 @@ pub(super) fn persist(
         .concat(),
     );
     let branch_reference = format!("branch:{reference}");
+    let agent_provisioning_reference = (input.principal_kind
+        == ramflux_protocol::PrincipalKind::HeadlessAi)
+        .then(|| format!("agent-provisioning:{reference}"));
     // On failure retain the reservation; no caller may retry through legacy account.create.
     vault.store_new(&reference, key)?;
     let mut branch_written = false;
+    let mut provisioning_written = false;
     let result = (|| {
         vault.store_branch(&branch_reference, branch)?;
         branch_written = true;
+        if let Some(agent_reference) = &agent_provisioning_reference {
+            let secret = data_secret.ok_or_else(invalid)?;
+            vault.store_provisioning_secret(agent_reference, secret)?;
+            provisioning_written = true;
+        }
         if let Some(secret) = data_secret {
             let mut data = crate::RamfluxClient::new();
             data.open_account_index(root)?;
@@ -365,6 +395,7 @@ pub(super) fn persist(
             custodian_publication: None,
             pins,
             custodian_account_id: input.custodian_account_id.clone(),
+            agent_provisioning_vault_ref: agent_provisioning_reference.clone(),
         };
         if let Some(gate) = commit_gate {
             gate.commit()?;
@@ -380,9 +411,62 @@ pub(super) fn persist(
         // Attempt both deletions even if one provider operation fails. The reservation remains
         // latched, so a partial setup cannot fall back to another identity scheme.
         let branch_cleanup = if branch_written { vault.delete(&branch_reference) } else { Ok(()) };
+        let provisioning_cleanup = if provisioning_written {
+            vault.delete(agent_provisioning_reference.as_deref().ok_or_else(invalid)?)
+        } else {
+            Ok(())
+        };
         let primary_cleanup = vault.delete(&reference);
         branch_cleanup?;
+        provisioning_cleanup?;
         primary_cleanup?;
+    }
+    result
+}
+
+/// Export the one-use agent data credential for its live native human custodian.
+/// The destination is created with owner-only permissions and is never overwritten.
+/// # Errors
+/// Rejects non-agent targets, the wrong custodian, non-live accounts, existing paths, and vault or
+/// filesystem failures.
+pub(crate) fn export_agent_credentials(
+    root: &Path,
+    owner_id: &str,
+    account_id: &str,
+    path: &Path,
+    vault: &dyn PrimaryVault,
+    now: u64,
+) -> Result<(), SdkError> {
+    let owner = load_account(root, owner_id, now)?;
+    owner.require_networking()?;
+    if owner.record().body.principal_kind != ramflux_protocol::PrincipalKind::Human {
+        return Err(invalid());
+    }
+    let agent = load_account(root, account_id, now)?;
+    agent.require_networking()?;
+    if agent.record().body.principal_kind != ramflux_protocol::PrincipalKind::HeadlessAi
+        || agent.stored.custodian_account_id.as_deref() != Some(owner_id)
+    {
+        return Err(invalid());
+    }
+    let reference = agent.stored.agent_provisioning_vault_ref.as_deref().ok_or_else(invalid)?;
+    let secret = vault.load_provisioning_secret(reference)?;
+    let passphrase = String::from_utf8(secret.to_vec()).map_err(|_| invalid())?;
+    let bundle =
+        AgentProvisioningBundle { account_id: account_id.to_owned(), data_passphrase: passphrase };
+    let bytes = Zeroizing::new(ramflux_protocol::canonical_json_bytes(&bundle)?);
+    let mut created = false;
+    let result = (|| {
+        let mut file =
+            fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        created = true;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        vault.delete(reference)?;
+        Ok(())
+    })();
+    if result.is_err() && created {
+        let _ = fs::remove_file(path);
     }
     result
 }

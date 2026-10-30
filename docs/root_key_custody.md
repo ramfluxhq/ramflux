@@ -586,6 +586,16 @@ creation and allow explicit per-service print/export, or storage of agent phrase
 in the human custodian's own vault with an explicit local compromise warning.
 Agent processes and nodes still receive none of them. Such optional user-managed
 vault storage does not turn routine full backups into authority backups.
+
+The implemented local headless flow requires a live native human custodian on the
+same daemon. The owner's trusted frontend performs the service's show-once ceremony.
+After confirmation, the daemon retains only a randomly generated service data
+passphrase in its configured credential vault until the owner exports a one-use
+0600 provisioning bundle. That bundle contains the service account ID and data
+passphrase only: never a recovery phrase, master key, self-signing key, branch key,
+or human credential. `ramflux-agent-host` imports it into the operator Mac Keychain
+and removes the file. The integration-only memory vault is compile- and runtime-gated;
+Linux production remains blocked on `ID-02-VAULT-LINUX-01`.
 Custodian renewal can be batched with explicit scope; show expiry reminders and a clear waiting state when the human
 is unavailable. A daemon cannot promote itself to avoid lease expiry.
 
