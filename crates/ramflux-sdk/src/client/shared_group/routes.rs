@@ -16,7 +16,10 @@ impl RamfluxClient {
             }
             let root = root.as_str();
             let before = routes.len();
-            if self.observed_device_set(root)?.is_none() {
+            let has_legacy_authority = self.observed_device_set(root)?.is_some();
+            let has_native_authority =
+                self.current_custody_authority(root, crate::custody::network_now()?)?.is_some();
+            if !has_legacy_authority && !has_native_authority {
                 for member in state
                     .view()
                     .members

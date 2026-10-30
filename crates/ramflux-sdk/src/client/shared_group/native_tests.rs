@@ -36,6 +36,17 @@ async fn peer_accepts_native_owner_snapshot_and_decrypts_its_group_key() -> Test
         Some(&owner_primary),
     )?;
     assert!(group_actor_matches_manifest(&owner.manifest, state.creator()));
+    let routes = owner.client.shared_group_member_routes(&state)?;
+    let peer_route = routes
+        .iter()
+        .find(|route| route.member_id == peer.config.device_id)
+        .ok_or("native peer route")?;
+    assert_eq!(
+        peer_route.member_principal_commitment.as_deref(),
+        Some(peer.manifest.principal_commitment.as_str())
+    );
+    assert!(peer_route.device_signing_public_key.is_some());
+    assert!(peer_route.target_delivery_id.is_some());
     assert!(peer.client.accept_shared_group_state(&state, &peer.config.target_delivery_id)?);
 
     let distribution =
