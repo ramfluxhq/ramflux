@@ -522,9 +522,12 @@ engine changes.
 ## Demo custody provisioning
 
 Native accounts need custody to leave `networking_pending`. Public discovery and
-health probes alone do not establish account networking. Use a demo wrapper with
-custody-input support, and provision the existing demo state and discovery identity
-first. `rf node custody-init` and `rf node custody-renew` are local operator
+health probes alone do not establish account networking. The included
+`deploy/scripts/demo-node.sh` consumes the provisioning fragment directly. First
+create the demo state and discovery identity with the normal `up` procedure above;
+without custody it prints the warning above and leaves accounts pending. Then
+provision custody and run `up` again with the same operator settings.
+`rf node custody-init` and `rf node custody-renew` are local operator
 commands: they do not connect to a daemon or a remote node.
 
 Custody records use the **existing pinned discovery identity**, not a separate
@@ -545,6 +548,7 @@ set -a
 . /absolute/path/demo.env
 . "$DEMO_DATA_DIR/identity.env"
 set +a
+DEMO_NODE_ID=${DEMO_NODE_ID:-demo.invalid}
 rf node custody-init \
   --node-id "$DEMO_NODE_ID" \
   --node-signing-seed "$DEMO_DATA_DIR/certs/node-identity/node-signing.key" \
@@ -566,13 +570,29 @@ fragments are 0600. Protect their backups as credentials.
 
 The fragment has exactly `RAMFLUX_CUSTODY_NODE_PUBLIC_KEY`,
 `RAMFLUX_CUSTODY_NODE_RECORD_FILE` and `RAMFLUX_CUSTODY_PROXY_SIGNING_SEED`.
-Add `. /absolute/path/to/custody.active.env` to the trusted operator env and run
-`deploy/scripts/demo-node.sh up /absolute/path/demo.env`. Use the generated
-record together with its matching seed. The record authorizes `ramflux-gateway`
+Add this line to `/absolute/path/demo.env`, after its `DEMO_DATA_DIR` setting:
+
+```sh
+. "$DEMO_DATA_DIR/custody.active.env"
+```
+
+Then apply the initial credentials with the included wrapper:
+
+```sh
+deploy/scripts/demo-node.sh up /absolute/path/demo.env
+```
+
+The wrapper copies the signed record to
+`$DEMO_DATA_DIR/secrets/custody/node-record.json` and mounts it read-only at
+`/etc/ramflux/custody/node-record.json` inside the router. It sends the matching
+proxy seed only to the gateway. Use the generated record together with its
+matching seed. The record authorizes `ramflux-gateway`
 for this node's audience in `HomeRelayReceipt` mode. No unbound mode is enabled.
 
-Give demo users the discovery origin, exact node id and the existing public pin
-through an authenticated operator channel. They confirm that same identity:
+Give demo users the published discovery origin, exact `DEMO_NODE_ID` and existing
+`DEMO_EXPECTED_NODE_PUBLIC_KEY` through an authenticated operator channel. On each
+client, set `DISCOVERY_ORIGIN`, `NODE_ID` and `NODE_PUBLIC_KEY` to those supplied
+values, then confirm that same identity with its running local daemon:
 
 ```sh
 rf node add "$DISCOVERY_ORIGIN"
@@ -648,9 +668,14 @@ remove that exact stale `.lock`. Never remove a live lock. Temporary files are
 removed on ordinary error paths; after a killed process, the next exclusive
 operation removes abandoned temporary files in this tool's private namespace.
 
-**Applying a changed proxy seed through the demo wrapper is pending a dedicated
-coordinated rotation operation.** Preparing renewal does not deploy it or extend
-the deployed credential's deadline. Keep deployed `custody.active.env` unchanged
+The wrapper can apply changed record bytes under the same retained pin and proxy
+seed with a same-version `up`; it restarts the router as described above. This
+tool's `custody-renew` also generates a new proxy seed, so that record-only path
+does not apply its output.
+
+**Applying a changed proxy seed through the demo wrapper is pending the dedicated
+DEMO-UPGRADE-FU-02 coordinated rotation operation.** Preparing renewal does not
+deploy it or extend the deployed credential's deadline. Keep deployed `custody.active.env` unchanged
 until that operation is available; ordinary `up`/`upgrade` deliberately refuse
 proxy-seed replacement. Do not bypass this by editing `runtime.env`, copying a
 prepared record over the installed record to simulate deployment, deleting state,
