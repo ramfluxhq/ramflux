@@ -139,7 +139,7 @@ async fn group_message_before_membership_update_retries_then_delivers_without_ac
     );
     crate::bus::sync_driver::run(&mut account).await?;
     assert!(!writes.lock().map_err(|_| invalid("mutex"))?.iter().any(|v| v["frame_type"] == "ack"));
-    assert!(account.client.direct_messages("ordered-thread")?.is_empty());
+    assert_eq!(account.client.direct_messages("ordered-thread")?, Vec::new());
     assert!(account.client.account_db()?.has_inbox_retry(&retry_key)?);
     fixture_member(&account.client, "ordered", &alice)?;
     account.client.import_group_sender_key_distribution(
