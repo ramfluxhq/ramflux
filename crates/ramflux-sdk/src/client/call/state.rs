@@ -392,10 +392,7 @@ impl LiveCall {
         reason: VoiceCallFailureReason,
         now: i64,
     ) -> Result<(), SdkError> {
-        if self.local == self.callee
-            && self.row.state == "active"
-            && reason == VoiceCallFailureReason::RelayUnavailable
-        {
+        if self.row.state == "active" && reason == VoiceCallFailureReason::RelayUnavailable {
             if self.media_loss.is_none() {
                 let deadline =
                     self.allocation.as_ref().map_or(now.unsigned_abs(), |a| a.expires_at);
