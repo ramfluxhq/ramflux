@@ -227,7 +227,7 @@ fn home_migration_cancel_during_presence_discards_the_returned_signature() -> Re
     assert_eq!(plan.proposal_digest(), digest);
     assert_eq!(plan.destination_fingerprint(), Fixture::intent()?.expected_node_fingerprint);
     f.journal()?.cancel(&hash(1), NOW)?;
-    f.vault.approve_next_migration_for_test();
+    f.vault.approve_migration_once_for_test("human", &hash(1))?;
     let result = plan.sign(&f.vault, NOW)?;
     assert!(f.journal()?.authorize(result, NOW).is_err());
     assert_eq!(f.journal()?.status(&hash(1))?.phase, MigrationPhase::AbortPending);
@@ -240,7 +240,7 @@ fn home_migration_lost_seal_reply_cancels_with_authorization_alone_and_never_rel
     let f = Fixture::new()?;
     let digest = f.offer()?;
     let plan = f.journal()?.approval_plan(&hash(1), &digest)?;
-    f.vault.approve_next_migration_for_test();
+    f.vault.approve_migration_once_for_test("human", &hash(1))?;
     let signature = plan.sign(&f.vault, NOW)?;
     let authorization = f.journal()?.authorize(signature, NOW)?;
     assert_eq!(f.journal()?.status(&hash(1))?.phase, MigrationPhase::SealSent);
@@ -266,7 +266,7 @@ fn home_migration_only_the_source_authorization_bound_fence_releases_a_lost_seal
     let f = Fixture::new()?;
     let digest = f.offer()?;
     let plan = f.journal()?.approval_plan(&hash(1), &digest)?;
-    f.vault.approve_next_migration_for_test();
+    f.vault.approve_migration_once_for_test("human", &hash(1))?;
     let authorization = f.journal()?.authorize(plan.sign(&f.vault, NOW)?, NOW)?;
     assert!(f.journal()?.commit_evidence(&hash(1), NOW).is_err());
     assert!(f.journal()?.activation_evidence(&hash(1)).is_err());

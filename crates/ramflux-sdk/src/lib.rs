@@ -10,6 +10,8 @@ compile_error!(
 );
 #[cfg(all(feature = "itest-memory-vault", ramflux_production))]
 compile_error!("production builds must not enable itest-memory-vault");
+#[cfg(all(feature = "itest-memory-vault", ramflux_release_profile))]
+compile_error!("release profiles must not enable itest-memory-vault");
 
 #[cfg(all(feature = "itest-legacy-accounts", not(any(test, ramflux_itest))))]
 compile_error!("itest-legacy-accounts requires cfg(test) or RAMFLUX_ITEST_BUILD=1");

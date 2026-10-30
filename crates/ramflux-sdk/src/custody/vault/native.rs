@@ -211,3 +211,7 @@ pub(super) fn store_branch(reference: &str, secret: &[u8]) -> Result<(), SdkErro
 pub(super) fn get_branch(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
     KeychainItems.read(reference, false)?.ok_or(SdkError::CustodyVaultUnavailable)
 }
+pub(super) fn delete(reference: &str) -> Result<(), SdkError> {
+    KeychainItems.delete(reference)?;
+    KeychainItems.delete(&protected_reference(reference))
+}

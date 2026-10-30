@@ -278,6 +278,15 @@ pub(crate) async fn dispatch_local_bus_request(
             }
             Ok(local_bus_ok(serde_json::json!({ "subscribed": true })))
         }
+        #[cfg(all(
+            feature = "itest-memory-vault",
+            ramflux_itest,
+            not(ramflux_release_profile),
+            not(ramflux_production)
+        ))]
+        "itest.migration.approve_once" => {
+            crate::bus::dispatch::itest_migration::approve_once(request, state)
+        }
         method if method.starts_with("node.") => {
             crate::bus::dispatch::node::dispatch_node_bus_request(request, state).await
         }
@@ -724,6 +733,43 @@ mod itest_legacy_startup_tests {
             .ok_or("unsupported fixture startup accepted")?;
         assert!(error.to_string().contains("require the integration feature"));
         assert!(!socket.exists());
+        Ok(())
+    }
+}
+
+#[cfg(all(test, ramflux_production))]
+mod production_migration_approval_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn itest_migration_approve_once_method_is_absent_from_a_production_build()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = LocalBusDaemonState {
+            account_index: None,
+            nodes: crate::node::NodeStore::default(),
+            config: LocalBusConfig::new("bus.sock", "data"),
+            accounts: BTreeMap::new(),
+            active_account_id: None,
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        };
+        let (outbound, _inbound) = mpsc::channel(1);
+        let mut connection = LocalBusConnectionState::new(1, outbound);
+        let request = LocalBusFrame::request(
+            "approve",
+            Some("human".into()),
+            "itest",
+            "itest.migration.approve_once",
+            serde_json::json!({
+                "account": "human",
+                "request_id": ramflux_protocol::encode_base64url([1; 32]),
+            }),
+        );
+        let error = dispatch_local_bus_request(&request, &mut state, &mut connection)
+            .await
+            .err()
+            .ok_or("production build exposed migration approval")?;
+        assert!(error.to_string().contains("unsupported local bus method"));
         Ok(())
     }
 }
