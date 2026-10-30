@@ -12,7 +12,9 @@ pub(super) async fn maintain_lease(
     next: &mut LiveCall,
     now: i64,
 ) -> Result<(), SdkError> {
-    if next.next_lease_refresh > now || !matches!(next.row.state.as_str(), "connecting" | "active")
+    if next.media_lost()
+        || next.next_lease_refresh > now
+        || !matches!(next.row.state.as_str(), "connecting" | "active")
     {
         return Ok(());
     }
@@ -118,6 +120,10 @@ async fn claim_callee(
             branch,
         );
     }
+    #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
+    if next.row.state == "active" {
+        super::refresh_barrier::wait().await?;
+    }
     let mut engine = account.take_live_engine().await?;
     let result =
         engine.voice_lease(VoiceLeaseRequest::Accept { consent: Box::new(consent.clone()) }).await;
@@ -126,7 +132,11 @@ async fn claim_callee(
         Ok(VoiceLeaseResponse::Allocation { allocation }) => {
             next.accept_lease(allocation, consent, now)?;
         }
-        Ok(VoiceLeaseResponse::Refused { reason }) => next.fail(reason, now)?,
+        Ok(VoiceLeaseResponse::Refused { reason }) => {
+            next.lease_refused(reason, now)?;
+            #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
+            super::refresh_barrier::refused().await?;
+        }
         _ => next.fail(VoiceCallFailureReason::SignalingUnavailable, now)?,
     }
     Ok(())
