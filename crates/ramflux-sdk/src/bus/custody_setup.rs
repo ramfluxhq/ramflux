@@ -169,9 +169,7 @@ fn apply(
             let input: Input = serde_json::from_value(std::mem::take(&mut request.body))
                 .map_err(|_| SdkError::CustodySetupInvalid)?;
             let valid = match input.principal_kind {
-                ramflux_protocol::PrincipalKind::Human => {
-                    input.custodian_account.is_none()
-                }
+                ramflux_protocol::PrincipalKind::Human => input.custodian_account.is_none(),
                 ramflux_protocol::PrincipalKind::HeadlessAi => {
                     request.method == "account.create.begin"
                         && input.custodian_account.is_some()

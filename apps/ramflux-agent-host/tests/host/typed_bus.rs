@@ -16,8 +16,14 @@ async fn typed_refusal_code_survives_sdk_transport_without_leaking_or_parsing_di
     let listener = tokio::net::UnixListener::bind(&f.config.socket)?;
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
-        for code in ["not_author", "too_large", "stale_hash", "unknown_failure", "resync_required"]
-        {
+        for code in [
+            "not_author",
+            "too_large",
+            "stale_hash",
+            "unknown_failure",
+            "resync_required",
+            "GroupLeaseUnavailable",
+        ] {
             let length = socket.read_u32().await?;
             let mut bytes = vec![0; usize::try_from(length)?];
             socket.read_exact(&mut bytes).await?;
@@ -56,6 +62,10 @@ async fn typed_refusal_code_survives_sdk_transport_without_leaking_or_parsing_di
             assert!(matches!(error, Error::Resync));
         }
     }
+    assert!(matches!(
+        bus.request("group.send", json!({}), None).await,
+        Err(Error::GroupLeaseUnavailable)
+    ));
     server.await?.map_err(|error| error.to_string())?;
     Ok(())
 }

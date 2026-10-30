@@ -45,6 +45,7 @@ impl<E: EngineProvider> AgentHost<E> {
                     self.stop_surface_output(&pending, refusal(&error))?;
                 } else {
                     self.state.last_refusal = Some(OutputRefusal {
+                        group_reason: None,
                         conversation_id: event.body["conversation_id"]
                             .as_str()
                             .or_else(|| event.body["message"]["conversation_id"].as_str())

@@ -205,6 +205,7 @@ impl<E: EngineProvider> AgentHost<E> {
                 Ok(plan) => Some(plan),
                 Err(Error::SurfaceRefused(reason)) => {
                     self.state.last_refusal = Some(crate::OutputRefusal {
+                        group_reason: None,
                         conversation_id: conversation_id.into(),
                         surface_id: intents
                             .first()

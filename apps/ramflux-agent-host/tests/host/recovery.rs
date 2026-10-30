@@ -13,7 +13,10 @@ async fn dm_and_group_reply_as_own_account_then_resume_without_duplicates() -> T
     host.apply(&mut bus, incoming(40, true), 2000).await?;
     assert_eq!(bus.replies.len(), 2);
     for reply in &bus.replies {
-        assert_eq!(reply["sender_id"], "agent-device");
+        assert_eq!(
+            reply["sender_id"],
+            if reply["group_id"].is_null() { "agent-device" } else { "agent-principal" }
+        );
         assert_eq!(
             ramflux_protocol::decode_base64url(
                 reply["plaintext_body_base64"].as_str().ok_or("body")?

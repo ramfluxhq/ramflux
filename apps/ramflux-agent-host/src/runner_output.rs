@@ -93,7 +93,12 @@ impl<E: EngineProvider> AgentHost<E> {
                     return Err(Error::State);
                 }
             } else {
-                if pending.body["sender_id"] != self.state.device_id {
+                let sender = if pending.method == "group.send" && self.state.native_account {
+                    &self.state.principal_id
+                } else {
+                    &self.state.device_id
+                };
+                if pending.body["sender_id"] != *sender {
                     return Err(Error::Unauthorized);
                 }
                 if pending.method == "group.send" && current["group_id"] != pending.body["group_id"]
@@ -107,6 +112,18 @@ impl<E: EngineProvider> AgentHost<E> {
                 .request(&pending.method, pending.body.clone(), Some(&pending.operation_id))
                 .await;
             let (value, refusal) = match result {
+                Err(Error::GroupLeaseUnavailable) => {
+                    // Retire this intent; only a fresh command after authority refresh may speak.
+                    self.stop_surface_output(
+                        &pending,
+                        ramflux_sdk::SurfaceRefusalCode::NotPermitted,
+                    )?;
+                    if let Some(refusal) = &mut self.state.last_refusal {
+                        refusal.group_reason = Some(crate::GroupRefusal::LeaseUnavailable);
+                    }
+                    self.store.save(&self.state)?;
+                    return Ok(());
+                }
                 Err(Error::SurfaceRefused(code)) => (serde_json::Value::Null, Some(code)),
                 Err(error) => return Err(error),
                 Ok(value)
