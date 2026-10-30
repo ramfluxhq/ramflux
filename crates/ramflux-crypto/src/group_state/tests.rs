@@ -381,6 +381,80 @@ fn creator_devices_choose_the_same_snapshot_and_other_roots_cannot_forge_it()
     assert!(verify_group_state_snapshot(copied).is_err());
     Ok(())
 }
+
+#[test]
+fn native_genesis_actor_is_bound_to_its_signed_creation_time() -> Result<(), CryptoError> {
+    let owner = native_person("genesis-owner", "owner", 40, 1000)?;
+    let authority = owner.actor.native_authority.as_ref().ok_or_else(|| invalid("authority"))?;
+    let expires = authority.branch_certificate.body.expires_at;
+    let create_at = |now| {
+        create_native_group_state(
+            &owner.primary,
+            &owner.branch,
+            &owner.actor,
+            GroupStateCreateInput {
+                group_id: "genesis-time",
+                conversation_id: "thread",
+                max_members: 200,
+                new_member_history: "no_history",
+                name: None,
+                now,
+            },
+        )
+    };
+    for now in [700, i64::try_from(expires + 300).map_err(|_| invalid("clock"))?] {
+        let state = create_at(now)?;
+        assert_eq!(state.genesis().issued_at, u64::try_from(now).ok());
+        verify_group_state_snapshot(state.snapshot().clone())?;
+    }
+    for now in [699, i64::try_from(expires + 301).map_err(|_| invalid("clock"))?] {
+        assert!(matches!(create_at(now), Err(CryptoError::GroupLeaseUnavailable)));
+    }
+    let state = create_at(1000)?;
+    let mut missing = state.snapshot().clone();
+    missing.genesis.issued_at = None;
+    assert!(verify_group_state_snapshot(missing).is_err());
+    let mut future = state.snapshot().clone();
+    future.genesis.issued_at = Some(1001);
+    assert!(verify_group_state_snapshot(future).is_err());
+    // A later version with fresh authority remains valid after the genesis lease expires.
+    let now = expires + 301;
+    let current = renew_native_actor(&owner, now, 91)?;
+    let later = snapshot::advance_as_with_native_signer(
+        &owner.primary,
+        &owner.branch,
+        &current,
+        &state,
+        snapshot::Apply {
+            requester: &current,
+            change: GroupStateChange::SetName { name: "Later".into() },
+            now: i64::try_from(now).map_err(|_| invalid("clock"))?,
+        },
+    )?;
+    verify_group_state_snapshot(later.snapshot().clone())?;
+    Ok(())
+}
+
+#[test]
+fn legacy_owner_refresh_preserves_the_original_snapshot_encoding() -> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
+    let sibling = person("owner", "laptop", 11, 32)?;
+    let base = create(&owner)?;
+    let state = step(&base, &sibling, GroupStateChange::SetName { name: "Sibling edit".into() })?;
+    assert_eq!(state.creator(), base.creator());
+    assert_eq!(canonical_json_bytes(state.genesis())?, canonical_json_bytes(base.genesis())?);
+    assert!(
+        serde_json::to_value(state.genesis())
+            .map_err(|_| invalid("genesis JSON"))?
+            .get("issued_at")
+            .is_none()
+    );
+    let mut expected = state.snapshot().clone();
+    expected.creator = base.creator().clone();
+    let expected = snapshot::sign(&owner.root, &sibling.branch, &sibling.actor, expected)?;
+    assert_eq!(canonical_json_bytes(state.snapshot())?, canonical_json_bytes(expected.snapshot())?);
+    Ok(())
+}
 #[test]
 fn ownership_transfer_certifies_new_root_and_old_root_loses_writes() -> Result<(), CryptoError> {
     let owner = person("owner", "phone", 11, 12)?;

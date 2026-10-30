@@ -11,6 +11,19 @@ name/name epoch, exclusions and creator. A separate device signature authenticat
 the transport issuer, who must match the authenticated transport source and a
 fresh signed device manifest. A forwarding member cannot alter creator authority.
 
+Native genesis carries a signed `issued_at` creation time. Its master and branch
+authority must be valid at that time with the custody protocol's 300-second
+clock-skew allowance, and creation cannot be later than the snapshot version.
+Later versions verify the genesis at its immutable creation time and the current
+owner at that version's issue time. Expiring a historical lease does not freeze
+the group. Legacy genesis has no `issued_at` field and its creator certificate
+remains byte-identical when another owner device writes a version.
+
+Pre-r4 experimental native snapshots without a signed genesis time fail closed;
+they cannot be safely assigned a creation time after signing. Recreate such an
+experimental group with fresh authority; existing stored message history is not
+erased. Existing legacy snapshots retain their encoding and verification rules.
+
 Receivers accept a higher creator-certified epoch, including an arbitrary gap.
 There is no operation history, delegated checkpoint or cross-root state writer.
 A verified ownership transfer must bind the issuing device's current base hash
@@ -86,10 +99,20 @@ rename, add, remove, and owner-state certification return
 The equivalent CLI forms are `rf group create --creator <principal_id>`,
 `rf group member add --member-device <principal_id>` (the compatibility option
 name accepts the same member selector as the bus), `rf group send --sender
-<principal_id>`, and `rf group rename --name <name>`. Create, add, send, rename,
-and remove refusals have distinct local-bus codes: `GroupCreateRefused`,
+<principal_id>`, and `rf group rename --name <name>`. Native create, add, send, rename,
+and remove generic refusals have distinct local-bus codes: `GroupCreateRefused`,
 `GroupMemberAddRefused`, `GroupSendRefused`, `GroupRenameRefused`, and
 `GroupMemberRemoveRefused`.
+
+Legacy generic refusals retain `ValidationFailed`. Existing typed codes are
+preserved for both account models. An unavailable native group actor lease has
+the dedicated crypto error and bus code `GroupLeaseUnavailable` (C ABI:
+`PermissionDenied`). No mutation is committed. The owner/admin must obtain a
+fresh branch certificate through account authority refresh, then retry the same
+operation; no group reset is required. Missing primary vault access continues
+to return `CustodyVaultUnavailable`. Received native sender display is selected
+from the verified device record; incomplete authority refuses delivery rather
+than displaying a native device id as a principal.
 
 An explicit root makes `member_id` literal, including address-shaped names.
 Otherwise the selector must be unambiguous. Existing owner/admin role rules apply;

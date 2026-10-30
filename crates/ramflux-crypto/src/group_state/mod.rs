@@ -260,7 +260,6 @@ pub fn certify_native_group_state_actor(
         device_id: branch.device_id.clone(),
         device_epoch: branch.device_epoch,
     };
-    record.authorize(&reference, "group", now)?;
     let device = body
         .devices
         .iter()
@@ -289,6 +288,7 @@ pub fn certify_native_group_state_actor(
     };
     identity_valid(&actor.identity)?;
     verify_group_state_actor_at(&actor, Some(now))?;
+    record.authorize(&reference, "group", now)?;
     // Keep construction visibly distinct from the legacy root-signature path.
     actor.root_signature.clear();
     Ok(actor)

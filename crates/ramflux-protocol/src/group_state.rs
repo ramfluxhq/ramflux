@@ -109,6 +109,9 @@ pub struct GroupStateGenesis {
     pub group_id: String,
     pub conversation_id: String,
     pub actor: GroupStateActor,
+    /// Signed native creation time. Legacy genesis encoding omits this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<u64>,
     pub max_members: u32,
     pub new_member_history: String,
     pub signature: String,

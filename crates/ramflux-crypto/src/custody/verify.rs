@@ -169,7 +169,7 @@ pub(crate) fn verify_group_native_authority(
             || branch.not_before > now.saturating_add(CLOCK_SKEW_SECONDS)
             || now > branch.expires_at.saturating_add(CLOCK_SKEW_SECONDS))
     {
-        return Err(reject("native group actor lease unavailable"));
+        return Err(CryptoError::GroupLeaseUnavailable);
     }
     Ok(())
 }

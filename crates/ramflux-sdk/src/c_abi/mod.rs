@@ -821,6 +821,9 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
             RamfluxErrorCode::UnsupportedVersion
         }
         SdkError::CustodyRandomUnavailable => RamfluxErrorCode::CryptoFailed,
+        SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
+            RamfluxErrorCode::PermissionDenied
+        }
         SdkError::Crypto(_) | SdkError::SignatureVerificationFailed(_) => {
             RamfluxErrorCode::CryptoFailed
         }
@@ -905,3 +908,6 @@ impl CAbiError {
 #[cfg(test)]
 #[path = "transport_error_tests.rs"]
 mod transport_error_tests;
+
+#[cfg(test)]
+mod group_error_tests;

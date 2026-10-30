@@ -117,7 +117,21 @@ pub(super) fn verify(snapshot: &GroupStateSnapshot) -> Result<(), CryptoError> {
     let issued_at = u64::try_from(snapshot.issued_at).map_err(|_| invalid("group clock"))?;
     // Genesis is immutable historical evidence. Its branch lease only had to be valid when the
     // group was created; requiring that lease at every later epoch would freeze the group.
-    verify_group_state_actor(&snapshot.genesis.actor)?;
+    if snapshot.genesis.actor.native_authority.is_some() {
+        let created_at = snapshot
+            .genesis
+            .issued_at
+            .filter(|created_at| {
+                *created_at <= ramflux_protocol::MAX_SAFE_JSON_INTEGER && *created_at <= issued_at
+            })
+            .ok_or_else(|| invalid("native genesis creation time unavailable"))?;
+        verify_group_state_actor_at(&snapshot.genesis.actor, Some(created_at))?;
+    } else {
+        if snapshot.genesis.issued_at.is_some() {
+            return Err(invalid("legacy genesis creation time must be absent"));
+        }
+        verify_group_state_actor(&snapshot.genesis.actor)?;
+    }
     verify_group_state_actor_at(&snapshot.creator, Some(issued_at))?;
     crate::verify_canonical_signature(
         &canonical_json_bytes(&without_signature(&snapshot.genesis, GENESIS_DOMAIN)?)?,
@@ -257,6 +271,11 @@ fn create_with_signer(
         group_id: input.group_id.into(),
         conversation_id: input.conversation_id.into(),
         actor: actor.clone(),
+        issued_at: if actor.native_authority.is_some() {
+            Some(u64::try_from(input.now).map_err(|_| invalid("group clock"))?)
+        } else {
+            None
+        },
         max_members: input.max_members,
         new_member_history: input.new_member_history.into(),
         signature: String::new(),
@@ -448,7 +467,9 @@ fn advance_as_with_signer(
         transition::apply(&mut snapshot.state, requester, &change, epoch, now)?;
         // Carry the current owner's authority for this version, not the branch lease captured at
         // group creation. The requester remains the member that authorized the mutation.
-        snapshot.creator = actor.clone();
+        if actor.native_authority.is_some() {
+            snapshot.creator = actor.clone();
+        }
     }
     sign_with_signer(signer, branch, actor, snapshot)
 }

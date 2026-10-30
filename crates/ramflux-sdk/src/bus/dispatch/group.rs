@@ -4,19 +4,27 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+#[cfg(test)]
+mod native_contract_tests;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn dispatch_group_bus_request(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    let native = request
+        .account_id
+        .as_deref()
+        .and_then(|id| state.accounts.get(id))
+        .is_some_and(|account| account.client.born_v3_account.is_some());
     let result = dispatch_group_bus_request_inner(request, state).await;
-    result.map_err(|error| group_operation_error(&request.method, error))
+    result.map_err(|error| group_operation_error(&request.method, error, native))
 }
 
-fn group_operation_error(method: &str, error: SdkError) -> SdkError {
+fn group_operation_error(method: &str, error: SdkError, native: bool) -> SdkError {
     let Some(operation) = crate::GroupOperation::for_method(method) else { return error };
-    if matches!(&error, SdkError::GroupRefused { .. })
+    if !native
+        || matches!(&error, SdkError::GroupRefused { .. })
         || crate::bus::io::local_bus_error_code(&error) != "ValidationFailed"
     {
         return error;
@@ -1476,18 +1484,20 @@ mod tests {
             (SdkError::CapabilityDenied("group".into()), "CapabilityDenied"),
         ];
         for (error, expected) in cases {
-            let wrapped = group_operation_error("group.send", error);
+            let wrapped = group_operation_error("group.send", error, true);
             assert_eq!(crate::bus::io::local_bus_error_code(&wrapped), expected);
         }
         let transfer = group_operation_error(
             "group.member.remove",
             SdkError::Protocol(ramflux_protocol::ProtocolError::GroupTransferRequiresSync),
+            true,
         );
         assert_eq!(
             crate::bus::io::local_bus_error_body(&transfer).reason_code.as_deref(),
             Some("head_or_removal_floor_mismatch")
         );
-        let generic = group_operation_error("group.send", SdkError::LocalBus("denied".into()));
+        let generic =
+            group_operation_error("group.send", SdkError::LocalBus("denied".into()), true);
         assert_eq!(crate::bus::io::local_bus_error_code(&generic), "GroupSendRefused");
     }
 
@@ -1534,7 +1544,7 @@ mod tests {
         })
     }
 
-    fn account_state(
+    pub(super) fn account_state(
         test_name: &str,
         account_id: &str,
         principal: &str,

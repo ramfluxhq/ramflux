@@ -96,6 +96,17 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {
+        let record = self.authenticated_sender_record(entry)?;
+        Ok(record["principal_id"]
+            .as_str()
+            .ok_or_else(|| invalid("sender principal missing"))?
+            .to_owned())
+    }
+
+    pub(crate) fn authenticated_sender_record(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Value, SdkError> {
         let record =
             self.trusted_device(&self.device_identity(&self.inbound_device_reference(entry)?)?)?;
         if let Some(hint) =
@@ -104,7 +115,8 @@ impl RamfluxClient {
         {
             return Err(invalid("sender Root hint differs from verified device owner"));
         }
-        verify_sender_record(entry, &record)
+        verify_sender_record(entry, &record)?;
+        Ok(record)
     }
 
     pub(super) fn authenticated_direct_participant(
