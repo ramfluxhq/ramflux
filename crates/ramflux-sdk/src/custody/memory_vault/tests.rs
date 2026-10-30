@@ -68,12 +68,7 @@ fn home_migration_memory_fixture_requires_a_new_explicit_approval_for_each_exact
         Err(SdkError::HomeMigrationRefused(Refusal::CustodyUserPresenceUnavailable))
     ));
     // An older provider with an available primary but no presence-specific operation also refuses.
-    let old_provider = TestVault::default();
-    old_provider.store_new(reference, &vault.load_primary(reference)?)?;
-    assert!(matches!(
-        old_provider.sign_home_authorization(request()?),
-        Err(SdkError::HomeMigrationRefused(Refusal::CustodyUserPresenceUnavailable))
-    ));
+    assert_older_provider_refuses(reference, &vault.load_primary(reference)?, request()?)?;
     vault.approve_migration_once_for_test("human", &hash(1))?;
     assert!(matches!(
         vault.approve_migration_once_for_test("human", &hash(1)),
@@ -105,6 +100,7 @@ fn home_migration_memory_fixture_requires_a_new_explicit_approval_for_each_exact
         vault.sign_home_authorization(request()?),
         Err(SdkError::HomeMigrationRefused(Refusal::CustodyUserPresenceUnavailable))
     ));
+    assert_consumed_cannot_rearm(&vault, &hash(1), &hash(7))?;
     assert!(
         HomeAuthorizationRequest::new(HomeAuthorizationInput {
             local_account_id: "human",
@@ -117,5 +113,32 @@ fn home_migration_memory_fixture_requires_a_new_explicit_approval_for_each_exact
         })
         .is_err()
     );
+    Ok(())
+}
+
+fn assert_older_provider_refuses(
+    reference: &str,
+    primary: &SelfSigningKey,
+    request: HomeAuthorizationRequest<'_>,
+) -> Result<(), SdkError> {
+    let old_provider = TestVault::default();
+    old_provider.store_new(reference, primary)?;
+    assert!(matches!(
+        old_provider.sign_home_authorization(request),
+        Err(SdkError::HomeMigrationRefused(Refusal::CustodyUserPresenceUnavailable))
+    ));
+    Ok(())
+}
+
+fn assert_consumed_cannot_rearm(
+    vault: &MemoryPrimaryVault,
+    consumed: &str,
+    next: &str,
+) -> Result<(), SdkError> {
+    assert!(matches!(vault.approve_migration_once_for_test("human", consumed),
+        Err(SdkError::LocalBusRefused { code, .. }) if code == "MigrationApprovalConsumed"));
+    vault.approve_migration_once_for_test("human", next)?;
+    assert!(matches!(vault.approve_migration_once_for_test("human", consumed),
+        Err(SdkError::LocalBusRefused { code, .. }) if code == "MigrationApprovalConsumed"));
     Ok(())
 }

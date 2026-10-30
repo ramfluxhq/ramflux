@@ -5,11 +5,7 @@
 // Only this private FFI boundary permits unsafe. The safe password setter updates duplicate
 // items, so it cannot implement our insert-only primary replacement protocol.
 #![allow(unsafe_code)]
-use super::{
-    SdkError, Zeroizing,
-    presence::{Items, protected_reference},
-};
-use crate::custody::home_authorization::unavailable;
+use super::{SdkError, Zeroizing, presence::Items, primary_items};
 use core_foundation::{
     base::{CFType, TCFType},
     boolean::CFBoolean,
@@ -41,6 +37,16 @@ unsafe extern "C" {
 }
 pub(super) struct KeychainItems;
 type Pairs = Vec<(CFString, CFType)>;
+fn unavailable() -> SdkError {
+    SdkError::CustodyVaultUnavailable
+}
+fn keychain_status(call: impl FnOnce() -> i32) -> i32 {
+    #[cfg(test)]
+    if let Some(status) = tests::FORCED_STATUS.get() {
+        return status;
+    }
+    call()
+}
 fn pairs(reference: &str, interactive: bool) -> Pairs {
     // SAFETY: Security's keys/values are process-lifetime CFString constants. Each returned
     // wrapper retains its value, and dictionaries own all values across the synchronous call.
@@ -87,7 +93,9 @@ fn copy(reference: &str, data: bool, interactive: bool) -> Result<Option<CFType>
     let query = CFDictionary::from_CFType_pairs(&fields);
     let mut value = std::ptr::null();
     // SAFETY: query is a live immutable dictionary; value receives a create-rule result.
-    let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &raw mut value) };
+    let status = keychain_status(|| unsafe {
+        SecItemCopyMatching(query.as_concrete_TypeRef(), &raw mut value)
+    });
     // SAFETY: Any non-null copy result follows the create rule, including an anomalous
     // result accompanying an error. Wrap it before branching so every exit releases it.
     let owned = (!value.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(value) });
@@ -139,7 +147,9 @@ impl Items for KeychainItems {
         }
         let query = CFDictionary::from_CFType_pairs(&fields);
         // SAFETY: The dictionary owns the complete bounded value; no result is requested.
-        let status = unsafe { SecItemAdd(query.as_concrete_TypeRef(), std::ptr::null_mut()) };
+        let status = keychain_status(|| unsafe {
+            SecItemAdd(query.as_concrete_TypeRef(), std::ptr::null_mut())
+        });
         if status == security_framework_sys::base::errSecDuplicateItem {
             return Ok(false);
         }
@@ -164,7 +174,9 @@ impl Items for KeychainItems {
             )])
         };
         // SAFETY: Both dictionaries remain live for the synchronous update.
-        if unsafe { SecItemUpdate(query.as_concrete_TypeRef(), updates.as_concrete_TypeRef()) } != 0
+        if keychain_status(|| unsafe {
+            SecItemUpdate(query.as_concrete_TypeRef(), updates.as_concrete_TypeRef())
+        }) != 0
         {
             return Err(unavailable());
         }
@@ -173,7 +185,7 @@ impl Items for KeychainItems {
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
         let query = CFDictionary::from_CFType_pairs(&pairs(reference, false));
         // SAFETY: The exact service/account dictionary lives through the synchronous call.
-        let status = unsafe { SecItemDelete(query.as_concrete_TypeRef()) };
+        let status = keychain_status(|| unsafe { SecItemDelete(query.as_concrete_TypeRef()) });
         if status != 0 && status != errSecItemNotFound {
             return Err(unavailable());
         }
@@ -187,20 +199,10 @@ pub(super) fn preflight() -> Result<(), SdkError> {
         .map_err(|_| SdkError::CustodyVaultUnavailable)
 }
 pub(super) fn store_primary(reference: &str, secret: &[u8]) -> Result<(), SdkError> {
-    if KeychainItems.exists(reference)?
-        || !KeychainItems.insert(&protected_reference(reference), secret, true)?
-    {
-        return Err(SdkError::CustodyVaultUnavailable);
-    }
-    Ok(())
+    primary_items::store(&KeychainItems, reference, secret)
 }
 pub(super) fn get_primary(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-    let protected = protected_reference(reference);
-    if KeychainItems.exists(&protected)? {
-        KeychainItems.read(&protected, true)?.ok_or_else(unavailable)
-    } else {
-        KeychainItems.read(reference, false)?.ok_or_else(unavailable)
-    }
+    primary_items::load(&KeychainItems, reference)
 }
 pub(super) fn store_branch(reference: &str, secret: &[u8]) -> Result<(), SdkError> {
     if !KeychainItems.insert(reference, secret, false)? {
@@ -212,6 +214,8 @@ pub(super) fn get_branch(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError
     KeychainItems.read(reference, false)?.ok_or(SdkError::CustodyVaultUnavailable)
 }
 pub(super) fn delete(reference: &str) -> Result<(), SdkError> {
-    KeychainItems.delete(reference)?;
-    KeychainItems.delete(&protected_reference(reference))
+    primary_items::delete(&KeychainItems, reference)
 }
+
+#[cfg(test)]
+mod tests;
