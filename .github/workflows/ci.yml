@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           persist-credentials: false
 
@@ -40,12 +40,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           persist-credentials: false
 
       - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
@@ -75,12 +75,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           persist-credentials: false
 
       - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
 
       - name: Test SDK
         run: cargo test -p ramflux-sdk
@@ -97,12 +97,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           persist-credentials: false
 
       - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
 
       - name: Test workspace except SDK
         run: cargo test --workspace --exclude ramflux-sdk
