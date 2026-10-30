@@ -88,31 +88,6 @@ fn status_ready(status: &Value) -> bool {
     }
 }
 
-#[cfg(test)]
-mod status_tests {
-    use super::*;
-
-    #[test]
-    fn native_status_requires_live_unfenced_authority_and_supports_legacy_shape() {
-        let native = json!({
-            "account_id":"agent", "local_account_id":"agent", "state":"unlocked",
-            "networking":"live", "networking_reason":null, "display_name":"Agent",
-            "principal_id":"principal", "authority_blocked":false,
-            "principal_commitment":"commitment", "device_id":"device",
-            "target_delivery_id":"target", "node_id":"node", "session_id":"session",
-            "active_transport_kind":"quic", "pending_deliveries":0
-        });
-        assert!(status_ready(&native));
-        let mut pending = native.clone();
-        pending["networking"] = json!("networking_pending");
-        pending["networking_reason"] = json!({"kind":"node_unreachable","retry_after_ms":100});
-        assert!(!status_ready(&pending));
-        let mut fenced = native;
-        fenced["authority_blocked"] = json!(true);
-        assert!(!status_ready(&fenced));
-        assert!(status_ready(&json!({"client_mode":"headless_ai","local_device_authorized":true})));
-    }
-}
 pub(crate) async fn conversation(
     bus: &mut impl AgentBus,
     state: &Checkpoint,
@@ -238,5 +213,31 @@ pub(crate) async fn reply_outputs(
             });
         }
         Ok(outputs)
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn native_status_requires_live_unfenced_authority_and_supports_legacy_shape() {
+        let native = json!({
+            "account_id":"agent", "local_account_id":"agent", "state":"unlocked",
+            "networking":"live", "networking_reason":null, "display_name":"Agent",
+            "principal_id":"principal", "authority_blocked":false,
+            "principal_commitment":"commitment", "device_id":"device",
+            "target_delivery_id":"target", "node_id":"node", "session_id":"session",
+            "active_transport_kind":"quic", "pending_deliveries":0
+        });
+        assert!(status_ready(&native));
+        let mut pending = native.clone();
+        pending["networking"] = json!("networking_pending");
+        pending["networking_reason"] = json!({"kind":"node_unreachable","retry_after_ms":100});
+        assert!(!status_ready(&pending));
+        let mut fenced = native;
+        fenced["authority_blocked"] = json!(true);
+        assert!(!status_ready(&fenced));
+        assert!(status_ready(&json!({"client_mode":"headless_ai","local_device_authorized":true})));
     }
 }

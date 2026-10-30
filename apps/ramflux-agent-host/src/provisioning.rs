@@ -119,13 +119,13 @@ pub fn import_provisioning_bundle(
         || metadata.permissions().mode() & 0o077 != 0
         || metadata.uid() != rustix::process::geteuid().as_raw()
     {
-        let _ = file.set_permissions(std::fs::Permissions::from_mode(0));
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o0));
         return Err(Error::Config);
     }
     let link = std::fs::symlink_metadata(path).map_err(|_| Error::Storage)?;
     if link.file_type().is_symlink() || link.dev() != metadata.dev() || link.ino() != metadata.ino()
     {
-        let _ = file.set_permissions(std::fs::Permissions::from_mode(0));
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o0));
         return Err(Error::Config);
     }
     let mut bytes = Zeroizing::new(Vec::new());
@@ -133,7 +133,7 @@ pub fn import_provisioning_bundle(
     // Consume the only on-disk copy before parsing or touching the destination vault. This makes
     // malformed, mismatched, unsupported-vault and vault-write failures fail closed as well.
     if std::fs::remove_file(path).is_err() {
-        let _ = file.set_permissions(std::fs::Permissions::from_mode(0));
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o0));
         return Err(Error::Storage);
     }
     read.map_err(|_| Error::Storage)?;
