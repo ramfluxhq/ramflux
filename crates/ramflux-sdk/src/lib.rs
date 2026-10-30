@@ -83,8 +83,8 @@ pub use bus::{
     LocalBusGroupInviteAcceptRequest, LocalBusGroupInviteCreateRequest,
     LocalBusGroupMemberAddRequest, LocalBusGroupMemberBanRequest, LocalBusGroupMemberKickRequest,
     LocalBusGroupMemberRemoveRequest, LocalBusGroupMemberRoute, LocalBusGroupMessageDeleteRequest,
-    LocalBusGroupReceiveRequest, LocalBusGroupRequest, LocalBusGroupRoleSetRequest,
-    LocalBusGroupSendRequest, LocalBusGroupSenderKeyExportRequest,
+    LocalBusGroupNameSetRequest, LocalBusGroupReceiveRequest, LocalBusGroupRequest,
+    LocalBusGroupRoleSetRequest, LocalBusGroupSendRequest, LocalBusGroupSenderKeyExportRequest,
     LocalBusGroupSenderKeyImportRequest, LocalBusIoCause, LocalBusMcpApprovalDecisionRequest,
     LocalBusMcpApprovalGrantRequest, LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest,
     LocalBusMessageAckRequest, LocalBusMessageAttachmentInput, LocalBusMessageDeleteRequest,
@@ -116,7 +116,7 @@ pub use dm::{
     SdkDmAttachmentImportResult, SdkDmX3dhHeader, SdkFrankingEvidenceKind,
     SdkSelectedFrankingEvidence,
 };
-pub use error::SdkError;
+pub use error::{GroupOperation, SdkError};
 mod surface_refusal;
 pub use federation::{
     SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,

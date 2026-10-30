@@ -513,6 +513,14 @@ pub struct LocalBusGroupRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusGroupNameSetRequest {
+    pub group_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusGroupMemberAddRequest {
     pub group_id: String,
     pub member_id: String,

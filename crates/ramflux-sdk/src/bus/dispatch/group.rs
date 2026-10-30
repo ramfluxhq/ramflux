@@ -10,6 +10,25 @@ pub(crate) async fn dispatch_group_bus_request(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    let result = dispatch_group_bus_request_inner(request, state).await;
+    result.map_err(|error| {
+        if let Some(operation) = crate::GroupOperation::for_method(&request.method) {
+            if matches!(&error, SdkError::GroupRefused { .. }) {
+                error
+            } else {
+                SdkError::GroupRefused { operation, source: Box::new(error) }
+            }
+        } else {
+            error
+        }
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+async fn dispatch_group_bus_request_inner(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
     if let Some(response) = super::super::shared_group_sync::dispatch(
         request,
@@ -668,11 +687,17 @@ pub(crate) async fn dispatch_group_send_request(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let mut body: LocalBusGroupSendRequest = serde_json::from_value(request.body.clone())?;
-    account.client.assert_shared_group_send_capacity(&body.group_id, &body.sender_id)?;
-    let mut fanout_routes = if body.envelope_id.is_some()
+    let directed_transport = body.envelope_id.is_some()
         && body.source_principal_id.is_some()
-        && body.target_delivery_id.is_some()
-    {
+        && body.target_delivery_id.is_some();
+    if account.client.born_v3_account.is_some() && !directed_transport {
+        if body.sender_id != account.gateway_config.principal_id {
+            return Err(StorageError::GroupPermissionDenied.into());
+        }
+        body.sender_id.clone_from(&account.gateway_config.device_id);
+    }
+    account.client.assert_shared_group_send_capacity(&body.group_id, &body.sender_id)?;
+    let mut fanout_routes = if directed_transport {
         None
     } else {
         Some(super::super::group_delivery::resolve_current(account, &body).await?)

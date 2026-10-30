@@ -4,7 +4,8 @@
 //! Full authenticated group state, local actor certificates and root-qualified projections.
 use crate::prelude::*;
 use ramflux_crypto::{
-    VerifiedGroupState, advance_group_state, certify_group_state_actor, create_group_state,
+    VerifiedGroupState, advance_group_state, advance_native_group_state, certify_group_state_actor,
+    certify_native_group_state_actor, create_group_state, create_native_group_state,
 };
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateActor, GroupStateChange};
 use serde_json::{Value, json};
@@ -63,6 +64,15 @@ impl RamfluxClient {
     }
 
     pub(crate) fn owned_group_actor(&self, target: &str) -> Result<GroupStateActor, SdkError> {
+        if let Some(account) = &self.born_v3_account {
+            let branch = self.device_branch.as_ref().ok_or(SdkError::NetworkingPending)?;
+            return Ok(certify_native_group_state_actor(
+                account.verified(),
+                branch,
+                target,
+                crate::custody::network_now()?,
+            )?);
+        }
         Ok(certify_group_state_actor(
             self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
@@ -76,24 +86,44 @@ impl RamfluxClient {
         name: Option<String>,
         target: &str,
     ) -> Result<VerifiedGroupState, SdkError> {
+        self.shared_group_create_with_primary(group, conversation, name, target, None)
+    }
+    pub(crate) fn shared_group_create_with_primary(
+        &self,
+        group: &str,
+        conversation: &str,
+        name: Option<String>,
+        target: &str,
+        primary: Option<&ramflux_crypto::custody::SelfSigningKey>,
+    ) -> Result<VerifiedGroupState, SdkError> {
         if self.account_db()?.group_snapshot_epoch(group)?.is_some() {
             return Err(invalid("group already exists"));
         }
         let actor = self.owned_group_actor(target)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let verified = create_group_state(
-            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            branch,
-            &actor,
-            ramflux_crypto::GroupStateCreateInput {
-                group_id: group,
-                conversation_id: conversation,
-                max_members: 200,
-                new_member_history: "no_history",
-                name,
-                now: now_unix_timestamp(),
-            },
-        )?;
+        let input = ramflux_crypto::GroupStateCreateInput {
+            group_id: group,
+            conversation_id: conversation,
+            max_members: 200,
+            new_member_history: "no_history",
+            name,
+            now: now_unix_timestamp(),
+        };
+        let verified = if self.born_v3_account.is_some() {
+            create_native_group_state(
+                primary.ok_or(SdkError::CustodyVaultUnavailable)?,
+                branch,
+                &actor,
+                input,
+            )?
+        } else {
+            create_group_state(
+                self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+                branch,
+                &actor,
+                input,
+            )?
+        };
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&verified, &actor)?;
             crate::bus::enqueue_shared_group(self, &verified, None)
@@ -105,6 +135,15 @@ impl RamfluxClient {
         group: &str,
         target: &str,
         change: GroupStateChange,
+    ) -> Result<VerifiedGroupState, SdkError> {
+        self.shared_group_change_with_primary(group, target, change, None)
+    }
+    pub(crate) fn shared_group_change_with_primary(
+        &self,
+        group: &str,
+        target: &str,
+        change: GroupStateChange,
+        primary: Option<&ramflux_crypto::custody::SelfSigningKey>,
     ) -> Result<VerifiedGroupState, SdkError> {
         let previous = self
             .account_db()?
@@ -118,13 +157,24 @@ impl RamfluxClient {
         };
         self.check_group_transfer_lease(group, nonce)?;
         let actor = self.owned_group_actor(target)?;
-        let state = advance_group_state(
-            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &actor,
-            &previous,
-            change.clone(),
-        )?;
+        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let state = if self.born_v3_account.is_some() {
+            advance_native_group_state(
+                primary.ok_or(SdkError::CustodyVaultUnavailable)?,
+                branch,
+                &actor,
+                &previous,
+                change.clone(),
+            )?
+        } else {
+            advance_group_state(
+                self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+                branch,
+                &actor,
+                &previous,
+                change.clone(),
+            )?
+        };
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&state, &actor)?;
             self.record_group_write(&state, change)?;

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Shared group mutations and bounded state distribution on the existing account actor.
+#[cfg(test)]
+mod native_tests;
 mod outbox;
 mod recovery;
 mod requests;
@@ -52,25 +54,7 @@ pub(super) async fn dispatch(
         return Err(StorageError::GroupPermissionDenied.into());
     }
     let target = account.gateway_config.target_delivery_id.clone();
-    let change = if method == "group.create" {
-        if required(body, "creator_id")? != account.gateway_config.device_id {
-            return Err(SdkError::Storage(StorageError::GroupPermissionDenied));
-        }
-        None
-    } else if method == "group.member.add" {
-        let member = verified_member(account, body).await?;
-        Some(GroupStateChange::Add { member, role: required(body, "role")?.parse()? })
-    } else if method == "group.owner.transfer" {
-        Some(ownership_transfer(account, body).await?)
-    } else if method == "group.name.set" {
-        Some(GroupStateChange::SetName { name: required(body, "name")?.into() })
-    } else {
-        selected_change(
-            previous.as_ref().ok_or(StorageError::GroupPermissionDenied)?,
-            body,
-            method,
-        )?
-    };
+    let change = requested_change(account, previous.as_ref(), body, method).await?;
     let route = federation_route(body, change.as_ref())?;
     if let (Some(previous), Some(change)) = (&previous, &change)
         && account.client.owned_device_identity()?.root_commitment()
@@ -91,13 +75,33 @@ pub(super) async fn dispatch(
         let result = pending_metadata(&account.client, group, &request)?;
         return Ok(Some(result));
     }
+    let primary = native_group_primary(account).await?;
     account.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
         if let Some(change) = change {
-            account.client.shared_group_change(group, &target, change)?
+            if let Some(primary) = primary.as_ref() {
+                account.client.shared_group_change_with_primary(
+                    group,
+                    &target,
+                    change,
+                    Some(primary),
+                )?
+            } else {
+                account.client.shared_group_change(group, &target, change)?
+            }
         } else {
             let conversation = body["conversation_id"].as_str().unwrap_or(group);
             let name = body["name"].as_str().or_else(|| body["title"].as_str()).map(str::to_owned);
-            account.client.shared_group_create(group, conversation, name, &target)?
+            if let Some(primary) = primary.as_ref() {
+                account.client.shared_group_create_with_primary(
+                    group,
+                    conversation,
+                    name,
+                    &target,
+                    Some(primary),
+                )?
+            } else {
+                account.client.shared_group_create(group, conversation, name, &target)?
+            }
         };
         if let Some(route) = &route {
             account.client.persist_group_member_route(group, route)?;
@@ -119,6 +123,50 @@ pub(super) async fn dispatch(
     result["accepted"] = json!(true);
     Ok(Some(result))
 }
+
+async fn requested_change(
+    account: &LocalBusAccountState,
+    previous: Option<&ramflux_crypto::VerifiedGroupState>,
+    body: &Value,
+    method: &str,
+) -> Result<Option<GroupStateChange>, SdkError> {
+    if method == "group.create" {
+        let creator = required(body, "creator_id")?;
+        let valid = if account.client.born_v3_account.is_some() {
+            creator == account.gateway_config.principal_id
+                || creator == account.gateway_config.device_id
+                || creator == account.gateway_config.target_delivery_id
+        } else {
+            creator == account.gateway_config.device_id
+        };
+        return if valid { Ok(None) } else { Err(StorageError::GroupPermissionDenied.into()) };
+    }
+    if method == "group.member.add" {
+        let member = verified_member(account, body).await?;
+        return Ok(Some(GroupStateChange::Add { member, role: required(body, "role")?.parse()? }));
+    }
+    if method == "group.owner.transfer" {
+        return Ok(Some(ownership_transfer(account, body).await?));
+    }
+    if method == "group.name.set" {
+        return Ok(Some(GroupStateChange::SetName { name: required(body, "name")?.into() }));
+    }
+    selected_change(previous.ok_or(StorageError::GroupPermissionDenied)?, body, method)
+}
+
+async fn native_group_primary(
+    account: &LocalBusAccountState,
+) -> Result<Option<ramflux_crypto::custody::SelfSigningKey>, SdkError> {
+    let Some(native) = account.client.born_v3_account.as_deref().cloned() else {
+        return Ok(None);
+    };
+    let setup = account.native_setup.as_ref().ok_or(SdkError::CustodyVaultUnavailable)?;
+    let vault = super::custody_setup::primary_provider(setup);
+    tokio::task::spawn_blocking(move || native.group_primary(vault.as_ref()))
+        .await
+        .map_err(|_| SdkError::CustodyVaultUnavailable)?
+        .map(Some)
+}
 fn selected_change(
     previous: &ramflux_crypto::VerifiedGroupState,
     body: &Value,
@@ -127,15 +175,38 @@ fn selected_change(
     Ok({
         let selected = required(body, "member_id")?;
         let explicit = body["member_principal_commitment"].as_str();
+        let principal_member = if explicit.is_none() {
+            let matches = previous
+                .view()
+                .members
+                .iter()
+                .filter(|member| member.identity.principal_id == selected)
+                .collect::<Vec<_>>();
+            if matches.len() > 1 {
+                return Err(SdkError::LocalBus(
+                    "member principal selects multiple explicit devices; use a qualified device address"
+                        .into(),
+                ));
+            }
+            matches.into_iter().next()
+        } else {
+            None
+        };
         let address = if explicit.is_none()
+            && principal_member.is_none()
             && !previous.view().members.iter().any(|m| m.identity.device_id == selected)
         {
             ramflux_protocol::parse_qualified_device_id(selected)?
         } else {
             None
         };
-        let member = address.as_ref().map_or(selected, |(_, device)| device.as_str());
-        let selected_root = explicit.or_else(|| address.as_ref().map(|(root, _)| root.as_str()));
+        let member = principal_member.map_or_else(
+            || address.as_ref().map_or(selected, |(_, device)| device.as_str()),
+            |member| member.identity.device_id.as_str(),
+        );
+        let selected_root = explicit
+            .or_else(|| address.as_ref().map(|(root, _)| root.as_str()))
+            .or_else(|| principal_member.map(|member| member.identity.root_commitment.as_str()));
         let matches = previous
             .view()
             .members
@@ -182,15 +253,22 @@ async fn verified_member(
 ) -> Result<GroupMemberIdentity, SdkError> {
     let selected = required(body, "member_id")?;
     let explicit = body["member_principal_commitment"].as_str();
+    let principal_selection =
+        if explicit.is_none() { cached_principal_member(&account.client, selected)? } else { None };
     // An explicit root makes member_id a literal device name, including address-shaped names.
-    let address = if explicit.is_none() {
+    let address = if explicit.is_none() && principal_selection.is_none() {
         ramflux_protocol::parse_qualified_device_id(selected)?
     } else {
         None
     };
-    let device = address.as_ref().map_or(selected, |(_, device)| device.as_str());
+    let device = principal_selection.as_ref().map_or_else(
+        || address.as_ref().map_or(selected, |(_, device)| device.as_str()),
+        |(_, device)| device.as_str(),
+    );
     let gateway = account.engine.as_ref().map_or(&account.gateway_config, |engine| &engine.config);
-    let expected = explicit.or_else(|| address.as_ref().map(|(root, _)| root.as_str()));
+    let expected = explicit
+        .or_else(|| address.as_ref().map(|(root, _)| root.as_str()))
+        .or_else(|| principal_selection.as_ref().map(|(root, _)| root.as_str()));
     let manifest = if let Some(federation) = body.get("federation").filter(|value| !value.is_null())
     {
         let federation: LocalBusFederationRoute = serde_json::from_value(federation.clone())?;
@@ -226,6 +304,31 @@ async fn verified_member(
     };
     account.client.persist_identity_directory(&manifest)?;
     Ok(identity)
+}
+
+fn cached_principal_member(
+    client: &RamfluxClient,
+    selector: &str,
+) -> Result<Option<(String, String)>, SdkError> {
+    let Some(identity) = client.account_db()?.client_record("identity", selector)? else {
+        return Ok(None);
+    };
+    let Some(root) = identity["contact_identity_commitment"].as_str() else {
+        return Ok(None);
+    };
+    let active = identity["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|device| device["device_id"].as_str())
+        .collect::<Vec<_>>();
+    if active.len() != 1 {
+        return Err(SdkError::LocalBus(
+            "member principal selects multiple active devices; use a qualified device address"
+                .into(),
+        ));
+    }
+    Ok(Some((root.into(), active[0].into())))
 }
 
 fn federation_route(
