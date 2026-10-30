@@ -13,7 +13,8 @@ impl ControlDriver for RecordingDriver {
         self.events.push("hangup delivery started");
         tokio::task::yield_now().await;
         self.events.push("hangup delivery completed");
-        if self.offline { Err(SdkError::InboundPending("peer offline".into())) } else { Ok(1) }
+        // The real path retains its retry and reports zero submitted controls when offline.
+        Ok(usize::from(!self.offline))
     }
     fn release(&mut self, _: &str, _: i64) -> impl Future<Output = Result<(), SdkError>> {
         self.events.push("lease released");
@@ -22,13 +23,15 @@ impl ControlDriver for RecordingDriver {
 }
 
 #[tokio::test]
-async fn hangup_delivery_completes_before_release_even_when_peer_is_offline() {
+async fn hangup_delivery_completes_before_release_even_when_peer_is_offline() -> Result<(), SdkError>
+{
     for offline in [false, true] {
         let mut driver = RecordingDriver { events: Vec::new(), offline };
-        assert_eq!(drive_controls(&mut driver, "call", 100).await.is_err(), offline);
+        assert_eq!(drive_controls(&mut driver, "call", 100).await?, usize::from(!offline));
         assert_eq!(
             driver.events,
             ["hangup delivery started", "hangup delivery completed", "lease released"]
         );
     }
+    Ok(())
 }

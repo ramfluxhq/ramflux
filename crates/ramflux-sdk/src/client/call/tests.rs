@@ -353,8 +353,9 @@ fn refused_callee_without_hangup_fails_at_original_lease_expiry() -> Result<(), 
 }
 
 #[test]
-fn caller_and_connecting_callee_still_fail_immediately_on_refusal() -> Result<(), SdkError> {
+fn connecting_endpoints_and_authority_refusals_still_fail_immediately() -> Result<(), SdkError> {
     let (mut origin, mut callee) = active_pair()?;
+    origin.row.state = "connecting".into();
     origin.lease_refused(VoiceCallFailureReason::RelayUnavailable, 121)?;
     assert_eq!(origin.row.end_reason.as_deref(), Some("failed"));
     callee.row.state = "connecting".into();
@@ -363,5 +364,40 @@ fn caller_and_connecting_callee_still_fail_immediately_on_refusal() -> Result<()
     let (_, mut callee) = active_pair()?;
     callee.lease_refused(VoiceCallFailureReason::AuthorityRefused, 121)?;
     assert_eq!(callee.row.end_reason.as_deref(), Some("failed"));
+    Ok(())
+}
+
+#[test]
+fn active_caller_waits_for_pending_callee_hangup_after_relay_refusal() -> Result<(), SdkError> {
+    let (mut origin, mut callee) = active_pair()?;
+    callee.end(false, 120)?;
+    assert_eq!(callee.row.end_reason.as_deref(), Some("completed"));
+    assert!(matches!(callee.pending.last().map(|c| &c.body), Some(CallAction::Hangup)));
+    origin.lease_refused(VoiceCallFailureReason::RelayUnavailable, 121)?;
+    assert_eq!(origin.row.state, "active");
+    assert!(origin.media_lost());
+    assert!(origin.allocation.is_none());
+    assert!(origin.receive_key.is_none());
+    assert_eq!(origin.send_key.as_ref(), &[0; 32]);
+    assert!(!origin.expire_media(199)?);
+    origin.apply(callee.pending.last().ok_or_else(|| invalid("hangup"))?, 199)?;
+    assert_eq!(origin.row.end_reason.as_deref(), Some("completed"));
+    assert_eq!(origin.row.failure_reason, None);
+    assert!(!origin.expire_media(201)?);
+    Ok(())
+}
+
+#[test]
+fn refused_caller_without_hangup_fails_at_original_lease_expiry() -> Result<(), SdkError> {
+    let (mut origin, _) = active_pair()?;
+    origin.lease_refused(VoiceCallFailureReason::RelayUnavailable, 121)?;
+    origin.lease_refused(VoiceCallFailureReason::RelayUnavailable, 190)?;
+    assert_eq!(origin.row.state, "active");
+    assert!(!origin.expire_media(199)?);
+    assert!(origin.expire_media(200)?);
+    assert_eq!(origin.row.end_reason.as_deref(), Some("failed"));
+    assert_eq!(origin.row.failure_reason, Some(VoiceCallFailureReason::RelayUnavailable));
+    assert!(origin.pending.iter().any(|c| matches!(c.body, CallAction::Failed)));
+    assert!(!origin.expire_media(201)?);
     Ok(())
 }

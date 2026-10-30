@@ -71,6 +71,8 @@ pub(super) async fn maintain_lease(
             next.next_lease_refresh = now.saturating_add(2);
             return Ok(());
         };
+        #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
+        super::refresh_barrier::wait().await?;
         let mut engine = account.take_live_engine().await?;
         let result =
             engine.voice_lease(VoiceLeaseRequest::Renew { consent: Box::new(consent) }).await;
@@ -90,7 +92,11 @@ pub(super) async fn maintain_lease(
                 next.pending.push(ack);
                 next.next_lease_refresh = now.saturating_add(20);
             }
-            Ok(VoiceLeaseResponse::Refused { reason }) => next.fail(reason, now)?,
+            Ok(VoiceLeaseResponse::Refused { reason }) => {
+                next.lease_refused(reason, now)?;
+                #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
+                super::refresh_barrier::refused().await?;
+            }
             _ => next.next_lease_refresh = now.saturating_add(5),
         }
     }
