@@ -2451,6 +2451,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "ramflux-core",
  "ramflux-protocol",
  "ramflux-sdk",
  "reqwest",

@@ -90,7 +90,8 @@ The bundle and the PRX bearer are separate credentials and neither belongs in th
 
 Each Ramflux conversation owns one persisted PRX session and at most one detached job. A second
 message while a job or human decision is pending receives `engine_busy`; it is not forwarded or
-queued. Replies are
+queued. Busy hints bypass the ordinary reply interval; they do not admit another provider turn.
+Replies are
 final text, not streamed. PRX tool access is scoped in PRX configuration, including
 `[autonomy.scopes]`, `[tool_tiering]`, and `exposed_tools`; the agent host does not broaden it.
 In `authorization: "supervised"` (the default), the host fetches the authoritative PRX approval
@@ -106,6 +107,12 @@ from clearing an unaccepted proposal or unresolved human step: if that update is
 records the refusal, retires the bridge, and returns `approval_timeout` while the signed task
 remains available for human resolution. It never retries a permanently refused update in a
 host-wide loop. A resumed turn can request another fresh human decision.
+
+After PRX confirms an approval, transient resume failures retry only the resume request, never
+the single-use approval POST. The shared core retry policy bounds this to three attempts with
+100/200 ms backoff; each attempt retains the configured HTTP timeout. Permanent resume refusals
+or exhausted retries retire the approval with `approval_unavailable`. Restoring state caps job
+and approval deadlines to their configured remaining maxima without extending expired work.
 
 For full authorization, set `authorization: "full"` here and `[autonomy] level = "full"` in PRX.
 PRX must execute within its own configured scopes without asking the bridge for human approval.

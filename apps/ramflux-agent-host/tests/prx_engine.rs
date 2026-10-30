@@ -442,6 +442,119 @@ async fn absent_prx_expiry_uses_the_configured_bound() -> TestResult {
 }
 
 #[tokio::test]
+async fn resume_retries_only_resume_after_the_approval_post_succeeds() -> TestResult {
+    let mut steps = approval_steps("1970-01-01T00:05:00Z");
+    steps.extend([
+        step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({})),
+        Step { delay_ms: 1500, ..step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1/resume?mode=async", StatusCode::SERVICE_UNAVAILABLE, json!({"error":"temporarily unavailable"})) },
+        step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1/resume?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+        step(hyper::Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"ok","reply":"resumed"}})),
+    ]);
+    let server = FakePrx::start(steps).await?;
+    let (_root, mut engine) = engine(&server, 1)?;
+    submit(&mut engine).await?;
+    let events = engine.poll(2).await?;
+    engine.acknowledge(&events[0])?;
+    engine.decide("conversation", "message", "decision-1", true, 3).await?;
+    assert!(
+        matches!(engine.poll(4).await?.as_slice(), [EngineEvent::Intents {intents, ..}] if matches!(intents.as_slice(), [Intent::ReplyText(reply)] if reply == "resumed"))
+    );
+    let seen = server.seen().await;
+    assert_eq!(
+        seen.iter()
+            .filter(|r| r.as_str() == "POST /api/sessions/session-1/approvals/decision-1")
+            .count(),
+        1
+    );
+    assert_eq!(seen.iter().filter(|r| r.ends_with("/resume?mode=async")).count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_retry_budget_is_bounded_and_permanent_refusals_are_not_retried() -> TestResult {
+    for (status, attempts) in [(StatusCode::CONFLICT, 1), (StatusCode::SERVICE_UNAVAILABLE, 3)] {
+        let mut steps = approval_steps("1970-01-01T00:05:00Z");
+        steps.push(step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/approvals/decision-1",
+            StatusCode::OK,
+            json!({}),
+        ));
+        for _ in 0..attempts {
+            steps.push(step(
+                hyper::Method::POST,
+                "/api/sessions/session-1/approvals/decision-1/resume?mode=async",
+                status,
+                json!({"error":"unavailable"}),
+            ));
+        }
+        steps.push(step(
+            hyper::Method::DELETE,
+            "/api/sessions/session-1/approvals/decision-1",
+            StatusCode::OK,
+            json!({}),
+        ));
+        let server = FakePrx::start(steps).await?;
+        let (_root, mut engine) = engine(&server, 1)?;
+        submit(&mut engine).await?;
+        let events = engine.poll(2).await?;
+        engine.acknowledge(&events[0])?;
+        assert!(matches!(
+            engine.decide("conversation", "message", "decision-1", true, 3).await,
+            Err(Error::EngineRejected)
+        ));
+        assert!(!engine.is_busy("conversation"));
+        let seen = server.seen().await;
+        assert_eq!(
+            seen.iter()
+                .filter(|r| r.as_str() == "POST /api/sessions/session-1/approvals/decision-1")
+                .count(),
+            1
+        );
+        assert_eq!(seen.iter().filter(|r| r.ends_with("/resume?mode=async")).count(), attempts);
+    }
+    Ok(())
+}
+
+fn now_ms() -> TestResult<u64> {
+    Ok(u64::try_from(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis(),
+    )?)
+}
+
+#[tokio::test]
+async fn restore_caps_corrupt_job_and_approval_deadlines_without_extending_expired_work()
+-> TestResult {
+    let server = FakePrx::start(approval_steps("1970-01-01T00:05:00Z")).await?;
+    let (_root, mut engine) = engine(&server, 1)?;
+    submit(&mut engine).await?;
+    let mut state = engine.checkpoint()?.ok_or("state")?;
+    state["jobs"]["conversation"]["deadline_ms"] = json!(u64::MAX);
+    let before = now_ms()?;
+    engine.restore(Some(&state))?;
+    let restored = engine.checkpoint()?.ok_or("state")?;
+    let deadline = restored["jobs"]["conversation"]["deadline_ms"].as_u64().ok_or("deadline")?;
+    assert!(deadline >= before + 120_000 && deadline <= now_ms()? + 120_000);
+    state["jobs"]["conversation"]["deadline_ms"] = json!(1);
+    engine.restore(Some(&state))?;
+    assert_eq!(engine.checkpoint()?.ok_or("state")?["jobs"]["conversation"]["deadline_ms"], 1);
+    // Restore the original job to obtain a real completed approval record.
+    state["jobs"]["conversation"]["deadline_ms"] = json!(120_001);
+    engine.restore(Some(&state))?;
+    engine.poll(2).await?;
+    let mut state = engine.checkpoint()?.ok_or("state")?;
+    state["completed"]["conversation"]["approval"]["deadline_ms"] = json!(u64::MAX);
+    let before = now_ms()?;
+    engine.restore(Some(&state))?;
+    let restored = engine.checkpoint()?.ok_or("state")?;
+    let deadline = restored["completed"]["conversation"]["approval"]["deadline_ms"]
+        .as_u64()
+        .ok_or("deadline")?;
+    assert!(deadline >= before + 600_000 && deadline <= now_ms()? + 600_000);
+    Ok(())
+}
+
+#[tokio::test]
 async fn unavailable_prx_is_silent_and_logs_once_without_bearer_on_stderr() -> TestResult {
     if std::env::var_os("RAMFLUX_PRX_STDERR_CHILD").is_some() {
         let server = FakePrx::start(Vec::new()).await?;

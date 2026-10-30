@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ramflux-core.workspace = true
 ramflux-sdk.workspace = true
 ramflux-protocol.workspace = true
 serde.workspace = true
