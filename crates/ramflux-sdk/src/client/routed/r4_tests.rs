@@ -146,10 +146,10 @@ async fn group_message_before_membership_update_retries_then_delivers_without_ac
         &alice.client.export_group_sender_key_distribution("ordered", "alice")?,
     )?;
     // The receive clock and dependency redrive can straddle a wall-clock second.
-    // Drive synchronization until delivery, using only the durable retry after redelivery.
+    // Only that boundary may require a second sync, using the retained local retry.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut redelivery = vec![entry];
-    loop {
+    for round in 1..=2 {
         let (engine, retry_writes) = Inbox::engine_with_acknowledgements(
             account.gateway_config.clone(),
             std::mem::take(&mut redelivery),
@@ -173,7 +173,13 @@ async fn group_message_before_membership_update_retries_then_delivers_without_ac
             tokio::time::Instant::now() < deadline,
             "group message did not retry after membership update"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(round, 1, "membership redrive did not deliver within two sync rounds");
+        // Redrive has already sampled the wall clock, even if receive sampled the prior second.
+        // The ordinary two-second backoff must not satisfy this dependency-wakeup assertion.
+        assert!(
+            account.client.account_db()?.inbox_retry_ready(&retry_key, now_unix_timestamp())?,
+            "membership redrive did not make the retained retry due"
+        );
     }
     let messages = account.client.direct_messages("ordered-thread")?;
     assert_eq!(messages.len(), 1);
