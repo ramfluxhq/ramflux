@@ -13,12 +13,22 @@ mod store;
 pub(crate) use discovery::{discovery_origin, fetch_client_record};
 pub use profile::{NodeGateway, NodePinSource, NodeProfile, NodeRelay};
 pub(crate) use store::{NodeStore, PendingNode};
+const NODE_RETRY_AFTER_MS: u64 = 5_000;
 pub(crate) async fn resolve_node_addr(addr: &str) -> Result<SocketAddr, SdkError> {
-    tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host(addr))
+    let resolved = tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host(addr))
         .await
-        .map_err(|_| node_error("node DNS lookup timed out"))??
-        .next()
-        .ok_or_else(|| node_error("node address has no resolved addresses"))
+        .map_err(|_| SdkError::NodeUnreachable {
+            retry_after_ms: NODE_RETRY_AFTER_MS,
+            source: Box::new(node_error("node DNS lookup timed out")),
+        })?
+        .map_err(|error| SdkError::NodeUnreachable {
+            retry_after_ms: NODE_RETRY_AFTER_MS,
+            source: Box::new(error.into()),
+        })?;
+    resolved.into_iter().next().ok_or_else(|| SdkError::NodeUnreachable {
+        retry_after_ms: NODE_RETRY_AFTER_MS,
+        source: Box::new(node_error("node address has no resolved addresses")),
+    })
 }
 
 pub(crate) fn node_error(message: &str) -> SdkError {

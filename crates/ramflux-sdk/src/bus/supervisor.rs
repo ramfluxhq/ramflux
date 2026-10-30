@@ -306,6 +306,7 @@ impl Supervisor {
         &self,
         id: &str,
         passphrase: zeroize::Zeroizing<String>,
+        home_node_id: Option<String>,
     ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
         self.start_event_router();
         let existing = self.accounts.borrow().get(id).cloned();
@@ -322,7 +323,7 @@ impl Supervisor {
             self.accounts.borrow_mut().insert(id.into(), actor.clone());
             actor
         };
-        let result = actor.unlock_native(passphrase).await?;
+        let result = actor.unlock_native(passphrase, home_node_id).await?;
         self.set_active(id).await?;
         self.set_unlocked(id, true).await?;
         Ok(result)

@@ -110,7 +110,7 @@ pub(crate) async fn recover(socket: &Path, account: &str) -> Result<(), RfError>
 pub(crate) async fn create(socket: &Path, display_name: &str) -> Result<(), RfError> {
     let mut terminal = Terminal::open()?;
     let mut client = ramflux_sdk::LocalBusCreationClient::connect(socket).await?;
-    client.begin(display_name, ramflux_protocol::PrincipalKind::Human).await?;
+    client.begin(display_name, ramflux_protocol::PrincipalKind::Human, None).await?;
     let result = create_confirm(&mut terminal, &mut client).await;
     if result.is_err() {
         let _ = client.cancel().await;

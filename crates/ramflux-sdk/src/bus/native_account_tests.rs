@@ -4,6 +4,7 @@
 //! Ordinary account actor lifecycle without access to the primary credential provider.
 use crate::custody::tests::{Root, TestVault, input, words};
 use crate::{LocalBusClient, LocalBusConfig, LocalBusFrame, custody::CreationCeremony};
+use ramflux_protocol::custody::CustodyRefusal;
 use serde_json::json;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -13,6 +14,31 @@ struct Stop(watch::Sender<bool>);
 impl Drop for Stop {
     fn drop(&mut self) {
         let _ = self.0.send(true);
+    }
+}
+
+fn node_profile(id: &str, gateway_addr: &str, seed: u8) -> crate::NodeProfile {
+    crate::NodeProfile {
+        discovery_url: format!("https://{id}"),
+        node_id: id.to_owned(),
+        node_public_key: ramflux_protocol::encode_base64url([seed; 32]),
+        pin_source: crate::NodePinSource::Operator,
+        ca_cert_pem: "test CA".to_owned(),
+        gateway: crate::NodeGateway {
+            quic_addr: gateway_addr.to_owned(),
+            tcp_addr: gateway_addr.to_owned(),
+            server_name: id.to_owned(),
+        },
+        relay: crate::NodeRelay { quic_addr: "127.0.0.1:1".to_owned(), server_name: id.to_owned() },
+        prekey_http_url: format!("https://{id}"),
+        signaling_turn_addr: String::new(),
+        protocol_versions: Vec::new(),
+        client_capabilities: Vec::new(),
+        discovered_at: 1,
+        expires_at: u64::MAX,
+        enabled: true,
+        builtin: false,
+        safety_warnings: std::collections::BTreeSet::new(),
     }
 }
 
@@ -136,8 +162,9 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         let _stop = Stop(stop);
         let mut ordinary = connect(&socket).await?;
         let mut ceremony = LocalBusCreationClient::connect(&socket).await?;
-        let pending =
-            ceremony.begin("New Ordinary Human", ramflux_protocol::PrincipalKind::Human).await?;
+        let pending = ceremony
+            .begin("New Ordinary Human", ramflux_protocol::PrincipalKind::Human, None)
+            .await?;
         assert!(pending.ceremony_id.starts_with("ceremony-"));
         assert!((1..=300_000).contains(&pending.expires_in_ms));
         let phrase = ceremony.show_once().await?;
@@ -158,18 +185,36 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
             .await?;
         assert_eq!(status["state"], "unlocked");
         assert_eq!(status["networking"], "networking_pending");
-        ordinary
-            .request(Some(account.account_id.clone()), "account", "account.lock", json!({}))
-            .await?;
+        assert_eq!(status["networking_reason"]["kind"], "no_node_selected");
+        let listed = ordinary.request(None, "account", "account.list", json!({})).await?;
+        assert_eq!(listed["account_details"][0]["networking_reason"]["kind"], "no_node_selected");
+        let account_id = account.account_id.clone();
+        ordinary.request(Some(account_id.clone()), "account", "account.lock", json!({})).await?;
         ordinary
             .request(
-                Some(account.account_id),
+                Some(account_id.clone()),
                 "account",
                 "account.unlock",
                 json!({"passphrase":"creation data secret"}),
             )
             .await?;
-        ceremony.begin("Failed Human", ramflux_protocol::PrincipalKind::Human).await?;
+        ordinary
+            .request(
+                Some(account_id),
+                "stream",
+                "bus.subscribe",
+                json!({"topics":["account.networking.changed"],"since_seq":0}),
+            )
+            .await?;
+        let networking =
+            tokio::time::timeout(Duration::from_secs(2), ordinary.next_event()).await??;
+        assert_eq!(networking.method, "account.networking.changed");
+        assert_eq!(networking.body["state"], "networking_pending");
+        assert_eq!(networking.body["networking_reason"]["kind"], "no_node_selected");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), ordinary.next_event()).await.is_err()
+        );
+        ceremony.begin("Failed Human", ramflux_protocol::PrincipalKind::Human, None).await?;
         drop(ceremony.show_once().await?);
         ceremony.hidden_challenge().await?;
         let wrong = std::array::from_fn(|_| Zeroizing::new("invalid".into()));
@@ -183,7 +228,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         assert_eq!(listed["account_details"].as_array().ok_or("accounts")?.len(), 1);
         assert!(matches!(
             ceremony
-                .begin("AI without custodian", ramflux_protocol::PrincipalKind::HeadlessAi)
+                .begin("AI without custodian", ramflux_protocol::PrincipalKind::HeadlessAi, None)
                 .await,
             Err(crate::SdkError::CustodySetupInvalid)
         ));
@@ -193,6 +238,108 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
     server?;
     flow?;
     Ok(())
+}
+
+#[tokio::test]
+async fn per_account_home_node_does_not_change_daemon_default() -> Result {
+    use crate::{LocalBusCreationClient, custody::CreationState};
+    use std::sync::Arc;
+    use zeroize::Zeroizing;
+
+    let root = Root::new()?;
+    let mut nodes = crate::node::NodeStore::default();
+    let default = node_profile("default.example", "127.0.0.1:1", 4);
+    let selected = node_profile("selected.example", "invalid node address", 5);
+    nodes.profiles.insert(default.node_id.clone(), default.clone());
+    nodes.profiles.insert(selected.node_id.clone(), selected.clone());
+    nodes.default_node_id = Some(default.node_id.clone());
+    nodes.save(&root.0)?;
+
+    let socket = root.0.join("per-account-node.sock");
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.custody_vault = Some(Arc::new(TestVault::default()));
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _stop = Stop(stop);
+        let mut ordinary = connect(&socket).await?;
+        let mut ceremony = LocalBusCreationClient::connect(&socket).await?;
+        ceremony
+            .begin(
+                "Selected Home Node",
+                ramflux_protocol::PrincipalKind::Human,
+                Some(&selected.node_id),
+            )
+            .await?;
+        let phrase = ceremony.show_once().await?;
+        let challenge = ceremony.hidden_challenge().await?;
+        let answers = words(&phrase, challenge)?;
+        drop(phrase);
+        let account =
+            ceremony.confirm(&answers, &Zeroizing::new("selected node data secret".into())).await?;
+        assert_eq!(account.networking, CreationState::NetworkingPending);
+        let status = ordinary
+            .request(Some(account.account_id), "account", "account.status", json!({}))
+            .await?;
+        assert_eq!(status["node_id"], selected.node_id);
+        assert_eq!(status["networking_reason"]["kind"], "node_unreachable");
+        let saved = crate::node::NodeStore::load(&root.0, &[])?;
+        assert_eq!(saved.default_node_id.as_deref(), Some(default.node_id.as_str()));
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    server?;
+    flow?;
+    Ok(())
+}
+
+#[test]
+fn node_unreachable_reason_comes_from_typed_transport_failure() {
+    let error = crate::SdkError::NodeUnreachable {
+        retry_after_ms: 7_500,
+        source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into()),
+    };
+    assert_eq!(
+        super::native_account::networking_reason(&error),
+        Some(crate::AccountNetworkingReason::NodeUnreachable { retry_after_ms: 7_500 })
+    );
+}
+
+#[test]
+fn gateway_without_custody_configuration_has_typed_reason() {
+    let error = crate::SdkError::CustodyNetwork(CustodyRefusal::Unsupported);
+    assert_eq!(
+        super::native_account::networking_reason(&error),
+        Some(crate::AccountNetworkingReason::NodeCustodyUnavailable)
+    );
+}
+
+#[test]
+fn pool_busy_refusal_has_retryable_typed_reason() {
+    let error = crate::SdkError::CustodyNetwork(CustodyRefusal::Busy);
+    assert_eq!(
+        super::native_account::networking_reason(&error),
+        Some(crate::AccountNetworkingReason::NodeBusy { retry_after_ms: 16_000 })
+    );
+}
+
+#[test]
+fn registration_refusal_preserves_typed_code() {
+    let error = crate::SdkError::CustodyNetwork(CustodyRefusal::PrincipalIdTaken);
+    assert_eq!(
+        super::native_account::networking_reason(&error),
+        Some(crate::AccountNetworkingReason::RegistrationRefused {
+            code: CustodyRefusal::PrincipalIdTaken,
+        })
+    );
+}
+
+#[test]
+fn expired_custody_session_has_typed_reason() {
+    let error = crate::SdkError::CustodyNetwork(CustodyRefusal::SessionExpired);
+    assert_eq!(
+        super::native_account::networking_reason(&error),
+        Some(crate::AccountNetworkingReason::CustodyExpired)
+    );
 }
 
 #[tokio::test]

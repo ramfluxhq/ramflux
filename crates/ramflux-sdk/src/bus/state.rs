@@ -248,102 +248,109 @@ impl LocalBusAccountState {
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SdkError>> + '_>> {
         Box::pin(async move {
-            let root = self.client.account_index()?.root().to_path_buf();
-            let id = self.client.account_db()?.local_account_id.clone();
             let native = self.client.born_v3_account.is_some();
+            let result = self.ensure_gateway_live_inner(native).await;
             if native {
-                self.prepare_native_branch().await?;
+                super::native_account::record_networking(self, result.as_ref().err())?;
             }
-            let path = local_bus_account_manifest_path(&root, &id);
-            let mut pending = if !native && super::daemon::account_manifest_available(&path) {
-                Some(read_local_bus_account_manifest(&path)?)
-            } else {
-                None
-            };
-            let refresh_due = !native && self.client.own_proof_refresh_due(now_unix_timestamp())?;
-            if let Some(manifest) =
-                pending.as_ref().filter(|manifest| manifest.activation_pending || refresh_due)
-            {
-                self.client
-                    .initialize_and_publish_prekey_bundle_via_gateway_request(
-                        &self.gateway_config,
-                        &manifest.principal_commitment,
-                        &manifest.device_id,
-                        &manifest.target_delivery_id,
-                        manifest.device_seed,
-                    )
-                    .await
-                    .map_err(|error| {
-                        if refresh_due && !manifest.activation_pending {
-                            SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
-                        } else {
-                            error
-                        }
-                    })?;
-                self.client
-                    .cache_verified_device_manifest(
-                        &self.gateway_config,
-                        &manifest.principal_commitment,
-                        "account.create",
-                    )
-                    .await
-                    .map_err(|error| {
-                        if refresh_due && !manifest.activation_pending {
-                            SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
-                        } else {
-                            error
-                        }
-                    })?;
-            }
-            let target_delivery_id = self.target_delivery_id.clone();
-            let last_seen_inbox_seq = self
-                .client
-                .gateway_cursor(&target_delivery_id)?
-                .max(self.client.gateway_receive_cursor(&target_delivery_id)?);
-            let mut restored_resume_checkpoint = false;
-            let connected = if let Some(engine) = self.engine.as_mut() {
-                let ensure = Box::pin(engine.ensure_live(last_seen_inbox_seq));
-                gateway_connection_timeout(native, "gateway ensure live", ensure).await
-            } else {
-                let mut config = self.gateway_config.clone();
-                config.last_seen_inbox_seq = last_seen_inbox_seq;
-                restored_resume_checkpoint = self.restore_gateway_resume_checkpoint(&mut config)?;
-                if config.device_branch.is_none()
-                    && let Some(branch) = self.client.device_branch.as_ref()
-                    && branch.principal_id == config.principal_id
-                    && branch.device_id == config.device_id
-                    && branch.device_epoch == config.device_epoch
-                {
-                    config.device_branch = Some(std::sync::Arc::new(branch.clone()));
-                }
-                self.engine = Some(
-                    gateway_connection_timeout(
-                        native,
-                        "gateway connect",
-                        Box::pin(GatewaySessionEngine::connect(config)),
-                    )
-                    .await?,
-                );
-                Ok(())
-            };
-            connected?;
-            self.finish_restored_resume_checkpoint(restored_resume_checkpoint)?;
-            if native {
-                super::native_account::finish_connection(self).await?;
-            }
-            self.persist_push_route_seq();
-            if self.gateway_config.push_route_clear_pending {
-                self.forget_confirmed_push_clear();
-            }
-            self.client.complete_backup_activation()?;
-            if let Some(manifest) = pending.as_mut().filter(|manifest| manifest.activation_pending)
-            {
-                manifest.activation_pending = false;
-                write_local_bus_account_manifest(&root, manifest)?;
-                self.activation_pending = false;
-            }
-            Ok(())
+            result
         })
+    }
+
+    async fn ensure_gateway_live_inner(&mut self, native: bool) -> Result<(), SdkError> {
+        let root = self.client.account_index()?.root().to_path_buf();
+        let id = self.client.account_db()?.local_account_id.clone();
+        if native {
+            self.prepare_native_branch().await?;
+        }
+        let path = local_bus_account_manifest_path(&root, &id);
+        let mut pending = if !native && super::daemon::account_manifest_available(&path) {
+            Some(read_local_bus_account_manifest(&path)?)
+        } else {
+            None
+        };
+        let refresh_due = !native && self.client.own_proof_refresh_due(now_unix_timestamp())?;
+        if let Some(manifest) =
+            pending.as_ref().filter(|manifest| manifest.activation_pending || refresh_due)
+        {
+            self.client
+                .initialize_and_publish_prekey_bundle_via_gateway_request(
+                    &self.gateway_config,
+                    &manifest.principal_commitment,
+                    &manifest.device_id,
+                    &manifest.target_delivery_id,
+                    manifest.device_seed,
+                )
+                .await
+                .map_err(|error| {
+                    if refresh_due && !manifest.activation_pending {
+                        SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
+                    } else {
+                        error
+                    }
+                })?;
+            self.client
+                .cache_verified_device_manifest(
+                    &self.gateway_config,
+                    &manifest.principal_commitment,
+                    "account.create",
+                )
+                .await
+                .map_err(|error| {
+                    if refresh_due && !manifest.activation_pending {
+                        SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
+                    } else {
+                        error
+                    }
+                })?;
+        }
+        let target_delivery_id = self.target_delivery_id.clone();
+        let last_seen_inbox_seq = self
+            .client
+            .gateway_cursor(&target_delivery_id)?
+            .max(self.client.gateway_receive_cursor(&target_delivery_id)?);
+        let mut restored_resume_checkpoint = false;
+        let connected = if let Some(engine) = self.engine.as_mut() {
+            let ensure = Box::pin(engine.ensure_live(last_seen_inbox_seq));
+            gateway_connection_timeout(native, "gateway ensure live", ensure).await
+        } else {
+            let mut config = self.gateway_config.clone();
+            config.last_seen_inbox_seq = last_seen_inbox_seq;
+            restored_resume_checkpoint = self.restore_gateway_resume_checkpoint(&mut config)?;
+            if config.device_branch.is_none()
+                && let Some(branch) = self.client.device_branch.as_ref()
+                && branch.principal_id == config.principal_id
+                && branch.device_id == config.device_id
+                && branch.device_epoch == config.device_epoch
+            {
+                config.device_branch = Some(std::sync::Arc::new(branch.clone()));
+            }
+            self.engine = Some(
+                gateway_connection_timeout(
+                    native,
+                    "gateway connect",
+                    Box::pin(GatewaySessionEngine::connect(config)),
+                )
+                .await?,
+            );
+            Ok(())
+        };
+        connected?;
+        self.finish_restored_resume_checkpoint(restored_resume_checkpoint)?;
+        if native {
+            super::native_account::finish_connection(self).await?;
+        }
+        self.persist_push_route_seq();
+        if self.gateway_config.push_route_clear_pending {
+            self.forget_confirmed_push_clear();
+        }
+        self.client.complete_backup_activation()?;
+        if let Some(manifest) = pending.as_mut().filter(|manifest| manifest.activation_pending) {
+            manifest.activation_pending = false;
+            write_local_bus_account_manifest(&root, manifest)?;
+            self.activation_pending = false;
+        }
+        Ok(())
     }
 
     fn finish_restored_resume_checkpoint(&self, restored: bool) -> Result<(), SdkError> {

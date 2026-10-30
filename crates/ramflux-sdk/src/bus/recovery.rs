@@ -204,7 +204,7 @@ async fn promote(
     if *disconnected.borrow() {
         return Err(SdkError::CustodySetupInvalid);
     }
-    supervisor.activate_native(&id, secret).await
+    supervisor.activate_native(&id, secret, None).await
 }
 
 async fn refresh_checkpoints(config: &crate::LocalBusConfig, id: &str) -> Result<(), SdkError> {

@@ -19,6 +19,25 @@ These are live subscription events; a subscriber that connects after completion 
 for the current state. Locked accounts are not auto-restored. Failed restores can be retried with
 `account.unlock` and the correct passphrase.
 
+## Native networking state
+
+For a native account, `account.status` and each native `account.list.account_details`
+row expose `networking` plus optional `networking_reason`. A reason is represented as
+`{"kind":"no_node_selected"}`, `{"kind":"node_unreachable","retry_after_ms":5000}`,
+`{"kind":"node_custody_unavailable"}`, `{"kind":"node_busy","retry_after_ms":16000}`,
+`{"kind":"registration_refused","code":"principal_id_taken"}`, or
+`{"kind":"custody_expired"}`. The daemon derives these only from typed selection,
+transport, and custody errors; it does not classify log strings. The value is null
+when no typed cause is available or networking is live.
+
+The resumable topic `account.networking.changed` carries `account_id`, `state`, and
+`networking_reason`. It is appended only when the networking state or reason changes,
+so clients can subscribe instead of polling with backoff.
+
+The trusted `account.create.begin` request accepts optional `node_id`. It must reference an
+enabled, confirmed node. That node is persisted for the new account without changing
+`node.list.default_node_id`; omitting it preserves default-node behavior.
+
 ## Typed display metadata
 
 `LocalBusAccountCreateRequest` accepts optional `label` and `kind`. Labels contain at most 64
@@ -193,7 +212,8 @@ receive-time import behavior. A per-object fetch never advances the main message
 ## Existing list extensions
 
 - `account.list` preserves `accounts` (open IDs) and `active_account_id`, and adds `account_details`
-  for every indexed account: `{id,state,label,kind,principal_id}`. State is `locked` or `unlocked`.
+  for every indexed account: `{id,state,label,kind,principal_id,networking,networking_reason}`.
+  State is `locked` or `unlocked`; the networking fields are present for native accounts.
   Locked manifests are read without opening account databases. New `account.create` bodies may
   supply `label` and `kind`; both are retained in the private account manifest. This index-wide
   method belongs to the Supervisor and does not require an unlocked account.

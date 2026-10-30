@@ -83,13 +83,18 @@ impl LocalBusCreationClient {
         &mut self,
         display_name: &str,
         principal_kind: PrincipalKind,
+        node_id: Option<&str>,
     ) -> Result<LocalBusPendingCreation, SdkError> {
         #[derive(Serialize)]
         struct Input<'a> {
             display_name: &'a str,
             principal_kind: PrincipalKind,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            node_id: Option<&'a str>,
         }
-        let body = self.exchange("account.create", Input { display_name, principal_kind }).await?;
+        let body = self
+            .exchange("account.create.begin", Input { display_name, principal_kind, node_id })
+            .await?;
         if body.ceremony.as_deref() != Some("pending") {
             return Err(SdkError::CustodySetupInvalid);
         }

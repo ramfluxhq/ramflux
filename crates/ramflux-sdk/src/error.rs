@@ -11,6 +11,14 @@ pub enum SdkError {
     CustodyNetwork(#[from] ramflux_protocol::custody::CustodyRefusal),
     #[error("born-v3 network registration is pending; legacy proofs are forbidden")]
     NetworkingPending,
+    #[error("no confirmed home node is selected")]
+    NoNodeSelected,
+    #[error("node is unreachable; retry after {retry_after_ms}ms: {source}")]
+    NodeUnreachable {
+        retry_after_ms: u64,
+        #[source]
+        source: Box<SdkError>,
+    },
     #[error("born-v3 cannot accept legacy authority")]
     CustodyModeDowngrade,
     #[error("invalid custody setup")]
