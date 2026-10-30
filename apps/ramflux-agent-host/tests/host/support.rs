@@ -69,6 +69,7 @@ pub enum Fault {
     SpoofKind,
     RemoveBeforeSend,
     Revoked,
+    EmptyDevices,
 }
 impl Fake {
     pub fn with(fault: Fault) -> Self {
@@ -97,7 +98,11 @@ impl Fake {
                 json!({"principal_id":"agent-principal","local_device_id":"agent-device","devices":[{"device_id":"agent-device"}]})
             }
             "identity.directory" => {
-                json!({"identities":[{"principal_id":"agent-principal","is_self":true,"kind":if self.faults.contains(&Fault::Human) && !self.faults.contains(&Fault::SpoofKind){"human"}else{"headless_ai"}}, {"principal_id":"human-principal","contact_identity_commitment":"human-commitment","devices":[{"device_id":"human-device","target_delivery_id":"human-target"}]}],"next_cursor":null})
+                json!({"identities":[{"principal_id":"agent-principal","is_self":true,"kind":if self.faults.contains(&Fault::Human) && !self.faults.contains(&Fault::SpoofKind){"human"}else{"headless_ai"}}, {"principal_id":"human-principal","contact_identity_commitment":"human-commitment","devices":if self.faults.contains(&Fault::EmptyDevices){json!([])}else{json!([{"device_id":"human-device","target_delivery_id":"human-target"}])}}],"next_cursor":null})
+            }
+            "device.refresh" => {
+                self.faults.remove(&Fault::EmptyDevices);
+                json!({"principal_id":"human-principal","devices":[{"device_id":"human-device","target_delivery_id":"human-target"}]})
             }
             "conversation.directory" => {
                 json!({"conversations":if self.faults.contains(&Fault::Absent){vec![]}else{vec![json!({"id":"dm","kind":"direct","participants":["agent-principal","human-principal"]}),json!({"id":"group-thread","kind":"group","group_id":if self.faults.contains(&Fault::ChangedContext){"another-group"}else{"group"}})]},"next_cursor":null})
@@ -114,7 +119,7 @@ impl Fake {
                 json!({"head_seq":10,"floor_seq":1,"subscribed":true})
             }
             "message.read" => {
-                json!({"messages":[{"conversation_id":body["conversation_id"],"message_id":"ping","sender_id":if self.faults.contains(&Fault::SelfSender){"agent-principal"}else{"human-principal"},"body_utf8":"@agent ping","created_at":1000,"deleted":false}]})
+                json!({"messages":[{"conversation_id":body["conversation_id"],"message_id":"ping","sender_id":if self.faults.contains(&Fault::SelfSender){"agent-principal"}else{"human-device"},"sender_root_commitment":"human-commitment","body_utf8":"@agent ping","created_at":1000,"deleted":false}]})
             }
             "message.submit" | "group.send" => {
                 let id = operation.ok_or(Error::Bus)?;

@@ -3,7 +3,7 @@
 
 //! Refused events and finite recent caches cannot poison later work.
 use super::{
-    support::{Fake, Fixture, TestResult, incoming},
+    support::{Fake, Fault, Fixture, TestResult, incoming},
     surface_bus::{SurfaceBus, event},
     surfaces::fixture,
 };
@@ -14,6 +14,18 @@ use ramflux_agent_host::{
 use ramflux_sdk::{LocalBusFrame, SurfaceRefusalCode as Code};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
+
+#[tokio::test]
+async fn native_reply_refreshes_a_temporarily_empty_peer_device_projection() -> TestResult {
+    let f = Fixture::new()?;
+    let mut bus = Fake::with(Fault::EmptyDevices);
+    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
+    host.start(&mut bus).await?;
+    host.apply(&mut bus, incoming(11, false), 2000).await?;
+    assert!(bus.requests.iter().any(|(method, _)| method == "device.refresh"));
+    assert_eq!(bus.replies.len(), 1);
+    Ok(())
+}
 
 #[derive(Default)]
 struct RoutedBus {
