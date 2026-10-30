@@ -111,7 +111,7 @@ pub fn import_provisioning_bundle(
 ) -> Result<()> {
     let mut file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
         .map_err(|_| Error::Storage)?;
     let metadata = file.metadata().map_err(|_| Error::Storage)?;
@@ -175,6 +175,22 @@ pub async fn unlock_provisioned_account(
 mod tests {
     use super::*;
     use std::os::unix::fs::OpenOptionsExt;
+
+    #[test]
+    fn fifo_bundle_is_refused_without_waiting_for_a_writer() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|_| Error::Storage)?;
+        let path = root.path().join("fifo.bundle");
+        let status =
+            std::process::Command::new("mkfifo").arg(&path).status().map_err(|_| Error::Storage)?;
+        assert!(status.success());
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            import_provisioning_bundle(&CredentialVault::itest_memory(), &path, "agent"),
+            Err(Error::Config)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        Ok(())
+    }
 
     #[test]
     fn private_bundle_imports_once_and_is_removed() -> Result<()> {

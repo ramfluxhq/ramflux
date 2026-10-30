@@ -8,10 +8,11 @@ trimmed whole messages exactly and return one text reply or one bounded
 surface batch.
 
 The live native human owner creates the `headless_ai` account through the local-bus
-ceremony documented in `docs/local_bus_account_creation.md`, saves the service phrase,
+ceremony in an unlocked owner session documented in `docs/local_bus_account_creation.md`, saves the service phrase,
 and exports the agent credentials to a new private path. Add the resulting principal as
 a contact through normal rfd flows. The host verifies self identity
-kind before acting. Persisted local-device authorization is checked independently of
+kind before acting. Native status checks the local branch's message authorization against
+the current persisted custody record, independently of
 the display device list, which always includes the active device. Conversation
 membership and device authorization are checked again
 before every output. Direct-message replies resolve the projected sender principal

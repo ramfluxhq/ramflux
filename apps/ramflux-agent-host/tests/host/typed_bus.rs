@@ -133,7 +133,7 @@ async fn gateway_authentication_races_revalidate_identity_without_resending_the_
                 frame.ok = Some(!rejected);
                 frame.body = match method {
                     "account.status" => {
-                        json!({"account_id":"agent","local_account_id":"agent","state":"unlocked","networking":"live","display_name":"Agent","principal_id":"agent","principal_kind":"headless_ai","authority_blocked":false,"principal_commitment":"commitment","device_id":"device","target_delivery_id":"target","node_id":"node","session_id":"session","active_transport_kind":"quic","pending_deliveries":0})
+                        json!({"account_id":"agent","local_account_id":"agent","state":"unlocked","networking":"live","display_name":"Agent","principal_id":"agent","principal_kind":"headless_ai","authority_blocked":false,"local_device_authorized":true,"principal_commitment":"commitment","device_id":"device","target_delivery_id":"target","node_id":"node","session_id":"session","active_transport_kind":"quic","pending_deliveries":0})
                     }
                     "device.list" => {
                         json!({"principal_id":"agent","local_device_id":"device","devices":[{"device_id":"device"}]})
@@ -248,7 +248,7 @@ async fn contact02_r2_start_uses_the_real_adapter_capabilities_and_keeps_manual_
             frame.ok = Some(true);
             frame.body = match method {
                 "account.status" => {
-                    json!({"account_id":"agent","local_account_id":"agent","state":"unlocked","networking":"live","display_name":"Agent","principal_id":"agent","principal_kind":"headless_ai","authority_blocked":false,"principal_commitment":"commitment","device_id":"device","target_delivery_id":"target","node_id":"node","session_id":"session","active_transport_kind":"quic","pending_deliveries":0})
+                    json!({"account_id":"agent","local_account_id":"agent","state":"unlocked","networking":"live","display_name":"Agent","principal_id":"agent","principal_kind":"headless_ai","authority_blocked":false,"local_device_authorized":true,"principal_commitment":"commitment","device_id":"device","target_delivery_id":"target","node_id":"node","session_id":"session","active_transport_kind":"quic","pending_deliveries":0})
                 }
                 "device.list" => {
                     json!({"principal_id":"agent","local_device_id":"device","devices":[{"device_id":"device"}]})

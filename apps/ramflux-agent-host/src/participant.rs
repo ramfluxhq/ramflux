@@ -64,6 +64,7 @@ async fn direct_peer(bus: &mut impl AgentBus, message: &Value) -> Result<Value> 
         }
     };
     if peer["devices"].as_array().is_some_and(Vec::is_empty) {
+        // One bounded verified manifest fetch and store for an existing contact.
         let commitment = field(&peer, "contact_identity_commitment")?.to_owned();
         bus.request("device.refresh", json!({"principal_commitment":commitment.clone()}), None)
             .await?;
@@ -115,7 +116,10 @@ fn status_ready(status: &Value) -> bool {
     if status.get("client_mode").is_some() {
         return status["client_mode"] == "headless_ai" && status["local_device_authorized"] == true;
     }
-    if status["principal_kind"] != "headless_ai" || status["authority_blocked"] == true {
+    if status["principal_kind"] != "headless_ai"
+        || status["authority_blocked"] == true
+        || status["local_device_authorized"] != true
+    {
         return false;
     }
     match status.get("networking").and_then(Value::as_str) {
@@ -258,7 +262,7 @@ mod status_tests {
     fn native_status_requires_live_unfenced_authority_and_supports_legacy_shape() {
         let native = json!({
             "account_id":"agent", "local_account_id":"agent", "state":"unlocked",
-            "networking":"live", "networking_reason":null, "display_name":"Agent",
+            "networking":"live", "networking_reason":null, "display_name":"Agent", "local_device_authorized":true,
             "principal_id":"principal", "principal_kind":"headless_ai", "authority_blocked":false,
             "principal_commitment":"commitment", "device_id":"device",
             "target_delivery_id":"target", "node_id":"node", "session_id":"session",
@@ -269,6 +273,9 @@ mod status_tests {
         pending["networking"] = json!("networking_pending");
         pending["networking_reason"] = json!({"kind":"node_unreachable","retry_after_ms":100});
         assert!(!status_ready(&pending));
+        let mut revoked = native.clone();
+        revoked["local_device_authorized"] = json!(false);
+        assert!(!status_ready(&revoked));
         let mut fenced = native;
         fenced["authority_blocked"] = json!(true);
         assert!(!status_ready(&fenced));

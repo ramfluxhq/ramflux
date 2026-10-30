@@ -88,6 +88,18 @@ impl RamfluxClient {
             let previous_name = old.as_ref().and_then(|row| row["display_name"].as_str()).map(str::to_owned);
             let previous_fingerprint = old.as_ref().and_then(|row| row["device_set_hash"].as_str()).map(str::to_owned);
             let fingerprint = native_fingerprint(&verified)?;
+            // Authority-only observations (notably an external custodian's nested record)
+            // contain no prekeys. Retain already verified routes only while this exact
+            // roster still authorizes each device; an absent prekey list is not revocation.
+            let retained = old.as_ref().and_then(|row| row["devices"].as_array()).map(|devices| {
+                devices.iter().filter(|device| {
+                    let Some(id) = device["device_id"].as_str() else { return false; };
+                    let Some(epoch) = device["device_epoch"].as_u64() else { return false; };
+                    verified.authorize(&DeviceRef { account_anchor: expected.into(), device_id: id.into(), device_epoch: epoch }, "message", now)
+                        .is_ok_and(|cert| device["signing_public_key"] == cert.branch_signing_public_key
+                            && ramflux_protocol::qualified_device_id(expected, id).is_ok_and(|target| device["target_delivery_id"] == target))
+                }).cloned().collect::<Vec<_>>()
+            }).unwrap_or_default();
             let mut row = old.unwrap_or_else(|| json!({"id":body.principal_id,"principal_id":body.principal_id}));
             row["contact_identity_commitment"] = json!(expected);
             row["root_public_key"] = json!(body.master_certificate.body.master_public_key);
@@ -105,6 +117,9 @@ impl RamfluxClient {
                 let cert = verified.authorize(&device.device_ref, "message", now)?;
                 Ok(json!({"id":device.device_ref.device_id,"device_id":device.device_ref.device_id,"device_epoch":device.device_ref.device_epoch,"target_delivery_id":device.target_delivery_id,"signing_public_key":cert.branch_signing_public_key}))
             }).collect::<Result<Vec<_>, SdkError>>()?);
+            if manifest.devices.is_empty() {
+                row["devices"] = json!(retained);
+            }
             if previous_name.as_deref().is_some_and(|name| name != body.profile.display_name) {
                 db.append_journal(&format!("identity-public-name:{expected}:{}", body.device_set_epoch), "contact.changed",
                     &json!({"principal_id":body.principal_id,"reason":"public_profile_renamed","old_display_name":previous_name,"new_display_name":body.profile.display_name}),
