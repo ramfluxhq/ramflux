@@ -38,6 +38,43 @@ pub(crate) async fn snapshot(bus: &mut impl AgentBus, method: &str, field: &str)
     directory_find(bus, method, field, |_| false).await?;
     Ok(())
 }
+async fn direct_peer(bus: &mut impl AgentBus, message: &Value) -> Result<Value> {
+    let sender = field(message, "sender_id")?;
+    let mut peer = if let Some(peer) =
+        directory_find(bus, "identity.directory", "identities", |peer| {
+            peer["principal_id"] == sender
+        })
+        .await?
+    {
+        peer
+    } else {
+        let by_device = directory_find(bus, "identity.directory", "identities", |peer| {
+            contains(&peer["devices"], "device_id", sender)
+        })
+        .await?;
+        if let Some(peer) = by_device {
+            peer
+        } else {
+            let commitment = field(message, "sender_root_commitment")?;
+            directory_find(bus, "identity.directory", "identities", |peer| {
+                peer["contact_identity_commitment"] == commitment
+            })
+            .await?
+            .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?
+        }
+    };
+    if peer["devices"].as_array().is_some_and(Vec::is_empty) {
+        let commitment = field(&peer, "contact_identity_commitment")?.to_owned();
+        bus.request("device.refresh", json!({"principal_commitment":commitment.clone()}), None)
+            .await?;
+        peer = directory_find(bus, "identity.directory", "identities", |candidate| {
+            candidate["contact_identity_commitment"] == commitment
+        })
+        .await?
+        .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
+    }
+    Ok(peer)
+}
 pub(crate) async fn identity(
     bus: &mut impl AgentBus,
     state: &mut Checkpoint,
@@ -159,18 +196,15 @@ pub(crate) async fn reply_outputs(
             body,
         }])
     } else {
-        let sender = field(message, "sender_id")?;
-        let peer = directory_find(bus, "identity.directory", "identities", |peer| {
-            peer["principal_id"] == sender
-        })
-        .await?
-        .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
-        let principal = field(&peer, "principal_id")?;
-        if principal == state.principal_id || !array_has(&conversation["participants"], principal) {
+        let peer = direct_peer(bus, message).await?;
+        let principal = field(&peer, "principal_id")?.to_owned();
+        if principal == state.principal_id || !array_has(&conversation["participants"], &principal)
+        {
             return Err(Error::Unauthorized);
         }
         let devices = peer["devices"]
             .as_array()
+            .filter(|devices| !devices.is_empty())
             .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
         let mut active = devices
             .iter()
