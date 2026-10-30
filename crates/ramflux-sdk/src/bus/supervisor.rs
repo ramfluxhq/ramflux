@@ -70,6 +70,10 @@ impl Supervisor {
         Ok(supervisor)
     }
 
+    pub(super) fn account_is_open(&self, id: &str) -> bool {
+        self.accounts.borrow().get(id).is_some_and(AccountActor::is_open)
+    }
+
     #[cfg(test)]
     pub(super) fn from_initializers(
         config: &LocalBusConfig,
@@ -244,6 +248,9 @@ impl Supervisor {
                 self.shutdown().await?;
                 return Ok(reply(serde_json::json!({"stopping":true})));
             }
+            "account.export_agent_credentials" => {
+                return self.export_agent_credentials(&request, connection).await;
+            }
             _ => {}
         }
         if request.method.starts_with("node.")
@@ -300,6 +307,50 @@ impl Supervisor {
             self.attended.borrow_mut().retain(|_, account| account != &id);
         }
         response
+    }
+
+    async fn export_agent_credentials(
+        &self,
+        request: &LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<ActorResponse, SdkError> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            account: String,
+            path: PathBuf,
+        }
+        let owner = request_account_id(request)?.to_owned();
+        if connection.attended_account_id.as_deref() != Some(&owner)
+            || !self.accounts.borrow().get(&owner).is_some_and(AccountActor::is_open)
+        {
+            return Err(SdkError::LocalBusPermissionDenied);
+        }
+        let input: Input = serde_json::from_value(request.body.clone())?;
+        let root = self.config.data_root.clone();
+        let vault = super::custody_setup::primary_provider(&self.config);
+        let owner_for_export = owner.clone();
+        let account_for_export = input.account.clone();
+        let path_for_export = input.path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::custody::export_agent_credentials(
+                &root,
+                &owner_for_export,
+                &account_for_export,
+                &path_for_export,
+                vault.as_ref(),
+                super::custody_setup::now()?,
+            )
+        })
+        .await
+        .map_err(|error| {
+            SdkError::LocalBus(format!("agent credential export failed: {error}"))
+        })??;
+        Ok(reply(serde_json::json!({
+            "account": input.account,
+            "path": input.path,
+            "exported": true,
+        })))
     }
 
     pub(super) async fn activate_native(

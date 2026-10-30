@@ -38,6 +38,19 @@ pub trait PrimaryVault: Send + Sync {
     /// # Errors
     /// Fails closed on provider failure or an existing entry.
     fn store_branch(&self, reference: &str, seeds: &Zeroizing<[u8; 64]>) -> Result<(), SdkError>;
+    /// Store the one-use local data passphrase for a headless participant until its custodian
+    /// exports the provisioning bundle. This secret is independent of primary and branch keys.
+    /// # Errors
+    /// Fails closed on unsupported providers, an existing entry, or provider failure.
+    fn store_provisioning_secret(&self, _reference: &str, _secret: &[u8]) -> Result<(), SdkError> {
+        Err(SdkError::CustodyVaultUnavailable)
+    }
+    /// Load the pending headless-participant data passphrase without exposing authority keys.
+    /// # Errors
+    /// Rejects unsupported providers and missing or corrupt entries.
+    fn load_provisioning_secret(&self, _reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        Err(SdkError::CustodyVaultUnavailable)
+    }
 }
 /// Software OS credential vault. This is not a nonexportable hardware Ed25519 key.
 /// macOS uses its protected, explicitly non-synchronizing keychain. Other platforms
@@ -179,6 +192,28 @@ impl PrimaryVault for NativePrimaryVault {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (reference, seeds);
+            Err(SdkError::CustodyVaultUnavailable)
+        }
+    }
+    fn store_provisioning_secret(&self, reference: &str, secret: &[u8]) -> Result<(), SdkError> {
+        #[cfg(target_os = "macos")]
+        {
+            native::put(reference, secret)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (reference, secret);
+            Err(SdkError::CustodyVaultUnavailable)
+        }
+    }
+    fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        #[cfg(target_os = "macos")]
+        {
+            native::get(reference)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = reference;
             Err(SdkError::CustodyVaultUnavailable)
         }
     }
