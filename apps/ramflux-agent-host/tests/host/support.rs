@@ -80,7 +80,17 @@ impl Fake {
         self.requests.push((method.into(), body.clone()));
         Ok(match method {
             "account.status" => {
-                json!({"principal_id":"agent-principal","local_device_authorized":!self.faults.contains(&Fault::Revoked),"client_mode":if self.faults.contains(&Fault::Human){"attended_cli"}else{"headless_ai"}})
+                // Mirrors the native account.status snapshot emitted by native_account::status.
+                json!({
+                    "account_id":"agent", "local_account_id":"agent",
+                    "state":if self.faults.contains(&Fault::Revoked){"locked"}else{"unlocked"},
+                    "networking":if self.faults.contains(&Fault::Revoked){"networking_pending"}else{"live"},
+                    "display_name":"Agent", "principal_id":"agent-principal",
+                    "authority_blocked":false, "principal_commitment":"agent-commitment",
+                    "device_id":"agent-device", "target_delivery_id":"agent-target",
+                    "node_id":"node", "session_id":"session", "active_transport_kind":"quic",
+                    "pending_deliveries":0
+                })
             }
             "device.list" => {
                 json!({"principal_id":"agent-principal","local_device_id":"agent-device","devices":[{"device_id":"agent-device"}]})
