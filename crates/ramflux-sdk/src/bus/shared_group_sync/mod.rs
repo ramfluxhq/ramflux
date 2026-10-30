@@ -21,6 +21,35 @@ fn required<'a>(body: &'a Value, key: &str) -> Result<&'a str, SdkError> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| SdkError::LocalBus(format!("{key} is required")))
 }
+fn local_creator_matches(creator: &str, root: &str, device: &str) -> Result<bool, SdkError> {
+    Ok(if creator == device {
+        true
+    } else {
+        ramflux_protocol::parse_qualified_device_id(creator)?.is_some_and(
+            |(candidate_root, candidate_device)| {
+                candidate_root == root && candidate_device == device
+            },
+        )
+    })
+}
+async fn validate_local_creator(
+    account: &mut LocalBusAccountState,
+    body: &Value,
+) -> Result<(), SdkError> {
+    if account.client.born_v3_account.is_some() {
+        account.ensure_gateway_live().await?;
+    }
+    let local = account.client.owned_device_identity()?;
+    if local_creator_matches(
+        required(body, "creator_id")?,
+        local.root_commitment(),
+        local.device_id(),
+    )? {
+        Ok(())
+    } else {
+        Err(StorageError::GroupPermissionDenied.into())
+    }
+}
 pub(super) async fn dispatch(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
@@ -53,9 +82,7 @@ pub(super) async fn dispatch(
     }
     let target = account.gateway_config.target_delivery_id.clone();
     let change = if method == "group.create" {
-        if required(body, "creator_id")? != account.gateway_config.device_id {
-            return Err(SdkError::Storage(StorageError::GroupPermissionDenied));
-        }
+        validate_local_creator(account, body).await?;
         None
     } else if method == "group.member.add" {
         let member = verified_member(account, body).await?;
@@ -119,6 +146,7 @@ pub(super) async fn dispatch(
     result["accepted"] = json!(true);
     Ok(Some(result))
 }
+
 fn selected_change(
     previous: &ramflux_crypto::VerifiedGroupState,
     body: &Value,
@@ -317,4 +345,22 @@ fn pending_metadata(
     result["status"] = json!(if live { "waiting_for_owner" } else { "expired" });
     result["request_id"] = json!(request.request_id);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_group_creator_accepts_only_the_local_raw_or_exact_qualified_device()
+    -> Result<(), SdkError> {
+        let local = ramflux_protocol::qualified_device_id("anchor", "phone")?;
+        let foreign_root = ramflux_protocol::qualified_device_id("other", "phone")?;
+        let foreign_device = ramflux_protocol::qualified_device_id("anchor", "tablet")?;
+        assert!(local_creator_matches("phone", "anchor", "phone")?);
+        assert!(local_creator_matches(&local, "anchor", "phone")?);
+        assert!(!local_creator_matches(&foreign_root, "anchor", "phone")?);
+        assert!(!local_creator_matches(&foreign_device, "anchor", "phone")?);
+        Ok(())
+    }
 }
