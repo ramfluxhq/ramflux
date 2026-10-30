@@ -32,6 +32,7 @@ pub(crate) fn now() -> Result<u64, SdkError> {
 /// Provider request built only from the SDK's stored, verified pending proposal.
 /// It is not deserializable or clonable and grants no reusable management key.
 pub struct HomeAuthorizationRequest<'a> {
+    local_account_id: &'a str,
     pub(crate) reference: &'a str,
     body: &'a Authorization,
     branch: &'a DeviceBranch,
@@ -39,25 +40,45 @@ pub struct HomeAuthorizationRequest<'a> {
     digest: String,
     pub(crate) requested_at: u64,
 }
+#[derive(Clone, Copy)]
+pub(crate) struct HomeAuthorizationInput<'a, 'd> {
+    pub local_account_id: &'a str,
+    pub reference: &'a str,
+    pub body: &'a Authorization,
+    pub branch: &'a DeviceBranch,
+    pub authority: &'a VerifiedRecord,
+    pub digest: &'d str,
+    pub now: u64,
+}
 impl<'a> HomeAuthorizationRequest<'a> {
-    pub(crate) fn new(
-        reference: &'a str,
-        body: &'a Authorization,
-        branch: &'a DeviceBranch,
-        authority: &'a VerifiedRecord,
-        digest: &str,
-        now: u64,
-    ) -> Result<Self, SdkError> {
+    pub(crate) fn new(input: HomeAuthorizationInput<'a, '_>) -> Result<Self, SdkError> {
+        let HomeAuthorizationInput {
+            local_account_id,
+            reference,
+            body,
+            branch,
+            authority,
+            digest,
+            now,
+        } = input;
         let expected = proposal_digest(body)?;
         if digest != expected
+            || local_account_id.is_empty()
             || reference.is_empty()
             || reference.len() > 256
             || reference.chars().any(char::is_control)
         {
             return Err(refused(Refusal::CustodyApprovalRequired));
         }
-        let request =
-            Self { reference, body, branch, authority, digest: expected, requested_at: now };
+        let request = Self {
+            local_account_id,
+            reference,
+            body,
+            branch,
+            authority,
+            digest: expected,
+            requested_at: now,
+        };
         request.validate(now)?;
         Ok(request)
     }
@@ -92,6 +113,14 @@ impl<'a> HomeAuthorizationRequest<'a> {
         self.reference
     }
     #[must_use]
+    pub fn local_account_id(&self) -> &str {
+        self.local_account_id
+    }
+    #[must_use]
+    pub fn request_id(&self) -> &str {
+        &self.body.migration_id
+    }
+    #[must_use]
     pub fn destination_fingerprint(&self) -> String {
         ramflux_protocol::hash_hex(
             ramflux_protocol::CLIENT_DISCOVERY_DOMAIN,
@@ -119,8 +148,15 @@ impl<'a> HomeAuthorizationRequest<'a> {
         now: u64,
     ) -> Result<Signed<Authorization>, SdkError> {
         let now = now.max(self.requested_at);
-        let current =
-            Self::new(self.reference, self.body, self.branch, self.authority, &self.digest, now)?;
+        let current = Self::new(HomeAuthorizationInput {
+            local_account_id: self.local_account_id,
+            reference: self.reference,
+            body: self.body,
+            branch: self.branch,
+            authority: self.authority,
+            digest: &self.digest,
+            now,
+        })?;
         Ok(primary.sign_home_authorization(
             current.body.clone(),
             current.branch,

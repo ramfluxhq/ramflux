@@ -11,7 +11,7 @@ impl Fixture {
     fn authorize(&self) -> Result<wire::Signed<wire::Authorization>> {
         let digest = self.offer()?;
         let plan = self.journal()?.approval_plan(&hash(1), &digest)?;
-        self.vault.approve_next_migration_for_test();
+        self.vault.approve_migration_once_for_test("human", &hash(1))?;
         Ok(self.journal()?.authorize(plan.sign(&self.vault, NOW)?, NOW)?)
     }
     fn seal_request(&self) -> Result<wire::Request> {
@@ -149,7 +149,7 @@ fn home_migration_saved_prepare_and_seal_resume_byte_identically_without_vault_a
     assert_eq!(recovered.status(&hash(1))?.seq, seq);
     let digest = f.accept_prepare(&prepare)?;
     let plan = recovered.approval_plan(&hash(1), &digest)?;
-    f.vault.approve_next_migration_for_test();
+    f.vault.approve_migration_once_for_test("human", &hash(1))?;
     let auth = recovered.authorize(plan.sign(&f.vault, NOW)?, NOW)?;
     let original = recovered.load(&hash(1))?;
     let request = f.seal_request()?;
@@ -356,7 +356,7 @@ fn home_migration_expired_offer_releases_account_lock_and_invalidates_pending_ap
     let f = Fixture::new()?;
     let digest = f.offer()?;
     let plan = f.journal()?.approval_plan(&hash(1), &digest)?;
-    f.vault.approve_next_migration_for_test();
+    f.vault.approve_migration_once_for_test("human", &hash(1))?;
     let result = plan.sign(&f.vault, NOW)?;
     let db = f.reopen()?;
     let recovered = HomeMigrationJournal::new(&db, &f.index, &f.account)?;

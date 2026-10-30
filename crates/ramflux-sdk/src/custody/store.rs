@@ -134,12 +134,15 @@ impl BornAccount {
             return Err(invalid());
         }
         let request = super::HomeAuthorizationRequest::new(
-            &self.stored.primary_vault_ref,
-            body,
-            &credentials.signing,
-            self.verified(),
-            digest,
-            now,
+            super::home_authorization::HomeAuthorizationInput {
+                local_account_id: self.local_account_id(),
+                reference: &self.stored.primary_vault_ref,
+                body,
+                branch: &credentials.signing,
+                authority: self.verified(),
+                digest,
+                now,
+            },
         )?;
         vault.sign_home_authorization(request)
     }
