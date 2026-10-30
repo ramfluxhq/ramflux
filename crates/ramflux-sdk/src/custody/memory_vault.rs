@@ -56,4 +56,11 @@ impl PrimaryVault for MemoryPrimaryVault {
     ) -> Result<BranchCredentials, SdkError> {
         BranchCredentials::from_vault_seeds(principal, device, &self.get(reference)?)
     }
+    fn store_provisioning_secret(&self, reference: &str, secret: &[u8]) -> Result<(), SdkError> {
+        self.put(reference, secret)
+    }
+    fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        let entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        entries.get(reference).cloned().ok_or(SdkError::CustodyVaultUnavailable)
+    }
 }

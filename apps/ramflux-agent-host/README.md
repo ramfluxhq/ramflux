@@ -1,14 +1,16 @@
 # Agent host
 
-`ramflux-agent-host` is an ordinary headless participant using an existing unlocked
-rfd account. rfd retains its keys and performs normal authenticated message delivery.
-The host accepts no root seeds, device seeds, passphrases, human credentials or grant
-confirmations. Rules match trimmed whole messages exactly and return one text reply or one bounded
+`ramflux-agent-host` is an ordinary native headless participant. rfd retains authority
+keys and performs normal authenticated message delivery. On first start the host may
+consume the daemon-generated one-use provisioning bundle; it never receives a recovery
+phrase, master key, branch key, human credential, or grant confirmation. Rules match
+trimmed whole messages exactly and return one text reply or one bounded
 surface batch.
 
-Provision the account with `rf account create --client-mode headless_ai` using the
-normal account setup options. Add its principal as a contact and group member through
-normal rfd flows. The host verifies both persisted `client_mode` and self identity
+The live native human owner creates the `headless_ai` account through the local-bus
+ceremony documented in `docs/local_bus_account_creation.md`, saves the service phrase,
+and exports the agent credentials to a new private path. Add the resulting principal as
+a contact through normal rfd flows. The host verifies self identity
 kind before acting. Persisted local-device authorization is checked independently of
 the display device list, which always includes the active device. Conversation
 membership and device authorization are checked again
@@ -25,8 +27,19 @@ demo; moving to persistent storage is an operator choice.
 
 ```sh
 install -d -m 700 "$HOME/.local/state/ramflux-agent"
-cargo run -p ramflux-agent-host -- --config /path/to/agent.json
+cargo run -p ramflux-agent-host -- \
+  --config /path/to/agent.json \
+  --provisioning-bundle /private/path/agent.bundle
 ```
+
+The first successful import stores the data passphrase in the operator Mac Keychain,
+removes the bundle, and unlocks the rfd account. Later starts need only `--config`.
+For an sd001 demo, run rfd and the agent host on the operator Mac, configure rfd with
+the signed sd001 node profile, create the human owner first, create/export the agent as
+that owner, add the two native principals as contacts, and then start the host with the
+bundle. Linux production is not supported until `ID-02-VAULT-LINUX-01`; do not copy the
+bundle to the Linux service host. Integration tests compile the explicit
+`--itest-memory-vault` alternative, which is volatile and unavailable in production.
 
 For remote rfd, supply an operator-managed authenticated Unix-socket forward, such as
 OpenSSH StreamLocal forwarding, as `socket`. The host speaks the existing local bus;

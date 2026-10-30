@@ -47,7 +47,8 @@ async fn confirm(
     let home_node_id = pending.home_node_id().map(str::to_owned);
     let data_root = supervisor.config.data_root.clone();
     let builtin_nodes = supervisor.config.builtin_nodes.clone();
-    let (words, passphrase) = take_secrets(request)?;
+    let agent = pending.principal_kind() == ramflux_protocol::PrincipalKind::HeadlessAi;
+    let (words, passphrase) = take_secrets(request, agent)?;
     let gate = Arc::new(CommitGate::new(pending.deadline()));
     let _cancel = CancelOnDrop(Arc::clone(&gate));
     pending.guard_commit(gate);
@@ -91,16 +92,23 @@ fn revalidate_home_node(
 
 fn take_secrets(
     request: &mut LocalBusFrame,
+    agent: bool,
 ) -> Result<([Zeroizing<String>; 3], Zeroizing<String>), SdkError> {
     let map = request
         .body
         .as_object_mut()
-        .filter(|map| map.len() == 2)
+        .filter(|map| map.len() == if agent { 1 } else { 2 })
         .ok_or(SdkError::CustodySetupInvalid)?;
-    let Some(serde_json::Value::String(passphrase)) = map.remove("passphrase") else {
-        return Err(SdkError::CustodySetupInvalid);
+    let passphrase = if agent {
+        let mut bytes = Zeroizing::new([0_u8; 32]);
+        getrandom::fill(&mut *bytes).map_err(|_| SdkError::CustodyRandomUnavailable)?;
+        Zeroizing::new(ramflux_protocol::encode_base64url(*bytes))
+    } else {
+        let Some(serde_json::Value::String(passphrase)) = map.remove("passphrase") else {
+            return Err(SdkError::CustodySetupInvalid);
+        };
+        Zeroizing::new(passphrase)
     };
-    let passphrase = Zeroizing::new(passphrase);
     let values = map
         .get_mut("words")
         .and_then(serde_json::Value::as_array_mut)

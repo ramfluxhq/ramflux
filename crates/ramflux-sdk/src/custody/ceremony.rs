@@ -62,10 +62,11 @@ impl CreationCeremony {
         root: &Path,
         display_name: String,
         kind: PrincipalKind,
+        custodian_account_id: Option<String>,
         home_node_id: Option<String>,
         now: u64,
     ) -> Result<Self, SdkError> {
-        if kind != PrincipalKind::Human {
+        if !matches!(kind, PrincipalKind::Human | PrincipalKind::HeadlessAi) {
             return Err(invalid());
         }
         let input = CreateInput {
@@ -74,7 +75,7 @@ impl CreationCeremony {
             device_id: format!("device-{}", encode_base64url(*random()?)),
             display_name,
             principal_kind: kind,
-            custodian_account_id: None,
+            custodian_account_id,
         };
         Self::prepare(root, input, true, home_node_id, now)
     }
@@ -112,6 +113,7 @@ impl CreationCeremony {
             if human.record().body.principal_kind != PrincipalKind::Human {
                 return Err(invalid());
             }
+            human.require_networking()?;
             human.verified().authorize(
                 &human.record().body.master_certificate.body.primary_device_ref,
                 "register",
@@ -149,6 +151,9 @@ impl CreationCeremony {
     }
     pub(crate) fn ceremony_id(&self) -> &str {
         &self.ceremony_id
+    }
+    pub(crate) fn principal_kind(&self) -> PrincipalKind {
+        self.input.principal_kind
     }
     pub(crate) fn expires_in_ms(&self) -> u64 {
         u64::try_from(self.deadline.saturating_duration_since(Instant::now()).as_millis())

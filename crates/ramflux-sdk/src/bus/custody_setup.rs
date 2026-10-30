@@ -162,11 +162,24 @@ fn apply(
                 principal_kind: ramflux_protocol::PrincipalKind,
                 #[serde(default)]
                 node_id: Option<String>,
+                #[serde(default)]
+                custodian_account: Option<String>,
             }
             *ceremony = None;
             let input: Input = serde_json::from_value(std::mem::take(&mut request.body))
                 .map_err(|_| SdkError::CustodySetupInvalid)?;
-            if input.principal_kind != ramflux_protocol::PrincipalKind::Human {
+            let valid = match input.principal_kind {
+                ramflux_protocol::PrincipalKind::Human => {
+                    input.custodian_account.is_none()
+                }
+                ramflux_protocol::PrincipalKind::HeadlessAi => {
+                    request.method == "account.create.begin"
+                        && input.custodian_account.is_some()
+                        && request.account_id.as_deref() == input.custodian_account.as_deref()
+                }
+                _ => false,
+            };
+            if !valid {
                 return Err(SdkError::CustodySetupInvalid);
             }
             let display_name =
@@ -184,6 +197,7 @@ fn apply(
                 &config.data_root,
                 display_name,
                 input.principal_kind,
+                input.custodian_account,
                 home_node_id,
                 now()?,
             )?;

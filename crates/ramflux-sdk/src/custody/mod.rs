@@ -13,8 +13,10 @@ mod store;
 mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
 pub use store::RecoveryCeremony;
-pub use store::{BornAccount, CreationState, load_account};
-pub(crate) use store::{accept_publication, account_exists, list_accounts, load_data_account};
+pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
+pub(crate) use store::{
+    accept_publication, account_exists, export_agent_credentials, list_accounts, load_data_account,
+};
 pub(crate) use store::{finish_recovery, pending_restore};
 pub use vault::{BranchCredentials, NativePrimaryVault, PrimaryVault};
 
