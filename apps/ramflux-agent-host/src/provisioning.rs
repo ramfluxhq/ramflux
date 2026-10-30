@@ -4,7 +4,12 @@
 //! One-use participant provisioning into a local credential vault.
 use crate::{Error, Result};
 use ramflux_sdk::{LocalBusClient, custody::AgentProvisioningBundle};
-use std::{io::Read, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    fs::OpenOptions,
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    path::Path,
+};
 use zeroize::Zeroizing;
 
 const MAX_BUNDLE_BYTES: u64 = 8192;
@@ -42,6 +47,8 @@ impl CredentialVault {
     }
 
     fn store(&self, account: &str, passphrase: &str) -> Result<()> {
+        #[cfg(not(any(target_os = "macos", feature = "itest-memory-vault")))]
+        let _ = (account, passphrase);
         match self {
             #[cfg(target_os = "macos")]
             Self::Keychain => {
@@ -67,6 +74,8 @@ impl CredentialVault {
     }
 
     fn load(&self, account: &str) -> Result<Option<Zeroizing<String>>> {
+        #[cfg(not(any(target_os = "macos", feature = "itest-memory-vault")))]
+        let _ = account;
         match self {
             #[cfg(target_os = "macos")]
             Self::Keychain => {
@@ -100,17 +109,34 @@ pub fn import_provisioning_bundle(
     path: &Path,
     expected_account: &str,
 ) -> Result<()> {
-    let link = std::fs::symlink_metadata(path).map_err(|_| Error::Storage)?;
-    if link.file_type().is_symlink() {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| Error::Storage)?;
+    let metadata = file.metadata().map_err(|_| Error::Storage)?;
+    if !metadata.file_type().is_file()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+    {
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0));
         return Err(Error::Config);
     }
-    let file = std::fs::File::open(path).map_err(|_| Error::Storage)?;
-    let metadata = file.metadata().map_err(|_| Error::Storage)?;
-    if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+    let link = std::fs::symlink_metadata(path).map_err(|_| Error::Storage)?;
+    if link.file_type().is_symlink() || link.dev() != metadata.dev() || link.ino() != metadata.ino()
+    {
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0));
         return Err(Error::Config);
     }
     let mut bytes = Zeroizing::new(Vec::new());
-    file.take(MAX_BUNDLE_BYTES + 1).read_to_end(&mut bytes).map_err(|_| Error::Storage)?;
+    let read = (&mut file).take(MAX_BUNDLE_BYTES + 1).read_to_end(&mut bytes);
+    // Consume the only on-disk copy before parsing or touching the destination vault. This makes
+    // malformed, mismatched, unsupported-vault and vault-write failures fail closed as well.
+    if std::fs::remove_file(path).is_err() {
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0));
+        return Err(Error::Storage);
+    }
+    read.map_err(|_| Error::Storage)?;
     if bytes.len() > usize::try_from(MAX_BUNDLE_BYTES).map_err(|_| Error::Limit)? {
         return Err(Error::Limit);
     }
@@ -171,6 +197,34 @@ mod tests {
         import_provisioning_bundle(&vault, &path, "agent")?;
         assert!(!path.exists());
         assert_eq!(vault.load("agent")?.as_ref().map(|secret| secret.as_str()), Some("private"));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_bundle_import_is_consumed_and_symlinks_are_refused() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|_| Error::Storage)?;
+        let target = root.path().join("target.bundle");
+        std::fs::write(&target, b"not-json").map_err(|_| Error::Storage)?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| Error::Storage)?;
+        let link = root.path().join("link.bundle");
+        std::os::unix::fs::symlink(&target, &link).map_err(|_| Error::Storage)?;
+        let vault = CredentialVault::itest_memory();
+        assert!(matches!(import_provisioning_bundle(&vault, &link, "agent"), Err(Error::Storage)));
+        assert!(target.exists());
+        assert!(matches!(import_provisioning_bundle(&vault, &target, "agent"), Err(Error::Config)));
+        assert!(!target.exists());
+
+        let mismatch = root.path().join("mismatch.bundle");
+        std::fs::write(&mismatch, br#"{"account_id":"other","data_passphrase":"private"}"#)
+            .map_err(|_| Error::Storage)?;
+        std::fs::set_permissions(&mismatch, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| Error::Storage)?;
+        assert!(matches!(
+            import_provisioning_bundle(&vault, &mismatch, "agent"),
+            Err(Error::Config)
+        ));
+        assert!(!mismatch.exists());
         Ok(())
     }
 }

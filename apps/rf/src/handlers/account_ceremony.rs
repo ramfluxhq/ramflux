@@ -107,21 +107,62 @@ pub(crate) async fn recover(socket: &Path, account: &str) -> Result<(), RfError>
 }
 
 /// Show recovery material only on the controlling terminal, then erase before challenging.
-pub(crate) async fn create(socket: &Path, display_name: &str) -> Result<(), RfError> {
+pub(crate) async fn create(
+    socket: &Path,
+    display_name: &str,
+    kind: crate::cli::AccountKind,
+    custodian: Option<&str>,
+) -> Result<(), RfError> {
     let mut terminal = Terminal::open()?;
     let mut client = ramflux_sdk::LocalBusCreationClient::connect(socket).await?;
-    client.begin(display_name, ramflux_protocol::PrincipalKind::Human).await?;
-    let result = create_confirm(&mut terminal, &mut client).await;
+    let result = match (kind, custodian) {
+        (crate::cli::AccountKind::Human, None) => {
+            client.begin(display_name, ramflux_protocol::PrincipalKind::Human).await?;
+            create_human_confirm(&mut terminal, &mut client).await
+        }
+        (crate::cli::AccountKind::HeadlessAi, Some(custodian)) => {
+            client.begin_headless(display_name, custodian).await?;
+            create_headless_confirm(&mut terminal, &mut client).await
+        }
+        (crate::cli::AccountKind::HeadlessAi, None) => {
+            Err(RfError::Message("Headless AI account creation requires --custodian.".into()))
+        }
+        (crate::cli::AccountKind::Human, Some(_)) => {
+            Err(RfError::Message("Human account creation does not accept --custodian.".into()))
+        }
+    };
     if result.is_err() {
         let _ = client.cancel().await;
     }
     crate::utils::print_json(&serde_json::to_value(result?)?)
 }
 
-async fn create_confirm(
+async fn create_human_confirm(
     terminal: &mut Terminal,
     client: &mut ramflux_sdk::LocalBusCreationClient,
 ) -> Result<ramflux_sdk::LocalBusCreatedAccount, RfError> {
+    let words = recovery_challenge(terminal, client).await?;
+    let passphrase = terminal.line("New local data passphrase (hidden): ", true)?;
+    let repeated = terminal.line("Repeat local data passphrase (hidden): ", true)?;
+    if *passphrase != *repeated {
+        return Err(RfError::Message("Local data passphrases did not match.".into()));
+    }
+    drop(repeated);
+    Ok(client.confirm(&words, &passphrase).await?)
+}
+
+async fn create_headless_confirm(
+    terminal: &mut Terminal,
+    client: &mut ramflux_sdk::LocalBusCreationClient,
+) -> Result<ramflux_sdk::LocalBusCreatedAccount, RfError> {
+    let words = recovery_challenge(terminal, client).await?;
+    Ok(client.confirm_headless(&words).await?)
+}
+
+async fn recovery_challenge(
+    terminal: &mut Terminal,
+    client: &mut ramflux_sdk::LocalBusCreationClient,
+) -> Result<[Zeroizing<String>; 3], RfError> {
     // An alternate screen keeps the once-only phrase out of the normal terminal scrollback.
     terminal.output.write_all(b"\x1b[?1049h\x1b[2J\x1b[H")?;
     let shown = show_phrase(terminal, client).await;
@@ -134,13 +175,7 @@ async fn create_confirm(
     for (word, position) in words.iter_mut().zip(positions) {
         *word = terminal.line(&format!("Recovery word {position} (hidden): "), true)?;
     }
-    let passphrase = terminal.line("New local data passphrase (hidden): ", true)?;
-    let repeated = terminal.line("Repeat local data passphrase (hidden): ", true)?;
-    if *passphrase != *repeated {
-        return Err(RfError::Message("Local data passphrases did not match.".into()));
-    }
-    drop(repeated);
-    Ok(client.confirm(&words, &passphrase).await?)
+    Ok(words)
 }
 
 async fn show_phrase(

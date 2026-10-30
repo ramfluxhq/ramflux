@@ -60,6 +60,26 @@ fn other_opaque_message_and_surface_selectors_accept_hyphen_prefixed_values()
 #[test]
 fn itest_legacy_creation_is_a_separate_feature_gated_command() -> Result<(), clap::Error> {
     Cli::try_parse_from(["rf", "account", "create", "--display-name", "Alice"])?;
+    Cli::try_parse_from([
+        "rf",
+        "account",
+        "create",
+        "--display-name",
+        "Service",
+        "--kind",
+        "headless_ai",
+        "--custodian",
+        "alice",
+    ])?;
+    Cli::try_parse_from([
+        "rf",
+        "account",
+        "export-agent-credentials",
+        "--account",
+        "agent",
+        "--out",
+        "/tmp/agent.bundle",
+    ])?;
     assert!(Cli::try_parse_from(["rf", "account", "create", "--account", "alice"]).is_err());
     let fixture = [
         "rf",
