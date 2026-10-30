@@ -31,7 +31,7 @@ pub(super) fn read_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, RfError> {
 
 pub(super) fn read_deployed(path: &Path) -> Result<Envelope<NodeIdentityRecord>, RfError> {
     decode(&private_fs::read_input(path, 512 * 1024, false)?, 512 * 1024)
-        .map_err(|error| invalid(error.to_string()))
+        .map_err(|_| invalid("DEMO_CUSTODY_DEPLOYED_RECORD_INVALID: malformed signed node record"))
 }
 
 fn quote(text: &str) -> String {
@@ -125,7 +125,7 @@ impl Destination {
             &self.records.read(name, 512 * 1024, false)?,
             512 * 1024,
         )
-        .map_err(|error| invalid(error.to_string()))?;
+        .map_err(|_| invalid("custody retained node record is malformed"))?;
         let hash = object_hash(&record).map_err(|error| invalid(error.to_string()))?;
         if name != format!("{hash}.json") {
             return Err(invalid("custody record content does not match its retained hash"));
