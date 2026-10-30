@@ -127,24 +127,14 @@ pub(super) async fn handle(
                     },
                 };
                 if super::custody_setup::handles(&incoming.frame()?.method) {
-                    let bytes = if incoming.frame()?.method == "account.create.begin"
-                        && !incoming
-                            .frame()?
-                            .account_id
-                            .as_deref()
-                            .is_some_and(|id| supervisor.account_is_open(id))
-                    {
-                        super::custody_response::error(
-                            incoming.frame()?,
-                            &SdkError::LocalBusPermissionDenied,
-                        )?
-                    } else if incoming.frame()?.method.starts_with("account.recover.") {
-                        super::recovery::respond(incoming.frame()?, &supervisor, &mut recovery, &mut disconnected).await?
-                    } else if incoming.frame()?.method == "account.create.confirm" {
-                        super::creation_confirm::respond(incoming.frame()?, &supervisor, &mut ceremony, &mut disconnected).await?
-                    } else {
-                        super::custody_setup::respond(incoming.frame()?, &supervisor.config, &mut ceremony)?
-                    };
+                    let bytes = custody_response(
+                        &mut incoming,
+                        &supervisor,
+                        &mut ceremony,
+                        &mut recovery,
+                        &mut disconnected,
+                    )
+                    .await?;
                     tokio::time::timeout(Duration::from_secs(10),secrets.send(bytes)).await.map_err(|_|closed())?.map_err(|_|closed())?;
                     continue;
                 }
@@ -190,6 +180,28 @@ pub(super) async fn handle(
     writer_task.abort();
     let _ = writer_task.await;
     result
+}
+
+async fn custody_response(
+    incoming: &mut super::custody_setup::Incoming,
+    supervisor: &Supervisor,
+    ceremony: &mut Option<crate::custody::CreationCeremony>,
+    recovery: &mut Option<crate::custody::RecoveryCeremony>,
+    disconnected: &mut watch::Receiver<bool>,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+    let frame = incoming.frame()?;
+    if frame.method == "account.create.begin"
+        && !frame.account_id.as_deref().is_some_and(|id| supervisor.account_is_open(id))
+    {
+        return super::custody_response::error(frame, &SdkError::LocalBusPermissionDenied);
+    }
+    if frame.method.starts_with("account.recover.") {
+        return super::recovery::respond(frame, supervisor, recovery, disconnected).await;
+    }
+    if frame.method == "account.create.confirm" {
+        return super::creation_confirm::respond(frame, supervisor, ceremony, disconnected).await;
+    }
+    super::custody_setup::respond(frame, &supervisor.config, ceremony)
 }
 
 async fn configure_subscription(
