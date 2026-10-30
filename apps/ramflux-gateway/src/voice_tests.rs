@@ -106,6 +106,16 @@ fn native_identity(
     seed: u8,
     now: u64,
 ) -> anyhow::Result<(CallEndpoint, DeviceManifestResponse, ramflux_crypto::DeviceBranch)> {
+    native_identity_with(name, seed, now, ramflux_protocol::PrincipalKind::Human, None, None)
+}
+fn native_identity_with(
+    name: &str,
+    seed: u8,
+    now: u64,
+    kind: ramflux_protocol::PrincipalKind,
+    custodian: Option<&DeviceManifestResponse>,
+    capabilities: Option<&[&str]>,
+) -> anyhow::Result<(CallEndpoint, DeviceManifestResponse, ramflux_crypto::DeviceBranch)> {
     use ramflux_crypto::custody::{
         GenesisInput, MasterKey, RecoveryPhrase, SelfSigningKey, create_genesis,
     };
@@ -117,26 +127,43 @@ fn native_identity(
     let self_signing = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
     let branch = ramflux_crypto::create_device_branch(name, "primary", 1, [seed + 2; 32]);
     let agreement = ramflux_crypto::X25519KeyPair::from_seed([seed + 3; 32]);
-    let record = create_genesis(
+    let external_human_primary =
+        custodian.and_then(|manifest| manifest.custody.as_ref()).map(|custody| {
+            custody.publication.record.body.master_certificate.body.primary_device_ref.clone()
+        });
+    let mut record = create_genesis(
         &master,
         &self_signing,
         &branch,
         &agreement,
         GenesisInput {
-            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            principal_kind: kind,
             display_name: name.into(),
             issued_at: now,
             master_cert_id: ramflux_protocol::encode_base64url([seed + 4; 32]),
             branch_cert_id: ramflux_protocol::encode_base64url([seed + 5; 32]),
-            external_human_primary: None,
+            external_human_primary,
         },
     )?;
+    if let Some(capabilities) = capabilities {
+        let mut body = record.body;
+        let certificate = body.devices[0]
+            .branch_certificate
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("native branch certificate missing"))?;
+        let mut certificate_body = certificate.body.clone();
+        certificate_body.capabilities = capabilities.iter().map(|value| (*value).into()).collect();
+        body.devices[0].branch_certificate = Some(self_signing.certify_branch(certificate_body)?);
+        record = self_signing.sign_record(body)?;
+    }
     let anchor = record.body.account_anchor.clone();
     let root_public_key = record.body.master_certificate.body.master_public_key.clone();
     let manifest = DeviceManifestResponse {
         custody: Some(Box::new(CustodyManifest {
             publication: Publication { record, compacted_ids: None },
-            custodian_publication: None,
+            custodian_publication: custodian
+                .and_then(|manifest| manifest.custody.as_ref())
+                .map(|custody| custody.publication.clone()),
             devices: Vec::new(),
         })),
         signed_device_set: None,
@@ -219,6 +246,88 @@ fn native_custody_authority_allocates_and_accepts_voice_leases() -> anyhow::Resu
     assert!(
         validate_authority(&accept, &native_runtime(&recipient, &kb, &b, now)?, &a, &mixed, now)
             .is_err()
+    );
+    Ok(())
+}
+#[test]
+fn native_voice_authority_rejects_wrong_kind_capability_anchor_and_master_key() -> anyhow::Result<()>
+{
+    let now = 1_700_000_000;
+    let (caller, caller_manifest, caller_key) = native_identity("alice", 61, now)?;
+    let (recipient, recipient_manifest, _) = native_identity("bob", 71, now)?;
+    let allocate = |caller: CallEndpoint, callee: CallEndpoint| VoiceLeaseRequest::Allocate {
+        scope: VoiceAllocationRequest {
+            call_id: ramflux_protocol::encode_base64url([9; 16]),
+            caller,
+            callee,
+        },
+    };
+
+    let (service, service_manifest, _) = native_identity_with(
+        "service",
+        81,
+        now,
+        ramflux_protocol::PrincipalKind::HeadlessAi,
+        Some(&caller_manifest),
+        None,
+    )?;
+    assert!(
+        validate_authority(
+            &allocate(caller.clone(), service),
+            &native_runtime(&caller, &caller_key, &caller_manifest, now)?,
+            &caller_manifest,
+            &service_manifest,
+            now,
+        )
+        .is_err()
+    );
+
+    let (no_call, no_call_manifest, no_call_key) = native_identity_with(
+        "no-call",
+        91,
+        now,
+        ramflux_protocol::PrincipalKind::Human,
+        None,
+        Some(&["register"]),
+    )?;
+    assert!(
+        validate_authority(
+            &allocate(no_call.clone(), recipient.clone()),
+            &native_runtime(&no_call, &no_call_key, &no_call_manifest, now)?,
+            &no_call_manifest,
+            &recipient_manifest,
+            now,
+        )
+        .is_err()
+    );
+
+    let mut wrong_anchor = recipient_manifest.clone();
+    wrong_anchor.principal_commitment = ramflux_protocol::encode_base64url([0xa1; 32]);
+    assert!(
+        validate_authority(
+            &allocate(caller.clone(), recipient.clone()),
+            &native_runtime(&caller, &caller_key, &caller_manifest, now)?,
+            &caller_manifest,
+            &wrong_anchor,
+            now,
+        )
+        .is_err()
+    );
+
+    let mut wrong_master_endpoint = recipient;
+    let mut wrong_master_manifest = recipient_manifest;
+    let replacement = ramflux_crypto::public_key_base64url_from_seed([0xb1; 32]);
+    wrong_master_endpoint.root_public_key = replacement.clone();
+    wrong_master_manifest.root_public_key = replacement;
+    assert!(
+        validate_authority(
+            &allocate(caller.clone(), wrong_master_endpoint),
+            &native_runtime(&caller, &caller_key, &caller_manifest, now)?,
+            &caller_manifest,
+            &wrong_master_manifest,
+            now,
+        )
+        .is_err()
     );
     Ok(())
 }

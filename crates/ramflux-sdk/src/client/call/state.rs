@@ -139,6 +139,7 @@ impl LiveCall {
                 state: if outgoing { "outgoing_ringing" } else { "incoming_ringing" }.into(),
                 end_reason: None,
                 failure_reason: None,
+                peer_reason: None,
                 seq: 1,
                 created_at: now,
                 answered_at: None,
@@ -278,8 +279,8 @@ impl LiveCall {
                     )?;
                 }
             }
-            CallAction::Failed { reason } => {
-                self.finish_failure(*reason, now)?;
+            CallAction::Failed => {
+                self.finish_peer_failure(VoiceCallFailureReason::SignalingUnavailable, now)?;
             }
             CallAction::Hangup | CallAction::Timeout => {
                 if self.local == self.caller && c.callee != self.callee {
@@ -361,10 +362,11 @@ impl LiveCall {
         }
         self.end(false, now)?;
         for control in &mut self.pending {
-            control.body = CallAction::Failed { reason };
+            control.body = CallAction::Failed;
         }
         self.row.end_reason = Some("failed".into());
         self.row.failure_reason = Some(reason);
+        self.row.peer_reason = None;
         Ok(())
     }
     pub fn expire_media(&mut self, now: i64) -> Result<bool, SdkError> {
@@ -394,6 +396,7 @@ impl LiveCall {
         self.set_state("ended", now)?;
         self.row.end_reason = Some(reason.into());
         self.row.failure_reason = None;
+        self.row.peer_reason = None;
         self.row.ended_at = Some(now);
         self.pending.retain(|c| {
             matches!(
@@ -402,7 +405,7 @@ impl LiveCall {
                     | CallAction::Busy
                     | CallAction::Hangup
                     | CallAction::Timeout
-                    | CallAction::Failed { .. }
+                    | CallAction::Failed
                     | CallAction::AnsweredElsewhere
             )
         });
@@ -416,9 +419,13 @@ impl LiveCall {
         self.lease_consent = None;
         Ok(())
     }
-    fn finish_failure(&mut self, reason: VoiceCallFailureReason, now: i64) -> Result<(), SdkError> {
+    fn finish_peer_failure(
+        &mut self,
+        reason: VoiceCallFailureReason,
+        now: i64,
+    ) -> Result<(), SdkError> {
         self.finish("failed", now)?;
-        self.row.failure_reason = Some(reason);
+        self.row.peer_reason = Some(reason);
         Ok(())
     }
 }

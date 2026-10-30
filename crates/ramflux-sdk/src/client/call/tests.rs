@@ -173,6 +173,31 @@ fn a_busy_callee_sends_a_terminal_control_and_never_keeps_media_keys() -> Result
 }
 
 #[test]
+fn a_peer_failure_is_not_attributed_as_a_local_failure() -> Result<(), SdkError> {
+    let mut origin = outgoing()?;
+    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    recipient.fail(ramflux_protocol::VoiceCallFailureReason::RelayUnavailable, 101)?;
+    let failed = recipient
+        .pending
+        .iter()
+        .find(|control| matches!(control.body, CallAction::Failed))
+        .ok_or_else(|| invalid("failed control missing"))?;
+    origin.apply(failed, 101)?;
+    assert_eq!(origin.row.end_reason.as_deref(), Some("failed"));
+    assert_eq!(origin.row.failure_reason, None);
+    assert_eq!(
+        origin.row.peer_reason,
+        Some(ramflux_protocol::VoiceCallFailureReason::SignalingUnavailable)
+    );
+    assert_eq!(
+        recipient.row.failure_reason,
+        Some(ramflux_protocol::VoiceCallFailureReason::RelayUnavailable)
+    );
+    assert_eq!(recipient.row.peer_reason, None);
+    Ok(())
+}
+
+#[test]
 fn authenticated_lease_updates_preserve_active_state_until_the_new_expiry() -> Result<(), SdkError>
 {
     let mut origin = outgoing()?;
