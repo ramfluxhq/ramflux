@@ -22,10 +22,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@a16f4a497336b68eeff8ef72868ea4bab1c672bb
+        uses: github/codeql-action/init@4f900f43bc6bfc406aac5f37e402badfc55f9342
         with:
           languages: rust
 
@@ -33,4 +33,4 @@ jobs:
         run: cargo build --workspace
 
       - name: Analyze
-        uses: github/codeql-action/analyze@a16f4a497336b68eeff8ef72868ea4bab1c672bb
+        uses: github/codeql-action/analyze@4f900f43bc6bfc406aac5f37e402badfc55f9342
