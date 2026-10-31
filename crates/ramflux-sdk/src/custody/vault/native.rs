@@ -82,6 +82,8 @@ fn pairs(reference: &str, interactive: bool) -> Pairs {
     }
 }
 fn copy(reference: &str, data: bool, interactive: bool) -> Result<Option<CFType>, SdkError> {
+    #[cfg(test)]
+    tests::COPY_REQUEST.set(Some((data, interactive)));
     let mut fields = pairs(reference, interactive);
     // SAFETY: Both return keys are static Security constants and the Boolean is retained.
     unsafe {
@@ -127,6 +129,8 @@ impl Items for KeychainItems {
             .transpose()
     }
     fn insert(&self, reference: &str, bytes: &[u8], presence: bool) -> Result<bool, SdkError> {
+        #[cfg(test)]
+        tests::INSERT_PRESENCE.set(Some(presence));
         // SecItemAdd receives creation attributes, not query-only UI controls. It never
         // reads/replaces an existing item; duplicates return without an update.
         let mut fields = pairs(reference, true);
@@ -212,6 +216,17 @@ pub(super) fn store_branch(reference: &str, secret: &[u8]) -> Result<(), SdkErro
 }
 pub(super) fn get_branch(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
     KeychainItems.read(reference, false)?.ok_or(SdkError::CustodyVaultUnavailable)
+}
+pub(super) fn put(reference: &str, secret: &[u8]) -> Result<(), SdkError> {
+    if !KeychainItems.insert(reference, secret, false)? {
+        return Err(SdkError::CustodyVaultUnavailable);
+    }
+    Ok(())
+}
+pub(super) fn get(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+    let value = copy(reference, true, false)?.ok_or_else(unavailable)?;
+    let data = value.downcast::<CFData>().ok_or_else(unavailable)?;
+    Ok(Zeroizing::new(data.bytes().to_vec()))
 }
 pub(super) fn delete(reference: &str) -> Result<(), SdkError> {
     primary_items::delete(&KeychainItems, reference)
