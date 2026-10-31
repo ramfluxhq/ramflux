@@ -8,6 +8,8 @@ use std::cell::Cell;
 
 thread_local! {
     pub(super) static FORCED_STATUS: Cell<Option<i32>> = const { Cell::new(None) };
+    pub(super) static COPY_REQUEST: Cell<Option<(bool, bool)>> = const { Cell::new(None) };
+    pub(super) static INSERT_PRESENCE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 struct Failure;
@@ -15,12 +17,16 @@ impl Failure {
     fn install() -> Self {
         // errSecInteractionNotAllowed: models a locked or headless Keychain.
         FORCED_STATUS.set(Some(-25308));
+        COPY_REQUEST.set(None);
+        INSERT_PRESENCE.set(None);
         Self
     }
 }
 impl Drop for Failure {
     fn drop(&mut self) {
         FORCED_STATUS.set(None);
+        COPY_REQUEST.set(None);
+        INSERT_PRESENCE.set(None);
     }
 }
 
@@ -97,6 +103,39 @@ fn native_migration_boundary_alone_maps_provider_failure_to_presence_refusal() {
             ramflux_protocol::home_migration::Refusal::CustodyUserPresenceUnavailable
         ))
     ));
+}
+
+#[test]
+fn native_provisioning_secret_failures_keep_generic_errors_without_requesting_presence() {
+    let _failure = Failure::install();
+    assert!(matches!(
+        NativePrimaryVault
+            .store_provisioning_secret("pending-native-participant", b"fixture-secret"),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    assert_eq!(INSERT_PRESENCE.get(), Some(false));
+    assert!(matches!(
+        NativePrimaryVault.load_provisioning_secret("pending-native-participant"),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    assert_eq!(COPY_REQUEST.get(), Some((true, false)));
+}
+
+#[test]
+fn native_provisioning_secret_duplicate_and_missing_entries_keep_generic_errors() {
+    let _failure = Failure::install();
+    FORCED_STATUS.set(Some(security_framework_sys::base::errSecDuplicateItem));
+    assert!(matches!(
+        NativePrimaryVault
+            .store_provisioning_secret("pending-native-participant", b"fixture-secret"),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    FORCED_STATUS.set(Some(errSecItemNotFound));
+    assert!(matches!(
+        NativePrimaryVault.load_provisioning_secret("pending-native-participant"),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    assert_eq!(COPY_REQUEST.get(), Some((true, false)));
 }
 
 #[test]
