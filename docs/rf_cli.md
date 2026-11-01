@@ -34,8 +34,12 @@ The receiver runs `rf dm read --account=ACCOUNT --conversation=CONVERSATION`.
 It automatically fetches, verifies and decrypts received attachments, returning
 their bytes in `decrypted_messages[].attachments[].plaintext_base64` (base64url).
 Repeat `dm read` after a fetch failure to retry; SDK clients can also invoke
-`object.fetch`. `rf object list --account=ACCOUNT` lists available metadata on
-either side, using bounded directory pages rather than embedding ciphertext.
+`object.fetch`. Automatic reads have a bounded work window. A deferred fetch
+resumes verified chunks and confirmed relay acknowledgements on the next read;
+it does not restart the acknowledgement pass. The daemon logs
+`scheduler_fetch_deadline` when that window expires.
+`rf object list --account=ACCOUNT` lists available metadata on either side, using
+bounded directory pages rather than embedding ciphertext.
 Existing object data and attachment references remain readable.
 
 ## Native groups

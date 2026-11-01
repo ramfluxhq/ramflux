@@ -170,3 +170,42 @@ async fn fetched_attachment_reads_are_local_with_a_saved_node_profile() -> Resul
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn scheduler_deadline_preserves_resume_before_retiring_the_borrowed_gateway_engine()
+-> Result<(), SdkError> {
+    let root = test_root();
+    let mut account = crate::bus::runtime_tests::account(
+        &root,
+        "deadline",
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    let mut engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    engine.config.previous_session_id = Some("current-session".into());
+    engine.config.resume_token = Some("current-resume".into());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        std::future::pending::<Result<serde_json::Value, SdkError>>(),
+    )
+    .await;
+    let error = finish_fetch(&mut account, engine, "object", result)
+        .err()
+        .ok_or_else(|| SdkError::LocalBus("deadline unexpectedly succeeded".into()))?;
+    assert!(
+        matches!(error, SdkError::LocalBus(reason) if reason == "attachment fetch deferred; retry object.fetch")
+    );
+    assert!(!account.has_pooled_engine(), "an interrupted frame stream cannot be reused");
+    assert_eq!(account.gateway_config.previous_session_id.as_deref(), Some("current-session"));
+    assert_eq!(account.gateway_config.resume_token.as_deref(), Some("current-resume"));
+    let saved = account
+        .client
+        .projection_checkpoint(LocalBusAccountState::GATEWAY_RESUME_CHECKPOINT)?
+        .ok_or_else(|| SdkError::LocalBus("missing saved resume".into()))?;
+    let saved: serde_json::Value = serde_json::from_str(&saved)?;
+    assert_eq!(saved["previous_session_id"], "current-session");
+    assert_eq!(saved["resume_token"], "current-resume");
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

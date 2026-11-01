@@ -362,3 +362,6 @@ fn a_received_object_selector_resolves_only_its_expected_manifest() -> Result<()
     assert!(f.client.decrypt_object("received:wrong").is_err());
     Ok(())
 }
+
+#[path = "tests/ack_progress.rs"]
+mod ack_progress;

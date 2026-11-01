@@ -4,7 +4,7 @@
 //! Attachment diagnostics expose fixed check names and error categories, never access material.
 use crate::SdkError;
 
-pub(super) fn failed(object_id: &str, check: &'static str, error: &SdkError) {
+pub(crate) fn failed(object_id: &str, check: &'static str, error: &SdkError) {
     tracing::warn!(
         object_id,
         check,

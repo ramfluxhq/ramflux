@@ -459,10 +459,21 @@ impl RamfluxClient {
                         expires_at: download.expires_at,
                     };
                     check = "relay_ack";
-                    for chunk_index in 0..download.manifest.total_chunks {
-                        ack_dm_attachment_chunk_via_relay_quic(engine, pool, &ack_ctx, chunk_index)
+                    self.acknowledge_received_attachment_with(
+                        attachment,
+                        download.manifest.total_chunks,
+                        async |chunk_index| {
+                            ack_dm_attachment_chunk_via_relay_quic(
+                                engine,
+                                pool,
+                                &ack_ctx,
+                                chunk_index,
+                            )
                             .await?;
-                    }
+                            Ok(())
+                        },
+                    )
+                    .await?;
                 }
             }
             // T21-A2a: every chunk was downloaded, persisted, plaintext-verified, and ACKed; only now

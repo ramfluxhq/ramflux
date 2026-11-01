@@ -26,7 +26,7 @@ pub(super) async fn run_next(account: &mut LocalBusAccountState) -> Result<bool,
     attempt.next_at = now.saturating_add(2_i64.pow(attempt.attempts));
     account.client.account_db()?.persist_actor_state(&key, &attempt)?;
     if let Err(error) = fetch(account, &id).await {
-        tracing::debug!(%error,"background attachment fetch rejected");
+        crate::client::attachment_diagnostics::failed(&id, "background_fetch", &error);
     }
     Ok(true)
 }
@@ -34,6 +34,14 @@ pub(super) async fn run_next(account: &mut LocalBusAccountState) -> Result<bool,
 pub(super) async fn fetch(
     account: &mut LocalBusAccountState,
     id: &str,
+) -> Result<serde_json::Value, SdkError> {
+    fetch_until(account, id, tokio::time::Instant::now() + Duration::from_secs(20)).await
+}
+
+async fn fetch_until(
+    account: &mut LocalBusAccountState,
+    id: &str,
+    deadline: tokio::time::Instant,
 ) -> Result<serde_json::Value, SdkError> {
     let operation = format!(
         "sync-fetch:{}",
@@ -46,21 +54,9 @@ pub(super) async fn fetch(
         "object.fetch",
         serde_json::json!({"object_id":id,"operation_id":operation}),
     );
-    let result = tokio::time::timeout(
-        Duration::from_secs(20),
-        super::dispatch::deferred_attachment::dispatch(account, &request),
-    )
-    .await;
-    if let Ok(result) = result {
-        Ok(result?.response_body)
-    } else {
-        // The cancelled importer retained verified chunks. Clear its transient fetching state.
-        account.client.recover_received_attachment_fetches()?;
-        Ok(account
-            .client
-            .received_attachment_status(id)?
-            .unwrap_or_else(|| serde_json::json!({"object_id":id,"transfer_state":"failed"})))
-    }
+    Ok(super::dispatch::deferred_attachment::dispatch_until(account, &request, Some(deadline))
+        .await?
+        .response_body)
 }
 
 pub(super) async fn fetch_for_page(
@@ -83,24 +79,16 @@ pub(super) async fn fetch_for_page(
         selected += 1;
         ids.extend(account.client.account_db()?.client_message_object_ids(&message)?);
     }
-    let result = tokio::time::timeout(Duration::from_secs(20), async {
-        for id in ids {
-            let result = fetch(account, &id).await?;
-            if result["transfer_state"] != "available" {
-                return Err(SdkError::LocalBus(
-                    "attachment fetch failed; retry object.fetch".to_owned(),
-                ));
-            }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    for id in ids {
+        let result = fetch_until(account, &id, deadline).await?;
+        if result["transfer_state"] != "available" {
+            return Err(SdkError::LocalBus(
+                "attachment fetch failed; retry object.fetch".to_owned(),
+            ));
         }
-        Ok(())
-    })
-    .await;
-    if let Ok(result) = result {
-        result
-    } else {
-        account.client.recover_received_attachment_fetches()?;
-        Err(SdkError::LocalBus("attachment fetch deferred; retry object.fetch".to_owned()))
     }
+    Ok(())
 }
 
 #[cfg(test)]

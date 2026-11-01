@@ -6,7 +6,7 @@ use super::object::DeferredObjectKeySlot;
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::ops::AsyncFnOnce;
+use std::ops::{AsyncFnMut, AsyncFnOnce};
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -29,6 +29,12 @@ struct ReceivedAttachment {
     prepared_slot: Option<PreparedSlot>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct AckProgress {
+    object_id: String,
+    acknowledged: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 struct PreparedSlot {
     object_key: [u8; 32],
@@ -48,6 +54,48 @@ struct FetchState {
 }
 
 impl RamfluxClient {
+    /// Persist each confirmed ACK so a bounded fetch never restarts an entire ACK pass.
+    pub(super) async fn acknowledge_received_attachment_with<F>(
+        &self,
+        reference: &SdkDmAttachmentRef,
+        total_chunks: u32,
+        mut acknowledge: F,
+    ) -> Result<(), SdkError>
+    where
+        F: AsyncFnMut(u32) -> Result<(), SdkError>,
+    {
+        // Bind progress to the exact relay, grant, manifest and key slot, not a reusable object id.
+        let hash = ramflux_crypto::blake3_256_base64url(
+            "ramflux.attachment.ack.progress.v1",
+            &ramflux_protocol::canonical_json_bytes(reference)?,
+        );
+        let db = self.account_db()?;
+        let selector = db
+            .load_actor_state::<String>(&slot_reference_key(reference)?)?
+            .unwrap_or_else(|| reference.object_id.clone());
+        let resumable =
+            db.load_actor_state::<ReceivedAttachment>(&reference_key(&selector))?.is_some();
+        for index in 0..total_chunks {
+            let key = format!("attachment/ack/{hash}/{index}");
+            if resumable
+                && db
+                    .load_actor_state::<AckProgress>(&key)?
+                    .is_some_and(|saved| saved.object_id == selector && saved.acknowledged)
+            {
+                continue;
+            }
+            acknowledge(index).await?;
+            if resumable {
+                // object_id also registers the erasure footprint, including sender-scoped aliases.
+                db.persist_actor_state(
+                    &key,
+                    &AckProgress { object_id: selector.clone(), acknowledged: true },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// Persist before the message's receive checkpoint, without contacting any relay.
     pub(crate) fn persist_received_attachment_reference(
         &self,
