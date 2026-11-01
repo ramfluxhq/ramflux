@@ -15,6 +15,29 @@ are logged at warn with the same fields and an `outcome`. Use
 starting the daemon; changing the environment of a later CLI command does not
 change a running daemon's filter.
 
+For background operation, use `RUST_LOG=ramflux_sdk=info rf daemon start
+2>daemon.log &`. A ready daemon writes an info event to that file. Attachment
+failures log the object id, failing check and fixed error category; access grants,
+keys and transport response bodies are excluded.
+
+## Born-v3 DM attachments
+
+Create both accounts through `rf account create` after selecting and confirming
+their node, then complete contact consent. Send with the usual DM recipient
+selectors and `--attach /path/to/file --relay-url quic://HOST:PORT
+--attachment-chunk-size 1024`. Use the selected node profile's `relay.quic_addr`
+for `HOST:PORT` (`rf node list` shows the profiles). Keep the profile's node
+identity and certificate pin; the relay address can be an IP address and need
+not equal the node id. Do not substitute the discovery HTTP or gateway address.
+
+The receiver runs `rf dm read --account=ACCOUNT --conversation=CONVERSATION`.
+It automatically fetches, verifies and decrypts received attachments, returning
+their bytes in `decrypted_messages[].attachments[].plaintext_base64` (base64url).
+Repeat `dm read` after a fetch failure to retry; SDK clients can also invoke
+`object.fetch`. `rf object list --account=ACCOUNT` lists available metadata on
+either side, using bounded directory pages rather than embedding ciphertext.
+Existing object data and attachment references remain readable.
+
 ## Native groups
 
 A born-v3 group has one signed conversation, selected at creation. `rf group

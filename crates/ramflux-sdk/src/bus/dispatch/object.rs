@@ -405,9 +405,7 @@ pub(crate) async fn dispatch_object_bus_request(
             };
             Ok(local_bus_ok(serde_json::json!({ "transfer": status })))
         }
-        "object.list" => Ok(local_bus_ok(serde_json::json!({
-            "objects": account.client.persisted_objects()?,
-        }))),
+        "object.list" => object_list_response(request, &account.client),
         "object.share" => {
             let body: LocalBusObjectShareRequest = serde_json::from_value(request.body.clone())?;
             let conversation_id = body.conversation_id.clone();
@@ -2160,4 +2158,21 @@ mod spool_tests {
         assert_eq!(decoded, plaintext, "one-shot get must round-trip the small object");
         std::fs::remove_dir_all(&root).ok();
     }
+}
+
+// Keep the legacy full-object response unchanged when it fits. Large objects must use the
+// existing paginated metadata API rather than letting the socket writer close mid-request.
+pub(crate) fn object_list_response(
+    request: &LocalBusFrame,
+    client: &RamfluxClient,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body = serde_json::json!({"objects":client.persisted_objects()?});
+    crate::bus::io::encode_local_bus_frame(&local_bus_response(request, body.clone())).map_err(
+        |_| {
+            SdkError::LocalBus(
+                "object.list response exceeds frame limit; use object.directory".into(),
+            )
+        },
+    )?;
+    Ok(local_bus_ok(body))
 }

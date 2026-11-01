@@ -26,6 +26,7 @@ pub(super) async fn serve(
     let supervisor = Supervisor::new(config)?;
     let mut background = JoinSet::new();
     supervisor.hydrate(&mut background)?;
+    tracing::info!(socket = %supervisor.config.socket_path.display(), "local bus daemon ready");
     let result = accept(listener, uid, supervisor, shutdown).await;
     background.abort_all();
     while background.join_next().await.is_some() {}

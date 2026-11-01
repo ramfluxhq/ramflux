@@ -4,6 +4,9 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+#[cfg(test)]
+#[path = "object_listing_tests.rs"]
+mod listing_tests;
 
 /// T21-A2a: the decrypted attachment key slot plus its advanced recv session, held so the caller can
 /// commit the slot recv checkpoint only after the whole import (download, persist, plaintext verify,
@@ -15,6 +18,12 @@ pub(crate) struct DeferredObjectKeySlot {
     pub(super) commit_label: String,
     pub(super) pair_slot: Option<SdkObjectKeySlot>,
     pub(super) legacy_slot: Option<SdkObjectKeySlot>,
+}
+
+struct VerifiedAttachmentImport {
+    object: EncryptedObject,
+    plaintext: Vec<u8>,
+    plaintext_hash: String,
 }
 
 impl RamfluxClient {
@@ -381,112 +390,145 @@ impl RamfluxClient {
         attachment: &SdkDmAttachmentRef,
         relay_service_key_base64: Option<String>,
     ) -> Result<SdkDmAttachmentImportResult, SdkError> {
-        if attachment.schema != "ramflux.sdk.dm_attachment_ref.v1" {
-            return Err(SdkError::LocalBus(format!(
-                "unsupported DM attachment ref schema: {}",
-                attachment.schema
-            )));
-        }
-        let key_slot = match self.received_attachment_prepared_slot(attachment)? {
-            Some(slot) => slot,
-            None => self.decrypt_object_key_slot(&attachment.key_slot)?,
-        };
-        let object_key = key_slot.object_key;
-        let download = self
-            .download_dm_attachment_ciphertext_via_gateway(
-                engine,
-                pool,
-                attachment,
-                object_key,
-                relay_service_key_base64.clone(),
-            )
-            .await?;
-        let ciphertext = download.ciphertext;
-        let assembled_hash = ramflux_crypto::blake3_256_base64url(
-            ramflux_protocol::domain::OBJECT_MANIFEST,
-            &ciphertext,
-        );
-        if assembled_hash != attachment.manifest_hash {
-            return Err(SdkError::LocalBus("DM attachment manifest hash mismatch".to_owned()));
-        }
-        let object = self.object_store.put_received_encrypted_object_with_key(
-            &attachment.object_id,
-            &attachment.manifest_hash,
-            &ciphertext,
-            &attachment.plaintext_hash,
-            object_key,
-        );
-        self.persist_object_if_unlocked(&object, Some(&object_key))?;
-        self.persist_object_transfer(ObjectTransferPersist {
-            transfer_id: &download.transfer_id,
-            object: &object,
-            direction: OBJECT_TRANSFER_DOWNLOAD,
-            relay_endpoint: Some(&download.relay_endpoint),
-            chunk_size: download.manifest.chunk_size,
-            total_chunks: download.manifest.total_chunks,
-            completed: &download.completed,
-            done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
-            state: "complete",
-            last_error: None,
-            resume_token: None,
-            expires_at: Some(i64::try_from(download.expires_at).unwrap_or(i64::MAX)),
-        })?;
-        let plaintext = self.decrypt_object(&attachment.object_id)?;
-        let plaintext_hash = verify_attachment_plaintext(attachment, &plaintext)?;
-        #[cfg(feature = "itest-rfd-fault")]
-        crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::GranteeImport).await?;
-        // T21-A2: the encrypted object + key + transfer state are now durably persisted and the
-        // plaintext hash verified. Only now — and only when a durable account store actually holds
-        // the object — do we ACK each chunk, so a crash can never leave a relay chunk acked while
-        // the grantee holds the object only in memory. ACK reuses the received A-signed grant (B
-        // signs only its own PoP) and requires Ack capability; a Get-only grant imports without
-        // acking. Relay ACK is idempotent, so a retried import safely re-acks the persisted object.
-        let grant_authorizes_ack = attachment.access_grant.as_ref().is_some_and(|grant| {
-            grant.capabilities.contains(&ramflux_protocol::ObjectRelayCapability::Ack)
-        });
-        if self.active_account_db.is_some() && grant_authorizes_ack {
-            let ack_options = self
-                .relay_transfer_options(
-                    Some(attachment.relay_endpoint.clone()),
-                    relay_service_key_base64,
-                    None,
-                )?
-                .ok_or_else(|| {
-                    SdkError::LocalBus("DM attachment relay options missing".to_owned())
-                })?;
-            if matches!(ack_options.token_provider, RelayTokenProvider::GatewayIssued) {
-                let branch = self
-                    .device_branch
-                    .as_ref()
-                    .ok_or_else(|| {
-                        SdkError::LocalBus("object relay requires a device branch".to_owned())
-                    })?
-                    .clone();
-                let ack_ctx = DmAttachmentFetch {
-                    options: &ack_options,
-                    branch: &branch,
-                    attachment: Some(attachment),
-                    object: &object,
-                    manifest: &download.manifest,
+        let mut check = "reference_schema";
+        let outcome = Box::pin(async {
+            if attachment.schema != "ramflux.sdk.dm_attachment_ref.v1" {
+                return Err(SdkError::LocalBus(format!(
+                    "unsupported DM attachment ref schema: {}",
+                    attachment.schema
+                )));
+            }
+            check = "prepared_key_slot";
+            let key_slot = if let Some(slot) = self.received_attachment_prepared_slot(attachment)? {
+                slot
+            } else {
+                check = "key_slot_decrypt";
+                self.decrypt_object_key_slot(&attachment.key_slot)?
+            };
+            let object_key = key_slot.object_key;
+            check = "relay_download";
+            let download = self
+                .download_dm_attachment_ciphertext_via_gateway(
+                    engine,
+                    pool,
+                    attachment,
                     object_key,
-                    expires_at: download.expires_at,
-                };
-                for chunk_index in 0..download.manifest.total_chunks {
-                    ack_dm_attachment_chunk_via_relay_quic(engine, pool, &ack_ctx, chunk_index)
-                        .await?;
+                    relay_service_key_base64.clone(),
+                )
+                .await?;
+            check = "verify_and_persist";
+            let verified = self.verify_persist_dm_attachment(attachment, &download, object_key)?;
+            let object = &verified.object;
+            #[cfg(feature = "itest-rfd-fault")]
+            crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::GranteeImport).await?;
+            // T21-A2: the encrypted object + key + transfer state are now durably persisted and the
+            // plaintext hash verified. Only now — and only when a durable account store actually holds
+            // the object — do we ACK each chunk, so a crash can never leave a relay chunk acked while
+            // the grantee holds the object only in memory. ACK reuses the received A-signed grant (B
+            // signs only its own PoP) and requires Ack capability; a Get-only grant imports without
+            // acking. Relay ACK is idempotent, so a retried import safely re-acks the persisted object.
+            let grant_authorizes_ack = attachment.access_grant.as_ref().is_some_and(|grant| {
+                grant.capabilities.contains(&ramflux_protocol::ObjectRelayCapability::Ack)
+            });
+            if self.active_account_db.is_some() && grant_authorizes_ack {
+                check = "relay_ack_options";
+                let ack_options = self
+                    .relay_transfer_options(
+                        Some(attachment.relay_endpoint.clone()),
+                        relay_service_key_base64,
+                        None,
+                    )?
+                    .ok_or_else(|| {
+                        SdkError::LocalBus("DM attachment relay options missing".to_owned())
+                    })?;
+                if matches!(ack_options.token_provider, RelayTokenProvider::GatewayIssued) {
+                    let branch = self
+                        .device_branch
+                        .as_ref()
+                        .ok_or_else(|| {
+                            SdkError::LocalBus("object relay requires a device branch".to_owned())
+                        })?
+                        .clone();
+                    let ack_ctx = DmAttachmentFetch {
+                        options: &ack_options,
+                        branch: &branch,
+                        attachment: Some(attachment),
+                        object,
+                        manifest: &download.manifest,
+                        object_key,
+                        expires_at: download.expires_at,
+                    };
+                    check = "relay_ack";
+                    for chunk_index in 0..download.manifest.total_chunks {
+                        ack_dm_attachment_chunk_via_relay_quic(engine, pool, &ack_ctx, chunk_index)
+                            .await?;
+                    }
                 }
             }
-        }
-        // T21-A2a: every chunk was downloaded, persisted, plaintext-verified, and ACKed; only now
-        // commit the slot recv checkpoint so a failed ACK above leaves the slot ratchet re-usable.
-        self.commit_object_key_slot_session(&key_slot)?;
-        Ok(SdkDmAttachmentImportResult {
-            object_id: attachment.object_id.clone(),
-            manifest_hash: attachment.manifest_hash.clone(),
-            plaintext_base64: ramflux_protocol::encode_base64url(&plaintext),
-            plaintext_hash,
-            imported: true,
+            // T21-A2a: every chunk was downloaded, persisted, plaintext-verified, and ACKed; only now
+            // commit the slot recv checkpoint so a failed ACK above leaves the slot ratchet re-usable.
+            check = "key_slot_commit";
+            self.commit_object_key_slot_session(&key_slot)?;
+            Ok(SdkDmAttachmentImportResult {
+                object_id: attachment.object_id.clone(),
+                manifest_hash: attachment.manifest_hash.clone(),
+                plaintext_base64: ramflux_protocol::encode_base64url(&verified.plaintext),
+                plaintext_hash: verified.plaintext_hash,
+                imported: true,
+            })
         })
+        .await;
+        super::attachment_diagnostics::checked(outcome, &attachment.object_id, check)
+    }
+
+    fn verify_persist_dm_attachment(
+        &mut self,
+        attachment: &SdkDmAttachmentRef,
+        download: &DmAttachmentDownload,
+        object_key: [u8; 32],
+    ) -> Result<VerifiedAttachmentImport, SdkError> {
+        let mut check = "manifest_hash";
+        let outcome = (|| {
+            let ciphertext = &download.ciphertext;
+            check = "manifest_hash";
+            let assembled_hash = ramflux_crypto::blake3_256_base64url(
+                ramflux_protocol::domain::OBJECT_MANIFEST,
+                ciphertext,
+            );
+            if assembled_hash != attachment.manifest_hash {
+                return Err(SdkError::LocalBus("DM attachment manifest hash mismatch".to_owned()));
+            }
+            let object = self.object_store.put_received_encrypted_object_with_key(
+                &attachment.object_id,
+                &attachment.manifest_hash,
+                ciphertext,
+                &attachment.plaintext_hash,
+                object_key,
+            );
+            check = "object_persist";
+            self.persist_object_if_unlocked(&object, Some(&object_key))?;
+            check = "transfer_persist";
+            self.persist_object_transfer(ObjectTransferPersist {
+                transfer_id: &download.transfer_id,
+                object: &object,
+                direction: OBJECT_TRANSFER_DOWNLOAD,
+                relay_endpoint: Some(&download.relay_endpoint),
+                chunk_size: download.manifest.chunk_size,
+                total_chunks: download.manifest.total_chunks,
+                completed: &download.completed,
+                done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
+                state: "complete",
+                last_error: None,
+                resume_token: None,
+                expires_at: Some(i64::try_from(download.expires_at).unwrap_or(i64::MAX)),
+            })?;
+            check = "content_decrypt";
+            let plaintext = self.decrypt_object(&attachment.object_id)?;
+            check = "plaintext_hash";
+            let plaintext_hash = verify_attachment_plaintext(attachment, &plaintext)?;
+            Ok(VerifiedAttachmentImport { object, plaintext, plaintext_hash })
+        })();
+        super::attachment_diagnostics::checked(outcome, &attachment.object_id, check)
     }
 
     #[cfg(feature = "itest-local-mint")]

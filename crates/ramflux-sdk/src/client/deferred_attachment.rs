@@ -229,6 +229,7 @@ impl RamfluxClient {
         match outcome {
             Ok(()) => "available".clone_into(&mut state.transfer_state),
             Err(error) => {
+                super::attachment_diagnostics::failed(object_id, "attachment_fetch", &error);
                 "failed".clone_into(&mut state.transfer_state);
                 // Fixed diagnostic categories never echo grants, key slots or transport bodies.
                 state.last_error = Some(

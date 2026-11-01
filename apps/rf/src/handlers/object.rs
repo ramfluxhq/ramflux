@@ -4,6 +4,7 @@
 #![allow(unused_imports)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
+mod list;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Result<(), RfError> {
@@ -60,10 +61,7 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
                 .await?,
             )
         }
-        ObjectAction::List(selector) => print_json(
-            &bus.request(Some(selector.account), "object", "object.list", serde_json::json!({}))
-                .await?,
-        ),
+        ObjectAction::List(selector) => print_json(&list::read(&mut bus, &selector.account).await?),
         ObjectAction::Share(share) => {
             let request = LocalBusObjectShareRequest {
                 object_id: share.object,
