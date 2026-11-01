@@ -5,6 +5,9 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 #[cfg(test)]
+#[path = "object_cache_tests.rs"]
+mod cache_tests;
+#[cfg(test)]
 #[path = "object_listing_tests.rs"]
 mod listing_tests;
 
@@ -676,7 +679,9 @@ impl RamfluxClient {
         let mut completed = Vec::new();
         let mut done_bytes = 0_u64;
         for chunk_index in 0..manifest.total_chunks {
-            let plaintext_chunk = match self.received_attachment_chunk(attachment, chunk_index)? {
+            let cached = self.received_attachment_chunk(attachment, chunk_index)?;
+            let fresh = cached.is_none();
+            let plaintext_chunk = match cached {
                 Some(payload) => DmAttachmentChunk {
                     len: u64::try_from(
                         decrypt_chunk_payload(&object_key, &manifest, &payload)?.len(),
@@ -704,25 +709,29 @@ impl RamfluxClient {
             };
             validate_dm_attachment_chunk(attachment, chunk_index, &plaintext_chunk)?;
             session.receive_chunk(plaintext_chunk.payload.clone(), &branch)?;
-            self.persist_received_attachment_chunk(attachment, &plaintext_chunk.payload)?;
+            if fresh {
+                self.persist_received_attachment_chunk(attachment, &plaintext_chunk.payload)?;
+            }
             completed.push(chunk_index);
-            completed.sort_unstable();
-            completed.dedup();
             done_bytes = done_bytes.saturating_add(plaintext_chunk.len);
-            self.persist_object_transfer(ObjectTransferPersist {
-                transfer_id: &transfer_id,
-                object: &object_stub,
-                direction: OBJECT_TRANSFER_DOWNLOAD,
-                relay_endpoint: Some(&options.relay_endpoint),
-                chunk_size: manifest.chunk_size,
-                total_chunks: manifest.total_chunks,
-                completed: &completed,
-                done_bytes,
-                state: "running",
-                last_error: None,
-                resume_token: None,
-                expires_at: Some(i64::try_from(expires_at).unwrap_or(i64::MAX)),
-            })?;
+            // Cached chunks are already durable. Rewriting their payload and transfer snapshot
+            // can exhaust every retry window before the importer reaches its outstanding ACKs.
+            if fresh {
+                self.persist_object_transfer(ObjectTransferPersist {
+                    transfer_id: &transfer_id,
+                    object: &object_stub,
+                    direction: OBJECT_TRANSFER_DOWNLOAD,
+                    relay_endpoint: Some(&options.relay_endpoint),
+                    chunk_size: manifest.chunk_size,
+                    total_chunks: manifest.total_chunks,
+                    completed: &completed,
+                    done_bytes,
+                    state: "running",
+                    last_error: None,
+                    resume_token: None,
+                    expires_at: Some(i64::try_from(expires_at).unwrap_or(i64::MAX)),
+                })?;
+            }
         }
         Ok(DmAttachmentDownload {
             ciphertext: session.assemble()?,
