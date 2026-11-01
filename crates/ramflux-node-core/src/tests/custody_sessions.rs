@@ -205,7 +205,7 @@ fn custody_network_admits_only_signed_possession_and_consumes_challenge_once() -
             CustodyProofAction::OpenSession,
             proof.clone()
         )?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused }
+        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
     ));
     let mut wrong = proof.clone();
     wrong.body.record_hash = ramflux_protocol::encode_base64url([0; 32]);
@@ -220,14 +220,14 @@ fn custody_network_admits_only_signed_possession_and_consumes_challenge_once() -
     ));
     assert!(matches!(
         driver.attempt(&service, &router, &store, action, proof)?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::Replay }
+        CustodyServerFrame::Refused { code: CustodyRefusal::Replay, capacity: None }
     ));
     let attacker = Driver::new("alice", 20)?;
     let attacker_result = attacker.run(&service, &router, &store, attacker.publish())?;
     assert!(
         matches!(
             attacker_result,
-            CustodyServerFrame::Refused { code: CustodyRefusal::PrincipalIdTaken }
+            CustodyServerFrame::Refused { code: CustodyRefusal::PrincipalIdTaken, capacity: None }
         ),
         "unexpected conflict result: {attacker_result:?}"
     );
@@ -252,7 +252,7 @@ fn custody_network_admits_only_signed_possession_and_consumes_challenge_once() -
     let restarted = crate::CustodyService::new(driver.node.clone(), false, &store, NOW)?;
     assert!(matches!(
         driver.attempt(&restarted, &router, &store, CustodyProofAction::OpenSession, lost_proof)?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::ChallengeUnknown }
+        CustodyServerFrame::Refused { code: CustodyRefusal::ChallengeUnknown, capacity: None }
     ));
     assert!(matches!(
         driver.run(&restarted, &router, &store, CustodyProofAction::OpenSession)?,
@@ -333,7 +333,7 @@ fn custody_session_requests_bind_connection_possession_nonce_and_current_head() 
     let request = signed_request(&driver, &session, &action, &nonce)?;
     assert!(matches!(
         send(&ramflux_protocol::encode_base64url([2; 32]), request.clone(), NOW),
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused }
+        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
     ));
     assert!(matches!(
         send(&driver.connection, request.clone(), NOW),
@@ -341,20 +341,20 @@ fn custody_session_requests_bind_connection_possession_nonce_and_current_head() 
     ));
     assert!(matches!(
         send(&driver.connection, request, NOW),
-        CustodyServerFrame::Refused { code: CustodyRefusal::Replay }
+        CustodyServerFrame::Refused { code: CustodyRefusal::Replay, capacity: None }
     ));
     let mut forged =
         signed_request(&driver, &session, &action, &ramflux_protocol::encode_base64url([3; 32]))?;
     forged.signed.signature = ramflux_protocol::encode_base64url([0; 64]);
     assert!(matches!(
         send(&driver.connection, forged, NOW),
-        CustodyServerFrame::Refused { code: CustodyRefusal::InvalidInput }
+        CustodyServerFrame::Refused { code: CustodyRefusal::InvalidInput, capacity: None }
     ));
     let fresh =
         signed_request(&driver, &session, &action, &ramflux_protocol::encode_base64url([4; 32]))?;
     assert!(matches!(
         send(&driver.connection, fresh.clone(), NOW + 301),
-        CustodyServerFrame::Refused { code: CustodyRefusal::SessionExpired }
+        CustodyServerFrame::Refused { code: CustodyRefusal::SessionExpired, capacity: None }
     ));
     let verified = verify_record(&driver.publication.record, NOW, None, None)?;
     let primary = SelfSigningKey::from_vault_seed(&zeroize::Zeroizing::new([11; 32]));
@@ -366,7 +366,7 @@ fn custody_session_requests_bind_connection_possession_nonce_and_current_head() 
     )?;
     assert!(matches!(
         send(&driver.connection, fresh, NOW + 1),
-        CustodyServerFrame::Refused { code: CustodyRefusal::UpdateRequired }
+        CustodyServerFrame::Refused { code: CustodyRefusal::UpdateRequired, capacity: None }
     ));
     drop(service);
     drop(store);
@@ -530,13 +530,19 @@ fn custody_publication_quota_refusal_does_not_occupy_successful_replay_cache() -
     let action = refused.publish();
     let challenge = refused.challenge(&service, &router, &store, action.clone())?;
     let proof = refused.proof(&challenge)?;
-    assert!(matches!(
+    assert_eq!(
         refused.attempt(&service, &router, &store, action.clone(), proof.clone())?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::Capacity }
-    ));
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::Capacity,
+            capacity: Some(CapacityHint {
+                scope: CapacityScope::PrefixDaily,
+                resets_at_unix: (NOW / 86_400 + 1) * 86_400,
+            }),
+        }
+    );
     assert!(matches!(
         refused.attempt(&service, &router, &store, action, proof)?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::ChallengeUnknown }
+        CustodyServerFrame::Refused { code: CustodyRefusal::ChallengeUnknown, capacity: None }
     ));
     assert!(router.custody_record(&refused.reference.account_anchor, NOW)?.is_none());
     drop(store);
@@ -612,7 +618,7 @@ fn custody_direct_prove_busy_and_revoked_grants_never_establish_a_session() -> R
             context,
             (NOW, Some(&permit))
         ),
-        CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
+        CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None }
     );
     assert_eq!(
         service.tls_with_permit(
@@ -622,7 +628,7 @@ fn custody_direct_prove_busy_and_revoked_grants_never_establish_a_session() -> R
             context,
             (NOW, Some(&permit))
         ),
-        CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
+        CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None }
     );
     assert!(!permit.is_revoked());
     drop(wall);
@@ -654,7 +660,7 @@ fn custody_direct_prove_busy_and_revoked_grants_never_establish_a_session() -> R
     permit.revoke();
     assert_eq!(
         service.tls_with_permit(&router, &store, queued.clone(), context, (NOW, Some(&permit))),
-        CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
+        CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None }
     );
     service.disconnect("direct-tls", &driver.connection);
     assert!(!matches!(

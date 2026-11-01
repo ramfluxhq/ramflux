@@ -129,7 +129,10 @@ fn custody_publication_prefix_budget_and_incremental_head_survive_restart() -> T
                 &store,
                 "192.0.2.99".parse()?
             ),
-            Err(NodeCoreError::Capacity { .. })
+            Err(NodeCoreError::CustodyDailyCapacity(ramflux_protocol::custody::CapacityHint {
+                scope: ramflux_protocol::custody::CapacityScope::PrefixDaily,
+                resets_at_unix,
+            })) if resets_at_unix == (now / 86_400 + 1) * 86_400
         ));
         router.publish_custody_record_from(
             &native("another-prefix", 40)?,

@@ -258,6 +258,7 @@ impl RouterHandle {
         runtime.custody.get().map_or(
             ramflux_protocol::custody::CustodyServerFrame::Refused {
                 code: ramflux_protocol::custody::CustodyRefusal::Unsupported,
+                capacity: None,
             },
             |service| {
                 service.mesh(
@@ -304,6 +305,7 @@ impl RouterHandle {
         runtime.custody.get().map_or(
             ramflux_protocol::custody::CustodyServerFrame::Refused {
                 code: ramflux_protocol::custody::CustodyRefusal::Unsupported,
+                capacity: None,
             },
             |service| {
                 service.tls_with_permit(

@@ -843,6 +843,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
         SdkError::CustodyConfirmationFailed
+        | SdkError::CustodyCapacity { .. }
         | SdkError::CustodyNetwork(_)
         | SdkError::IdentityRootMissing
         | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => RamfluxErrorCode::AuthFailed,

@@ -57,6 +57,7 @@ enum GatewayCause {
     NoCustody,
     PoolBusy,
     Refused(CustodyRefusal),
+    DailyQuota(ramflux_protocol::custody::CapacityHint),
     ShortExpiry,
 }
 
@@ -127,6 +128,7 @@ async fn serve_cause(
         return Ok(());
     }
     let _: ramflux_protocol::custody::CustodyClientFrame = serde_json::from_slice(&bytes)?;
+    let capacity = if let GatewayCause::DailyQuota(hint) = &cause { Some(*hint) } else { None };
     let code = match cause {
         GatewayCause::BlackHole => return std::future::pending().await,
         GatewayCause::NoCustody => CustodyRefusal::Unsupported,
@@ -138,6 +140,7 @@ async fn serve_cause(
             CustodyRefusal::Busy
         }
         GatewayCause::Refused(code) => code,
+        GatewayCause::DailyQuota(_) => CustodyRefusal::Capacity,
         GatewayCause::ShortExpiry => {
             let valid_until = tokio::time::Instant::now() + Duration::from_millis(1);
             tokio::time::sleep_until(valid_until).await;
@@ -147,7 +150,10 @@ async fn serve_cause(
     };
     ramflux_transport::write_custody_tcp_frame(
         &mut stream,
-        &serde_json::to_vec(&ramflux_protocol::custody::CustodyServerFrame::Refused { code })?,
+        &serde_json::to_vec(&ramflux_protocol::custody::CustodyServerFrame::Refused {
+            code,
+            capacity,
+        })?,
     )
     .await?;
     Ok(())
@@ -652,7 +658,7 @@ async fn per_account_home_node_does_not_change_daemon_default() -> Result {
     Ok(())
 }
 
-async fn reason_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Value> {
+async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Value> {
     use crate::LocalBusCreationClient;
     use zeroize::Zeroizing;
 
@@ -687,13 +693,41 @@ async fn reason_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
         let status = ordinary
             .request(Some(account.account_id), "account", "account.status", json!({}))
             .await?;
-        Ok::<_, Box<dyn std::error::Error>>(status["networking_reason"].clone())
+        Ok::<_, Box<dyn std::error::Error>>(status)
     };
     let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
     server?;
     let reason = flow?;
     drop(gateway);
     Ok(reason)
+}
+
+async fn reason_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Value> {
+    Ok(status_from_gateway_cause(cause).await?["networking_reason"].clone())
+}
+
+#[tokio::test]
+async fn custody_capacity_hint_round_trips_through_tls_and_account_status() -> Result {
+    use ramflux_protocol::custody::{CapacityHint, CapacityScope};
+    for scope in [CapacityScope::PrefixDaily, CapacityScope::GlobalDaily] {
+        let capacity = CapacityHint { scope, resets_at_unix: 4_102_444_800 };
+        let status = status_from_gateway_cause(GatewayCause::DailyQuota(capacity)).await?;
+        assert_eq!(status["networking_reason"]["kind"], "node_busy");
+        assert_eq!(status["networking_reason"]["capacity"], serde_json::to_value(capacity)?);
+        let message = status["networking_hint"].as_str().ok_or("hint text missing")?;
+        assert!(message.contains(if scope == CapacityScope::PrefixDaily {
+            "for your network"
+        } else {
+            "for the whole network"
+        }));
+        assert!(message.contains("2100-01-01T00:00:00Z"));
+        assert!(
+            status["networking_reason"]["retry_after_ms"]
+                .as_u64()
+                .is_some_and(|delay| delay >= 300_000)
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -743,7 +777,7 @@ fn capacity_refusal_uses_the_node_busy_reason() {
         super::native_account::networking_reason(&crate::SdkError::CustodyNetwork(
             CustodyRefusal::Capacity,
         )),
-        Some(crate::AccountNetworkingReason::NodeBusy { retry_after_ms: 300_000 })
+        Some(crate::AccountNetworkingReason::NodeBusy { retry_after_ms: 300_000, capacity: None })
     );
 }
 

@@ -757,3 +757,9 @@ means that count no longer applies; inspection never resets, charges, or prunes
 receipts. Empty rows mean no principal has yet been admitted. No full source IP
 or prefix is returned. Inspect the `publication_daily` prefix row to distinguish
 a used venue quota from challenge, minute, or global capacity pressure.
+
+Daily quota refusal frames now carry an optional server-owned UTC reset hint.
+Rebuild both clients and node services together: older v3 clients reject hinted
+refusals. Clients display the supplied reset and wait until it (at least 300 s);
+other Capacity refusals remain generic. See `docs/custody_networking.md` for the
+client contract and `CHANGELOG.md` for the breaking development wire notice.

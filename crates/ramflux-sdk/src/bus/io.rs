@@ -93,6 +93,9 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
     }
     LocalBusErrorBody {
         details: match error {
+            SdkError::CustodyCapacity { capacity } => {
+                Some(Box::new(serde_json::json!({"capacity": capacity})))
+            }
             SdkError::ContactConfirmationRequired(change) => {
                 Some(Box::new(serde_json::json!(change)))
             }
@@ -112,6 +115,12 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
         code: local_bus_error_code(error).to_owned(),
         message: error.to_string(),
         retry_after_ms: match error {
+            SdkError::CustodyCapacity { capacity } => {
+                Some(crate::custody::capacity_hint::retry_after_ms(
+                    *capacity,
+                    crate::custody::capacity_hint::unix_now(),
+                ))
+            }
             SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::Capacity) => {
                 Some(crate::custody::CAPACITY_RETRY_AFTER_MS)
             }

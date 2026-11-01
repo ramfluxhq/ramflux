@@ -467,3 +467,21 @@ means that count no longer applies; inspection never resets, charges, or prunes
 receipts. Empty rows mean no principal has yet been admitted. No full source IP
 or prefix is returned. Inspect the `publication_daily` prefix row to distinguish
 a used venue quota from challenge, minute, or global capacity pressure.
+
+### Server-supplied daily reset hints
+
+A durable prefix-day or global-day publication refusal keeps the `Capacity` code
+and includes `capacity: { scope, resets_at_unix }`. The scope is `prefix_daily`
+or `global_daily`; the reset is copied from the durable UTC-day window. Minute,
+lease, byte, listener, and other capacity refusals omit this field.
+
+The client shows the network's new-account quota and the supplied UTC reset in
+`rf account status` and in the error text. It waits until that reset, with the
+existing 300-second cooldown as a minimum. Repeated status calls do not extend
+or bypass the deadline; monotonic time and wall time both gate expiry. Pending
+accounts retain the hint across daemon restarts. Without a hint, the generic
+Capacity message remains and the client makes no midnight-reset claim.
+
+This is a breaking development v3 wire change: older strict decoders reject a
+refusal carrying `capacity`. Rebuild clients and node services together; the
+version stays unchanged for the current development deployment.

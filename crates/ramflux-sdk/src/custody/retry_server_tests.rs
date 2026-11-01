@@ -221,13 +221,7 @@ async fn handle(
             if point == Some(Point::RegisterProve) {
                 assert!(matches!(committed, Some(CustodyServerFrame::Registered { .. })));
             }
-            CustodyServerFrame::Refused {
-                code: if context.script.lock().map_err(|_| "script lock")?.capacity {
-                    CustodyRefusal::Capacity
-                } else {
-                    CustodyRefusal::Busy
-                },
-            }
+            scripted_refusal(context)?
         } else {
             committed.ok_or("missing service response")?
         };
@@ -238,6 +232,15 @@ async fn handle(
         }
     }
 }
+fn scripted_refusal(context: &Context) -> Result<CustodyServerFrame> {
+    let code = if context.script.lock().map_err(|_| "script lock")?.capacity {
+        CustodyRefusal::Capacity
+    } else {
+        CustodyRefusal::Busy
+    };
+    Ok(CustodyServerFrame::Refused { code, capacity: None })
+}
+
 #[tokio::test]
 async fn custody_busy_open_challenge_and_prove_resume_without_republishing_or_reusing_proofs()
 -> Result {

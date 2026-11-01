@@ -159,10 +159,18 @@ pub struct LocalBusCreatedAccount {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AccountNetworkingReason {
     NoNodeSelected,
-    NodeUnreachable { retry_after_ms: u64 },
+    NodeUnreachable {
+        retry_after_ms: u64,
+    },
     NodeCustodyUnavailable,
-    NodeBusy { retry_after_ms: u64 },
-    RegistrationRefused { code: ramflux_protocol::custody::CustodyRefusal },
+    NodeBusy {
+        retry_after_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capacity: Option<ramflux_protocol::custody::CapacityHint>,
+    },
+    RegistrationRefused {
+        code: ramflux_protocol::custody::CustodyRefusal,
+    },
     CustodyExpired,
 }
 #[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]

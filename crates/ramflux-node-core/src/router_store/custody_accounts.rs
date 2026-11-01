@@ -28,6 +28,9 @@ struct Budget {
     total: u64,
 }
 impl Budget {
+    fn daily_reset(&self) -> u64 {
+        self.day.saturating_add(1).saturating_mul(86_400)
+    }
     fn charge(
         &mut self,
         now: u64,
@@ -71,7 +74,19 @@ impl Budget {
                     refusal = "Capacity",
                     "custody admission refused"
                 );
-                return Err(capacity());
+                return Err(if budget == "publication_daily" {
+                    use ramflux_protocol::custody::{CapacityHint, CapacityScope};
+                    NodeCoreError::CustodyDailyCapacity(CapacityHint {
+                        scope: if global {
+                            CapacityScope::GlobalDaily
+                        } else {
+                            CapacityScope::PrefixDaily
+                        },
+                        resets_at_unix: self.daily_reset(),
+                    })
+                } else {
+                    capacity()
+                });
             }
         }
         self.daily += 1;
@@ -146,12 +161,7 @@ impl RouterRedbStore {
                 self.custody_prefix_daily_limit(key.ends_with("/48"))
             };
             for (budget, count, limit, reset_at) in [
-                (
-                    "publication_daily",
-                    receipt.daily,
-                    daily_limit,
-                    Some(receipt.day.saturating_add(1).saturating_mul(86_400)),
-                ),
+                ("publication_daily", receipt.daily, daily_limit, Some(receipt.daily_reset())),
                 (
                     "publication_minute",
                     receipt.burst,
@@ -304,6 +314,66 @@ impl RouterRedbStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn custody_daily_capacity_hints_use_the_inspected_durable_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use ramflux_protocol::custody::{
+            CapacityHint, CapacityScope, CustodyRefusal, CustodyServerFrame,
+        };
+        let path = std::env::temp_dir().join(format!(
+            "rf-quota-hint-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        {
+            let store = RouterRedbStore::open_without_wal(&path)?;
+            for (key, daily, burst, total, expected) in [
+                ("192.0.2.0/24", 8, 0, 8, Some(CapacityScope::PrefixDaily)),
+                ("global", 256, 0, 256, Some(CapacityScope::GlobalDaily)),
+                ("global", 0, 16, 16, None),
+                ("global", 0, 0, MAX_ACCOUNTS, None),
+            ] {
+                let encoded =
+                    serde_json::to_vec(&Budget { day: 1, daily, minute: 1440, burst, total })?;
+                let tx = store.db.begin_write()?;
+                {
+                    let mut table = tx.open_table(BUDGETS)?;
+                    table.remove("global")?;
+                    table.remove("192.0.2.0/24")?;
+                    table.insert(key, encoded.as_slice())?;
+                }
+                tx.commit()?;
+                let error = store
+                    .check_custody_new_principal_budget("192.0.2.1".parse()?, 86_400)
+                    .err()
+                    .ok_or("expected refusal")?;
+                let frame = crate::custody_service::publication_failure(error)
+                    .response()
+                    .unwrap_or_else(|code| CustodyServerFrame::Refused { code, capacity: None });
+                let expected =
+                    expected.map(|scope| CapacityHint { scope, resets_at_unix: 172_800 });
+                assert_eq!(
+                    frame,
+                    CustodyServerFrame::Refused {
+                        code: CustodyRefusal::Capacity,
+                        capacity: expected
+                    }
+                );
+                if let Some(hint) = expected {
+                    let rows = store.custody_publication_budgets()?;
+                    let scope =
+                        if hint.scope == CapacityScope::GlobalDaily { "global" } else { "prefix" };
+                    let row = rows
+                        .iter()
+                        .find(|r| r.scope == scope && r.budget == "publication_daily")
+                        .ok_or("inspection row missing")?;
+                    assert_eq!(row.reset_at, Some(hint.resets_at_unix));
+                }
+            }
+        }
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
     #[test]
     fn configured_prefix_limits_cover_ipv4_and_ipv6_source_keys()
     -> Result<(), Box<dyn std::error::Error>> {

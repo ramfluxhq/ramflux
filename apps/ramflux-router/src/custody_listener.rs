@@ -155,6 +155,7 @@ async fn serve(
             if !permit.mark_authenticated(&session.device_ref.account_anchor) {
                 let busy = ramflux_protocol::custody::CustodyServerFrame::Refused {
                     code: ramflux_protocol::custody::CustodyRefusal::Busy,
+                    capacity: None,
                 };
                 tokio::time::timeout_at(
                     deadline,
@@ -175,7 +176,8 @@ async fn serve(
         let busy = matches!(
             response,
             ramflux_protocol::custody::CustodyServerFrame::Refused {
-                code: ramflux_protocol::custody::CustodyRefusal::Busy
+                code: ramflux_protocol::custody::CustodyRefusal::Busy,
+                capacity: None
             }
         );
         tokio::time::timeout_at(

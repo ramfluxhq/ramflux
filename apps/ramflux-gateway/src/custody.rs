@@ -146,7 +146,7 @@ impl Proxy {
             Ok(request) => request,
             Err(error) => {
                 if let Some(code) = error.downcast_ref::<CustodyRefusal>() {
-                    return Ok(CustodyServerFrame::Refused { code: code.clone() });
+                    return Ok(CustodyServerFrame::Refused { code: code.clone(), capacity: None });
                 }
                 return Err(error);
             }
@@ -273,7 +273,7 @@ fn initialize_if_configured(
     initialize().map(Some)
 }
 pub(crate) fn unavailable() -> CustodyServerFrame {
-    CustodyServerFrame::Refused { code: CustodyRefusal::Unsupported }
+    CustodyServerFrame::Refused { code: CustodyRefusal::Unsupported, capacity: None }
 }
 pub(crate) async fn admit_tcp(
     stream: &mut GatewayTcpTlsStream,
@@ -315,7 +315,7 @@ pub(crate) async fn admit_quic(
     Ok(None)
 }
 fn busy() -> CustodyServerFrame {
-    CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
+    CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None }
 }
 impl Proxy {
     fn handoff(&mut self, session_id: &str) -> anyhow::Result<GatewayGrant> {
@@ -405,8 +405,10 @@ async fn tcp_inner(
                 proxy.frame(&context, frame, observed.as_deref(), &capacity),
             )
             .await??;
-            let saturated =
-                matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy });
+            let saturated = matches!(
+                response,
+                CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None }
+            );
             tokio::time::timeout_at(
                 deadline,
                 write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
@@ -476,8 +478,10 @@ async fn quic_inner(
                 proxy.frame(&context, frame, observed.as_deref(), &capacity),
             )
             .await??;
-            let saturated =
-                matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy });
+            let saturated = matches!(
+                response,
+                CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None }
+            );
             tokio::time::timeout_at(
                 deadline,
                 write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?),

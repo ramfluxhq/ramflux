@@ -190,7 +190,7 @@ async fn id02_nine_same_ip_challenges_succeed_without_a_retry_wait() -> Result {
     let attempt = Client::connect(&fixture, &limiter, &node).await?;
     assert_eq!(
         attempt.prove(&impostor, impostor.actions()?[0].clone(), &service, &router, &store)?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::PrincipalIdTaken }
+        CustodyServerFrame::Refused { code: CustodyRefusal::PrincipalIdTaken, capacity: None }
     );
     service.disconnect("ramflux-gateway", &attempt.proxy.connection);
     drop(attempt);

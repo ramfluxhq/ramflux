@@ -49,6 +49,22 @@ pub enum CustodySessionAction {
     HomeMigration { request: Box<crate::home_migration::Request> },
     Close,
 }
+/// Durable new-principal daily window identified by the receiving node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityScope {
+    PrefixDaily,
+    GlobalDaily,
+}
+
+/// Server-owned reset time; no address or other admission budget is disclosed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityHint {
+    pub scope: CapacityScope,
+    pub resets_at_unix: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodyClientFrame {
@@ -178,6 +194,8 @@ pub enum CustodyServerFrame {
     Closed,
     Refused {
         code: CustodyRefusal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capacity: Option<CapacityHint>,
     },
 }
 /// Authenticated internal mesh request. Direct-exporter evidence is deliberately
@@ -231,4 +249,35 @@ pub fn custody_session_action_hash(
     action: &CustodySessionAction,
 ) -> Result<String, crate::ProtocolError> {
     super::framed_hash("ramflux.identity.custody_session_action.v1", action)
+}
+
+#[cfg(test)]
+mod capacity_hint_tests {
+    use super::*;
+    #[test]
+    fn capacity_hint_round_trips_and_old_refusal_shape_still_parses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let old = serde_json::json!({"frame_type":"refused", "code":"capacity"});
+        let absent: CustodyServerFrame = serde_json::from_value(old.clone())?;
+        assert_eq!(
+            absent,
+            CustodyServerFrame::Refused { code: CustodyRefusal::Capacity, capacity: None }
+        );
+        assert_eq!(serde_json::to_value(&absent)?, old);
+        for scope in [CapacityScope::PrefixDaily, CapacityScope::GlobalDaily] {
+            let frame = CustodyServerFrame::Refused {
+                code: CustodyRefusal::Capacity,
+                capacity: Some(CapacityHint { scope, resets_at_unix: 172_800 }),
+            };
+            let bytes = serde_json::to_vec(&frame)?;
+            assert_eq!(serde_json::from_slice::<CustodyServerFrame>(&bytes)?, frame);
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(value["capacity"]["resets_at_unix"], 172_800);
+            assert_eq!(
+                value["capacity"]["scope"],
+                if scope == CapacityScope::PrefixDaily { "prefix_daily" } else { "global_daily" }
+            );
+        }
+        Ok(())
+    }
 }

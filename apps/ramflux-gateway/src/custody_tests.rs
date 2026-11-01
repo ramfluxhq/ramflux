@@ -198,7 +198,7 @@ fn exercise(
     }
     assert!(matches!(
         service.mesh(&router, &store, other_connection, "ramflux-gateway", now),
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused }
+        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
     ));
     assert!(matches!(
         service.mesh(&router, &store, request, "ramflux-gateway", now),
@@ -208,7 +208,7 @@ fn exercise(
         proxy.prepare(frame, Some(&branch_exporter_hash(&server)), "127.0.0.1".parse()?)?;
     assert!(matches!(
         service.mesh(&router, &store, request, "ramflux-gateway", now),
-        CustodyServerFrame::Refused { code: CustodyRefusal::Replay }
+        CustodyServerFrame::Refused { code: CustodyRefusal::Replay, capacity: None }
     ));
     Ok(())
 }

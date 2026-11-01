@@ -52,6 +52,34 @@ pub struct CustodyService {
     leases: Mutex<CustodyLeases>,
     admission: Mutex<()>,
 }
+pub(crate) struct ProofFailure {
+    code: CustodyRefusal,
+    capacity: Option<ramflux_protocol::custody::CapacityHint>,
+}
+impl From<CustodyRefusal> for ProofFailure {
+    fn from(code: CustodyRefusal) -> Self {
+        Self { code, capacity: None }
+    }
+}
+impl ProofFailure {
+    pub(crate) fn response(self) -> Result<CustodyServerFrame, CustodyRefusal> {
+        if self.capacity.is_some() {
+            Ok(CustodyServerFrame::Refused { code: self.code, capacity: self.capacity })
+        } else {
+            Err(self.code)
+        }
+    }
+}
+pub(crate) fn publication_failure(error: crate::NodeCoreError) -> ProofFailure {
+    match error {
+        crate::NodeCoreError::CustodyDailyCapacity(capacity) => {
+            ProofFailure { code: CustodyRefusal::Capacity, capacity: Some(capacity) }
+        }
+        crate::NodeCoreError::Capacity { .. } => CustodyRefusal::Capacity.into(),
+        crate::NodeCoreError::PrincipalIdTaken => CustodyRefusal::PrincipalIdTaken.into(),
+        error => persistence(error).into(),
+    }
+}
 fn invalid(_: impl std::fmt::Display) -> CustodyRefusal {
     CustodyRefusal::InvalidInput
 }
@@ -120,7 +148,10 @@ impl CustodyService {
         now: u64,
     ) -> CustodyServerFrame {
         if peer != "ramflux-gateway" {
-            return CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused };
+            return CustodyServerFrame::Refused {
+                code: CustodyRefusal::BindingRefused,
+                capacity: None,
+            };
         }
         match self.dispatch(
             request,
@@ -135,7 +166,7 @@ impl CustodyService {
             },
         ) {
             Ok(frame) => frame,
-            Err(code) => CustodyServerFrame::Refused { code },
+            Err(code) => CustodyServerFrame::Refused { code, capacity: None },
         }
     }
     fn dispatch(
@@ -317,7 +348,40 @@ impl CustodyService {
         })();
         match result {
             Ok(frame) => frame,
-            Err(code) => CustodyServerFrame::Refused { code },
+            Err(code) => CustodyServerFrame::Refused { code, capacity: None },
         }
+    }
+}
+
+#[cfg(test)]
+mod capacity_hint_tests {
+    use super::*;
+    #[test]
+    fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use ramflux_protocol::custody::{CapacityHint, CapacityScope};
+        let pool =
+            crate::CustodyIngressLimiter::with_pools(1, 1, 1, std::time::Duration::from_secs(300));
+        let permit =
+            pool.acquire("192.0.2.1".parse()?, None, Instant::now()).ok_or("permit missing")?;
+        let hint = CapacityHint { scope: CapacityScope::GlobalDaily, resets_at_unix: 172_800 };
+        let result = permit
+            .try_grant("refused-principal", || {
+                Err::<CustodyServerFrame, _>(publication_failure(
+                    crate::NodeCoreError::CustodyDailyCapacity(hint),
+                ))
+            })
+            .ok_or("grant check missing")?;
+        let response = result.or_else(ProofFailure::response)?;
+        assert_eq!(
+            response,
+            CustodyServerFrame::Refused { code: CustodyRefusal::Capacity, capacity: Some(hint) }
+        );
+        // A prior successful grant would pin the holder to refused-principal and reject this.
+        assert!(matches!(
+            permit.try_grant("actual-principal", || Ok::<_, CustodyRefusal>(())),
+            Some(Ok(()))
+        ));
+        Ok(())
     }
 }

@@ -134,8 +134,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                 .await?;
         super::capacity_backoff::check(&capacity_key)?;
         let result = Self::connect_admitted(&config, vault, &mut open, &mut budget).await;
-        if matches!(&result, Err(SdkError::CustodyNetwork(CustodyRefusal::Capacity))) {
-            super::capacity_backoff::record(capacity_key);
+        if let Err(error) = &result {
+            super::capacity_backoff::record_error(capacity_key, error);
         }
         result
     }
@@ -164,6 +164,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                 .map_err(|_| invalid())?
             })
             .await?;
+        // A pending account retains the server's reset across daemon restarts.
+        super::capacity_hint::check_account(&authority.account, now()?)?;
         let (mut transport, opened) = Self::open_admitted(config, &mut open, budget).await?;
         let mut connection = Self::from_authority(authority, opened, config);
         let actions = connection.registration_actions()?;
@@ -449,8 +451,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             self.timeout,
         )
         .await;
-        if matches!(&result, Err(SdkError::CustodyNetwork(CustodyRefusal::Capacity))) {
-            super::capacity_backoff::record(self.capacity_key.clone());
+        if let Err(error) = &result {
+            super::capacity_backoff::record_error(self.capacity_key.clone(), error);
         }
         result
     }
@@ -494,7 +496,7 @@ pub(super) async fn exchange<S: ramflux_transport::GatewaySessionTransport + ?Si
         stream.send_frame(&bytes).await?;
         let bytes = stream.recv_custody_frame().await?;
         let response: CustodyServerFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
-        if let CustodyServerFrame::Refused { code } = response {
+        if let CustodyServerFrame::Refused { code, capacity } = response {
             if matches!(code, CustodyRefusal::Capacity | CustodyRefusal::Busy) {
                 let (phase, action) = match request {
                     CustodyClientFrame::CustodyOpen { .. } => ("open", "identity"),
@@ -509,6 +511,11 @@ pub(super) async fn exchange<S: ramflux_transport::GatewaySessionTransport + ?Si
                     CustodyClientFrame::GatewayHandoff { .. } => ("handoff", "session"),
                 };
                 tracing::warn!(phase, action, refusal = ?code, "custody request refused");
+            }
+            if code == CustodyRefusal::Capacity
+                && let Some(capacity) = capacity
+            {
+                return Err(SdkError::CustodyCapacity { capacity });
             }
             return Err(code.into());
         }

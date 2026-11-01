@@ -133,7 +133,7 @@ async fn requests(
         GatewayQuicResponse { status: 404, body: serde_json::json!({"error":"not found"}) };
     let custody_open =
         CustodyClientFrame::CustodyOpen { binding_mode: BindingMode::HomeRelayReceipt };
-    let refused = CustodyServerFrame::Refused { code: refusal };
+    let refused = CustodyServerFrame::Refused { code: refusal, capacity: None };
     let (_, mut stream) = ramflux_transport::TcpTlsGatewayClient::connect(
         "127.0.0.1:0".parse()?,
         tcp_address,

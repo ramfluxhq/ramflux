@@ -145,11 +145,7 @@ impl CustodyService {
             && let Err(error) = store.check_custody_new_principal_budget(source, now)
         {
             self.leases().reject(&proof.body.challenge_nonce);
-            return Err(if matches!(error, crate::NodeCoreError::Capacity { .. }) {
-                CustodyRefusal::Capacity
-            } else {
-                persistence(error)
-            });
+            return super::publication_failure(error).response();
         }
         // Refused new-principal budgets cannot fill successful-proof replay storage.
         // No durable write precedes possession and single-use admission.
@@ -170,40 +166,35 @@ impl CustodyService {
         attempt: ProofAttempt,
         possession: Possession<'_>,
     ) -> Result<CustodyServerFrame, CustodyRefusal> {
-        if let Some(permit) = scope.permit {
+        // Keep every publication failure as Err until the listener's grant transaction ends.
+        // A hinted refusal is a response frame, but is never successful authentication.
+        let result = if let Some(permit) = scope.permit {
             let principal = attempt.proof.body.device_ref.account_anchor.clone();
             permit
                 .try_grant(&principal, || self.finish_admitted_proof(scope, attempt, possession))
                 .ok_or(CustodyRefusal::Busy)?
         } else {
             self.finish_admitted_proof(scope, attempt, possession)
-        }
+        };
+        result.or_else(super::ProofFailure::response)
     }
     fn finish_admitted_proof(
         &self,
         scope: Scope<'_>,
         attempt: ProofAttempt,
         possession: Possession<'_>,
-    ) -> Result<CustodyServerFrame, CustodyRefusal> {
+    ) -> Result<CustodyServerFrame, super::ProofFailure> {
         let Possession { publication, authority, holder, source } = possession;
         let Scope { router, store, now, tick, .. } = scope;
         let now = now.saturating_add(tick.elapsed().as_secs());
         let tick = std::time::Instant::now();
         let proof = attempt.proof;
         match attempt.action {
-            CustodyProofAction::HomeMigration { .. } => Err(CustodyRefusal::Unsupported),
+            CustodyProofAction::HomeMigration { .. } => Err(CustodyRefusal::Unsupported.into()),
             CustodyProofAction::Publish { .. } => {
-                router.publish_custody_record_from(publication, now, store, source).map_err(
-                    |e| {
-                        if matches!(e, crate::NodeCoreError::PrincipalIdTaken) {
-                            CustodyRefusal::PrincipalIdTaken
-                        } else if matches!(e, crate::NodeCoreError::Capacity { .. }) {
-                            CustodyRefusal::Capacity
-                        } else {
-                            persistence(e)
-                        }
-                    },
-                )?;
+                router
+                    .publish_custody_record_from(publication, now, store, source)
+                    .map_err(super::publication_failure)?;
                 Ok(CustodyServerFrame::Published {
                     record_hash: object_hash(&publication.record).map_err(invalid)?,
                 })

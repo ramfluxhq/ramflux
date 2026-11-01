@@ -9,6 +9,8 @@ pub enum NodeCoreError {
     SourceAuthorityRefused { reason_code: crate::EnvelopeAuthorityReason },
     #[error("capacity: {resource}")]
     Capacity { resource: &'static str },
+    #[error("capacity: new custody principals")]
+    CustodyDailyCapacity(ramflux_protocol::custody::CapacityHint),
     #[error("principal_id_taken")]
     PrincipalIdTaken,
     #[error("device_id_taken")]

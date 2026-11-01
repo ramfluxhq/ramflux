@@ -131,7 +131,7 @@ pub(super) fn status(
                     )
                     .is_ok()
             });
-    Ok(serde_json::json!({
+    let mut status = serde_json::json!({
         "account_id":account_id,"local_account_id":account_id,"state":"unlocked","networking":native.state(),
         "networking_reason":native.networking_reason(),
         "display_name":native.record().body.profile.display_name,"principal_id":native.record().body.principal_id,
@@ -144,7 +144,13 @@ pub(super) fn status(
         "session_id":account.engine.as_ref().map(|engine|engine.session().session_id.clone()),
         "active_transport_kind":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),
         "pending_deliveries":account.pending_deliveries.len(),
-    }))
+    });
+    if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(hint), .. }) =
+        native.networking_reason()
+    {
+        status["networking_hint"] = crate::custody::capacity_hint::message(hint).into();
+    }
+    Ok(status)
 }
 
 pub(super) async fn unlock_request(
@@ -301,14 +307,23 @@ pub(super) fn networking_reason(error: &SdkError) -> Option<AccountNetworkingRea
         SdkError::CustodyNetwork(CustodyRefusal::Unsupported) => {
             Some(AccountNetworkingReason::NodeCustodyUnavailable)
         }
+        SdkError::CustodyCapacity { capacity } => Some(AccountNetworkingReason::NodeBusy {
+            retry_after_ms: crate::custody::capacity_hint::retry_after_ms(
+                *capacity,
+                crate::custody::capacity_hint::unix_now(),
+            ),
+            capacity: Some(*capacity),
+        }),
         SdkError::CustodyNetwork(CustodyRefusal::Capacity) => {
             Some(AccountNetworkingReason::NodeBusy {
                 retry_after_ms: crate::custody::CAPACITY_RETRY_AFTER_MS,
+                capacity: None,
             })
         }
-        SdkError::CustodyNetwork(CustodyRefusal::Busy) => {
-            Some(AccountNetworkingReason::NodeBusy { retry_after_ms: NODE_BUSY_RETRY_AFTER_MS })
-        }
+        SdkError::CustodyNetwork(CustodyRefusal::Busy) => Some(AccountNetworkingReason::NodeBusy {
+            retry_after_ms: NODE_BUSY_RETRY_AFTER_MS,
+            capacity: None,
+        }),
         SdkError::CustodyNetwork(
             CustodyRefusal::ChallengeExpired | CustodyRefusal::SessionExpired,
         )

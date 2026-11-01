@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- BREAKING (v3 custody capacity hints): refusal frames may carry the optional
+  `capacity` field identifying a prefix/global daily new-principal quota and its
+  UTC reset time. Clients built before this commit reject refusal frames that
+  carry `capacity`; rebuild both sides. The public demo node is upgraded in the
+  coordinated deployment follow-up. Other capacity refusals retain the old shape.
+
 - BREAKING (development identity reset): native v3 creation is enabled by default,
   with an interactive `rf account create --display-name` recovery-phrase ceremony.
   The seed-taking CLI create/login interface and creation opt-in option are removed.

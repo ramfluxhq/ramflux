@@ -44,6 +44,8 @@ pub enum SdkError {
     HomeMigrationRefused(ramflux_protocol::home_migration::Refusal),
     #[error("custody networking refused: {0}")]
     CustodyNetwork(#[from] ramflux_protocol::custody::CustodyRefusal),
+    #[error("custody networking refused: Capacity; {}", crate::custody::capacity_hint::message(.capacity))]
+    CustodyCapacity { capacity: ramflux_protocol::custody::CapacityHint },
     #[error("born-v3 network registration is pending; legacy proofs are forbidden")]
     NetworkingPending,
     #[error("no confirmed home node is selected")]
@@ -150,4 +152,24 @@ pub enum SdkError {
     SignatureVerificationFailed(String),
     #[error("remote_app approval requires an App-signed mcp.approval.granted")]
     RemoteAppApprovalRequired,
+}
+
+impl SdkError {
+    /// Typed custody refusal category, including a server-supplied daily capacity hint.
+    #[must_use]
+    pub fn custody_refusal(&self) -> Option<ramflux_protocol::custody::CustodyRefusal> {
+        match self {
+            Self::CustodyNetwork(code) => Some(code.clone()),
+            Self::CustodyCapacity { .. } => {
+                Some(ramflux_protocol::custody::CustodyRefusal::Capacity)
+            }
+            _ => None,
+        }
+    }
+
+    /// Daily reset metadata supplied by the receiving node, if present.
+    #[must_use]
+    pub const fn capacity_hint(&self) -> Option<ramflux_protocol::custody::CapacityHint> {
+        if let Self::CustodyCapacity { capacity } = self { Some(*capacity) } else { None }
+    }
 }
