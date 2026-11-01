@@ -98,7 +98,8 @@ pub(super) fn retain(
             tracing::warn!(
                 budget = "history_bytes",
                 scope = scope_name,
-                count = incoming_bytes,
+                count = value.bytes,
+                requested = size,
                 limit = max_bytes,
                 refusal = "Capacity",
                 "custody admission refused"
