@@ -406,8 +406,12 @@ account-count or byte ceiling. Use the warning's budget before choosing a remedy
 
 The outstanding source ceiling remains 64, independent of successful issuance:
 N well-behaved bootstrap flows use three challenges each in sequence, with at
-most one pending per flow. Listener handshake admission permits at most four
-such concurrent flows per source IP. A shared NAT therefore has at most four
-pending handshake challenges from admitted flows, while its 16-per-minute
-issuance budget may delay the 3N bootstrap challenges. Neither increasing the
-64-pending ceiling nor restarting a node increases that issuance rate.
+most one pending per flow. Each listener pool admits at most four concurrent
+connections per source IP, including authenticated connections. One gateway has
+independent TCP and QUIC pools, so its admitted flows can hold at most eight
+pending challenges from that NAT. Additional gateway instances multiply that
+bound; an exposed direct-router listener adds its own pool. For N honest flows,
+G gateways and D direct-router pools, the bound is min(N, 8G + 4D, 64).
+The shared 16-per-minute issuance budget may delay the 3N bootstrap challenges.
+Neither increasing the 64-pending ceiling nor restarting a node increases that
+issuance rate.
