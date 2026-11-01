@@ -16,22 +16,15 @@ pub(crate) fn refuse(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{cell::RefCell, sync::OnceLock};
     use tracing::{Event, Level, Metadata, Subscriber, field::Visit, span};
-    #[derive(Clone, Default)]
-    struct Warnings(Arc<Mutex<Vec<String>>>);
+    std::thread_local! {
+        static LINES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+    struct Warnings;
     impl Subscriber for Warnings {
         fn enabled(&self, metadata: &Metadata<'_>) -> bool {
             *metadata.level() == Level::WARN && metadata.target().starts_with("ramflux_node_core")
-        }
-        fn register_callsite(
-            &self,
-            _: &'static Metadata<'static>,
-        ) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::sometimes()
-        }
-        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
-            Some(tracing::metadata::LevelFilter::WARN)
         }
         fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
             span::Id::from_u64(1)
@@ -54,8 +47,27 @@ pub(crate) mod tests {
             }
             let mut fields = Fields(String::new());
             event.record(&mut fields);
-            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(fields.0);
+            LINES.with(|lines| {
+                if let Some(lines) = lines.borrow_mut().as_mut() {
+                    lines.push(fields.0);
+                }
+            });
         }
+    }
+    /// Isolate tracing callsite initialization from unrelated parallel tests.
+    pub(crate) fn run_isolated() -> Result<bool, Box<dyn std::error::Error>> {
+        const MARKER: &str = "RAMFLUX_CUSTODY_WARNING_TEST";
+        let thread = std::thread::current();
+        let name = thread.name().ok_or("test thread name unavailable")?;
+        if std::env::var(MARKER).as_deref() == Ok(name) {
+            return Ok(false);
+        }
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", name, "--nocapture"])
+            .env(MARKER, name)
+            .status()?;
+        assert!(status.success(), "isolated warning assertions failed: {name}: {status}");
+        Ok(true)
     }
     pub(crate) fn assert_warning<T>(
         budget: &str,
@@ -63,9 +75,13 @@ pub(crate) mod tests {
         limit: usize,
         operation: impl FnOnce() -> T,
     ) -> T {
-        let warnings = Warnings::default();
-        let result = tracing::subscriber::with_default(warnings.clone(), operation);
-        let lines = warnings.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Retain one dispatcher across parallel tests so callsite interest cannot become
+        // stale as short-lived scoped subscribers are created and dropped on other threads.
+        static DISPATCH: OnceLock<tracing::Dispatch> = OnceLock::new();
+        let dispatch = DISPATCH.get_or_init(|| tracing::Dispatch::new(Warnings));
+        LINES.with(|lines| *lines.borrow_mut() = Some(Vec::new()));
+        let result = tracing::dispatcher::with_default(dispatch, operation);
+        let lines = LINES.with(|lines| lines.borrow_mut().take().unwrap_or_default());
         assert_eq!(lines.len(), 1, "one warning per {budget} refusal: {lines:?}");
         for expected in
             [format!("budget={budget:?}"), format!("count={count} "), format!("limit={limit} ")]

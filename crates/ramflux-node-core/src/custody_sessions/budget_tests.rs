@@ -10,6 +10,9 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[test]
 fn holder_prefix_and_global_refusals_log_the_exhausted_counter() -> Result {
+    if crate::custody_budget_log::tests::run_isolated()? {
+        return Ok(());
+    }
     let tick = Instant::now();
     let mut pool = CustodyLeases::default();
     for _ in 0..HOLDER_LIMIT {
@@ -57,6 +60,9 @@ fn session() -> CustodySession {
 }
 #[test]
 fn replay_session_and_request_refusals_log_the_exhausted_counter() -> Result {
+    if crate::custody_budget_log::tests::run_isolated()? {
+        return Ok(());
+    }
     let tick = Instant::now();
     let mut pool = CustodyLeases::default();
     let challenge = issue(&mut pool, tick)?;

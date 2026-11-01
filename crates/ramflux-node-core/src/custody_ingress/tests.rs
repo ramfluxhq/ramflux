@@ -344,6 +344,9 @@ fn nine_same_ip_challenges_succeed_within_one_window_without_retry_wait() -> Res
 #[test]
 fn issuance_and_listener_refusals_emit_one_budget_warning() -> Result {
     use crate::custody_budget_log::tests::assert_warning;
+    if crate::custody_budget_log::tests::run_isolated()? {
+        return Ok(());
+    }
     let now = Instant::now();
     let source: IpAddr = "192.0.2.1".parse()?;
     let mut budget = CustodySourceBudget::default();
@@ -376,5 +379,24 @@ fn issuance_and_listener_refusals_emit_one_budget_warning() -> Result {
     let second = limiter.acquire(ip(2, 1), None, now).ok_or("second")?;
     assert!(first.mark_authenticated("one"));
     assert_warning("principal_session", 1, 1, || assert!(!second.mark_authenticated("one")));
+    Ok(())
+}
+
+#[test]
+fn unavailable_or_mismatched_grants_log_once_without_disclosing_principals() -> Result {
+    use crate::custody_budget_log::tests::assert_warning;
+    if crate::custody_budget_log::tests::run_isolated()? {
+        return Ok(());
+    }
+    let now = Instant::now();
+    let limiter = CustodyIngressLimiter::with_pools(4, 4, 4, Duration::from_secs(10));
+    let permit = limiter.acquire(ip(1, 1), None, now).ok_or("permit")?;
+    assert_warning("principal_bytes", 0, 1, || assert!(!permit.mark_authenticated("")));
+    assert!(permit.mark_authenticated("one"));
+    assert_warning("principal_binding_mismatch", 1, 0, || {
+        assert!(!permit.mark_authenticated("two"));
+    });
+    permit.revoke();
+    assert_warning("unavailable_holder", 1, 0, || assert!(!permit.mark_authenticated("one")));
     Ok(())
 }

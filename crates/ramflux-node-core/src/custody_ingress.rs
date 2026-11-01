@@ -203,7 +203,16 @@ impl CustodyIngressLimiter {
         if let Some(id) = connection {
             *state.connections.entry(id).or_default() += 1;
         }
-        state.sequence = state.sequence.checked_add(1)?;
+        state.sequence = state.sequence.checked_add(1).or_else(|| {
+            tracing::warn!(
+                budget = "holder_sequence",
+                count = state.sequence,
+                limit = u64::MAX,
+                refusal = "Busy",
+                "custody admission refused"
+            );
+            None
+        })?;
         let holder = state.sequence;
         let revoked = Arc::new(AtomicBool::new(false));
         let revocation = Arc::new(Notify::new());
@@ -286,12 +295,29 @@ impl CustodyIngressPermit {
     ) -> Option<Result<T, E>> {
         let mut s = self.limiter.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         CustodyIngressLimiter::prune(&mut s, Instant::now());
-        let h = s.holders.get(&self.holder)?;
-        if self.is_revoked() || principal.is_empty() || principal.len() > 512 {
+        let Some(h) = s.holders.get(&self.holder) else {
+            refuse("unavailable_holder", 1, 0, CustodyRefusal::Busy);
+            return None;
+        };
+        if self.is_revoked() {
+            refuse("revoked_holder", 1, 0, CustodyRefusal::Busy);
+            return None;
+        }
+        if principal.is_empty() || principal.len() > 512 {
+            refuse(
+                "principal_bytes",
+                principal.len(),
+                if principal.is_empty() { 1 } else { 512 },
+                CustodyRefusal::Busy,
+            );
             return None;
         }
         if let Some(current) = &h.principal {
-            return (current == principal).then(grant);
+            if current != principal {
+                refuse("principal_binding_mismatch", 1, 0, CustodyRefusal::Busy);
+                return None;
+            }
+            return Some(grant());
         }
         if s.authenticated >= self.limiter.authenticated_limit {
             refuse(

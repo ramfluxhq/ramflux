@@ -234,8 +234,12 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn durable_publication_capacity_reports_current_window_and_limit() {
+    fn durable_publication_capacity_reports_current_window_and_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
         use crate::custody_budget_log::tests::assert_warning;
+        if crate::custody_budget_log::tests::run_isolated()? {
+            return Ok(());
+        }
         let mut daily = Budget { day: 1, daily: 8, minute: 1440, burst: 0, total: 8 };
         assert_warning("publication_daily", 8, 8, || {
             assert!(daily.charge(86_400, 8, 16, false).is_err());
@@ -248,6 +252,7 @@ mod tests {
         assert_warning("publication_total", 65_536, 65_536, || {
             assert!(total.charge(86_400, 100, 16, true).is_err());
         });
+        Ok(())
     }
     #[test]
     fn custody_budget_configuration_refuses_invalid_or_out_of_range_values() {
