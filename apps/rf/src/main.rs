@@ -4,6 +4,7 @@
 mod cli;
 mod handlers;
 mod keychain;
+mod logging;
 mod utils;
 
 use clap::Parser;

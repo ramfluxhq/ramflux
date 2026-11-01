@@ -21,7 +21,7 @@ cryptography, storage, transport, sync, and core libraries.
 - `apps/ramflux-retention` — retention policy and authenticated router/federation GC.
   See [server data and retention](docs/server-data.md) for actual TTLs, metadata
   exposure, mounted secrets and migration requirements.
-- `apps/rf` — reference CLI over the SDK local bus.
+- `apps/rf` — reference CLI over the SDK local bus. See the [CLI guide](docs/rf_cli.md).
 - `crates/ramflux-sdk` — Rust SDK facade and C ABI substrate.
 - `crates/ramflux-{core,protocol,crypto,storage,transport,sync,node-core}` —
   shared libraries used by the services, SDK, and CLI.

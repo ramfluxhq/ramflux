@@ -8,6 +8,7 @@ use super::*;
 pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Result<(), RfError> {
     match command.action {
         DaemonAction::Start(start) => {
+            crate::logging::init()?;
             let mut config = LocalBusConfig::new(socket, start.data_root);
             config.itest_legacy_accounts = start.itest_legacy_accounts;
             #[cfg(feature = "itest-memory-vault")]

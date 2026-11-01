@@ -471,10 +471,11 @@ pub(super) fn quarantine_failure(
     // Immutable malformed signature bytes cannot become valid after a directory refresh.
     let wire_error = crate::client::inbox_failure::wire_signature_error(entry);
     let error = wire_error.as_ref().unwrap_or(error);
-    tracing::debug!(%error, error_code = local_bus_error_code(error),
-        envelope_id = %entry.envelope.envelope_id, source_device_id = %entry.envelope.source_device_id,
-        target_delivery_id = %entry.target_delivery_id, inbox_seq = entry.inbox_seq,
-        "gateway receive entry handling failed");
+    let kind = match error {
+        SdkError::InboundPending(_) => "InboundPending",
+        SdkError::InboundRejected(_) => "InboundRejected",
+        _ => local_bus_error_code(error),
+    };
     let retry_bytes = serde_json::to_vec(entry)?;
     let code = if let Some(code) = crate::client::inbox_failure::deterministic(error) {
         code
@@ -483,6 +484,8 @@ pub(super) fn quarantine_failure(
     } else {
         if crate::client::inbox_failure::defer_entry(client, device, entry, key, &retry_bytes, now)?
         {
+            tracing::info!(inbox_seq = entry.inbox_seq, kind,
+                reason = %error, "gateway inbound entry held");
             return Ok(false);
         }
         "retry_exhausted"
@@ -510,6 +513,8 @@ pub(super) fn quarantine_failure(
             now,
         )?;
     }
+    tracing::warn!(inbox_seq = entry.inbox_seq, kind,
+        reason = %error, outcome = code, "gateway inbound entry dead-lettered");
     Ok(true)
 }
 

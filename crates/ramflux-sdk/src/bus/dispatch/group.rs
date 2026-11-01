@@ -6,6 +6,8 @@
 use crate::prelude::*;
 #[cfg(test)]
 mod native_contract_tests;
+#[cfg(test)]
+mod native_selector_tests;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn dispatch_group_bus_request(
@@ -699,7 +701,7 @@ pub(crate) async fn dispatch_group_send_request(
         && body.source_principal_id.is_some()
         && body.target_delivery_id.is_some();
     if account.client.born_v3_account.is_some() && !directed_transport {
-        normalize_native_group_sender(&mut body, &account.gateway_config)?;
+        normalize_native_group_request(&mut body, &account.gateway_config, &account.client)?;
     }
     account.client.assert_shared_group_send_capacity(&body.group_id, &body.sender_id)?;
     let mut fanout_routes = if directed_transport {
@@ -1015,6 +1017,32 @@ pub(crate) async fn dispatch_group_send_request(
     Ok(local_bus_ok(response))
 }
 
+fn normalize_native_group_request(
+    body: &mut LocalBusGroupSendRequest,
+    gateway: &GatewaySessionConfig,
+    client: &RamfluxClient,
+) -> Result<(), SdkError> {
+    normalize_native_group_sender(body, gateway)?;
+    body.conversation_id =
+        group_receive_conversation(client, &body.group_id, &body.conversation_id)?;
+    Ok(())
+}
+
+fn group_receive_conversation(
+    client: &RamfluxClient,
+    group: &str,
+    requested: &str,
+) -> Result<String, SdkError> {
+    // Native CLI creation signs the group id as its conversation. Resolve later CLI selectors
+    // to that signed thread before storing or sealing, matching the receive authorization gate.
+    if client.born_v3_account.is_some()
+        && let Some(state) = client.account_db()?.shared_group_state(group)?
+    {
+        return Ok(state.view().conversation_id.clone());
+    }
+    Ok(requested.to_owned())
+}
+
 fn normalize_native_group_sender(
     body: &mut LocalBusGroupSendRequest,
     gateway: &GatewaySessionConfig,
@@ -1231,8 +1259,10 @@ pub(crate) async fn dispatch_group_receive_request(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let body: LocalBusGroupReceiveRequest = serde_json::from_value(request.body.clone())?;
+    let mut body: LocalBusGroupReceiveRequest = serde_json::from_value(request.body.clone())?;
     super::super::sync_driver::run(account).await?;
+    body.conversation_id =
+        group_receive_conversation(&account.client, &body.group_id, &body.conversation_id)?;
     let mut engine = account.take_live_engine().await?;
     let receive_result = async {
         let mut entries = Vec::<GatewayInboxEntry>::new();

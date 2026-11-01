@@ -14,6 +14,7 @@ mod erasure_matrix;
 mod fixture;
 mod followups;
 mod limits;
+mod logging;
 #[tokio::test(flavor = "current_thread")]
 async fn peer_dm_is_delivered_without_a_recipient_ui_and_restart_does_not_send_another_receipt()
 -> TestResult {

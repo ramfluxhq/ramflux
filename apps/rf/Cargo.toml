@@ -47,9 +47,11 @@ serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.42", features = ["macros", "rt", "rt-multi-thread"] }
 zeroize = "1.8"
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 
 [dev-dependencies]
+tracing = { workspace = true }
 ramflux-node-core = { workspace = true }
 
 [lints.rust]
