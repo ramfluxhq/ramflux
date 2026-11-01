@@ -1,0 +1,5 @@
+# Optional realnet quota fixture; ordinary stacks leave the router setting unset.
+services:
+  ramflux-router:
+    environment:
+      RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY: "${RF_COMPOSE_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY:?quota fixture requires a prefix limit}"

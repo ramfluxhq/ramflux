@@ -415,3 +415,55 @@ G gateways and D direct-router pools, the bound is min(N, 8G + 4D, 64).
 The shared 16-per-minute issuance budget may delay the 3N bootstrap challenges.
 Neither increasing the 64-pending ceiling nor restarting a node increases that
 issuance rate.
+
+### Daily new-principal quotas and operator inspection
+
+Publication admission is durable. Its UTC-day counters reset at 00:00 UTC;
+restarting the router does not clear them. A client receiving `Capacity` waits
+at least 300 seconds before another attempt. A daily quota can remain exhausted
+until midnight, independently of the process-local challenge limits.
+
+The router accepts `RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY` in
+`1..4096`. It caps an explicit value at
+`RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY` (default 256). IPv4 /24 and IPv6 /64
+use that value; the wider IPv6 /48 uses `max(32, value * 4)`, also capped at
+the global daily limit. Invalid values fail startup. When unset, the old
+fair-share policy remains: narrow `min(8, ceil(global / 32))`, wider
+`min(32, ceil(global / 32))`. With default global 256, all prefix limits are 8.
+For a shared demo network, set prefix 128 and global 1024: IPv4 /24 and IPv6 /64
+allow 128 new principals per UTC day, IPv6 /48 allows 512, and the whole node
+allows 1024. Existing principals do not spend another daily admission on update.
+The independent global per-minute limit remains 16 by default.
+
+In the trusted demo operator env, configure:
+
+```sh
+RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY=128
+RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY=1024
+```
+
+The demo wrapper retains these inputs across upgrades and snapshot rollback and
+passes them only to the router. Omitted inputs stay absent, preserving the unset
+policy. Apply configuration through the normal operator-managed deployment flow.
+
+Inspect the running router through the existing authenticated mesh admin listener:
+
+```sh
+# Load the private operator environment; never put the token in argv.
+set -a
+. "$DEMO_DATA_DIR/identity.env"
+set +a
+"$DEMO_TOOL" custody-budgets 127.0.0.1:59453 "$DEMO_DATA_DIR/certs" router
+```
+
+Use the configured `DEMO_MESH_PORT` instead of 59453 when different. The tool
+uses the existing gateway mesh certificate and router admin token. Keep both
+operator-only. This path is not forwarded by the public gateway.
+The JSON result includes `observed_at` and a row per durable daily/minute window,
+plus the global lifetime ceiling: `scope`, truncated node-keyed `prefix` hash,
+`budget`, `count`, `limit`, and `reset_at` (Unix seconds, UTC). A null reset is a
+non-expiring ceiling. Counts belong to the retained window: a reset in the past
+means that count no longer applies; inspection never resets, charges, or prunes
+receipts. Empty rows mean no principal has yet been admitted. No full source IP
+or prefix is returned. Inspect the `publication_daily` prefix row to distinguish
+a used venue quota from challenge, minute, or global capacity pressure.

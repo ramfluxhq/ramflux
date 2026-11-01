@@ -112,7 +112,7 @@ pub(crate) fn handle_home_node_route_update_apply(
     Ok(ramflux_node_core::HomeNodeRouteUpdateApplyResponse { record })
 }
 
-fn require_router_admin_token(supplied: &str) -> anyhow::Result<()> {
+pub(crate) fn require_router_admin_token(supplied: &str) -> anyhow::Result<()> {
     let configured = ramflux_node_core::environment::var("RAMFLUX_ROUTER_ADMIN_TOKEN")
         .map_err(|_| anyhow::anyhow!("router admin token is not configured"))?;
     if configured.trim().is_empty() || !constant_time_eq(supplied.as_bytes(), configured.as_bytes())
@@ -127,4 +127,21 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         return false;
     }
     left.iter().zip(right.iter()).fold(0_u8, |acc, (left, right)| acc | (left ^ right)) == 0
+}
+
+/// The mesh admin path uses the already configured router token, never a public route.
+pub(crate) fn handle_custody_budgets(
+    body: &[u8],
+    store: &ramflux_node_core::RouterRedbStore,
+) -> anyhow::Result<serde_json::Value> {
+    let request: serde_json::Value = serde_json::from_slice(body)?;
+    let token = request
+        .get("admin_token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("router admin token is required"))?;
+    require_router_admin_token(token)?;
+    Ok(serde_json::json!({
+        "observed_at": ramflux_node_core::now_unix_seconds(),
+        "rows": store.custody_publication_budgets()?,
+    }))
 }

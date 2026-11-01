@@ -623,6 +623,10 @@ fn handle_mesh_general_value(
             let response = handle_mvp7_federated_tombstone(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
+        ("POST", "/admin/custody/budgets") => {
+            let response = crate::lifecycle::handle_custody_budgets(body, router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
         ("POST", "/admin/home-node-migration/apply") => {
             let response = handle_home_node_migration_apply(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
@@ -1187,6 +1191,56 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn custody_budget_inspection_requires_admin_token_and_mesh_peer() -> anyhow::Result<()> {
+        const CHILD: &str = "RAMFLUX_BUDGET_ADMIN_TEST_CHILD";
+        const TOKEN: &str = "custody-budget-inspection-private-test-token";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "handlers::tests::custody_budget_inspection_requires_admin_token_and_mesh_peer",
+                ])
+                .env(CHILD, "1")
+                .env("RAMFLUX_ROUTER_ADMIN_TOKEN", TOKEN)
+                .output()?;
+            anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+            return Ok(());
+        }
+        let path = temp_path("custody_budget_admin")?;
+        let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
+        let handle = crate::router_runtime::RouterHandle::tokio(
+            Arc::new(ramflux_node_core::RouterCore::new()),
+            store,
+            None,
+        );
+        for token in ["", "wrong"] {
+            let request = ramflux_transport::MeshHttpRequest {
+                method: "POST".into(),
+                path: "/admin/custody/budgets".into(),
+                body: serde_json::to_vec(&serde_json::json!({"admin_token": token}))?,
+            };
+            assert!(handle_mesh_request_value(request, &handle, "ramflux-gateway").is_err());
+        }
+        let request = || ramflux_transport::MeshHttpRequest {
+            method: "POST".into(),
+            path: "/admin/custody/budgets".into(),
+            body: serde_json::to_vec(&serde_json::json!({"admin_token": TOKEN}))
+                .unwrap_or_default(),
+        };
+        let response = handle_mesh_request_value(request(), &handle, "ramflux-retention")?;
+        assert_eq!(response.status, "403 Forbidden");
+        let response = handle_mesh_request_value(request(), &handle, "ramflux-gateway")?;
+        assert_eq!(response.status, "200 OK");
+        let value: serde_json::Value = serde_json::from_slice(&response.body)?;
+        assert_eq!(value["rows"], serde_json::json!([]));
+        assert!(value["observed_at"].is_u64());
+        assert_eq!(handle.store().custody_publication_write_count(), 0);
+        drop(handle);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
 
     #[test]
     fn only_explicit_authority_refusals_are_terminal() -> anyhow::Result<()> {

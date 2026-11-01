@@ -130,7 +130,9 @@ else:
                          "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED=test-proxy-seed\n"
                          "RAMFLUX_CUSTODY_HANDSHAKE_POOL=128\n"
                          "RAMFLUX_CUSTODY_AUTHENTICATED_POOL=512\n"
-                         "RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS=5000\n")
+                         "RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS=5000\n"
+                         "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY=1024\n"
+                         "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY=128\n")
         self.run_script("up")
         original = self.managed_state()
         runtime = (self.state / "runtime.env").read_text()
@@ -138,7 +140,8 @@ else:
                               ("PROXY_SIGNING_SEED", "test-proxy-seed"),
                               ("NODE_RECORD_FILE", "/etc/ramflux/custody/node-record.json"),
                               ("HANDSHAKE_POOL", "128"), ("AUTHENTICATED_POOL", "512"),
-                              ("AUTH_TIMEOUT_MS", "5000")):
+                              ("AUTH_TIMEOUT_MS", "5000"), ("NEW_PRINCIPALS_PER_DAY", "1024"),
+                              ("NEW_PRINCIPALS_PER_PREFIX_PER_DAY", "128")):
             self.assertIn(f"RAMFLUX_CUSTODY_{suffix}={value}\n", runtime)
             self.assertIn(f"RF_COMPOSE_CUSTODY_{suffix}={value}\n", runtime)
         override = json.loads((self.state / "demo-override.json").read_text())
@@ -149,6 +152,8 @@ else:
         self.assertIn("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED",
                       override["services"]["ramflux-gateway"]["environment"])
         self.assertNotIn("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", router["environment"])
+        self.assertEqual(router["environment"]["RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY"],
+                         "${RF_COMPOSE_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY}")
         configured_env = self.env_file.read_text()
         for key in ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED"):
             with self.subTest(changed=key):

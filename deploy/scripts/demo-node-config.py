@@ -298,6 +298,9 @@ def custody_inputs(state):
         "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "RAMFLUX_CUSTODY_NODE_RECORD_FILE",
         "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", "RAMFLUX_CUSTODY_HANDSHAKE_POOL",
         "RAMFLUX_CUSTODY_AUTHENTICATED_POOL", "RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS",
+        "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY",
+        "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_MINUTE",
+        "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY",
     )
     previous = runtime_values(state)
     values = {key: os.environ.get(key, previous.get(key, "")) for key in keys}
@@ -416,7 +419,10 @@ def render_files(repo, state, owner):
         ]
     for service, keys in (
         ("gateway", ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED")),
-        ("router", ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "RAMFLUX_CUSTODY_NODE_RECORD_FILE")),
+        ("router", ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", "RAMFLUX_CUSTODY_NODE_RECORD_FILE",
+                    "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY",
+                    "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_MINUTE",
+                    "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY")),
     ):
         environment = {key: "${RF_COMPOSE_" + key.removeprefix("RAMFLUX_") + "}"
                        for key in keys if key in custody}

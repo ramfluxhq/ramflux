@@ -31,6 +31,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod custody;
 mod custody_accounts;
+mod custody_budget_policy;
+pub use custody_accounts::CustodyPublicationBudgetRow;
 mod custody_history;
 mod expiry_index;
 mod identity_registry;
@@ -63,6 +65,7 @@ pub struct RouterRedbStore {
     #[cfg(test)]
     fail_next_registration_admission: std::sync::atomic::AtomicBool,
     custody_new_principals_per_day: u64,
+    custody_new_principals_per_prefix_per_day: Option<u64>,
     custody_new_principals_per_minute: u64,
     #[cfg(test)]
     pub(crate) fail_next_migration_commit: std::sync::atomic::AtomicBool,
@@ -481,6 +484,8 @@ impl RouterRedbStore {
         let submission_wal = wal_root.map(RouterWalStore::open).transpose()?;
         let custody_new_principals_per_day =
             custody_budget_env(CUSTODY_NEW_PRINCIPALS_PER_DAY_ENV, 256, 32, 65_536)?;
+        let custody_new_principals_per_prefix_per_day =
+            custody_budget_policy::prefix_budget_env(custody_new_principals_per_day)?;
         let custody_new_principals_per_minute = custody_budget_env(
             CUSTODY_NEW_PRINCIPALS_PER_MINUTE_ENV,
             16,
@@ -499,6 +504,7 @@ impl RouterRedbStore {
             #[cfg(test)]
             fail_next_registration_admission: std::sync::atomic::AtomicBool::new(false),
             custody_new_principals_per_day,
+            custody_new_principals_per_prefix_per_day,
             custody_new_principals_per_minute,
             #[cfg(test)]
             fail_next_migration_commit: std::sync::atomic::AtomicBool::new(false),

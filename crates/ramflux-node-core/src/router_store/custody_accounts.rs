@@ -80,10 +80,20 @@ impl Budget {
         Ok(())
     }
 }
+/// Read-only operator view of one durable admission window.
+#[derive(Debug, Serialize)]
+pub struct CustodyPublicationBudgetRow {
+    pub scope: &'static str,
+    pub prefix: Option<String>,
+    pub budget: &'static str,
+    pub count: u64,
+    pub limit: u64,
+    /// Unix seconds in UTC; `None` denotes the non-expiring global account ceiling.
+    pub reset_at: Option<u64>,
+}
+
 impl RouterRedbStore {
     fn custody_budget_keys(&self, source: IpAddr) -> Vec<(String, u64, u64, bool)> {
-        const FAIR_PREFIXES: u64 = 32;
-        let fair_daily = self.custody_new_principals_per_day.div_ceil(FAIR_PREFIXES).max(1);
         let mut keys = vec![(
             "global".to_owned(),
             self.custody_new_principals_per_day,
@@ -92,12 +102,86 @@ impl RouterRedbStore {
         )];
         keys.extend(crate::custody_source_prefixes(source).into_iter().skip(1).enumerate().map(
             |(n, key)| {
-                let prior_daily = if n == 0 { 8 } else { 32 };
-                (key, prior_daily.min(fair_daily), self.custody_new_principals_per_minute, false)
+                let daily = self.custody_prefix_daily_limit(n != 0);
+                (key, daily, self.custody_new_principals_per_minute, false)
             },
         ));
         keys
     }
+    fn custody_prefix_daily_limit(&self, wider: bool) -> u64 {
+        super::custody_budget_policy::prefix_daily_limit(
+            self.custody_new_principals_per_day,
+            self.custody_new_principals_per_prefix_per_day,
+            wider,
+        )
+    }
+
+    /// Inspect durable publication receipts without charging, resetting, or pruning them.
+    /// Counts refer to the retained window; a past reset time means its count has expired.
+    /// Prefix identifiers are node-keyed truncated hashes, never addresses.
+    ///
+    /// # Errors
+    /// Returns an error if durable receipts cannot be read or decoded.
+    pub fn custody_publication_budgets(
+        &self,
+    ) -> Result<Vec<CustodyPublicationBudgetRow>, NodeCoreError> {
+        let tx = self.db.begin_read().map_err(error)?;
+        let table = match tx.open_table(BUDGETS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(error(e)),
+        };
+        let mut rows = Vec::new();
+        for entry in table.iter().map_err(error)? {
+            let (key, value) = entry.map_err(error)?;
+            let key = key.value();
+            let receipt: Budget = serde_json::from_slice(value.value()).map_err(error)?;
+            let global = key == "global";
+            let scope = if global { "global" } else { "prefix" };
+            let prefix =
+                (!global).then(|| crate::source_ip_hash(key).chars().take(16).collect::<String>());
+            let daily_limit = if global {
+                self.custody_new_principals_per_day
+            } else {
+                self.custody_prefix_daily_limit(key.ends_with("/48"))
+            };
+            for (budget, count, limit, reset_at) in [
+                (
+                    "publication_daily",
+                    receipt.daily,
+                    daily_limit,
+                    Some(receipt.day.saturating_add(1).saturating_mul(86_400)),
+                ),
+                (
+                    "publication_minute",
+                    receipt.burst,
+                    self.custody_new_principals_per_minute,
+                    Some(receipt.minute.saturating_add(1).saturating_mul(60)),
+                ),
+            ] {
+                rows.push(CustodyPublicationBudgetRow {
+                    scope,
+                    prefix: prefix.clone(),
+                    budget,
+                    count,
+                    limit,
+                    reset_at,
+                });
+            }
+            if global {
+                rows.push(CustodyPublicationBudgetRow {
+                    scope,
+                    prefix,
+                    budget: "publication_total",
+                    count: receipt.total,
+                    limit: MAX_ACCOUNTS,
+                    reset_at: None,
+                });
+            }
+        }
+        Ok(rows)
+    }
+
     pub(crate) fn check_custody_new_principal_budget(
         &self,
         source: IpAddr,
@@ -220,6 +304,74 @@ impl RouterRedbStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn configured_prefix_limits_cover_ipv4_and_ipv6_source_keys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "rf-custody-policy-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        {
+            let mut store = RouterRedbStore::open_without_wal(&path)?;
+            for source in ["192.0.2.9", "2001:db8:1:2::9"] {
+                let keys = store.custody_budget_keys(source.parse()?);
+                assert_eq!(keys[1].1, 8);
+                if keys.len() == 3 {
+                    assert_eq!(keys[2].1, 8);
+                }
+            }
+            store.custody_new_principals_per_day = 1024;
+            store.custody_new_principals_per_prefix_per_day = Some(128);
+            let v4 = store.custody_budget_keys("192.0.2.9".parse()?);
+            assert_eq!(v4[1].1, 128);
+            let v6 = store.custody_budget_keys("2001:db8:1:2::9".parse()?);
+            assert_eq!(v6[1].1, 128);
+            assert_eq!(v6[2].1, 512);
+        }
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_preserves_durable_rows_and_redacts_prefixes_after_restart()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "rf-custody-inspection-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        let encoded =
+            serde_json::to_vec(&Budget { day: 1, daily: 8, minute: 1441, burst: 2, total: 8 })?;
+        {
+            let store = RouterRedbStore::open_without_wal(&path)?;
+            assert!(store.custody_publication_budgets()?.is_empty());
+            let tx = store.db.begin_write()?;
+            {
+                let mut table = tx.open_table(BUDGETS)?;
+                table.insert("global", encoded.as_slice())?;
+                table.insert("192.0.2.0/24", encoded.as_slice())?;
+            }
+            tx.commit()?;
+        }
+        {
+            let store = RouterRedbStore::open_without_wal(&path)?;
+            let rows = store.custody_publication_budgets()?;
+            assert_eq!(rows.len(), 5);
+            let daily = rows
+                .iter()
+                .find(|r| r.scope == "prefix" && r.budget == "publication_daily")
+                .ok_or("prefix row missing")?;
+            assert_eq!((daily.count, daily.limit, daily.reset_at), (8, 8, Some(172_800)));
+            assert_eq!(daily.prefix.as_ref().map(String::len), Some(16));
+            assert!(!serde_json::to_string(&rows)?.contains("192.0.2"));
+            let tx = store.db.begin_read()?;
+            let table = tx.open_table(BUDGETS)?;
+            assert_eq!(table.get("192.0.2.0/24")?.ok_or("row missing")?.value(), encoded);
+            assert_eq!(store.custody_publication_write_count(), 0);
+        }
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
     #[test]
     fn publication_budget_retains_daily_floor_on_restart_and_clock_rollback()
     -> Result<(), Box<dyn std::error::Error>> {
