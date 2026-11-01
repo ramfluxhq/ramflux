@@ -119,6 +119,6 @@ async fn native_group_envelope_rejects_divergent_conversation_and_accepts_resolv
     assert_eq!(delivered.routing.ok_or("routing")?.conversation_id, "signed-thread");
     assert!(delivered.plaintext.is_some());
     assert!(peer.client.committed_routing(&correct)?.is_some());
-    assert!(peer.client.direct_messages("operator-thread")?.is_empty());
+    assert_eq!(peer.client.direct_messages("operator-thread")?.len(), 0);
     Ok(())
 }
