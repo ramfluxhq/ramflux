@@ -420,7 +420,7 @@ pub(super) async fn process(
     }
     if value["schema"] == "ramflux.sdk.group_sender_key.message.v1" {
         account.client.retain_legacy_group_entry(entry)?;
-        log_unrouted_hold(entry, "legacy group sender key unavailable");
+        log_unrouted_hold(entry, "legacy group entry awaits compatibility receive");
         return Ok(Processed::held());
     }
     if account.client.v2_blocks_legacy(&account.client.inbound_device_reference(entry)?)? {
