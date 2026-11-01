@@ -25,3 +25,5 @@ group history even when their commands supply a different local conversation
 name.
 
 An invalid `RUST_LOG` value produces one stderr warning and leaves daemon logging disabled; the daemon continues to start. Hold and dead-letter diagnostics include the envelope, source device and target delivery identifiers. Unrouted inbound entries also emit an info-level hold with a reason.
+
+On the next native group operation, cached group links from earlier CLI versions are reconciled with the signed group conversation. Existing conversation and history records are retained.

@@ -77,6 +77,16 @@ async fn native_send_and_read_capture_only_the_signed_group_link() -> TestResult
         owner.manifest.principal_commitment,
     );
     for method in ["group.send", "group.read", "group.receive"] {
+        let db = account.client.account_db()?;
+        // Reproduce metadata left by an earlier CLI send/read before upgrading the daemon.
+        db.persist_client_record(
+            "group",
+            "group",
+            &serde_json::json!({
+                "conversation_id":null, "conversation_ids":["group", "operator-thread"],
+                "custom":"preserved",
+            }),
+        )?;
         let request = LocalBusFrame::request(
             "capture",
             Some("owner".into()),
@@ -89,6 +99,7 @@ async fn native_send_and_read_capture_only_the_signed_group_link() -> TestResult
         let link = db.client_record("group", "group")?.ok_or("group link")?;
         assert_eq!(link["conversation_id"], "group", "{method}: {link}");
         assert_eq!(link["conversation_ids"], serde_json::json!(["group"]));
+        assert_eq!(link["custom"], "preserved");
         assert!(db.client_record("conversation", "operator-thread")?.is_none());
         assert_eq!(
             db.client_record("conversation", "group")?.ok_or("thread")?["group_id"],

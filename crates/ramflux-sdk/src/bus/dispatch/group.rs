@@ -40,6 +40,14 @@ async fn dispatch_group_bus_request_inner(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
+    if let Some(group) = request.body.get("group_id").and_then(serde_json::Value::as_str) {
+        // Controls also need a canonical link when an earlier CLI version cached aliases.
+        crate::bus::group_conversation::resolve(
+            &local_bus_account(state, account_id)?.client,
+            group,
+            group,
+        )?;
+    }
     if let Some(response) = super::super::shared_group_sync::dispatch(
         request,
         local_bus_account_mut(state, account_id)?,
