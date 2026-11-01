@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Resume born-v3 DM attachment downloads and confirmed relay ACKs across bounded
+  fetch windows; expose safe fetch diagnostics and daemon readiness in SDK logs.
+- CLI compatibility: `rf object list` now returns paginated metadata instead of
+  encrypted payloads. Use `rf object get` to export bytes. Oversized legacy SDK
+  listings return a bounded error instead of closing the local connection.
+
 - BREAKING (v3 custody capacity hints): refusal frames may carry the optional
   `capacity` field identifying a prefix/global daily new-principal quota and its
   UTC reset time. Clients built before this commit reject refusal frames that
