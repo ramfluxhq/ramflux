@@ -1940,6 +1940,7 @@ async fn ack_dm_attachment_chunk_via_relay_quic(
     let attachment = ctx.attachment.ok_or_else(|| {
         SdkError::CapabilityDenied("v3 relay ACK requires the signed attachment grant".to_owned())
     })?;
+    let started = std::time::Instant::now();
     let issued_at = u64::try_from(now_unix_timestamp()).unwrap_or(0);
     let expires_at = issued_at.saturating_add(120);
     let chunk_id =
@@ -1964,7 +1965,9 @@ async fn ack_dm_attachment_chunk_via_relay_quic(
         expires_at,
         &format!("sdk-ack-{issued_at}-{chunk_index}"),
     )?;
+    let prepared = std::time::Instant::now();
     let token = engine.issue_relay_token_v3(issue_body).await?;
+    let token_issued = std::time::Instant::now();
     let pop = build_signed_requester_pop(
         ctx.branch,
         token.token_id.clone(),
@@ -1986,9 +1989,20 @@ async fn ack_dm_attachment_chunk_via_relay_quic(
         "body_hash": body_hash,
         "capability": "ack",
     });
+    let request_ready = std::time::Instant::now();
     let response = relay_quic_success_body(
         relay_quic_request(pool, ctx.options, "/relay/v1/object/ack", body).await?,
     )?;
+    tracing::debug!(
+        target: "ramflux_sdk::attachment_timing",
+        object_id = %attachment.object_id,
+        chunk_index,
+        prepare_ms = prepared.duration_since(started).as_secs_f64() * 1000.0,
+        gateway_ms = token_issued.duration_since(prepared).as_secs_f64() * 1000.0,
+        requester_ms = request_ready.duration_since(token_issued).as_secs_f64() * 1000.0,
+        relay_ms = request_ready.elapsed().as_secs_f64() * 1000.0,
+        "attachment ACK round trips confirmed"
+    );
     Ok(serde_json::from_value(response)?)
 }
 

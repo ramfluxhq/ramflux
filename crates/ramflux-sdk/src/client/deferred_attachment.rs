@@ -84,7 +84,9 @@ impl RamfluxClient {
             {
                 continue;
             }
+            let started = std::time::Instant::now();
             acknowledge(index).await?;
+            let confirmed = std::time::Instant::now();
             if resumable {
                 // object_id also registers the erasure footprint, including sender-scoped aliases.
                 db.persist_actor_state(
@@ -92,6 +94,14 @@ impl RamfluxClient {
                     &AckProgress { object_id: selector.clone(), acknowledged: true },
                 )?;
             }
+            tracing::debug!(
+                target: "ramflux_sdk::attachment_timing",
+                object_id = %reference.object_id,
+                chunk_index = index,
+                acknowledge_ms = confirmed.duration_since(started).as_secs_f64() * 1000.0,
+                checkpoint_ms = confirmed.elapsed().as_secs_f64() * 1000.0,
+                "attachment ACK progress durable"
+            );
         }
         Ok(())
     }
