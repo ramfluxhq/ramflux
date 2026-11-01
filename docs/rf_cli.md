@@ -23,3 +23,5 @@ read` commands resolve their conversation selector to that same thread; the send
 response reports its conversation id. Both participants therefore use the same
 group history even when their commands supply a different local conversation
 name.
+
+An invalid `RUST_LOG` value produces one stderr warning and leaves daemon logging disabled; the daemon continues to start. Hold and dead-letter diagnostics include the envelope, source device and target delivery identifiers. Unrouted inbound entries also emit an info-level hold with a reason.

@@ -22,7 +22,7 @@ pub(crate) enum A2iAction {
 
 #[derive(Args)]
 pub(crate) struct A2iAppend {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) event: String,
@@ -36,17 +36,17 @@ pub(crate) struct A2iAppend {
     pub(crate) control_domain: String,
     #[arg(long)]
     pub(crate) action: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) subject: String,
     #[arg(long)]
     pub(crate) created_at: Option<i64>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_delivery: Option<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct A2iAck {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) event: String,
@@ -66,19 +66,19 @@ pub(crate) enum A2uiAction {
 
 #[derive(Args)]
 pub(crate) struct A2uiRender {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) surface: PathBuf,
-    #[arg(long = "catalog", default_value = "ramflux.basic.v1")]
+    #[arg(allow_hyphen_values = true, long = "catalog", default_value = "ramflux.basic.v1")]
     pub(crate) supported_catalog: Vec<String>,
-    #[arg(long = "permission")]
+    #[arg(allow_hyphen_values = true, long = "permission")]
     pub(crate) permission: Vec<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct A2uiActionSubmit {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) surface: PathBuf,

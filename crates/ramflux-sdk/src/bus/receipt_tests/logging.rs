@@ -80,6 +80,40 @@ async fn held_inbound_pending_logs_one_info_line_with_sequence_kind_and_reason()
         assert!(observed[0].1.contains(expected), "missing {expected}: {observed:?}");
     }
     drop(observed);
+    lines.0.lock().map_err(|_| "lines lock")?.clear();
+    tracing::subscriber::with_default(lines.clone(), || {
+        assert!(sync_driver::quarantine_failure(
+            &receiver,
+            &b.device,
+            &entry,
+            &key,
+            &SdkError::InboundRejected(
+                "authenticated group conversation conflicts with local binding".into()
+            ),
+            now_unix_timestamp(),
+        )?);
+        Ok::<_, SdkError>(())
+    })?;
+    assert!(!receiver.account_db()?.has_inbox_retry(&key)?);
+    let observed = lines.0.lock().map_err(|_| "lines lock")?;
+    assert_eq!(observed.len(), 1, "{observed:?}");
+    assert_eq!(observed[0].0, Level::WARN);
+    for expected in [
+        "gateway inbound entry dead-lettered",
+        "inbox_seq=42",
+        "InboundRejected",
+        "authenticated group conversation conflicts with local binding",
+        "outcome=",
+        "envelope_id=",
+        entry.envelope.envelope_id.as_str(),
+        "source_device_id=",
+        entry.envelope.source_device_id.as_str(),
+        "target_delivery_id=",
+        entry.target_delivery_id.as_str(),
+    ] {
+        assert!(observed[0].1.contains(expected), "missing {expected}: {observed:?}");
+    }
+    drop(observed);
     drop((source, receiver));
     std::fs::remove_dir_all(root)?;
     Ok(())

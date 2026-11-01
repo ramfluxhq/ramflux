@@ -24,7 +24,7 @@ pub(crate) enum CallAction {
 
 #[derive(Args)]
 pub(crate) struct CallInvite {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
@@ -32,7 +32,7 @@ pub(crate) struct CallInvite {
 
 #[derive(Args)]
 pub(crate) struct CallAnswer {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) call: String,
@@ -40,7 +40,7 @@ pub(crate) struct CallAnswer {
 
 #[derive(Args)]
 pub(crate) struct CallHangup {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) call: String,
@@ -73,7 +73,7 @@ pub(crate) enum BotTrustAction {
 
 #[derive(Args)]
 pub(crate) struct BotTrustAdd {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) bot: String,
@@ -87,19 +87,19 @@ pub(crate) struct BotTrustAdd {
 
 #[derive(Args)]
 pub(crate) struct BotInstall {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) manifest: PathBuf,
     #[arg(long)]
     pub(crate) grant: PathBuf,
-    #[arg(long = "consent")]
+    #[arg(allow_hyphen_values = true, long = "consent")]
     pub(crate) consent: Vec<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct BotRevoke {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) bot: String,

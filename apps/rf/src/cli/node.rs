@@ -28,13 +28,13 @@ pub(crate) enum NodeAction {
 
 #[derive(Args)]
 pub(crate) struct NodeCustody {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) node_id: String,
     /// Existing certs/node-identity/node-signing.key, never generated or overwritten.
     #[arg(long)]
     pub(crate) node_signing_seed: std::path::PathBuf,
     /// Independently retained `DEMO_EXPECTED_NODE_PUBLIC_KEY` from the demo identity.env.
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) expected_public_key: String,
     #[arg(long)]
     pub(crate) output_dir: std::path::PathBuf,
@@ -57,14 +57,16 @@ pub(crate) struct NodeAdd {
 
 #[derive(Args)]
 pub(crate) struct NodeConfirm {
+    #[arg(allow_hyphen_values = true)]
     pub(crate) node_id: String,
     #[arg(long, default_value = "tofu", value_parser = ["tofu", "operator", "invitation"])]
     pub(crate) pin_source: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) expected_public_key: Option<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct NodeSelector {
+    #[arg(allow_hyphen_values = true)]
     pub(crate) node_id: String,
 }

@@ -21,13 +21,13 @@ pub(crate) enum KeychainAction {
 
 #[derive(Args)]
 pub(crate) struct KeychainSelector {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
 }
 
 #[derive(Args)]
 pub(crate) struct KeychainStore {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) passphrase_env: Option<String>,

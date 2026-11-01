@@ -10,7 +10,7 @@ pub(crate) struct SurfaceCommand {
 #[derive(Subcommand)]
 pub(crate) enum SurfaceAction {
     Get {
-        #[arg(long)]
+        #[arg(allow_hyphen_values = true, long)]
         account: String,
         #[arg(
             long,
@@ -23,13 +23,13 @@ pub(crate) enum SurfaceAction {
         surface_ref: Option<String>,
         #[arg(long, allow_hyphen_values = true)]
         conversation: Option<String>,
-        #[arg(long)]
+        #[arg(allow_hyphen_values = true, long)]
         author: Option<String>,
         #[arg(long, allow_hyphen_values = true)]
         action_id: Option<String>,
     },
     List {
-        #[arg(long)]
+        #[arg(allow_hyphen_values = true, long)]
         account: String,
         #[arg(long, allow_hyphen_values = true)]
         conversation: String,
@@ -40,13 +40,13 @@ pub(crate) enum SurfaceAction {
     },
     /// Ask the author for a signed full state when this recipient is out of sync.
     RequestResync {
-        #[arg(long)]
+        #[arg(allow_hyphen_values = true, long)]
         account: String,
         #[arg(long, allow_hyphen_values = true)]
         surface_ref: String,
     },
     Resync {
-        #[arg(long)]
+        #[arg(allow_hyphen_values = true, long)]
         account: String,
         #[arg(long, allow_hyphen_values = true)]
         surface_ref: String,
@@ -58,7 +58,7 @@ pub(crate) enum SurfaceAction {
 }
 #[derive(Args)]
 pub(crate) struct SurfaceSend {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
@@ -66,6 +66,6 @@ pub(crate) struct SurfaceSend {
     pub(crate) message: Option<String>,
     #[arg(long)]
     pub(crate) wire_file: PathBuf,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) author: Option<String>,
 }

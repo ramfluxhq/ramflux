@@ -26,7 +26,7 @@ pub(crate) enum GrantAction {
 
 #[derive(Args)]
 pub(crate) struct ApprovalSelector {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) approval: String,
@@ -34,7 +34,7 @@ pub(crate) struct ApprovalSelector {
 
 #[derive(Args)]
 pub(crate) struct GrantSelector {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) grant: String,
@@ -42,15 +42,15 @@ pub(crate) struct GrantSelector {
 
 #[derive(Args)]
 pub(crate) struct GrantRequest {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) grant: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) server: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) tool: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) capability: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) full_delegation: bool,
@@ -58,7 +58,7 @@ pub(crate) struct GrantRequest {
 
 #[derive(Args)]
 pub(crate) struct GrantRevoke {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) grant: String,

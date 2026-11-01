@@ -28,9 +28,9 @@ pub(crate) enum DeviceAction {
 
 #[derive(Args)]
 pub(crate) struct DeviceActivate {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) node: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) device: String,
@@ -44,7 +44,7 @@ pub(crate) struct DeviceActivate {
 
 #[derive(Args)]
 pub(crate) struct DeviceRevoke {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) device: String,
@@ -64,13 +64,13 @@ pub(crate) enum DeviceSyncAction {
 
 #[derive(Args)]
 pub(crate) struct DeviceSyncExport {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) target_device: String,
     #[arg(long)]
     pub(crate) relay_endpoint: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) relay_service_key_base64: Option<String>,
     #[arg(long)]
     pub(crate) chunk_size: Option<usize>,
@@ -78,27 +78,27 @@ pub(crate) struct DeviceSyncExport {
 
 #[derive(Args)]
 pub(crate) struct DeviceSyncImport {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) envelope_json: Option<String>,
     #[arg(long)]
     pub(crate) envelope_file: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) relay_service_key_base64: Option<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct DeviceMigrate {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long = "authorization-file")]
     pub(crate) authorizations: Vec<PathBuf>,
 }
 #[derive(Args)]
 pub(crate) struct DeviceRefresh {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) principal_commitment: Option<String>,
 }

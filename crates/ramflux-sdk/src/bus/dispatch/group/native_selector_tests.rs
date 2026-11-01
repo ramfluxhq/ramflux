@@ -31,7 +31,7 @@ async fn native_cli_conversation_selector_resolves_to_signed_group_thread() -> T
         Some(&primary),
     )?;
     assert_eq!(
-        group_receive_conversation(&owner.client, "group", "operator-conversation")?,
+        crate::bus::group_conversation::resolve(&owner.client, "group", "operator-conversation")?,
         "group"
     );
     let mut body: LocalBusGroupSendRequest = serde_json::from_value(serde_json::json!({
@@ -47,10 +47,53 @@ async fn native_cli_conversation_selector_resolves_to_signed_group_thread() -> T
     let legacy =
         runtime_tests::account(&legacy_root, "legacy", None, Arc::new(AtomicBool::new(false)))?;
     assert_eq!(
-        group_receive_conversation(&legacy.client, "group", "legacy-thread")?,
+        crate::bus::group_conversation::resolve(&legacy.client, "group", "legacy-thread")?,
         "legacy-thread"
     );
     drop(legacy);
     std::fs::remove_dir_all(legacy_root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_send_and_read_capture_only_the_signed_group_link() -> TestResult {
+    let owner = crate::client::native_test_support::Fixture::new("cli-capture").await?;
+    let primary = owner
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or("native")?
+        .group_primary(owner.vault.as_ref())?;
+    owner.client.shared_group_create_with_primary(
+        "group",
+        "group",
+        None,
+        &owner.config.target_delivery_id,
+        Some(&primary),
+    )?;
+    let account = LocalBusAccountState::disconnected(
+        owner.client,
+        owner.config,
+        owner.manifest.principal_commitment,
+    );
+    for method in ["group.send", "group.read", "group.receive"] {
+        let request = LocalBusFrame::request(
+            "capture",
+            Some("owner".into()),
+            "ramflux.sdk.v1",
+            method,
+            serde_json::json!({"group_id":"group", "conversation_id":"operator-thread"}),
+        );
+        crate::bus::read_model::capture(&account, &request, &serde_json::json!({}))?;
+        let db = account.client.account_db()?;
+        let link = db.client_record("group", "group")?.ok_or("group link")?;
+        assert_eq!(link["conversation_id"], "group", "{method}: {link}");
+        assert_eq!(link["conversation_ids"], serde_json::json!(["group"]));
+        assert!(db.client_record("conversation", "operator-thread")?.is_none());
+        assert_eq!(
+            db.client_record("conversation", "group")?.ok_or("thread")?["group_id"],
+            "group"
+        );
+    }
     Ok(())
 }

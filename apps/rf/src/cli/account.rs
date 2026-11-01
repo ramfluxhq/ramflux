@@ -32,13 +32,13 @@ pub(crate) enum AccountAction {
 
 #[derive(Args)]
 pub(crate) struct AccountSelector {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
 }
 
 #[derive(Args)]
 pub(crate) struct AccountLock {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) use_keychain: bool,
@@ -46,7 +46,7 @@ pub(crate) struct AccountLock {
 
 #[derive(Args)]
 pub(crate) struct AccountUnlock {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) use_keychain: bool,
@@ -60,7 +60,7 @@ pub(crate) struct AccountCreate {
     pub(crate) display_name: String,
     #[arg(long, value_enum, default_value = "human")]
     pub(crate) kind: AccountKind,
-    #[arg(long, requires = "kind")]
+    #[arg(allow_hyphen_values = true, long, requires = "kind")]
     pub(crate) custodian: Option<String>,
 }
 
@@ -73,7 +73,7 @@ pub(crate) enum AccountKind {
 
 #[derive(Args)]
 pub(crate) struct AccountExportAgentCredentials {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) out: PathBuf,
@@ -93,7 +93,7 @@ pub(crate) enum AccountBackupAction {
 
 #[derive(Args)]
 pub(crate) struct AccountBackupExport {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) out: PathBuf,
@@ -125,7 +125,7 @@ pub(crate) enum AccountPassphraseAction {
 
 #[derive(Args)]
 pub(crate) struct AccountPassphraseRotate {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) old_passphrase_env: Option<String>,
@@ -136,13 +136,13 @@ pub(crate) struct AccountPassphraseRotate {
 #[cfg(feature = "itest-legacy-accounts")]
 #[derive(Args)]
 pub(crate) struct ItestLegacyAccountCreate {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) node: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) principal: String,
-    #[arg(long, hide = true)]
+    #[arg(allow_hyphen_values = true, long, hide = true)]
     pub(crate) expected_commitment: Option<String>,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) device: String,

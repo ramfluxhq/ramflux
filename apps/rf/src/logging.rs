@@ -6,11 +6,14 @@ use crate::RfError;
 use tracing_subscriber::EnvFilter;
 
 pub(crate) fn init() -> Result<(), RfError> {
-    let filter = match std::env::var("RUST_LOG") {
-        Ok(value) => EnvFilter::try_new(value)
-            .map_err(|error| RfError::Message(format!("invalid RUST_LOG: {error}")))?,
-        Err(std::env::VarError::NotPresent) => EnvFilter::new("off"),
-        Err(error) => return Err(RfError::Message(format!("invalid RUST_LOG: {error}"))),
+    let filter = match EnvFilter::try_from_env("RUST_LOG") {
+        Ok(filter) => filter,
+        Err(error) => {
+            if std::env::var_os("RUST_LOG").is_some() {
+                eprintln!("warning: invalid RUST_LOG; daemon logging disabled: {error}");
+            }
+            EnvFilter::new("off")
+        }
     };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -35,7 +38,7 @@ mod tests {
             tracing::debug!(target: "ramflux_sdk", "debug-filter-probe");
             return Ok(());
         }
-        for setting in [Some("ramflux_sdk=info"), None] {
+        for setting in [Some("ramflux_sdk=info"), Some("ramflux_sdk=["), Some("non-utf8"), None] {
             let mut child = Command::new(std::env::current_exe()?);
             child
                 .args([
@@ -46,7 +49,12 @@ mod tests {
                 .env("RF_LOGGING_TEST_CHILD", "1")
                 .env_remove("RUST_LOG");
             if let Some(value) = setting {
-                child.env("RUST_LOG", value);
+                if value == "non-utf8" {
+                    use std::os::unix::ffi::OsStringExt;
+                    child.env("RUST_LOG", std::ffi::OsString::from_vec(vec![0xff]));
+                } else {
+                    child.env("RUST_LOG", value);
+                }
             }
             let output = child.output()?;
             assert!(output.status.success());
@@ -54,10 +62,13 @@ mod tests {
             assert!(!String::from_utf8(output.stdout)?.contains("held-entry-filter-probe"));
             assert_eq!(
                 stderr.matches("held-entry-filter-probe").count(),
-                usize::from(setting.is_some())
+                usize::from(setting == Some("ramflux_sdk=info"))
             );
             assert!(!stderr.contains("debug-filter-probe"));
-            if setting.is_some() {
+            if matches!(setting, Some("ramflux_sdk=[" | "non-utf8")) {
+                assert_eq!(stderr.matches("warning: invalid RUST_LOG").count(), 1);
+            }
+            if setting == Some("ramflux_sdk=info") {
                 for expected in ["INFO", "inbox_seq=42", "InboundPending", "group root unavailable"]
                 {
                     assert!(stderr.contains(expected), "missing {expected}: {stderr}");

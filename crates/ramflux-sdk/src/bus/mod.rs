@@ -22,6 +22,7 @@ pub mod daemon;
 mod delivery_receipts;
 pub mod dispatch;
 mod events;
+pub(crate) mod group_conversation;
 mod group_delivery;
 pub mod io;
 mod journal;

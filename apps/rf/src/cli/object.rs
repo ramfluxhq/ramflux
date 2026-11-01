@@ -27,7 +27,7 @@ pub(crate) enum ObjectAction {
 
 #[derive(Args)]
 pub(crate) struct ObjectPut {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
@@ -36,7 +36,7 @@ pub(crate) struct ObjectPut {
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
     #[cfg(feature = "itest-local-mint")]
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) relay_service_key: Option<String>,
     #[arg(long)]
     pub(crate) relay_interrupt_after_chunks: Option<u32>,
@@ -45,14 +45,14 @@ pub(crate) struct ObjectPut {
 
 #[derive(Args)]
 pub(crate) struct ObjectGet {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
     #[cfg(feature = "itest-local-mint")]
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) relay_service_key: Option<String>,
     #[arg(long)]
     pub(crate) relay_ack: bool,
@@ -63,7 +63,7 @@ pub(crate) struct ObjectGet {
 
 #[derive(Args)]
 pub(crate) struct ObjectStatus {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
@@ -73,7 +73,7 @@ pub(crate) struct ObjectStatus {
 
 #[derive(Args)]
 pub(crate) struct ObjectResume {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
@@ -82,7 +82,7 @@ pub(crate) struct ObjectResume {
     #[arg(long)]
     pub(crate) relay_url: String,
     #[cfg(feature = "itest-local-mint")]
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) relay_service_key: Option<String>,
     #[arg(long)]
     pub(crate) relay_interrupt_after_chunks: Option<u32>,
@@ -90,7 +90,7 @@ pub(crate) struct ObjectResume {
 
 #[derive(Args)]
 pub(crate) struct ObjectShare {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
@@ -110,20 +110,20 @@ pub(crate) struct ObjectShare {
 
 #[derive(Args)]
 pub(crate) struct ObjectDelete {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
     #[cfg(feature = "itest-local-mint")]
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) relay_service_key: Option<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct ObjectImport {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     pub(crate) package: PathBuf,
 }

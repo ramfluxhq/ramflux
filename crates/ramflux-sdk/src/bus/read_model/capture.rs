@@ -266,7 +266,12 @@ fn capture_group(account: &LocalBusAccountState, request: &LocalBusFrame) -> Res
     ) && body.get("conversation_id").is_some()
     {
         let group = required(body, "group_id")?;
-        let conversation = required(body, "conversation_id")?;
+        let resolved = super::super::group_conversation::resolve(
+            &account.client,
+            group,
+            required(body, "conversation_id")?,
+        )?;
+        let conversation = resolved.as_str();
         let members = account.client.group_state(group)?.members;
         let mut principals = std::collections::BTreeSet::new();
         for device in members {

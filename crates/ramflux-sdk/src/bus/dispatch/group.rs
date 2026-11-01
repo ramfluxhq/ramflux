@@ -1024,23 +1024,8 @@ fn normalize_native_group_request(
 ) -> Result<(), SdkError> {
     normalize_native_group_sender(body, gateway)?;
     body.conversation_id =
-        group_receive_conversation(client, &body.group_id, &body.conversation_id)?;
+        crate::bus::group_conversation::resolve(client, &body.group_id, &body.conversation_id)?;
     Ok(())
-}
-
-fn group_receive_conversation(
-    client: &RamfluxClient,
-    group: &str,
-    requested: &str,
-) -> Result<String, SdkError> {
-    // Native CLI creation signs the group id as its conversation. Resolve later CLI selectors
-    // to that signed thread before storing or sealing, matching the receive authorization gate.
-    if client.born_v3_account.is_some()
-        && let Some(state) = client.account_db()?.shared_group_state(group)?
-    {
-        return Ok(state.view().conversation_id.clone());
-    }
-    Ok(requested.to_owned())
 }
 
 fn normalize_native_group_sender(
@@ -1261,8 +1246,11 @@ pub(crate) async fn dispatch_group_receive_request(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let mut body: LocalBusGroupReceiveRequest = serde_json::from_value(request.body.clone())?;
     super::super::sync_driver::run(account).await?;
-    body.conversation_id =
-        group_receive_conversation(&account.client, &body.group_id, &body.conversation_id)?;
+    body.conversation_id = crate::bus::group_conversation::resolve(
+        &account.client,
+        &body.group_id,
+        &body.conversation_id,
+    )?;
     let mut engine = account.take_live_engine().await?;
     let receive_result = async {
         let mut entries = Vec::<GatewayInboxEntry>::new();

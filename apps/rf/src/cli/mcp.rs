@@ -35,15 +35,15 @@ pub(crate) enum McpServerAction {
 
 #[derive(Args)]
 pub(crate) struct McpServerAdd {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) server: String,
     #[arg(long, default_value = "stdio-echo")]
     pub(crate) command: String,
-    #[arg(long, default_value = "echo")]
+    #[arg(allow_hyphen_values = true, long, default_value = "echo")]
     pub(crate) tool: String,
-    #[arg(long, default_value = "external_tool_invoke.echo")]
+    #[arg(allow_hyphen_values = true, long, default_value = "external_tool_invoke.echo")]
     pub(crate) capability: String,
     #[arg(long, default_value = "low")]
     pub(crate) risk: String,
@@ -63,11 +63,11 @@ pub(crate) enum McpToolAction {
 
 #[derive(Args)]
 pub(crate) struct McpToolCall {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) server: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) tool: String,
     #[arg(long, default_value = "{}")]
     pub(crate) args_json: String,
@@ -89,7 +89,7 @@ pub(crate) enum McpApprovalAction {
 
 #[derive(Args)]
 pub(crate) struct McpApprovalSelector {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) approval: String,

@@ -420,6 +420,7 @@ pub(super) async fn process(
     }
     if value["schema"] == "ramflux.sdk.group_sender_key.message.v1" {
         account.client.retain_legacy_group_entry(entry)?;
+        log_unrouted_hold(entry, "legacy group sender key unavailable");
         return Ok(Processed::held());
     }
     if account.client.v2_blocks_legacy(&account.client.inbound_device_reference(entry)?)? {
@@ -430,6 +431,7 @@ pub(super) async fn process(
             &serde_json::to_vec(entry)?,
             now_unix_timestamp(),
         )?;
+        log_unrouted_hold(entry, "legacy traffic blocked by v2 binding");
         return Ok(Processed::held());
     }
     if let Some(conversation) =
@@ -454,7 +456,16 @@ pub(super) async fn process(
     let key = account.client.inbox_admission_key(entry)?;
     db.hold_unrouted(&key, entry.inbox_seq, &serde_json::to_vec(entry)?, now_unix_timestamp())?;
     db.append_journal(&format!("unrouted:{key}"),"message.unrouted",&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash,"inbox_seq":entry.inbox_seq}),now_unix_timestamp(),None)?;
+    log_unrouted_hold(entry, "no authenticated conversation binding");
     Ok(Processed::held())
+}
+
+fn log_unrouted_hold(entry: &GatewayInboxEntry, reason: &str) {
+    tracing::info!(inbox_seq = entry.inbox_seq, kind = "unrouted",
+        envelope_id = %entry.envelope.envelope_id,
+        source_device_id = %entry.envelope.source_device_id,
+        target_delivery_id = %entry.target_delivery_id,
+        reason, "gateway inbound entry held");
 }
 
 pub(super) fn quarantine_failure(
@@ -485,6 +496,9 @@ pub(super) fn quarantine_failure(
         if crate::client::inbox_failure::defer_entry(client, device, entry, key, &retry_bytes, now)?
         {
             tracing::info!(inbox_seq = entry.inbox_seq, kind,
+                envelope_id = %entry.envelope.envelope_id,
+                source_device_id = %entry.envelope.source_device_id,
+                target_delivery_id = %entry.target_delivery_id,
                 reason = %error, "gateway inbound entry held");
             return Ok(false);
         }
@@ -514,6 +528,9 @@ pub(super) fn quarantine_failure(
         )?;
     }
     tracing::warn!(inbox_seq = entry.inbox_seq, kind,
+        envelope_id = %entry.envelope.envelope_id,
+        source_device_id = %entry.envelope.source_device_id,
+        target_delivery_id = %entry.target_delivery_id,
         reason = %error, outcome = code, "gateway inbound entry dead-lettered");
     Ok(true)
 }

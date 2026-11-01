@@ -32,29 +32,29 @@ pub(crate) enum ContactAction {
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("contact_selector").args(["principal", "card", "target"]).required(true).multiple(false)))]
 pub(crate) struct ContactAdd {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) principal: Option<String>,
     #[arg(long)]
     pub(crate) card: Option<String>,
-    #[arg(long, requires = "card")]
+    #[arg(allow_hyphen_values = true, long, requires = "card")]
     pub(crate) replace_provisional_root: Option<String>,
     #[arg(long, requires_all = ["link", "requester"], allow_hyphen_values = true)]
     pub(crate) target: Option<String>,
-    #[arg(long, requires = "target")]
+    #[arg(allow_hyphen_values = true, long, requires = "target")]
     pub(crate) link: Option<String>,
-    #[arg(long, requires = "target")]
+    #[arg(allow_hyphen_values = true, long, requires = "target")]
     pub(crate) requester: Option<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct ContactLink {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) link: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) requester: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: String,
@@ -70,9 +70,9 @@ pub(crate) struct ContactAccept {
 
 #[derive(Args)]
 pub(crate) struct ContactRemove {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) link: String,
     #[arg(long, default_value = "me")]
     pub(crate) scope: String,
@@ -80,9 +80,9 @@ pub(crate) struct ContactRemove {
 
 #[derive(Args)]
 pub(crate) struct ContactLinkSelector {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) link: String,
 }
 
@@ -102,19 +102,19 @@ pub(crate) struct ContactFederatedArgs {
     pub(crate) message: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) envelope: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) source_principal: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) sender: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) recipient_device: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_delivery: String,
     #[arg(long)]
     pub(crate) federation_url: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) source_node: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_node: String,
     #[arg(long)]
     pub(crate) federation_admin_token: Option<String>,
@@ -126,9 +126,9 @@ pub(crate) struct ContactFederatedArgs {
 
 #[derive(Args)]
 pub(crate) struct ContactSafetySelector {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) contact: String,
 }
 

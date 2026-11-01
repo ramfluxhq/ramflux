@@ -35,7 +35,7 @@ pub(crate) struct AdminFederationPeer {
     pub(crate) node_a_admin_url: String,
     #[arg(long)]
     pub(crate) node_a_token: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) node_a_id: String,
     #[arg(long)]
     pub(crate) node_a_well_known_url: String,
@@ -43,7 +43,7 @@ pub(crate) struct AdminFederationPeer {
     pub(crate) node_b_admin_url: String,
     #[arg(long)]
     pub(crate) node_b_token: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) node_b_id: String,
     #[arg(long)]
     pub(crate) node_b_well_known_url: String,

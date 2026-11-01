@@ -31,37 +31,37 @@ pub(crate) enum GroupAction {
 
 #[derive(Args)]
 pub(crate) struct GroupRename {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) name: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) request_id: Option<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct GroupCreate {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) creator: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) creator_signing_public_key: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) creator_target_delivery: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member: Vec<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_target_delivery: Option<String>,
     #[arg(long)]
     pub(crate) federation_url: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) source_node: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_node: Option<String>,
     #[arg(long)]
     pub(crate) federation_admin_token: Option<String>,
@@ -73,7 +73,7 @@ pub(crate) struct GroupCreate {
 
 #[derive(Args)]
 pub(crate) struct GroupMembers {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
@@ -96,25 +96,25 @@ pub(crate) enum GroupMemberAction {
 
 #[derive(Args)]
 pub(crate) struct GroupMemberAdd {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_device: String,
     #[arg(long, default_value = "member")]
     pub(crate) role: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_signing_public_key: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_principal_commitment: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_delivery: Option<String>,
     #[arg(long)]
     pub(crate) federation_url: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) source_node: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_node: Option<String>,
     #[arg(long)]
     pub(crate) federation_admin_token: Option<String>,
@@ -126,25 +126,25 @@ pub(crate) struct GroupMemberAdd {
 
 #[derive(Args)]
 pub(crate) struct GroupMemberRemove {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) actor: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_device: String,
 }
 
 #[derive(Args)]
 pub(crate) struct GroupMemberKick {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) actor: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_device: String,
     #[arg(long)]
     pub(crate) reason: Option<String>,
@@ -152,13 +152,13 @@ pub(crate) struct GroupMemberKick {
 
 #[derive(Args)]
 pub(crate) struct GroupMemberBan {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) actor: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_device: String,
     #[arg(long)]
     pub(crate) reason: Option<String>,
@@ -177,11 +177,11 @@ pub(crate) enum GroupMessageAction {
 
 #[derive(Args)]
 pub(crate) struct GroupMessageDelete {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) actor: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
@@ -205,19 +205,19 @@ pub(crate) enum GroupInviteAction {
 
 #[derive(Args)]
 pub(crate) struct GroupInviteCreate {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) actor: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) invitee_device: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) invitee_signing_public_key: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) invitee_principal_commitment: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_delivery: String,
     #[arg(long, default_value = "member")]
     pub(crate) role: String,
@@ -229,17 +229,17 @@ pub(crate) struct GroupInviteCreate {
 
 #[derive(Args)]
 pub(crate) struct GroupInviteAccept {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) actor: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) invite_id: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_delivery: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_principal_commitment: Option<String>,
 }
 
@@ -256,13 +256,13 @@ pub(crate) enum GroupRoleAction {
 
 #[derive(Args)]
 pub(crate) struct GroupRoleSet {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) actor: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_device: String,
     #[arg(long)]
     pub(crate) role: String,
@@ -282,7 +282,7 @@ pub(crate) enum GroupDisappearingAction {
 
 #[derive(Args)]
 pub(crate) struct GroupDisappearingSet {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
@@ -292,7 +292,7 @@ pub(crate) struct GroupDisappearingSet {
 
 #[derive(Args)]
 pub(crate) struct GroupDisappearingExpire {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
@@ -302,7 +302,7 @@ pub(crate) struct GroupDisappearingExpire {
 
 #[derive(Args)]
 pub(crate) struct GroupMute {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
@@ -314,7 +314,7 @@ pub(crate) struct GroupMute {
 
 #[derive(Args)]
 pub(crate) struct GroupSend {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
@@ -328,15 +328,15 @@ pub(crate) struct GroupSend {
     pub(crate) body: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) envelope: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) source_principal: Option<String>,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: Option<String>,
     #[arg(long)]
     pub(crate) federation_url: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) source_node: Option<String>,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_node: Option<String>,
     #[arg(long)]
     pub(crate) federation_admin_token: Option<String>,
@@ -350,7 +350,7 @@ pub(crate) struct GroupSend {
 
 #[derive(Args)]
 pub(crate) struct GroupRead {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,

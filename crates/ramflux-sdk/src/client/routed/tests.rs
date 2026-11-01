@@ -869,3 +869,6 @@ async fn r5_outsider_controls_are_rejected_before_directory_io() -> Result<(), S
         Err(SdkError::InboundPending(reason)) if reason == "group control source rate exceeded"));
     Ok(())
 }
+
+#[path = "native_group_conversation_tests.rs"]
+mod native_group_conversation;
