@@ -41,6 +41,13 @@ it does not restart the acknowledgement pass. The daemon logs
 `rf object list --account=ACCOUNT` lists available metadata on either side, using
 bounded directory pages rather than embedding ciphertext.
 Existing object data and attachment references remain readable.
+After fetching, save the file with
+`rf object get --account=ACCOUNT --object=OBJECT_ID output.bin`.
+Scripts that previously consumed payload fields from `rf object list` should use
+`object get` or the SDK's bounded object-read APIs; `object_id` remains the list
+selector. The legacy SDK `object.list` response remains unchanged when it fits
+the bus frame limit; oversized responses return an error directing callers to
+`object.directory`.
 
 ## Native groups
 
