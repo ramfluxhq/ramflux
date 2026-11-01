@@ -111,13 +111,12 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
         },
         code: local_bus_error_code(error).to_owned(),
         message: error.to_string(),
-        retry_after_ms: if matches!(
-            error,
-            SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
-        ) {
-            Some(60_000)
-        } else {
-            None
+        retry_after_ms: match error {
+            SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::Capacity) => {
+                Some(crate::custody::CAPACITY_RETRY_AFTER_MS)
+            }
+            SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => Some(60_000),
+            _ => None,
         },
         cause,
     }

@@ -206,6 +206,12 @@ impl RouterCore {
         let state = CustodyAccountState { publication: accepted, pins };
         let is_new = !registry.custody.records.contains_key(anchor);
         if is_new && registry.custody.records.len() >= 65_536 {
+            crate::custody_budget_log::refuse(
+                "account_count",
+                registry.custody.records.len(),
+                65_536,
+                ramflux_protocol::custody::CustodyRefusal::Capacity,
+            );
             return Err(crate::NodeCoreError::Capacity { resource: "custody account count" });
         }
         if verified.capacity_pressure().any() {

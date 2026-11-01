@@ -58,7 +58,16 @@ pub(super) fn retain(
     if records.get(key.as_str()).map_err(error)?.is_some() {
         return Ok(());
     }
-    let expires_at = now.checked_add(RETENTION).ok_or_else(capacity)?;
+    let expires_at = now.checked_add(RETENTION).ok_or_else(|| {
+        tracing::warn!(
+            budget = "history_clock",
+            count = now,
+            limit = u64::MAX - RETENTION,
+            refusal = "Capacity",
+            "custody admission refused"
+        );
+        capacity()
+    })?;
     let bytes = serde_json::to_vec(&Historical { expires_at, publication: previous.clone() })
         .map_err(error)?;
     let size = u64::try_from(bytes.len()).map_err(error)?;
@@ -72,7 +81,28 @@ pub(super) fn retain(
             .map(|row| serde_json::from_slice(row.value()).map_err(error))
             .transpose()?
             .unwrap_or_default();
-        if value.rows >= max_rows || value.bytes.saturating_add(size) > max_bytes {
+        let scope_name = if scope.is_empty() { "global" } else { "account" };
+        if value.rows >= max_rows {
+            tracing::warn!(
+                budget = "history_rows",
+                scope = scope_name,
+                count = value.rows,
+                limit = max_rows,
+                refusal = "Capacity",
+                "custody admission refused"
+            );
+            return Err(capacity());
+        }
+        let incoming_bytes = value.bytes.saturating_add(size);
+        if incoming_bytes > max_bytes {
+            tracing::warn!(
+                budget = "history_bytes",
+                scope = scope_name,
+                count = incoming_bytes,
+                limit = max_bytes,
+                refusal = "Capacity",
+                "custody admission refused"
+            );
             return Err(capacity());
         }
         value.rows += 1;

@@ -735,11 +735,15 @@ async fn short_gateway_session_expiry_reports_custody_expired() -> Result {
 
 #[test]
 fn capacity_refusal_uses_the_node_busy_reason() {
+    let error = crate::SdkError::CustodyNetwork(CustodyRefusal::Capacity);
+    let body = super::io::local_bus_error_body(&error);
+    assert_eq!(body.retry_after_ms, Some(300_000));
+    assert_eq!(body.code, "ValidationFailed");
     assert_eq!(
         super::native_account::networking_reason(&crate::SdkError::CustodyNetwork(
             CustodyRefusal::Capacity,
         )),
-        Some(crate::AccountNetworkingReason::NodeBusy { retry_after_ms: 16_000 })
+        Some(crate::AccountNetworkingReason::NodeBusy { retry_after_ms: 300_000 })
     );
 }
 

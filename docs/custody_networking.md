@@ -351,6 +351,12 @@ quarter of each interval (one-second floor, sixteen-second ceiling). The whole
 connection attempt, including account-flight waits and transport setup, has a
 90-second deadline; exhaustion returns typed `Busy`. Other refusals and transport
 errors remain immediate, with no legacy, unbound-mode or trust-anchor fallback.
+A server `Capacity` refusal starts a 300-second monotonic cooldown shared by new
+connections for the same account directory, account, receiving-node pin and
+endpoint within the client process. During that interval commands return the
+same typed `Capacity` without opening another custody transport. Local retries
+do not extend the deadline. Other accounts and nodes remain independent. A
+client process restart loses this local cooldown.
 
 Ordinary native gateway sessions use this same retry path and account lease, including TCP-TLS
 and QUIC. Their outer connection deadline is ninety seconds as well; the shorter timeout used by
@@ -373,3 +379,35 @@ a rate-limit retry. A group of ten clients needs two issuance windows, even when
 has spare capacity. The per-call retry deadline does not promise that an arbitrary
 concurrent batch can all complete in ninety seconds. Durable new-principal quotas
 remain separate; reconnecting known principals does not consume that quota.
+
+## Operator admission diagnostics
+
+Each custody `Capacity` or `Busy` budget refusal emits one warning named
+`custody admission refused` with `budget`, `count`, `limit` and `refusal` fields.
+Warnings contain no credential material, nonces, account identifiers or full
+client addresses. `holder` and `prefix` identify outstanding-challenge ceilings;
+`global` is the global outstanding ceiling; `replay`, `session` and `request`
+identify successful-proof markers, active sessions and per-session request
+nonces. `source_*_rate` means issuance rate, while `handshake`, `authenticated`,
+`listener_source`, `principal_session` and `authenticated_prefix` describe
+listener admission. Durable publication and consent-history warnings identify
+their own budget and scope separately.
+
+A pending challenge expires after 300 seconds and is removed from admission
+accounting when consumed, rejected or its connection disconnects. The node
+prunes expired process-local leases on the next operation. Consumed nonce/proof
+markers remain for their 600-second replay horizon. Sessions expire within
+300 seconds; a full request-nonce budget requires a fresh session. Restarting
+the node clears these process-local leases and markers. Durable new-principal
+and authority-history quotas survive a restart: daily quotas reset on the next
+UTC day, minute quotas on the next UTC minute, and retained consent history
+expires after seven days plus fifteen minutes. A restart cannot clear a durable
+account-count or byte ceiling. Use the warning's budget before choosing a remedy.
+
+The outstanding source ceiling remains 64, independent of successful issuance:
+N well-behaved bootstrap flows use three challenges each in sequence, with at
+most one pending per flow. Listener handshake admission permits at most four
+such concurrent flows per source IP. A shared NAT therefore has at most four
+pending handshake challenges from admitted flows, while its 16-per-minute
+issuance budget may delay the 3N bootstrap challenges. Neither increasing the
+64-pending ceiling nor restarting a node increases that issuance rate.

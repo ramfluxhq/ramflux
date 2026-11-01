@@ -340,3 +340,41 @@ fn nine_same_ip_challenges_succeed_within_one_window_without_retry_wait() -> Res
     }
     Ok(())
 }
+
+#[test]
+fn issuance_and_listener_refusals_emit_one_budget_warning() -> Result {
+    use crate::custody_budget_log::tests::assert_warning;
+    let now = Instant::now();
+    let source: IpAddr = "192.0.2.1".parse()?;
+    let mut budget = CustodySourceBudget::default();
+    for _ in 0..16 {
+        assert!(budget.admit(source, now).is_some());
+    }
+    assert_warning("source_ip_rate", 16, 16, || assert!(budget.admit(source, now).is_none()));
+    for host in ["192.0.2.2", "192.0.2.3"] {
+        let ip = host.parse()?;
+        if host.ends_with('2') {
+            for _ in 0..16 {
+                assert!(budget.admit(ip, now).is_some());
+            }
+        } else {
+            assert_warning("source_prefix_rate", 32, 32, || {
+                assert!(budget.admit(ip, now).is_none());
+            });
+        }
+    }
+    let limiter = CustodyIngressLimiter::with_pools(1, 1, 1, Duration::from_secs(10));
+    let _permit = limiter.acquire(source, None, now).ok_or("first handshake")?;
+    assert_warning("handshake", 1, 1, || assert!(limiter.acquire(ip(2, 1), None, now).is_none()));
+    let limiter = CustodyIngressLimiter::with_pools(4, 1, 1, Duration::from_secs(10));
+    let first = limiter.acquire(source, None, now).ok_or("first")?;
+    let second = limiter.acquire(ip(2, 1), None, now).ok_or("second")?;
+    assert!(first.mark_authenticated("one"));
+    assert_warning("authenticated", 1, 1, || assert!(!second.mark_authenticated("two")));
+    let limiter = CustodyIngressLimiter::with_pools(4, 4, 1, Duration::from_secs(10));
+    let first = limiter.acquire(source, None, now).ok_or("first")?;
+    let second = limiter.acquire(ip(2, 1), None, now).ok_or("second")?;
+    assert!(first.mark_authenticated("one"));
+    assert_warning("principal_session", 1, 1, || assert!(!second.mark_authenticated("one")));
+    Ok(())
+}

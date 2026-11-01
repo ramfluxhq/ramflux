@@ -99,6 +99,12 @@ impl CustodyService {
             self.leases().disconnect(&holder);
         }
     }
+    /// Process-local admission counts for the existing integration metrics endpoint.
+    #[cfg(feature = "itest-http")]
+    #[must_use]
+    pub fn budget_snapshot(&self) -> serde_json::Value {
+        self.leases().budget_snapshot()
+    }
     fn leases(&self) -> std::sync::MutexGuard<'_, CustodyLeases> {
         self.leases.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }

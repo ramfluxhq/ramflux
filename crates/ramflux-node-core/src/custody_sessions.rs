@@ -15,9 +15,12 @@ const GLOBAL_LIMIT: usize = 4096;
 // More than eleven 1024/minute issuance windows covering the 600-second replay horizon.
 const REPLAY_LIMIT: usize = 12_288;
 const SOURCE_LIMIT: usize = 64;
+const HOLDER_LIMIT: usize = 4;
 const REQUEST_LIMIT: usize = 256;
 const CHALLENGE_SECONDS: u64 = 300;
 const RETAIN_SECONDS: u64 = 600;
+
+use crate::custody_budget_log::refuse;
 
 fn random() -> Result<String, CustodyRefusal> {
     ramflux_crypto::random_32()
@@ -64,6 +67,18 @@ pub(crate) struct CustodyLeases {
     by_prefix: BTreeMap<String, BTreeSet<(Instant, String)>>,
 }
 impl CustodyLeases {
+    #[cfg(feature = "itest-http")]
+    pub(crate) fn budget_snapshot(&mut self) -> serde_json::Value {
+        self.prune(Instant::now());
+        serde_json::json!({
+            "outstanding": self.pending_count,
+            "holders": self.by_holder.values().map(BTreeSet::len).collect::<Vec<_>>(),
+            "prefixes": self.by_prefix.iter().filter(|(key, _)| key.contains('/'))
+                .map(|(key, entries)| (key.clone(), entries.len())).collect::<BTreeMap<_, _>>(),
+            "replay": self.proofs.len(),
+            "sessions": self.sessions.len(),
+        })
+    }
     fn prune(&mut self, tick: Instant) {
         let expired: Vec<_> = self
             .challenges
@@ -100,16 +115,21 @@ impl CustodyLeases {
         let source_ip: std::net::IpAddr =
             source.parse().map_err(|_| CustodyRefusal::InvalidInput)?;
         let prefixes = crate::custody_source_prefixes(source_ip);
-        if holder.len() > 512
-            || self.by_holder.get(&holder).is_some_and(|entries| entries.len() >= 4)
-            || prefixes.iter().any(|key| {
-                self.by_prefix.get(key).is_some_and(|entries| entries.len() >= SOURCE_LIMIT)
-            })
-        {
-            return Err(CustodyRefusal::Capacity);
+        if holder.len() > 512 {
+            return Err(refuse("holder_bytes", holder.len(), 512, CustodyRefusal::Capacity));
+        }
+        let holder_count = self.by_holder.get(&holder).map_or(0, BTreeSet::len);
+        if holder_count >= HOLDER_LIMIT {
+            return Err(refuse("holder", holder_count, HOLDER_LIMIT, CustodyRefusal::Capacity));
+        }
+        for key in &prefixes {
+            let count = self.by_prefix.get(key).map_or(0, BTreeSet::len);
+            if count >= SOURCE_LIMIT {
+                return Err(refuse("prefix", count, SOURCE_LIMIT, CustodyRefusal::Capacity));
+            }
         }
         if self.pending_count >= GLOBAL_LIMIT {
-            return Err(CustodyRefusal::Busy);
+            return Err(refuse("global", self.pending_count, GLOBAL_LIMIT, CustodyRefusal::Busy));
         }
         self.sources.admit(source_ip, tick).ok_or(CustodyRefusal::Busy)?;
         let challenge = BranchChallenge {
@@ -195,7 +215,12 @@ impl CustodyLeases {
             return Err(CustodyRefusal::Replay);
         }
         if self.proofs.len() >= REPLAY_LIMIT {
-            return Err(CustodyRefusal::Capacity);
+            return Err(refuse(
+                "replay",
+                self.proofs.len(),
+                REPLAY_LIMIT,
+                CustodyRefusal::Capacity,
+            ));
         }
         self.proofs.insert(proof_id.into(), c.retain_until);
         self.untrack(nonce);
@@ -214,7 +239,12 @@ impl CustodyLeases {
         self.prune(tick);
         self.sessions.retain(|_, lease| lease.holder != holder);
         if self.sessions.len() >= GLOBAL_LIMIT {
-            return Err(CustodyRefusal::Capacity);
+            return Err(refuse(
+                "session",
+                self.sessions.len(),
+                GLOBAL_LIMIT,
+                CustodyRefusal::Capacity,
+            ));
         }
         session.session_id = random()?;
         let seconds = session.expires_at.saturating_sub(now).min(CHALLENGE_SECONDS);
@@ -260,7 +290,12 @@ impl CustodyLeases {
             return Err(CustodyRefusal::Replay);
         }
         if lease.nonces.len() >= REQUEST_LIMIT {
-            return Err(CustodyRefusal::Capacity);
+            return Err(refuse(
+                "request",
+                lease.nonces.len(),
+                REQUEST_LIMIT,
+                CustodyRefusal::Capacity,
+            ));
         }
         lease.nonces.insert(nonce.into());
         Ok(())
@@ -292,7 +327,7 @@ impl CustodyLeases {
 mod tests {
     use super::*;
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-    fn issue(pool: &mut CustodyLeases, tick: Instant) -> Result<BranchChallenge> {
+    pub(super) fn issue(pool: &mut CustodyLeases, tick: Instant) -> Result<BranchChallenge> {
         Ok(pool.issue(
             ChallengeIntent {
                 device: DeviceRef {
@@ -359,7 +394,7 @@ mod tests {
         assert!(issue(&mut pool, tick + Duration::from_secs(601)).is_ok());
         Ok(())
     }
-    fn intent(source: String, holder: String) -> ChallengeIntent {
+    pub(super) fn intent(source: String, holder: String) -> ChallengeIntent {
         ChallengeIntent {
             device: DeviceRef {
                 account_anchor: ramflux_protocol::encode_base64url([1; 32]),
@@ -478,3 +513,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "custody_sessions/budget_tests.rs"]
+mod budget_tests;

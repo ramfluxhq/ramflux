@@ -27,6 +27,7 @@ struct OpenTransport<S = GatewayTcpTlsStream> {
     stream: S,
     pins: NodePins,
 }
+#[derive(Clone)]
 pub struct CustodyNetworkConfig {
     pub account_root: PathBuf,
     pub account_id: String,
@@ -53,6 +54,7 @@ pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     pub(super) timeout: Duration,
     mode: BindingMode,
     audience: String,
+    capacity_key: String,
 }
 pub(crate) fn now() -> Result<u64, SdkError> {
     Ok(SystemTime::now()
@@ -124,10 +126,29 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         {
             return Err(CustodyRefusal::BindingRefused.into());
         }
+        let capacity_key = super::capacity_backoff::key(&config);
+        super::capacity_backoff::check(&capacity_key)?;
         let mut budget = super::retry::Budget::new();
         let _flight =
             super::retry::single_flight(&config.account_root, &config.account_id, &mut budget)
                 .await?;
+        super::capacity_backoff::check(&capacity_key)?;
+        let result = Self::connect_admitted(&config, vault, &mut open, &mut budget).await;
+        if matches!(&result, Err(SdkError::CustodyNetwork(CustodyRefusal::Capacity))) {
+            super::capacity_backoff::record(capacity_key);
+        }
+        result
+    }
+    async fn connect_admitted<T, F, Fut>(
+        config: &CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+        mut open: F,
+        budget: &mut super::retry::Budget,
+    ) -> Result<(T, Self), SdkError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(T, S), SdkError>>,
+    {
         let root = config.account_root.clone();
         let account_id = config.account_id.clone();
         let device_id = config.device_id.clone();
@@ -143,8 +164,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                 .map_err(|_| invalid())?
             })
             .await?;
-        let (mut transport, opened) = Self::open_admitted(&config, &mut open, &mut budget).await?;
-        let mut connection = Self::from_authority(authority, opened, &config);
+        let (mut transport, opened) = Self::open_admitted(config, &mut open, budget).await?;
+        let mut connection = Self::from_authority(authority, opened, config);
         let actions = connection.registration_actions()?;
         let mut next = 0;
         loop {
@@ -159,9 +180,9 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                     drop(transport);
                     budget.pause().await?;
                     let (replacement, opened) =
-                        Self::open_admitted(&config, &mut open, &mut budget).await?;
+                        Self::open_admitted(config, &mut open, budget).await?;
                     transport = replacement;
-                    connection = Self::from_authority(authority, opened, &config);
+                    connection = Self::from_authority(authority, opened, config);
                 }
                 Err(error) => return Err(error),
             }
@@ -239,6 +260,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             timeout: config.timeout,
             mode: config.binding_mode,
             audience: config.audience.clone(),
+            capacity_key: super::capacity_backoff::key(config),
         }
     }
     fn into_authority(self) -> LocalAuthority {
@@ -390,6 +412,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         &mut self,
         action: CustodySessionAction,
     ) -> Result<CustodyServerFrame, SdkError> {
+        super::capacity_backoff::check(&self.capacity_key)?;
         let session = self.session.as_ref().ok_or(CustodyRefusal::SessionRequired)?;
         let clock = now()?;
         if clock > session.expires_at {
@@ -416,7 +439,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             &self.credentials.signing,
             &request,
         )?;
-        exchange(
+        let result = exchange(
             &mut self.stream,
             &CustodyClientFrame::Request {
                 session_id: session.session_id.clone(),
@@ -425,7 +448,11 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             },
             self.timeout,
         )
-        .await
+        .await;
+        if matches!(&result, Err(SdkError::CustodyNetwork(CustodyRefusal::Capacity))) {
+            super::capacity_backoff::record(self.capacity_key.clone());
+        }
+        result
     }
     /// Fetch and independently validate the peer's current complete authority and prekeys.
     /// # Errors
@@ -468,10 +495,34 @@ pub(super) async fn exchange<S: ramflux_transport::GatewaySessionTransport + ?Si
         let bytes = stream.recv_custody_frame().await?;
         let response: CustodyServerFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
         if let CustodyServerFrame::Refused { code } = response {
+            if matches!(code, CustodyRefusal::Capacity | CustodyRefusal::Busy) {
+                let (phase, action) = match request {
+                    CustodyClientFrame::CustodyOpen { .. } => ("open", "identity"),
+                    CustodyClientFrame::NodeIdentity { .. } => ("identity", "identity"),
+                    CustodyClientFrame::Challenge { action, .. } => {
+                        ("challenge", proof_action_name(action))
+                    }
+                    CustodyClientFrame::Prove { action, .. } => {
+                        ("prove", proof_action_name(action))
+                    }
+                    CustodyClientFrame::Request { .. } => ("request", "session"),
+                    CustodyClientFrame::GatewayHandoff { .. } => ("handoff", "session"),
+                };
+                tracing::warn!(phase, action, refusal = ?code, "custody request refused");
+            }
             return Err(code.into());
         }
         Ok::<_, SdkError>(response)
     })
     .await
     .map_err(|_| SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS })?
+}
+
+fn proof_action_name(action: &CustodyProofAction) -> &'static str {
+    match action {
+        CustodyProofAction::Publish { .. } => "publish",
+        CustodyProofAction::Register { .. } => "register",
+        CustodyProofAction::OpenSession => "open_session",
+        CustodyProofAction::HomeMigration { .. } => "home_migration",
+    }
 }

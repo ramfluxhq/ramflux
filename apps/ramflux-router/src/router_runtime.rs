@@ -273,6 +273,14 @@ impl RouterHandle {
 }
 
 impl RouterHandle {
+    #[cfg(feature = "itest-http")]
+    pub(crate) fn custody_budget_snapshot(&self) -> serde_json::Value {
+        let Self::Tokio(runtime) = self;
+        runtime
+            .custody
+            .get()
+            .map_or(serde_json::Value::Null, ramflux_node_core::CustodyService::budget_snapshot)
+    }
     pub(crate) fn custody_public_certificate(&self, hash: &str) -> bool {
         let Self::Tokio(runtime) = self;
         runtime.custody.get().is_some_and(|service| service.accepts_public_certificate(hash))

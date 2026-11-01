@@ -301,7 +301,12 @@ pub(super) fn networking_reason(error: &SdkError) -> Option<AccountNetworkingRea
         SdkError::CustodyNetwork(CustodyRefusal::Unsupported) => {
             Some(AccountNetworkingReason::NodeCustodyUnavailable)
         }
-        SdkError::CustodyNetwork(CustodyRefusal::Busy | CustodyRefusal::Capacity) => {
+        SdkError::CustodyNetwork(CustodyRefusal::Capacity) => {
+            Some(AccountNetworkingReason::NodeBusy {
+                retry_after_ms: crate::custody::CAPACITY_RETRY_AFTER_MS,
+            })
+        }
+        SdkError::CustodyNetwork(CustodyRefusal::Busy) => {
             Some(AccountNetworkingReason::NodeBusy { retry_after_ms: NODE_BUSY_RETRY_AFTER_MS })
         }
         SdkError::CustodyNetwork(

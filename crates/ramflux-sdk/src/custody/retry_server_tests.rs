@@ -27,6 +27,7 @@ struct Script {
     publish_proofs: usize,
     proofs: Vec<(String, String, String)>,
     busy_at: Vec<Point>,
+    capacity: bool,
 }
 struct Fixture {
     _root: tempfile::TempDir,
@@ -220,7 +221,13 @@ async fn handle(
             if point == Some(Point::RegisterProve) {
                 assert!(matches!(committed, Some(CustodyServerFrame::Registered { .. })));
             }
-            CustodyServerFrame::Refused { code: CustodyRefusal::Busy }
+            CustodyServerFrame::Refused {
+                code: if context.script.lock().map_err(|_| "script lock")?.capacity {
+                    CustodyRefusal::Capacity
+                } else {
+                    CustodyRefusal::Busy
+                },
+            }
         } else {
             committed.ok_or("missing service response")?
         };
@@ -265,3 +272,29 @@ async fn custody_busy_open_challenge_and_prove_resume_without_republishing_or_re
 
 #[path = "gateway_retry_tests.rs"]
 mod ordinary;
+
+#[tokio::test]
+async fn capacity_is_shared_across_new_connections_and_blocks_network_retries() -> Result {
+    let fixture = Fixture::new(&[Point::RegisterChallenge]).await?;
+    fixture.script.lock().map_err(|_| "script lock")?.capacity = true;
+    let key = crate::custody::capacity_backoff::key(&fixture.config);
+    let first = CustodyConnection::connect(fixture.config.clone(), fixture.vault.clone()).await;
+    assert!(matches!(first, Err(crate::SdkError::CustodyNetwork(CustodyRefusal::Capacity))));
+    for _ in 0..5 {
+        assert!(matches!(
+            CustodyConnection::connect(fixture.config.clone(), fixture.vault.clone()).await,
+            Err(crate::SdkError::CustodyNetwork(CustodyRefusal::Capacity))
+        ));
+    }
+    {
+        let script = fixture.script.lock().map_err(|_| "script lock")?;
+        assert_eq!(script.accepted, 1, "cooldown must prevent all new TLS attempts");
+        assert_eq!(script.publish_proofs, 1);
+    }
+    crate::custody::capacity_backoff::clear_for_test(&key);
+    let connection = CustodyConnection::connect(fixture.config, fixture.vault).await?;
+    assert!(connection.session().is_some());
+    drop(connection);
+    fixture.server.abort();
+    Ok(())
+}

@@ -24,7 +24,9 @@ pub(crate) fn handle_itest_request(
         return Ok(());
     };
     log_router_itest_request(&request);
-    if handle_healthz_request(stream, &request)? || handle_perf_metrics_request(stream, &request)? {
+    if handle_healthz_request(stream, &request)?
+        || handle_perf_metrics_request(stream, &request, router)?
+    {
         return Ok(());
     }
     if handle_itest_mvp0_request(stream, &request, router)?
@@ -261,11 +263,13 @@ fn handle_healthz_request(
 fn handle_perf_metrics_request(
     stream: &mut TcpStream,
     request: &ramflux_node_core::NodeHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/perf/metrics") => {
             let snapshot = serde_json::json!({
                 "service": "ramflux-router",
+                "custody": router.custody_budget_snapshot(),
                 "node": ramflux_node_core::node_perf_snapshot(),
                 "transport": ramflux_transport::mesh_perf_snapshot()
             });

@@ -39,6 +39,14 @@ impl Budget {
         let minute = now / 60;
         // Clock rollback cannot reset the durable window or grant a fresh budget.
         if day < self.day || minute < self.minute {
+            tracing::warn!(
+                scope = if global { "global" } else { "prefix" },
+                budget = "publication_clock",
+                count = self.minute,
+                limit = minute,
+                refusal = "Capacity",
+                "custody admission refused"
+            );
             return Err(capacity());
         }
         if day > self.day {
@@ -49,11 +57,22 @@ impl Budget {
             self.minute = minute;
             self.burst = 0;
         }
-        if self.daily >= daily_limit
-            || self.burst >= minute_limit
-            || (global && self.total >= MAX_ACCOUNTS)
-        {
-            return Err(capacity());
+        for (budget, count, limit) in [
+            ("publication_daily", self.daily, daily_limit),
+            ("publication_minute", self.burst, minute_limit),
+            ("publication_total", self.total, if global { MAX_ACCOUNTS } else { u64::MAX }),
+        ] {
+            if count >= limit {
+                tracing::warn!(
+                    scope = if global { "global" } else { "prefix" },
+                    budget,
+                    count,
+                    limit,
+                    refusal = "Capacity",
+                    "custody admission refused"
+                );
+                return Err(capacity());
+            }
         }
         self.daily += 1;
         self.burst += 1;
@@ -112,6 +131,12 @@ impl RouterRedbStore {
     ) -> Result<(), NodeCoreError> {
         let bytes = serde_json::to_vec(state).map_err(error)?;
         if bytes.len() > 16 * 1024 * 1024 {
+            crate::custody_budget_log::refuse(
+                "authority_bytes",
+                bytes.len(),
+                16 * 1024 * 1024,
+                ramflux_protocol::custody::CustodyRefusal::Capacity,
+            );
             return Err(NodeCoreError::Capacity { resource: "custody account authority bytes" });
         }
         self.prune_custody_history(now)?;
@@ -207,6 +232,22 @@ mod tests {
         assert!(restored.charge(1, 8, 8, false).is_err());
         restored.charge(172_800, 8, 8, false)?;
         Ok(())
+    }
+    #[test]
+    fn durable_publication_capacity_reports_current_window_and_limit() {
+        use crate::custody_budget_log::tests::assert_warning;
+        let mut daily = Budget { day: 1, daily: 8, minute: 1440, burst: 0, total: 8 };
+        assert_warning("publication_daily", 8, 8, || {
+            assert!(daily.charge(86_400, 8, 16, false).is_err());
+        });
+        let mut minute = Budget { day: 1, daily: 2, minute: 1440, burst: 2, total: 2 };
+        assert_warning("publication_minute", 2, 2, || {
+            assert!(minute.charge(86_400, 100, 2, true).is_err());
+        });
+        let mut total = Budget { day: 1, total: MAX_ACCOUNTS, minute: 1440, ..Budget::default() };
+        assert_warning("publication_total", 65_536, 65_536, || {
+            assert!(total.charge(86_400, 100, 16, true).is_err());
+        });
     }
     #[test]
     fn custody_budget_configuration_refuses_invalid_or_out_of_range_values() {

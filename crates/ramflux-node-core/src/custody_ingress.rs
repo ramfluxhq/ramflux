@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Hard-capped listener pools; arrivals never revoke existing holders.
+use crate::custody_budget_log::refuse;
+use ramflux_protocol::custody::CustodyRefusal;
 use std::{
     collections::BTreeMap,
     net::IpAddr,
@@ -52,12 +54,18 @@ impl CustodySourceBudget {
         self.buckets
             .retain(|_, b| tick.saturating_duration_since(b.started) < Duration::from_secs(60));
         let keys = custody_source_prefixes(source);
-        if keys
-            .iter()
-            .enumerate()
-            .any(|(n, k)| self.buckets.get(k).is_some_and(|b| b.count >= [16, 32, 32][n]))
-        {
-            return None;
+        for (n, key) in keys.iter().enumerate() {
+            let count = self.buckets.get(key).map_or(0, |b| b.count);
+            let limit = [16, 32, 32][n];
+            if count >= limit {
+                refuse(
+                    if n == 0 { "source_ip_rate" } else { "source_prefix_rate" },
+                    count as usize,
+                    limit as usize,
+                    CustodyRefusal::Busy,
+                );
+                return None;
+            }
         }
         let share = keys.last()?;
         let incoming = self.buckets.get(share).map_or(0, |b| b.count);
@@ -70,10 +78,13 @@ impl CustodySourceBudget {
             .map(|(_, b)| b.count.max(2))
             .sum();
         let extra = if incoming == 0 { 2 } else { u32::from(incoming != 1) };
-        if reserved + extra > 1024
-            || self.buckets.len() + keys.iter().filter(|k| !self.buckets.contains_key(*k)).count()
-                > 8192
-        {
+        if reserved + extra > 1024 {
+            refuse("source_global_rate", reserved as usize, 1024, CustodyRefusal::Busy);
+            return None;
+        }
+        let incoming_keys = keys.iter().filter(|key| !self.buckets.contains_key(*key)).count();
+        if self.buckets.len() + incoming_keys > 8192 {
+            refuse("source_bucket", self.buckets.len(), 8192, CustodyRefusal::Busy);
             return None;
         }
         for key in keys {
@@ -162,22 +173,31 @@ impl CustodyIngressLimiter {
     ) -> Option<CustodyIngressPermit> {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::prune(&mut state, tick);
-        if state.handshakes >= self.handshake_limit
-            || connection.is_some_and(|id| state.connections.get(&id).copied().unwrap_or(0) >= 4)
-        {
+        if state.handshakes >= self.handshake_limit {
+            refuse("handshake", state.handshakes, self.handshake_limit, CustodyRefusal::Busy);
+            return None;
+        }
+        let streams = connection.and_then(|id| state.connections.get(&id)).copied().unwrap_or(0);
+        if streams >= 4 {
+            refuse("connection_stream", streams, 4, CustodyRefusal::Busy);
             return None;
         }
         let keys = custody_source_prefixes(source);
-        if keys.iter().enumerate().any(|(n, key)| {
+        for (n, key) in keys.iter().enumerate() {
             let total = state.holders.values().filter(|holder| holder.keys.contains(key)).count();
             let handshakes = state
                 .holders
                 .values()
                 .filter(|holder| holder.principal.is_none() && holder.keys.contains(key))
                 .count();
-            total >= [4, 8, 16][n] || handshakes >= 4
-        }) {
-            return None;
+            if total >= [4, 8, 16][n] {
+                refuse("listener_source", total, [4, 8, 16][n], CustodyRefusal::Busy);
+                return None;
+            }
+            if handshakes >= 4 {
+                refuse("listener_source_handshake", handshakes, 4, CustodyRefusal::Busy);
+                return None;
+            }
         }
         let share = keys.last()?.clone();
         if let Some(id) = connection {
@@ -273,15 +293,33 @@ impl CustodyIngressPermit {
         if let Some(current) = &h.principal {
             return (current == principal).then(grant);
         }
-        if s.authenticated >= self.limiter.authenticated_limit
-            || s.holders.values().filter(|h| h.principal.as_deref() == Some(principal)).count()
-                >= self.limiter.authenticated_per_principal
-            || s.holders
-                .values()
-                .filter(|other| other.principal.is_some() && other.share == h.share)
-                .count()
-                >= 16
-        {
+        if s.authenticated >= self.limiter.authenticated_limit {
+            refuse(
+                "authenticated",
+                s.authenticated,
+                self.limiter.authenticated_limit,
+                CustodyRefusal::Busy,
+            );
+            return None;
+        }
+        let principal_count =
+            s.holders.values().filter(|h| h.principal.as_deref() == Some(principal)).count();
+        if principal_count >= self.limiter.authenticated_per_principal {
+            refuse(
+                "principal_session",
+                principal_count,
+                self.limiter.authenticated_per_principal,
+                CustodyRefusal::Busy,
+            );
+            return None;
+        }
+        let share_count = s
+            .holders
+            .values()
+            .filter(|other| other.principal.is_some() && other.share == h.share)
+            .count();
+        if share_count >= 16 {
+            refuse("authenticated_prefix", share_count, 16, CustodyRefusal::Busy);
             return None;
         }
         let result = grant();
