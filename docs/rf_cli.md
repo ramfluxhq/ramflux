@@ -20,6 +20,11 @@ For background operation, use `RUST_LOG=ramflux_sdk=info rf daemon start
 failures log the object id, failing check and fixed error category; access grants,
 keys and transport response bodies are excluded.
 
+An invalid `RUST_LOG` value produces one stderr warning and leaves daemon logging
+disabled; the daemon continues to start. Hold and dead-letter diagnostics include
+the envelope, source device and target delivery identifiers. Unrouted inbound
+entries also emit an info-level hold with a reason.
+
 ## Born-v3 DM attachments
 
 Create both accounts through `rf account create` after selecting and confirming
@@ -70,9 +75,16 @@ response reports its conversation id. Both participants therefore use the same
 group history even when their commands supply a different local conversation
 name.
 
-An invalid `RUST_LOG` value produces one stderr warning and leaves daemon logging disabled; the daemon continues to start. Hold and dead-letter diagnostics include the envelope, source device and target delivery identifiers. Unrouted inbound entries also emit an info-level hold with a reason.
+When a native account is unlocked, cached group links from earlier CLI versions
+are reconciled with the verified signed conversation before networking starts.
+Group commands also reconcile their selected group before applying a control.
+Unrelated group metadata and existing conversation/history records are retained.
+Empty selector conversation threads created by earlier versions remain visible
+by design; this repair does not sweep or delete them.
 
-On the next native group operation, cached group links from earlier CLI versions are reconciled with the signed group conversation. Existing conversation and history records are retained.
+Free-text `--body` and `--name` values can start with a hyphen in either split or
+`--flag=value` form. Administrative token parsing is unchanged; use the equals
+form when an admin token starts with a hyphen.
 
 ## Native backup and fresh installation restore
 

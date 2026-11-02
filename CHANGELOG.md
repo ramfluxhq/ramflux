@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound custody capacity reset hints to two days, keep node-bound retry deadlines
   without repeated status writes, and expose router budget inspection through
   the operator-only loopback administration overlay.
+- Enable daemon diagnostics through `RUST_LOG` with safe invalid-filter handling,
+  accept hyphen-leading CLI identifiers and free-text bodies/names, and normalize
+  native group selectors to their signed thread. Repair saved group links before
+  networking at account unlock while preserving metadata and older history.
 
 - Upgrade SHA-2, HMAC, HKDF, and X25519 dependencies without changing stored or wire formats.
 - Prepare task courier routes outside the account synchronization loop, isolate

@@ -35,7 +35,7 @@ pub(crate) struct GroupRename {
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) name: String,
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) request_id: Option<String>,
@@ -324,7 +324,7 @@ pub(crate) struct GroupSend {
     pub(crate) message: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) sender: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) body: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) envelope: Option<String>,

@@ -67,7 +67,7 @@ pub(crate) struct DmSend {
     pub(crate) recipient_principal_commitment: Option<String>,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) body: String,
     #[arg(long)]
     pub(crate) attach: Vec<PathBuf>,

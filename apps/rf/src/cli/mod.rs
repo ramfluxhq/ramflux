@@ -215,3 +215,6 @@ mod tests {
 #[cfg(test)]
 #[path = "opaque_id_tests.rs"]
 mod opaque_id_tests;
+
+#[cfg(test)]
+mod free_text_tests;

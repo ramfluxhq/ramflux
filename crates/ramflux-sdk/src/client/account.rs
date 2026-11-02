@@ -158,6 +158,7 @@ impl RamfluxClient {
         };
         let mut db = AccountDb::open(account_index, local_account_id, &key)?;
         if born.is_some() {
+            crate::bus::group_conversation::repair_on_open(&db)?;
             self.identity_root = None;
             self.device_branch = None;
             self.reader_device_identity = None;
