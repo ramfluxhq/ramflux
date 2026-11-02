@@ -68,6 +68,11 @@ pub(super) fn selected_authority(
     }
     let mut expected = journal.intent;
     expected.state = current.state;
+    // Connection metadata can change while the certified replacement awaits publication.
+    // Every authority, pin and credential field must still match the recovery intent.
+    expected.networking_reason.clone_from(&current.networking_reason);
+    expected.networking_node.clone_from(&current.networking_node);
+    expected.capacity_retry_at = current.capacity_retry_at;
     if snapshot(&expected)? != snapshot(&current)? {
         return Err(invalid());
     }

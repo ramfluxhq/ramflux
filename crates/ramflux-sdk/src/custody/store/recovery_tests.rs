@@ -179,3 +179,54 @@ fn wrong_phrase_or_cancelled_recovery_cannot_change_authority_or_leave_vault_ent
     assert!(journal(&root.0, "recoverable")?.is_none());
     Ok(())
 }
+
+#[test]
+fn custody_recovery_journal_allows_connection_metadata_but_rejects_credential_changes() -> TestResult
+{
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let (_, phrase) = known_account(&root.0, &vault)?;
+    let now = crate::custody::network_now()?;
+    let recovery = RecoveryCeremony::begin(&root.0, "recoverable", now)?;
+    let anchor = recovery.account_anchor().to_owned();
+    let mut account = recovery.confirm(&phrase, &anchor, &vault, now)?;
+    let record = account.record().clone();
+    account.bind_capacity_node(&root.0, "recovery-node", "recovery-key", now)?;
+    let mut account = load_data_account(&root.0, "recoverable", now)?;
+    assert_eq!(account.record(), &record);
+    account.set_networking_reason(
+        &root.0,
+        Some(crate::AccountNetworkingReason::NodeBusy {
+            retry_after_ms: 300_000,
+            capacity: Some(ramflux_protocol::custody::CapacityHint {
+                scope: ramflux_protocol::custody::CapacityScope::PrefixDaily,
+                resets_at_unix: now + 3600,
+            }),
+        }),
+    )?;
+    let mut account = load_data_account(&root.0, "recoverable", now)?;
+    assert_eq!(account.record(), &record);
+    assert!(account.check_capacity_deadline(now).is_err());
+    account.bind_capacity_node(&root.0, "replacement-node", "replacement-key", now)?;
+    load_data_account(&root.0, "recoverable", now)?.check_capacity_deadline(now)?;
+    let path = directory(&root.0, "recoverable")?.join("authority.json");
+    let original = fs::read(&path)?;
+    for field in ["primary_vault_ref", "branch_vault_ref", "local_device_id", "vault_class"] {
+        let mut forged: serde_json::Value = serde_json::from_slice(&original)?;
+        forged[field] = "changed-outside-the-recovery-intent".into();
+        fs::write(&path, ramflux_protocol::canonical_json_bytes(&forged)?)?;
+        assert!(
+            matches!(
+                load_data_account(&root.0, "recoverable", now),
+                Err(SdkError::CustodySetupInvalid)
+            ),
+            "recovery accepted an unexpected {field}"
+        );
+        fs::write(&path, &original)?;
+    }
+    let mut account = load_data_account(&root.0, "recoverable", now)?;
+    account.mark_live(&root.0)?;
+    finish_recovery(&root.0, "recoverable", &vault, now)?;
+    assert!(journal(&root.0, "recoverable")?.is_none());
+    Ok(())
+}
