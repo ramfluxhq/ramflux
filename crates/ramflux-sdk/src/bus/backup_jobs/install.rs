@@ -68,7 +68,7 @@ impl BackupJobs {
         staging: VerifiedBackupStaging,
         native_key: Option<super::NativeInstallKey>,
         native_setup: Option<super::NativeRestoreSetup>,
-    ) -> Result<(String, BackupCounts, BackupCounts), SdkError> {
+    ) -> Result<(crate::backup::BackupInstalledAccount, BackupCounts, BackupCounts), SdkError> {
         let metadata =
             format::load_metadata(&staging.directory().join("identity.sealed"), staging.key())?;
         if matches!(&metadata.identity, format::Identity::Native { .. }) {
@@ -77,7 +77,12 @@ impl BackupJobs {
         if native_setup.is_some() {
             return Err(crate::SdkError::CustodyModeDowngrade);
         }
-        self.install_legacy_generation(job, staging, metadata)
+        let (id, restored, kept_newer) = self.install_legacy_generation(job, staging, metadata)?;
+        Ok((
+            crate::backup::BackupInstalledAccount { local_account_id: id, networking: None },
+            restored,
+            kept_newer,
+        ))
     }
     fn install_legacy_generation(
         &self,

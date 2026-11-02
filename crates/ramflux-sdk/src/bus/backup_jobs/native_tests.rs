@@ -280,7 +280,7 @@ fn native_metadata_is_public_evidence_without_a_manifest_or_vault_reference() ->
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn native_fresh_restore_refuses_networking_even_with_a_primary_available() -> TestResult {
+async fn native_fresh_restore_requires_install_setup_even_with_a_primary_available() -> TestResult {
     LocalSet::new()
         .run_until(Box::pin(async {
             let root = Root::new()?;
@@ -309,10 +309,9 @@ async fn native_fresh_restore_refuses_networking_even_with_a_primary_available()
             let id = verify(&target, &archive).await?;
             call(&target, "account.restore.install", None, json!({"job_id":id})).await?;
             let row = finished(&target, &id, crate::backup::BackupJobState::Failed).await?;
-            assert_eq!(
-                row.error.ok_or("missing typed refusal")?.code,
-                crate::backup::BackupFailureCode::NetworkingPending
-            );
+            let failure = row.error.ok_or("missing typed refusal")?;
+            assert_eq!(failure.code, crate::backup::BackupFailureCode::RestoreSetupRequired);
+            assert!(failure.message.ok_or("setup instruction")?.contains("--new-passphrase-env"));
             assert_eq!(target.index.known_account_ids()?, Vec::<String>::new());
             assert!(!target_root.0.join("custody_accounts").exists());
             assert_eq!(vault.primary_for_public_key(&public)?.public_key(), public);

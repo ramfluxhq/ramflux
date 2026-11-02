@@ -128,6 +128,7 @@ impl BackupJobRegistry {
             archive_bytes: None,
             archive: None,
             restored: None,
+            installed_account: None,
             kept_newer: None,
             attachments: None,
             error: None,
@@ -225,6 +226,7 @@ impl BackupJobRegistry {
     pub fn installed(
         &mut self,
         id: &str,
+        account: super::BackupInstalledAccount,
         restored: ramflux_storage::BackupCounts,
         kept_newer: ramflux_storage::BackupCounts,
         now: u64,
@@ -239,6 +241,7 @@ impl BackupJobRegistry {
         }
         let mut row = self.transition(id, BackupJobState::Done, now)?;
         row.restored = Some(restored);
+        row.installed_account = Some(account);
         row.kept_newer = Some(kept_newer);
         self.entry_mut(id)?.row = row.clone();
         Ok(row)

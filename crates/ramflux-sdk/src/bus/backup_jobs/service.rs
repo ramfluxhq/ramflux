@@ -105,6 +105,11 @@ impl BackupJobs {
     }
     pub(super) fn fail_install(&self, id: &str, error: &SdkError) {
         let failure = match error {
+            SdkError::RestoreSetupRequired => {
+                let mut failure = BackupFailure::new(BackupFailureCode::RestoreSetupRequired);
+                failure.message = Some(error.to_string().into_boxed_str());
+                failure
+            }
             SdkError::NetworkingPending => BackupFailure::new(BackupFailureCode::NetworkingPending),
             SdkError::LocalBusRefused { body, .. } => body
                 .get("failure")

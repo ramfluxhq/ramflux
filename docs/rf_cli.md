@@ -61,3 +61,66 @@ name.
 An invalid `RUST_LOG` value produces one stderr warning and leaves daemon logging disabled; the daemon continues to start. Hold and dead-letter diagnostics include the envelope, source device and target delivery identifiers. Unrouted inbound entries also emit an info-level hold with a reason.
 
 On the next native group operation, cached group links from earlier CLI versions are reconciled with the signed group conversation. Existing conversation and history records are retained.
+
+## Native backup and fresh installation restore
+
+A native backup contains account data and public identity evidence. It contains no
+private signing credentials and cannot authorize a new device. Export an unlocked
+account with an archive passphrase supplied through an environment variable:
+
+```sh
+rf --socket /tmp/source.sock account backup export --account=SOURCE_ACCOUNT \
+  --out account.rfb --passphrase-env=RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE
+```
+
+On a fresh daemon, import requires a separate local data passphrase. Set
+`RESTORED_LOCAL_PASSPHRASE` privately to the new local encryption password; it is
+independent of `RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE`, which decrypts the archive.
+Neither password belongs on the command line or in a log.
+
+```sh
+rf --socket /tmp/restored.sock account backup import --in account.rfb \
+  --passphrase-env=RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE \
+  --new-passphrase-env=RESTORED_LOCAL_PASSPHRASE
+rf --socket /tmp/restored.sock account list
+rf --socket /tmp/restored.sock account status --account=RESTORED_ACCOUNT
+```
+
+Import verifies and installs contacts, conversations, history, groups and
+attachments entirely offline. Missing fresh-install setup returns
+`restore_setup_required`, naming `--new-passphrase-env`; the CLI refuses before
+verifying an archive on an empty daemon. Existing-installation merges keep the
+independently installed authority and local data key; omit the new-passphrase
+option for those merges.
+
+Success returns `local_account_id`, `networking: networking_pending` and
+`next_command` as an exact argument array including the selected socket. The
+SDK job row also includes `installed_account` with the local id and networking
+state captured at installation. `account list.account_details` contains the
+persisted account; `accounts` contains only unlocked accounts. The fresh account
+is locked and its device is uncertified. `account status` shows this pending
+state without unlocking it.
+
+Configure and confirm the restored daemon's home node through `rf node add`,
+`rf node confirm` and `rf node set-default` before recovery. Then run:
+
+```sh
+rf --socket /tmp/restored.sock account recover --account=RESTORED_ACCOUNT
+rf --socket /tmp/restored.sock account status --account=RESTORED_ACCOUNT
+rf --socket /tmp/restored.sock dm list --account=RESTORED_ACCOUNT --conversation=DM_THREAD
+rf --socket /tmp/restored.sock group read --account=RESTORED_ACCOUNT \
+  --group=GROUP_ID --conversation=GROUP_ID
+```
+
+Recovery requires a local controlling terminal. Confirm the displayed account
+fingerprint, enter the original account's 24 recovery words in the hidden prompt,
+and enter the restored local data passphrase (the value of
+`RESTORED_LOCAL_PASSPHRASE`, not the archive password). Recovery revokes all other
+devices and certifies this installation's fresh signing branch. Ordinary custody
+admission then publishes the replacement authority; networking becomes `live`
+only after the exact durable publication acknowledgement. A node or admission
+failure leaves the restored data persisted with networking pending; it does not
+undo the offline import. Inspect `account status` and retry ordinary activation
+with `rf account unlock --account=RESTORED_ACCOUNT
+--passphrase-env=RESTORED_LOCAL_PASSPHRASE` after resolving node availability.
+Never enter recovery words in response to an unsolicited network prompt.

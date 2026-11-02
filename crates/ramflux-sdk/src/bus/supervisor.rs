@@ -268,6 +268,9 @@ impl Supervisor {
             return Err(super::backup_jobs::refusal("restore_install_in_progress"));
         }
         let actor = self.accounts.borrow().get(&id).cloned();
+        if let Some(status) = self.locked_native_status(&request, &id).await? {
+            return Ok(status);
+        }
         let creating = matches!(
             request.method.as_str(),
             "account.create"
@@ -307,6 +310,38 @@ impl Supervisor {
             self.attended.borrow_mut().retain(|_, account| account != &id);
         }
         response
+    }
+
+    async fn locked_native_status(
+        &self,
+        request: &LocalBusFrame,
+        id: &str,
+    ) -> Result<Option<ActorResponse>, SdkError> {
+        if request.method != "account.status"
+            || self.accounts.borrow().get(id).is_some_and(AccountActor::is_open)
+        {
+            return Ok(None);
+        }
+        let root = self.config.data_root.clone();
+        let id = id.to_owned();
+        let index = self.index.clone();
+        let status = tokio::task::spawn_blocking(move || {
+            if !crate::custody::account_exists(&root, &id)? {
+                return Ok(None);
+            }
+            // Authority-only compatibility ceremonies have no installed account data.
+            match index.load_wrapped_db_key(&id) {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(ramflux_storage::StorageError::AccountNotFound(_)) => {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            }
+            super::native_account::locked_status(&root, &id).map(Some)
+        })
+        .await
+        .map_err(|_| SdkError::CustodySetupInvalid)??;
+        Ok(status.map(reply))
     }
 
     async fn export_agent_credentials(

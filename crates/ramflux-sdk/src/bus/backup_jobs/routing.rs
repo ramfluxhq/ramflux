@@ -98,9 +98,9 @@ impl Supervisor {
                     let reopened=if supervisor.index.account(&account).is_ok(){supervisor.restart_backup_actor(&account,&context).await}else{Ok(())};
                     match result {
                         Err(error)=>supervisor.backup_jobs.fail_install(&job.job_id,&error),
-                        Ok((_,restored,kept_newer))=>{
+                        Ok((account,restored,kept_newer))=>{
                             if let Err(error)=reopened {tracing::warn!(%error,"restored account will reopen on next unlock");}
-                            let _=supervisor.backup_jobs.change(|registry|registry.installed(&job.job_id,restored,kept_newer,super::service::now()));
+                            let _=supervisor.backup_jobs.change(|registry|registry.installed(&job.job_id,account,restored,kept_newer,super::service::now()));
                         }
                     }
                 }))?;

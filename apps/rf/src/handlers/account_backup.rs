@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 pub(crate) async fn handle(
     bus: &mut LocalBusClient,
     command: AccountBackupCommand,
+    socket: &std::path::Path,
 ) -> Result<(), RfError> {
     bus.request(
         None,
@@ -44,6 +45,14 @@ pub(crate) async fn handle(
             wait(bus, job(started)?, BackupJobState::Done).await?
         }
         AccountBackupAction::Import(import) => {
+            if import.new_passphrase_env.is_none() {
+                let listing = bus.request(None, "account", "account.list", json!({})).await?;
+                if listing["accounts"].as_array().is_some_and(Vec::is_empty)
+                    && listing["account_details"].as_array().is_some_and(Vec::is_empty)
+                {
+                    return Err(ramflux_sdk::SdkError::RestoreSetupRequired.into());
+                }
+            }
             let passphrase = super::account::rf_required_env(
                 import.passphrase_env.as_deref(),
                 "RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE",
@@ -70,7 +79,26 @@ pub(crate) async fn handle(
             wait(bus, job(started)?, BackupJobState::Done).await?
         }
     };
-    print_json(&serde_json::to_value(response)?)
+    let mut output = serde_json::to_value(&response)?;
+    if let Some(account) = &response.installed_account {
+        output["local_account_id"] = account.local_account_id.clone().into();
+        if let Some(networking) = account.networking {
+            output["networking"] = serde_json::to_value(networking)?;
+            if networking == ramflux_sdk::custody::CreationState::NetworkingPending
+                && response.archive.as_ref().is_some_and(|archive| !archive.merge)
+            {
+                output["next_command"] = json!([
+                    "rf",
+                    "--socket",
+                    socket,
+                    "account",
+                    "recover",
+                    format!("--account={}", account.local_account_id)
+                ]);
+            }
+        }
+    }
+    print_json(&output)
 }
 
 fn job(mut response: serde_json::Value) -> Result<BackupJob, RfError> {

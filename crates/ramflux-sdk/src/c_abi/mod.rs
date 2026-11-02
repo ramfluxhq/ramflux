@@ -876,7 +876,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
         | SdkError::ContactRequestCapacity(_)
         | SdkError::CallControlReceiptCapacity { .. } => RamfluxErrorCode::RateLimited,
-        SdkError::CustodySetupInvalid
+        SdkError::RestoreSetupRequired
+        | SdkError::CustodySetupInvalid
         | SdkError::CustodyExpired
         | SdkError::SurfaceRefused { .. }
         | SdkError::GroupRefused { .. }

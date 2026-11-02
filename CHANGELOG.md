@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Report missing fresh native restore setup as `restore_setup_required` and refuse
+  incomplete CLI imports before archive verification. Successful offline imports
+  expose the restored local id, networking state and attended recovery command;
+  locked native account status remains readable before recovery and admission.
+
 - Resume born-v3 DM attachment downloads and confirmed relay ACKs across bounded
   fetch windows; expose safe fetch diagnostics and daemon readiness in SDK logs.
 - CLI compatibility: `rf object list` now returns paginated metadata instead of

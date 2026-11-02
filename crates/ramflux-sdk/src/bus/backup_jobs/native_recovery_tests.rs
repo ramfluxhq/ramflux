@@ -66,8 +66,18 @@ async fn install_archive(
     call(&target, "account.restore.install", None, json!({"job_id":id,"passphrase":LOCAL_SECRET}))
         .await?;
     let installed = finished(&target, &id, crate::backup::BackupJobState::Done).await?;
+    let result = installed.installed_account.ok_or("installed account result")?;
+    assert_eq!(result.networking, Some(CreationState::NetworkingPending));
+    let local = result.local_account_id;
+    let listing = call(&target, "account.list", None, json!({})).await?;
+    assert!(listing["account_details"].as_array().ok_or("account details")?.iter().any(|row| {
+        row["local_account_id"] == local && row["networking"] == "networking_pending"
+    }));
+    let status = call(&target, "account.status", Some(&local), json!({})).await?;
+    assert_eq!(status["networking"], "networking_pending");
+    assert_eq!(status["state"], "locked");
     target.shutdown().await?;
-    Ok(installed.archive.ok_or("preview")?.local_account_id)
+    Ok(local)
 }
 fn assert_restored_history(root: &Path, id: &str) -> TestResult {
     let mut data = RamfluxClient::new();
@@ -200,6 +210,27 @@ async fn native_fresh_restore_requires_phrase_recovery_and_exact_ack_before_live
             drop(old);
             server.await?.map_err(|error| -> Box<dyn std::error::Error> { error })?;
             assert_durable_authority(&server_root.0, &accepted_anchor, &accepted_hash)?;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account() -> TestResult {
+    LocalSet::new()
+        .run_until(Box::pin(async {
+            let source = Root::new()?;
+            let target = Root::new()?;
+            let source_vault = TestVault::default();
+            let _source = source_with_history(&source.0, &source_vault)?;
+            // A distinct empty vault has no source signing credential and no configured node.
+            let target_vault = Arc::new(TestVault::default());
+            let id = install_archive(&source.0, &target.0, target_vault).await?;
+            assert_restored_history(&target.0, &id)?;
+            let pending =
+                crate::custody::load_account(&target.0, &id, crate::custody::network_now()?)?;
+            assert!(pending.branch_pending());
+            assert_eq!(pending.state(), CreationState::NetworkingPending);
             Ok(())
         }))
         .await

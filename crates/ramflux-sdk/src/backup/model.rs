@@ -111,6 +111,7 @@ pub struct BackupAttachmentChecks {
 #[serde(rename_all = "snake_case")]
 pub enum BackupFailureCode {
     WrongPassphrase,
+    RestoreSetupRequired,
     NetworkingPending,
     Tampered,
     Truncated,
@@ -129,6 +130,8 @@ pub enum BackupFailureCode {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BackupFailure {
     pub code: BackupFailureCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<Box<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needed_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,6 +148,7 @@ impl BackupFailure {
     pub const fn new(code: BackupFailureCode) -> Self {
         Self {
             code,
+            message: None,
             needed_bytes: None,
             available_bytes: None,
             unavailable_attachments: Vec::new(),
@@ -152,6 +156,14 @@ impl BackupFailure {
             unavailable_next_cursor: None,
         }
     }
+}
+
+/// Public account projection captured at the offline installation boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BackupInstalledAccount {
+    pub local_account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub networking: Option<crate::custody::CreationState>,
 }
 
 /// No request body, passphrase, private root material or staging key belongs in this row.
@@ -173,6 +185,8 @@ pub struct BackupJob {
     pub archive: Option<BackupArchivePreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restored: Option<BackupCounts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_account: Option<BackupInstalledAccount>,
     /// Newer local values retained, per category rather than a scalar total.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kept_newer: Option<BackupCounts>,

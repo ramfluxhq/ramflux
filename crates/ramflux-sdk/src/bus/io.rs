@@ -147,6 +147,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::NetworkingPending
         | SdkError::NodeUnreachable { .. }
         | SdkError::NodeTimeout { .. } => "NetworkingPending",
+        SdkError::RestoreSetupRequired => "restore_setup_required",
         SdkError::NoNodeSelected => "NoNodeSelected",
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
         SdkError::CustodySetupInvalid => "CustodySetupInvalid",

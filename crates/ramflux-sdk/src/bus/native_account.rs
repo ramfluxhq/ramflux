@@ -101,6 +101,18 @@ pub(super) fn response(account: &LocalBusAccountState) -> Result<LocalBusCreated
     })
 }
 
+pub(super) fn locked_status(
+    root: &std::path::Path,
+    id: &str,
+) -> Result<serde_json::Value, SdkError> {
+    let native = crate::custody::load_data_account(root, id, crate::custody::network_now()?)?;
+    let mut status = native.summary();
+    status["account_id"] = id.into();
+    status["state"] = "locked".into();
+    status["networking"] = serde_json::to_value(native.state())?;
+    Ok(status)
+}
+
 pub(super) fn status(
     account: &LocalBusAccountState,
     account_id: &str,

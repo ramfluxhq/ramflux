@@ -107,7 +107,7 @@ impl BackupJobs {
             }
             (id, local_key)
         } else {
-            let setup = setup.ok_or(SdkError::NetworkingPending)?;
+            let setup = setup.ok_or(SdkError::RestoreSetupRequired)?;
             let id = job
                 .archive
                 .as_ref()
@@ -139,12 +139,15 @@ impl BackupJobs {
         metadata: &Metadata,
         local_key: Option<super::NativeInstallKey>,
         setup: Option<super::NativeRestoreSetup>,
-    ) -> Result<(String, BackupCounts, BackupCounts), SdkError> {
+    ) -> Result<(crate::backup::BackupInstalledAccount, BackupCounts, BackupCounts), SdkError> {
         let Identity::Native { native } = &metadata.identity else {
             return Err(refused("root_conflict"));
         };
         let (id, local_key) = self.install_target(job, native, local_key, setup)?;
         let id = &id;
+        let networking =
+            crate::custody::load_data_account(&self.data_root, id, crate::custody::network_now()?)?
+                .state();
         let lease =
             self.generations.try_acquire(id)?.ok_or_else(|| refused("install_in_progress"))?;
         let prepared = local_key.ok_or(SdkError::AccountDbNotUnlocked)?;
@@ -205,6 +208,55 @@ impl BackupJobs {
         super::recovery::selected(&generation);
         drop(lease);
         self.cleanup_committed_generations();
-        Ok((id.clone(), report.restored, report.kept_newer))
+        Ok((
+            crate::backup::BackupInstalledAccount {
+                local_account_id: id.clone(),
+                networking: Some(networking),
+            },
+            report.restored,
+            report.kept_newer,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_restore_setup_is_typed_and_does_not_persist_an_account()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = crate::custody::tests::Root::new()?;
+        let target = crate::custody::tests::Root::new()?;
+        let vault = crate::custody::tests::TestVault::default();
+        let account = crate::custody::tests::create(
+            &source.0,
+            "source",
+            &vault,
+            crate::custody::network_now()?,
+        )?;
+        let identity = DataIdentity {
+            schema: "ramflux.backup.native_data.v1".into(),
+            local_account_id: "source".into(),
+            authority: ramflux_protocol::custody::CustodyAuthority {
+                publication: account.publication(),
+                custodian_publication: None,
+            },
+        };
+        let index = ramflux_storage::AccountIndex::open(&target.0)?;
+        let jobs = BackupJobs::new(&target.0, index.clone())?;
+        let job = crate::backup::BackupJobRegistry::default().start(
+            crate::backup::BackupJobKind::Restore,
+            "archive.rfb".into(),
+            1,
+        )?;
+        let error =
+            jobs.install_target(&job, &identity, None, None).err().ok_or("missing refusal")?;
+        assert!(matches!(error, SdkError::RestoreSetupRequired));
+        assert_eq!(crate::bus::io::local_bus_error_code(&error), "restore_setup_required");
+        assert!(error.to_string().contains("--new-passphrase-env"));
+        assert_eq!(index.known_account_ids()?, Vec::<String>::new());
+        assert!(!target.0.join("custody_accounts").exists());
+        Ok(())
     }
 }

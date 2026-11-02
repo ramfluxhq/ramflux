@@ -48,6 +48,10 @@ pub enum SdkError {
     CustodyCapacity { capacity: ramflux_protocol::custody::CapacityHint },
     #[error("born-v3 network registration is pending; legacy proofs are forbidden")]
     NetworkingPending,
+    #[error(
+        "restore_setup_required: fresh restore requires an independent local data passphrase via --new-passphrase-env"
+    )]
+    RestoreSetupRequired,
     #[error("no confirmed home node is selected")]
     NoNodeSelected,
     #[error("node is unreachable; retry after {retry_after_ms}ms: {source}")]
