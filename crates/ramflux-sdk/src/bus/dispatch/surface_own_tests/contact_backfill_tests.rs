@@ -52,8 +52,18 @@ async fn slow_contact(park: bool) -> TestResult {
     assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 0);
     assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 0);
     if park {
+        // Setup can cross a clock tick: use the deadline persisted by the scheduler.
+        let progress: serde_json::Value = source
+            .client
+            .account_db()?
+            .load_actor_state("own-contact/backfill")?
+            .ok_or("progress")?;
+        let retry_start =
+            progress["missing"]["next_at"].as_i64().ok_or("missing manifest retry deadline")?;
         // Consume the normal five exponentially spaced attempts without publishing a manifest.
-        for at in [now, now + 5, now + 15, now + 35, now + 75] {
+        for offset in [0, 5, 15, 35, 75] {
+            let at = retry_start + offset;
+            assert_eq!(source.client.claim_contact_backfill_refresh(at - 1)?, None);
             assert_eq!(source.client.claim_contact_backfill_refresh(at)?, Some(peer_root.clone()));
         }
         assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 0);
@@ -76,7 +86,8 @@ async fn slow_contact(park: bool) -> TestResult {
         server.abort();
     }
     assert_eq!(result?, 1);
-    server.await??;
+    // A fast fixture can supply the same manifest; require this slow server to have served it.
+    tokio::time::timeout(Duration::from_secs(5), server).await???;
     let persisted: crate::prekey::SdkDeviceManifestResponse =
         source.client.account_db()?.load_actor_state(&key)?.ok_or("slow manifest missing")?;
     assert_eq!(persisted.principal_commitment, *peer_root);
