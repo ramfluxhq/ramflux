@@ -10,11 +10,17 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{CryptoError, DeviceBranch, random_32, verify_canonical_signature};
 
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct X25519KeyPair {
     pub secret: StaticSecret,
     #[zeroize(skip)]
     pub public: [u8; 32],
+}
+
+impl Zeroize for X25519KeyPair {
+    fn zeroize(&mut self) {
+        self.secret = StaticSecret::from([0_u8; 32]);
+    }
 }
 
 impl fmt::Debug for X25519KeyPair {
