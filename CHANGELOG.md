@@ -102,6 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Upgraded rustls, rustls-webpki, quinn-proto, h2, webpki-roots, and webpki-root-certs to patched versions to close RUSTSEC-2026-0258, 0338, 0339, 0340, 0341, 0342, 0285, 0346, 0348, 0349, 0381, 0382, and 0383.
+
 - Only local contact unblock restores local request consent; peer unblock controls
   retain local decline and block fences.
 
