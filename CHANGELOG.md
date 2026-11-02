@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI direct-message history preserves the daemon's saved outbound plaintext display after restore instead of overwriting it with encrypted envelope JSON.
+
+
 - Native group reads include stored plaintext history after restore even when the new device has no pending receive page.
 
 

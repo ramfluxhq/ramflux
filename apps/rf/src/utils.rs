@@ -72,7 +72,9 @@ pub(crate) fn with_message_plaintext(mut value: serde_json::Value) -> serde_json
         }
         message["body_base64"] =
             serde_json::Value::String(ramflux_protocol::encode_base64url(&bytes));
-        if let Ok(text) = String::from_utf8(bytes) {
+        if message.get("body_utf8").is_none()
+            && let Ok(text) = String::from_utf8(bytes)
+        {
             message["body_utf8"] = serde_json::Value::String(text);
         }
     }
@@ -170,6 +172,20 @@ fn read_rf_http_response_by_content_length(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn message_plaintext_preserves_projected_history_and_narrow_tombstones() {
+        let tombstone = serde_json::json!({"message_id":"deleted","deleted":true});
+        let read = serde_json::json!({"messages":[
+            {"encrypted_body":b"opaque outbound envelope","body_utf8":"saved outgoing text"},
+            {"encrypted_body":b"legacy readable body"},
+            tombstone.clone(),
+        ]});
+        let displayed = super::with_message_plaintext(read);
+        assert_eq!(displayed["messages"][0]["body_utf8"], "saved outgoing text");
+        assert_eq!(displayed["messages"][1]["body_utf8"], "legacy readable body");
+        assert_eq!(displayed["messages"][2], tombstone);
+    }
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;

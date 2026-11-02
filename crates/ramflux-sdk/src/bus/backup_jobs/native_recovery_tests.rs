@@ -215,6 +215,41 @@ async fn native_fresh_restore_requires_phrase_recovery_and_exact_ack_before_live
         .await
 }
 
+fn persist_outbound_history(client: &RamfluxClient, sender: &str) -> TestResult {
+    // Native sends persist the encrypted envelope and plaintext content separately.
+    client.send_direct_message(
+        "outbound-thread",
+        "own-history",
+        sender,
+        b"opaque encrypted outbound envelope",
+    )?;
+    client.account_db()?.store_message_content(
+        "outbound-thread",
+        "own-history",
+        b"restored outgoing history",
+    )?;
+    Ok(())
+}
+
+async fn assert_restored_outbound_history(reader: &RamfluxClient) -> TestResult {
+    let messages = reader.direct_messages("outbound-thread")?;
+    let stored = messages.first().ok_or("outbound history")?;
+    assert_eq!(stored.encrypted_body, b"opaque encrypted outbound envelope");
+    for method in ["message.list", "message.read"] {
+        let request = LocalBusFrame::request(
+            "restored-outbound-history",
+            None,
+            "message",
+            method,
+            json!({"conversation_id":"outbound-thread"}),
+        );
+        let page =
+            crate::bus::readers::test_account_reader_request(reader.account_db()?, request).await?;
+        assert_eq!(page["messages"][0]["body_utf8"], "restored outgoing history");
+    }
+    Ok(())
+}
+
 fn assert_restored_group_history(
     reader: &RamfluxClient,
     expected: &ramflux_protocol::GroupStateSnapshot,
@@ -278,6 +313,7 @@ async fn recover_group_read_projection(
     let mut unrelated = Vec::new();
     crate::bus::dispatch::group::append_native_group_history(reader, &alias, &mut unrelated)?;
     assert!(unrelated.is_empty(), "history must follow the signed conversation binding");
+    assert_restored_outbound_history(reader).await?;
     Ok(())
 }
 
@@ -385,6 +421,7 @@ async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account
                 b"restored group history",
             )?;
             persist_group_driver_progress(&data)?;
+            persist_outbound_history(&data, owner.storage_key())?;
             let expected_group = group.snapshot().clone();
             drop(data);
             // A distinct empty vault has no source signing credential and no configured node.
