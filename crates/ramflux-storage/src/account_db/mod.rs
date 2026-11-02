@@ -23,6 +23,10 @@ pub(crate) mod backup_merge;
 mod backup_message_footprint;
 mod backup_missing;
 mod backup_native;
+mod backup_object_erasure;
+#[cfg(test)]
+mod backup_object_erasure_tests;
+mod backup_object_metadata;
 mod backup_retirement;
 mod backup_shared_groups;
 pub mod bot;
@@ -79,6 +83,7 @@ pub struct AccountDb {
     clock: AccountClock,
     object_retirement: object_retention::RetirementObserver,
     pub(crate) connection: Connection,
+    erasure_authority: Option<Connection>,
     volatile_typing: RefCell<BTreeMap<(String, String), TypingStateRecord>>,
     volatile_presence: RefCell<BTreeMap<String, ContactPresenceRecord>>,
 }
@@ -113,6 +118,7 @@ impl AccountDb {
             clock: AccountClock::real(),
             object_retirement: object_retention::RetirementObserver::default(),
             connection,
+            erasure_authority: None,
             volatile_typing: RefCell::new(BTreeMap::new()),
             volatile_presence: RefCell::new(BTreeMap::new()),
         };
@@ -124,6 +130,7 @@ impl AccountDb {
         crate::schema_receipt_identity::upgrade(&db.connection)?;
         crate::schema_group_sender_identity::upgrade(&db.connection)?;
         crate::schema_group_control_identity::upgrade(&db.connection)?;
+        db.maintain_object_retention()?;
         Ok(db)
     }
 

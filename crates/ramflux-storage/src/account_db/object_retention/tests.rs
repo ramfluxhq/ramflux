@@ -5,7 +5,7 @@ use super::*;
 use crate::{EventStore, ObjectWrite};
 use serde_json::json;
 
-fn install(db: &AccountDb, message: &str, reference: &str) -> Result<(), StorageError> {
+pub(super) fn install(db: &AccountDb, message: &str, reference: &str) -> Result<(), StorageError> {
     db.send_direct_message("thread", message, "peer", b"body")?;
     db.register_object_reference(&ObjectReferenceOwner {
         reference_hash: reference,
@@ -19,7 +19,7 @@ fn install(db: &AccountDb, message: &str, reference: &str) -> Result<(), Storage
     Ok(())
 }
 
-fn payload(db: &AccountDb) -> Result<(), StorageError> {
+pub(super) fn payload(db: &AccountDb) -> Result<(), StorageError> {
     db.upsert_object(&ObjectWrite {
         object_id: "wire",
         manifest_hash: "manifest",
@@ -41,6 +41,8 @@ fn shared_reference_keeps_payload_until_last_message_then_fences_reimport()
     let (root, db) = crate::tests::test_db("object-shared-reference")?;
     install(&db, "one", "reference")?;
     install(&db, "two", "reference")?;
+    assert_eq!(db.client_message_object_ids("one")?, vec!["wire"]);
+    assert_eq!(db.client_message_object_ids("two")?, vec!["wire"]);
     payload(&db)?;
     db.persist_actor_state(
         "directory/object/wire",
@@ -286,6 +288,12 @@ fn attachment_erasure_canary_covers_payload_legacy_tables_archives_journal_and_w
         reference: &value,
         metadata: &value,
     })?;
+    db.reserve_operation("canary-operation", "fingerprint")?;
+    db.bind_operation_objects("canary-operation", &json!({"object_id":"wire"}))?;
+    db.complete_operation(
+        "canary-operation",
+        &json!({"payload":"private-canary","key":"body-canary"}),
+    )?;
     db.delete_direct_message("thread", "one", "local", "delete")?;
     db.connection.call(|sql| {
         let names = sql
@@ -301,10 +309,10 @@ fn attachment_erasure_canary_covers_payload_legacy_tables_archives_journal_and_w
             let mut rows = query.query([])?;
             while let Some(row) = rows.next()? {
                 for column in 0..columns {
-                    let bytes = match row.get_ref(column)? {
-                        rusqlite::types::ValueRef::Text(bytes)
-                        | rusqlite::types::ValueRef::Blob(bytes) => bytes,
-                        _ => continue,
+                    let (rusqlite::types::ValueRef::Text(bytes)
+                    | rusqlite::types::ValueRef::Blob(bytes)) = row.get_ref(column)?
+                    else {
+                        continue;
                     };
                     for canary in [
                         b"private-canary".as_slice(),
@@ -322,6 +330,41 @@ fn attachment_erasure_canary_covers_payload_legacy_tables_archives_journal_and_w
         }
         Ok(())
     })?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+// Mutation: use the payload-fence cursor as the snapshot publication generation.
+#[test]
+fn shared_reference_erasure_invalidates_snapshot_resources_without_retiring_payload()
+-> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("shared-snapshot-generation")?;
+    install(&db, "one", "reference")?;
+    install(&db, "two", "reference")?;
+    payload(&db)?;
+    let reader = db.open_reader()?;
+    let generation = reader.privacy_erasure_generation()?;
+    let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let notification = Arc::clone(&retired);
+    let _registration = reader.register_privacy_resource(
+        "snapshot",
+        generation,
+        Arc::new(move || {
+            notification.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }),
+    )?;
+    db.delete_direct_message("thread", "one", "local", "delete-one")?;
+    assert_eq!(db.object_erasure_generation()?, 0);
+    assert!(db.privacy_erasure_generation()? > generation);
+    assert!(retired.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(db.load_object::<Value>("wire")?.is_some());
+    assert!(matches!(
+        reader.register_privacy_resource("stale", generation, Arc::new(|| Ok(()))),
+        Err(StorageError::ObjectErased)
+    ));
+    drop(reader);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

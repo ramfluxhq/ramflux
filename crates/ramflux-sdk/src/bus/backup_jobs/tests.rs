@@ -178,6 +178,30 @@ fn initialized_at_scale(
     )?;
     Ok(LocalBusAccountState::disconnected(client, gateway, commitment))
 }
+fn bind_fixture_attachment(
+    client: &RamfluxClient,
+    selector: &str,
+    message: &str,
+    value: &serde_json::Value,
+) -> Result<(), SdkError> {
+    let reference = &value["reference"];
+    let wire = reference["object_id"]
+        .as_str()
+        .ok_or_else(|| SdkError::LocalBus("fixture object id".into()))?;
+    let manifest = reference["manifest_hash"]
+        .as_str()
+        .ok_or_else(|| SdkError::LocalBus("fixture manifest".into()))?;
+    let hash = ramflux_crypto::blake3_256_base64url(
+        "ramflux.attachment.reference.v1",
+        &ramflux_protocol::canonical_json_bytes(reference)?,
+    );
+    let db = client.account_db()?;
+    db.write_transaction(||->Result<(),SdkError>{
+        db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {reference_hash:&hash,wire_id:wire,manifest_hash:manifest,selector,message_id:message,reference:value,metadata:&json!({"message_id":message,"manifest_hash":manifest,"direction":"incoming"})})?;
+        db.persist_actor_state(&format!("attachment/reference/{selector}"),value)?;
+        Ok(())
+    })
+}
 fn source_supervisor(root: &Path, scale: Scale) -> Result<Rc<Supervisor>, SdkError> {
     let config = LocalBusConfig::new(root.join("bus.sock"), root);
     let source = root.to_owned();
@@ -696,7 +720,7 @@ async fn r2_create_fetches_missing_files_then_requires_explicit_authenticated_om
             let state=initialized_at_scale(&source,index,SMALL)?;
             for n in 0..65 {
                 let id=format!("lost-{n:03}");
-                state.client.account_db()?.persist_actor_state(&format!("attachment/reference/{id}"),&json!({"reference":{
+                bind_fixture_attachment(&state.client,&id,"m0",&json!({"reference":{
                     "schema":"ramflux.sdk.dm_attachment_ref.v1","version":1,"object_id":id,
                     "manifest_hash":format!("manifest-{n}"),"plaintext_hash":format!("plain-{n}"),"cipher_size":16,"chunk_size":32,
                     "total_chunks":1,"relay_endpoint":"https://relay.invalid","key_slot":{
@@ -768,4 +792,36 @@ fn r8_backup_actor_uses_the_manifests_current_branch_epoch() -> TestResult {
     drop(account);
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+// Mutation: retain the failed-backup diagnostic snapshot after its account erasure generation changes.
+#[tokio::test(flavor = "current_thread")]
+async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestResult {
+    LocalSet::new().run_until(async {
+        let root = crate::bus::runtime_tests::root("backup-diagnostic-erasure");
+        let supervisor = source_supervisor(&root, SMALL)?;
+        call(&supervisor, "account.status", Some("alice"), json!({})).await?;
+        let captured = supervisor.account_actor("alice").ok_or("actor")?.capture_backup().await?;
+        let jobs = &supervisor.backup_jobs;
+        let job = jobs.start(crate::backup::BackupJobKind::Backup, root.join("unused.rfb").to_string_lossy().into_owned())?;
+        let directory = jobs.directory(&job.job_id)?;
+        let path = directory.join("account.db");
+        let snapshot = captured.reader.write_backup_snapshot(&path)?;
+        let db = ramflux_storage::BackupDatabase::open(&path, &snapshot.key)?;
+        jobs.unavailable_failure(&job, directory.clone(), &snapshot.key, &db, &captured)?;
+        drop(db);
+        drop(snapshot);
+        drop(captured);
+        assert!(path.is_file());
+        assert!(jobs.diagnostics.lock().map_err(|_|"diagnostics")?.contains_key(&job.job_id));
+        let (outbound, _events) = mpsc::channel(8);
+        let mut connection = LocalBusConnectionState::new(1, outbound);
+        connection.attended_account_id = Some("alice".into());
+        supervisor.request(LocalBusFrame::request("erase", Some("alice".into()), "message", "message.delete", json!({"conversation_id":"thread","message_id":"m0","delete_scope":"local"})), &connection).await?;
+        assert!(!jobs.diagnostics.lock().map_err(|_|"diagnostics")?.contains_key(&job.job_id));
+        assert!(!directory.exists());
+        supervisor.shutdown().await?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }).await
 }

@@ -86,7 +86,7 @@ async fn r3_merge_preserves_local_undownloaded_references_and_reports_them_separ
         supervisor.account_actor("alice").ok_or("actor")?.stop().await?;supervisor.remove_backup_actor("alice");
         let mut client=RamfluxClient::new();client.open_account_index(&root)?;client.unlock_account("alice",b"account-test-secret")?;
         let reference=json!({"reference":{"object_id":"local-pending","manifest_hash":"unavailable-local-hash","plaintext_hash":"unavailable-plain-hash"}});
-        client.account_db()?.persist_actor_state("attachment/reference/local-pending",&reference)?;drop(client);
+        bind_fixture_attachment(&client,"local-pending","m0",&reference)?;drop(client);
         let actor=supervisor.new_backup_actor("alice")?;let (outbound,_events)=mpsc::channel(16);
         actor.request(crate::bus::actor::AccountCommand{private:None,request:LocalBusFrame::request("unlock",Some("alice".into()),"account","account.unlock",json!({"passphrase":"account-test-secret"})),connection_id:1,topics:BTreeSet::new(),attended:true,nodes:None,outbound,reply:None}).await?;
         let row=call(&supervisor,"account.restore.verify",None,json!({"input_path":archive,"passphrase":secret})).await?;
@@ -107,7 +107,7 @@ async fn r3_fetch_phase_reports_items_before_the_single_snapshot_capture() -> Te
         let root=crate::bus::runtime_tests::root("backup-fetch-progress");let config=LocalBusConfig::new(root.join("bus.sock"),&root);let source=root.clone();
         let initialize:AccountInitializer=Box::new(move|index|{
             let account=initialized_at_scale(&source,index,SMALL)?;
-            account.client.account_db()?.persist_actor_state("attachment/reference/missing",&json!({"reference":{"object_id":"missing","manifest_hash":"missing","plaintext_hash":"missing"}}))?;Ok(account)
+            bind_fixture_attachment(&account.client,"missing","m0",&json!({"reference":{"object_id":"missing","manifest_hash":"missing","plaintext_hash":"missing"}}))?;Ok(account)
         });
         let supervisor=Supervisor::from_initializers(&config,vec![("alice".into(),initialize)],Some("alice".into()))?;
         let row=call(&supervisor,"account.backup.create",Some("alice"),json!({"output_path":root.join("missing.rfb"),"passphrase":"fetch progress regression"})).await?;

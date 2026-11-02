@@ -36,8 +36,18 @@ impl BackupDatabase {
         if fingerprint != key.fingerprint() {
             return Err(StorageError::AccountKeyMismatch);
         }
+        let input_version: i64 = db.query_row(
+            "SELECT COALESCE(MAX(schema_version),0) FROM schema_migration",
+            [],
+            |r| r.get(0),
+        )?;
+        crate::schema_object_erasure::upgrade_private(&db)?;
         db.execute_batch(super::event_counter::SCHEMA)?;
         super::message_footprint::install(&db)?;
+        let unsafe_references:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22)))",[],|r|r.get(0))?;
+        if unsafe_references {
+            return Err(StorageError::ObjectOwnershipUnverified { schema_version: input_version });
+        }
         let opened = Self { db };
         opened.ensure_missing_manifest()?;
         opened.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;

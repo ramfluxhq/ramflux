@@ -831,7 +831,10 @@ impl RamfluxClient {
                         || SdkError::LocalBus("object.revoke_access missing object_id".to_owned()),
                     )?;
                 if let Err(error) = self.tombstone_object(object_id)
-                    && !matches!(error, SdkError::Sync(SyncError::ObjectNotFound))
+                    && !matches!(
+                        error,
+                        SdkError::ObjectErased | SdkError::Sync(SyncError::ObjectNotFound)
+                    )
                 {
                     return Err(error);
                 }

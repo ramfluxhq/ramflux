@@ -572,6 +572,15 @@ struct ReceivedChunk {
     plaintext: Vec<u8>,
 }
 
+impl Drop for ObjectSyncSession {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.content_key);
+        for chunk in self.chunks.values_mut() {
+            zeroize::Zeroize::zeroize(&mut chunk.plaintext);
+        }
+    }
+}
+
 impl ObjectSyncSession {
     #[must_use]
     pub fn new(manifest: ChunkManifest, content_key: [u8; 32]) -> Self {

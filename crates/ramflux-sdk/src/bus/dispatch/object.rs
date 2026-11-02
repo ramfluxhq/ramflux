@@ -1968,6 +1968,68 @@ mod spool_tests {
         .expect("put local object");
     }
 
+    // Mutation: omit the exact-payload resource registration from object_get_begin.
+    #[tokio::test]
+    async fn attachment_last_owner_deletion_closes_download_spool_and_refuses_later_reads()
+    -> Result<(), SdkError> {
+        let root = temp_data_root("get_attachment_erasure");
+        let mut state = make_state(root.clone());
+        let mut donor = ramflux_sync::ObjectStore::new();
+        let object = donor.put_encrypted_object(GET_OBJECT_ID, b"private attachment spool")?;
+        let key = donor.object_key(GET_OBJECT_ID)?;
+        let account = state
+            .accounts
+            .get(ACCOUNT)
+            .ok_or_else(|| SdkError::LocalBus("fixture account or session missing".into()))?;
+        let db = account.client.account_db()?;
+        db.send_direct_message("thread", "message", "peer", b"body")?;
+        db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
+            reference_hash: "spool-reference",
+            wire_id: GET_OBJECT_ID,
+            manifest_hash: &object.manifest_hash,
+            selector: GET_OBJECT_ID,
+            message_id: "message",
+            reference: &serde_json::json!({}),
+            metadata: &serde_json::json!({}),
+        })?;
+        db.upsert_object(&ramflux_storage::ObjectWrite {
+            object_id: GET_OBJECT_ID,
+            manifest_hash: &object.manifest_hash,
+            nonce: &object.nonce,
+            ciphertext: &object.ciphertext,
+            plaintext_hash: &object.plaintext_hash,
+            tombstoned: false,
+            backup_excluded: false,
+            content_key: Some(&key),
+            object: &object,
+            updated_at: 1,
+        })?;
+        dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID)).await?;
+        let path = get_spool_path(&state);
+        assert!(path.is_file());
+        let account = state
+            .accounts
+            .get(ACCOUNT)
+            .ok_or_else(|| SdkError::LocalBus("fixture account or session missing".into()))?;
+        let file = std::sync::Arc::clone(
+            &account
+                .object_get_spools
+                .get(GET_OPERATION)
+                .ok_or_else(|| SdkError::LocalBus("fixture account or session missing".into()))?
+                .file,
+        );
+        account.client.delete_direct_message("thread", "message", "local", "erase-spool")?;
+        assert!(!path.exists());
+        assert!(file.lock().map_err(|_| SdkError::ObjectErased)?.is_none());
+        assert!(matches!(
+            dispatch(&mut state, "object.get.read", get_read_body(0, 1)).await,
+            Err(SdkError::ObjectErased)
+        ));
+        drop(state);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn get_begin_read_finish_streams_bounded_and_cleans_up() {
         let root = temp_data_root("get_happy");

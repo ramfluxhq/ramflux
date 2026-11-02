@@ -12,6 +12,21 @@ use serde::de::DeserializeOwned;
 pub type StoredObject<T> = (T, Option<[u8; 32]>);
 
 pub type StoredObjects<T> = (Vec<T>, BTreeMap<String, [u8; 32]>);
+struct ObjectPayloadRow {
+    row_id: i64,
+    manifest: Option<String>,
+    body: Vec<u8>,
+    key: Option<Vec<u8>>,
+}
+#[derive(Default)]
+struct ObjectKeyAccumulator(BTreeMap<String, [u8; 32]>);
+impl Drop for ObjectKeyAccumulator {
+    fn drop(&mut self) {
+        for key in self.0.values_mut() {
+            zeroize::Zeroize::zeroize(key);
+        }
+    }
+}
 
 impl AccountDb {
     pub fn upsert_object<T: Serialize>(
@@ -31,7 +46,7 @@ impl AccountDb {
         self.write_transaction(|| {
             let previous: Option<Vec<u8>> = self.connection.query_row("SELECT manifest_hash FROM object_index WHERE object_id=?1", params![write.object_id], |row| row.get(0)).optional()?;
             if previous.as_deref() != expected_manifest.map(str::as_bytes) { return Err(StorageError::ObjectIdentityConflict); }
-            let owned: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM object_retention_payload p JOIN object_retention_reference r USING(commitment) JOIN object_message_reference m USING(reference_hash) WHERE p.wire_id=?1)", params![write.object_id], |r| r.get(0))?;
+            let owned: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM object_retention_payload p JOIN object_retention_reference r USING(commitment) JOIN object_message_reference m USING(reference_hash) WHERE p.wire_id=?1 AND p.manifest_hash<>?2)", params![write.object_id,write.manifest_hash], |r| r.get(0))?;
             if owned { return Err(StorageError::ObjectIdentityConflict); }
             let verified = ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT_MANIFEST, write.ciphertext);
             if verified != write.manifest_hash { return Err(StorageError::ObjectIdentityConflict); }
@@ -44,6 +59,7 @@ impl AccountDb {
                 self.connection.execute_batch(&sql)?;
             }
             self.upsert_object_checked(write, true)?;
+            self.connection.execute("INSERT INTO object_identity_replacement VALUES(?1) ON CONFLICT DO NOTHING",params![ramflux_crypto::object_erasure_commitment(&self.principal_commitment,write.object_id,write.manifest_hash)])?;
             self.retain_object(write.object_id, write.manifest_hash, super::object_retention::ObjectRetention::Standalone)
         })
     }
@@ -115,36 +131,41 @@ impl AccountDb {
     }
 
     pub fn set_object_tombstoned(&self, object_id: &str) -> Result<(), StorageError> {
-        let object_body = self
-            .connection
-            .query_row(
-                "SELECT object_body FROM object_index WHERE object_id = ?1",
-                params![object_id],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()?;
-        let Some(object_body) = object_body else {
-            return Ok(());
-        };
-        let mut body: serde_json::Value = serde_json::from_slice(&object_body)?;
-        if let Some(object) = body.as_object_mut() {
-            object.insert("tombstoned".to_owned(), serde_json::Value::Bool(true));
-        }
-        self.connection.execute(
-            "UPDATE object_index
+        self.write_transaction(|| {
+            self.check_object_access(object_id)?;
+            let object_body = self
+                .connection
+                .query_row(
+                    "SELECT object_body FROM object_index WHERE object_id = ?1",
+                    params![object_id],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            let Some(object_body) = object_body else {
+                return Ok(());
+            };
+            let mut body: serde_json::Value = serde_json::from_slice(&object_body)?;
+            if let Some(object) = body.as_object_mut() {
+                object.insert("tombstoned".to_owned(), serde_json::Value::Bool(true));
+            }
+            self.connection.execute(
+                "UPDATE object_index
                 SET tombstoned = 1, object_state = 'tombstoned', object_body = ?2
               WHERE object_id = ?1",
-            params![object_id, serde_json::to_vec(&body)?],
-        )?;
-        Ok(())
+                params![object_id, serde_json::to_vec(&body)?],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn record_object_share_grant(
         &self,
         write: &ObjectShareGrantWrite<'_>,
     ) -> Result<ObjectShareGrantRecord, StorageError> {
-        self.connection.execute(
-            "INSERT INTO object_share_grant_projection (
+        self.write_transaction(|| {
+            self.check_object_access(write.object_id)?;
+            self.connection.execute(
+                "INSERT INTO object_share_grant_projection (
                 object_id, recipient_principal_id, recipient_principal_commitment,
                 recipient_device_id, conversation_id, shared_at, revoked_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
@@ -154,17 +175,18 @@ impl AccountDb {
                 conversation_id = excluded.conversation_id,
                 shared_at = excluded.shared_at,
                 revoked_at = NULL",
-            params![
-                write.object_id,
-                write.recipient_principal_id,
-                write.recipient_principal_commitment,
-                write.recipient_device_id,
-                write.conversation_id,
-                write.shared_at,
-            ],
-        )?;
-        self.object_share_grant(write.object_id, write.recipient_principal_id)?
-            .ok_or_else(|| StorageError::MessageNotFound(write.object_id.to_owned()))
+                params![
+                    write.object_id,
+                    write.recipient_principal_id,
+                    write.recipient_principal_commitment,
+                    write.recipient_device_id,
+                    write.conversation_id,
+                    write.shared_at,
+                ],
+            )?;
+            self.object_share_grant(write.object_id, write.recipient_principal_id)?
+                .ok_or_else(|| StorageError::MessageNotFound(write.object_id.to_owned()))
+        })
     }
 
     pub fn object_share_grants_for_recipients(
@@ -194,6 +216,7 @@ impl AccountDb {
         object_id: &str,
         recipient_principal_id: &str,
     ) -> Result<Option<ObjectShareGrantRecord>, StorageError> {
+        self.check_object_access(object_id)?;
         Ok(self
             .connection
             .query_row(
@@ -229,21 +252,26 @@ impl AccountDb {
         object_id: &str,
     ) -> Result<Option<StoredObject<T>>, StorageError> {
         self.check_object_access(object_id)?;
-        let row: Option<(i64, Vec<u8>, Option<Vec<u8>>)> = self.connection.query_row(
-            "SELECT rowid,object_body,object_content_key FROM object_index WHERE object_id=?1 AND object_body IS NOT NULL",
-            params![object_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))
+        let row:Option<ObjectPayloadRow>=self.connection.query_row(
+            "SELECT rowid,object_body,object_content_key,CAST(manifest_hash AS TEXT) FROM object_index WHERE object_id=?1 AND object_body IS NOT NULL",
+            params![object_id],|row|Ok(ObjectPayloadRow {row_id:row.get(0)?,manifest:row.get(3)?,body:row.get(1)?,key:row.get(2)?}),
         ).optional()?;
-        row.map(|(rowid, body, key)| {
+        row.map(|ObjectPayloadRow { row_id: rowid, body, key, manifest }| {
+            let body = zeroize::Zeroizing::new(body);
             let key = key
                 .map(|key| {
-                    key.try_into().map_err(|_| {
-                        StorageError::KeyWrappingFailed(
-                            "invalid object content key length".to_owned(),
-                        )
-                    })
+                    let key = zeroize::Zeroizing::new(key);
+                    let value: [u8; 32] = key.as_slice().try_into().map_err(|_| {
+                        StorageError::KeyWrappingFailed("invalid object content key length".into())
+                    })?;
+                    Ok::<_, StorageError>(zeroize::Zeroizing::new(value))
                 })
                 .transpose()?;
-            Ok((super::object_payload::decode(&self.connection, rowid, &body)?, key))
+            let object = super::object_payload::decode(&self.connection, rowid, &body)?;
+            if let Some(manifest) = manifest {
+                self.check_object_identity(object_id, &manifest)?;
+            }
+            Ok((object, key.as_deref().copied()))
         })
         .transpose()
     }
@@ -261,16 +289,16 @@ impl AccountDb {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut objects = Vec::with_capacity(ids.len());
-        let mut keys = BTreeMap::new();
+        let mut keys = ObjectKeyAccumulator::default();
         for id in ids {
             if let Some((object, key)) = self.load_object::<T>(&id)? {
                 objects.push(object);
                 if let Some(key) = key {
-                    keys.insert(id, key);
+                    keys.0.insert(id, key);
                 }
             }
         }
-        Ok((objects, keys))
+        Ok((objects, std::mem::take(&mut keys.0)))
     }
 
     pub fn load_objects<T>(&self) -> Result<StoredObjects<T>, StorageError>
@@ -284,24 +312,26 @@ impl AccountDb {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut objects = Vec::new();
-        let mut object_keys = BTreeMap::new();
+        let mut object_keys = ObjectKeyAccumulator::default();
         for id in ids {
             if let Some((object, key)) = self.load_object(&id)? {
                 objects.push(object);
                 if let Some(key) = key {
-                    object_keys.insert(id, key);
+                    object_keys.0.insert(id, key);
                 }
             }
         }
-        Ok((objects, object_keys))
+        Ok((objects, std::mem::take(&mut object_keys.0)))
     }
 
     pub fn upsert_object_transfer(
         &self,
         write: &ObjectTransferWrite<'_>,
     ) -> Result<(), StorageError> {
-        self.connection.execute(
-            "INSERT INTO object_transfer_state (
+        self.write_transaction(|| {
+            self.check_object_identity(write.object_id, write.manifest_hash)?;
+            self.connection.execute(
+                "INSERT INTO object_transfer_state (
                 transfer_id, object_id, direction, peer_device_id, manifest_hash, relay_endpoint,
                 resume_token, missing_chunk_bitmap, completed_chunk_bitmap, state, last_error,
                 chunk_size, total_bytes, done_bytes, total_chunks, next_chunk_index, updated_at,
@@ -326,28 +356,29 @@ impl AccountDb {
                 next_chunk_index = excluded.next_chunk_index,
                 updated_at = excluded.updated_at,
                 expires_at = excluded.expires_at",
-            params![
-                write.transfer_id,
-                write.object_id,
-                write.direction,
-                write.peer_device_id,
-                write.manifest_hash.as_bytes(),
-                write.relay_endpoint,
-                write.resume_token,
-                serde_json::to_vec(write.missing_chunks)?,
-                serde_json::to_vec(write.completed_chunks)?,
-                write.state,
-                write.last_error,
-                i64::try_from(write.chunk_size).unwrap_or(i64::MAX),
-                i64::try_from(write.total_bytes).unwrap_or(i64::MAX),
-                i64::try_from(write.done_bytes).unwrap_or(i64::MAX),
-                i64::from(write.total_chunks),
-                write.next_chunk_index.map(i64::from),
-                write.updated_at,
-                write.expires_at,
-            ],
-        )?;
-        Ok(())
+                params![
+                    write.transfer_id,
+                    write.object_id,
+                    write.direction,
+                    write.peer_device_id,
+                    write.manifest_hash.as_bytes(),
+                    write.relay_endpoint,
+                    write.resume_token,
+                    serde_json::to_vec(write.missing_chunks)?,
+                    serde_json::to_vec(write.completed_chunks)?,
+                    write.state,
+                    write.last_error,
+                    i64::try_from(write.chunk_size).unwrap_or(i64::MAX),
+                    i64::try_from(write.total_bytes).unwrap_or(i64::MAX),
+                    i64::try_from(write.done_bytes).unwrap_or(i64::MAX),
+                    i64::from(write.total_chunks),
+                    write.next_chunk_index.map(i64::from),
+                    write.updated_at,
+                    write.expires_at,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn object_transfer(
@@ -355,6 +386,7 @@ impl AccountDb {
         object_id: &str,
         direction: Option<&str>,
     ) -> Result<Option<ObjectTransferRecord>, StorageError> {
+        self.check_object_access(object_id)?;
         let mut query = String::from(
             "SELECT transfer_id, object_id, direction, peer_device_id, manifest_hash,
                     relay_endpoint, resume_token, missing_chunk_bitmap, completed_chunk_bitmap,
@@ -412,8 +444,14 @@ impl AccountDb {
         &self,
         write: &ObjectOperationWrite<'_>,
     ) -> Result<(), StorageError> {
-        self.connection.execute(
-            "INSERT INTO object_operation (
+        self.write_transaction(|| {
+            if let Some(manifest) = write.manifest_hash {
+                self.check_object_identity(write.object_id, manifest)?;
+            } else {
+                self.check_object_access(write.object_id)?;
+            }
+            self.connection.execute(
+                "INSERT INTO object_operation (
                 object_id, operation_id, state, request_hash, manifest_hash, plaintext_hash,
                 terminal_result, last_error, created_at, updated_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -426,20 +464,21 @@ impl AccountDb {
                 terminal_result = excluded.terminal_result,
                 last_error = excluded.last_error,
                 updated_at = excluded.updated_at",
-            params![
-                write.object_id,
-                write.operation_id,
-                write.state,
-                write.request_hash.as_bytes(),
-                write.manifest_hash,
-                write.plaintext_hash,
-                write.terminal_result,
-                write.last_error,
-                write.created_at,
-                write.updated_at,
-            ],
-        )?;
-        Ok(())
+                params![
+                    write.object_id,
+                    write.operation_id,
+                    write.state,
+                    write.request_hash.as_bytes(),
+                    write.manifest_hash,
+                    write.plaintext_hash,
+                    write.terminal_result,
+                    write.last_error,
+                    write.created_at,
+                    write.updated_at,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Reads the reconciliation record for `object_id`, if any.
@@ -447,6 +486,7 @@ impl AccountDb {
         &self,
         object_id: &str,
     ) -> Result<Option<ObjectOperationRecord>, StorageError> {
+        self.check_object_access(object_id)?;
         Ok(self
             .connection
             .query_row(

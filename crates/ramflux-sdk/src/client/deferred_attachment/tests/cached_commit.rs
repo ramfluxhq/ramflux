@@ -194,8 +194,8 @@ async fn attachment_owned_state_erasure_survives_account_reopen() -> Result<(), 
     Ok(())
 }
 
+// Mutation: skip last-owner object_index payload/key erasure.
 #[tokio::test]
-#[ignore = "ATTACH-ERASE-01: object_index payload/key erasure after message delete"]
 async fn attachment_object_payload_erasure_survives_account_reopen() -> Result<(), SdkError> {
     let fixture = erase_imported_attachment().await?;
     assert!(
@@ -409,6 +409,7 @@ async fn attachment_valid_grant_completes_remaining_cached_acks()
                 client.materialize_cached_attachment(
                     reference,
                     slot.object_key,
+                    ramflux_storage::ObjectRetention::Imported,
                     &mut "cached_chunk",
                 )?;
                 client

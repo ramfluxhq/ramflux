@@ -144,6 +144,7 @@ pub(super) fn read_relay_options(
     service_key: Option<String>,
     interrupt: Option<u32>,
 ) -> Result<Option<RelayTransferOptions>, SdkError> {
+    account.client.account_db()?.check_object_access(object_id)?;
     if endpoint.is_none()
         && service_key.is_none()
         && interrupt.is_none()

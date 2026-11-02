@@ -19,6 +19,10 @@ pub(super) enum PrivateCommand {
         reply: oneshot::Sender<Result<crate::LocalBusCreatedAccount, SdkError>>,
     },
     Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
+    AuthorizeBackup {
+        generation: i64,
+        reply: oneshot::Sender<Result<(), SdkError>>,
+    },
 }
 pub(super) struct AccountCommand {
     pub private: Option<PrivateCommand>,
@@ -127,7 +131,33 @@ impl AccountActor {
         self.backup_captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (backup, received) = oneshot::channel();
         self.send_private(PrivateCommand::Capture(backup)).await?;
-        received.await.map_err(|_| stopped())?
+        let mut captured = received.await.map_err(|_| stopped())??;
+        captured.actor = Some(self.clone());
+        Ok(captured)
+    }
+
+    pub(super) fn authorize_backup_publication(&self, generation: i64) -> Result<(), SdkError> {
+        let (reply, response) = oneshot::channel();
+        let (outbound, _events) = mpsc::channel(1);
+        self.sender
+            .blocking_send(AccountCommand {
+                private: Some(PrivateCommand::AuthorizeBackup { generation, reply }),
+                request: LocalBusFrame::request(
+                    "backup-publication",
+                    None,
+                    "account",
+                    "account.backup.authorize",
+                    serde_json::json!({}),
+                ),
+                connection_id: 0,
+                topics: BTreeSet::new(),
+                attended: false,
+                nodes: None,
+                outbound,
+                reply: None,
+            })
+            .map_err(|_| stopped())?;
+        response.blocking_recv().map_err(|_| stopped())?
     }
     pub(super) async fn backup_missing_references(
         &self,

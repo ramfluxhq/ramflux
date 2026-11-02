@@ -445,7 +445,7 @@ impl RamfluxClient {
         let task_id = outcome.task_id.clone().or(db
             .load_actor_state::<Value>(&key)?
             .and_then(|v| v["task_id"].as_str().map(str::to_owned)));
-        db.persist_actor_state(&key,&json!({"task_id":task_id,"reason_code":outcome.reason_code,"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind":super::carrier_actor_kind(self, carrier),"actor_kind_verified":super::carrier_kind_verified(self, carrier)}))?;
+        db.persist_message_actor_state(delivery.message,&key,&json!({"task_id":task_id,"reason_code":outcome.reason_code,"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind":super::carrier_actor_kind(self, carrier),"actor_kind_verified":super::carrier_kind_verified(self, carrier)}))?;
         Ok(())
     }
     pub(crate) fn task_message_metadata(

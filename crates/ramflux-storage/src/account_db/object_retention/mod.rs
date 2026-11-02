@@ -3,11 +3,14 @@
 
 //! Indexed attachment ownership and portable, append-only erasure fences.
 mod actors;
+mod generation;
 mod holds;
+mod legacy;
 mod resources;
 mod schema;
 use super::AccountDb;
 use crate::StorageError;
+pub use generation::PrivacyResourceRegistration;
 pub use holds::PreSendObjectHold;
 use ramflux_crypto::{object_erasure_commitment, object_erasure_lookup};
 pub use resources::ObjectResourceRetirement;
@@ -16,7 +19,7 @@ use serde_json::Value;
 use std::cell::Cell;
 use std::sync::Arc;
 
-pub(crate) use schema::install;
+pub(crate) use schema::{SCHEMA, install};
 pub(super) use schema::{erasure_body, payload_erasure_body};
 
 /// The reason an object may outlive message ownership.
@@ -47,6 +50,7 @@ pub(super) struct RetirementObserver {
     pub callback: std::cell::RefCell<Option<ObjectRetirementObserver>>,
     pub cursor: Cell<i64>,
     pub resources: resources::Resources,
+    pub generations: generation::Resources,
 }
 
 impl AccountDb {
@@ -81,6 +85,10 @@ impl AccountDb {
         if !self.connection.is_autocommit()? {
             return Ok(());
         }
+        generation::retire(
+            &self.object_retirement.generations,
+            self.privacy_erasure_generation()?,
+        )?;
         let callback = self.object_retirement.callback.borrow().clone();
         let result = (|| -> Result<(), StorageError> {
             loop {
@@ -104,10 +112,10 @@ impl AccountDb {
             }
             Ok(())
         })();
-        if result.is_err() {
-            if let Some(callback) = &callback {
-                callback(None);
-            }
+        if result.is_err()
+            && let Some(callback) = &callback
+        {
+            callback(None);
         }
         result
     }
@@ -116,7 +124,7 @@ impl AccountDb {
     /// Refuses retired identities before loading ciphertext or private reference state.
     pub fn check_object_identity(&self, wire: &str, manifest: &str) -> Result<(), StorageError> {
         let digest = object_erasure_commitment(&self.principal_commitment, wire, manifest);
-        let erased: bool = self.connection.query_row(
+        let erased: bool = self.erasure_authority.as_ref().unwrap_or(&self.connection).query_row(
             "SELECT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?1)",
             params![digest],
             |row| row.get(0),
@@ -125,12 +133,12 @@ impl AccountDb {
     }
 
     /// # Errors
-    /// Returns ObjectErased for an erased selector, including after payload removal.
+    /// Returns `ObjectErased` for an erased selector, including after payload removal.
     pub fn check_object_access(&self, selector: &str) -> Result<(), StorageError> {
         let current: Option<String> = self
             .connection
             .query_row(
-                "SELECT CAST(manifest_hash AS TEXT) FROM object_index WHERE object_id=?1",
+                "SELECT COALESCE(CAST(manifest_hash AS TEXT),CASE WHEN json_valid(CAST(object_body AS TEXT)) THEN json_extract(CAST(object_body AS TEXT),'$.manifest_hash') END) FROM object_index WHERE object_id=?1 AND (manifest_hash IS NOT NULL OR CASE WHEN json_valid(CAST(object_body AS TEXT)) THEN json_type(CAST(object_body AS TEXT),'$.manifest_hash')='text' ELSE 0 END)",
                 params![selector],
                 |row| row.get(0),
             )
@@ -143,7 +151,7 @@ impl AccountDb {
             return self.check_object_identity(&wire, &manifest);
         }
         let lookup = object_erasure_lookup(&self.principal_commitment, selector);
-        let erased: bool = self.connection.query_row(
+        let erased: bool = self.erasure_authority.as_ref().unwrap_or(&self.connection).query_row(
             "SELECT EXISTS(SELECT 1 FROM object_erasure_lookup WHERE lookup=?1)",
             params![lookup],
             |row| row.get(0),
@@ -162,7 +170,9 @@ impl AccountDb {
         self.check_object_identity(wire, manifest)?;
         let (class, expiry) = match retention {
             ObjectRetention::Standalone => ("standalone", None),
-            ObjectRetention::OwnDeviceTransport => ("transport", None),
+            ObjectRetention::OwnDeviceTransport => {
+                ("transport", Some(self.now_unix().saturating_add(3600)))
+            }
             ObjectRetention::PreSend { expires_at } => {
                 ("pre_send", Some(expires_at.min(self.now_unix().saturating_add(600))))
             }
@@ -170,7 +180,53 @@ impl AccountDb {
         };
         let digest = object_erasure_commitment(&self.principal_commitment, wire, manifest);
         let lookup = object_erasure_lookup(&self.principal_commitment, wire);
-        self.connection.execute("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class,hold_expires_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(commitment) DO UPDATE SET retention_class=CASE WHEN object_retention_payload.retention_class='standalone' THEN 'standalone' ELSE excluded.retention_class END,hold_expires_at=excluded.hold_expires_at", params![digest, wire, manifest, lookup, class, expiry])?;
+        self.connection.execute("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class,hold_expires_at) VALUES(?1,?2,?3,?4,CASE WHEN ?5='imported' AND EXISTS(SELECT 1 FROM object_index WHERE object_id=?2) THEN 'legacy' ELSE ?5 END,?6) ON CONFLICT(commitment) DO UPDATE SET retention_class=CASE WHEN object_retention_payload.retention_class='standalone' THEN 'standalone' WHEN object_retention_payload.retention_class='legacy' AND excluded.retention_class<>'standalone' THEN 'legacy' ELSE ?5 END,hold_expires_at=excluded.hold_expires_at", params![digest, wire, manifest, lookup, class, expiry])?;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Binds a runtime control copy to its owning history container.
+    pub fn bind_transport_actor(
+        &self,
+        wire: &str,
+        manifest: &str,
+        key: &str,
+    ) -> Result<(), StorageError> {
+        self.check_object_identity(wire, manifest)?;
+        self.connection.execute(
+            "INSERT INTO object_transport_actor VALUES(?1,?2) ON CONFLICT DO NOTHING",
+            params![object_erasure_commitment(&self.principal_commitment, wire, manifest), key],
+        )?;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Retires a consumed history container that also carried locally deleted message bytes.
+    pub fn retire_transport_object(&self, wire: &str, manifest: &str) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            let digest=object_erasure_commitment(&self.principal_commitment,wire,manifest);
+            self.connection.execute("INSERT INTO object_erasure_work SELECT commitment,wire_id,manifest_hash FROM object_retention_payload WHERE commitment=?1 AND retention_class='transport' ON CONFLICT DO NOTHING", params![digest])?;
+            let sql=self.connection.call(|db|schema::payload_erasure_body(db))?;
+            self.connection.execute_batch(&sql)?;
+            Ok(())
+        })
+    }
+
+    /// # Errors
+    /// Binds a short-lived history container to the exact child access material it carries.
+    pub fn retain_transport_dependency(
+        &self,
+        parent_wire: &str,
+        parent_manifest: &str,
+        child_wire: &str,
+        child_manifest: &str,
+    ) -> Result<(), StorageError> {
+        self.check_object_identity(child_wire, child_manifest)?;
+        let parent =
+            object_erasure_commitment(&self.principal_commitment, parent_wire, parent_manifest);
+        let child =
+            object_erasure_commitment(&self.principal_commitment, child_wire, child_manifest);
+        self.connection.execute("INSERT INTO object_payload_dependency SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM object_retention_payload WHERE commitment=?1 AND retention_class='transport') ON CONFLICT DO NOTHING", params![parent,child])?;
         Ok(())
     }
 
@@ -184,7 +240,7 @@ impl AccountDb {
             if self.message_is_deleted(owner.message_id)? { return Err(StorageError::ObjectErased); }
             self.check_object_identity(owner.wire_id, owner.manifest_hash)?;
             let digest = object_erasure_commitment(&self.principal_commitment, owner.wire_id, owner.manifest_hash);
-            self.connection.execute("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class) VALUES(?1,?2,?3,?4,'imported') ON CONFLICT(commitment) DO UPDATE SET retention_class=CASE WHEN object_retention_payload.retention_class='pre_send' THEN 'imported' ELSE object_retention_payload.retention_class END,hold_expires_at=NULL", params![digest, owner.wire_id, owner.manifest_hash, object_erasure_lookup(&self.principal_commitment, owner.wire_id)])?;
+            self.connection.execute("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class) VALUES(?1,?2,?3,?4,CASE WHEN EXISTS(SELECT 1 FROM object_index WHERE object_id=?2) THEN 'legacy' ELSE 'imported' END) ON CONFLICT(commitment) DO UPDATE SET retention_class=CASE WHEN object_retention_payload.retention_class='pre_send' THEN 'imported' ELSE object_retention_payload.retention_class END,hold_expires_at=CASE WHEN object_retention_payload.retention_class='transport' THEN object_retention_payload.hold_expires_at ELSE NULL END", params![digest, owner.wire_id, owner.manifest_hash, object_erasure_lookup(&self.principal_commitment, owner.wire_id)])?;
             self.connection.execute("INSERT INTO object_retention_reference(reference_hash,commitment,selector,selector_lookup,reference_json) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(reference_hash) DO NOTHING", params![owner.reference_hash,digest,owner.selector,object_erasure_lookup(&self.principal_commitment, owner.selector),serde_json::to_vec(owner.reference)?])?;
             self.connection.execute("INSERT INTO object_message_reference(message_id,reference_hash,metadata_json) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING", params![owner.message_id,owner.reference_hash,serde_json::to_vec(owner.metadata)?])?;
             self.connection.execute("INSERT INTO message_copy_binding VALUES(?1,?2) ON CONFLICT DO NOTHING", params![format!("object:{}",owner.selector),owner.message_id])?;
@@ -198,3 +254,6 @@ impl AccountDb {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod upgrade_tests;

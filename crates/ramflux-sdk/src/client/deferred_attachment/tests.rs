@@ -307,6 +307,8 @@ async fn committed_slot_checkpoint_recovers_a_lost_success_receipt() -> Result<(
 fn interrupted_fetch_becomes_retryable_after_restart() -> Result<(), SdkError> {
     let mut f = Fixture::new()?;
     f.client.persist_attachment_fetch_state(&FetchState {
+        wire_object_id: Some(f.reference.object_id.clone()),
+        manifest_hash: Some(f.reference.manifest_hash.clone()),
         object_id: "remote-object".to_owned(),
         operation_id: "interrupted".to_owned(),
         transfer_state: "fetching".to_owned(),
@@ -369,3 +371,42 @@ fn a_received_object_selector_resolves_only_its_expected_manifest() -> Result<()
 mod ack_progress;
 
 mod cached_commit;
+// Mutation: omit the in-transaction fence check after the relay ACK future completes.
+#[tokio::test]
+async fn attachment_ack_completion_after_deletion_returns_object_erased_without_new_progress()
+-> Result<(), SdkError> {
+    let fixture = Fixture::new()?;
+    let client = &fixture.client;
+    client.send_direct_message("conversation", "message", "owner", b"body")?;
+    let outcome = client
+        .acknowledge_received_attachment_with(&fixture.reference, 1, async |_| {
+            client.account_db()?.delete_direct_message(
+                "conversation",
+                "message",
+                "local",
+                "erase-during-ack",
+            )?;
+            Ok(())
+        })
+        .await;
+    assert!(matches!(outcome, Err(SdkError::ObjectErased)));
+    assert!(matches!(
+        client
+            .acknowledge_received_attachment_with(&fixture.reference, 1, async |_| {
+                Err(SdkError::LocalBus("late ACK must never run".into()))
+            })
+            .await,
+        Err(SdkError::ObjectErased)
+    ));
+    assert_eq!(client.account_db()?.actor_state_keys("attachment/ack/")?, Vec::<String>::new());
+    assert!(matches!(
+        client.persist_received_attachment_reference(
+            &fixture.reference,
+            "owner",
+            "conversation",
+            "message"
+        ),
+        Err(SdkError::ObjectErased)
+    ));
+    Ok(())
+}

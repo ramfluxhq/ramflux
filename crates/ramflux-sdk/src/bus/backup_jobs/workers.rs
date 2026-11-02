@@ -27,10 +27,21 @@ use zeroize::Zeroizing;
 fn failure(code: BackupFailureCode) -> BackupFailure {
     BackupFailure::new(code)
 }
+fn sdk_error(error: &crate::SdkError) -> BackupFailure {
+    match error {
+        crate::SdkError::ObjectErased => failure(BackupFailureCode::ObjectErased),
+        crate::SdkError::Storage(error) => storage_error(error),
+        _ => failure(BackupFailureCode::Interrupted),
+    }
+}
 pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFailure {
     use ramflux_storage::StorageError as E;
     match error {
         E::AccountWriterBusy(_) => BackupFailure::account_busy(),
+        E::ObjectErased => failure(BackupFailureCode::ObjectErased),
+        E::ObjectIdentityConflict => failure(BackupFailureCode::ObjectIdentityConflict),
+        E::ObjectOwnershipUnverified { .. } => failure(BackupFailureCode::ObjectOwnershipUnverified),
+        E::AccountSchemaTooNew { .. } => failure(BackupFailureCode::UnsupportedVersion),
         E::Integrity(_) | E::HistoryBundleHashMismatch => failure(BackupFailureCode::Tampered),
         E::Sqlite(_) if error.is_insufficient_space() => {
             failure(BackupFailureCode::InsufficientSpace)
@@ -86,6 +97,22 @@ fn stream_error(error: BackupStreamError, header: bool) -> BackupFailure {
         BackupStreamError::Invalid(_) => failure(BackupFailureCode::UnsupportedVersion),
         BackupStreamError::Derivation(_) => failure(BackupFailureCode::WrongPassphrase),
     }
+}
+fn archive_totals(
+    counts: &BackupCounts,
+    size: u64,
+    missing_count: u64,
+) -> Result<std::collections::BTreeMap<String, u64>, BackupFailure> {
+    let mut totals = serde_json::to_value(counts)
+        .map_err(|_| failure(BackupFailureCode::Interrupted))?
+        .as_object()
+        .ok_or_else(|| failure(BackupFailureCode::Interrupted))?
+        .iter()
+        .map(|(key, value)| (key.clone(), value.as_u64().unwrap_or(0)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    totals.insert("database_bytes".into(), size);
+    totals.insert("missing_attachments".into(), missing_count);
+    Ok(totals)
 }
 impl BackupJobs {
     fn verify_files(
@@ -156,7 +183,7 @@ impl BackupJobs {
                     storage_error(&error)
                 }
             })?;
-        drop(captured.reader);
+
         self.change(|registry| registry.writing(&job.job_id, snapshot.counts.clone(), now()))
             .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         let db = BackupDatabase::open(&database, &snapshot.key)
@@ -165,8 +192,8 @@ impl BackupJobs {
         if db.missing_attachment_count().map_err(|error| storage_error(&error))? > 0 {
             if !allow_missing_attachments {
                 let failure = self
-                    .unavailable_failure(job, directory.clone(), &snapshot.key, &db)
-                    .map_err(|_| failure(BackupFailureCode::Interrupted))?;
+                    .unavailable_failure(job, directory.clone(), &snapshot.key, &db, &captured)
+                    .map_err(|error| sdk_error(&error))?;
                 private.transferred = true;
                 return Err(failure);
             }
@@ -202,15 +229,7 @@ impl BackupJobs {
                 service.progress(&id, BackupCategory::Attachments, 0, bytes, Some(size));
             }),
         };
-        let mut totals = serde_json::to_value(&snapshot.counts)
-            .map_err(|_| failure(BackupFailureCode::Interrupted))?
-            .as_object()
-            .ok_or_else(|| failure(BackupFailureCode::Interrupted))?
-            .iter()
-            .map(|(key, value)| (key.clone(), value.as_u64().unwrap_or(0)))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        totals.insert("database_bytes".into(), size);
-        totals.insert("missing_attachments".into(), missing_count);
+        let totals = archive_totals(&snapshot.counts, size, missing_count)?;
         let context = BackupContext {
             account_id: metadata.identity.account_id().to_owned(),
             created_at: now(),
@@ -224,7 +243,32 @@ impl BackupJobs {
         output_io.inner.sync_all().map_err(|_| failure(BackupFailureCode::NotWritable))?;
         let bytes = output_io.bytes;
         drop(output_io);
+        #[cfg(test)]
+        self.install_checkpoint(
+            super::test_install::InstallPoint::BeforeArchiveAuthorization,
+            &temporary,
+        )
+        .map_err(|_| failure(BackupFailureCode::Interrupted))?;
+        Self::authorize_archive_publication(captured.actor.as_ref(), captured.erasure_generation)?;
+        #[cfg(test)]
+        self.install_checkpoint(super::test_install::InstallPoint::ArchiveAuthorized, &temporary)
+            .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         self.publish_archive(job, &cancel, &mut guard, &output, bytes)
+    }
+    fn authorize_archive_publication(
+        actor: Option<&super::super::actor::AccountActor>,
+        generation: i64,
+    ) -> Result<(), BackupFailure> {
+        actor
+            .ok_or_else(|| failure(BackupFailureCode::Interrupted))?
+            .authorize_backup_publication(generation)
+            .map_err(|error| {
+                failure(if matches!(error, crate::SdkError::ObjectErased) {
+                    BackupFailureCode::ObjectErased
+                } else {
+                    BackupFailureCode::Interrupted
+                })
+            })
     }
     fn publish_archive(
         &self,

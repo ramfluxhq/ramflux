@@ -14,6 +14,14 @@ pub enum StorageError {
     ObjectErased,
     #[error("object identity conflict; explicit verified replacement is required")]
     ObjectIdentityConflict,
+    #[error(
+        "account schema version {schema_version} requires a newer binary (supported {supported}); upgrade the binary"
+    )]
+    AccountSchemaTooNew { schema_version: i64, supported: i64 },
+    #[error(
+        "object ownership cannot be reconstructed safely from archive schema version {schema_version}"
+    )]
+    ObjectOwnershipUnverified { schema_version: i64 },
     #[error("protocol error: {0}")]
     Protocol(#[from] ramflux_protocol::ProtocolError),
     #[error("ambiguous device ID: {0}; root-qualified address required")]

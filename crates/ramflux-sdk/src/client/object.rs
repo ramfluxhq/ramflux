@@ -10,6 +10,8 @@ use ramflux_storage::ObjectRetention;
 mod cache_tests;
 #[path = "object_cached_download.rs"]
 mod cached_download;
+#[path = "object_history_ownership.rs"]
+mod history_ownership;
 #[cfg(test)]
 #[path = "object_listing_tests.rs"]
 mod listing_tests;
@@ -103,7 +105,7 @@ impl RamfluxClient {
     ) -> Result<SdkObjectSharePackage, SdkError> {
         let object =
             self.object_store_object(&request.object_id)?.ok_or(SyncError::ObjectNotFound)?;
-        let object_key = self.object_content_key(&object.object_id)?;
+        let object_key = zeroize::Zeroizing::new(self.object_content_key(&object.object_id)?);
         let recipient_device_id = request.recipient_device_id.clone().ok_or_else(|| {
             SdkError::LocalBus("object.share requires recipient_device_id".to_owned())
         })?;
@@ -141,6 +143,7 @@ impl RamfluxClient {
                 &request.conversation_id,
             )
             .await?;
+        self.account_db()?.check_object_identity(&object.object_id, &object.manifest_hash)?;
         Ok(SdkObjectSharePackage {
             schema: "ramflux.sdk.object_share_package.v1".to_owned(),
             version: 1,
@@ -266,31 +269,84 @@ impl RamfluxClient {
         &mut self,
         package: &SdkObjectSharePackage,
     ) -> Result<EncryptedObject, SdkError> {
-        if package.schema != "ramflux.sdk.object_share_package.v1" {
-            return Err(SdkError::LocalBus(format!(
-                "unsupported object share package schema: {}",
-                package.schema
-            )));
+        let (object, slot) = self.prepare_shared_import(package)?;
+        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            self.persist_object_if_unlocked(
+                &object,
+                Some(&slot.object_key),
+                ObjectRetention::Standalone,
+            )?;
+            self.commit_object_key_slot_session(&slot)
+        })?;
+        self.object_store.cache_persisted_object(object.clone(), Some(slot.object_key));
+        Ok(object)
+    }
+
+    /// Explicitly replaces the expected prior identity, or requires an absent retired wire id.
+    /// # Errors
+    /// Refuses unexpected state, active owners of a different identity, or an erased incoming identity.
+    pub fn replace_shared_object(
+        &mut self,
+        package: &SdkObjectSharePackage,
+        expected_manifest: Option<&str>,
+    ) -> Result<EncryptedObject, SdkError> {
+        let (object, slot) = self.prepare_shared_import(package)?;
+        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            self.account_db()?.replace_object(
+                expected_manifest,
+                &ObjectWrite {
+                    object_id: &object.object_id,
+                    manifest_hash: &object.manifest_hash,
+                    nonce: &object.nonce,
+                    ciphertext: &object.ciphertext,
+                    plaintext_hash: &object.plaintext_hash,
+                    tombstoned: false,
+                    backup_excluded: false,
+                    content_key: Some(&slot.object_key),
+                    object: &persisted_descriptor(&object),
+                    updated_at: now_unix_timestamp(),
+                },
+            )?;
+            self.commit_object_key_slot_session(&slot)
+        })?;
+        self.object_store.cache_persisted_object(object.clone(), Some(slot.object_key));
+        Ok(object)
+    }
+
+    fn prepare_shared_import(
+        &self,
+        package: &SdkObjectSharePackage,
+    ) -> Result<(EncryptedObject, DeferredObjectKeySlot), SdkError> {
+        if package.schema != "ramflux.sdk.object_share_package.v1" || package.version != 1 {
+            return Err(SdkError::LocalBus("unsupported object share package version".into()));
         }
-        if let Some(db) = self.active_account_db.as_ref() {
-            db.check_object_identity(&package.object.object_id, &package.object.manifest_hash)?;
-        }
-        let deferred = self.decrypt_object_key_slot(&package.key_slot)?;
-        let object_key = deferred.object_key;
+        self.account_db()?
+            .check_object_identity(&package.object.object_id, &package.object.manifest_hash)?;
+        let slot = self.decrypt_object_key_slot(&package.key_slot)?;
         let ciphertext = ramflux_protocol::decode_base64url(&package.ciphertext_base64)
-            .map_err(|error| SdkError::LocalBus(format!("invalid object ciphertext: {error}")))?;
+            .map_err(|_| SdkError::LocalBus("invalid object ciphertext encoding".into()))?;
+        let manifest = ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::OBJECT_MANIFEST,
+            &ciphertext,
+        );
+        if manifest != package.object.manifest_hash {
+            return Err(SdkError::LocalBus("object ciphertext manifest mismatch".into()));
+        }
         let mut staged = ObjectStore::new();
         let object = staged.put_received_encrypted_object_with_key(
             &package.object.object_id,
-            &package.object.manifest_hash,
+            &manifest,
             &ciphertext,
             &package.object.plaintext_hash,
-            object_key,
+            slot.object_key,
         );
-        self.persist_object_if_unlocked(&object, Some(&object_key), ObjectRetention::Standalone)?;
-        self.object_store.cache_persisted_object(object.clone(), Some(object_key));
-        self.commit_object_key_slot_session(&deferred)?;
-        Ok(object)
+        let plaintext = zeroize::Zeroizing::new(staged.decrypt_object(&object.object_id)?);
+        if ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, &plaintext)
+            != object.plaintext_hash
+        {
+            return Err(SdkError::LocalBus("object plaintext hash mismatch".into()));
+        }
+        Ok((object, slot))
     }
 
     /// Decrypts the attachment key slot, returning the object key and the advanced slot recv session
@@ -335,7 +391,7 @@ impl RamfluxClient {
     }
 
     /// Commits the advanced attachment key-slot recv session. T21-A2a: only called once the whole
-    /// attachment content is durable and verified, including verified local-cache completion.
+    /// attachment import (download, persist, plaintext verification, and every ACK) has succeeded.
     pub(crate) fn commit_object_key_slot_session(
         &self,
         deferred: &DeferredObjectKeySlot,
@@ -399,10 +455,10 @@ impl RamfluxClient {
             )));
         }
         let key_slot = self.decrypt_object_key_slot(&attachment.key_slot)?;
-        let object_key = key_slot.object_key;
+        let object_key = zeroize::Zeroizing::new(key_slot.object_key);
         let download = self.download_dm_attachment_ciphertext(
             attachment,
-            object_key,
+            *object_key,
             relay_service_key_base64,
         )?;
         let ciphertext = download.ciphertext;
@@ -419,10 +475,10 @@ impl RamfluxClient {
             &attachment.manifest_hash,
             &ciphertext,
             &attachment.plaintext_hash,
-            object_key,
+            *object_key,
         );
         self.persist_object_if_unlocked(&object, Some(&object_key), ObjectRetention::Imported)?;
-        self.object_store.cache_persisted_object(object.clone(), Some(object_key));
+        self.object_store.cache_persisted_object(object.clone(), Some(*object_key));
         self.persist_object_transfer(ObjectTransferPersist {
             transfer_id: &download.transfer_id,
             object: &object,
@@ -461,18 +517,34 @@ impl RamfluxClient {
         attachment: &SdkDmAttachmentRef,
         relay_service_key_base64: Option<String>,
     ) -> Result<SdkDmAttachmentImportResult, SdkError> {
+        self.import_dm_attachment_retained(
+            engine,
+            pool,
+            attachment,
+            relay_service_key_base64,
+            ObjectRetention::Imported,
+        )
+        .await
+    }
+
+    pub(crate) async fn import_dm_attachment_retained(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
+        attachment: &SdkDmAttachmentRef,
+        relay_service_key_base64: Option<String>,
+        retention: ObjectRetention,
+    ) -> Result<SdkDmAttachmentImportResult, SdkError> {
         let mut check = "reference_schema";
         let outcome = Box::pin(async {
-            if attachment.schema != "ramflux.sdk.dm_attachment_ref.v1" {
-                return Err(SdkError::LocalBus(format!(
-                    "unsupported DM attachment ref schema: {}",
-                    attachment.schema
-                )));
-            }
-            self.account_db()?
-                .check_object_identity(&attachment.object_id, &attachment.manifest_hash)?;
+            self.validate_attachment_import(attachment)?;
             check = "verified_local_cache";
-            if let Some(imported) = self.try_import_cached_attachment(attachment)? {
+            let cached = if matches!(retention, ObjectRetention::Imported) {
+                self.try_import_cached_attachment(attachment)?
+            } else {
+                self.try_import_cached_attachment_retained(attachment, retention)?
+            };
+            if let Some(imported) = cached {
                 return Ok(imported);
             }
             check = "prepared_key_slot";
@@ -482,20 +554,24 @@ impl RamfluxClient {
                 check = "key_slot_decrypt";
                 self.decrypt_object_key_slot(&attachment.key_slot)?
             };
-            let object_key = key_slot.object_key;
+            let object_key = zeroize::Zeroizing::new(key_slot.object_key);
             check = "relay_download";
             let download = self
                 .download_dm_attachment_ciphertext_via_gateway(
                     engine,
                     pool,
                     attachment,
-                    object_key,
+                    object_key.clone(),
                     relay_service_key_base64.clone(),
                 )
                 .await?;
             check = "verify_and_persist";
-            let verified =
-                self.verify_persist_dm_attachment(attachment, &download, object_key, &mut check)?;
+            let verified = self.verify_persist_dm_attachment_retained(
+                attachment,
+                &download,
+                *object_key,
+                retention,
+            )?;
             let object = &verified.object;
             #[cfg(feature = "itest-rfd-fault")]
             crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::GranteeImport).await?;
@@ -533,7 +609,7 @@ impl RamfluxClient {
                         attachment: Some(attachment),
                         object,
                         manifest: &download.manifest,
-                        object_key,
+                        object_key: *object_key,
                         expires_at: download.expires_at,
                     };
                     check = "relay_ack";
@@ -544,11 +620,7 @@ impl RamfluxClient {
             // T21-A2a: every chunk was downloaded, persisted, plaintext-verified, and ACKed; only now
             // commit the slot recv checkpoint so a failed ACK above leaves the slot ratchet re-usable.
             check = "key_slot_commit";
-            self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-                self.account_db()?
-                    .check_object_identity(&attachment.object_id, &attachment.manifest_hash)?;
-                self.commit_received_attachment_import(attachment, &key_slot)
-            })?;
+            self.commit_received_attachment_import(attachment, &key_slot)?;
             Ok(SdkDmAttachmentImportResult {
                 object_id: attachment.object_id.clone(),
                 manifest_hash: attachment.manifest_hash.clone(),
@@ -563,6 +635,18 @@ impl RamfluxClient {
         } else {
             super::attachment_diagnostics::checked(outcome, &attachment.object_id, check)
         }
+    }
+
+    fn validate_attachment_import(&self, attachment: &SdkDmAttachmentRef) -> Result<(), SdkError> {
+        if attachment.schema != "ramflux.sdk.dm_attachment_ref.v1" {
+            return Err(SdkError::LocalBus(format!(
+                "unsupported DM attachment ref schema: {}",
+                attachment.schema
+            )));
+        }
+        self.account_db()?
+            .check_object_identity(&attachment.object_id, &attachment.manifest_hash)?;
+        Ok(())
     }
 
     async fn acknowledge_dm_attachment_chunks(
@@ -583,16 +667,34 @@ impl RamfluxClient {
         .await
     }
 
+    #[cfg(test)]
     fn verify_persist_dm_attachment(
         &mut self,
         attachment: &SdkDmAttachmentRef,
         download: &DmAttachmentDownload,
         object_key: [u8; 32],
-        check: &mut &'static str,
     ) -> Result<VerifiedAttachmentImport, SdkError> {
+        let object_key = zeroize::Zeroizing::new(object_key);
+        self.verify_persist_dm_attachment_retained(
+            attachment,
+            download,
+            *object_key,
+            ObjectRetention::Imported,
+        )
+    }
+
+    fn verify_persist_dm_attachment_retained(
+        &mut self,
+        attachment: &SdkDmAttachmentRef,
+        download: &DmAttachmentDownload,
+        object_key: [u8; 32],
+        retention: ObjectRetention,
+    ) -> Result<VerifiedAttachmentImport, SdkError> {
+        let object_key = zeroize::Zeroizing::new(object_key);
+        let mut check = "manifest_hash";
         let outcome = (|| {
             let ciphertext = &download.ciphertext;
-            *check = "manifest_hash";
+            check = "manifest_hash";
             let assembled_hash = ramflux_crypto::blake3_256_base64url(
                 ramflux_protocol::domain::OBJECT_MANIFEST,
                 ciphertext,
@@ -606,33 +708,36 @@ impl RamfluxClient {
                 &attachment.manifest_hash,
                 ciphertext,
                 &attachment.plaintext_hash,
-                object_key,
+                *object_key,
             );
-            *check = "object_persist";
-            self.persist_object_if_unlocked(&object, Some(&object_key), ObjectRetention::Imported)?;
-            self.object_store.cache_persisted_object(object.clone(), Some(object_key));
-            *check = "transfer_persist";
-            self.persist_object_transfer(ObjectTransferPersist {
-                transfer_id: &download.transfer_id,
-                object: &object,
-                direction: OBJECT_TRANSFER_DOWNLOAD,
-                relay_endpoint: Some(&download.relay_endpoint),
-                chunk_size: download.manifest.chunk_size,
-                total_chunks: download.manifest.total_chunks,
-                completed: &download.completed,
-                done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
-                state: "complete",
-                last_error: None,
-                resume_token: None,
-                expires_at: Some(i64::try_from(download.expires_at).unwrap_or(i64::MAX)),
-            })?;
-            *check = "content_decrypt";
-            let plaintext = zeroize::Zeroizing::new(self.decrypt_object(&attachment.object_id)?);
-            *check = "plaintext_hash";
+            check = "content_decrypt";
+            let plaintext = zeroize::Zeroizing::new(staged.decrypt_object(&object.object_id)?);
+            check = "plaintext_hash";
             let plaintext_hash = verify_attachment_plaintext(attachment, &plaintext)?;
+            self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+                check = "object_persist";
+                self.persist_object_if_unlocked(&object, Some(&object_key), retention)?;
+                check = "transfer_persist";
+                self.persist_object_transfer(ObjectTransferPersist {
+                    transfer_id: &download.transfer_id,
+                    object: &object,
+                    direction: OBJECT_TRANSFER_DOWNLOAD,
+                    relay_endpoint: Some(&download.relay_endpoint),
+                    chunk_size: download.manifest.chunk_size,
+                    total_chunks: download.manifest.total_chunks,
+                    completed: &download.completed,
+                    done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
+                    state: "complete",
+                    last_error: None,
+                    resume_token: None,
+                    expires_at: Some(i64::try_from(download.expires_at).unwrap_or(i64::MAX)),
+                })?;
+                Ok(())
+            })?;
+            self.object_store.cache_persisted_object(object.clone(), Some(*object_key));
             Ok(VerifiedAttachmentImport { object, plaintext, plaintext_hash })
         })();
-        outcome
+        super::attachment_diagnostics::checked(outcome, &attachment.object_id, check)
     }
 
     #[cfg(feature = "itest-local-mint")]
@@ -643,6 +748,7 @@ impl RamfluxClient {
         object_key: [u8; 32],
         relay_service_key_base64: Option<String>,
     ) -> Result<DmAttachmentDownload, SdkError> {
+        let object_key = zeroize::Zeroizing::new(object_key);
         let options = self
             .relay_transfer_options(
                 Some(attachment.relay_endpoint.clone()),
@@ -671,7 +777,7 @@ impl RamfluxClient {
             object_created_group_key_epoch: None,
         };
         let object_stub = dm_attachment_object_stub(attachment);
-        let mut session = ObjectSyncSession::new(manifest.clone(), object_key);
+        let mut session = ObjectSyncSession::new(manifest.clone(), *object_key);
         let expires_at = relay_expires_at();
         let transfer_id = object_transfer_id(
             &attachment.object_id,
@@ -688,7 +794,7 @@ impl RamfluxClient {
                     attachment: Some(attachment),
                     object: &object_stub,
                     manifest: &manifest,
-                    object_key,
+                    object_key: *object_key,
                     expires_at,
                 },
                 chunk_index,
@@ -728,7 +834,7 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         pool: &ramflux_transport::RelayQuicPool,
         attachment: &SdkDmAttachmentRef,
-        object_key: [u8; 32],
+        object_key: zeroize::Zeroizing<[u8; 32]>,
         relay_service_key_base64: Option<String>,
     ) -> Result<DmAttachmentDownload, SdkError> {
         let options = self
@@ -759,7 +865,7 @@ impl RamfluxClient {
             object_created_group_key_epoch: None,
         };
         let object_stub = dm_attachment_object_stub(attachment);
-        let mut session = ObjectSyncSession::new(manifest.clone(), object_key);
+        let mut session = ObjectSyncSession::new(manifest.clone(), *object_key);
         let expires_at = relay_expires_at();
         let transfer_id = object_transfer_id(
             &attachment.object_id,
@@ -789,7 +895,7 @@ impl RamfluxClient {
                             attachment: Some(attachment),
                             object: &object_stub,
                             manifest: &manifest,
-                            object_key,
+                            object_key: *object_key,
                             expires_at,
                         },
                         chunk_index,
@@ -892,30 +998,74 @@ impl RamfluxClient {
                 Some(prepared.object_key()),
                 ObjectRetention::OwnDeviceTransport,
             )?;
-            for message in messages.iter().filter(|message| !message.deleted) {
-                let hash = ramflux_crypto::blake3_256_base64url(
-                    "ramflux.object.transport.owner.v1",
-                    &ramflux_protocol::canonical_json_bytes(&(
-                        object_id,
-                        &object.manifest_hash,
-                        &message.message_id,
-                    ))?,
-                );
-                self.account_db()?.register_object_reference(
-                    &ramflux_storage::ObjectReferenceOwner {
-                        reference_hash: &hash,
-                        wire_id: object_id,
-                        manifest_hash: &object.manifest_hash,
-                        selector: object_id,
-                        message_id: &message.message_id,
-                        reference: &serde_json::json!({}),
-                        metadata: &serde_json::json!({}),
-                    },
-                )?;
-            }
+            self.bind_history_transport_owners(
+                object_id,
+                &object.manifest_hash,
+                plaintext,
+                messages,
+                false,
+            )?;
             Ok(())
         })?;
         Ok(self.object_store.install_prepared_object(prepared))
+    }
+
+    pub(super) fn bind_history_transport_owners(
+        &self,
+        object_id: &str,
+        manifest_hash: &str,
+        plaintext: &[u8],
+        messages: &[DirectMessageRecord],
+        consumed: bool,
+    ) -> Result<bool, SdkError> {
+        let owners = history_ownership::from_bytes(plaintext)?;
+        let safe_deleted = messages
+            .iter()
+            .filter(|message| message.deleted)
+            .map(|message| message.message_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for (wire, manifest) in &owners.objects {
+            self.account_db()?.retain_transport_dependency(
+                object_id,
+                manifest_hash,
+                wire,
+                manifest,
+            )?;
+        }
+        let mut retire = false;
+        for owner in &owners.messages {
+            if safe_deleted.contains(owner.as_str()) {
+                continue;
+            }
+            if self.account_db()?.message_is_deleted(owner)? {
+                if consumed {
+                    retire = true;
+                    continue;
+                }
+                return Err(SdkError::ObjectErased);
+            }
+            let message_id = owner;
+            let hash = ramflux_crypto::blake3_256_base64url(
+                "ramflux.object.transport.owner.v1",
+                &ramflux_protocol::canonical_json_bytes(&(object_id, manifest_hash, message_id))?,
+            );
+            self.account_db()?.register_object_reference(
+                &ramflux_storage::ObjectReferenceOwner {
+                    reference_hash: &hash,
+                    wire_id: object_id,
+                    manifest_hash,
+                    selector: object_id,
+                    message_id,
+                    reference: &serde_json::json!({}),
+                    metadata: &serde_json::json!({}),
+                },
+            )?;
+        }
+
+        if retire {
+            self.account_db()?.retire_transport_object(object_id, manifest_hash)?;
+        }
+        Ok(retire)
     }
 
     /// T25-A2 (OBJ-IPC-01) P0-1: prepare the whole-object encryption (fresh key + AEAD seal)
@@ -994,17 +1144,24 @@ impl RamfluxClient {
         } else {
             None
         };
-        Ok(object.filter(|object| {
+        let object = object.filter(|object| {
             alias.as_ref().is_none_or(|(_, manifest)| object.manifest_hash == *manifest)
-        }))
+        });
+        if let (Some(db), Some(object)) = (self.active_account_db.as_ref(), object.as_ref()) {
+            db.check_object_identity(&object.object_id, &object.manifest_hash)?;
+        }
+        Ok(object)
     }
 
     pub(super) fn object_content_key(&self, object_id: &str) -> Result<[u8; 32], SdkError> {
         if let Some(db) = self.active_account_db.as_ref() {
             db.check_object_access(object_id)?;
         }
-        if let Ok(key) = self.object_store.object_key(object_id) {
-            return Ok(key);
+        if let Some(object) = self.object_store.cached_object(object_id) {
+            if let Some(db) = self.active_account_db.as_ref() {
+                db.check_object_identity(object_id, &object.manifest_hash)?;
+            }
+            return Ok(self.object_store.object_key(object_id)?);
         }
         let Some(db) = self.active_account_db.as_ref() else {
             return Err(SyncError::ObjectKeyMissing.into());
@@ -1016,7 +1173,13 @@ impl RamfluxClient {
 
     pub(crate) fn persisted_objects(&self) -> Result<Vec<EncryptedObject>, SdkError> {
         match self.active_account_db.as_ref() {
-            Some(db) => Ok(db.load_objects::<EncryptedObject>()?.0),
+            Some(db) => {
+                let (objects, mut keys) = db.load_objects::<EncryptedObject>()?;
+                for key in keys.values_mut() {
+                    zeroize::Zeroize::zeroize(key);
+                }
+                Ok(objects)
+            }
             None => Ok(self.object_store.objects()),
         }
     }
@@ -1047,28 +1210,31 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn decrypt_object(&self, object_id: &str) -> Result<Vec<u8>, SdkError> {
+        let object = self.object_store_object(object_id)?.ok_or(SyncError::ObjectNotFound)?;
+        let wire = &object.object_id;
+        let mut plaintext =
+            zeroize::Zeroizing::new(if self.object_store.cached_object(wire).is_some() {
+                self.object_store.decrypt_object(wire)?
+            } else {
+                let db = self.active_account_db.as_ref().ok_or(SyncError::ObjectNotFound)?;
+                let (persisted, key) =
+                    db.load_object::<EncryptedObject>(wire)?.ok_or(SyncError::ObjectNotFound)?;
+                let mut single = ObjectStore::new();
+                single.cache_persisted_object(persisted, key);
+                single.decrypt_object(wire)?
+            });
         if let Some(db) = self.active_account_db.as_ref() {
-            db.check_object_access(object_id)?;
+            db.check_object_identity(wire, &object.manifest_hash)?;
         }
-        let alias = self.received_object_alias(object_id)?;
-        if alias.is_some() && self.object_store_object(object_id)?.is_none() {
-            return Err(SyncError::ObjectNotFound.into());
-        }
-        let object_id = alias.as_ref().map_or(object_id, |(wire, _)| wire.as_str());
-        if self.object_store.cached_object(object_id).is_some() {
-            return Ok(self.object_store.decrypt_object(object_id)?);
-        }
-        let db = self.active_account_db.as_ref().ok_or(SyncError::ObjectNotFound)?;
-        let (object, key) =
-            db.load_object::<EncryptedObject>(object_id)?.ok_or(SyncError::ObjectNotFound)?;
-        let mut single = ObjectStore::new();
-        single.cache_persisted_object(object, key);
-        Ok(single.decrypt_object(object_id)?)
+        Ok(std::mem::take(&mut *plaintext))
     }
 
     /// # Errors
     /// Returns an error when the object does not exist or cannot be tombstoned.
     pub fn tombstone_object(&mut self, object_id: &str) -> Result<(), SdkError> {
+        if let Some(db) = self.active_account_db.as_ref() {
+            db.check_object_access(object_id)?;
+        }
         if self.object_store.cached_object(object_id).is_none() {
             let db = self.active_account_db.as_ref().ok_or(SyncError::ObjectNotFound)?;
             let (object, key) =
@@ -1246,7 +1412,7 @@ impl RamfluxClient {
         ack: bool,
     ) -> Result<Vec<u8>, SdkError> {
         let object = self.object_store_object(object_id)?.ok_or(SyncError::ObjectNotFound)?;
-        let object_key = self.object_content_key(&object.object_id)?;
+        let object_key = zeroize::Zeroizing::new(self.object_content_key(&object.object_id)?);
         let branch = self
             .device_branch
             .as_ref()
@@ -1433,7 +1599,7 @@ impl RamfluxClient {
             .ok_or_else(|| SdkError::LocalBus("object relay requires a device branch".to_owned()))?
             .clone();
         let object = self.object_store_object(object_id)?.ok_or(SyncError::ObjectNotFound)?;
-        let object_key = self.object_content_key(object_id)?;
+        let object_key = zeroize::Zeroizing::new(self.object_content_key(object_id)?);
         let chunk_size = self
             .account_db()?
             .object_transfer(object_id, Some(OBJECT_TRANSFER_UPLOAD))?
@@ -1596,7 +1762,7 @@ impl RamfluxClient {
         chunk_size: usize,
         options: &RelayTransferOptions,
     ) -> Result<SdkObjectTransferStatus, SdkError> {
-        let object_key = self.object_content_key(&object.object_id)?;
+        let object_key = zeroize::Zeroizing::new(self.object_content_key(&object.object_id)?);
         let branch = self.device_branch.as_ref().ok_or_else(|| {
             SdkError::LocalBus("object relay requires a device branch".to_owned())
         })?;
@@ -1728,7 +1894,7 @@ impl RamfluxClient {
         chunk_size: usize,
         options: &RelayTransferOptions,
     ) -> Result<SdkObjectTransferStatus, SdkError> {
-        let object_key = self.object_content_key(&object.object_id)?;
+        let object_key = zeroize::Zeroizing::new(self.object_content_key(&object.object_id)?);
         let branch = self.device_branch.as_ref().ok_or_else(|| {
             SdkError::LocalBus("object relay requires a device branch".to_owned())
         })?;
@@ -1952,6 +2118,12 @@ struct DmAttachmentFetch<'a> {
     // Read only by the itest-local-mint v2 fetch path; the v3 async fetch derives its own expiry.
     #[cfg_attr(not(feature = "itest-local-mint"), allow(dead_code))]
     expires_at: u64,
+}
+
+impl Drop for DmAttachmentFetch<'_> {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.object_key);
+    }
 }
 
 #[cfg(feature = "itest-local-mint")]

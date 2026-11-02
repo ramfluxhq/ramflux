@@ -102,8 +102,9 @@ impl ObjectStore {
     }
 
     /// Binds retirement commitments to the authenticated account root.
+    #[must_use]
     pub fn retirement_handle(&self, root: &str) -> ObjectRetirementHandle {
-        self.data().root = root.to_owned();
+        root.clone_into(&mut self.data().root);
         ObjectRetirementHandle(Arc::downgrade(&self.data))
     }
 }

@@ -242,6 +242,10 @@ impl AccountRuntime {
                     continue;
                 },
                 () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
+                    if let Some(account)=self.state.accounts.get(&self.id)
+                        && let Err(error)=account.client.account_db().and_then(|db|db.maintain_expired_object_holds().map_err(SdkError::from)) {
+                        tracing::warn!(error_code=local_bus_error_code(&error),"expired object cleanup deferred; account remains open");
+                    }
                     let mut shutdown = self.shutdown.clone();
                     let active = tokio::select! {
                         _ = shutdown.changed() => break,
@@ -327,6 +331,31 @@ impl AccountRuntime {
         self.state.accounts.remove(&self.id);
     }
 
+    fn authorize_backup(&self, generation: i64) -> Result<(), SdkError> {
+        let account = local_bus_account(&self.state, &self.id)?;
+        if account.client.account_db()?.privacy_erasure_generation()? != generation {
+            return Err(SdkError::ObjectErased);
+        }
+        Ok(())
+    }
+
+    fn capture_backup(&self) -> Result<super::backup_jobs::CapturedAccount, SdkError> {
+        let account = local_bus_account(&self.state, &self.id)?;
+        let reader = account.client.account_db()?.open_backup_reader()?;
+        let identity = super::backup_jobs::capture_identity(
+            &account.client,
+            &self.state.config.data_root,
+            &self.id,
+        )?;
+        let erasure_generation = reader.privacy_erasure_generation()?;
+        Ok(super::backup_jobs::CapturedAccount {
+            reader,
+            identity,
+            erasure_generation,
+            actor: None,
+        })
+    }
+
     async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
         if let Some(backup) = command.private.take() {
             match backup {
@@ -355,18 +384,13 @@ impl AccountRuntime {
                         let _ = reply.send(result);
                     }
                 }
+                super::actor::PrivateCommand::AuthorizeBackup { generation, reply } => {
+                    let result = self.authorize_backup(generation);
+                    let _ = reply.send(result);
+                }
                 super::actor::PrivateCommand::Capture(reply) => {
                     if !reply.is_closed() {
-                        let result = (|| {
-                            let account = local_bus_account(&self.state, &self.id)?;
-                            let reader = account.client.account_db()?.open_backup_reader()?;
-                            let identity = super::backup_jobs::capture_identity(
-                                &account.client,
-                                &self.state.config.data_root,
-                                &self.id,
-                            )?;
-                            Ok(super::backup_jobs::CapturedAccount { reader, identity })
-                        })();
+                        let result = self.capture_backup();
                         let _ = reply.send(result);
                     }
                 }

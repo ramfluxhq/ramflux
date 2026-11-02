@@ -167,7 +167,8 @@ Before opening the backup snapshot, an independent account reader worker builds 
 remaining pages with `account.backup.jobs {job_id, missing_after}`; its answer is
 `{job, unavailable_attachments, unavailable_count, unavailable_next_cursor}`.
 Continue until the cursor is null. Encrypted diagnostics expire after 30 minutes,
-or when their recent job is evicted; after daemon restart retry create. No grant,
+when their recent job is evicted, or immediately when their account erasure
+generation changes; after daemon restart retry create. No grant,
 content key or attachment reference enters the error details. An explicit retry
 with `allow_missing_attachments:true` still tries fetching first. It records every
 remaining valid selector and its expected hashes in the encrypted archive's
@@ -246,3 +247,63 @@ stale local passphrase) and a failed `PRAGMA integrity_check` also use `unreadab
 `tampered` is reserved for backup archive MAC, hash or signature verification
 failures. These failures follow the
 [account writer error mapping](account_writer_ownership.md#error-codes).
+
+## Attachment erasure and restore boundaries
+
+An attachment received by several messages keeps its payload and content key until
+its last message owner is deleted. Separate references retain their own private
+key slots. Explicit standalone object puts/imports keep their independent retention
+claim; deleting a message does not delete such an object. Unconverted send holds
+expire within ten minutes, with cancellation cleanup on the normal send path.
+Internal history containers expire after one hour and are also retired when a
+message whose bytes they carry is deleted.
+
+Last-owner deletion removes the payload, content key, cached chunks, private
+references and progress in the message deletion transaction. Cached keys are wiped
+and runtime-owned download spools are closed and unlinked before successful
+completion. Later get, fetch, share, decrypt and export requests report
+`ObjectErased`; `rf` reports that code and exits unsuccessfully without terminating
+the daemon. Cached operation responses become compact erased receipts.
+
+Portable fences contain only a domain-separated BLAKE3 commitment to the account
+root, wire object id and verified ciphertext manifest, plus opaque lookup indexes.
+Both native and full restore merge fences before payloads or private archive
+copies, regardless of payload timestamps. A post-delete backup preserves these
+fences across rekey and fresh restore. Reusing a wire id with different verified
+ciphertext requires an explicit checked replacement; ordinary put/import and
+conflicting restore refuse it with `ObjectIdentityConflict`. SDK
+`replace_encrypted_object` and `replace_shared_object` require the expected prior
+manifest, or explicit expected absence. Active owners of a different identity
+prevent replacement. A replacement never removes an existing fence.
+
+A backup worker captures the erasure generation and asks the account's ordered
+writer for publication authorization after staging and encryption. The generation
+also advances when one shared message reference is removed while another owner
+keeps the payload. If deletion
+wins first, the job fails with `object_erased` and discards its staged snapshot,
+key and partial archive; create a new backup after deletion. If authorization
+wins first, the archive is a pre-delete external copy.
+
+Account schema version 12 installs a versioned checksum sentinel on migration 1.
+Older binaries fail closed with `MigrationChecksumMismatch`, naming that migration
+and its writer-floor version. Operator recovery is to upgrade the binary and
+reopen the same account; no data change is required. Keep the sentinel and
+migration checksums intact. Newer unsupported schema versions also fail closed.
+
+Existing accounts discover ownership with a durable phase/cursor. Each account
+open scans at most 256 metadata rows and decodes at most 1 MiB. Reclamation starts
+only after discovery completes, handles at most one proven imported orphan per
+maintenance transaction, and measures ciphertext and legacy body sizes before
+reclaiming either BLOB (each is bounded by the supported 16 MiB ciphertext size
+plus its authentication tag). Oversized legacy BLOBs await a separate policy.
+Ambiguous legacy zero-reference objects remain readable and listed as before;
+missing references alone never prove that an object may be erased. This is a
+residual limitation for previously orphaned ciphertext and keys. Legacy archives
+whose private attachment references cannot be reconstructed safely are refused
+with `object_ownership_unverified`, rather than installed. Reopen and upgrade the
+original account to complete discovery, then create a verifiable archive; retain
+an intact source if ownership remains ambiguous.
+
+A fresh restore using only a pre-delete archive has no newer erasure fence.
+Deletion does not revoke another device's data, relay copies, user-owned exports
+or bytes already returned to callers. Those copies are outside local erasure.

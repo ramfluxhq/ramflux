@@ -61,14 +61,32 @@ pub(super) async fn execute(
     {
         return Ok(ActorResponse { body, events: Vec::new(), nodes: None });
     }
+    bind_operation_objects(state, account_id, key, &command.request.body)?;
     let snapshot = state
         .accounts
         .get_mut(account_id)
         .map(|account| super::control_state::snapshot(account, &command.request))
         .transpose()?
         .flatten();
-    let result =
-        Box::pin(dispatch_local_bus_request(&command.request, state, &mut connection)).await?;
+    let result = match Box::pin(dispatch_local_bus_request(
+        &command.request,
+        state,
+        &mut connection,
+    ))
+    .await
+    {
+        Ok(result) => result,
+        Err(SdkError::ObjectErased) => {
+            if let (Some(key), Some(account)) = (key, state.accounts.get(account_id)) {
+                account
+                    .client
+                    .account_db()?
+                    .complete_operation(key, &serde_json::json!({"object_erased":true}))?;
+            }
+            return Err(SdkError::ObjectErased);
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(account) = state.accounts.get(account_id) {
         super::read_model::capture(account, &command.request, &result.response_body)?;
     }
@@ -91,4 +109,22 @@ pub(super) async fn execute(
         events,
         nodes: command.request.method.starts_with("node.").then(|| state.nodes.clone()),
     })
+}
+
+fn bind_operation_objects(
+    state: &LocalBusDaemonState,
+    account_id: &str,
+    key: Option<&str>,
+    body: &serde_json::Value,
+) -> Result<(), SdkError> {
+    if let (Some(key), Some(account)) = (key, state.accounts.get(account_id)) {
+        let db = account.client.account_db()?;
+        if let Err(error) = db.bind_operation_objects(key, body) {
+            if matches!(error, StorageError::ObjectErased) {
+                db.complete_operation(key, &serde_json::json!({"object_erased":true}))?;
+            }
+            return Err(error.into());
+        }
+    }
+    Ok(())
 }

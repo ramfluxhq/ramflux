@@ -167,7 +167,7 @@ impl AccountDb {
     /// # Errors
     /// Returns SQL/JSON decoding errors.
     pub fn client_message_object_ids(&self, message: &str) -> Result<Vec<String>, StorageError> {
-        let mut statement=self.connection.prepare("SELECT substr(state_kind,18) FROM runtime_actor_state WHERE state_kind GLOB 'directory/object/*' AND json_extract(CAST(state_json AS TEXT),'$.message_id')=?1 ORDER BY state_kind LIMIT 128")?;
+        let mut statement=self.connection.prepare("SELECT selector FROM (SELECT r.selector FROM object_message_reference m JOIN object_retention_reference r USING(reference_hash) WHERE m.message_id=?1 UNION SELECT substr(state_kind,18) FROM runtime_actor_state WHERE state_kind GLOB 'directory/object/*' AND json_extract(CAST(state_json AS TEXT),'$.message_id')=?1) ORDER BY selector LIMIT 128")?;
         Ok(statement
             .query_map(params![message], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)

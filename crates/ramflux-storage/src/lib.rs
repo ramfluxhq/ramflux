@@ -31,6 +31,7 @@ mod schema_device_namespace;
 mod schema_group_control_identity;
 mod schema_group_sender_identity;
 mod schema_identity_keys;
+mod schema_object_erasure;
 mod schema_receipt_identity;
 
 pub use account_db::AccountDb;
@@ -40,7 +41,7 @@ pub use account_db::journal::{
 };
 pub use account_db::object_retention::{
     ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention, ObjectRetirementObserver,
-    PreSendObjectHold,
+    PreSendObjectHold, PrivacyResourceRegistration,
 };
 pub use account_db::runtime::AccountOutboxEntry;
 pub use account_index::AccountIndex;

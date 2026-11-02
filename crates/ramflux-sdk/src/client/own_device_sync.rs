@@ -122,7 +122,7 @@ impl RamfluxClient {
                 &relay_options,
             )
             .await?;
-        let object_key = self.object_store.object_key(&object.object_id)?;
+        let object_key = zeroize::Zeroizing::new(self.object_store.object_key(&object.object_id)?);
         let slot_conversation_id =
             own_device_sync_slot_conversation_id(&snapshot_id, &object.object_id, target_device_id);
         let slot_message = GatewayDirectMessage {
@@ -145,7 +145,7 @@ impl RamfluxClient {
             &slot_conversation_id,
             target_device_id,
         );
-        let ciphertext = session.encrypt(&object_key, &associated_data)?;
+        let ciphertext = session.encrypt(object_key.as_ref(), &associated_data)?;
         self.persist_dm_session(
             &slot_conversation_id,
             &format!("own-device-sync-slot:{}", object.object_id),
@@ -179,6 +179,7 @@ impl RamfluxClient {
             )?,
             signed: sdk_device_signed_fields(&source_device_id, ""),
         };
+        self.account_db()?.check_object_identity(&object.object_id, &object.manifest_hash)?;
         self.sign_own_history_envelope(&mut envelope)?;
         Ok(SdkOwnDeviceSyncExportResponse {
             snapshot_id,
@@ -286,25 +287,44 @@ impl RamfluxClient {
         let plaintext = if cached {
             self.decrypt_object(&envelope.history_ref.object_id)?
         } else {
-            let import = self
-                .import_dm_attachment_from_relay_via_gateway(
+            let mut import = self
+                .import_dm_attachment_retained(
                     engine,
                     pool,
                     &envelope.history_ref,
                     relay_service_key_base64,
+                    ramflux_storage::ObjectRetention::OwnDeviceTransport,
                 )
                 .await?;
-            ramflux_protocol::decode_base64url(&import.plaintext_base64).map_err(|_| {
-                SdkError::InboundRejected("invalid own-device history encoding".into())
-            })?
+            let decoded =
+                ramflux_protocol::decode_base64url(&import.plaintext_base64).map_err(|_| {
+                    SdkError::InboundRejected("invalid own-device history encoding".into())
+                });
+            zeroize::Zeroize::zeroize(&mut import.plaintext_base64);
+            decoded?
         };
         let plaintext = zeroize::Zeroizing::new(plaintext);
         let bundle: SdkOwnDeviceHistoryBundle = serde_json::from_slice(&plaintext)?;
         self.account_db()?.write_transaction(|| {
             let result = self.import_own_device_history_bundle(envelope, &bundle)?;
+            let retired = self.bind_history_transport_owners(
+                &envelope.history_ref.object_id,
+                &envelope.history_ref.manifest_hash,
+                &plaintext,
+                &bundle.messages,
+                true,
+            )?;
             self.cache_own_sync_import_receipt(envelope, &result)?;
             if let Some(next) = &bundle.next_page {
-                self.account_db()?.persist_actor_state(&format!("{receipt}/next"), next)?;
+                let key = format!("{receipt}/next");
+                self.account_db()?.persist_actor_state(&key, next)?;
+                if !retired {
+                    self.account_db()?.bind_transport_actor(
+                        &envelope.history_ref.object_id,
+                        &envelope.history_ref.manifest_hash,
+                        &key,
+                    )?;
+                }
             }
             Ok((result, bundle.next_page.clone()))
         })

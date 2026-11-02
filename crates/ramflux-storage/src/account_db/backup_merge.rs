@@ -33,7 +33,8 @@ struct RowSelection<'a> {
 fn skip_merge_table(table: &str) -> bool {
     matches!(
         table,
-        "message_footprint"
+        "account_erasure_generation"
+            | "message_footprint"
             | "message_copy_binding"
             | "runtime_account_identity"
             | "shared_group_removal_floor"
@@ -45,7 +46,18 @@ fn skip_merge_table(table: &str) -> bool {
             | "contact_request_decision"
             | "contact_link_decision"
             | "contact_message_fence_retention"
-    ) || table.starts_with("runtime_home_migration_")
+    ) || table.starts_with("object_retention_")
+        || table.starts_with("object_erasure_")
+        || table.starts_with("object_reference_")
+        || table.starts_with("object_legacy_")
+        || table.starts_with("object_identity_")
+        || table.starts_with("object_payload_")
+        || table.starts_with("object_transport_")
+        || matches!(
+            table,
+            "object_message_reference" | "object_payload_actor" | "object_runtime_response"
+        )
+        || table.starts_with("runtime_home_migration_")
         || table.starts_with("backup_archived_")
         || table == "account_key_check"
         || table.starts_with("schema_")
@@ -143,6 +155,7 @@ impl BackupDatabase {
         let result = (|| {
             let tables = self.incoming_tables()?;
             self.begin_message_merge()?;
+            self.merge_object_erasure(&mut progress)?;
             let shared_groups = self.select_backup_shared_groups(mode)?;
             // A restored generation starts fresh handshakes, never archived reservations.
             self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'merge-local',state_kind,state_json FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
@@ -183,13 +196,13 @@ impl BackupDatabase {
                 let filter = merge_filter(&table, native_data_only);
                 let kept:u64=self.db.query_row(&format!("SELECT count(*) FROM incoming.{t} r JOIN main.{t} l ON {join} WHERE {filter} AND NOT ({newer})",t=quoted(&table)),[],|row|row.get(0))?;
                 if table == "runtime_actor_state" {
-                    self.count_actor_states(filter, &join, &newer, &mut report)?;
+                    self.count_actor_states(&filter, &join, &newer, &mut report)?;
                 }
                 self.record_conversation_changes(&RowSelection {
                     table: &table,
                     join: &join,
                     newer: &newer,
-                    filter,
+                    filter: &filter,
                 })?;
                 if table == "contact_message_request" {
                     self.db
@@ -298,8 +311,8 @@ impl BackupDatabase {
         let source = key.fingerprint();
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); CREATE TABLE IF NOT EXISTS backup_archived_local_event AS SELECT '' AS source,* FROM incoming.local_event_log WHERE 0; CREATE UNIQUE INDEX IF NOT EXISTS backup_archive_event_key ON backup_archived_local_event(source,event_id);")?;
         super::message_footprint::install(&self.db)?;
-        self.db.execute("INSERT OR IGNORE INTO backup_archived_actor_state SELECT ?1,state_kind,state_json FROM incoming.runtime_actor_state",params![source])?;
-        self.db.execute("INSERT OR IGNORE INTO backup_archived_local_event SELECT ?1,* FROM incoming.local_event_log",params![source])?;
+        self.db.execute("INSERT OR IGNORE INTO backup_archived_actor_state SELECT ?1,state_kind,state_json FROM incoming.runtime_actor_state r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid)",params![source])?;
+        self.db.execute("INSERT OR IGNORE INTO backup_archived_local_event SELECT ?1,r.* FROM incoming.local_event_log r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='local_event_log' AND e.row_id=r.rowid)",params![source])?;
         for table in ["backup_archived_actor_state", "backup_archived_local_event"] {
             let exists:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name=?1)",params![table],|r|r.get(0))?;
             if exists {
@@ -309,7 +322,7 @@ impl BackupDatabase {
                     .map(|(name, _)| quoted(&name))
                     .collect::<Vec<_>>()
                     .join(",");
-                self.db.execute(&format!("INSERT OR IGNORE INTO {table}(source,{names}) SELECT ?1||'/'||source,{names} FROM incoming.{table}"),params![source])?;
+                self.db.execute(&format!("INSERT OR IGNORE INTO {table}(source,{names}) SELECT ?1||'/'||source,{names} FROM incoming.{table} r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{table}' AND e.row_id=r.rowid)"),params![source])?;
             }
         }
         Ok(())
@@ -332,7 +345,7 @@ impl BackupDatabase {
             })
             .collect::<Vec<_>>()
             .join(",");
-        let mut query=self.db.prepare("SELECT rowid,object_id,updated_at,length(ciphertext),backup_excluded,tombstoned FROM incoming.object_index ORDER BY rowid")?;
+        let mut query=self.db.prepare("SELECT rowid,object_id,updated_at,length(ciphertext),backup_excluded,tombstoned,CAST(manifest_hash AS TEXT) FROM incoming.object_index o WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='object_index' AND e.row_id=o.rowid) ORDER BY rowid")?;
         let mut rows = query.query([])?;
         while let Some(row) = rows.next()? {
             progress()?;
@@ -342,6 +355,18 @@ impl BackupDatabase {
             let bytes: u64 = row.get(3)?;
             let excluded: bool = row.get(4)?;
             let source_deleted: bool = row.get(5)?;
+            let source_manifest: String = row.get(6)?;
+            let current_manifest: Option<String> = self
+                .db
+                .query_row(
+                    "SELECT CAST(manifest_hash AS TEXT) FROM object_index WHERE object_id=?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if current_manifest.as_deref().is_some_and(|manifest| manifest != source_manifest) {
+                return Err(StorageError::ObjectIdentityConflict);
+            }
             let current: Option<(i64, bool)> = self
                 .db
                 .query_row(
@@ -401,7 +426,14 @@ impl BackupDatabase {
         Ok(())
     }
 }
-fn merge_filter(table: &str, native_data_only: bool) -> &'static str {
+fn merge_filter(table: &str, native_data_only: bool) -> String {
+    format!(
+        "({}) AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{}' AND e.row_id=r.rowid)",
+        base_merge_filter(table, native_data_only),
+        table.replace('\'', "''")
+    )
+}
+fn base_merge_filter(table: &str, native_data_only: bool) -> &'static str {
     if table == "runtime_actor_state" && native_data_only {
         super::backup_native::DATA_STATE_FILTER
     } else if table == "runtime_actor_state" {

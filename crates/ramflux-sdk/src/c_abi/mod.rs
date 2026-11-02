@@ -44,6 +44,8 @@ pub enum RamfluxErrorCode {
     /// Another process owns the account writer. Retry after the owner releases it.
     AccountBusy = 18,
     ObjectErased = 19,
+    ObjectIdentityConflict = 20,
+    ObjectOwnershipUnverified = 21,
 }
 
 /// Retryable account writer contention (18). Existing `StorageFailed` (8) remains
@@ -69,6 +71,8 @@ impl RamfluxErrorCode {
             Self::McpGrantRejected => "McpGrantRejected",
             Self::ObjectTransferFailed => "ObjectTransferFailed",
             Self::ObjectErased => "ObjectErased",
+            Self::ObjectIdentityConflict => "ObjectIdentityConflict",
+            Self::ObjectOwnershipUnverified => "ObjectOwnershipUnverified",
             Self::RateLimited => "RateLimited",
             Self::Internal => "Internal",
             Self::PanicAborted => "PanicAborted",
@@ -827,6 +831,12 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
     let message = error.to_string();
     let code = match error {
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
+        SdkError::Storage(ramflux_storage::StorageError::ObjectIdentityConflict) => {
+            RamfluxErrorCode::ObjectIdentityConflict
+        }
+        SdkError::Storage(ramflux_storage::StorageError::ObjectOwnershipUnverified { .. }) => {
+            RamfluxErrorCode::ObjectOwnershipUnverified
+        }
         SdkError::HomeMigrationRefused(reason) => match reason {
             ramflux_protocol::home_migration::Refusal::RateLimited => RamfluxErrorCode::RateLimited,
             ramflux_protocol::home_migration::Refusal::StorageUnavailable => {
@@ -838,9 +848,9 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
             }
             _ => RamfluxErrorCode::PermissionDenied,
         },
-        SdkError::NetworkingPending | SdkError::CustodyModeDowngrade => {
-            RamfluxErrorCode::UnsupportedVersion
-        }
+        SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
+        | SdkError::NetworkingPending
+        | SdkError::CustodyModeDowngrade => RamfluxErrorCode::UnsupportedVersion,
         SdkError::CustodyRandomUnavailable => RamfluxErrorCode::CryptoFailed,
         SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
         | SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected) => {

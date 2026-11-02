@@ -7,11 +7,22 @@ use super::{
     SdkError, ack_progress_prefix, reference_key, slot_reference_key, validate_reference,
 };
 
+use ramflux_storage::ObjectRetention;
+
 impl RamfluxClient {
     pub(in crate::client) fn try_import_cached_attachment(
         &mut self,
         reference: &SdkDmAttachmentRef,
     ) -> Result<Option<SdkDmAttachmentImportResult>, SdkError> {
+        self.try_import_cached_attachment_retained(reference, ObjectRetention::Imported)
+    }
+
+    pub(in crate::client) fn try_import_cached_attachment_retained(
+        &mut self,
+        reference: &SdkDmAttachmentRef,
+        retention: ObjectRetention,
+    ) -> Result<Option<SdkDmAttachmentImportResult>, SdkError> {
+        self.account_db()?.check_object_identity(&reference.object_id, &reference.manifest_hash)?;
         let mut check = "attachment_deleted";
         let outcome = (|| {
             if self.discard_deleted_attachment_chunks(reference)? {
@@ -24,6 +35,13 @@ impl RamfluxClient {
             }
             check = "cached_reference";
             validate_reference(reference)?;
+            if matches!(retention, ObjectRetention::OwnDeviceTransport) {
+                self.account_db()?.retain_object(
+                    &reference.object_id,
+                    &reference.manifest_hash,
+                    retention,
+                )?;
+            }
             if self.cached_attachment_ack_pending(reference)? {
                 return Ok(None);
             }
@@ -31,7 +49,12 @@ impl RamfluxClient {
                 let slot = self
                     .received_attachment_prepared_slot(reference)?
                     .map_or_else(|| self.decrypt_object_key_slot(&reference.key_slot), Ok)?;
-                self.materialize_cached_attachment(reference, slot.object_key, &mut check)?;
+                self.materialize_cached_attachment(
+                    reference,
+                    slot.object_key,
+                    retention,
+                    &mut check,
+                )?;
             }
             check = "cached_reference";
             validate_reference(reference)?;
@@ -42,8 +65,9 @@ impl RamfluxClient {
                 let slot = self
                     .received_attachment_prepared_slot(reference)?
                     .map_or_else(|| self.decrypt_object_key_slot(&reference.key_slot), Ok)?;
-                let object_key = self.object_content_key(&reference.object_id)?;
-                if object_key != slot.object_key {
+                let object_key =
+                    zeroize::Zeroizing::new(self.object_content_key(&reference.object_id)?);
+                if *object_key != slot.object_key {
                     return Err(SdkError::LocalBus(
                         "cached attachment key differs from key slot".into(),
                     ));
@@ -51,12 +75,11 @@ impl RamfluxClient {
                 check = "key_slot_commit";
                 self.commit_received_attachment_import(reference, &slot)?;
             }
+            let plaintext = zeroize::Zeroizing::new(self.decrypt_object(&reference.object_id)?);
             Ok(Some(SdkDmAttachmentImportResult {
                 object_id: reference.object_id.clone(),
                 manifest_hash: reference.manifest_hash.clone(),
-                plaintext_base64: ramflux_protocol::encode_base64url(
-                    &self.decrypt_object(&reference.object_id)?,
-                ),
+                plaintext_base64: ramflux_protocol::encode_base64url(&plaintext),
                 plaintext_hash: reference.plaintext_hash.clone(),
                 imported: true,
             }))
@@ -141,6 +164,8 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         // Nested writer phases use savepoints, so the slot and ACK removal commit together.
         self.account_db()?.write_transaction(|| {
+            self.account_db()?
+                .check_object_identity(&reference.object_id, &reference.manifest_hash)?;
             self.commit_object_key_slot_session(slot)?;
             self.sweep_attachment_acks(reference)
         })

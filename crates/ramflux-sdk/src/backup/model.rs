@@ -112,6 +112,8 @@ pub struct BackupAttachmentChecks {
 pub enum BackupFailureCode {
     AccountBusy,
     ObjectErased,
+    ObjectIdentityConflict,
+    ObjectOwnershipUnverified,
     WrongPassphrase,
     RestoreSetupRequired,
     AuthorizationRejected,

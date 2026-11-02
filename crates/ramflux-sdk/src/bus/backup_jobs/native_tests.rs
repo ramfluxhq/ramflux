@@ -12,6 +12,7 @@ use crate::{
     prelude::*,
 };
 use serde_json::json;
+use std::sync::Arc;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const LOCAL_SECRET: &str = "independent local data passphrase";
 const ARCHIVE_SECRET: &str = "independent archive passphrase";
@@ -361,4 +362,74 @@ fn backup_authorization_rejection_has_specific_job_and_bus_codes() -> TestResult
     assert_eq!(rows["jobs"][0]["error"]["code"], "authorization_rejected");
     assert_eq!(crate::bus::io::local_bus_error_code(&error), "authorization_rejected");
     Ok(())
+}
+
+// Mutation: omit account-serialized erasure-generation authorization before publishing the archive.
+#[tokio::test(flavor = "current_thread")]
+async fn backup_publication_erasure_generation_orders_both_deletion_races() -> TestResult {
+    use super::test_install::InstallPoint;
+    LocalSet::new().run_until(Box::pin(async {
+        for (authorization_first, shared_owner) in [(false,false),(true,false),(false,true)] {
+            let root=Root::new()?;
+            let vault=TestVault::default();
+            let account=create(&root.0,"account",&vault,crate::custody::network_now()?)?;
+            let mut client=RamfluxClient::new();
+            client.open_account_index(&root.0)?;
+            client.seal_new_account_data("account",&account.record().body.account_anchor,LOCAL_SECRET.as_bytes())?;
+            client.unlock_account("account",LOCAL_SECRET.as_bytes())?;
+            let db=client.account_db()?;
+            db.send_direct_message("thread","message","peer",b"body")?;
+            let mut donor=ramflux_sync::ObjectStore::new();
+            let object=donor.put_encrypted_object("publication-wire",b"publication-private-body")?;
+            let key=donor.object_key(&object.object_id)?;
+            db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
+                reference_hash:"publication-reference",wire_id:&object.object_id,manifest_hash:&object.manifest_hash,
+                selector:&object.object_id,message_id:"message",reference:&json!({}),metadata:&json!({}),
+            })?;
+            if shared_owner {
+                db.send_direct_message("thread","survivor","peer",b"body")?;
+                db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
+                    reference_hash:"publication-reference",wire_id:&object.object_id,manifest_hash:&object.manifest_hash,
+                    selector:&object.object_id,message_id:"survivor",reference:&json!({}),metadata:&json!({}),
+                })?;
+            }
+            db.upsert_object(&ramflux_storage::ObjectWrite {
+                object_id:&object.object_id,manifest_hash:&object.manifest_hash,nonce:&object.nonce,
+                ciphertext:&object.ciphertext,plaintext_hash:&object.plaintext_hash,tombstoned:false,
+                backup_excluded:false,content_key:Some(&key),object:&object,updated_at:1,
+            })?;
+            drop(client);
+            let supervisor=supervisor(&root.0)?;
+            let (started,ready)=tokio::sync::oneshot::channel();
+            let started=std::sync::Mutex::new(Some(started));
+            let (release,resume)=std::sync::mpsc::sync_channel(1);
+            let resume=std::sync::Mutex::new(resume);
+            *supervisor.backup_jobs.install_hook.lock().map_err(|_|"hook")?=Some(Arc::new(move |point,_| {
+                let selected=if authorization_first {InstallPoint::ArchiveAuthorized}else{InstallPoint::BeforeArchiveAuthorization};
+                if point==selected {
+                    if let Some(started)=started.lock().map_err(|_|std::io::ErrorKind::Other)?.take() { let _=started.send(()); }
+                    resume.lock().map_err(|_|std::io::ErrorKind::Other)?.recv_timeout(Duration::from_secs(15)).map_err(|_|std::io::ErrorKind::TimedOut)?;
+                }
+                Ok(())
+            }));
+            let path=root.0.join("publication.rfb");
+            let row=call(&supervisor,"account.backup.create",Some("account"),json!({"output_path":path,"passphrase":ARCHIVE_SECRET})).await?;
+            let id=row["job"]["job_id"].as_str().ok_or("job")?;
+            tokio::time::timeout(Duration::from_secs(15),ready).await??;
+            let (outbound,_events)=mpsc::channel(8);
+            let mut connection=LocalBusConnectionState::new(1,outbound);
+            connection.attended_account_id=Some("account".into());
+            supervisor.request(LocalBusFrame::request("delete",Some("account".into()),"message","message.delete",json!({"conversation_id":"thread","message_id":"message","delete_scope":"local"})),&connection).await?;
+            release.send(())?;
+            let expected=if authorization_first {crate::backup::BackupJobState::Done}else{crate::backup::BackupJobState::Failed};
+            let job=finished(&supervisor,id,expected).await?;
+            if authorization_first { assert!(path.is_file()); } else {
+                assert_eq!(job.error.ok_or("failure")?.code,crate::backup::BackupFailureCode::ObjectErased);
+                assert!(!path.exists());
+                assert!(!root.0.join(format!(".ramflux-backup-{id}.partial")).exists());
+            }
+            supervisor.shutdown().await?;
+        }
+        Ok(())
+    })).await
 }

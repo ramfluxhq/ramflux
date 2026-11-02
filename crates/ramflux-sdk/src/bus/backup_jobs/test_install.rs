@@ -12,6 +12,8 @@ pub(super) enum InstallPoint {
     Prepared,
     BeforeCommit,
     Committed,
+    BeforeArchiveAuthorization,
+    ArchiveAuthorized,
 }
 pub(super) type InstallHook =
     Arc<Mutex<Option<Arc<dyn Fn(InstallPoint, &Path) -> std::io::Result<()> + Send + Sync>>>>;

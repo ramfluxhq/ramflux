@@ -138,7 +138,7 @@ fn a_restored_group_sender_rotates_its_chain_and_the_live_peer_keeps_late_old_me
 #[tokio::test]
 async fn r2_key_only_recovery_then_full_merge_creates_a_unique_group_chain_accepted_by_live_peer()
 -> Result<(), SdkError> {
-    let original = Fixture::new("alice", 41)?;
+    let original = canonical_key_recovery_fixture()?;
     let bob = Fixture::new("bob", 61)?;
     trust(&original, &bob)?;
     trust(&bob, &original)?;
@@ -311,4 +311,22 @@ async fn native_data_merge_rebootstraps_without_reusing_the_archived_outbound_ra
     assert_eq!(recipient.decrypt(&encrypted, b"message AAD")?, b"fresh native session");
     assert!(recipient.decrypt(&encrypted, b"message AAD").is_err());
     Ok(())
+}
+
+// Key-only recovery uses the cryptographic root, rather than a display-name namespace.
+fn canonical_key_recovery_fixture() -> Result<Fixture, SdkError> {
+    let root = std::env::temp_dir().join(format!(
+        "ramflux-key-recovery-{}",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    let mut client = RamfluxClient::new();
+    let identity = client.create_identity_root("alice", [41; 32]);
+    let commitment =
+        ramflux_crypto::identity_root_commitment(&identity.signing_key.verifying_key());
+    client.create_device_branch("alice", "alice", 1, [42; 32]);
+    client.open_account_index(&root)?;
+    client.create_account("alice", &commitment)?;
+    client.unlock_account("alice", b"routed-test")?;
+    client.initialize_and_publish_prekey_bundle("alice", "alice", "alice", [42; 32], None)?;
+    Ok(Fixture { root, client, id: "alice".into() })
 }

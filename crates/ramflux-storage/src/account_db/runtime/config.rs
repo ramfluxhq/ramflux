@@ -86,8 +86,14 @@ impl AccountDb {
             current_key: self.current_key.clone(),
             device_signer: self.device_signer.clone(),
             clock: self.clock.clone(),
-            object_retirement: super::super::object_retention::RetirementObserver::default(),
+            object_retirement: super::super::object_retention::RetirementObserver {
+                generations: std::sync::Arc::clone(&self.object_retirement.generations),
+                ..Default::default()
+            },
             connection,
+            erasure_authority: Some(
+                self.erasure_authority.as_ref().unwrap_or(&self.connection).clone(),
+            ),
             volatile_typing: RefCell::new(BTreeMap::new()),
             volatile_presence: RefCell::new(BTreeMap::new()),
         })

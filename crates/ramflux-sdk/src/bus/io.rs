@@ -149,6 +149,11 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     }
     match error {
         SdkError::ObjectErased => "ObjectErased",
+        SdkError::Storage(StorageError::ObjectIdentityConflict) => "ObjectIdentityConflict",
+        SdkError::Storage(StorageError::ObjectOwnershipUnverified { .. }) => {
+            "ObjectOwnershipUnverified"
+        }
+        SdkError::Storage(StorageError::AccountSchemaTooNew { .. }) => "AccountSchemaTooNew",
         SdkError::Crypto(CryptoError::GroupLeaseUnavailable) => "GroupLeaseUnavailable",
         SdkError::ContactInput(crate::ContactReason::AnchorMismatch) => "AnchorMismatch",
         SdkError::NetworkingPending

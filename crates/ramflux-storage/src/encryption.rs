@@ -20,9 +20,20 @@ pub enum EncryptionMode {
     InsecureTestSqlite,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AccountDbKey {
     bytes: [u8; 32],
+}
+
+impl Drop for AccountDbKey {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.bytes);
+    }
+}
+impl std::fmt::Debug for AccountDbKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AccountDbKey([redacted])")
+    }
 }
 
 impl AccountDbKey {

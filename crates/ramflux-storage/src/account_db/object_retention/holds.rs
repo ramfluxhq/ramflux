@@ -11,6 +11,7 @@ pub struct PreSendObjectHold {
     observer: Option<ObjectRetirementObserver>,
     armed: bool,
     resources: resources::Resources,
+    generations: generation::Resources,
 }
 
 impl PreSendObjectHold {
@@ -30,6 +31,12 @@ impl PreSendObjectHold {
         self.connection.execute_batch(&sql)?;
         transaction.commit()?;
         if changed > 0 {
+            let current = self.connection.query_row(
+                "SELECT generation FROM account_erasure_generation WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )?;
+            generation::retire(&self.generations, current)?;
             if let Some(observer) = &self.observer {
                 observer(Some(std::slice::from_ref(&self.commitment)));
             }
@@ -69,6 +76,7 @@ impl AccountDb {
             observer: self.object_retirement.callback.borrow().clone(),
             armed: true,
             resources: Arc::clone(&self.object_retirement.resources),
+            generations: Arc::clone(&self.object_retirement.generations),
         })
     }
 }

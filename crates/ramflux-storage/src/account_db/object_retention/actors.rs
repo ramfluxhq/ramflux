@@ -8,22 +8,42 @@ impl AccountDb {
     pub(crate) fn guard_object_actor(&self, key: &str, value: &Value) -> Result<(), StorageError> {
         if !(key.starts_with("attachment/")
             || key.starts_with("directory/object/")
-            || key.starts_with("sync/attachment/"))
+            || key.starts_with("sync/attachment/")
+            || key.starts_with("own-device/"))
         {
             return Ok(());
         }
-        if let Some(reference) = value.get("reference") {
-            if let (Some(wire), Some(manifest)) = (
+        if let Some(reference) = value.get("reference").or_else(|| value.get("history_ref"))
+            && let (Some(wire), Some(manifest)) = (
                 reference.get("object_id").and_then(Value::as_str),
                 reference.get("manifest_hash").and_then(Value::as_str),
-            ) {
-                self.check_object_identity(wire, manifest)?;
-                let hash = ramflux_crypto::blake3_256_base64url(
-                    "ramflux.attachment.reference.v1",
-                    &ramflux_protocol::canonical_json_bytes(reference)?,
-                );
-                self.connection.execute("UPDATE object_retention_reference SET reference_json=?2 WHERE reference_hash=?1", params![hash,serde_json::to_vec(value)?])?;
-            }
+            )
+        {
+            self.check_object_identity(wire, manifest)?;
+            self.connection.execute(
+                "INSERT INTO object_payload_actor VALUES(?1,?2) ON CONFLICT DO NOTHING",
+                params![object_erasure_commitment(&self.principal_commitment, wire, manifest), key],
+            )?;
+            let hash = ramflux_crypto::blake3_256_base64url(
+                "ramflux.attachment.reference.v1",
+                &ramflux_protocol::canonical_json_bytes(reference)?,
+            );
+            self.connection.execute(
+                "UPDATE object_retention_reference SET reference_json=?2 WHERE reference_hash=?1",
+                params![hash, serde_json::to_vec(value)?],
+            )?;
+        }
+        if let Some(manifest) = value.get("manifest_hash").and_then(Value::as_str)
+            && let Some(wire) = value
+                .get("wire_object_id")
+                .or_else(|| value.get("object_id"))
+                .and_then(Value::as_str)
+        {
+            self.check_object_identity(wire, manifest)?;
+            self.connection.execute(
+                "INSERT INTO object_payload_actor VALUES(?1,?2) ON CONFLICT DO NOTHING",
+                params![object_erasure_commitment(&self.principal_commitment, wire, manifest), key],
+            )?;
         }
         let selector = value
             .get("object_id")
@@ -36,13 +56,12 @@ impl AccountDb {
             self.check_object_access(selector)?;
             self.connection.execute("INSERT INTO object_payload_actor SELECT p.commitment,?2 FROM object_retention_payload p WHERE p.wire_id=?1 UNION SELECT r.commitment,?2 FROM object_retention_reference r WHERE r.selector=?1 ON CONFLICT DO NOTHING", params![selector,key])?;
         }
-        if let Some(chunk) = key.strip_prefix("attachment/chunk/") {
-            if let Some((wire_manifest, _)) = chunk.rsplit_once('/')
-                && let Some((wire, _)) = wire_manifest.rsplit_once('/')
-            {
-                self.check_object_access(wire)?;
-                self.connection.execute("INSERT INTO object_payload_actor SELECT commitment,?2 FROM object_retention_payload WHERE wire_id=?1 ON CONFLICT DO NOTHING",params![wire,key])?;
-            }
+        if let Some(chunk) = key.strip_prefix("attachment/chunk/")
+            && let Some((wire_manifest, _)) = chunk.rsplit_once('/')
+            && let Some((wire, manifest)) = wire_manifest.rsplit_once('/')
+        {
+            self.check_object_identity(wire, manifest)?;
+            self.connection.execute("INSERT INTO object_payload_actor SELECT commitment,?2 FROM object_retention_payload WHERE wire_id=?1 ON CONFLICT DO NOTHING",params![wire,key])?;
         }
         Ok(())
     }

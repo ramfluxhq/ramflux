@@ -106,6 +106,15 @@ impl BackupJobs {
     pub(super) fn fail_install(&self, id: &str, error: &SdkError) {
         let failure = match error {
             SdkError::ObjectErased => BackupFailure::new(BackupFailureCode::ObjectErased),
+            SdkError::Storage(ramflux_storage::StorageError::ObjectIdentityConflict) => {
+                BackupFailure::new(BackupFailureCode::ObjectIdentityConflict)
+            }
+            SdkError::Storage(ramflux_storage::StorageError::ObjectOwnershipUnverified {
+                ..
+            }) => BackupFailure::new(BackupFailureCode::ObjectOwnershipUnverified),
+            SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. }) => {
+                BackupFailure::new(BackupFailureCode::UnsupportedVersion)
+            }
             SdkError::RestoreSetupRequired => {
                 let mut failure = BackupFailure::new(BackupFailureCode::RestoreSetupRequired);
                 failure.message = Some(error.to_string().into_boxed_str());

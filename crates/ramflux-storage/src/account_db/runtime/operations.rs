@@ -49,6 +49,16 @@ impl AccountDb {
     }
 
     /// # Errors
+    /// Binds a reserved operation to its payloads before effects, including payload-free responses.
+    pub fn bind_operation_objects(
+        &self,
+        id: &str,
+        request: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        self.register_object_response(id, request)
+    }
+
+    /// # Errors
     /// Returns an error if the committed mutation response cannot be saved for retries.
     pub fn complete_operation(
         &self,
@@ -56,7 +66,13 @@ impl AccountDb {
         response: &serde_json::Value,
     ) -> Result<(), StorageError> {
         let transaction = self.connection.immediate_transaction()?;
-        self.register_object_response(id, response)?;
+        if let Err(error) = self.register_object_response(id, response) {
+            if matches!(error, StorageError::ObjectErased) {
+                self.connection.execute("UPDATE runtime_operation SET response_json='{\"object_erased\":true}' WHERE operation_id=?1",params![id])?;
+                transaction.commit()?;
+            }
+            return Err(error);
+        }
         self.connection.execute(
             "UPDATE runtime_operation SET response_json=?2 WHERE operation_id=?1",
             params![id, serde_json::to_string(response)?],

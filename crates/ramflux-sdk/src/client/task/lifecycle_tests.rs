@@ -302,3 +302,29 @@ fn commit_certificate_cache_is_peer_bounded_and_expires_without_erasing_consumed
     assert!(db.load_actor_state::<serde_json::Value>(&consumed)?.is_some());
     Ok(())
 }
+
+// Mutation: persist task/message metadata without the authenticated message's footprint.
+#[test]
+fn attachment_erasure_removes_task_fallback_metadata_and_refuses_replay_residue() -> TestResult {
+    let fixture = Fixture::new()?;
+    let carrier = sign(&fixture.agent, "thread", "proposal", proposal())?;
+    let outcome = project(&fixture.human, &carrier)?;
+    let client = &fixture.human;
+    client.send_direct_message("thread", "proposal", "peer", b"task body")?;
+    assert!(client.task_message_metadata("thread", "proposal")?.is_some());
+    client.delete_direct_message("thread", "proposal", "local", "erase-task-message")?;
+    assert!(client.task_message_metadata("thread", "proposal")?.is_none());
+    client.store_task_message_metadata(
+        &super::Delivery {
+            conversation: "thread",
+            message: "proposal",
+            principal: &carrier.principal_id,
+            device: &carrier.device_id,
+            at: 1,
+        },
+        &outcome,
+        &carrier,
+    )?;
+    assert!(client.task_message_metadata("thread", "proposal")?.is_none());
+    Ok(())
+}

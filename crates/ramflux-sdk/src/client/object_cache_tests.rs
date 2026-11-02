@@ -103,7 +103,13 @@ async fn cached_attachment_retry_keeps_completed_download_state_without_rewritin
         GatewaySessionEngine::with_test_transport(fixture.config.clone(), Box::new(NoNetwork));
     let downloaded = fixture
         .client
-        .download_dm_attachment_ciphertext_via_gateway(&mut engine, &pool, &reference, key, None)
+        .download_dm_attachment_ciphertext_via_gateway(
+            &mut engine,
+            &pool,
+            &reference,
+            key.into(),
+            None,
+        )
         .await?;
     assert_eq!(downloaded.ciphertext, object.ciphertext);
     assert_eq!(before["state"], "complete");
@@ -155,7 +161,7 @@ async fn attachment_last_owner_erasure_invalidates_cached_keys_and_reopen_reads(
         fixture.client.object_store_object(&object.object_id),
         Err(SdkError::ObjectErased)
     ));
-    assert!(fixture.client.persisted_objects()?.is_empty());
+    assert_eq!(fixture.client.persisted_objects()?, Vec::<ramflux_sync::EncryptedObject>::new());
     assert!(matches!(
         fixture.client.verify_persist_dm_attachment(&reference, &download, key),
         Err(SdkError::ObjectErased)
@@ -170,7 +176,10 @@ async fn attachment_last_owner_erasure_invalidates_cached_keys_and_reopen_reads(
         fixture.client.decrypt_object(&object.object_id),
         Err(SdkError::ObjectErased)
     ));
-    assert!(fixture.client.account_db()?.client_directory_ids("object", "", 128)?.is_empty());
+    assert_eq!(
+        fixture.client.account_db()?.client_directory_ids("object", "", 128)?,
+        Vec::<String>::new()
+    );
     Ok(())
 }
 
@@ -210,5 +219,82 @@ async fn attachment_erasure_requires_explicit_conflict_checked_replacement() -> 
         Err(SdkError::Storage(StorageError::ObjectIdentityConflict))
     ));
     assert_eq!(fixture.client.decrypt_object("replace-wire")?, b"replacement");
+    Ok(())
+}
+
+// Mutation: retain history-container payloads or owned next-page slots after a carried message retires.
+#[tokio::test]
+async fn attachment_history_container_erasure_covers_both_dependency_orders_and_stale_export()
+-> TestResult {
+    for parent_first in [false, true] {
+        let mut fixture = Fixture::new("attachment-history-erasure").await?;
+        for message in ["first", "second"] {
+            fixture.client.send_direct_message("thread", message, "peer", b"body")?;
+        }
+        let first = fixture.client.account_db()?.direct_message_by_id("first")?.ok_or("message")?;
+        let second =
+            fixture.client.account_db()?.direct_message_by_id("second")?.ok_or("message")?;
+        let child_body = serde_json::to_vec(
+            &serde_json::json!({"messages":[{"message_id":"first","encrypted_body":[1,2,3]}]}),
+        )?;
+        let child = fixture.client.prepare_history_transport(
+            "history-child",
+            &child_body,
+            std::slice::from_ref(&first),
+        )?;
+        let parent_body = serde_json::to_vec(
+            &serde_json::json!({"messages":[{"message_id":"second","encrypted_body":[4,5,6]}],"next_page":{"history_ref":{"object_id":child.object_id,"manifest_hash":child.manifest_hash}}}),
+        )?;
+        let parent = fixture.client.prepare_history_transport(
+            "history-parent",
+            &parent_body,
+            std::slice::from_ref(&second),
+        )?;
+        let key = "own-device/imported/receipt/next";
+        fixture.client.account_db()?.persist_actor_state(key,&serde_json::json!({"history_ref":{"object_id":child.object_id,"manifest_hash":child.manifest_hash},"key_slot":"private-slot"}))?;
+        fixture.client.account_db()?.bind_transport_actor(
+            &parent.object_id,
+            &parent.manifest_hash,
+            key,
+        )?;
+        if parent_first {
+            fixture.client.delete_direct_message("thread", "second", "local", "delete-second")?;
+            assert!(matches!(
+                fixture.client.decrypt_object(&parent.object_id),
+                Err(SdkError::ObjectErased)
+            ));
+            assert_eq!(fixture.client.decrypt_object(&child.object_id)?, child_body);
+            assert!(!fixture.client.account_db()?.actor_state_exists(key)?);
+        }
+        fixture.client.delete_direct_message("thread", "first", "local", "delete-first")?;
+        assert!(matches!(
+            fixture.client.decrypt_object(&child.object_id),
+            Err(SdkError::ObjectErased)
+        ));
+        assert!(matches!(
+            fixture.client.decrypt_object(&parent.object_id),
+            Err(SdkError::ObjectErased)
+        ));
+        assert!(!fixture.client.account_db()?.actor_state_exists(key)?);
+        if !parent_first {
+            assert!(
+                !fixture
+                    .client
+                    .account_db()?
+                    .direct_message_by_id("second")?
+                    .ok_or("message")?
+                    .deleted
+            );
+        }
+        assert!(matches!(
+            fixture.client.prepare_history_transport(
+                "history-replay",
+                &child_body,
+                std::slice::from_ref(&first)
+            ),
+            Err(SdkError::ObjectErased)
+        ));
+        assert!(fixture.client.object_store_object("history-replay")?.is_none());
+    }
     Ok(())
 }

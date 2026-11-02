@@ -23,6 +23,8 @@ pub(super) use service::BackupJobs;
 pub(super) struct CapturedAccount {
     pub reader: ramflux_storage::AccountDb,
     pub identity: format::Identity,
+    pub erasure_generation: i64,
+    pub actor: Option<super::actor::AccountActor>,
 }
 
 #[cfg(test)]

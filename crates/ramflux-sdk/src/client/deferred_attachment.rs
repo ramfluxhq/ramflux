@@ -54,6 +54,10 @@ impl Drop for PreparedSlot {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct FetchState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wire_object_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest_hash: Option<String>,
     object_id: String,
     operation_id: String,
     transfer_state: String,
@@ -80,6 +84,7 @@ impl RamfluxClient {
         // Bind progress to the exact relay, grant, manifest and key slot, not a reusable object id.
         let prefix = ack_progress_prefix(reference)?;
         let db = self.account_db()?;
+        db.check_object_identity(&reference.object_id, &reference.manifest_hash)?;
         let selector = db
             .load_actor_state::<String>(&slot_reference_key(reference)?)?
             .unwrap_or_else(|| reference.object_id.clone());
@@ -99,11 +104,19 @@ impl RamfluxClient {
             let confirmed = std::time::Instant::now();
             if resumable {
                 // object_id also registers the erasure footprint, including sender-scoped aliases.
-                db.check_object_identity(&reference.object_id, &reference.manifest_hash)?;
-                db.persist_actor_state(
-                    &key,
-                    &AckProgress { object_id: selector.clone(), acknowledged: true },
-                )?;
+                db.write_transaction(|| -> Result<(), SdkError> {
+                    db.check_object_identity(&reference.object_id, &reference.manifest_hash)?;
+                    db.persist_actor_state(
+                        &key,
+                        &AckProgress { object_id: selector.clone(), acknowledged: true },
+                    )?;
+                    let hash = ramflux_crypto::blake3_256_base64url(
+                        "ramflux.attachment.reference.v1",
+                        &ramflux_protocol::canonical_json_bytes(reference)?,
+                    );
+                    db.register_object_reference_actor(&hash, &key)?;
+                    Ok(())
+                })?;
             }
             tracing::debug!(
                 target: "ramflux_sdk::attachment_timing",
@@ -125,6 +138,7 @@ impl RamfluxClient {
         conversation: &str,
         message: &str,
     ) -> Result<(), SdkError> {
+        self.account_db()?.check_object_identity(&reference.object_id, &reference.manifest_hash)?;
         let prepared = self.decrypt_object_key_slot(&reference.key_slot).ok();
         self.persist_received_reference_prepared(reference, owner, conversation, message, prepared)
     }
@@ -249,6 +263,8 @@ impl RamfluxClient {
             let error = SdkError::LocalBus("attachment was deleted".into());
             super::attachment_diagnostics::failed(object_id, "attachment_deleted", &error);
             let state = FetchState {
+                wire_object_id: Some(stored.reference.object_id.clone()),
+                manifest_hash: Some(stored.reference.manifest_hash.clone()),
                 object_id: object_id.to_owned(),
                 operation_id: operation_id.to_owned(),
                 transfer_state: "failed".into(),
@@ -269,6 +285,8 @@ impl RamfluxClient {
             && self.try_import_cached_attachment(&stored.reference)?.is_some()
         {
             let state = FetchState {
+                wire_object_id: Some(stored.reference.object_id.clone()),
+                manifest_hash: Some(stored.reference.manifest_hash.clone()),
                 object_id: object_id.to_owned(),
                 operation_id: operation_id.to_owned(),
                 transfer_state: "available".into(),
@@ -317,6 +335,8 @@ impl RamfluxClient {
         let previous = self.attachment_fetch_state(object_id)?;
         let attempts = previous.as_ref().map_or(1, |state| state.attempts.saturating_add(1));
         let mut state = FetchState {
+            wire_object_id: Some(stored.reference.object_id.clone()),
+            manifest_hash: Some(stored.reference.manifest_hash.clone()),
             object_id: object_id.to_owned(),
             operation_id: operation_id.to_owned(),
             transfer_state: if attempts > 1 { "retrying" } else { "fetching" }.to_owned(),
@@ -410,7 +430,7 @@ impl RamfluxClient {
         {
             return Ok(false);
         }
-        let plaintext = self.decrypt_object(&reference.object_id)?;
+        let plaintext = zeroize::Zeroizing::new(self.decrypt_object(&reference.object_id)?);
         Ok(ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, &plaintext)
             == reference.plaintext_hash)
     }

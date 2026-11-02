@@ -25,6 +25,7 @@ pub struct VerifiedBackupStaging {
     key: Zeroizing<[u8; 32]>,
     expires_at: u64,
     deadline: std::time::Instant,
+    privacy_registration: std::sync::Mutex<Option<ramflux_storage::PrivacyResourceRegistration>>,
 }
 impl VerifiedBackupStaging {
     /// Takes ownership of an already verified encrypted staging directory.
@@ -39,10 +40,18 @@ impl VerifiedBackupStaging {
         Ok(Self {
             directory,
             key: Zeroizing::new(key),
+            privacy_registration: std::sync::Mutex::new(None),
             expires_at,
             deadline: std::time::Instant::now()
                 + std::time::Duration::from_secs(VERIFIED_LIFETIME_SECONDS),
         })
+    }
+    pub(crate) fn retain_privacy_registration(
+        &self,
+        registration: ramflux_storage::PrivacyResourceRegistration,
+    ) {
+        *self.privacy_registration.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(registration);
     }
     #[must_use]
     pub fn directory(&self) -> &Path {

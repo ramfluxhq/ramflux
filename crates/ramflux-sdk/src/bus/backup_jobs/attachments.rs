@@ -76,15 +76,38 @@ impl BackupJobs {
         directory: PathBuf,
         key: &AccountDbKey,
         db: &BackupDatabase,
+        captured: &CapturedAccount,
     ) -> Result<BackupFailure, SdkError> {
         let page = db.missing_attachment_page("")?;
         let count = db.missing_attachment_count()?;
         let next = if page.len() == 64 { page.last().cloned() } else { None };
-        let stage = VerifiedBackupStaging::new(directory, *key.bytes(), now())?;
+        let stage = Arc::new(VerifiedBackupStaging::new(directory, *key.bytes(), now())?);
         self.diagnostics
             .lock()
             .map_err(|_| refused("interrupted"))?
-            .insert(job.job_id.clone(), Arc::new(stage));
+            .insert(job.job_id.clone(), Arc::clone(&stage));
+        let diagnostics = Arc::downgrade(&self.diagnostics);
+        let id = job.job_id.clone();
+        let registration = captured.reader.register_privacy_resource(
+            &id.clone(),
+            captured.erasure_generation,
+            Arc::new(move || {
+                if let Some(diagnostics) = diagnostics.upgrade() {
+                    diagnostics
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&id);
+                }
+                Ok(())
+            }),
+        );
+        match registration {
+            Ok(registration) => stage.retain_privacy_registration(registration),
+            Err(error) => {
+                self.diagnostics.lock().map_err(|_| refused("interrupted"))?.remove(&job.job_id);
+                return Err(error.into());
+            }
+        }
         Ok(BackupFailure {
             unavailable_attachments: page,
             unavailable_count: Some(count),

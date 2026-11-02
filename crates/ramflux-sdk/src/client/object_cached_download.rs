@@ -24,8 +24,10 @@ impl RamfluxClient {
         &mut self,
         reference: &SdkDmAttachmentRef,
         key: [u8; 32],
+        retention: ObjectRetention,
         check: &mut &'static str,
     ) -> Result<(), SdkError> {
+        let key = zeroize::Zeroizing::new(key);
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let manifest = ChunkManifest {
             object_id: reference.object_id.clone(),
@@ -34,7 +36,7 @@ impl RamfluxClient {
             total_chunks: reference.total_chunks,
             object_created_group_key_epoch: None,
         };
-        let mut session = ObjectSyncSession::new(manifest.clone(), key);
+        let mut session = ObjectSyncSession::new(manifest.clone(), *key);
         for index in 0..manifest.total_chunks {
             *check = "cached_chunk";
             let payload = self
@@ -61,7 +63,7 @@ impl RamfluxClient {
             // Local completion does not renew the expired relay grant or its transfer lease.
             expires_at: 0,
         };
-        self.verify_persist_dm_attachment(reference, &download, key, check)?;
+        self.verify_persist_dm_attachment_retained(reference, &download, *key, retention)?;
         Ok(())
     }
 }
