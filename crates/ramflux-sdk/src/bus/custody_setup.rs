@@ -406,6 +406,38 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_vault_refuses_create_begin_before_phrase_or_reservation() -> Result {
+        let root = crate::custody::tests::Root::new()?;
+        let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
+        let vault = crate::custody::tests::TestVault::default();
+        vault.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        config.custody_vault = Some(std::sync::Arc::new(vault));
+        let mut pending = None;
+        let mut request = LocalBusFrame::request(
+            "begin",
+            None,
+            "account",
+            "account.create.begin",
+            serde_json::json!({"display_name":"Ordinary Human","principal_kind":"human"}),
+        );
+        assert!(matches!(
+            apply(&mut request, &config, &mut pending),
+            Err(SdkError::CustodyVaultUnavailable)
+        ));
+        assert!(pending.is_none());
+        let mut show = LocalBusFrame::request(
+            "show",
+            None,
+            "account",
+            "account.create.show_once",
+            serde_json::json!({}),
+        );
+        assert!(apply(&mut show, &config, &mut pending).is_err());
+        assert!(!root.0.join("custody_accounts").exists());
+        Ok(())
+    }
+
+    #[test]
     fn oversized_request_id_cancels_pending_setup_before_secret_output() -> Result {
         let root = crate::custody::tests::Root::new()?;
         let config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);

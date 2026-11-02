@@ -51,6 +51,11 @@ pub(crate) async fn dispatch_account_bus_request(
         "account.unlock" => {
             let account_id = request_account_id(request)?.to_owned();
             if crate::custody::account_exists(&state.config.data_root, &account_id)? {
+                if let Some(reason) =
+                    crate::custody::failed_setup(&state.config.data_root, &account_id)?
+                {
+                    return Err(crate::custody::failed_setup_error(&account_id, reason));
+                }
                 let result =
                     super::super::native_account::unlock_request(state, &account_id, request)
                         .await?;

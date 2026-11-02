@@ -448,7 +448,7 @@ pub(crate) fn pending_restore(
         custody_v3_observed: true,
         primary_vault_ref: String::new(),
         branch_vault_ref: branch_ref.clone(),
-        vault_class: "software_os_credential_non_synchronizing".into(),
+        vault_class: vault.vault_class().into(),
         record: authority.publication.record.clone(),
         compacted_ids: authority.publication.compacted_ids.clone(),
         custodian_publication: authority.custodian_publication.clone().map(Box::new),

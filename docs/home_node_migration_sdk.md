@@ -54,7 +54,8 @@ the `PrimaryVault` interface, whose migration-signing default refuses. Other OSe
 return `custody_user_presence_unavailable`; there is no file or data-unlock fallback.
 
 `rfd` must run in the user's GUI/login session with the required protected-Keychain
-entitlements. A headless/SSH/LaunchDaemon context or rejected interaction fails
+entitlements. Accounts recorded with the login-keychain vault class (unentitled
+builds) refuse migration signing with `custody_user_presence_unavailable`. A headless/SSH/LaunchDaemon context or rejected interaction fails
 closed. Presence work must run off the socket/UI and account DB writer threads.
 
 ## Test providers and the real-device acceptance boundary

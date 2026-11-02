@@ -733,7 +733,13 @@ there is no legacy authentication fallback.
 
 The native primary provider supports macOS's protected OS credential keychain
 with synchronization disabled and When-Unlocked/This-Device-Only access control.
-It requires the appropriate user context and provisioning entitlements. It is
+It requires the appropriate user context and provisioning entitlements. A process
+without them (an ad hoc signed build, where `SecItemAdd` returns
+`errSecMissingEntitlement`) stores the same non-synchronizing items in the login
+keychain instead and records `vault_class: software_os_credential_login_keychain`;
+that class cannot hold the migration user-presence item. Availability is checked
+with an insert probe before the phrase is shown. See
+[macOS keychain authorization](macos_keychain_authorization.md). It is
 software credential custody, not nonexportable hardware Ed25519 isolation. Other
 platforms fail closed until an appropriate provider is implemented. There is no
 plaintext file fallback. Integration-only memory custody is explicitly selected

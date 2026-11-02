@@ -27,6 +27,10 @@ pub trait PrimaryVault: Send + Sync {
             })),
         })
     }
+    /// Durable class recorded with new authority after a successful store.
+    fn vault_class(&self) -> &'static str {
+        VAULT_CLASS_PROTECTED
+    }
     /// Check provider availability before asking a user to save recovery material.
     /// # Errors
     /// Fails closed when the provider is unsupported, locked or lacks host entitlements.
@@ -89,8 +93,14 @@ pub trait PrimaryVault: Send + Sync {
         Err(SdkError::CustodyVaultUnavailable)
     }
 }
+/// Data-protection keychain (or another reviewed protected OS store) without synchronization.
+pub const VAULT_CLASS_PROTECTED: &str = "software_os_credential_non_synchronizing";
+/// macOS login keychain, used only when the process lacks the data-protection entitlement.
+/// Items are when-unlocked-this-device-only and non-synchronizing; no user-presence items.
+pub const VAULT_CLASS_LOGIN_KEYCHAIN: &str = "software_os_credential_login_keychain";
 /// Software OS credential vault. This is not a nonexportable hardware Ed25519 key.
-/// macOS uses its protected, explicitly non-synchronizing keychain. Other platforms
+/// macOS uses its protected, explicitly non-synchronizing keychain, or the login keychain
+/// when the process has no data-protection entitlement (ad hoc signing). Other platforms
 /// fail closed until their primary provider is implemented and reviewed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativePrimaryVault;
@@ -101,10 +111,21 @@ mod presence;
 #[cfg(any(target_os = "macos", test))]
 mod primary_items;
 impl PrimaryVault for NativePrimaryVault {
+    fn vault_class(&self) -> &'static str {
+        #[cfg(target_os = "macos")]
+        if native::backend().ok() == Some(native::Backend::LoginKeychain) {
+            return VAULT_CLASS_LOGIN_KEYCHAIN;
+        }
+        VAULT_CLASS_PROTECTED
+    }
     fn home_authorization_preflight(&self) -> Result<(), SdkError> {
         #[cfg(target_os = "macos")]
         {
-            native::preflight().map_err(|_| super::home_authorization::unavailable())
+            // User presence requires SecAccessControl, which only the protected store has.
+            match native::backend() {
+                Ok(native::Backend::DataProtection) => Ok(()),
+                _ => Err(super::home_authorization::unavailable()),
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -122,7 +143,7 @@ impl PrimaryVault for NativePrimaryVault {
         #[cfg(target_os = "macos")]
         {
             let primary = presence::approved_primary(
-                &native::KeychainItems,
+                &native::KeychainItems::PROTECTED,
                 request.primary_reference(),
                 request.expected_primary_public_key(),
             )?;

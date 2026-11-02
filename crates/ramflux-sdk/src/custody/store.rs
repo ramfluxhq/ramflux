@@ -234,14 +234,39 @@ pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Val
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let id = entry.file_name().into_string().map_err(|_| invalid())?;
-            let summary=load_data_account(root,&id,now).map_or_else(
-                |_|serde_json::json!({"local_account_id":id,"state":CreationState::NetworkingPending,"custody_v3_observed":true,"setup_incomplete":true}),
-                |account|account.summary());
+            let summary = if let Ok(account) = load_data_account(root, &id, now) {
+                account.summary()
+            } else {
+                let failed = failed_setup(root, &id)?;
+                serde_json::json!({"local_account_id":id,"state":CreationState::NetworkingPending,
+                    "custody_v3_observed":true,"setup_incomplete":true,"setup_failed":failed.is_some(),
+                    "reason":failed.unwrap_or("authority_unreadable")})
+            };
             accounts.push(summary);
         }
     }
     accounts.sort_by(|a, b| a["local_account_id"].as_str().cmp(&b["local_account_id"].as_str()));
     Ok(accounts)
+}
+/// A reservation whose creation failed before its authority was written stays latched and can
+/// never be unlocked. Returns the reason code for such an entry.
+/// # Errors
+/// Rejects invalid identifiers and filesystem failures.
+pub(crate) fn failed_setup(root: &Path, id: &str) -> Result<Option<&'static str>, SdkError> {
+    let dir = directory(root, id)?;
+    Ok((dir.try_exists()? && !dir.join("authority.json").try_exists()?)
+        .then_some("setup_failed_before_authority"))
+}
+/// Typed refusal for unlocking a failed setup, instead of a misleading networking state.
+pub(crate) fn failed_setup_error(id: &str, reason: &str) -> SdkError {
+    SdkError::LocalBusRefused {
+        code: "CustodySetupFailed".into(),
+        message: format!(
+            "account {id} did not finish setup; its reservation is latched and cannot be \
+             unlocked, so create a new account"
+        ),
+        body: Box::new(serde_json::json!({"reason_code": reason, "local_account_id": id})),
+    }
 }
 /// Read public authority without unlocking the primary vault. Malformed or incomplete
 /// custody state fails closed; it is never reinterpreted as a legacy manifest.
@@ -417,7 +442,7 @@ pub(super) fn persist(
             custody_v3_observed: true,
             primary_vault_ref: reference.clone(),
             branch_vault_ref: branch_reference.clone(),
-            vault_class: "software_os_credential_non_synchronizing".into(),
+            vault_class: vault.vault_class().into(),
             record,
             compacted_ids: None,
             custodian_publication: None,

@@ -544,5 +544,12 @@ fn custody_cancel_during_persistence_removes_new_primary_and_branch_credentials(
     let accounts = list_accounts(&root.0, 100)?;
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0]["setup_incomplete"], true);
+    assert_eq!(accounts[0]["setup_failed"], true);
+    assert_eq!(accounts[0]["reason"], "setup_failed_before_authority");
+    let reason = crate::custody::failed_setup(&root.0, "cancelled-commit")?.ok_or("not failed")?;
+    assert!(matches!(
+        crate::custody::failed_setup_error("cancelled-commit", reason),
+        SdkError::LocalBusRefused { code, .. } if code == "CustodySetupFailed"
+    ));
     Ok(())
 }
