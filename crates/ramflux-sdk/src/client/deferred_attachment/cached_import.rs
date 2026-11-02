@@ -84,7 +84,11 @@ impl RamfluxClient {
                 imported: true,
             }))
         })();
-        super::super::attachment_diagnostics::checked(outcome, &reference.object_id, check)
+        super::super::attachment_diagnostics::checked(
+            outcome.map_err(super::attachment_error),
+            &reference.object_id,
+            check,
+        )
     }
 
     pub(super) fn discard_deleted_attachment_chunks(

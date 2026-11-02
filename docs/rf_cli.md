@@ -60,6 +60,8 @@ on failure. Deleted or revoked attachments report `attachment deleted` and `retr
 retrying cannot restore access. The same typed error ends `rf dm read --wait` immediately when
 an in-progress fetch observes revocation. Object and message attachment lists omit revoked
 objects, including references revoked before their first import.
+An attachment already revoked before `rf dm read --wait` starts is omitted from the message's
+attachment list; the containing message remains visible.
 `rf object list --account=ACCOUNT` lists available metadata on either side, using
 bounded directory pages rather than embedding ciphertext.
 Existing object data and attachment references remain readable.

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#![cfg(unix)]
+
 //! The CLI surfaces a terminal attachment receipt and uses the usual failure exit status.
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

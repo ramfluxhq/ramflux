@@ -105,6 +105,61 @@ async fn deleted_attachment_receipt_is_not_retried() -> Result<(), SdkError> {
 }
 
 #[tokio::test]
+async fn object_get_preserves_tombstoned_error_for_a_locally_deleted_ordinary_object()
+-> Result<(), SdkError> {
+    let root = test_root();
+    let mut state = make_state(&root)?;
+    let account = state.accounts.get_mut("account").ok_or(SdkError::AccountDbNotUnlocked)?;
+    account.client.put_encrypted_object("ordinary-object", b"ordinary local bytes")?;
+    account.client.tombstone_object("ordinary-object")?;
+    let request = LocalBusFrame::request(
+        "read",
+        Some("account".into()),
+        "object",
+        "object.get",
+        json!({"object_id":"ordinary-object"}),
+    );
+    let result =
+        Box::pin(crate::bus::dispatch::object::dispatch_object_bus_request(&request, &mut state))
+            .await;
+    assert!(matches!(result, Err(SdkError::Sync(SyncError::ObjectTombstoned))));
+    drop(state);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn deleted_attachment_page_fetch_preserves_typed_error() -> Result<(), SdkError> {
+    let root = test_root();
+    let mut state = make_state(&root)?;
+    let account = state.accounts.get_mut("account").ok_or(SdkError::AccountDbNotUnlocked)?;
+    // Start with a real retryable fetch failure to retain the generic failure outcome.
+    let failed = account.client.fail_received_attachment_fetch("object", "page-fetch").await?;
+    assert!(matches!(
+        crate::bus::attachment_scheduler::ensure_page_attachment_available(&failed),
+        Err(SdkError::LocalBus(_))
+    ));
+    account.client.account_db()?.set_object_tombstoned("object")?;
+    let request = LocalBusFrame::request(
+        "fetch",
+        None,
+        "object",
+        "object.fetch",
+        json!({"object_id":"object","operation_id":"page-fetch"}),
+    );
+    let receipt = dispatch_until(account, &request, None).await?.response_body;
+    let error = crate::bus::attachment_scheduler::ensure_page_attachment_available(&receipt)
+        .err()
+        .ok_or_else(|| SdkError::LocalBus("deleted page fetch succeeded".into()))?;
+    assert!(matches!(error, SdkError::AttachmentDeleted));
+    assert_eq!(crate::bus::io::local_bus_error_code(&error), "AttachmentDeleted");
+    assert_eq!(error.to_string(), crate::error::ATTACHMENT_DELETED);
+    drop(state);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<(), SdkError> {
     let root = test_root();
     let mut state = make_state(&root)?;

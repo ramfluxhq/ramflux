@@ -56,6 +56,36 @@ fn revoke_before_import(f: &Fixture) -> Result<(), SdkError> {
 }
 
 #[tokio::test]
+async fn attachment_fetch_maps_mid_fetch_object_tombstone_to_deleted() -> Result<(), SdkError> {
+    let mut f = Fixture::new()?;
+    let mut fetches = 0;
+    let receipt = f
+        .client
+        .fetch_received_with(
+            "remote-object",
+            "mid-fetch-revoke",
+            FETCH_TIMEOUT,
+            async |client, _reference| {
+                fetches += 1;
+                client.account_db()?.set_object_tombstoned("remote-object")?;
+                // The generic object read retains its public error inside an attachment fetch.
+                client.decrypt_object("remote-object")?;
+                Ok(())
+            },
+        )
+        .await?;
+    assert_eq!(fetches, 1);
+    assert_eq!(receipt["transfer_state"], "failed");
+    assert_eq!(receipt["last_error"], crate::error::ATTACHMENT_DELETED);
+    assert_eq!(receipt["retryable"], false);
+    assert!(matches!(
+        f.client.decrypt_object("remote-object"),
+        Err(SdkError::Sync(SyncError::ObjectTombstoned))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn revocation_before_first_import_blocks_cached_completion()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut f = Fixture::new()?;

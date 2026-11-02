@@ -11,6 +11,13 @@ use std::time::Duration;
 
 mod cached_import;
 
+pub(super) fn attachment_error(error: SdkError) -> SdkError {
+    match error {
+        SdkError::Sync(SyncError::ObjectTombstoned) => SdkError::AttachmentDeleted,
+        other => other,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct ReferenceContext<'a> {
     pub owner: &'a str,
@@ -395,7 +402,7 @@ impl RamfluxClient {
             Ok::<(), SdkError>(())
         }
         .await;
-        match outcome {
+        match outcome.map_err(attachment_error) {
             Ok(()) => {
                 "available".clone_into(&mut state.transfer_state);
                 state.retryable = false;

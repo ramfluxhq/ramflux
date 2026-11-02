@@ -630,6 +630,7 @@ impl RamfluxClient {
             })
         })
         .await;
+        let outcome = outcome.map_err(super::deferred_attachment::attachment_error);
         if check == "verified_local_cache" {
             super::attachment_diagnostics::checked_context(outcome, &attachment.object_id, check)
         } else {

@@ -82,16 +82,26 @@ pub(super) async fn fetch_for_page(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     for id in ids {
         let result = fetch_until(account, &id, deadline).await?;
-        if result["transfer_state"] != "available" {
-            return Err(SdkError::LocalBus(
-                result["last_error"]
-                    .as_str()
-                    .unwrap_or("attachment fetch failed; retry object.fetch")
-                    .to_owned(),
-            ));
-        }
+        ensure_page_attachment_available(&result)?;
     }
     Ok(())
+}
+
+pub(super) fn ensure_page_attachment_available(
+    receipt: &serde_json::Value,
+) -> Result<(), SdkError> {
+    if receipt["transfer_state"] == "available" {
+        return Ok(());
+    }
+    if receipt["retryable"] == false && receipt["last_error"] == crate::error::ATTACHMENT_DELETED {
+        return Err(SdkError::AttachmentDeleted);
+    }
+    Err(SdkError::LocalBus(
+        receipt["last_error"]
+            .as_str()
+            .unwrap_or("attachment fetch failed; retry object.fetch")
+            .to_owned(),
+    ))
 }
 
 #[cfg(test)]
