@@ -102,7 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Upgraded rustls, rustls-webpki, quinn-proto, h2, webpki-roots, and webpki-root-certs to patched versions to close RUSTSEC-2026-0258, 0338, 0339, 0340, 0341, 0342, 0285, 0346, 0348, 0349, 0381, 0382, and 0383.
+- Upgraded rustls, rustls-webpki, quinn-proto, h2, tokio, webpki-roots, and webpki-root-certs to patched versions to close RUSTSEC-2026-0258, 0338, 0339, 0340, 0341, 0342, 0285, 0346, 0348, 0349, 0381, 0382, 0383, and 0386. RUSTSEC-2026-0387 (crypto-bigint 0.5, pinned by the P-256 ECDSA stack) remains an accepted, time-limited deny.toml exception until 2026-12-15.
 
 - Only local contact unblock restores local request consent; peer unblock controls
   retain local decline and block fences.
