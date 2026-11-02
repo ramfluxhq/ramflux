@@ -25,6 +25,16 @@ fn card(principal: &str, seed: [u8; 32]) -> Result<String, SdkError> {
     };
     Ok(crate::contact_card::encode_contact_card(body, seed, now)?.0)
 }
+// Model an accepted contact with an absent optional cache, independent of first-accept behavior.
+fn forget_safety_cache_for_retry(client: &RamfluxClient) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    let mut identity = db.client_record("identity", "alice")?.ok_or_else(|| invalid("identity"))?;
+    identity["safety_number"] = Value::Null;
+    identity["safety_number_algorithm_version"] = Value::Null;
+    db.persist_client_record("identity", "alice", &identity)?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn auto_accepted_card_retry_exposes_safety_number_without_a_network_fetch()
 -> Result<(), SdkError> {
@@ -34,6 +44,7 @@ async fn auto_accepted_card_retry_exposes_safety_number_without_a_network_fetch(
     let mut state = state(&mut a, &mut b, &directory)?;
     account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
     pending(&mut state, &directory).await?;
+    forget_safety_cache_for_retry(account(&state, "bob")?)?;
     let root = r2::root(&state, "alice")?;
     assert!(account(&state, "bob")?.friend_link_peer_is_accepted(&root)?);
     let seed = account(&state, "alice")?
@@ -49,7 +60,7 @@ async fn auto_accepted_card_retry_exposes_safety_number_without_a_network_fetch(
     assert!(receiver.observed_device_set(&receiver.contact_own_commitment()?)?.is_some());
     let row = crate::bus::read_model::row(receiver, "identity", "alice")?;
     assert_eq!(row["safety_number_available"], false);
-    assert!(row["safety_number"].is_null(), "automatic acceptance has not computed it");
+    assert!(row["safety_number"].is_null(), "the retry starts with an absent cached number");
     let started = std::time::Instant::now();
     for retry in 0..2 {
         let accepted =
@@ -85,6 +96,7 @@ async fn accepted_retry_without_a_verified_manifest_preserves_success_without_ca
     let mut state = state(&mut a, &mut b, &directory)?;
     account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
     pending(&mut state, &directory).await?;
+    forget_safety_cache_for_retry(account(&state, "bob")?)?;
     let root = r2::root(&state, "alice")?;
     let (expected, request_id) = {
         let receiver = account(&state, "bob")?;
@@ -115,6 +127,7 @@ async fn accepted_legacy_retry_without_a_signed_device_set_does_not_cache_a_numb
     let mut state = state(&mut a, &mut b, &directory)?;
     account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
     pending(&mut state, &directory).await?;
+    forget_safety_cache_for_retry(account(&state, "bob")?)?;
     let root = r2::root(&state, "alice")?;
     account(&state, "bob")?
         .account_db()?
@@ -143,6 +156,9 @@ async fn lookup_accept_and_accepted_retry_cache_safety_without_changing_verifica
             account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
         }
         pending(&mut state, &directory).await?;
+        if automatic {
+            forget_safety_cache_for_retry(account(&state, "bob")?)?;
+        }
         let root = r2::root(&state, "alice")?;
         let receiver = account(&state, "bob")?;
         assert_eq!(

@@ -7,7 +7,7 @@ use crate::client::native_test_support::{Fixture, TestResult};
 fn pair(local: &Fixture, remote: &Fixture) -> TestResult<String> {
     let local_ref = local.client.owned_device_identity()?;
     let remote_ref = remote.client.owned_device_identity()?;
-    let bundle = remote.client.load_x3dh_private_state(&remote_ref)?.bundle;
+    let bundle = remote.client.load_x3dh_private_state(&remote_ref)?.bundle.clone();
     let hash = crate::dm::prekey_bundle_hash(&bundle)?;
     let message = crate::GatewayDirectMessage {
         conversation_id: "native-retirement".into(),

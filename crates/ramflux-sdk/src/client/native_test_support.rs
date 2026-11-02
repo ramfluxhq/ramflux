@@ -34,7 +34,7 @@ impl Fixture {
         client.unlock_account(id, b"native fixture data passphrase")?;
         client.initialize_born_v3_branch(device, vault.clone()).await?;
         let identity = client.owned_device_identity()?;
-        let bundle = client.load_x3dh_private_state(&identity)?.bundle;
+        let bundle = client.load_x3dh_private_state(&identity)?.bundle.clone();
         let manifest = SdkDeviceManifestResponse::from_native(CustodyManifest {
             publication: Publication { record: account.record().clone(), compacted_ids: None },
             custodian_publication: None,

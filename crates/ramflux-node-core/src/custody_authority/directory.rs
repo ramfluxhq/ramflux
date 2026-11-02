@@ -310,6 +310,10 @@ impl super::RouterCore {
             device_id: identity.device_id().into(),
             principal_commitment: identity.root_commitment().into(),
             target_delivery_id: Some(identity.storage_key().into()),
+            one_time_prekey_exhausted: false,
+            prekey_exhaustion_warning: false,
+            available_one_time_prekeys: 0,
+            one_time_prekey_leases: std::collections::BTreeMap::new(),
             bundle,
         }))
     }
@@ -350,6 +354,10 @@ impl super::RouterCore {
             device_id: request.device_id.clone(),
             principal_commitment: anchor.into(),
             target_delivery_id: Some(identity.storage_key().into()),
+            one_time_prekey_exhausted: false,
+            prekey_exhaustion_warning: false,
+            available_one_time_prekeys: 0,
+            one_time_prekey_leases: std::collections::BTreeMap::new(),
             bundle: Some(request.bundle.clone()),
         }))
     }

@@ -122,7 +122,8 @@ fn handle_itest_directory_request(
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            let response = handle_mvp1_prekey_fetch(path, router, request.source_ip_hash.as_deref())?;
+            let response =
+                handle_mvp1_prekey_fetch(path, router, request.source_ip_hash.as_deref())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("GET", path)
@@ -540,6 +541,9 @@ fn handle_mesh_device_lookup(
 ) -> Option<anyhow::Result<MeshResponse>> {
     let state = router.state();
     let value = match (method, path) {
+        ("POST", "/mvp1/prekey/lease") => {
+            handle_mvp1_prekey_lease(body, router).and_then(|r| Ok(serde_json::to_value(r)?))
+        }
         ("GET", path)
             if path.starts_with(ramflux_protocol::custody::CUSTODY_HISTORY_PATH_PREFIX) =>
         {
@@ -649,10 +653,6 @@ fn handle_mesh_general_value(
         }
         ("POST", "/mvp1/prekey/publish") => {
             let response = handle_mvp1_prekey_publish(body, router.state(), router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("POST", "/mvp1/prekey/lease") => {
-            let response = handle_mvp1_prekey_lease(body, router)?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
         ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => Ok(MeshResponse::json(
@@ -901,7 +901,6 @@ fn handle_itest_device_lookup(
     request: &ramflux_node_core::NodeHttpRequest,
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<bool> {
-    let state = router.state();
     if request.method != "GET" {
         return Ok(false);
     }
@@ -1041,7 +1040,10 @@ fn handle_mvp1_prekey_fetch(
     let device_id = path.trim_start_matches("/mvp1/prekey/");
     let _ = source;
     let response = if let Some(native) = router.state().custody_prekey_response(
-        device_id, ramflux_node_core::now_unix_seconds(), router.store())? {
+        device_id,
+        ramflux_node_core::now_unix_seconds(),
+        router.store(),
+    )? {
         native
     } else {
         router.state().mvp1_prekey_checked(device_id)?

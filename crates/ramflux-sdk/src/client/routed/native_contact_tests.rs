@@ -32,7 +32,7 @@ fn carrier(
     let (mut session, header, bundle) = sender.client.new_send_pair(
         &local,
         &message,
-        target.client.load_x3dh_private_state(&remote)?.bundle,
+        target.client.load_x3dh_private_state(&remote)?.bundle.clone(),
     )?;
     let mut packet = sender.client.seal_routed_with_route(
         &message,

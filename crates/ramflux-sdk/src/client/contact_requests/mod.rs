@@ -269,7 +269,7 @@ impl RamfluxClient {
             self.establish_friend_link(&request.link_id, &body.requester_root, &body.target_root)?;
             self.replicate_contact_acceptance(&request)?;
             self.promote_contact_request_cache(&request.contact_identity_commitment)?;
-            self.persist_native_accepted_contact_safety(
+            self.persist_accepted_contact_safety(
                 &request.principal_id,
                 &request.contact_identity_commitment,
             )?;
@@ -331,7 +331,7 @@ impl RamfluxClient {
                 )?;
                 self.replicate_contact_acceptance(request)?;
                 self.promote_contact_request_cache(&request.contact_identity_commitment)?;
-                self.persist_native_accepted_contact_safety(
+                self.persist_accepted_contact_safety(
                     &request.principal_id,
                     &request.contact_identity_commitment,
                 )?;
@@ -351,6 +351,20 @@ impl RamfluxClient {
             }
             Ok(())
         })
+    }
+    fn persist_accepted_contact_safety(&self, principal: &str, root: &str) -> Result<(), SdkError> {
+        if self.born_v3_account.is_some() {
+            return self.persist_native_accepted_contact_safety(principal, root);
+        }
+        let db = self.account_db()?;
+        let mut identity = db
+            .client_record("identity", principal)?
+            .ok_or_else(|| invalid("accepted contact identity missing"))?;
+        let safety = self.contact_safety_number(root)?;
+        identity["safety_number"] = json!(safety.safety_number);
+        identity["safety_number_algorithm_version"] = json!(safety.algorithm_version);
+        db.persist_client_record("identity", principal, &identity)?;
+        Ok(())
     }
     fn replicate_contact_acceptance(&self, request: &ContactRequestRecord) -> Result<(), SdkError> {
         let manifest: crate::prekey::SdkDeviceManifestResponse = self

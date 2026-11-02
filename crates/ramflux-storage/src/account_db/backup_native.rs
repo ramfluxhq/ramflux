@@ -6,7 +6,7 @@ use super::{backup_database::BackupDatabase, backup_merge::BackupMergeMode};
 use crate::{AccountDbKey, BackupMergeReport, StorageError};
 use std::path::Path;
 
-pub(super) const DATA_STATE_FILTER: &str = "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'identity/%' AND r.state_kind NOT LIKE 'account/%' AND r.state_kind NOT LIKE 'sync/%' AND r.state_kind NOT LIKE 'gateway/%' AND (r.state_kind NOT LIKE 'directory/%' OR r.state_kind LIKE 'directory/conversation/%') AND (r.state_kind NOT LIKE 'dm-pair/%' OR r.state_kind LIKE 'dm-pair/session/%' OR r.state_kind LIKE 'dm-pair/retired/%') AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'";
+pub(super) const DATA_STATE_FILTER: &str = "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'identity/%' AND r.state_kind NOT LIKE 'account/%' AND r.state_kind NOT LIKE 'sync/%' AND r.state_kind NOT LIKE 'gateway/%' AND (r.state_kind NOT LIKE 'directory/%' OR r.state_kind LIKE 'directory/conversation/%') AND (r.state_kind NOT LIKE 'dm-pair/%' OR r.state_kind LIKE 'dm-pair/session/%' OR r.state_kind LIKE 'dm-pair/retired/%') AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%' AND r.state_kind NOT LIKE 'x3dh/private-state/%'";
 
 pub(super) fn authority_table(table: &str) -> bool {
     matches!(

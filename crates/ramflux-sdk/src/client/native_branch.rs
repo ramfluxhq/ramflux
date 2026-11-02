@@ -40,6 +40,11 @@ impl RamfluxClient {
             identity_seed: *Zeroizing::new(credentials.agreement.secret.to_bytes()),
             signed_prekey_id: bundle.signed_prekey_id.clone(),
             signed_prekey_seed: *credentials.signed_prekey_seed(),
+            signed_prekey_created_at: 0,
+            signed_prekey_expires_at: 0,
+            previous_signed_prekeys: Vec::new(),
+            one_time_prekeys: Vec::new(),
+            bundle_counter: bundle.prekey_bundle_counter,
             bundle,
         };
         let identity = ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
@@ -213,7 +218,7 @@ mod tests {
         let bob_root = Root::new()?;
         let alice = native_client(&alice_root, "alice").await?;
         let bob = native_client(&bob_root, "bob").await?;
-        let bundle = bob.load_x3dh_private_state(&bob.owned_device_identity()?)?.bundle;
+        let bundle = bob.load_x3dh_private_state(&bob.owned_device_identity()?)?.bundle.clone();
         let message = crate::GatewayDirectMessage {
             conversation_id: "native-dm".into(),
             message_id: "first".into(),

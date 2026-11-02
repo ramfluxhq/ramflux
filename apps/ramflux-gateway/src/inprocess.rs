@@ -39,6 +39,7 @@ impl Gateway {
         store.save_state(&state)?;
         let context = crate::GatewayQuicContext {
             node_id: config.node_id.clone(),
+            custody: None,
             gateway_id: "ramflux-gateway".into(),
             peers: crate::GatewayPeerDirectory::empty(config),
             router: router.clone(),
