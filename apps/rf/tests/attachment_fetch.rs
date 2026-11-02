@@ -31,21 +31,23 @@ async fn attachment_fetch_prints_deleted_receipt_and_exits_one()
         stream.write_all(&bytes).await?;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_rf"))
-        .arg("--socket")
-        .arg(&socket)
-        .args([
-            "object",
-            "fetch",
-            "--account",
-            "account",
-            "--object",
-            "object",
-            "--operation-id",
-            "fetch-op",
-        ])
-        .output()
-        .await?;
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_rf"))
+            .arg("--socket")
+            .arg(&socket)
+            .args([
+                "object",
+                "fetch",
+                "--account",
+                "account",
+                "--object",
+                "object",
+                "--operation-id",
+                "fetch-op",
+            ])
+            .output()
+    })
+    .await??;
     tokio::time::timeout(std::time::Duration::from_secs(10), server).await???;
     assert_eq!(output.status.code(), Some(1));
     let receipt: Value = serde_json::from_slice(&output.stdout)?;

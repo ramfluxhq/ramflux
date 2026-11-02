@@ -816,14 +816,6 @@ async fn stream_upload_status(
 mod tests {
     use super::object_get_open_temp;
 
-    #[test]
-    fn attachment_fetch_reports_deleted_error_as_failure() {
-        let receipt = serde_json::json!({"transfer_state":"failed",
-            "last_error":"attachment deleted","retryable":false});
-        let error = super::fetch_result(&receipt).expect_err("deleted fetch must fail");
-        assert_eq!(error.to_string(), "attachment deleted");
-    }
-
     fn unique_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("rf-object-get-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
