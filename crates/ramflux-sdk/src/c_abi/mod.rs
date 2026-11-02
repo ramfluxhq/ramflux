@@ -832,7 +832,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
             RamfluxErrorCode::UnsupportedVersion
         }
         SdkError::CustodyRandomUnavailable => RamfluxErrorCode::CryptoFailed,
-        SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
+        SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
+        | SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected) => {
             RamfluxErrorCode::PermissionDenied
         }
         SdkError::Crypto(_) | SdkError::SignatureVerificationFailed(_) => {
@@ -924,3 +925,10 @@ mod transport_error_tests;
 
 #[cfg(test)]
 mod group_error_tests;
+
+#[cfg(test)]
+#[test]
+fn backup_authorization_rejection_maps_to_c_abi_permission_denied() {
+    let error = SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected);
+    assert_eq!(map_sdk_error(&error).code, RamfluxErrorCode::PermissionDenied);
+}

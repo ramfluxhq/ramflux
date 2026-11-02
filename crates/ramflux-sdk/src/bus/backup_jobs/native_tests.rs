@@ -347,3 +347,18 @@ fn native_restore_origin_id_cannot_select_a_different_installed_identity() -> Te
 
 #[path = "native_recovery_tests.rs"]
 mod recovery_tests;
+
+#[test]
+fn backup_authorization_rejection_has_specific_job_and_bus_codes() -> TestResult {
+    let root = Root::new()?;
+    let index = AccountIndex::open(&root.0)?;
+    let jobs = super::BackupJobs::new(&root.0, index)?;
+    let job = jobs.start(crate::backup::BackupJobKind::Restore, "archive.rfb".into())?;
+    let error = SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected);
+    jobs.fail_install(&job.job_id, &error);
+    let rows = jobs.jobs()?;
+    assert_eq!(rows["jobs"][0]["state"], "failed");
+    assert_eq!(rows["jobs"][0]["error"]["code"], "authorization_rejected");
+    assert_eq!(crate::bus::io::local_bus_error_code(&error), "authorization_rejected");
+    Ok(())
+}

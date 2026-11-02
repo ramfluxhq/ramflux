@@ -10,6 +10,12 @@ use rusqlite::{OptionalExtension, params};
 use std::io::{Read, Write};
 use std::path::Path;
 
+#[derive(Clone, Copy)]
+pub(super) enum BackupMergeMode<'a> {
+    FullAccount(Option<&'a ramflux_protocol::GroupStateActor>),
+    NativeDataOnly,
+}
+
 #[derive(Default, Debug)]
 pub struct BackupMergeReport {
     pub restored: BackupCounts,
@@ -106,7 +112,7 @@ impl BackupDatabase {
         key: &AccountDbKey,
         progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
-        self.merge_backup_mode(path, key, None, false, progress)
+        self.merge_backup_mode(path, key, BackupMergeMode::FullAccount(None), progress)
     }
     /// Merge while rebuilding shared groups from verified snapshots and durable removal floors.
     /// # Errors
@@ -118,22 +124,26 @@ impl BackupDatabase {
         local: Option<&ramflux_protocol::GroupStateActor>,
         progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
-        self.merge_backup_mode(path, key, local, false, progress)
+        self.merge_backup_mode(path, key, BackupMergeMode::FullAccount(local), progress)
     }
     pub(super) fn merge_backup_mode(
         &mut self,
         path: &Path,
         key: &AccountDbKey,
-        local: Option<&ramflux_protocol::GroupStateActor>,
-        native_data_only: bool,
+        mode: BackupMergeMode<'_>,
         mut progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
+        let native_data_only = matches!(mode, BackupMergeMode::NativeDataOnly);
+        let local = match mode {
+            BackupMergeMode::FullAccount(local) => local,
+            BackupMergeMode::NativeDataOnly => None,
+        };
         self.check_backup_pins(path, key)?;
         self.attach(path, key)?;
         let result = (|| {
             let tables = self.incoming_tables()?;
             self.begin_message_merge()?;
-            let shared_groups = self.select_backup_shared_groups(local)?;
+            let shared_groups = self.select_backup_shared_groups(mode)?;
             // A restored generation starts fresh handshakes, never archived reservations.
             self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'merge-local',state_kind,state_json FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
             self.preserve_imported_archives(key)?;
@@ -195,9 +205,7 @@ impl BackupDatabase {
                 let _ = replacements;
             }
             self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/%'; INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));")?;
-            if let Some(local) = local {
-                self.project_backup_shared_groups(&shared_groups, local)?;
-            }
+            self.project_backup_shared_groups(&shared_groups, local)?;
             self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;

@@ -604,3 +604,6 @@ fn r7_indexed_removal_capacity_rejects_only_the_new_fence_and_prunes_departed_de
     std::fs::remove_dir_all(path)?;
     Ok(())
 }
+
+#[path = "native_group_backup_tests.rs"]
+mod native_backup;

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Native data archives cannot install authority, credentials or active outbound state.
-use super::backup_database::BackupDatabase;
+use super::{backup_database::BackupDatabase, backup_merge::BackupMergeMode};
 use crate::{AccountDbKey, BackupMergeReport, StorageError};
 use std::path::Path;
 
@@ -52,7 +52,7 @@ impl BackupDatabase {
         key: &AccountDbKey,
         progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
-        self.merge_backup_mode(path, key, None, true, progress)
+        self.merge_backup_mode(path, key, BackupMergeMode::NativeDataOnly, progress)
     }
 }
 

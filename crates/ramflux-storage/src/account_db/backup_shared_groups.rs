@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Restore merge chooses signed group state atomically with its monotonic removal fences.
-use super::{backup_database::BackupDatabase, shared_group_removals::Floors};
+use super::{
+    backup_database::BackupDatabase, backup_merge::BackupMergeMode, shared_group_removals::Floors,
+};
 use crate::StorageError;
 use ramflux_crypto::{GroupStateRelation, VerifiedGroupState};
 use ramflux_protocol::{GroupMemberIdentity, GroupStateActor, GroupStateSnapshot};
@@ -94,16 +96,18 @@ impl BackupDatabase {
     }
     pub(super) fn select_backup_shared_groups(
         &self,
-        local: Option<&GroupStateActor>,
+        mode: BackupMergeMode<'_>,
     ) -> Result<Vec<GroupMerge>, StorageError> {
         let live = self.backup_shared_states(false)?;
         let incoming = self.backup_shared_states(true)?;
         if live.is_empty() && incoming.is_empty() {
             return Ok(Vec::new());
         }
-        ramflux_crypto::verify_group_state_actor(
-            local.ok_or(StorageError::AuthorizationRejected)?,
-        )?;
+        if let BackupMergeMode::FullAccount(local) = mode {
+            ramflux_crypto::verify_group_state_actor(
+                local.ok_or(StorageError::AuthorizationRejected)?,
+            )?;
+        }
         let mut groups = Vec::new();
         for group in live.keys().chain(incoming.keys()).collect::<std::collections::BTreeSet<_>>() {
             let a = live.get(group);
@@ -176,13 +180,14 @@ impl BackupDatabase {
     pub(super) fn project_backup_shared_groups(
         &self,
         groups: &[GroupMerge],
-        local: &GroupStateActor,
+        local: Option<&GroupStateActor>,
     ) -> Result<(), StorageError> {
         for group in groups {
             let state = group.state.view();
             let id = &state.group_id;
-            let role =
-                state.effective_role(&local.identity.root_commitment, &local.identity.device_id);
+            let role = local.and_then(|actor| {
+                state.effective_role(&actor.identity.root_commitment, &actor.identity.device_id)
+            });
             self.db.execute("INSERT INTO group_projection(group_id,group_epoch,role,max_members,new_member_history,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,unixepoch(),unixepoch()) ON CONFLICT(group_id) DO UPDATE SET group_epoch=excluded.group_epoch,role=excluded.role,max_members=excluded.max_members,new_member_history=excluded.new_member_history,updated_at=excluded.updated_at",params![id,state.epoch,role.map(ramflux_protocol::SharedGroupRole::as_str),state.max_members,state.new_member_history])?;
             self.db.execute(
                 "UPDATE group_member_projection SET active=0,removed_epoch=?2 WHERE group_id=?1 AND active=1",
@@ -199,7 +204,8 @@ impl BackupDatabase {
                     member.joined_epoch,
                 )?;
             }
-            if role.is_some()
+            if let Some(local) = local
+                && role.is_some()
                 && !state.members.iter().any(|m| {
                     m.identity.root_commitment == local.identity.root_commitment
                         && m.identity.device_id == local.identity.device_id
@@ -218,7 +224,9 @@ impl BackupDatabase {
             self.put_state(&format!("group-state/{encoded}"), group.state.snapshot())?;
             group.floors.store_index(&self.db, id)?;
             self.put_state(&format!("group-state/known-heads/{encoded}"), &group.heads)?;
-            self.put_state(&format!("directory/group-local/{id}"), &local.identity)?;
+            if let Some(local) = local {
+                self.put_state(&format!("directory/group-local/{id}"), &local.identity)?;
+            }
             self.put_state(
                 &format!("directory/group-name/{id}"),
                 &json!({"name":state.name,"name_epoch":state.name_epoch}),

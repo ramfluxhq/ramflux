@@ -112,6 +112,7 @@ pub struct BackupAttachmentChecks {
 pub enum BackupFailureCode {
     WrongPassphrase,
     RestoreSetupRequired,
+    AuthorizationRejected,
     NetworkingPending,
     Tampered,
     Truncated,

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Restore signed native group data offline without requiring a local actor before
+  attended recovery. Preserve signed state selection, member data and removal
+  floors; report rejected archive authorization as `authorization_rejected`.
+
 - Report missing fresh native restore setup as `restore_setup_required` and refuse
   incomplete CLI imports before archive verification. Successful offline imports
   expose the restored local id, networking state and attended recovery command;

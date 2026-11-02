@@ -122,6 +122,9 @@ impl BackupJobs {
                         .map(BackupFailure::new)
                 })
                 .unwrap_or_else(|| BackupFailure::new(BackupFailureCode::Interrupted)),
+            SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected) => {
+                BackupFailure::new(BackupFailureCode::AuthorizationRejected)
+            }
             SdkError::Storage(error) if error.is_insufficient_space() => {
                 BackupFailure::new(BackupFailureCode::InsufficientSpace)
             }

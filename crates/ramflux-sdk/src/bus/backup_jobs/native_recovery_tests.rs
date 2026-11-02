@@ -221,12 +221,55 @@ async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account
         .run_until(Box::pin(async {
             let source = Root::new()?;
             let target = Root::new()?;
-            let source_vault = TestVault::default();
-            let _source = source_with_history(&source.0, &source_vault)?;
+            let source_vault = Arc::new(TestVault::default());
+            let (account, _phrase) = source_with_history(&source.0, source_vault.as_ref())?;
+            let mut data = RamfluxClient::new();
+            data.open_account_index(&source.0)?;
+            data.unlock_account("account", LOCAL_SECRET.as_bytes())?;
+            data.initialize_born_v3_branch(account.local_device_id()?, source_vault.clone())
+                .await?;
+            let owner = data.owned_device_identity()?;
+            let primary = account.group_primary(source_vault.as_ref())?;
+            let group = data.shared_group_create_with_primary(
+                "restore-group",
+                "restore-group-thread",
+                Some("Restored group".into()),
+                owner.storage_key(),
+                Some(&primary),
+            )?;
+            data.send_direct_message(
+                "restore-group-thread",
+                "group-history",
+                owner.storage_key(),
+                b"restored group history",
+            )?;
+            data.account_db()?.store_message_content(
+                "restore-group-thread",
+                "group-history",
+                b"restored group history",
+            )?;
+            let expected_group = group.snapshot().clone();
+            drop(data);
             // A distinct empty vault has no source signing credential and no configured node.
             let target_vault = Arc::new(TestVault::default());
             let id = install_archive(&source.0, &target.0, target_vault).await?;
             assert_restored_history(&target.0, &id)?;
+            let mut restored = RamfluxClient::new();
+            restored.open_account_index(&target.0)?;
+            restored.unlock_account(&id, LOCAL_SECRET.as_bytes())?;
+            let state = restored
+                .account_db()?
+                .shared_group_state("restore-group")?
+                .ok_or("restored signed group")?;
+            assert_eq!(*state.snapshot(), expected_group);
+            assert_eq!(restored.groups()?.len(), 1);
+            let rows = restored.direct_messages("restore-group-thread")?;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].message_id, "group-history");
+            assert_eq!(
+                restored.account_db()?.message_content("group-history")?,
+                Some(b"restored group history".to_vec())
+            );
             let pending =
                 crate::custody::load_account(&target.0, &id, crate::custody::network_now()?)?;
             assert!(pending.branch_pending());
