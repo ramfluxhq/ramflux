@@ -63,6 +63,12 @@ struct FetchState {
     transfer_state: String,
     last_error: Option<String>,
     attempts: u32,
+    #[serde(default = "default_retryable")]
+    retryable: bool,
+}
+
+const fn default_retryable() -> bool {
+    true
 }
 
 impl RamfluxClient {
@@ -260,7 +266,7 @@ impl RamfluxClient {
             return Ok(None);
         };
         if self.discard_deleted_attachment_chunks(&stored.reference)? {
-            let error = SdkError::LocalBus("attachment was deleted".into());
+            let error = SdkError::AttachmentDeleted;
             super::attachment_diagnostics::failed(object_id, "attachment_deleted", &error);
             let state = FetchState {
                 wire_object_id: Some(stored.reference.object_id.clone()),
@@ -268,7 +274,8 @@ impl RamfluxClient {
                 object_id: object_id.to_owned(),
                 operation_id: operation_id.to_owned(),
                 transfer_state: "failed".into(),
-                last_error: Some("attachment fetch failed; retry object.fetch".into()),
+                last_error: Some(crate::error::ATTACHMENT_DELETED.into()),
+                retryable: false,
                 attempts: self
                     .attachment_fetch_state(object_id)?
                     .map_or(1, |old| old.attempts.saturating_add(1)),
@@ -290,6 +297,7 @@ impl RamfluxClient {
                 object_id: object_id.to_owned(),
                 operation_id: operation_id.to_owned(),
                 transfer_state: "available".into(),
+                retryable: false,
                 last_error: None,
                 attempts: self
                     .attachment_fetch_state(object_id)?
@@ -342,21 +350,22 @@ impl RamfluxClient {
             transfer_state: if attempts > 1 { "retrying" } else { "fetching" }.to_owned(),
             last_error: None,
             attempts,
+            retryable: true,
         };
         self.persist_attachment_fetch_state(&state)?;
         let outcome = async {
+            if self.discard_deleted_attachment_chunks(&stored.reference)? {
+                return super::attachment_diagnostics::checked(
+                    Err(SdkError::AttachmentDeleted),
+                    object_id,
+                    "attachment_deleted",
+                );
+            }
             super::attachment_diagnostics::checked(
                 validate_reference(&stored.reference),
                 object_id,
                 "attachment_reference",
             )?;
-            if self.discard_deleted_attachment_chunks(&stored.reference)? {
-                return super::attachment_diagnostics::checked(
-                    Err(SdkError::LocalBus("attachment was deleted".into())),
-                    object_id,
-                    "attachment_deleted",
-                );
-            }
             // Recover a crash after the import's ACK/slot checkpoint but before this receipt.
             let imported = self.recv_session_checkpoint_at(
                 &stored.reference.key_slot.conversation_id,
@@ -387,14 +396,19 @@ impl RamfluxClient {
         }
         .await;
         match outcome {
-            Ok(()) => "available".clone_into(&mut state.transfer_state),
+            Ok(()) => {
+                "available".clone_into(&mut state.transfer_state);
+                state.retryable = false;
+            }
             Err(SdkError::ObjectErased) => return Err(SdkError::ObjectErased),
             Err(error) => {
                 super::attachment_diagnostics::context(object_id, "attachment_fetch", &error);
                 "failed".clone_into(&mut state.transfer_state);
                 // Fixed diagnostic categories never echo grants, key slots or transport bodies.
+                state.retryable = !matches!(error, SdkError::AttachmentDeleted);
                 state.last_error = Some(
                     match error {
+                        SdkError::AttachmentDeleted => crate::error::ATTACHMENT_DELETED,
                         SdkError::Transport(_) | SdkError::GatewaySessionNotEstablished => {
                             "attachment transport failed; retry object.fetch"
                         }
@@ -451,6 +465,23 @@ impl RamfluxClient {
     pub(crate) fn recover_received_attachment_fetches(&self) -> Result<(), SdkError> {
         let states: Vec<FetchState> = self.account_db()?.list_actor_states("attachment/fetch/")?;
         for mut state in states {
+            let stored: Option<ReceivedAttachment> =
+                self.account_db()?.load_actor_state(&reference_key(&state.object_id))?;
+            let deleted = stored
+                .as_ref()
+                .map(|stored| self.discard_deleted_attachment_chunks(&stored.reference))
+                .transpose()?
+                .unwrap_or(false);
+            if deleted || self.account_db()?.object_is_tombstoned(&state.object_id)? {
+                state.transfer_state = "failed".into();
+                state.last_error = Some(crate::error::ATTACHMENT_DELETED.into());
+                state.retryable = false;
+                self.persist_attachment_fetch_state(&state)?;
+                continue;
+            }
+            if !state.retryable {
+                continue;
+            }
             if matches!(state.transfer_state.as_str(), "fetching" | "retrying") {
                 "failed".clone_into(&mut state.transfer_state);
                 state.last_error =
@@ -573,7 +604,7 @@ fn validate_reference(reference: &SdkDmAttachmentRef) -> Result<(), SdkError> {
 fn public_receipt(state: &FetchState) -> Value {
     json!({"object_id":state.object_id,"operation_id":state.operation_id,
         "transfer_state":state.transfer_state,"last_error":state.last_error,
-        "retryable":state.transfer_state != "available"})
+        "retryable":state.retryable && state.transfer_state != "available"})
 }
 
 #[cfg(test)]

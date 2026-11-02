@@ -5,6 +5,8 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+pub(crate) const ATTACHMENT_DELETED: &str = "attachment deleted";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GroupOperation {
     Create,
@@ -42,6 +44,8 @@ impl GroupOperation {
 pub enum SdkError {
     #[error("object erased")]
     ObjectErased,
+    #[error("{}", ATTACHMENT_DELETED)]
+    AttachmentDeleted,
     #[error("home migration refused: {0:?}")]
     HomeMigrationRefused(ramflux_protocol::home_migration::Refusal),
     #[error("custody networking refused: {0}")]

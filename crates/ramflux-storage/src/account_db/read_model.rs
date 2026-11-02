@@ -167,7 +167,7 @@ impl AccountDb {
     /// # Errors
     /// Returns SQL/JSON decoding errors.
     pub fn client_message_object_ids(&self, message: &str) -> Result<Vec<String>, StorageError> {
-        let mut statement=self.connection.prepare("SELECT selector FROM (SELECT r.selector FROM object_message_reference m JOIN object_retention_reference r USING(reference_hash) WHERE m.message_id=?1 UNION SELECT substr(state_kind,18) FROM runtime_actor_state WHERE state_kind GLOB 'directory/object/*' AND json_extract(CAST(state_json AS TEXT),'$.message_id')=?1) ORDER BY selector LIMIT 128")?;
+        let mut statement=self.connection.prepare("SELECT listed.selector FROM (SELECT r.selector FROM object_message_reference m JOIN object_retention_reference r USING(reference_hash) WHERE m.message_id=?1 UNION SELECT substr(state_kind,18) FROM runtime_actor_state WHERE state_kind GLOB 'directory/object/*' AND json_extract(CAST(state_json AS TEXT),'$.message_id')=?1) AS listed WHERE NOT EXISTS(SELECT 1 FROM object_index o WHERE o.object_id=listed.selector AND o.tombstoned=1) ORDER BY listed.selector LIMIT 128")?;
         Ok(statement
             .query_map(params![message], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -190,6 +190,7 @@ impl AccountDb {
              LEFT JOIN runtime_actor_state s ON s.state_kind='sync/attachment/'||substr(r.state_kind,22)
              WHERE r.state_kind GLOB 'attachment/reference/*'
                AND coalesce(json_extract(CAST(f.state_json AS TEXT),'$.transfer_state'),'not_fetched')<>'available'
+               AND coalesce(json_extract(CAST(f.state_json AS TEXT),'$.retryable'),1)<>0
                AND coalesce(json_extract(CAST(s.state_json AS TEXT),'$.attempts'),0)<3
                AND coalesce(json_extract(CAST(s.state_json AS TEXT),'$.next_at'),0)<=?1
              ORDER BY r.state_kind LIMIT ?2",

@@ -55,6 +55,54 @@ fn make_state(root: &Path) -> Result<LocalBusDaemonState, SdkError> {
 }
 
 #[tokio::test]
+async fn deleted_attachment_receipt_is_not_retried() -> Result<(), SdkError> {
+    let root = test_root();
+    let mut state = make_state(&root)?;
+    let account = state.accounts.get_mut("account").ok_or(SdkError::AccountDbNotUnlocked)?;
+    assert_eq!(
+        account.client.account_db()?.pending_received_attachment_ids(i64::MAX, 64)?,
+        vec!["object"]
+    );
+    account.client.account_db()?.set_object_tombstoned("object")?;
+    let request = LocalBusFrame::request(
+        "fetch",
+        None,
+        "object",
+        "object.fetch",
+        json!({"object_id":"object","operation_id":"deleted-fetch"}),
+    );
+    let result = dispatch_until(account, &request, Some(tokio::time::Instant::now())).await?;
+    assert_eq!(result.response_body["transfer_state"], "failed");
+    assert_eq!(result.response_body["last_error"], crate::error::ATTACHMENT_DELETED);
+    assert_eq!(result.response_body["retryable"], false);
+    assert!(
+        account.client.account_db()?.pending_received_attachment_ids(i64::MAX, 64)?.is_empty(),
+        "the scheduler must not requeue the nonretryable failure"
+    );
+    account.client.account_db()?.persist_actor_state(
+        "attachment/fetch/object",
+        &json!({
+            "object_id":"object","operation_id":"interrupted","transfer_state":"fetching",
+            "last_error":null,"attempts":1,"retryable":true,
+        }),
+    )?;
+    account.client.recover_received_attachment_fetches()?;
+    let recovered = account
+        .client
+        .received_attachment_status("object")?
+        .ok_or(SdkError::AccountDbNotUnlocked)?;
+    assert_eq!(recovered["last_error"], crate::error::ATTACHMENT_DELETED);
+    assert_eq!(recovered["retryable"], false);
+    assert_eq!(
+        account.client.account_db()?.pending_received_attachment_ids(i64::MAX, 64)?,
+        Vec::<String>::new()
+    );
+    drop(state);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<(), SdkError> {
     let root = test_root();
     let mut state = make_state(&root)?;
@@ -114,6 +162,35 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
         Box::pin(crate::bus::mutations::execute(&mut state, "account", &command)).await.is_err()
     );
     drop(state);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn deleted_attachment_receipt_survives_scheduler_deadline() -> Result<(), SdkError> {
+    let root = test_root();
+    let mut account = crate::bus::runtime_tests::account(
+        &root,
+        "terminal",
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    let engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    let receipt = json!({"transfer_state":"failed",
+        "last_error":crate::error::ATTACHMENT_DELETED,"retryable":false});
+    let result = finish_fetch(
+        &mut account,
+        engine,
+        "object",
+        Ok(Ok(receipt.clone())),
+        Some(tokio::time::Instant::now()),
+    )?;
+    assert_eq!(
+        result.response_body, receipt,
+        "a terminal receipt must not become a retryable deadline error"
+    );
+    assert!(account.has_pooled_engine());
+    drop(account);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

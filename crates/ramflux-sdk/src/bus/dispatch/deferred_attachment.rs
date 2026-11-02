@@ -90,8 +90,15 @@ fn finish_fetch(
     let available = result.as_ref().is_ok_and(|result| {
         result.as_ref().is_ok_and(|receipt| receipt["transfer_state"] == "available")
     });
+    let terminal = result.as_ref().is_ok_and(|result| {
+        result.as_ref().is_ok_and(|receipt| {
+            receipt["transfer_state"] == "failed" && receipt["retryable"] == false
+        })
+    });
     let expired = result.is_err()
-        || (!available && deadline.is_some_and(|at| tokio::time::Instant::now() >= at));
+        || (!available
+            && !terminal
+            && deadline.is_some_and(|at| tokio::time::Instant::now() >= at));
     if expired {
         let error = SdkError::LocalBus("attachment fetch deferred; retry object.fetch".into());
         if result.is_err() {

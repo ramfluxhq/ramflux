@@ -318,6 +318,7 @@ fn interrupted_fetch_becomes_retryable_after_restart() -> Result<(), SdkError> {
         transfer_state: "fetching".to_owned(),
         last_error: None,
         attempts: 1,
+        retryable: true,
     })?;
     let old = std::mem::replace(&mut f.client, RamfluxClient::new());
     drop(old);

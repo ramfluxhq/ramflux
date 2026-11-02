@@ -54,7 +54,12 @@ commits. After expiry, verified cached bytes can finish locally without contacti
 the relay or renewing the grant. A cached-completion check that observes local
 deletion or sender revocation refuses the import and discards its cached chunks. A completed import removes its
 durable ACK progress rows. Repeat a read
-or invoke SDK `object.fetch` to resume after a failed attempt.
+or run `rf object fetch --account=ACCOUNT --object=OBJECT --operation-id=OPERATION` to resume a
+retryable failed attempt. The fetch command prints its compact receipt and exits with status 1
+on failure. Deleted or revoked attachments report `attachment deleted` and `retryable: false`;
+retrying cannot restore access. The same typed error ends `rf dm read --wait` immediately when
+an in-progress fetch observes revocation. Object and message attachment lists omit revoked
+objects, including references revoked before their first import.
 `rf object list --account=ACCOUNT` lists available metadata on either side, using
 bounded directory pages rather than embedding ciphertext.
 Existing object data and attachment references remain readable.

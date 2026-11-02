@@ -9,6 +9,178 @@ use crate::object::{
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
 use tracing::instrument::WithSubscriber;
 
+fn revocation_entry(f: &Fixture) -> Result<GatewayInboxEntry, SdkError> {
+    let seed = [41; 32];
+    let manifest = crate::client::identity_authority::test_support::remote_manifest(
+        "owner",
+        "owner-device",
+        seed,
+    )?;
+    f.client.persist_identity_directory(&manifest)?;
+    let root = ramflux_crypto::create_identity_root(
+        "owner",
+        ramflux_crypto::blake3_256("ramflux.test.remote.root.v1", &seed),
+    );
+    let branch = ramflux_crypto::create_device_branch("owner", "owner-device", 1, seed);
+    let config = unused_engine()
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?
+        .config
+        .with_owned_device(&root, branch)?;
+    let message = GatewayDirectMessage {
+        conversation_id: "conversation".into(),
+        message_id: "revoke-message".into(),
+        envelope_id: "revoke-wire".into(),
+        source_principal_id: "owner".into(),
+        sender_id: "owner-device".into(),
+        recipient_device_id: Some("recipient-device".into()),
+        recipient_principal_commitment: None,
+        target_delivery_id: "recipient-device".into(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 3600,
+    };
+    Ok(GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: "recipient-device".into(),
+        envelope: crate::dm::gateway_direct_message_envelope(&config, &message, None)?,
+    })
+}
+
+fn revoke_before_import(f: &Fixture) -> Result<(), SdkError> {
+    assert!(f.client.account_db()?.load_object::<Value>("remote-object")?.is_none());
+    f.client.project_contact_control(
+        &revocation_entry(f)?,
+        &json!({"type":"object.revoke_access","object_id":"remote-object"}),
+    )
+}
+
+#[tokio::test]
+async fn revocation_before_first_import_blocks_cached_completion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut f = Fixture::new()?;
+    stage_chunks(&f)?;
+    f.client.acknowledge_received_attachment_with(&f.reference, 1, async |_| Ok(())).await?;
+    let ack = ack_progress_prefix(&f.reference)?;
+    assert_eq!(f.client.account_db()?.actor_state_keys(&ack)?.len(), 1);
+    f.client.account_db()?.import_direct_message_projection(DirectMessageWrite {
+        conversation_id: "conversation",
+        message_id: "message",
+        sender_id: "owner",
+        encrypted_body: b"visible message",
+        metadata: &MessageMetadata::default(),
+        created_at: 1,
+    })?;
+    f.client.account_db()?.store_message_content("conversation", "message", b"visible message")?;
+    revoke_before_import(&f)?;
+    let receipt = f
+        .client
+        .received_attachment_receipt("remote-object", "after-revoke")?
+        .ok_or("receipt missing")?;
+    assert_eq!(receipt["transfer_state"], "failed");
+    assert_eq!(receipt["last_error"], crate::error::ATTACHMENT_DELETED);
+    assert_eq!(receipt["retryable"], false);
+    assert!(f.client.received_attachment_chunk(&f.reference, 0)?.is_none());
+    assert_eq!(f.client.account_db()?.actor_state_keys(&ack)?, Vec::<String>::new());
+    let (placeholder, key) = f
+        .client
+        .account_db()?
+        .load_object::<ramflux_sync::EncryptedObject>("remote-object")?
+        .ok_or("fence missing")?;
+    assert!(placeholder.tombstoned && placeholder.ciphertext.is_empty() && key.is_none());
+    assert_eq!(placeholder.manifest_hash, f.reference.manifest_hash);
+    let list = crate::bus::dispatch::object::object_list_response(
+        &LocalBusFrame::request("list", None, "object", "object.list", json!({})),
+        &f.client,
+    )?;
+    assert_eq!(list.response_body["objects"], json!([]));
+    let directory = crate::bus::test_account_reader_request(
+        f.client.account_db()?,
+        LocalBusFrame::request(
+            "directory",
+            Some("account".into()),
+            "object",
+            "object.directory",
+            json!({}),
+        ),
+    )
+    .await?;
+    assert_eq!(directory["objects"], json!([]));
+    let read = crate::bus::test_account_reader_request(
+        f.client.account_db()?,
+        LocalBusFrame::request(
+            "read",
+            None,
+            "message",
+            "message.read",
+            json!({"conversation_id":"conversation"}),
+        ),
+    )
+    .await?;
+    assert_eq!(read["messages"][0]["body_utf8"], "visible message");
+    assert_eq!(read["messages"][0]["attachments"], json!([]));
+    // The fence must also hydrate safely when no full object descriptor was ever stored.
+    let previous = std::mem::replace(&mut f.client, RamfluxClient::new());
+    drop(previous);
+    f.client = open(&f.root, false)?;
+    assert!(f.client.account_db()?.object_is_tombstoned("remote-object")?);
+    assert!(f.client.try_import_cached_attachment(&f.reference).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn revocation_before_first_import_blocks_relay_import()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut f = Fixture::new()?;
+    revoke_before_import(&f)?;
+    assert!(f.client.received_attachment_chunk(&f.reference, 0)?.is_none());
+    let mut engine = unused_engine()?;
+    let pool = ramflux_transport::RelayQuicPool::new(
+        ramflux_transport::RelayQuicPoolConfig::functional_default()?,
+    );
+    let result = f
+        .client
+        .import_dm_attachment_from_relay_via_gateway(&mut engine, &pool, &f.reference, None)
+        .await;
+    assert!(
+        matches!(result, Err(SdkError::AttachmentDeleted)),
+        "revocation must refuse before grant validation, download or persistence"
+    );
+    assert!(!f.client.object_key_slot_committed(&f.reference.key_slot)?);
+    Ok(())
+}
+
+#[test]
+fn revocation_for_unknown_reference_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let f = Fixture::new()?;
+    let error = f
+        .client
+        .project_contact_control(
+            &revocation_entry(&f)?,
+            &json!({"type":"object.revoke_access","object_id":"unknown-object"}),
+        )
+        .err()
+        .ok_or("unknown reference accepted")?;
+    assert!(error.to_string().contains("does not own the received reference"));
+    assert!(f.client.account_db()?.load_object::<Value>("unknown-object")?.is_none());
+    // A known reference still requires the authenticated owner's identity.
+    f.client.account_db()?.persist_client_record(
+        "object",
+        "remote-object",
+        &json!({"owner":"other-owner"}),
+    )?;
+    assert!(
+        f.client
+            .project_contact_control(
+                &revocation_entry(&f)?,
+                &json!({"type":"object.revoke_access","object_id":"remote-object"})
+            )
+            .is_err()
+    );
+    assert!(f.client.account_db()?.load_object::<Value>("remote-object")?.is_none());
+    Ok(())
+}
+
 fn expired_reference(f: &mut Fixture) -> Result<(), SdkError> {
     let branch = f.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let identity = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
@@ -289,6 +461,10 @@ async fn assert_cached_deletion_is_final(mode: Deletion) -> Result<(), Box<dyn s
                 );
             }
         }
+        assert!(
+            f.client.decrypt_object("remote-object").is_err(),
+            "a stale memory projection cannot bypass the durable fence"
+        );
         if gateway_path {
             let mut engine = unused_engine()?;
             let pool = ramflux_transport::RelayQuicPool::new(
@@ -299,7 +475,7 @@ async fn assert_cached_deletion_is_final(mode: Deletion) -> Result<(), Box<dyn s
                 .import_dm_attachment_from_relay_via_gateway(&mut engine, &pool, &f.reference, None)
                 .await;
             let error = result.err().ok_or("gateway import resurrected a deleted attachment")?;
-            assert!(error.to_string().contains("attachment was deleted"));
+            assert!(error.to_string().contains(crate::error::ATTACHMENT_DELETED));
         } else {
             let mut calls = 0;
             let receipt = f

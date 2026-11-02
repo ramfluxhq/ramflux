@@ -154,6 +154,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
             "ObjectOwnershipUnverified"
         }
         SdkError::Storage(StorageError::AccountSchemaTooNew { .. }) => "AccountSchemaTooNew",
+        SdkError::AttachmentDeleted => "AttachmentDeleted",
         SdkError::Crypto(CryptoError::GroupLeaseUnavailable) => "GroupLeaseUnavailable",
         SdkError::ContactInput(crate::ContactReason::AnchorMismatch) => "AnchorMismatch",
         SdkError::NetworkingPending

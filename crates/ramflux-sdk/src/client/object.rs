@@ -535,10 +535,8 @@ impl RamfluxClient {
         relay_service_key_base64: Option<String>,
         retention: ObjectRetention,
     ) -> Result<SdkDmAttachmentImportResult, SdkError> {
-        let mut check = "reference_schema";
+        let mut check = "verified_local_cache";
         let outcome = Box::pin(async {
-            self.validate_attachment_import(attachment)?;
-            check = "verified_local_cache";
             let cached = if matches!(retention, ObjectRetention::Imported) {
                 self.try_import_cached_attachment(attachment)?
             } else {
@@ -547,6 +545,8 @@ impl RamfluxClient {
             if let Some(imported) = cached {
                 return Ok(imported);
             }
+            check = "reference_schema";
+            self.validate_attachment_import(attachment)?;
             check = "prepared_key_slot";
             let key_slot = if let Some(slot) = self.received_attachment_prepared_slot(attachment)? {
                 slot
@@ -1137,6 +1137,13 @@ impl RamfluxClient {
         }
         let alias = self.received_object_alias(object_id)?;
         let wire = alias.as_ref().map_or(object_id, |(wire, _)| wire);
+        if let Some(db) = self.active_account_db.as_ref() {
+            for id in std::iter::once(object_id).chain((wire != object_id).then_some(wire)) {
+                if db.object_is_tombstoned(id)? {
+                    return Ok(db.load_object::<EncryptedObject>(id)?.map(|(object, _)| object));
+                }
+            }
+        }
         let object = if let Some(object) = self.object_store.cached_object(wire) {
             Some(object.clone())
         } else if let Some(db) = self.active_account_db.as_ref() {
@@ -1210,6 +1217,15 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn decrypt_object(&self, object_id: &str) -> Result<Vec<u8>, SdkError> {
+        let alias = self.received_object_alias(object_id)?;
+        if let Some(db) = self.active_account_db.as_ref() {
+            db.check_object_access(object_id)?;
+            let wire = alias.as_ref().map_or(object_id, |(wire, _)|wire.as_str());
+            if wire != object_id { db.check_object_access(wire)?; }
+            if db.object_is_tombstoned(object_id)? || (wire != object_id && db.object_is_tombstoned(wire)?) {
+                return Err(SyncError::ObjectTombstoned.into());
+            }
+        }
         let object = self.object_store_object(object_id)?.ok_or(SyncError::ObjectNotFound)?;
         let wire = &object.object_id;
         let mut plaintext =

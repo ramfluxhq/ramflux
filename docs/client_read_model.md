@@ -200,7 +200,9 @@ Call `object.fetch {object_id, operation_id}` to fetch one received reference in
 message receipt. Both identifiers must contain 1 to 256 bytes. The compact reply contains
 `object_id`, `operation_id`, `transfer_state`, `last_error` and `retryable`; it never includes keys,
 grants or plaintext. A failed transfer returns `transfer_state: "failed"`, a sanitized error category
-and `retryable: true`; the message remains visible. Retry with the same operation ID to resume
+and `retryable: true`; the message remains visible. Deleted or sender-revoked attachments
+return `last_error: "attachment deleted"` and `retryable: false`. Background scheduling and
+restart recovery do not retry these terminal failures. Retry with the same operation ID to resume
 verified encrypted chunk checkpoints. Interrupted attempts become retryable failures on daemon
 restart. During an attempt the directory reports `fetching` or
 `retrying`; success reports `available`, and the normal object read APIs then return the bytes.
@@ -395,3 +397,20 @@ expiry and durable decisions on every read and disappear after a decision. Reade
 lookups use the persisted public self principal; private device keys are not loaded.
 `grant.list.approvals` retains its existing aggregate behavior. Listing approvals does
 not grant authority to decide them; existing requester and signature checks still apply.
+
+
+### Revocation before attachment import
+
+An authenticated `object.revoke_access` requires a received object reference whose saved owner
+matches the sender. An unknown reference or a different owner is refused without writing a fence.
+Revocation is durable even before the first payload import. Cache and relay completion read the
+durable tombstone before memory, remove cached chunks and the slot's ACK progress together, and
+refuse to import. Object directories, legacy object lists and message attachment lists omit the
+revoked object; the containing message remains visible.
+
+No schema migration is required. Raw `object_index` diagnostics must accept a placeholder with
+`object_state = 'tombstoned'`, `tombstoned = 1`, `chunk_count = 0`, zero cipher size, empty ciphertext,
+no plaintext hash or content key, and a revocation provenance body. Its manifest comes from the
+received reference when known; otherwise the hash columns contain 32 zero bytes. Such rows are
+fences, not incomplete downloads. There is no `object list --all` CLI option. Backups include
+these rows and restore retains a current tombstone regardless of an archived object's timestamp.

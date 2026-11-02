@@ -156,7 +156,12 @@ impl RamfluxClient {
                     "object revocation sender does not own the received reference",
                 ));
             }
-            self.account_db()?.set_object_tombstoned(id)?;
+            self.account_db()?.set_object_tombstoned_with_revocation(
+                id,
+                Some(&entry.envelope.source_principal_id),
+                Some(&entry.envelope.envelope_id),
+                super::now_unix_timestamp(),
+            )?;
             return Ok(());
         }
         if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some() {

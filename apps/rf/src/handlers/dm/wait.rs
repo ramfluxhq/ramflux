@@ -67,8 +67,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn attachment_wait_does_not_retry_generic_errors_or_default_zero() {
-        for (budget, message) in [(0, DEFERRED), (2, "attachment fetch failed; retry object.fetch")]
-        {
+        for (budget, message) in [
+            (0, DEFERRED),
+            (2, "attachment fetch failed; retry object.fetch"),
+            (2, "attachment deleted"),
+        ] {
             let mut polls = 0;
             let started = tokio::time::Instant::now();
             let result = receive(Duration::from_secs(budget), async || {

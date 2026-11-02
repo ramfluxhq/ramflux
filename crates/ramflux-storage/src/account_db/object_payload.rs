@@ -11,11 +11,26 @@ pub(super) fn decode<T: DeserializeOwned>(
     rowid: i64,
     body: &[u8],
 ) -> Result<T, StorageError> {
-    // Old descriptors retain their complete serialized representation.
-    if !body.windows(b"ramflux:column:1".len()).any(|s| s == b"ramflux:column:1") {
+    if !body.windows(b"ramflux:column:1".len()).any(|s| s == b"ramflux:column:1")
+        && !body.windows(b"\"revocation\"".len()).any(|s| s == b"\"revocation\"")
+    {
         return Ok(serde_json::from_slice(body)?);
     }
     let mut descriptor: serde_json::Value = serde_json::from_slice(body)?;
+    if descriptor["tombstoned"] == true && descriptor.get("revocation").is_some() {
+        // A pre-import fence intentionally has no payload descriptor. Materialize only the
+        // empty reader projection; the persisted body retains its revocation provenance.
+        let manifest = descriptor["revocation"]["manifest_hash"]
+            .as_str()
+            .map_or_else(|| ramflux_protocol::encode_base64url([0_u8; 32]), str::to_owned);
+        let object = descriptor.as_object_mut().ok_or(StorageError::AuthorizationRejected)?;
+        object.insert("manifest_hash".into(), manifest.into());
+        object.insert("nonce".into(), ramflux_protocol::encode_base64url([0_u8; 12]).into());
+        object.insert("ciphertext".into(), serde_json::json!([]));
+        object.insert("plaintext_hash".into(), "".into());
+        object.insert("backup_excluded".into(), false.into());
+        return Ok(serde_json::from_value(descriptor)?);
+    }
     if descriptor.get("ciphertext").and_then(serde_json::Value::as_str) != Some("ramflux:column:1")
     {
         return Ok(serde_json::from_slice(body)?);

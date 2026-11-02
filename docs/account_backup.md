@@ -325,3 +325,8 @@ and a sender process dying after successful delivery but before recording the
 sender-side attachment owner can lose its own copy when the send hold expires.
 Receiver ownership is durable before import, so an interrupted receive can retry
 without orphan reclamation fencing its attachment.
+
+Pre-import attachment revocations are exported as tombstone placeholder rows, including their
+owner and revocation provenance. They have zero chunks and no payload or content key, so payload
+verification and missing-download preparation skip them. Export keeps the fence, and merge never
+replaces a current tombstone with an archived live object, even if its timestamp is newer.

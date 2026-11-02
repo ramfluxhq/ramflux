@@ -2256,7 +2256,12 @@ pub(crate) fn object_list_response(
     request: &LocalBusFrame,
     client: &RamfluxClient,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let body = serde_json::json!({"objects":client.persisted_objects()?});
+    let objects = client
+        .persisted_objects()?
+        .into_iter()
+        .filter(|object| !object.tombstoned)
+        .collect::<Vec<_>>();
+    let body = serde_json::json!({"objects": objects});
     crate::bus::io::encode_local_bus_frame(&local_bus_response(request, body.clone())).map_err(
         |_| {
             SdkError::LocalBus(

@@ -276,3 +276,6 @@ mod backup_missing_tests;
 
 #[cfg(test)]
 mod backup_verification_tests;
+
+#[cfg(test)]
+mod object_revocation_tests;

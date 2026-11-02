@@ -17,12 +17,23 @@ pub(crate) struct ObjectCommand {
 pub(crate) enum ObjectAction {
     Put(ObjectPut),
     Get(ObjectGet),
+    Fetch(ObjectFetch),
     Status(ObjectStatus),
     Resume(ObjectResume),
     Import(ObjectImport),
     List(AccountSelector),
     Share(ObjectShare),
     Delete(ObjectDelete),
+}
+
+#[derive(Args)]
+pub(crate) struct ObjectFetch {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) object: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) operation_id: String,
 }
 
 #[derive(Args)]

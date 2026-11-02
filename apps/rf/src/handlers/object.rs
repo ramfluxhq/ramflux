@@ -12,6 +12,18 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
     match command.action {
         ObjectAction::Put(put) => handle_object_put(&mut bus, socket.as_path(), put).await,
         ObjectAction::Get(get) => handle_object_get(socket.as_path(), get).await,
+        ObjectAction::Fetch(fetch) => {
+            let response = bus
+                .request(
+                    Some(fetch.account),
+                    "object",
+                    "object.fetch",
+                    serde_json::json!({"object_id":fetch.object,"operation_id":fetch.operation_id}),
+                )
+                .await?;
+            print_json(&response)?;
+            fetch_result(&response)
+        }
         ObjectAction::Status(status) => {
             let request = LocalBusObjectTransferStatusRequest {
                 object_id: status.object,
@@ -107,6 +119,18 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
             )
         }
     }
+}
+
+fn fetch_result(receipt: &serde_json::Value) -> Result<(), RfError> {
+    if receipt["transfer_state"] == "failed" {
+        return Err(RfError::Message(
+            receipt["last_error"]
+                .as_str()
+                .unwrap_or("attachment fetch failed; retry object.fetch")
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// T25-A4 (CTRL-104 / OBJ-IPC-01): the number of full restart attempts a streaming GET makes. A
@@ -791,6 +815,14 @@ async fn stream_upload_status(
 #[cfg(test)]
 mod tests {
     use super::object_get_open_temp;
+
+    #[test]
+    fn attachment_fetch_reports_deleted_error_as_failure() {
+        let receipt = serde_json::json!({"transfer_state":"failed",
+            "last_error":"attachment deleted","retryable":false});
+        let error = super::fetch_result(&receipt).expect_err("deleted fetch must fail");
+        assert_eq!(error.to_string(), "attachment deleted");
+    }
 
     fn unique_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("rf-object-get-{tag}-{}", std::process::id()));

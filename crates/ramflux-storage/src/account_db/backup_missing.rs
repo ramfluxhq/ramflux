@@ -5,7 +5,7 @@
 use super::{AccountDb, backup_database::BackupDatabase};
 use crate::StorageError;
 use rusqlite::{Connection, params};
-pub(super) const MISSING: &str = "r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index o WHERE o.manifest_hash IN (CAST(json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AS BLOB),json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash')) AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))";
+pub(super) const MISSING: &str = "r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index d WHERE d.object_id=substr(r.state_kind,length('attachment/reference/')+1) AND d.tombstoned=1) AND NOT EXISTS(SELECT 1 FROM object_index o WHERE o.manifest_hash IN (CAST(json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AS BLOB),json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash')) AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))";
 fn page(db: &Connection, after: &str) -> rusqlite::Result<Vec<String>> {
     let mut q=db.prepare(&format!("SELECT substr(r.state_kind,length('attachment/reference/')+1) FROM runtime_actor_state r WHERE {MISSING} AND r.state_kind>?1 ORDER BY r.state_kind LIMIT 64"))?;
     q.query_map(params![format!("attachment/reference/{after}")], |r| r.get(0))?
@@ -18,6 +18,9 @@ impl AccountDb {
     /// Returns SQLite or malformed JSON errors; there is no count-based truncation.
     pub fn backup_missing_selectors(&self) -> Result<Vec<String>, StorageError> {
         Ok(self.connection.call(|db| {
+            let mut deleted = std::collections::HashSet::new();
+            let mut tombstones = db.prepare("SELECT object_id FROM object_index WHERE tombstoned=1")?;
+            for row in tombstones.query_map([], |row| row.get::<_,String>(0))? { deleted.insert(row?); }
             let mut keys = std::collections::HashSet::new();
             let mut objects = db.prepare("SELECT CAST(manifest_hash AS BLOB),plaintext_hash FROM object_index WHERE manifest_hash IS NOT NULL AND plaintext_hash IS NOT NULL")?;
             for row in objects.query_map([], |r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?)))? {
@@ -27,7 +30,7 @@ impl AccountDb {
             let mut missing=Vec::new();
             for row in refs.query_map([], |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?)))? {
                 let (selector, manifest, plaintext)=row?;
-                if !manifest.zip(plaintext).is_some_and(|(m,p)|keys.contains(&(m.into_bytes(),p))) {
+                if !deleted.contains(&selector) && !manifest.zip(plaintext).is_some_and(|(m,p)|keys.contains(&(m.into_bytes(),p))) {
                     missing.push(selector);
                 }
             }

@@ -103,14 +103,30 @@ impl AccountDb {
                 return Err(StorageError::ObjectIdentityConflict);
             }
             self.connection.execute(
-                "INSERT OR REPLACE INTO object_index (
+                "INSERT INTO object_index (
                 object_id, chunk_manifest_hash, object_created_group_key_epoch, object_state,
                 total_cipher_size, chunk_count, created_at, updated_at, manifest_hash, nonce,
                 ciphertext, plaintext_hash, tombstoned, backup_excluded, object_content_key,
                 object_body
              ) VALUES (
                 ?1, ?2, NULL, ?3, ?4, 1, ?5, ?5, ?2, ?6, ?7, ?8, ?9, ?10, ?11, ?12
-             )",
+             ) ON CONFLICT(object_id) DO UPDATE SET
+                chunk_manifest_hash = excluded.chunk_manifest_hash,
+                object_created_group_key_epoch = excluded.object_created_group_key_epoch,
+                object_state = excluded.object_state,
+                total_cipher_size = excluded.total_cipher_size,
+                chunk_count = excluded.chunk_count,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                manifest_hash = excluded.manifest_hash,
+                nonce = excluded.nonce,
+                ciphertext = excluded.ciphertext,
+                plaintext_hash = excluded.plaintext_hash,
+                tombstoned = excluded.tombstoned,
+                backup_excluded = excluded.backup_excluded,
+                object_content_key = excluded.object_content_key,
+                object_body = excluded.object_body
+             WHERE object_index.tombstoned = 0",
                 params![
                     write.object_id,
                     write.manifest_hash.as_bytes(),
@@ -131,8 +147,52 @@ impl AccountDb {
     }
 
     pub fn set_object_tombstoned(&self, object_id: &str) -> Result<(), StorageError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |time| i64::try_from(time.as_secs()).unwrap_or(i64::MAX));
+        self.set_object_tombstoned_with_revocation(object_id, None, None, now)
+    }
+
+    /// Persist a deletion fence even when the received object has never been imported.
+    /// The caller authenticates the sender and reference before invoking this method.
+    pub fn set_object_tombstoned_with_revocation(
+        &self,
+        object_id: &str,
+        sender: Option<&str>,
+        wire_id: Option<&str>,
+        revoked_at: i64,
+    ) -> Result<(), StorageError> {
+        // Erasure is a stronger veto and must not be replaced by a tombstone row.
         self.write_transaction(|| {
-            self.check_object_access(object_id)?;
+            match self.check_object_access(object_id) {
+                Ok(()) => {},
+                Err(StorageError::ObjectErased) => return Ok(()),
+                Err(error) => return Err(error),
+            }
+            let record = self.client_record("object", object_id)?;
+            let manifest = record.as_ref().and_then(|value| value["manifest_hash"].as_str());
+            let placeholder = serde_json::json!({
+                "object_id": object_id,
+                "owner": record.as_ref().and_then(|value| value["owner"].as_str()),
+                "tombstoned": true,
+                "revoked_at": revoked_at,
+                "revocation": {"sender": sender, "wire_id": wire_id, "manifest_hash": manifest},
+            });
+            self.connection.execute(
+                "INSERT INTO object_index (
+                    object_id, chunk_manifest_hash, object_state, total_cipher_size, chunk_count,
+                    created_at, updated_at, manifest_hash, nonce, ciphertext, plaintext_hash,
+                    tombstoned, backup_excluded, object_content_key, object_body
+                 ) VALUES (?1, ?2, 'tombstoned', 0, 0, ?3, ?3, ?2, ?4, x'', NULL,
+                           1, 0, NULL, ?5) ON CONFLICT(object_id) DO NOTHING",
+                params![
+                    object_id,
+                    manifest.map_or(&[0_u8; 32][..], str::as_bytes),
+                    revoked_at,
+                    &[0_u8; 12][..],
+                    serde_json::to_vec(&placeholder)?
+                ],
+            )?;
             let object_body = self
                 .connection
                 .query_row(
@@ -141,9 +201,7 @@ impl AccountDb {
                     |row| row.get::<_, Vec<u8>>(0),
                 )
                 .optional()?;
-            let Some(object_body) = object_body else {
-                return Ok(());
-            };
+            let object_body = object_body.ok_or(StorageError::AuthorizationRejected)?;
             let mut body: serde_json::Value = serde_json::from_slice(&object_body)?;
             if let Some(object) = body.as_object_mut() {
                 object.insert("tombstoned".to_owned(), serde_json::Value::Bool(true));
@@ -156,6 +214,19 @@ impl AccountDb {
             )?;
             Ok(())
         })
+    }
+
+    /// Read the durable veto without decoding an object payload or content key.
+    pub fn object_is_tombstoned(&self, object_id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT tombstoned FROM object_index WHERE object_id=?1",
+                params![object_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
     }
 
     pub fn record_object_share_grant(

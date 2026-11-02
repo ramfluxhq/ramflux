@@ -165,7 +165,7 @@ impl BackupDatabase {
         } else {
             ""
         };
-        let mut statement=self.db.prepare(&format!("SELECT rowid,object_id,CAST(manifest_hash AS TEXT),plaintext_hash,object_content_key,length(ciphertext) FROM object_index WHERE backup_excluded=0{predicate} ORDER BY rowid"))?;
+        let mut statement=self.db.prepare(&format!("SELECT rowid,object_id,CAST(manifest_hash AS TEXT),plaintext_hash,object_content_key,length(ciphertext) FROM object_index WHERE backup_excluded=0 AND tombstoned=0{predicate} ORDER BY rowid"))?;
         let mut rows = statement.query([])?;
         let mut bytes = 0_u64;
         while let Some(row) = rows.next()? {

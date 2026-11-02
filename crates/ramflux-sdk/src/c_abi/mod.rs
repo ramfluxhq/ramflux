@@ -893,6 +893,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         }
         SdkError::Io(_) => RamfluxErrorCode::Internal,
         SdkError::CustodyVaultUnavailable
+        | SdkError::AttachmentDeleted
         | SdkError::Sync(_)
         | SdkError::CapabilityDenied(_)
         | SdkError::GrantInvalidated

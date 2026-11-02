@@ -26,7 +26,7 @@ impl RamfluxClient {
         let mut check = "attachment_deleted";
         let outcome = (|| {
             if self.discard_deleted_attachment_chunks(reference)? {
-                return Err(SdkError::LocalBus("attachment was deleted".into()));
+                return Err(SdkError::AttachmentDeleted);
             }
             check = "verified_local_object";
             let local = self.received_attachment_is_local(reference)?;
@@ -100,11 +100,7 @@ impl RamfluxClient {
         let mut deleted = false;
         for id in std::iter::once(reference.object_id.as_str()).chain(selector.as_deref()) {
             // A routed revocation may reach durable storage before the memory projection.
-            let durable = db
-                .map(|db| db.load_object::<ramflux_sync::EncryptedObject>(id))
-                .transpose()?
-                .flatten()
-                .is_some_and(|(object, _)| object.tombstoned);
+            let durable = db.map(|db| db.object_is_tombstoned(id)).transpose()?.unwrap_or(false);
             deleted |= durable
                 || self.object_store.cached_object(id).is_some_and(|object| object.tombstoned);
         }
@@ -120,6 +116,7 @@ impl RamfluxClient {
                         db.remove_actor_state(&key)?;
                     }
                 }
+                self.sweep_attachment_acks(reference)?;
                 Ok::<(), SdkError>(())
             })?;
         }

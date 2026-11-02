@@ -84,7 +84,10 @@ pub(super) async fn fetch_for_page(
         let result = fetch_until(account, &id, deadline).await?;
         if result["transfer_state"] != "available" {
             return Err(SdkError::LocalBus(
-                "attachment fetch failed; retry object.fetch".to_owned(),
+                result["last_error"]
+                    .as_str()
+                    .unwrap_or("attachment fetch failed; retry object.fetch")
+                    .to_owned(),
             ));
         }
     }
