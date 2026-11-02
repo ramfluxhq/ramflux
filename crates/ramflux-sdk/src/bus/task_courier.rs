@@ -46,7 +46,7 @@ pub(super) enum Failure {
 
 #[derive(Debug)]
 pub(super) enum Preparation {
-    Ready(Vec<SdkDeviceManifestResponse>),
+    Ready { manifests: Vec<SdkDeviceManifestResponse>, fetched_after: std::time::Instant },
     Charged(Failure),
     Deferred,
 }
@@ -102,9 +102,13 @@ impl TaskCourier {
                             if let Some(failure) = failure {
                                 return Preparation::Charged(failure);
                             }
+                            // Queued results must never refresh authority from their later apply time.
+                            let fetched_after = std::time::Instant::now();
                             match tokio::time::timeout(deadline, prepare_manifests(requests)).await
                             {
-                                Ok(Ok(manifests)) => Preparation::Ready(manifests),
+                                Ok(Ok(manifests)) => {
+                                    Preparation::Ready { manifests, fetched_after }
+                                }
                                 Ok(Err(SdkError::TaskManifestWorkerCapacity)) => {
                                     Preparation::Deferred
                                 }

@@ -46,25 +46,18 @@ async fn apply_item(
         account.signal_task_courier();
         return Ok(false);
     }
-    let manifests = match preparation {
+    let (manifests, fetched_after) = match preparation {
         Preparation::Deferred => return Ok(false),
         Preparation::Charged(reason) => {
             charge(account, item, reason)?;
             return Ok(false);
         }
-        Preparation::Ready(manifests) => manifests,
+        Preparation::Ready { manifests, fetched_after } => (manifests, fetched_after),
     };
     account.task_prepared_only = true;
     for manifest in manifests {
-        account.client.persist_identity_directory(&manifest)?;
-        for device in &manifest.devices {
-            account.client.account_db()?.upsert_device_directory_entry(
-                &device.device_id,
-                &manifest.principal_commitment,
-                "task_courier",
-                now_unix_timestamp(),
-            )?;
-        }
+        // Preserve the actual preparation age, rather than granting a fresh clock after queueing.
+        account.client.persist_fetched_identity_directory_at(&manifest, fetched_after)?;
         account.task_prepared_manifests.insert(manifest.principal_commitment.clone(), manifest);
     }
     let Some((mut job, _)) = queue::load(account, &item.key)? else {

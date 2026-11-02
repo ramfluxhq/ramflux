@@ -63,15 +63,7 @@ pub(super) async fn plan(
                 commitment,
             )
             .await?;
-            account.client.persist_identity_directory(&manifest)?;
-            for device in &manifest.devices {
-                account.client.account_db()?.upsert_device_directory_entry(
-                    &device.device_id,
-                    &manifest.principal_commitment,
-                    "task_group",
-                    now_unix_timestamp(),
-                )?;
-            }
+            account.client.persist_fetched_identity_directory(&manifest)?;
             manifest
                 .devices
                 .into_iter()

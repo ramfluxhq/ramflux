@@ -93,6 +93,7 @@ impl AccountRuntime {
     fn start_courier(&mut self) {
         if self.courier.is_none()
             && let Some(account) = self.state.accounts.get_mut(&self.id)
+            && super::task_courier_queue::networking_ready(account)
         {
             let courier = super::task_courier::TaskCourier::start();
             account.task_courier_wake = Some(courier.wake_sender());
@@ -123,7 +124,12 @@ impl AccountRuntime {
         match outcome {
             super::task_courier::Outcome::Requested { job_id } => {
                 tracing::trace!(job_id, "task courier pass requested");
-                let requests = if let Some(account) = self.state.accounts.get_mut(&self.id) {
+                let requests = if let Some(account) = self
+                    .state
+                    .accounts
+                    .get_mut(&self.id)
+                    .filter(|account| super::task_courier_queue::networking_ready(account))
+                {
                     super::dispatch::task_approval::prepare_queue(account);
                     match super::task_courier_queue::manifest_requests(account) {
                         Ok(requests) => requests,
@@ -295,6 +301,8 @@ impl AccountRuntime {
             Err(_) => ("error", false),
         };
         super::sync_status::record_with_reason(account, state, now_unix_timestamp(), reason)?;
+        // Native admission may have completed on this sync pass after a local-only unlock.
+        self.start_courier();
         let request = LocalBusFrame::request(
             "sync",
             Some(self.id.clone()),
@@ -313,6 +321,12 @@ impl AccountRuntime {
         Ok(activity || fetched)
     }
 
+    async fn cancel_native_unlock(&mut self) {
+        self.stop_courier().await;
+        self.close_readers().await;
+        self.state.accounts.remove(&self.id);
+    }
+
     async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
         if let Some(backup) = command.private.take() {
             match backup {
@@ -326,14 +340,14 @@ impl AccountRuntime {
                         )
                         .await;
                         if reply.is_closed() {
-                            self.close_readers().await;
-                            self.state.accounts.remove(&self.id);
+                            self.cancel_native_unlock().await;
                             return Ok(false);
                         }
                         let result = match self.initialize_readers() {
                             Ok(()) => result,
                             Err(error) => Err(error),
                         };
+                        self.start_courier();
                         let result = match self.publish(&command.request).await {
                             Ok(()) => result,
                             Err(error) => Err(error),

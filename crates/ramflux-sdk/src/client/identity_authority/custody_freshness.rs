@@ -15,6 +15,9 @@ pub(crate) struct NativeHeadFreshness {
 }
 impl NativeHeadFreshness {
     fn remember(&mut self, root: &str, hash: String, at: Instant) {
+        if self.heads.get(root).is_some_and(|(seen, observed)| seen == &hash && *observed > at) {
+            return;
+        }
         if !self.heads.contains_key(root) && self.heads.len() >= MAX_HEADS {
             let oldest =
                 self.heads.iter().min_by_key(|(_, (_, at))| *at).map(|(root, _)| root.clone());
@@ -38,13 +41,23 @@ impl RamfluxClient {
         &self,
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
+        self.persist_fetched_identity_directory_at(manifest, Instant::now())
+    }
+
+    /// A prepared network result retains its conservative fetch-time lower bound while queued.
+    /// Caller-supplied, cached or archived manifests must not use this freshness-bearing helper.
+    pub(crate) fn persist_fetched_identity_directory_at(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+        observed_at: Instant,
+    ) -> Result<(), SdkError> {
         self.persist_identity_directory(manifest)?;
         if let Some(native) = &manifest.custody {
             let hash = ramflux_protocol::custody::object_hash(&native.publication.record)?;
             self.native_head_freshness.borrow_mut().remember(
                 &manifest.principal_commitment,
                 hash,
-                Instant::now(),
+                observed_at,
             );
         }
         Ok(())
@@ -73,6 +86,30 @@ impl RamfluxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn prepared_courier_current_head_clock_retains_fetch_age()
+    -> crate::client::native_test_support::TestResult {
+        use crate::client::native_test_support::Fixture;
+        let local = Fixture::new("courier-freshness-local").await?;
+        let remote = Fixture::new("courier-freshness-remote").await?;
+        let old =
+            Instant::now().checked_sub(FRESH_FOR + Duration::from_secs(1)).ok_or("clock range")?;
+        let native = remote.manifest.custody.as_ref().ok_or("native manifest missing")?;
+        let root = &remote.manifest.principal_commitment;
+        local.client.persist_fetched_identity_directory_at(&remote.manifest, old)?;
+        assert!(
+            local.client.require_fresh_custody_head(root, &native.publication.record).is_err(),
+            "queued public evidence cannot renew the directory permission clock"
+        );
+        local.client.persist_fetched_identity_directory(&remote.manifest)?;
+        local.client.persist_fetched_identity_directory_at(&remote.manifest, old)?;
+        assert!(
+            local.client.require_fresh_custody_head(root, &native.publication.record).is_ok(),
+            "an older queued copy cannot overwrite a newer network observation"
+        );
+        Ok(())
+    }
+
     #[test]
     fn freshness_is_exact_monotonic_bounded_and_not_recreated_from_an_old_head() {
         let mut cache = NativeHeadFreshness::default();

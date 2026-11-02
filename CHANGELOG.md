@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Upgrade SHA-2, HMAC, HKDF, and X25519 dependencies without changing stored or wire formats.
+- Prepare task courier routes outside the account synchronization loop, isolate
+  per-item failures and bounded manifest workers, and retain one actor-owned
+  gateway session. Native pending accounts defer courier work until admission;
+  queued directory results retain their original current-head freshness age.
 
 - CLI direct-message history preserves the daemon's saved outbound plaintext display after restore instead of overwriting it with encrypted envelope JSON.
 

@@ -92,7 +92,18 @@ pub(super) fn quarantine(
     Ok(())
 }
 
+pub(super) fn networking_ready(account: &LocalBusAccountState) -> bool {
+    account
+        .client
+        .born_v3_account
+        .as_ref()
+        .is_none_or(|native| !account.activation_pending && native.require_networking().is_ok())
+}
+
 pub(super) fn manifest_requests(account: &mut LocalBusAccountState) -> Result<Vec<Item>, SdkError> {
+    if !networking_ready(account) {
+        return Ok(Vec::new());
+    }
     let now = now_unix_timestamp();
     let mut items = Vec::new();
     for (prefixes, cursor) in [

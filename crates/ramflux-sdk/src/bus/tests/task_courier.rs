@@ -183,7 +183,7 @@ async fn command(sender: &mpsc::Sender<AccountCommand>, method: &str, body: Valu
     let (outbound, _) = mpsc::channel(1);
     sender
         .send(AccountCommand {
-            backup: None,
+            private: None,
             request: LocalBusFrame::request(method, Some("sender".into()), "test", method, body),
             connection_id: 1,
             topics: BTreeSet::new(),
@@ -774,3 +774,6 @@ async fn inbound_delivered(sender: &mpsc::Sender<AccountCommand>, call_id: &str)
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
+
+#[path = "task_courier_native.rs"]
+mod native;
