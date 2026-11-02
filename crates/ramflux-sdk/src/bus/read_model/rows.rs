@@ -90,11 +90,21 @@ fn conversation(
     if let Some(group) = value.get("group_id").and_then(Value::as_str) {
         let routes = super::super::group_delivery::directory(client, group)?;
         let mut participants = std::collections::BTreeSet::new();
-        for member in client.group_state(group)?.members {
-            if let Some(peer) = client.group_device_metadata(group, &member)?
-                && let Some(id) = peer.get("principal_id").and_then(Value::as_str)
-            {
-                participants.insert(id.to_owned());
+        if client.born_v3_account.is_some()
+            && let Some(state) = db.shared_group_state(group)?
+        {
+            // Signed historical membership remains display metadata after device revocation.
+            // Current transport authority is resolved separately in the member routes.
+            participants.extend(
+                state.view().members.iter().map(|member| member.identity.principal_id.clone()),
+            );
+        } else {
+            for member in client.group_state(group)?.members {
+                if let Some(peer) = client.group_device_metadata(group, &member)?
+                    && let Some(id) = peer.get("principal_id").and_then(Value::as_str)
+                {
+                    participants.insert(id.to_owned());
+                }
             }
         }
         value["participants"] = json!(participants);

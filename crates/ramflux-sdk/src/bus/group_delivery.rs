@@ -6,9 +6,23 @@
 use crate::prelude::*;
 use serde_json::{Value, json};
 
+#[derive(Clone, Copy)]
+enum DirectoryPurpose {
+    Read,
+    Send,
+}
+
 pub(super) fn directory(client: &RamfluxClient, group_id: &str) -> Result<Vec<Value>, SdkError> {
+    directory_for(client, group_id, DirectoryPurpose::Read)
+}
+
+fn directory_for(
+    client: &RamfluxClient,
+    group_id: &str,
+    purpose: DirectoryPurpose,
+) -> Result<Vec<Value>, SdkError> {
     if let Some(state) = client.account_db()?.shared_group_state(group_id)? {
-        return shared_directory(client, &state);
+        return shared_directory(client, &state, purpose);
     }
     let stored = client
         .group_member_routes(group_id)?
@@ -87,7 +101,7 @@ pub(super) fn resolve(
     account: &LocalBusAccountState,
     body: &LocalBusGroupSendRequest,
 ) -> Result<Vec<LocalBusGroupMemberRoute>, SdkError> {
-    let rows = directory(&account.client, &body.group_id)?;
+    let rows = directory_for(&account.client, &body.group_id, DirectoryPurpose::Send)?;
     let mut missing = Vec::new();
     let mut routes = Vec::new();
     for row in rows {
@@ -123,14 +137,22 @@ fn complete(row: &Value) -> bool {
 fn shared_directory(
     client: &RamfluxClient,
     state: &ramflux_crypto::VerifiedGroupState,
+    purpose: DirectoryPurpose,
 ) -> Result<Vec<Value>, SdkError> {
     let routes = match client.shared_group_member_routes(state) {
         Ok(routes) => routes,
-        Err(SdkError::InboundPending(_)) => {
+        Err(error)
+            if matches!(error, SdkError::InboundPending(_))
+                || (matches!(purpose, DirectoryPurpose::Read)
+                    && client.born_v3_account.is_some()
+                    && matches!(error, SdkError::InboundRejected(_))) =>
+        {
+            // Recovery may revoke a roster device; historical metadata is still readable.
+            // Sending retains the original authorization failure rather than this fallback.
             // Reader clients have no process-local current-head freshness. Keep the signed
             // roster visible, without advertising a usable route or refreshing authority.
-            // resolve() fails closed on these incomplete rows; resolve_current() must fetch
-            // current manifests before any group send can obtain complete routes.
+            // Read fallbacks never supply send authority; current sends fetch manifests
+            // before strict route resolution.
             return Ok(state
                 .view()
                 .members

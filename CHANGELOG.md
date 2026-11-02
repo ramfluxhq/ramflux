@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Native group reads include stored plaintext history after restore even when the new device has no pending receive page.
+
+
+- Keep restored native group history readable after attended recovery revokes the
+  source device. Historical roster display does not grant current send routes.
+
 - Keep native group delivery and recovery cursors out of signed-snapshot selection
   during offline backup restore. Strict snapshot validation and full-account merge
   behavior remain unchanged.

@@ -1427,6 +1427,41 @@ pub(crate) async fn dispatch_group_receive_request(
     })))
 }
 
+/// Project already verified native group history independently of the current receive page.
+pub(crate) fn append_native_group_history(
+    client: &RamfluxClient,
+    body: &LocalBusGroupReceiveRequest,
+    plaintext: &mut Vec<serde_json::Value>,
+) -> Result<(), SdkError> {
+    if client.born_v3_account.is_none() {
+        return Ok(());
+    }
+    let db = client.account_db()?;
+    let Some(state) = db.shared_group_state(&body.group_id)? else { return Ok(()) };
+    if state.view().conversation_id != body.conversation_id {
+        return Ok(());
+    }
+    let mut seen = plaintext
+        .iter()
+        .filter_map(|row| row["message_id"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    for message in client.direct_messages(&body.conversation_id)? {
+        if message.deleted || seen.contains(&message.message_id) {
+            continue;
+        }
+        if let Some(content) = db.message_content(&message.message_id)? {
+            seen.insert(message.message_id.clone());
+            plaintext.push(group_plaintext_json(
+                &body.conversation_id,
+                &body.group_id,
+                &message.message_id,
+                &content,
+            ));
+        }
+    }
+    Ok(())
+}
+
 type GroupReceivePage = (Vec<GatewayInboxEntry>, Vec<serde_json::Value>, Vec<serde_json::Value>);
 fn group_receive_compat(
     account: &LocalBusAccountState,
@@ -1483,6 +1518,7 @@ fn group_receive_compat(
             page.0.push(entry);
         }
     }
+    append_native_group_history(&account.client, body, &mut page.1)?;
     Ok(page)
 }
 

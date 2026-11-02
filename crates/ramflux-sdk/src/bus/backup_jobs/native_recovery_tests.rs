@@ -215,6 +215,72 @@ async fn native_fresh_restore_requires_phrase_recovery_and_exact_ack_before_live
         .await
 }
 
+fn assert_restored_group_history(
+    reader: &RamfluxClient,
+    expected: &ramflux_protocol::GroupStateSnapshot,
+) -> TestResult {
+    let state =
+        reader.account_db()?.shared_group_state("restore-group")?.ok_or("reader signed group")?;
+    assert_eq!(*state.snapshot(), *expected);
+    assert_eq!(reader.groups()?.len(), 1);
+    let rows = reader.direct_messages("restore-group-thread")?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].message_id, "group-history");
+    assert_eq!(
+        reader.account_db()?.message_content("group-history")?,
+        Some(b"restored group history".to_vec())
+    );
+    Ok(())
+}
+
+async fn recover_group_read_projection(
+    root: &Path,
+    id: &str,
+    phrase: &zeroize::Zeroizing<String>,
+    vault: Arc<TestVault>,
+    reader: &mut RamfluxClient,
+) -> TestResult {
+    let recovery = RecoveryCeremony::begin(root, id, crate::custody::network_now()?)?;
+    let anchor = recovery.account_anchor().to_owned();
+    let recovered =
+        recovery.confirm(phrase, &anchor, vault.as_ref(), crate::custody::network_now()?)?;
+    reader.initialize_born_v3_branch(recovered.local_device_id()?, vault).await?;
+    let view = crate::bus::read_model::row(reader, "conversation", "restore-group-thread")?;
+    assert_eq!(view["group_id"], "restore-group");
+    assert_eq!(view["participants"].as_array().map(Vec::len), Some(2));
+    assert!(
+        view["member_routes"]
+            .as_array()
+            .ok_or("member routes")?
+            .iter()
+            .all(|row| row["delivery_target_known"] == false)
+    );
+    let state = reader.account_db()?.shared_group_state("restore-group")?.ok_or("signed group")?;
+    assert!(
+        reader.shared_group_member_routes(&state).is_err(),
+        "read projection granted send authority"
+    );
+    assert_eq!(
+        crate::custody::load_account(root, id, crate::custody::network_now()?)?.state(),
+        CreationState::NetworkingPending
+    );
+    let request = LocalBusGroupReceiveRequest {
+        group_id: "restore-group".into(),
+        conversation_id: "restore-group-thread".into(),
+        limit: 100,
+    };
+    let mut plaintext = Vec::new();
+    crate::bus::dispatch::group::append_native_group_history(reader, &request, &mut plaintext)?;
+    crate::bus::dispatch::group::append_native_group_history(reader, &request, &mut plaintext)?;
+    assert_eq!(plaintext.len(), 1, "cached history is independent of receive-page repetition");
+    assert_eq!(plaintext[0]["body_utf8"], "restored group history");
+    let alias = LocalBusGroupReceiveRequest { conversation_id: "unbound-thread".into(), ..request };
+    let mut unrelated = Vec::new();
+    crate::bus::dispatch::group::append_native_group_history(reader, &alias, &mut unrelated)?;
+    assert!(unrelated.is_empty(), "history must follow the signed conversation binding");
+    Ok(())
+}
+
 fn persist_group_driver_progress(data: &RamfluxClient) -> TestResult {
     // A drained native daemon retains operational cursors beside signed group snapshots.
     let db = data.account_db()?;
@@ -258,7 +324,7 @@ async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account
             let source = Root::new()?;
             let target = Root::new()?;
             let source_vault = Arc::new(TestVault::default());
-            let (account, _phrase) = source_with_history(&source.0, source_vault.as_ref())?;
+            let (account, phrase) = source_with_history(&source.0, source_vault.as_ref())?;
             let mut data = RamfluxClient::new();
             data.open_account_index(&source.0)?;
             data.unlock_account("account", LOCAL_SECRET.as_bytes())?;
@@ -323,28 +389,18 @@ async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account
             drop(data);
             // A distinct empty vault has no source signing credential and no configured node.
             let target_vault = Arc::new(TestVault::default());
-            let id = install_archive(&source.0, &target.0, target_vault).await?;
+            let id = install_archive(&source.0, &target.0, target_vault.clone()).await?;
             assert_restored_history(&target.0, &id)?;
             let mut restored = RamfluxClient::new();
             restored.open_account_index(&target.0)?;
             restored.unlock_account(&id, LOCAL_SECRET.as_bytes())?;
-            let state = restored
-                .account_db()?
-                .shared_group_state("restore-group")?
-                .ok_or("restored signed group")?;
-            assert_eq!(*state.snapshot(), expected_group);
-            assert_eq!(restored.groups()?.len(), 1);
-            let rows = restored.direct_messages("restore-group-thread")?;
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].message_id, "group-history");
-            assert_eq!(
-                restored.account_db()?.message_content("group-history")?,
-                Some(b"restored group history".to_vec())
-            );
+            assert_restored_group_history(&restored, &expected_group)?;
             let pending =
                 crate::custody::load_account(&target.0, &id, crate::custody::network_now()?)?;
             assert!(pending.branch_pending());
             assert_eq!(pending.state(), CreationState::NetworkingPending);
+            recover_group_read_projection(&target.0, &id, &phrase, target_vault, &mut restored)
+                .await?;
             Ok(())
         }))
         .await
