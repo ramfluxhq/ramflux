@@ -9,13 +9,13 @@ use ramflux_protocol::custody::*;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 const NOW: u64 = 1_760_000_000;
 const PEER: &str = "ramflux-gateway";
-struct Driver {
-    publication: crate::CustodyPublication,
+pub(crate) struct Driver {
+    pub(crate) publication: crate::CustodyPublication,
     branch: ramflux_crypto::DeviceBranch,
-    reference: DeviceRef,
-    node: VerifiedNodeRecord,
+    pub(crate) reference: DeviceRef,
+    pub(crate) node: VerifiedNodeRecord,
     proxy: SigningKey,
-    connection: String,
+    pub(crate) connection: String,
 }
 fn node() -> Result<(VerifiedNodeRecord, SigningKey)> {
     let root = SigningKey::from_bytes(&[8; 32]);
@@ -60,7 +60,7 @@ fn node() -> Result<(VerifiedNodeRecord, SigningKey)> {
     ))
 }
 impl Driver {
-    fn new(principal: &str, seed: u8) -> Result<Self> {
+    pub(crate) fn new(principal: &str, seed: u8) -> Result<Self> {
         let publication = super::custody_registration::native(principal, seed)?;
         let branch = ramflux_crypto::create_device_branch(principal, "primary", 1, [seed + 2; 32]);
         let reference = DeviceRef {
@@ -78,7 +78,7 @@ impl Driver {
             connection: ramflux_protocol::encode_base64url([seed; 32]),
         })
     }
-    fn publish(&self) -> CustodyProofAction {
+    pub(crate) fn publish(&self) -> CustodyProofAction {
         CustodyProofAction::Publish {
             publication: Box::new(Publication {
                 record: self.publication.record.clone(),
@@ -86,7 +86,7 @@ impl Driver {
             }),
         }
     }
-    fn challenge(
+    pub(crate) fn challenge(
         &self,
         service: &crate::CustodyService,
         router: &RouterCore,
@@ -110,7 +110,7 @@ impl Driver {
             other => Err(format!("challenge failed: {other:?}").into()),
         }
     }
-    fn proof(
+    pub(crate) fn proof(
         &self,
         challenge: &BranchChallenge,
     ) -> Result<ramflux_protocol::custody::Envelope<BranchProofV3>> {

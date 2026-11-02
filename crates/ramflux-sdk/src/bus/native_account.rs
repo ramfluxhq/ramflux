@@ -143,9 +143,10 @@ pub(super) fn status(
                     )
                     .is_ok()
             });
+    let reason = native.presented_networking_reason(now);
     let mut status = serde_json::json!({
         "account_id":account_id,"local_account_id":account_id,"state":"unlocked","networking":native.state(),
-        "networking_reason":native.networking_reason(),
+        "networking_reason":reason,
         "display_name":native.record().body.profile.display_name,"principal_id":native.record().body.principal_id,
         "principal_kind":native.record().body.principal_kind,
         "local_device_authorized":authorized,
@@ -157,9 +158,7 @@ pub(super) fn status(
         "active_transport_kind":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),
         "pending_deliveries":account.pending_deliveries.len(),
     });
-    if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(hint), .. }) =
-        native.networking_reason()
-    {
+    if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(hint), .. }) = reason.as_ref() {
         status["networking_hint"] = crate::custody::capacity_hint::message(hint).into();
     }
     Ok(status)
@@ -374,6 +373,11 @@ pub(super) fn record_networking(
     let now = crate::custody::network_now()?;
     let mut native = crate::custody::load_account(&root, &id, now)?;
     if native.state() == crate::custody::CreationState::NetworkingPending {
+        // A shared cooldown can return before connect_admitted loads the account.
+        // Persist its cause under the actual attempted node, including on a switch back.
+        if let Some(config) = account.gateway_config.custody.as_ref() {
+            native.bind_capacity_node(&root, &config.node_id, &config.node_public_key, now)?;
+        }
         if let Some(error) = error {
             native.set_networking_reason(&root, networking_reason(error))?;
         }

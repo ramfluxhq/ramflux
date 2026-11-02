@@ -44,4 +44,4 @@ mod custody;
 mod custody_registration;
 mod registration_persistence;
 
-mod custody_sessions;
+pub(crate) mod custody_sessions;

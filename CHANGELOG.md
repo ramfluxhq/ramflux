@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Bound custody capacity reset hints to two days, keep node-bound retry deadlines
+  without repeated status writes, and expose router budget inspection through
+  the operator-only loopback administration overlay.
+
 - Upgrade SHA-2, HMAC, HKDF, and X25519 dependencies without changing stored or wire formats.
 - Prepare task courier routes outside the account synchronization loop, isolate
   per-item failures and bounded manifest workers, and retain one actor-owned

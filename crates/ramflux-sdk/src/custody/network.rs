@@ -152,10 +152,13 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         let root = config.account_root.clone();
         let account_id = config.account_id.clone();
         let device_id = config.device_id.clone();
+        let node_id = config.node_id.clone();
+        let node_public_key = config.node_public_key.clone();
         let authority = budget
             .attempt(async move {
                 tokio::task::spawn_blocking(move || {
-                    let account = super::load_account(&root, &account_id, now()?)?;
+                    let mut account = super::load_account(&root, &account_id, now()?)?;
+                    account.bind_capacity_node(&root, &node_id, &node_public_key, now()?)?;
                     let (device, credentials) =
                         account.credentials(vault.as_ref(), &device_id, now()?)?;
                     Ok::<_, SdkError>(LocalAuthority { account, device, credentials })
@@ -514,6 +517,7 @@ pub(super) async fn exchange<S: ramflux_transport::GatewaySessionTransport + ?Si
             }
             if code == CustodyRefusal::Capacity
                 && let Some(capacity) = capacity
+                && let Some(capacity) = super::capacity_hint::accepted(capacity, now()?)
             {
                 return Err(SdkError::CustodyCapacity { capacity });
             }

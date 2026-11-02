@@ -344,6 +344,7 @@ fn persist_intent(
         current.stored.pending_branch = false;
         current.stored.state = CreationState::NetworkingPending;
         current.stored.networking_reason = None;
+        current.stored.capacity_retry_at = None;
         let journal = Journal {
             schema: "ramflux.local.recovery_intent.v1".into(),
             before_hash: ceremony.before_hash.clone(),
@@ -444,6 +445,8 @@ pub(crate) fn pending_restore(
         local_device_id: device,
         state: CreationState::NetworkingPending,
         networking_reason: None,
+        networking_node: None,
+        capacity_retry_at: None,
         pending_branch: true,
         custody_v3_observed: true,
         primary_vault_ref: String::new(),

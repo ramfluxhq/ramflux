@@ -524,7 +524,12 @@ For temporary administration, set `DEMO_ADMIN_LOOPBACK_PORT=59487` in the operat
 env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
 `DEMO_BIND_ADDR`, and can be reached through an SSH tunnel. Unset it and run `up`
 to remove the mapping. Production installs can use `docker-compose.admin.yml`
-with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. See
+with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. The same opt-in overlay publishes
+the router's authenticated mesh administration listener on loopback TCP 59488
+(`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` for the demo wrapper,
+`RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` for direct Compose use). This is separate
+from the federation listener. Both ports must be distinct from the other demo
+ports; the router still requires a trusted mesh certificate and its admin token. See
 [listener configuration, bounds and SSH commands](../docs/federation_http.md).
 
 For upgrades from tooling older than this snapshot workflow, first save the complete
@@ -736,17 +741,20 @@ The demo wrapper retains these inputs across upgrades and snapshot rollback and
 passes them only to the router. Omitted inputs stay absent, preserving the unset
 policy. Apply configuration through the normal operator-managed deployment flow.
 
-Inspect the running router through the existing authenticated mesh admin listener:
+Enable the private administration overlay as described above (`DEMO_ADMIN_LOOPBACK_PORT=59487`;
+router administration defaults to loopback TCP 59488), then inspect the router
+through its authenticated mesh admin listener:
 
 ```sh
 # Load the private operator environment; never put the token in argv.
 set -a
 . "$DEMO_DATA_DIR/identity.env"
 set +a
-"$DEMO_TOOL" custody-budgets 127.0.0.1:59453 "$DEMO_DATA_DIR/certs" router
+"$DEMO_TOOL" custody-budgets 127.0.0.1:59488 "$DEMO_DATA_DIR/certs" router
 ```
 
-Use the configured `DEMO_MESH_PORT` instead of 59453 when different. The tool
+Use `DEMO_ROUTER_ADMIN_LOOPBACK_PORT` instead of 59488 when configured.
+`DEMO_MESH_PORT` reaches federation and does not serve this router route. The tool
 uses the existing gateway mesh certificate and router admin token. Keep both
 operator-only. This path is not forwarded by the public gateway.
 The JSON result includes `observed_at` and a row per durable daily/minute window,
@@ -760,6 +768,9 @@ a used venue quota from challenge, minute, or global capacity pressure.
 
 Daily quota refusal frames now carry an optional server-owned UTC reset hint.
 Rebuild both clients and node services together: older v3 clients reject hinted
-refusals. Clients display the supplied reset and wait until it (at least 300 s);
+refusals. Clients honor reset hints at most two days ahead, bind persisted deadlines to
+the node identity, and display the remaining delay without rewriting the account
+on every blocked retry. Out-of-range hints are logged and use only the 300 s
+floor. Valid hints wait until the reset (at least 300 s);
 other Capacity refusals remain generic. See `docs/custody_networking.md` for the
 client contract and `CHANGELOG.md` for the breaking development wire notice.

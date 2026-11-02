@@ -84,7 +84,19 @@ fn phrase_recovery_never_persists_master_and_reconciles_a_crash_before_authority
 -> TestResult {
     let root = Root::new()?;
     let vault = TestVault::default();
-    let (prior, phrase) = known_account(&root.0, &vault)?;
+    let (mut prior, phrase) = known_account(&root.0, &vault)?;
+    let now = crate::custody::network_now()?;
+    prior.bind_capacity_node(&root.0, "recovery-node", "recovery-key", now)?;
+    prior.set_networking_reason(
+        &root.0,
+        Some(crate::AccountNetworkingReason::NodeBusy {
+            retry_after_ms: 300_000,
+            capacity: Some(ramflux_protocol::custody::CapacityHint {
+                scope: ramflux_protocol::custody::CapacityScope::PrefixDaily,
+                resets_at_unix: now + 3600,
+            }),
+        }),
+    )?;
     let old = fs::read(directory(&root.0, "recoverable")?.join("authority.json"))?;
     let old_primary = prior.stored.primary_vault_ref.clone();
     let old_branch = prior.stored.branch_vault_ref.clone();
@@ -93,6 +105,8 @@ fn phrase_recovery_never_persists_master_and_reconciles_a_crash_before_authority
     let anchor = recovery.account_anchor().to_owned();
     let replacement = recovery.confirm(&phrase, &anchor, &vault, now)?;
     assert_eq!(replacement.state(), CreationState::NetworkingPending);
+    replacement.check_capacity_deadline(now)?;
+    assert!(replacement.networking_reason().is_none());
     assert_ne!(replacement.local_device_id()?, prior.local_device_id()?);
     assert!(replacement.require_networking().is_err());
     assert!(replacement.stored.pins.require_current(prior.verified()).is_err());
@@ -110,6 +124,7 @@ fn phrase_recovery_never_persists_master_and_reconciles_a_crash_before_authority
     fs::write(directory(&root.0, "recoverable")?.join("authority.json"), old)?;
     let mut resumed = load_data_account(&root.0, "recoverable", now)?;
     assert_eq!(resumed.record(), replacement.record());
+    resumed.check_capacity_deadline(now)?;
     assert_eq!(resumed.state(), CreationState::NetworkingPending);
     let seed = master_seed()?;
     assert_no_secret(&root.0, &seed)?;

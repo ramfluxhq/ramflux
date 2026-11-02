@@ -892,9 +892,19 @@ else:
         up = next(call for call in calls if "up" in call["args"])
         self.assertIn(str(self.state / "compose.admin.yml"), up["args"])
         self.assertIn("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=59487", (self.state / "runtime.env").read_text())
+        self.assertIn("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=59488", (self.state / "runtime.env").read_text())
         with self.env_file.open("a") as output:
             output.write("DEMO_ADMIN_LOOPBACK_PORT=59482\n")
         self.assertIn("admin loopback port conflicts", self.run_script("up", success=False).stderr)
+
+    def test_router_admin_port_is_distinct_and_saved(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_ADMIN_LOOPBACK_PORT=59487\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT=59487\n")
+        self.assertIn("router admin loopback port conflicts", self.run_script("up", success=False).stderr)
+        with self.env_file.open("a") as output:
+            output.write("DEMO_ROUTER_ADMIN_LOOPBACK_PORT=59588\n")
+        self.run_script("up")
+        self.assertIn("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=59588", (self.state / "runtime.env").read_text())
 
     def test_preflight_and_up_share_all_compose_arguments(self):
         with self.env_file.open("a") as output:

@@ -234,10 +234,12 @@ def validate_snapshot_overlays(state, reference):
     applied = {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": target_voice_port,
         "DEMO_ADMIN_LOOPBACK_PORT": target_admin_port,
+        "DEMO_ROUTER_ADMIN_LOOPBACK_PORT": values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488") if target_admin_port else "",
     }
     selected = {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT", ""),
         "DEMO_ADMIN_LOOPBACK_PORT": os.environ.get("DEMO_ADMIN_LOOPBACK_PORT", ""),
+        "DEMO_ROUTER_ADMIN_LOOPBACK_PORT": os.environ.get("DEMO_ROUTER_ADMIN_LOOPBACK_PORT", "59488") if os.environ.get("DEMO_ADMIN_LOOPBACK_PORT") else "",
     }
     changed = [key for key in selected if selected[key] != applied[key]]
     if changed:
@@ -394,7 +396,8 @@ def validate_selected_overlay_values(state):
                      "before maintenance (or restore the last applied selection)")
     admin_port = os.environ.get("DEMO_ADMIN_LOOPBACK_PORT", "")
     if admin_port and (not (state / "compose.admin.yml").is_file()
-                       or values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT") != admin_port):
+                       or values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT") != admin_port
+                       or values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488") != os.environ.get("DEMO_ROUTER_ADMIN_LOOPBACK_PORT", "59488")):
         sys.exit("admin loopback configuration was not applied by the last up; run up first")
 
 

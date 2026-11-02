@@ -710,7 +710,8 @@ async fn reason_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
 async fn custody_capacity_hint_round_trips_through_tls_and_account_status() -> Result {
     use ramflux_protocol::custody::{CapacityHint, CapacityScope};
     for scope in [CapacityScope::PrefixDaily, CapacityScope::GlobalDaily] {
-        let capacity = CapacityHint { scope, resets_at_unix: 4_102_444_800 };
+        let capacity =
+            CapacityHint { scope, resets_at_unix: crate::custody::network_now()? + 3600 };
         let status = status_from_gateway_cause(GatewayCause::DailyQuota(capacity)).await?;
         assert_eq!(status["networking_reason"]["kind"], "node_busy");
         assert_eq!(status["networking_reason"]["capacity"], serde_json::to_value(capacity)?);
@@ -720,11 +721,35 @@ async fn custody_capacity_hint_round_trips_through_tls_and_account_status() -> R
         } else {
             "for the whole network"
         }));
-        assert!(message.contains("2100-01-01T00:00:00Z"));
+        assert_eq!(message, crate::custody::capacity_hint::message(&capacity));
         assert!(
             status["networking_reason"]["retry_after_ms"]
                 .as_u64()
                 .is_some_and(|delay| delay >= 300_000)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn custody_out_of_range_and_past_resets_show_only_the_remaining_floor() -> Result {
+    use ramflux_protocol::custody::{CapacityHint, CapacityScope};
+    let now = crate::custody::network_now()?;
+    for reset in [ramflux_protocol::MAX_SAFE_JSON_INTEGER, now + 3 * 86_400, now.saturating_sub(1)]
+    {
+        let capacity = CapacityHint { scope: CapacityScope::PrefixDaily, resets_at_unix: reset };
+        let status = status_from_gateway_cause(GatewayCause::DailyQuota(capacity)).await?;
+        assert_eq!(
+            status["networking_reason"]["kind"], "node_busy",
+            "reset={reset} status={status}"
+        );
+        assert!(status["networking_reason"]["capacity"].is_null(), "{status}");
+        assert!(status["networking_hint"].is_null(), "an unusable reset must not be displayed");
+        assert!(
+            status["networking_reason"]["retry_after_ms"]
+                .as_u64()
+                .is_some_and(|delay| delay > 0 && delay <= 300_000),
+            "{status}"
         );
     }
     Ok(())

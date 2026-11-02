@@ -3,11 +3,35 @@
 
 //! Presentation and persisted pending-account handling for server-owned daily reset times.
 use super::BornAccount;
-use crate::{AccountNetworkingReason, SdkError};
+use crate::SdkError;
 use ramflux_protocol::custody::{CapacityHint, CapacityScope};
 
 pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+pub(crate) const MAX_RESET_AHEAD_SECS: u64 = 2 * 86_400;
+
+pub(crate) fn accepted(hint: CapacityHint, now: u64) -> Option<CapacityHint> {
+    if hint.resets_at_unix <= now.saturating_add(MAX_RESET_AHEAD_SECS) {
+        Some(hint)
+    } else {
+        tracing::warn!(
+            discarded_resets_at_unix = hint.resets_at_unix,
+            local_now_unix = now,
+            "discarding custody capacity reset beyond the two-day bound"
+        );
+        None
+    }
+}
+
+pub(crate) fn node_identity(node_id: &str, node_public_key: &str) -> String {
+    let mut hash = blake3::Hasher::new();
+    for value in [node_id, node_public_key] {
+        hash.update(&(value.len() as u64).to_le_bytes());
+        hash.update(value.as_bytes());
+    }
+    hash.finalize().to_hex().to_string()
 }
 
 pub(crate) fn message(hint: &CapacityHint) -> String {
@@ -28,18 +52,13 @@ pub(crate) fn retry_after_ms(hint: CapacityHint, now: u64) -> u64 {
 }
 
 pub(super) fn check_account(account: &BornAccount, now: u64) -> Result<(), SdkError> {
-    if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(capacity), .. }) =
-        account.networking_reason()
-        && capacity.resets_at_unix > now
-    {
-        return Err(SdkError::CustodyCapacity { capacity: *capacity });
-    }
-    Ok(())
+    account.check_capacity_deadline(now)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AccountNetworkingReason;
     #[test]
     fn capacity_hint_messages_preserve_category_and_unhinted_wording() {
         for scope in [CapacityScope::PrefixDaily, CapacityScope::GlobalDaily] {
@@ -79,6 +98,7 @@ mod tests {
         let root = Root::new()?;
         let now = crate::custody::network_now()?;
         let mut account = create(&root.0, "daily-hint", &TestVault::default(), now)?;
+        account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
         let hint = CapacityHint { scope: CapacityScope::PrefixDaily, resets_at_unix: now + 3600 };
         account.set_networking_reason(
             &root.0,

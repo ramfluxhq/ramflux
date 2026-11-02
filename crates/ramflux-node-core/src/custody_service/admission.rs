@@ -404,3 +404,6 @@ impl CustodyService {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

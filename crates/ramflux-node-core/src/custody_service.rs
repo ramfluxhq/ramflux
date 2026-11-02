@@ -352,36 +352,3 @@ impl CustodyService {
         }
     }
 }
-
-#[cfg(test)]
-mod capacity_hint_tests {
-    use super::*;
-    #[test]
-    fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use ramflux_protocol::custody::{CapacityHint, CapacityScope};
-        let pool =
-            crate::CustodyIngressLimiter::with_pools(1, 1, 1, std::time::Duration::from_secs(300));
-        let permit =
-            pool.acquire("192.0.2.1".parse()?, None, Instant::now()).ok_or("permit missing")?;
-        let hint = CapacityHint { scope: CapacityScope::GlobalDaily, resets_at_unix: 172_800 };
-        let result = permit
-            .try_grant("refused-principal", || {
-                Err::<CustodyServerFrame, _>(publication_failure(
-                    crate::NodeCoreError::CustodyDailyCapacity(hint),
-                ))
-            })
-            .ok_or("grant check missing")?;
-        let response = result.or_else(ProofFailure::response)?;
-        assert_eq!(
-            response,
-            CustodyServerFrame::Refused { code: CustodyRefusal::Capacity, capacity: Some(hint) }
-        );
-        // A prior successful grant would pin the holder to refused-principal and reject this.
-        assert!(matches!(
-            permit.try_grant("actual-principal", || Ok::<_, CustodyRefusal>(())),
-            Some(Ok(()))
-        ));
-        Ok(())
-    }
-}

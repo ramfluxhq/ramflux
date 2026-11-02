@@ -20,6 +20,7 @@ struct Deadline {
 }
 impl Deadline {
     fn new(now: Instant, wall: u64, hint: Option<CapacityHint>) -> Self {
+        let hint = hint.and_then(|hint| super::capacity_hint::accepted(hint, wall));
         let wait = hint
             .map_or(COOLDOWN.as_secs(), |h| h.resets_at_unix.saturating_sub(wall))
             .max(COOLDOWN.as_secs());
@@ -45,6 +46,7 @@ impl Cooldowns {
         self.0.get(key).map_or(Ok(()), |deadline| Err(deadline.error()))
     }
     fn record(&mut self, key: String, now: Instant, wall: u64, hint: Option<CapacityHint>) {
+        let hint = hint.and_then(|hint| super::capacity_hint::accepted(hint, wall));
         self.0.retain(|_, deadline| deadline.active(now, wall));
         let entry = self.0.entry(key).or_insert_with(|| Deadline::new(now, wall, hint));
         // Repeated local refusals do not move the original deadline. A new, later server
@@ -157,7 +159,29 @@ mod tests {
             1000,
             Some(CapacityHint { resets_at_unix: u64::MAX, ..hint }),
         );
-        assert!(state.check("huge", now + COOLDOWN, 1300).is_err());
+        state.check("huge", now + COOLDOWN, 1300)?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn custody_capacity_far_future_and_past_resets_keep_the_monotonic_floor()
+    -> Result<(), SdkError> {
+        for reset in [u64::MAX, 1000 + 2 * 86_400 + 1, 999] {
+            let now = Instant::now();
+            let mut state = Cooldowns::default();
+            state.record(
+                "bounded".into(),
+                now,
+                1000,
+                Some(CapacityHint { scope: CapacityScope::PrefixDaily, resets_at_unix: reset }),
+            );
+            let error = state
+                .check("bounded", now + Duration::from_secs(299), 1299)
+                .err()
+                .ok_or(SdkError::CustodySetupInvalid)?;
+            assert_eq!(error.capacity_hint().is_some(), reset == 999);
+            state.check("bounded", now + COOLDOWN, 1300)?;
+        }
         Ok(())
     }
 }

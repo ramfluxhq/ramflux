@@ -453,10 +453,13 @@ Inspect the running router through the existing authenticated mesh admin listene
 set -a
 . "$DEMO_DATA_DIR/identity.env"
 set +a
-"$DEMO_TOOL" custody-budgets 127.0.0.1:59453 "$DEMO_DATA_DIR/certs" router
+"$DEMO_TOOL" custody-budgets 127.0.0.1:59488 "$DEMO_DATA_DIR/certs" router
 ```
 
-Use the configured `DEMO_MESH_PORT` instead of 59453 when different. The tool
+Enable the production private administration overlay first. Its router listener
+uses loopback TCP 59488 (`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` for the demo wrapper;
+`RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` for direct Compose). `DEMO_MESH_PORT` reaches
+federation and does not serve this router route. The tool
 uses the existing gateway mesh certificate and router admin token. Keep both
 operator-only. This path is not forwarded by the public gateway.
 The JSON result includes `observed_at` and a row per durable daily/minute window,
@@ -475,9 +478,16 @@ and includes `capacity: { scope, resets_at_unix }`. The scope is `prefix_daily`
 or `global_daily`; the reset is copied from the durable UTC-day window. Minute,
 lease, byte, listener, and other capacity refusals omit this field.
 
-The client shows the network's new-account quota and the supplied UTC reset in
+The client accepts daily resets no more than two days ahead of its wall clock.
+It logs a discarded out-of-range value and falls back to the 300-second cooldown.
+Past resets also retain that floor. Saved deadlines are bound to both the node
+id and its pinned public key; changing either clears the old node's hint.
+Old saved hints without a node binding are discarded on the first connection.
+The client shows the network's new-account quota and the accepted UTC reset in
 `rf account status` and in the error text. It waits until that reset, with the
-existing 300-second cooldown as a minimum. Repeated status calls do not extend
+existing 300-second cooldown as a minimum. The remaining delay is derived at
+status time, expired hint text disappears, and blocked retries do not rewrite
+the account authority file or extend its saved deadline. Repeated status calls do not extend
 or bypass the deadline; monotonic time and wall time both gate expiry. Pending
 accounts retain the hint across daemon restarts. Without a hint, the generic
 Capacity message remains and the client makes no midnight-reset claim.
