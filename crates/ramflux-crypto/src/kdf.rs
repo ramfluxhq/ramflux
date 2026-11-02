@@ -204,6 +204,19 @@ pub(crate) fn hkdf_sha256(
 mod tests {
     use super::*;
 
+    #[test]
+    fn hkdf_sha256_rfc5869_a1_golden() -> Result<(), Box<dyn std::error::Error>> {
+        let salt = hex::decode("000102030405060708090a0b0c")?;
+        let info = hex::decode("f0f1f2f3f4f5f6f7f8f9")?;
+        let mut output = [0_u8; 42];
+        hkdf_sha256(&salt, &[0x0b; 22], &info, &mut output)?;
+        assert_eq!(
+            hex::encode(output),
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+        );
+        Ok(())
+    }
+
     const SALT: &[u8] = b"ramflux-recovery-test-salt";
 
     #[test]

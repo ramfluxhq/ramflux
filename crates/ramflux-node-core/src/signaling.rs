@@ -970,3 +970,36 @@ impl SignalingRedbStore {
         load_snapshot(&self.db, SIGNALING_STATE_TABLE, SIGNALING_STATE_KEY)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signaling_token_golden_preserves_base64url_bytes() -> Result<(), NodeCoreError> {
+        let token = TurnMediaRelayToken {
+            call_id: "call-golden".into(),
+            allocation_id: "source-golden".into(),
+            target_allocation_id: "target-golden".into(),
+            flow_id: "flow-golden".into(),
+            identity_hash: "identity-golden".into(),
+            peer_hash: "peer-golden".into(),
+            issued_at: 1_700_000_000,
+            expires_at: 1_700_000_300,
+            nonce: "nonce-golden".into(),
+            mac: String::new(),
+        };
+        assert_eq!(
+            turn_media_relay_token_mac(b"golden-service-key", &token)?,
+            "gU9zZknM2IaUgznHB3nNUwpJl8nq6HvIpXjJ0VNuT40"
+        );
+        assert_eq!(
+            turn_credential_password(
+                b"golden-service-key",
+                "call-golden:device-golden:1700000000:nonce-golden"
+            )?,
+            "0eBxlVkKxzX-wCmcsMwB2y7nrVqOsTq1YNWoNBXunfk"
+        );
+        Ok(())
+    }
+}

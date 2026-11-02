@@ -139,6 +139,15 @@ impl NodeSecret {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pseudonym_golden_preserves_base64url_bytes() {
+        let secret = NodeSecret(Zeroizing::new([0x42; 32]));
+        assert_eq!(
+            secret.pseudonym("ip", b"192.0.2.1"),
+            "EvuKrXWHDYtXAqHCjlZA6aDhaSzHIpBQJNmODVXWuzY"
+        );
+    }
     #[test]
     fn sealed_credentials_bind_key_context_and_integrity() -> Result<(), NodeCoreError> {
         let a = NodeSecret::ephemeral()?;

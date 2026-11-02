@@ -68,6 +68,21 @@ impl AccountDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routed_seen_key_golden_preserves_persisted_marker_bytes() -> Result<(), StorageError> {
+        let root = crate::tests::temp_root("routed-seen-golden");
+        let index = AccountIndex::open(&root)?;
+        index.create_account("acct", "principal")?;
+        let db = AccountDb::open(&index, "acct", &AccountDbKey::from_bytes([0x42; 32]))?;
+        assert_eq!(
+            db.routed_seen_key(br#"{"envelope_id":"golden","payload_hash":"fixed"}"#)?,
+            "routed/seen/9Ibmcnnv8KOnPdS8zGqhCIcBSJ7FHZKDlIr_wIxYMto"
+        );
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     use crate::{AccountDbKey, AccountIndex, DirectMessageWrite, MessageMetadata};
     use rusqlite::params;
     use serde_json::json;

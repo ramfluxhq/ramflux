@@ -197,6 +197,21 @@ fn deleted_projection(conversation: &str, message: &str, created_at: i64, is_own
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_mac_golden_preserves_persisted_marker_bytes() -> Result<(), StorageError> {
+        let root = crate::tests::temp_root("account-mac-golden");
+        let index = AccountIndex::open(&root)?;
+        index.create_account("acct", "principal")?;
+        let db = AccountDb::open(&index, "acct", &AccountDbKey::from_bytes([0x42; 32]))?;
+        assert_eq!(
+            db.account_mac(b"ramflux/tombstone-key/v1", b"message-golden")?,
+            "7tkgKbZENWssE__yM22Lxml0UyZPLzZFfPBKNe9YgSg"
+        );
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     use crate::{AccountDbKey, AccountIndex, EventStore, MessageMetadata};
 
     #[test]

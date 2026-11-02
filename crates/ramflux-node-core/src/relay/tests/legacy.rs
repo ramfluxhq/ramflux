@@ -132,3 +132,30 @@ fn relay_token_issue_body_enforces_ttl_and_permission_binding() -> Result<(), St
     assert!(validate_relay_token_issue_body(&mismatched, now).is_err());
     Ok(())
 }
+
+#[test]
+fn legacy_relay_token_golden_preserves_base64url_bytes() -> Result<(), crate::NodeCoreError> {
+    let token = crate::relay::RelayToken {
+        token_version: 2,
+        token_id: "token-golden".into(),
+        object_id: "object-golden".into(),
+        manifest_hash: "manifest-golden".into(),
+        chunk_id: "chunk-golden".into(),
+        recipient_device_hash: "recipient-golden".into(),
+        owner_signing_key_id: "owner-key-golden".into(),
+        owner_public_key: "owner-public-golden".into(),
+        issuer_service: "ramflux-gateway".into(),
+        audience_service: "ramflux-relay".into(),
+        capabilities: vec![ObjectRelayCapability::Get],
+        delete_after_ack: false,
+        issued_at: 1_700_000_000,
+        expires_at: 1_700_000_300,
+        nonce: "nonce-golden".into(),
+        mac: String::new(),
+    };
+    assert_eq!(
+        relay_token_mac(b"golden-service-key", &token)?,
+        "N7X_3SD5SWTvAq3R53gDwsei_4V33QgjAfdd_nVOe1o"
+    );
+    Ok(())
+}

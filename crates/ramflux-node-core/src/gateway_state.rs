@@ -642,3 +642,31 @@ impl GatewayRedbStore {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_resume_token_mac_golden_preserves_persisted_bytes() {
+        let input = GatewayResumeMacInput {
+            session_id: "session-golden",
+            target_delivery_id: "delivery-golden",
+            device_id: "device-golden",
+            device_epoch: 7,
+            issued_at: 1_700_000_000,
+        };
+        let mac = gateway_resume_token_mac("golden-service-key", &input);
+        let hex: String = mac
+            .iter()
+            .flat_map(|byte| {
+                let digits = b"0123456789abcdef";
+                [
+                    char::from(digits[usize::from(byte >> 4)]),
+                    char::from(digits[usize::from(byte & 15)]),
+                ]
+            })
+            .collect();
+        assert_eq!(hex, "483eacd95f43a47f4584d68a93bb99085d49d3c4749849c2c60800fdba029d19");
+    }
+}
