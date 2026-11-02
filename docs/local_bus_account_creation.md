@@ -148,8 +148,8 @@ resolves the human custodian from the agent's durable custody record, regardless
 of which account is active. The owner must remain unlocked and Live; export does
 not switch the active account. Pass `--custodian <owner>` to select that custodian
 explicitly. A different custodian is refused with its recorded-owner mismatch;
-a missing custodian record names the agent and directs the operator to the owner
-account or `--custodian`. The daemon still checks attended access, custody binding,
+a missing custodian record names the agent and directs the operator to pass
+`--custodian <owner id>`. The daemon still checks attended access, custody binding,
 account kind, networking state and the one-use credential. A locked, pending or
 non-human custodian remains refused.
 

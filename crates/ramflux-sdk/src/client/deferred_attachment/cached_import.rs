@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Verified local attachment completion needs neither an unexpired grant nor a relay session.
+//! Cached attachment completion honors deletion fences and outstanding authorized ACKs.
 use super::{
     DeferredObjectKeySlot, RamfluxClient, SdkDmAttachmentImportResult, SdkDmAttachmentRef,
-    SdkError, ack_progress_prefix, validate_reference,
+    SdkError, ack_progress_prefix, reference_key, slot_reference_key, validate_reference,
 };
 
 impl RamfluxClient {
@@ -12,14 +12,22 @@ impl RamfluxClient {
         &mut self,
         reference: &SdkDmAttachmentRef,
     ) -> Result<Option<SdkDmAttachmentImportResult>, SdkError> {
-        let mut check = "verified_local_object";
+        let mut check = "attachment_deleted";
         let outcome = (|| {
-            if !self.received_attachment_is_local(reference)? {
-                if !self.cached_attachment_bytes_complete(reference)? {
-                    return Ok(None);
-                }
-                check = "cached_reference";
-                validate_reference(reference)?;
+            if self.discard_deleted_attachment_chunks(reference)? {
+                return Err(SdkError::LocalBus("attachment was deleted".into()));
+            }
+            check = "verified_local_object";
+            let local = self.received_attachment_is_local(reference)?;
+            if !local && !self.cached_attachment_bytes_complete(reference)? {
+                return Ok(None);
+            }
+            check = "cached_reference";
+            validate_reference(reference)?;
+            if self.cached_attachment_ack_pending(reference)? {
+                return Ok(None);
+            }
+            if !local {
                 let slot = self
                     .received_attachment_prepared_slot(reference)?
                     .map_or_else(|| self.decrypt_object_key_slot(&reference.key_slot), Ok)?;
@@ -54,6 +62,76 @@ impl RamfluxClient {
             }))
         })();
         super::super::attachment_diagnostics::checked(outcome, &reference.object_id, check)
+    }
+
+    pub(super) fn discard_deleted_attachment_chunks(
+        &self,
+        reference: &SdkDmAttachmentRef,
+    ) -> Result<bool, SdkError> {
+        let db = self.active_account_db.as_ref();
+        let selector = if let Some(db) = db {
+            db.load_actor_state::<String>(&slot_reference_key(reference)?)?
+        } else {
+            None
+        };
+        let mut deleted = false;
+        for id in std::iter::once(reference.object_id.as_str()).chain(selector.as_deref()) {
+            // A routed revocation may reach durable storage before the memory projection.
+            let durable = db
+                .map(|db| db.load_object::<ramflux_sync::EncryptedObject>(id))
+                .transpose()?
+                .flatten()
+                .is_some_and(|(object, _)| object.tombstoned);
+            deleted |= durable
+                || self.object_store.cached_object(id).is_some_and(|object| object.tombstoned);
+        }
+        if !deleted {
+            return Ok(false);
+        }
+        if let Some(db) = db {
+            let prefix = format!("attachment/chunk/{}/", reference.object_id);
+            db.write_transaction(|| {
+                for key in db.actor_state_keys(&prefix)? {
+                    // Exactly manifest/index follow this id, even when another id contains '/'.
+                    if key.strip_prefix(&prefix).is_some_and(|tail| tail.split('/').count() == 2) {
+                        db.remove_actor_state(&key)?;
+                    }
+                }
+                Ok::<(), SdkError>(())
+            })?;
+        }
+        Ok(true)
+    }
+
+    fn cached_attachment_ack_pending(
+        &self,
+        reference: &SdkDmAttachmentRef,
+    ) -> Result<bool, SdkError> {
+        let now = u64::try_from(super::now_unix_timestamp()).unwrap_or(0);
+        if !reference.access_grant.as_ref().is_some_and(|grant| {
+            now < grant.expires_at
+                && grant.capabilities.contains(&ramflux_protocol::ObjectRelayCapability::Ack)
+        }) || self.object_key_slot_committed(&reference.key_slot)?
+        {
+            return Ok(false);
+        }
+        let db = self.account_db()?;
+        let selector = db
+            .load_actor_state::<String>(&slot_reference_key(reference)?)?
+            .unwrap_or_else(|| reference.object_id.clone());
+        if db.load_actor_state::<super::ReceivedAttachment>(&reference_key(&selector))?.is_none() {
+            return Ok(true);
+        }
+        let prefix = ack_progress_prefix(reference)?;
+        for index in 0..reference.total_chunks {
+            if !db
+                .load_actor_state::<super::AckProgress>(&format!("{prefix}{index}"))?
+                .is_some_and(|saved| saved.object_id == selector && saved.acknowledged)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(in crate::client) fn commit_received_attachment_import(

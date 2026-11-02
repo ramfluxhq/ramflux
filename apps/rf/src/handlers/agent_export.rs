@@ -47,7 +47,7 @@ fn custodian(listed: &Value, agent: &str, explicit: Option<&str>) -> Result<Stri
         ))),
         (Some(selected), _) | (None, Some(selected)) => Ok(selected.to_owned()),
         (None, None) => Err(RfError::Message(format!(
-            "agent `{agent}` has no custodian record; switch to the owner account or pass `--custodian <owner id>`"
+            "agent `{agent}` has no custodian record; pass `--custodian <owner id>`"
         ))),
     }
 }

@@ -43,9 +43,12 @@ when a page window expires.
 
 An upload grant expires 240 seconds after it is issued at upload, rather than
 240 seconds after the recipient starts reading. Missing bytes still require a
-valid grant. Once all encrypted chunks are cached, the receiver can verify and
-finish locally even after expiry, without contacting the relay or renewing the
-grant. A completed import removes its durable ACK progress rows. Repeat a read
+valid grant. Once all encrypted chunks are cached, an unexpired ACK-capable
+grant still completes the remaining relay acknowledgements before the import
+commits. After expiry, verified cached bytes can finish locally without contacting
+the relay or renewing the grant. A cached-completion check that observes local
+deletion or sender revocation refuses the import and discards its cached chunks. A completed import removes its
+durable ACK progress rows. Repeat a read
 or invoke SDK `object.fetch` to resume after a failed attempt.
 `rf object list --account=ACCOUNT` lists available metadata on either side, using
 bounded directory pages rather than embedding ciphertext.
@@ -142,7 +145,7 @@ The CLI resolves the human owner from the agent's custody record; the agent may
 be active. Keep the owner unlocked and Live. Export does not switch accounts.
 Use `--custodian=OWNER` for explicit selection; a different recorded custodian
 is refused by name. If the record cannot name a custodian, the error identifies
-the agent and suggests selecting the owner or passing `--custodian`.
+the agent and directs the operator to pass `--custodian <owner id>`.
 The daemon retains its custody and attended-access checks. Export creates a
 private file, refuses to overwrite it, and consumes the credential once.
 Account backup export keeps its existing explicit `--account` selection.

@@ -39,11 +39,19 @@ pub(super) fn checked_context<T>(
 }
 
 #[cfg(test)]
+#[must_use]
+pub(super) fn capture_for_test()
+-> (impl tracing::Subscriber + Send + Sync, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    (tests::Capture(lines.clone()), lines)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tracing::{Event, Metadata, Subscriber, field::Visit, span};
-    struct Capture(Arc<Mutex<Vec<String>>>);
+    pub(super) struct Capture(pub(super) Arc<Mutex<Vec<String>>>);
     impl Subscriber for Capture {
         fn enabled(&self, _: &Metadata<'_>) -> bool {
             true

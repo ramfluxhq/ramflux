@@ -130,10 +130,7 @@ fn agent_export_names_missing_custodian_record_and_accepts_explicit_override() -
     let value = json!({"active_account_id":"agent","account_details":[{"id":"agent"}]});
     let error =
         custodian(&value, "agent", None).err().ok_or("missing record was accepted")?.to_string();
-    assert_eq!(
-        error,
-        "agent `agent` has no custodian record; switch to the owner account or pass `--custodian <owner id>`"
-    );
+    assert_eq!(error, "agent `agent` has no custodian record; pass `--custodian <owner id>`");
     assert_eq!(custodian(&value, "agent", Some("owner"))?, "owner");
     Ok(())
 }

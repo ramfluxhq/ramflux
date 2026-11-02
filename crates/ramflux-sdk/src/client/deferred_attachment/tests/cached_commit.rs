@@ -6,6 +6,9 @@ use crate::object::{
     build_signed_object_access_grant, recipient_device_hash, verify_recipient_object_access_grant,
 };
 
+use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
+use tracing::instrument::WithSubscriber;
+
 fn expired_reference(f: &mut Fixture) -> Result<(), SdkError> {
     let branch = f.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let identity = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
@@ -215,5 +218,251 @@ async fn attachment_cached_completion_rejects_corrupt_encrypted_chunks() -> Resu
     f.client.persist_received_attachment_chunk(&f.reference, &chunk)?;
     assert!(f.client.try_import_cached_attachment(&f.reference).is_err());
     assert!(!f.client.object_key_slot_committed(&f.reference.key_slot)?);
+    Ok(())
+}
+
+type TransportFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, TransportError>> + Send + 'a>>;
+struct NoNetwork;
+impl GatewaySessionFrameSink for NoNetwork {
+    fn send_frame<'a>(&'a mut self, _: &'a [u8]) -> TransportFuture<'a, ()> {
+        Box::pin(async {
+            Err(TransportError::Quic("cached lifecycle attempted network I/O".into()))
+        })
+    }
+    fn finish(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+impl GatewaySessionFrameSource for NoNetwork {
+    fn recv_frame(&mut self) -> TransportFuture<'_, Vec<u8>> {
+        Box::pin(async {
+            Err(TransportError::Quic("cached lifecycle attempted network I/O".into()))
+        })
+    }
+}
+fn unused_engine() -> Result<GatewaySessionEngine, Box<dyn std::error::Error>> {
+    let endpoint = crate::GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0".parse()?,
+        gateway_addr: "127.0.0.1:1".parse()?,
+        server_name: "unused.example".into(),
+        ca_cert: "unused.pem".into(),
+        principal_id: "recipient".into(),
+        device_id: "recipient-device".into(),
+        target_delivery_id: "recipient-device".into(),
+        prekey_http_url: None,
+    };
+    Ok(GatewaySessionEngine::with_test_transport(
+        crate::GatewaySessionConfig::auto(endpoint),
+        Box::new(NoNetwork),
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum Deletion {
+    Local,
+    SenderRevocation,
+}
+async fn assert_cached_deletion_is_final(mode: Deletion) -> Result<(), Box<dyn std::error::Error>> {
+    for gateway_path in [false, true] {
+        let mut f = Fixture::new()?;
+        stage_chunks(&f)?;
+        let available = f
+            .client
+            .fetch_received_with("remote-object", "before-delete", FETCH_TIMEOUT, async |_, _| {
+                Err(SdkError::LocalBus("cached seed reached transport".into()))
+            })
+            .await?;
+        assert_eq!(available["transfer_state"], "available");
+        assert!(f.client.received_attachment_chunk(&f.reference, 0)?.is_some());
+        match mode {
+            Deletion::Local => f.client.tombstone_object("remote-object")?,
+            Deletion::SenderRevocation => {
+                // project_contact_control persists revocation before its memory refresh.
+                f.client.account_db()?.set_object_tombstoned("remote-object")?;
+                assert!(
+                    !f.client
+                        .object_store
+                        .cached_object("remote-object")
+                        .ok_or("live cache missing")?
+                        .tombstoned
+                );
+            }
+        }
+        if gateway_path {
+            let mut engine = unused_engine()?;
+            let pool = ramflux_transport::RelayQuicPool::new(
+                ramflux_transport::RelayQuicPoolConfig::functional_default()?,
+            );
+            let result = f
+                .client
+                .import_dm_attachment_from_relay_via_gateway(&mut engine, &pool, &f.reference, None)
+                .await;
+            let error = result.err().ok_or("gateway import resurrected a deleted attachment")?;
+            assert!(error.to_string().contains("attachment was deleted"));
+        } else {
+            let mut calls = 0;
+            let receipt = f
+                .client
+                .fetch_received_with(
+                    "remote-object",
+                    "after-tombstone",
+                    FETCH_TIMEOUT,
+                    async |_, _| {
+                        calls += 1;
+                        Ok(())
+                    },
+                )
+                .await?;
+            let durable = f
+                .client
+                .account_db()?
+                .load_object::<ramflux_sync::EncryptedObject>("remote-object")?
+                .map(|(object, _)| object.tombstoned);
+            assert_eq!(
+                (receipt["transfer_state"].clone(), durable),
+                (json!("failed"), Some(true)),
+                "cached completion must not return available or clear the tombstone"
+            );
+            assert_eq!(calls, 0);
+        }
+        assert!(f.client.received_attachment_chunk(&f.reference, 0)?.is_none());
+        let replay = f
+            .client
+            .received_attachment_receipt("remote-object", "before-delete")?
+            .ok_or("deleted receipt missing")?;
+        assert_eq!(replay["transfer_state"], "failed", "old successful receipts obey revocation");
+        assert!(
+            f.client
+                .account_db()?
+                .load_object::<ramflux_sync::EncryptedObject>("remote-object")?
+                .is_some_and(|(object, _)| object.tombstoned)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn attachment_cached_completion_preserves_local_delete()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_cached_deletion_is_final(Deletion::Local).await
+}
+
+#[tokio::test]
+async fn attachment_cached_completion_obeys_durable_sender_revocation()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_cached_deletion_is_final(Deletion::SenderRevocation).await
+}
+
+#[tokio::test]
+async fn attachment_valid_grant_completes_remaining_cached_acks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut f = Fixture::new()?;
+    expired_reference(&mut f)?;
+    let expired = f.reference.access_grant.as_ref().ok_or("grant missing")?;
+    let branch = f.client.device_branch.as_ref().ok_or("branch missing")?;
+    let now = u64::try_from(now_unix_timestamp())?;
+    f.reference.access_grant = Some(build_signed_object_access_grant(
+        branch,
+        expired.object_id.clone(),
+        expired.manifest_hash.clone(),
+        expired.grantee_device_hash.clone(),
+        expired.capabilities.clone(),
+        now - 1,
+        now + 239,
+    )?);
+    f.reference.chunk_size = 16;
+    let manifest = ramflux_sync::chunk_manifest_for_object(
+        &f.reference.object_id,
+        &f.package.object.ciphertext,
+        16,
+        None,
+    );
+    f.reference.total_chunks = manifest.total_chunks;
+    let db = f.client.account_db()?;
+    let mut stored: ReceivedAttachment =
+        db.load_actor_state(&reference_key("remote-object"))?.ok_or("stored reference missing")?;
+    stored.reference = f.reference.clone();
+    db.persist_actor_state(&reference_key("remote-object"), &stored)?;
+    let key =
+        f.client.received_attachment_prepared_slot(&f.reference)?.ok_or("slot missing")?.object_key;
+    for (index, bytes) in f.package.object.ciphertext.chunks(16).enumerate() {
+        f.client.persist_received_attachment_chunk(
+            &f.reference,
+            &ramflux_sync::chunk_payload(&key, &manifest, u32::try_from(index)?, bytes),
+        )?;
+    }
+    f.client.acknowledge_received_attachment_with(&f.reference, 1, async |_| Ok(())).await?;
+    let mut fetches = 0;
+    let mut acknowledgements = Vec::new();
+    let receipt = f
+        .client
+        .fetch_received_with(
+            "remote-object",
+            "valid-cached",
+            FETCH_TIMEOUT,
+            async |client, reference| {
+                fetches += 1;
+                let slot = client
+                    .received_attachment_prepared_slot(reference)?
+                    .ok_or_else(|| SdkError::LocalBus("slot missing".into()))?;
+                client.materialize_cached_attachment(
+                    reference,
+                    slot.object_key,
+                    &mut "cached_chunk",
+                )?;
+                client
+                    .acknowledge_received_attachment_with(
+                        reference,
+                        reference.total_chunks,
+                        async |index| {
+                            acknowledgements.push(index);
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                assert!(client.try_import_cached_attachment(reference)?.is_some());
+                Ok(())
+            },
+        )
+        .await?;
+    assert_eq!(fetches, 1, "an unexpired grant must finish its pending ACK pass");
+    assert_eq!(acknowledgements, (1..f.reference.total_chunks).collect::<Vec<_>>());
+    assert_eq!(receipt["transfer_state"], "available");
+    assert!(f.client.object_key_slot_committed(&f.reference.key_slot)?);
+    assert!(
+        f.client.account_db()?.actor_state_keys(&ack_progress_prefix(&f.reference)?)?.is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn attachment_deleted_and_unverified_causes_keep_one_warning_each()
+-> Result<(), Box<dyn std::error::Error>> {
+    for deleted in [true, false] {
+        let mut f = Fixture::new()?;
+        if deleted {
+            stage_chunks(&f)?;
+            assert!(f.client.try_import_cached_attachment(&f.reference)?.is_some());
+            f.client.tombstone_object("remote-object")?;
+        }
+        let (capture, lines) = crate::client::attachment_diagnostics::capture_for_test();
+        let receipt = f
+            .client
+            .fetch_received_with(
+                "remote-object",
+                "warn-local-cause",
+                FETCH_TIMEOUT,
+                async |_, _| Ok(()),
+            )
+            .with_subscriber(capture)
+            .await?;
+        assert_eq!(receipt["transfer_state"], "failed");
+        let lines = lines.lock().map_err(|_| "capture lock")?;
+        let warnings = lines.iter().filter(|line| line.starts_with("WARN ")).collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 1, "each local failure must have one warning: {lines:?}");
+        let cause = if deleted { "attachment_deleted" } else { "attachment_content_unverified" };
+        assert!(warnings[0].contains(cause));
+    }
     Ok(())
 }

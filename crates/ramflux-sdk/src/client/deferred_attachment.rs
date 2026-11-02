@@ -180,7 +180,8 @@ impl RamfluxClient {
     }
 
     /// Fetches one durably received reference. Failed attempts can reuse the same operation id;
-    /// successful operations replay their compact receipt without touching the relay.
+    /// successful operations replay their compact receipt without touching the relay while the
+    /// object remains accessible. Later deletion or revocation takes precedence over replay.
     ///
     /// # Errors
     /// Returns an error for invalid identifiers, operation reuse or unavailable account storage.
@@ -215,19 +216,34 @@ impl RamfluxClient {
         validate_id(operation_id)?;
         let old: Option<FetchState> =
             self.account_db()?.load_actor_state(&format!("attachment/operation/{operation_id}"))?;
-        if let Some(old) = old {
-            if old.object_id != object_id {
-                return Err(SdkError::LocalBus("attachment operation_id already bound".to_owned()));
-            }
-            if old.transfer_state == "available" {
-                return Ok(Some(public_receipt(&old)));
-            }
+        if old.as_ref().is_some_and(|old| old.object_id != object_id) {
+            return Err(SdkError::LocalBus("attachment operation_id already bound".to_owned()));
         }
         let Some(stored) =
             self.account_db()?.load_actor_state::<ReceivedAttachment>(&reference_key(object_id))?
         else {
             return Ok(None);
         };
+        if self.discard_deleted_attachment_chunks(&stored.reference)? {
+            let error = SdkError::LocalBus("attachment was deleted".into());
+            super::attachment_diagnostics::failed(object_id, "attachment_deleted", &error);
+            let state = FetchState {
+                object_id: object_id.to_owned(),
+                operation_id: operation_id.to_owned(),
+                transfer_state: "failed".into(),
+                last_error: Some("attachment fetch failed; retry object.fetch".into()),
+                attempts: self
+                    .attachment_fetch_state(object_id)?
+                    .map_or(1, |old| old.attempts.saturating_add(1)),
+            };
+            self.persist_attachment_fetch_state(&state)?;
+            return Ok(Some(public_receipt(&state)));
+        }
+        if let Some(old) = old
+            && old.transfer_state == "available"
+        {
+            return Ok(Some(public_receipt(&old)));
+        }
         if validate_reference(&stored.reference).is_ok()
             && self.try_import_cached_attachment(&stored.reference)?.is_some()
         {
@@ -293,8 +309,12 @@ impl RamfluxClient {
                 object_id,
                 "attachment_reference",
             )?;
-            if self.object_store_object(object_id)?.is_some_and(|object| object.tombstoned) {
-                return Err(SdkError::LocalBus("attachment was deleted".to_owned()));
+            if self.discard_deleted_attachment_chunks(&stored.reference)? {
+                return super::attachment_diagnostics::checked(
+                    Err(SdkError::LocalBus("attachment was deleted".into())),
+                    object_id,
+                    "attachment_deleted",
+                );
             }
             // Recover a crash after the import's ACK/slot checkpoint but before this receipt.
             let imported = self.recv_session_checkpoint_at(
@@ -316,7 +336,11 @@ impl RamfluxClient {
                 )??;
             }
             if !self.received_attachment_is_local(&stored.reference)? {
-                return Err(SdkError::LocalBus("attachment content not verified".to_owned()));
+                return super::attachment_diagnostics::checked(
+                    Err(SdkError::LocalBus("attachment content not verified".into())),
+                    object_id,
+                    "attachment_content_unverified",
+                );
             }
             Ok::<(), SdkError>(())
         }
