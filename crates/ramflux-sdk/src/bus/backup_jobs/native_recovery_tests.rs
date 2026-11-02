@@ -215,6 +215,29 @@ async fn native_fresh_restore_requires_phrase_recovery_and_exact_ack_before_live
         .await
 }
 
+fn history_manifest(
+    data: &RamfluxClient,
+    account: &crate::custody::BornAccount,
+) -> TestResult<crate::prekey::SdkDeviceManifestResponse> {
+    let owner = data.owned_device_identity()?;
+    let manifest = crate::prekey::SdkDeviceManifestResponse::from_native(
+        ramflux_protocol::custody::CustodyManifest {
+            publication: account.publication(),
+            custodian_publication: None,
+            devices: vec![ramflux_protocol::custody::CustodyManifestDevice {
+                device_ref: ramflux_protocol::custody::DeviceRef {
+                    account_anchor: owner.root_commitment().into(),
+                    device_id: owner.device_id().into(),
+                    device_epoch: 1,
+                },
+                target_delivery_id: owner.storage_key().into(),
+                prekey_bundle: serde_json::to_value(data.load_x3dh_private_state(&owner)?.bundle)?,
+            }],
+        },
+    )?;
+    Ok(manifest)
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account() -> TestResult {
     LocalSet::new()
@@ -230,19 +253,53 @@ async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account
                 .await?;
             let owner = data.owned_device_identity()?;
             let primary = account.group_primary(source_vault.as_ref())?;
-            let group = data.shared_group_create_with_primary(
+            let peer = crate::client::native_test_support::Fixture::with_device(
+                "restore-group-peer",
+                "peer-device",
+            )
+            .await?;
+            data.persist_fetched_identity_directory(&peer.manifest)?;
+            let owner_manifest = history_manifest(&data, &account)?;
+            data.persist_fetched_identity_directory(&owner_manifest)?;
+            peer.client.persist_fetched_identity_directory(&owner_manifest)?;
+            data.shared_group_create_with_primary(
                 "restore-group",
                 "restore-group-thread",
                 Some("Restored group".into()),
                 owner.storage_key(),
                 Some(&primary),
             )?;
+            let member = peer.client.owned_device_identity()?;
+            let group = data.shared_group_change_with_primary(
+                "restore-group",
+                owner.storage_key(),
+                ramflux_protocol::GroupStateChange::Add {
+                    member: peer.client.owned_group_actor(member.storage_key())?.identity,
+                    role: ramflux_protocol::SharedGroupRole::Member,
+                },
+                Some(&primary),
+            )?;
+            peer.client.accept_shared_group_state(&group, member.storage_key())?;
+            let distribution = zeroize::Zeroizing::new(
+                peer.client
+                    .export_group_sender_key_distribution("restore-group", member.device_id())?,
+            );
+            data.import_group_sender_key_distribution(&distribution)?;
+            let encrypted = peer.client.encrypt_group_message(
+                "restore-group",
+                member.device_id(),
+                b"restored group history",
+            )?;
             data.send_direct_message(
                 "restore-group-thread",
                 "group-history",
-                owner.storage_key(),
-                b"restored group history",
+                member.storage_key(),
+                &encrypted,
             )?;
+            assert_eq!(
+                data.decrypt_group_message("restore-group-thread", "group-history")?,
+                b"restored group history"
+            );
             data.account_db()?.store_message_content(
                 "restore-group-thread",
                 "group-history",

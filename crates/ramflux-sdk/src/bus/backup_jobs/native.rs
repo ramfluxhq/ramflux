@@ -16,6 +16,30 @@ use ramflux_storage::{AccountDbKey, BackupCounts, BackupDatabase, BackupIndexIns
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+// Never format an underlying error: SQLite input errors can contain key-bearing SQL.
+fn install_step<T, E: Into<SdkError>>(
+    stage: &'static str,
+    result: Result<T, E>,
+) -> Result<T, SdkError> {
+    result.map_err(Into::into).inspect_err(|error| {
+        use ramflux_storage::StorageError;
+        let (category, sqlite_code) = match error {
+            SdkError::Storage(StorageError::Sqlite(error)) => {
+                ("sqlite", error.sqlite_error().map_or(0, |code| code.extended_code))
+            }
+            SdkError::Storage(StorageError::Crypto(_)) => ("crypto", 0),
+            SdkError::Storage(StorageError::Protocol(_)) => ("protocol", 0),
+            SdkError::Storage(StorageError::Serde(_)) => ("serialization", 0),
+            SdkError::Storage(StorageError::AuthorizationRejected) => ("authorization", 0),
+            SdkError::Storage(_) => ("storage", 0),
+            SdkError::Io(_) => ("io", 0),
+            SdkError::LocalBusRefused { .. } => ("refused", 0),
+            _ => ("sdk", 0),
+        };
+        tracing::warn!(stage, category, sqlite_code, "native backup installation failed");
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::bus) struct DataIdentity {
@@ -143,7 +167,8 @@ impl BackupJobs {
         let Identity::Native { native } = &metadata.identity else {
             return Err(refused("root_conflict"));
         };
-        let (id, local_key) = self.install_target(job, native, local_key, setup)?;
+        let (id, local_key) =
+            install_step("target", self.install_target(job, native, local_key, setup))?;
         let id = &id;
         let networking =
             crate::custody::load_data_account(&self.data_root, id, crate::custody::network_now()?)?
@@ -160,7 +185,7 @@ impl BackupJobs {
         let incoming_key = AccountDbKey::from_bytes(metadata.database_key);
         let source =
             BackupDatabase::open(&self.data_root.join(&previous.db_relative_path), &local_key)?;
-        source.check_backup_pins(&incoming, &incoming_key)?;
+        install_step("pins", source.check_backup_pins(&incoming, &incoming_key))?;
         let parent = self.data_root.join("accounts").join(id);
         check_space(
             &parent,
@@ -180,13 +205,17 @@ impl BackupJobs {
         super::recovery::mark_install(&generation)?;
         let target = generation.join("account.db");
         // Retain the independently wrapped live data key; no archive passphrase is used.
-        source.copy_to(&target, &local_key)?;
+        install_step("copy", source.copy_to(&target, &local_key))?;
         drop(source);
         let mut merged = BackupDatabase::open(&target, &local_key)?;
-        let report = merged.merge_native_backup(&incoming, &incoming_key, || Ok(()))?;
-        merged.check_integrity()?;
-        merged.enqueue_restore_events(id, &job.job_id)?;
-        self.verify_install_contribution(job, &merged, &incoming, &incoming_key, true)?;
+        let report =
+            install_step("merge", merged.merge_native_backup(&incoming, &incoming_key, || Ok(())))?;
+        install_step("integrity", merged.check_integrity())?;
+        install_step("events", merged.enqueue_restore_events(id, &job.job_id))?;
+        install_step(
+            "contribution",
+            self.verify_install_contribution(job, &merged, &incoming, &incoming_key, true),
+        )?;
         drop(merged);
         let wrapped = self.index.load_wrapped_db_key(id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
         let marker = serde_json::to_vec(
