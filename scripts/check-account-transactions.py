@@ -22,7 +22,10 @@ ALLOW = {
     ('database.rs', 'commit'): 'managed transaction completion boundary',
     ('database.rs', 'drop'): 'managed transaction rollback boundary',
     ('account_db/backup_database.rs', 'enqueue_restore_events'): 'private restore staging database',
-    ('account_db/backup_merge.rs', 'merge_backup_with_group_actor'): 'private restore staging database',
+    ('account_db/backup_merge.rs', 'begin_message_merge'): 'private restore staging database',
+    ('account_db/backup_merge.rs', 'merge_backup_mode'): 'private restore staging database',
+    ('account_db/backup_merge.rs', 'archive_outbound'): 'private restore staging database',
+    ('account_db/backup_native.rs', 'sanitize_native_backup'): 'private native archive snapshot',
 }
 METHOD = re.compile(r'\.\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\s*(?:::\s*<[^;{}]*>)?\s*\(')
 ASSOCIATED = re.compile(r'\b(?:Transaction|Savepoint)\s*::\s*(?:new(?:_unchecked)?|with_name)\b|(?:\bConnection\s*|<[^;{}>]*\bConnection[^;{}>]*>\s*)::\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\b')

@@ -13,7 +13,7 @@ pub(crate) enum Fault {
     Integrity,
 }
 
-struct Holder(Child);
+pub(crate) struct Holder(Child);
 impl Drop for Holder {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -73,39 +73,7 @@ impl Fixture {
         };
         write_local_bus_account_manifest(root, &manifest)?;
         let mut fixture = Self { index, manifest, holder: None, directory };
-        match fault {
-            Fault::Busy => {
-                let mut holder = Holder(
-                    Command::new(std::env::current_exe()?)
-                        .args([
-                            "--exact",
-                            "client::account::tests::account_writer_sdk_process_fixture",
-                            "--nocapture",
-                        ])
-                        .env("RAMFLUX_SDK_WRITER_TEST_ROOT", fixture.root())
-                        .stdin(Stdio::null())
-                        .spawn()?,
-                );
-                let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                while !fixture.root().join("sdk-writer-ready").exists() {
-                    assert!(holder.0.try_wait()?.is_none(), "writer child exited before readiness");
-                    assert!(std::time::Instant::now() < deadline, "writer child startup timed out");
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                fixture.holder = Some(holder);
-            }
-            Fault::Io => {
-                let lock = fixture.root().join("accounts/acct/.writer.lock");
-                std::fs::remove_file(&lock)?;
-                std::fs::create_dir(&lock)?;
-            }
-            Fault::Integrity => {
-                let mut wrapped =
-                    fixture.index.load_wrapped_db_key("acct")?.ok_or("wrapped key")?;
-                wrapped.wrapped_key[0] ^= 1;
-                fixture.index.store_wrapped_db_key("acct", &wrapped)?;
-            }
-        }
+        fixture.holder = apply_fault(&fixture.index, fault)?;
         Ok(fixture)
     }
 
@@ -125,4 +93,41 @@ impl Fixture {
             other => Err(format!("expected a real storage failure, got {other:?}").into()),
         }
     }
+}
+
+/// Injects the same real storage faults into either a native or legacy account.
+pub(crate) fn apply_fault(index: &AccountIndex, fault: Fault) -> TestResult<Option<Holder>> {
+    match fault {
+        Fault::Busy => {
+            let mut holder = Holder(
+                Command::new(std::env::current_exe()?)
+                    .args([
+                        "--exact",
+                        "client::account::tests::account_writer_sdk_process_fixture",
+                        "--nocapture",
+                    ])
+                    .env("RAMFLUX_SDK_WRITER_TEST_ROOT", index.root())
+                    .stdin(Stdio::null())
+                    .spawn()?,
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !index.root().join("sdk-writer-ready").exists() {
+                assert!(holder.0.try_wait()?.is_none(), "writer child exited before readiness");
+                assert!(std::time::Instant::now() < deadline, "writer child startup timed out");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return Ok(Some(holder));
+        }
+        Fault::Io => {
+            let lock = index.root().join("accounts/acct/.writer.lock");
+            std::fs::remove_file(&lock)?;
+            std::fs::create_dir(&lock)?;
+        }
+        Fault::Integrity => {
+            let mut wrapped = index.load_wrapped_db_key("acct")?.ok_or("wrapped key")?;
+            wrapped.wrapped_key[0] ^= 1;
+            index.store_wrapped_db_key("acct", &wrapped)?;
+        }
+    }
+    Ok(None)
 }

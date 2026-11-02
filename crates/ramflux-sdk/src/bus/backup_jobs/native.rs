@@ -16,6 +16,12 @@ use ramflux_storage::{AccountDbKey, BackupCounts, BackupDatabase, BackupIndexIns
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+struct InstallTarget {
+    id: String,
+    local_key: Option<super::NativeInstallKey>,
+    _writer: ramflux_storage::AccountWriterLease,
+}
+
 // Never format an underlying error: SQLite input errors can contain key-bearing SQL.
 fn install_step<T, E: Into<SdkError>>(
     stage: &'static str,
@@ -123,13 +129,14 @@ impl BackupJobs {
         native: &DataIdentity,
         local_key: Option<super::NativeInstallKey>,
         setup: Option<super::NativeRestoreSetup>,
-    ) -> Result<(String, Option<super::NativeInstallKey>), SdkError> {
+    ) -> Result<InstallTarget, SdkError> {
         // Resolve only independently installed authority, never the archive's local selector.
         let result = if let Some(id) = self.native_restore_target(native)? {
             if setup.is_some() {
                 return Err(SdkError::CustodySetupInvalid);
             }
-            (id, local_key)
+            let writer = self.index.acquire_account_writer(&id)?;
+            InstallTarget { id, local_key, _writer: writer }
         } else {
             let setup = setup.ok_or(SdkError::RestoreSetupRequired)?;
             let id = job
@@ -138,6 +145,7 @@ impl BackupJobs {
                 .ok_or_else(|| refused("invalid_job_phase"))?
                 .local_account_id
                 .clone();
+            let writer = self.index.acquire_account_writer(&id)?;
             crate::custody::pending_restore(
                 &self.data_root,
                 &id,
@@ -152,7 +160,11 @@ impl BackupJobs {
                 &id,
                 setup.passphrase.as_bytes(),
             )?;
-            (id.clone(), Some(super::NativeInstallKey { account_id: id, key }))
+            InstallTarget {
+                id: id.clone(),
+                local_key: Some(super::NativeInstallKey { account_id: id, key }),
+                _writer: writer,
+            }
         };
         Ok(result)
     }
@@ -167,7 +179,7 @@ impl BackupJobs {
         let Identity::Native { native } = &metadata.identity else {
             return Err(refused("root_conflict"));
         };
-        let (id, local_key) =
+        let InstallTarget { id, local_key, _writer } =
             install_step("target", self.install_target(job, native, local_key, setup))?;
         let id = &id;
         let networking =
@@ -247,6 +259,10 @@ impl BackupJobs {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "native_writer_tests.rs"]
+mod writer_tests;
 
 #[cfg(test)]
 mod tests {

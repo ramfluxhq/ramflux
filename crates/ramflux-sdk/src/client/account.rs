@@ -11,6 +11,7 @@ pub(crate) fn verify_stored_data_secret(
     secret: &[u8],
 ) -> Result<(), SdkError> {
     let index = AccountIndex::open(root)?;
+    let _writer = index.acquire_account_writer(id)?;
     let vault = FileVaultSecretSource::new(root);
     let vault_secret = zeroize::Zeroizing::new(vault.vault_secret(id)?);
     let wrapping = zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret));
@@ -86,6 +87,7 @@ impl RamfluxClient {
         secret: &[u8],
     ) -> Result<(), SdkError> {
         let index = self.account_index()?;
+        let _writer = index.acquire_account_writer(local_account_id)?;
         if index.account(local_account_id)?.principal_commitment != expected_anchor
             || index.load_wrapped_db_key(local_account_id)?.is_some()
         {
@@ -404,6 +406,10 @@ mod tests {
             client.unlock_account("acct", b"losing-secret"),
             Err(SdkError::Storage(StorageError::AccountWriterBusy(ref account))) if account == "acct"
         ));
+        assert!(matches!(
+            client.seal_new_account_data("acct", "principal", b"losing-secret"),
+            Err(SdkError::Storage(StorageError::AccountWriterBusy(ref account))) if account == "acct"
+        ));
         assert!(
             index.load_wrapped_db_key("acct")?.is_none(),
             "a refused first unlock must not publish its generated wrapped key"
@@ -430,6 +436,10 @@ mod tests {
         client.open_account_index(&root)?;
         assert!(matches!(
             client.verify_active_account_secret("acct", b"losing-secret"),
+            Err(SdkError::Storage(StorageError::AccountWriterBusy(ref account))) if account == "acct"
+        ));
+        assert!(matches!(
+            verify_stored_data_secret(&root, "acct", b"losing-secret"),
             Err(SdkError::Storage(StorageError::AccountWriterBusy(ref account))) if account == "acct"
         ));
         assert!(

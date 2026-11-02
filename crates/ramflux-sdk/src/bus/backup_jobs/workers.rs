@@ -8,6 +8,7 @@ use super::{
     io::{PartialFile, PrivateDirectory, ProgressIo, check_space},
     service::{BackupJobs, now},
 };
+use crate::SdkError;
 use crate::backup::{
     BackupArchivePreview, BackupAttachmentChecks, BackupCategory, BackupFailure, BackupFailureCode,
     BackupJob, BackupJobState, VerifiedBackup, VerifiedBackupStaging,
@@ -440,10 +441,7 @@ impl BackupJobs {
         key: &AccountDbKey,
     ) -> Result<bool, BackupFailure> {
         if let format::Identity::Native { native } = &metadata.identity {
-            return self
-                .native_restore_target(native)
-                .map(|target| target.is_some())
-                .map_err(|_| failure(BackupFailureCode::RootConflict));
+            return self.check_existing_native_identity(native);
         }
         let manifest =
             metadata.identity.legacy().map_err(|_| failure(BackupFailureCode::RootConflict))?;
@@ -452,7 +450,8 @@ impl BackupJobs {
             Err(ramflux_storage::StorageError::AccountNotFound(_)) => Ok(false),
             Err(_) => Err(failure(BackupFailureCode::Unreadable)),
             Ok(_) => {
-                let _writer = self.index.acquire_account_writer(id).map_err(|error| storage_error(&error))?;
+                let _writer =
+                    self.index.acquire_account_writer(id).map_err(|error| storage_error(&error))?;
                 let record = self.index.account(id).map_err(|error| storage_error(&error))?;
                 if record.principal_commitment != manifest.principal_commitment {
                     return Err(failure(BackupFailureCode::RootConflict));
@@ -488,6 +487,26 @@ impl BackupJobs {
             }
         }
     }
+
+    fn check_existing_native_identity(
+        &self,
+        native: &super::native::DataIdentity,
+    ) -> Result<bool, BackupFailure> {
+        let lookup = || {
+            self.native_restore_target(native).map_err(|error| match error {
+                SdkError::Storage(error) => storage_error(&error),
+                SdkError::Io(_) => failure(BackupFailureCode::Unreadable),
+                _ => failure(BackupFailureCode::RootConflict),
+            })
+        };
+        let Some(id) = lookup()? else { return Ok(false) };
+        let _writer =
+            self.index.acquire_account_writer(&id).map_err(|error| storage_error(&error))?;
+        if lookup()?.as_deref() != Some(id.as_str()) {
+            return Err(failure(BackupFailureCode::RootConflict));
+        }
+        Ok(true)
+    }
 }
 
 fn fresh_staging_keys() -> Result<(Zeroizing<[u8; 32]>, AccountDbKey), BackupFailure> {
@@ -519,9 +538,9 @@ fn archive_metadata(
             .map_err(|_| failure(BackupFailureCode::Unreadable))?,
         format::Identity::Native { .. } => {
             BackupDatabase::open(path, key)
-                .map_err(storage_error)?
+                .map_err(|error| storage_error(&error))?
                 .sanitize_native_backup()
-                .map_err(storage_error)?;
+                .map_err(|error| storage_error(&error))?;
             Vec::new()
         }
     };

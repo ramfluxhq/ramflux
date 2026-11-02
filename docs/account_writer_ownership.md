@@ -108,8 +108,10 @@ It also follows simple `const`, `static` and `let` string bindings used as the
 SQL argument, and covers `query_row_and_then` and associated `Connection` calls.
 Exceptions name exact functions: managed entrypoints/acquisition, commit and
 rollback-on-drop in `database.rs`,
-`BackupDatabase::enqueue_restore_events` and
-`BackupDatabase::merge_backup_with_group_actor` on private staging databases.
+`BackupDatabase::enqueue_restore_events`, `BackupDatabase::begin_message_merge`,
+`BackupDatabase::merge_backup_mode` and `BackupDatabase::archive_outbound` on
+private staging databases, plus `BackupDatabase::sanitize_native_backup` on
+private native archive snapshots.
 Read-only backup snapshots need no raw-SQL exception. Transaction keywords
 supplied through `format!` substitutions and calls through aliased rusqlite types
 remain explicit review items; the source guard cannot resolve Rust values or types.

@@ -9,7 +9,7 @@ fn check(fault: Fault, code: BackupFailureCode) -> TestResult {
     let fixture = Fixture::new(fault)?;
     let jobs = super::BackupJobs::new(fixture.root(), fixture.index.clone())?;
     let metadata = super::format::Metadata {
-        manifest: fixture.manifest.clone(),
+        identity: super::format::Identity::Legacy { manifest: Box::new(fixture.manifest.clone()) },
         database_key: [0; 32],
         ca_pem: Vec::new(),
     };
@@ -36,7 +36,7 @@ fn check(fault: Fault, code: BackupFailureCode) -> TestResult {
     super::format::save_metadata(&directory.join("identity.sealed"), &staging_key, &metadata)?;
     let staging =
         crate::backup::VerifiedBackupStaging::new(directory, staging_key, super::service::now())?;
-    let Err(install_error) = jobs.install_generation(&job, staging) else {
+    let Err(install_error) = jobs.install_generation(&job, staging, None, None) else {
         return Err("faulted installation unexpectedly succeeded".into());
     };
     jobs.fail_install(&job.job_id, &install_error);

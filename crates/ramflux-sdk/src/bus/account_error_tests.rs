@@ -9,7 +9,10 @@ fn state(fixture: &Fixture) -> LocalBusDaemonState {
     LocalBusDaemonState {
         account_index: Some(fixture.index.clone()),
         nodes: crate::node::NodeStore::default(),
-        config: LocalBusConfig::new(fixture.root().join("bus.sock"), fixture.root()),
+        config: LocalBusConfig {
+            itest_legacy_accounts: cfg!(feature = "itest-legacy-accounts"),
+            ..LocalBusConfig::new(fixture.root().join("bus.sock"), fixture.root())
+        },
         accounts: BTreeMap::new(),
         active_account_id: None,
         attended_accounts: BTreeSet::new(),
@@ -59,7 +62,20 @@ async fn check_account_surfaces(fault: Fault) -> TestResult {
     else {
         return Err("faulted account creation unexpectedly succeeded".into());
     };
-    assert_code(&error, fault);
+    // The retired seed-taking public method remains refused on every storage fault.
+    assert!(matches!(error, SdkError::CustodySetupInvalid));
+    #[cfg(feature = "itest-legacy-accounts")]
+    {
+        let mut legacy_create = create;
+        legacy_create.method = "account.itest_legacy.create".into();
+        let Err(error) =
+            super::dispatch::account::dispatch_account_bus_request(&legacy_create, &mut daemon)
+                .await
+        else {
+            return Err("faulted legacy fixture creation unexpectedly succeeded".into());
+        };
+        assert_code(&error, fault);
+    }
 
     let Err(error) =
         super::daemon::restore_local_bus_account_offline(&mut daemon, &fixture.manifest).await
