@@ -32,3 +32,10 @@ class FederationListenerTests(unittest.TestCase):
         override = yaml.safe_load((DEPLOY / 'docker-compose.admin.yml').read_text())
         self.assertEqual(override['services']['ramflux-federation']['ports'],
             ['127.0.0.1:${RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT:?operator loopback port required}:18084'])
+
+    def test_router_admin_requires_its_own_overlay_and_explicit_port(self):
+        federation = yaml.safe_load((DEPLOY / 'docker-compose.admin.yml').read_text())
+        self.assertNotIn('ramflux-router', federation['services'])
+        router = yaml.safe_load((DEPLOY / 'docker-compose.router-admin.yml').read_text())
+        self.assertEqual(router['services']['ramflux-router']['ports'],
+            ['127.0.0.1:${RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT:?operator router loopback port required}:7443/tcp'])

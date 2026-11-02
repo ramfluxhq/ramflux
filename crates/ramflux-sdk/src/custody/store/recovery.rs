@@ -364,7 +364,12 @@ fn persist_intent(
         replace_public(&dir.join("recovery.json"), &journal)?;
         journal_written = true;
         replace_public(&dir.join("authority.json"), &current.stored)?;
-        Ok(BornAccount { stored: current.stored, verified, authority_blocked: false })
+        Ok(BornAccount {
+            stored: current.stored,
+            verified,
+            authority_blocked: false,
+            networking_path: dir,
+        })
     })();
     if result.is_err() && !journal_written {
         let branch_cleanup = if branch_written { vault.delete(&new_branch) } else { Ok(()) };
@@ -474,7 +479,7 @@ pub(crate) fn pending_restore(
             &ramflux_protocol::canonical_json_bytes(&stored)?,
         )?;
         fs::File::open(&dir)?.sync_all()?;
-        Ok(BornAccount { stored, verified, authority_blocked: false })
+        Ok(BornAccount { stored, verified, authority_blocked: false, networking_path: dir.clone() })
     })();
     if result.is_err() {
         vault.delete(&branch_ref)?;

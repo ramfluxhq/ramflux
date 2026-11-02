@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only for actual object/reference erasure. Post-commit notification failures no
   longer report a committed deletion as failed. Pre-enrollment task metadata and
   the sender delivery/owner crash window remain follow-up limitations.
+- Clamp loaded and persisted custody retry deadlines after wall-clock rollback,
+  retain the unhinted monotonic cooldown across in-process account reloads, and
+  use one remaining-time view for status, account lists and networking events.
+  Past daily reset hints fall back to the generic 300-second floor.
+- Make router loopback administration a separate opt-in, off by default, with
+  port validation, occupied-port refusal, and saved overlay recovery. The
+  federation administration overlay no longer publishes the router listener.
 
 - Bound custody capacity reset hints to two days, keep node-bound retry deadlines
   without repeated status writes, and expose router budget inspection through

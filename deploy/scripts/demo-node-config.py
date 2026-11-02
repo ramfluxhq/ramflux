@@ -12,7 +12,7 @@ import sys
 
 SERVICES = ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
 SNAPSHOT_ROOT_FILES = (
-    "compose.yml", "compose.voice.yml", "compose.admin.yml", "runtime.env",
+    "compose.yml", "compose.voice.yml", "compose.admin.yml", "compose.router-admin.yml", "runtime.env",
     "owner.json", "owner.token", "demo-override.json", "deploy-tree.version",
     "identity.env", ".env",
 )
@@ -231,15 +231,18 @@ def validate_snapshot_overlays(state, reference):
     voice_value = values.get("RAMFLUX_RELAY_VOICE_UDP_PORT", "")
     target_voice_port = voice_value.rsplit(":", 1)[-1] if voice_value else ""
     target_admin_port = values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT", "")
+    router_enabled = values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1"
     applied = {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": target_voice_port,
         "DEMO_ADMIN_LOOPBACK_PORT": target_admin_port,
-        "DEMO_ROUTER_ADMIN_LOOPBACK_PORT": values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488") if target_admin_port else "",
+        "RAMFLUX_ROUTER_ADMIN_ENABLED": router_enabled,
+        "DEMO_ROUTER_ADMIN_LOOPBACK_PORT": values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488") if router_enabled else "",
     }
     selected = {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT", ""),
         "DEMO_ADMIN_LOOPBACK_PORT": os.environ.get("DEMO_ADMIN_LOOPBACK_PORT", ""),
-        "DEMO_ROUTER_ADMIN_LOOPBACK_PORT": os.environ.get("DEMO_ROUTER_ADMIN_LOOPBACK_PORT", "59488") if os.environ.get("DEMO_ADMIN_LOOPBACK_PORT") else "",
+        "RAMFLUX_ROUTER_ADMIN_ENABLED": os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1",
+        "DEMO_ROUTER_ADMIN_LOOPBACK_PORT": os.environ.get("DEMO_ROUTER_ADMIN_LOOPBACK_PORT", "59488") if os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1" else "",
     }
     changed = [key for key in selected if selected[key] != applied[key]]
     if changed:
@@ -365,6 +368,7 @@ def selected_overlays():
     return {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": bool(os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT")),
         "DEMO_ADMIN_LOOPBACK_PORT": bool(os.environ.get("DEMO_ADMIN_LOOPBACK_PORT")),
+        "RAMFLUX_ROUTER_ADMIN_ENABLED": os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1",
     }
 
 
@@ -375,6 +379,8 @@ def validate_maintenance_overlays(state):
             and values.get("RAMFLUX_RELAY_VOICE_UDP_PORT")),
         "DEMO_ADMIN_LOOPBACK_PORT": bool((state / "compose.admin.yml").is_file()
             and values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT")),
+        "RAMFLUX_ROUTER_ADMIN_ENABLED": bool((state / "compose.router-admin.yml").is_file()
+            and values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1"),
     }
     selected = selected_overlays()
     changed = [key for key in selected if selected[key] != applied[key]]
@@ -396,9 +402,13 @@ def validate_selected_overlay_values(state):
                      "before maintenance (or restore the last applied selection)")
     admin_port = os.environ.get("DEMO_ADMIN_LOOPBACK_PORT", "")
     if admin_port and (not (state / "compose.admin.yml").is_file()
-                       or values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT") != admin_port
-                       or values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488") != os.environ.get("DEMO_ROUTER_ADMIN_LOOPBACK_PORT", "59488")):
+                       or values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT") != admin_port):
         sys.exit("admin loopback configuration was not applied by the last up; run up first")
+    if os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1" and (
+            not (state / "compose.router-admin.yml").is_file()
+            or values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") != "1"
+            or values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT") != os.environ.get("DEMO_ROUTER_ADMIN_LOOPBACK_PORT", "59488")):
+        sys.exit("router admin configuration was not applied by the last up; run up first")
 
 
 def render_files(repo, state, owner):
@@ -437,6 +447,7 @@ def render_files(repo, state, owner):
         ("compose.yml", "docker-compose.yml", True),
         ("compose.voice.yml", "docker-compose.voice.yml", selected["RAMFLUX_DEMO_VOICE_UDP_PORT"]),
         ("compose.admin.yml", "docker-compose.admin.yml", selected["DEMO_ADMIN_LOOPBACK_PORT"]),
+        ("compose.router-admin.yml", "docker-compose.router-admin.yml", selected["RAMFLUX_ROUTER_ADMIN_ENABLED"]),
     ):
         frozen = state / filename
         if enabled or frozen.exists():

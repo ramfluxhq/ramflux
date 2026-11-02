@@ -117,8 +117,15 @@ pub(super) fn status(
     account: &LocalBusAccountState,
     account_id: &str,
 ) -> Result<serde_json::Value, SdkError> {
+    status_at(account, account_id, crate::custody::network_now()?)
+}
+
+pub(super) fn status_at(
+    account: &LocalBusAccountState,
+    account_id: &str,
+    now: u64,
+) -> Result<serde_json::Value, SdkError> {
     let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
-    let now = crate::custody::network_now()?;
     let current =
         crate::custody::load_data_account(account.client.account_index()?.root(), account_id, now)?;
     let authorized = !current.authority_blocked()
@@ -143,7 +150,7 @@ pub(super) fn status(
                     )
                     .is_ok()
             });
-    let reason = native.presented_networking_reason(now);
+    let reason = current.networking_view(now);
     let mut status = serde_json::json!({
         "account_id":account_id,"local_account_id":account_id,"state":"unlocked","networking":native.state(),
         "networking_reason":reason,
@@ -158,7 +165,9 @@ pub(super) fn status(
         "active_transport_kind":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),
         "pending_deliveries":account.pending_deliveries.len(),
     });
-    if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(hint), .. }) = reason.as_ref() {
+    if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(hint), .. }) =
+        reason.as_ref().map(|view| &view.cause)
+    {
         status["networking_hint"] = crate::custody::capacity_hint::message(hint).into();
     }
     Ok(status)
@@ -368,9 +377,16 @@ pub(super) fn record_networking(
     account: &mut LocalBusAccountState,
     error: Option<&SdkError>,
 ) -> Result<(), SdkError> {
+    record_networking_at(account, error, crate::custody::network_now()?)
+}
+
+pub(super) fn record_networking_at(
+    account: &mut LocalBusAccountState,
+    error: Option<&SdkError>,
+    now: u64,
+) -> Result<(), SdkError> {
     let root = account.client.account_index()?.root().to_path_buf();
     let id = account.client.account_db()?.local_account_id.clone();
-    let now = crate::custody::network_now()?;
     let mut native = crate::custody::load_account(&root, &id, now)?;
     if native.state() == crate::custody::CreationState::NetworkingPending {
         // A shared cooldown can return before connect_admitted loads the account.
@@ -379,14 +395,14 @@ pub(super) fn record_networking(
             native.bind_capacity_node(&root, &config.node_id, &config.node_public_key, now)?;
         }
         if let Some(error) = error {
-            native.set_networking_reason(&root, networking_reason(error))?;
+            native.set_networking_reason_at(&root, networking_reason(error), now)?;
         }
         native = crate::custody::load_account(&root, &id, now)?;
     }
     let body = serde_json::json!({
         "account_id": id,
         "state": native.state(),
-        "networking_reason": native.networking_reason(),
+        "networking_reason": native.networking_view(now),
     });
     let db = account.client.account_db()?;
     if db.load_actor_state::<serde_json::Value>("account/networking")?.as_ref() != Some(&body) {

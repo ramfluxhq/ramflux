@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Span Brain
+
+# Explicit router administration opt-in; never included by the federation overlay.
+services:
+  ramflux-router:
+    ports:
+      - "127.0.0.1:${RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT:?operator router loopback port required}:7443/tcp"

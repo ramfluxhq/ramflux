@@ -13,13 +13,14 @@ pub(crate) fn unix_now() -> u64 {
 pub(crate) const MAX_RESET_AHEAD_SECS: u64 = 2 * 86_400;
 
 pub(crate) fn accepted(hint: CapacityHint, now: u64) -> Option<CapacityHint> {
-    if hint.resets_at_unix <= now.saturating_add(MAX_RESET_AHEAD_SECS) {
+    if hint.resets_at_unix > now && hint.resets_at_unix <= now.saturating_add(MAX_RESET_AHEAD_SECS)
+    {
         Some(hint)
     } else {
         tracing::warn!(
             discarded_resets_at_unix = hint.resets_at_unix,
             local_now_unix = now,
-            "discarding custody capacity reset beyond the two-day bound"
+            "discarding custody capacity reset outside the future two-day window"
         );
         None
     }
@@ -117,3 +118,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "capacity_hint/wire_tests.rs"]
+mod wire_tests;

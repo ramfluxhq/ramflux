@@ -1148,3 +1148,69 @@ async fn custody_agent_export_uses_recorded_owner_while_agent_is_active() -> Res
     accept_refusal_server(server, "agent export server failed")?;
     flow
 }
+
+// Mutation: serialize native.networking_reason() instead of networking_view(now) in the event writer.
+#[tokio::test(start_paused = true)]
+async fn custody_networking_event_status_and_list_share_the_same_derived_view() -> Result {
+    use crate::client::native_test_support::Fixture;
+    let fixture = Fixture::new("capacity-view").await?;
+    let now = crate::custody::network_now()?;
+    let config = fixture.config.custody.as_ref().ok_or("custody config")?;
+    let mut native = crate::custody::load_account(&fixture.root.0, "capacity-view", now)?;
+    native.bind_capacity_node(&fixture.root.0, &config.node_id, &config.node_public_key, now)?;
+    native.set_networking_reason(
+        &fixture.root.0,
+        Some(crate::AccountNetworkingReason::NodeBusy {
+            retry_after_ms: 300_000,
+            capacity: Some(ramflux_protocol::custody::CapacityHint {
+                scope: ramflux_protocol::custody::CapacityScope::PrefixDaily,
+                resets_at_unix: now + 3600,
+            }),
+        }),
+    )?;
+    let mut account = super::state::LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config,
+        fixture.manifest.principal_commitment,
+    );
+    for captured in [now + 100, now + 3600] {
+        super::native_account::record_networking_at(&mut account, None, captured)?;
+        let event = account
+            .client
+            .account_db()?
+            .load_actor_state::<serde_json::Value>("account/networking")?
+            .ok_or("networking event missing")?;
+        let status = super::native_account::status_at(&account, "capacity-view", captured)?;
+        let listed = crate::custody::list_accounts(&fixture.root.0, captured)?;
+        assert_eq!(event["networking_reason"], status["networking_reason"]);
+        assert_eq!(event["networking_reason"], listed[0]["networking_reason"]);
+        if captured == now + 100 {
+            assert_eq!(event["networking_reason"]["remaining_ms"], 3_500_000);
+            assert_eq!(event["networking_reason"]["retry_after_ms"], 3_500_000);
+        } else {
+            assert!(event["networking_reason"].is_null());
+        }
+    }
+    // Error ingestion must use the same captured wall time as its derived event.
+    let captured = now + 7200;
+    let hint = ramflux_protocol::custody::CapacityHint {
+        scope: ramflux_protocol::custody::CapacityScope::PrefixDaily,
+        resets_at_unix: captured - 1,
+    };
+    super::native_account::record_networking_at(
+        &mut account,
+        Some(&crate::SdkError::CustodyCapacity { capacity: hint }),
+        captured,
+    )?;
+    let event = account
+        .client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>("account/networking")?
+        .ok_or("networking event missing")?;
+    let status = super::native_account::status_at(&account, "capacity-view", captured)?;
+    assert_eq!(event["networking_reason"], status["networking_reason"]);
+    assert_eq!(event["networking_reason"]["remaining_ms"], 300_000);
+    assert!(event["networking_reason"].get("capacity").is_none());
+    assert!(event["networking_reason"].get("resets_at").is_none());
+    Ok(())
+}

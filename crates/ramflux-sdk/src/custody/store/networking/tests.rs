@@ -16,8 +16,8 @@ fn reason(reset: u64, relative: u64) -> AccountNetworkingReason {
     }
 }
 
-#[test]
-fn custody_capacity_reset_bound_and_past_hint_keep_only_the_retry_floor() -> TestResult {
+#[tokio::test(start_paused = true)]
+async fn custody_capacity_reset_bound_and_past_hint_keep_only_the_retry_floor() -> TestResult {
     let root = Root::new()?;
     let now = capacity_hint::unix_now();
     let mut account = create(&root.0, "bounded-capacity", &TestVault::default(), now)?;
@@ -27,8 +27,9 @@ fn custody_capacity_reset_bound_and_past_hint_keep_only_the_retry_floor() -> Tes
         account.set_networking_reason_at(&root.0, Some(reason(reset, 300_000)), now)?;
         assert_eq!(account.stored.capacity_retry_at, Some(now + 300));
         assert!(account.check_capacity_deadline(now + 299).is_err());
+        tokio::time::advance(std::time::Duration::from_secs(300)).await;
         account.check_capacity_deadline(now + 300)?;
-        assert!(account.presented_networking_reason(now + 300).is_none());
+        assert!(account.networking_view(now + 300).is_none());
         if reset > now {
             assert_eq!(
                 account.networking_reason(),
@@ -96,11 +97,11 @@ fn custody_capacity_blocked_retry_loop_writes_once_and_displays_remaining_delay(
         assert_eq!(fs::metadata(&path)?.ino(), inode, "a blocked retry rewrote authority.json");
         assert_eq!(fs::read(&path)?, bytes);
         assert_eq!(
-            account.presented_networking_reason(now + elapsed),
+            account.networking_view(now + elapsed).map(|view| view.cause),
             Some(reason(now + 3600, (3600 - elapsed) * 1000,))
         );
     }
-    assert!(account.presented_networking_reason(now + 3600).is_none());
+    assert!(account.networking_view(now + 3600).is_none());
     assert_eq!(fs::metadata(&path)?.ino(), inode, "display expiry must not write");
     Ok(())
 }
@@ -127,6 +128,9 @@ fn custody_capacity_old_unbound_hint_is_discarded_on_first_node_binding() -> Tes
 #[derive(Clone, Default)]
 struct Logs(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
 impl tracing::Subscriber for Logs {
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
+    }
     fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
         true
     }
@@ -152,13 +156,212 @@ impl tracing::Subscriber for Logs {
 
 #[test]
 fn custody_capacity_rejected_reset_logs_the_discarded_value() -> TestResult {
+    for reset in [999, 1000, u64::MAX] {
+        let logs = Logs::default();
+        let hint = CapacityHint { scope: CapacityScope::PrefixDaily, resets_at_unix: reset };
+        let accepted =
+            tracing::subscriber::with_default(logs.clone(), || capacity_hint::accepted(hint, 1000));
+        assert!(accepted.is_none());
+        let text = logs.0.lock().map_err(|_| "log lock")?.join(" ");
+        assert_eq!(text.matches("WARN").count(), 1, "{text}");
+        assert!(text.contains(&format!("discarded_resets_at_unix={reset}")), "{text}");
+    }
+    Ok(())
+}
+
+// Mutation: replace the normalized deadline clamp with `let clamped = false`.
+#[tokio::test(start_paused = true)]
+async fn custody_capacity_clock_rollback_clamps_load_and_persist_and_keeps_monotonic_anchor()
+-> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    // The signed authority must predate every simulated wall-clock value.
+    let mut account = create(&root.0, "clock-capacity", &TestVault::default(), now - 7 * 86_400)?;
+    account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let path = directory(&root.0, "clock-capacity")?.join("authority.json");
+    let mut saved: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    saved["networking_reason"] = serde_json::to_value(AccountNetworkingReason::NodeBusy {
+        retry_after_ms: CAPACITY_RETRY_AFTER_MS,
+        capacity: None,
+    })?;
+    saved["capacity_retry_at"] = (now + 3 * 86_400).into();
+    fs::write(&path, ramflux_protocol::canonical_json_bytes(&saved)?)?;
+    let mut loaded = load_account(&root.0, "clock-capacity", now)?;
+    let view = loaded.networking_view(now).ok_or("missing clamped view")?;
+    assert!(view.remaining_ms.is_some_and(|ms| ms > 0 && ms <= 300_000));
+    assert!(view.clamped);
+    loaded.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    assert_eq!(saved["capacity_retry_at"], now + 300, "persist must also clamp");
+    tokio::time::advance(std::time::Duration::from_secs(299)).await;
+    let backwards = now.saturating_sub(3 * 86_400);
+    for wall in [backwards, now.saturating_sub(6 * 86_400)] {
+        let mut loaded = load_account(&root.0, "clock-capacity", wall)?;
+        assert_eq!(loaded.networking_view(wall).ok_or("floor vanished")?.remaining_ms, Some(1000));
+        loaded.bind_capacity_node(&root.0, "node-a", "key-a", wall)?;
+        let loaded = load_account(&root.0, "clock-capacity", wall)?;
+        assert_eq!(
+            loaded.networking_view(wall).ok_or("persist renewed floor")?.remaining_ms,
+            Some(1000)
+        );
+    }
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    let loaded = load_account(&root.0, "clock-capacity", backwards)?;
+    loaded.check_capacity_deadline(backwards)?;
+    assert!(loaded.networking_view(backwards).is_none());
+    Ok(())
+}
+
+// Mutation: accept a hint whose reset is equal to or before the local wall time.
+#[test]
+fn custody_capacity_past_persisted_reset_is_unhinted_in_view_and_error() -> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut account = create(&root.0, "past-capacity", &TestVault::default(), now)?;
+    account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let path = directory(&root.0, "past-capacity")?.join("authority.json");
+    for reset in [now - 1, now] {
+        let mut saved: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        saved["networking_reason"] = serde_json::to_value(reason(reset, 300_000))?;
+        saved["capacity_retry_at"] = (now + 300).into();
+        fs::write(&path, ramflux_protocol::canonical_json_bytes(&saved)?)?;
+        let loaded = load_account(&root.0, "past-capacity", now)?;
+        let view = loaded.networking_view(now).ok_or("floor missing")?;
+        assert!(view.resets_at.is_none());
+        assert!(matches!(view.cause, AccountNetworkingReason::NodeBusy { capacity: None, .. }));
+        let error = loaded.check_capacity_deadline(now).err().ok_or("floor missing")?;
+        assert_eq!(error.capacity_hint(), None);
+        assert!(!error.to_string().contains("resets at"));
+    }
+    Ok(())
+}
+
+#[test]
+fn custody_capacity_clamp_logs_once_and_marks_all_views_until_expiry() -> TestResult {
+    // Other custody tests initialize the process-wide daemon logger. Capture INFO in a
+    // fresh test process so those global filters cannot hide this event from the subscriber.
+    if std::env::var_os("RAMFLUX_CLAMP_LOG_TEST_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "custody::store::networking::tests::custody_capacity_clamp_logs_once_and_marks_all_views_until_expiry", "--nocapture"])
+            .env("RAMFLUX_CLAMP_LOG_TEST_CHILD", "1")
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains("test result: ok. 1 passed"), "{stdout}\n{stderr}");
+        return Ok(());
+    }
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut account = create(&root.0, "clamp-log", &TestVault::default(), now)?;
+    account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let path = directory(&root.0, "clamp-log")?.join("authority.json");
+    let mut saved: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    saved["networking_reason"] = serde_json::to_value(AccountNetworkingReason::NodeBusy {
+        retry_after_ms: CAPACITY_RETRY_AFTER_MS,
+        capacity: None,
+    })?;
+    saved["capacity_retry_at"] = (now + 3 * 86_400).into();
+    fs::write(&path, ramflux_protocol::canonical_json_bytes(&saved)?)?;
     let logs = Logs::default();
-    let hint = CapacityHint { scope: CapacityScope::PrefixDaily, resets_at_unix: u64::MAX };
-    let accepted =
-        tracing::subscriber::with_default(logs.clone(), || capacity_hint::accepted(hint, 1000));
-    assert!(accepted.is_none());
+    tracing::subscriber::with_default(logs.clone(), || -> TestResult {
+        for _ in 0..3 {
+            let mut loaded = load_account(&root.0, "clamp-log", now)?;
+            assert!(loaded.networking_view(now).ok_or("clamp missing")?.clamped);
+            loaded.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+            assert!(loaded.networking_view(now).ok_or("clamp lost after persist")?.clamped);
+        }
+        Ok(())
+    })?;
     let text = logs.0.lock().map_err(|_| "log lock")?.join(" ");
-    assert_eq!(text.matches("WARN").count(), 1, "{text}");
-    assert!(text.contains("discarded_resets_at_unix=18446744073709551615"), "{text}");
+    assert_eq!(text.matches("INFO").count(), 1, "{text}");
+    assert!(text.contains("clamped=true"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn custody_capacity_hinted_corrupt_deadline_is_clamped_on_load_and_persist() -> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut account = create(&root.0, "hinted-clamp", &TestVault::default(), now)?;
+    account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let path = directory(&root.0, "hinted-clamp")?.join("authority.json");
+    let mut saved: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    saved["networking_reason"] = serde_json::to_value(reason(now + 3600, 300_000))?;
+    saved["capacity_retry_at"] = (now + 3 * 86_400).into();
+    fs::write(&path, ramflux_protocol::canonical_json_bytes(&saved)?)?;
+    let mut loaded = load_account(&root.0, "hinted-clamp", now)?;
+    let view = loaded.networking_view(now).ok_or("clamped view missing")?;
+    assert!(view.remaining_ms.is_some_and(|ms| ms > 0 && ms <= 300_000));
+    assert!(view.clamped);
+    assert!(matches!(view.cause, AccountNetworkingReason::NodeBusy { capacity: None, .. }));
+    loaded.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+    assert_eq!(saved["capacity_retry_at"], now + 300);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn custody_capacity_forward_wall_step_keeps_the_active_capture_and_allows_a_new_refusal()
+-> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut account = create(&root.0, "forward-capacity", &TestVault::default(), now)?;
+    account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let cause = AccountNetworkingReason::NodeBusy {
+        retry_after_ms: CAPACITY_RETRY_AFTER_MS,
+        capacity: None,
+    };
+    account.set_networking_reason_at(&root.0, Some(cause.clone()), now)?;
+    let path = directory(&root.0, "forward-capacity")?.join("authority.json");
+    let captured = fs::read(&path)?;
+    let inode = fs::metadata(&path)?.ino();
+    assert_eq!(account.networking_view(now).ok_or("floor missing")?.remaining_ms, Some(300_000));
+    tokio::time::advance(std::time::Duration::from_secs(100)).await;
+    let forward = now + 86_400;
+    account.set_networking_reason_at(&root.0, Some(cause.clone()), forward)?;
+    assert!(fs::read(&path)? == captured, "a wall-clock step rewrote the active refusal");
+    assert_eq!(fs::metadata(&path)?.ino(), inode);
+    assert_eq!(
+        account.networking_view(forward).ok_or("active floor missing")?.remaining_ms,
+        Some(200_000)
+    );
+    tokio::time::advance(std::time::Duration::from_secs(200)).await;
+    assert!(account.networking_view(forward + 200).is_none());
+    account.set_networking_reason_at(&root.0, Some(cause), forward + 200)?;
+    assert_eq!(
+        account.networking_view(forward + 200).ok_or("new refusal missing")?.remaining_ms,
+        Some(300_000)
+    );
+    tokio::time::advance(std::time::Duration::from_secs(299)).await;
+    let repeated_wall = forward + 200 - 3600;
+    account.set_networking_reason_at(
+        &root.0,
+        Some(AccountNetworkingReason::NodeBusy {
+            retry_after_ms: CAPACITY_RETRY_AFTER_MS,
+            capacity: None,
+        }),
+        repeated_wall,
+    )?;
+    assert_eq!(
+        account.networking_view(repeated_wall).ok_or("rollback floor missing")?.remaining_ms,
+        Some(1000)
+    );
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(account.networking_view(repeated_wall).is_none());
+    // A new refusal can share the same wall second after a correction; it is a new floor.
+    account.set_networking_reason_at(
+        &root.0,
+        Some(AccountNetworkingReason::NodeBusy {
+            retry_after_ms: CAPACITY_RETRY_AFTER_MS,
+            capacity: None,
+        }),
+        repeated_wall,
+    )?;
+    assert_eq!(
+        account.networking_view(repeated_wall).map(|view| view.remaining_ms),
+        Some(Some(300_000)),
+        "a new refusal at the repeated wall second lost its floor"
+    );
     Ok(())
 }

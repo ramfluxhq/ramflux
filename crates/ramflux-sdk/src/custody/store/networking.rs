@@ -8,6 +8,19 @@ use super::{
 use crate::custody::{CAPACITY_RETRY_AFTER_MS, capacity_hint};
 use crate::{AccountNetworkingReason, SdkError};
 use std::{fs, os::unix::fs::OpenOptionsExt, path::Path};
+mod clock;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct NetworkingView {
+    #[serde(flatten)]
+    pub(crate) cause: AccountNetworkingReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remaining_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resets_at: Option<u64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    clamped: bool,
+}
 
 impl BornAccount {
     pub(crate) fn bind_capacity_node(
@@ -18,7 +31,7 @@ impl BornAccount {
         now: u64,
     ) -> Result<(), SdkError> {
         let identity = capacity_hint::node_identity(node_id, node_public_key);
-        self.update_networking(root, |current| {
+        self.update_networking(root, now, |current| {
             if current.stored.networking_node.as_ref() != Some(&identity) {
                 // Old unbound hints cannot establish which node owns their deadline.
                 current.stored.networking_node = Some(identity);
@@ -26,21 +39,12 @@ impl BornAccount {
                 current.stored.capacity_retry_at = None;
                 return true;
             }
-            if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(hint), .. }) =
-                current.stored.networking_reason.as_ref()
-                && capacity_hint::accepted(*hint, now).is_none()
-            {
-                current.stored.networking_reason = Some(AccountNetworkingReason::NodeBusy {
-                    retry_after_ms: CAPACITY_RETRY_AFTER_MS,
-                    capacity: None,
-                });
-                current.stored.capacity_retry_at = Some(now.saturating_add(300));
-                return true;
-            }
+
             false
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn set_networking_reason(
         &mut self,
         root: &Path,
@@ -49,7 +53,7 @@ impl BornAccount {
         self.set_networking_reason_at(root, reason, capacity_hint::unix_now())
     }
 
-    fn set_networking_reason_at(
+    pub(crate) fn set_networking_reason_at(
         &mut self,
         root: &Path,
         mut reason: Option<AccountNetworkingReason>,
@@ -67,16 +71,20 @@ impl BornAccount {
                 });
             }
         }
-        self.update_networking(root, |current| {
+        self.update_networking(root, now, |current| {
             let deadline = match reason.as_ref() {
                 Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity })
                     if capacity.is_some() || *retry_after_ms == CAPACITY_RETRY_AFTER_MS =>
                 {
-                    if current.stored.networking_reason == reason
-                        && current.stored.capacity_retry_at.is_some_and(|until| until > now)
-                    {
+                    let active = current
+                        .networking_view(now)
+                        .and_then(|view| view.remaining_ms)
+                        .is_some_and(|remaining| remaining > 0);
+                    if current.stored.networking_reason == reason && active {
                         current.stored.capacity_retry_at
                     } else {
+                        // A new refusal may share a wall timestamp after a clock correction.
+                        clock::begin_refusal(&current.networking_path);
                         Some(
                             capacity
                                 .map_or(0, |hint| hint.resets_at_unix)
@@ -98,36 +106,29 @@ impl BornAccount {
     }
 
     pub(crate) fn check_capacity_deadline(&self, now: u64) -> Result<(), SdkError> {
-        if self.state() == CreationState::NetworkingPending
-            && self.stored.capacity_retry_at.is_some_and(|deadline| now < deadline)
+        if let Some(view) = self.networking_view(now)
+            && self.stored.capacity_retry_at.is_some()
+            && view.remaining_ms.is_some_and(|remaining| remaining > 0)
         {
-            if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(capacity), .. }) =
-                self.networking_reason()
-            {
-                return Err(SdkError::CustodyCapacity { capacity: *capacity });
+            if let AccountNetworkingReason::NodeBusy { capacity: Some(capacity), .. } = view.cause {
+                return Err(SdkError::CustodyCapacity { capacity });
             }
             return Err(ramflux_protocol::custody::CustodyRefusal::Capacity.into());
         }
         Ok(())
     }
 
-    pub(crate) fn presented_networking_reason(&self, now: u64) -> Option<AccountNetworkingReason> {
-        let mut reason = self.networking_reason()?.clone();
-        if let Some(deadline) = self.stored.capacity_retry_at {
-            if deadline <= now {
-                return None;
-            }
-            if let AccountNetworkingReason::NodeBusy { retry_after_ms, capacity } = &mut reason {
-                *retry_after_ms = deadline.saturating_sub(now).saturating_mul(1000);
-                if capacity.is_some_and(|hint| hint.resets_at_unix <= now) {
-                    *capacity = None;
-                }
-            }
-        }
-        Some(reason)
+    pub(crate) fn networking_view(&self, now: u64) -> Option<NetworkingView> {
+        clock::view(
+            self.networking_reason(),
+            self.stored.capacity_retry_at,
+            self.stored.networking_node.as_deref(),
+            &self.networking_path,
+            now,
+        )
     }
 
-    fn update_networking<F>(&mut self, root: &Path, change: F) -> Result<(), SdkError>
+    fn update_networking<F>(&mut self, root: &Path, now: u64, change: F) -> Result<(), SdkError>
     where
         F: FnOnce(&mut Self) -> bool,
     {
@@ -143,11 +144,12 @@ impl BornAccount {
             .mode(0o600)
             .open(dir.join(".authority.lock"))?;
         fs2::FileExt::lock_exclusive(&lock)?;
-        let mut current = load_account(root, self.local_account_id(), capacity_hint::unix_now())?;
+        let mut current = load_account(root, self.local_account_id(), now)?;
         if current.record() != self.record() || current.state() == CreationState::Live {
             return Ok(());
         }
-        if change(&mut current) {
+        let clamped = clock::clamp(&mut current.stored, now);
+        if change(&mut current) || clamped {
             let bytes = ramflux_protocol::canonical_json_bytes(&current.stored)?;
             if bytes.len() > MAX_STORED_AUTHORITY_BYTES {
                 return Err(super::invalid());
@@ -159,6 +161,9 @@ impl BornAccount {
             write_public(&temp, &bytes)?;
             fs::rename(temp, dir.join("authority.json"))?;
             fs::File::open(&dir)?.sync_all()?;
+            if clamped {
+                clock::persisted(&dir, &current.stored);
+            }
         }
         self.stored.networking_reason = current.stored.networking_reason;
         self.stored.networking_node = current.stored.networking_node;

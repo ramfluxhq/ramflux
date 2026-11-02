@@ -125,10 +125,14 @@ class RenderedComposeInputTests(unittest.TestCase):
                     inputs["RF_COMPOSE_RELAY_VOICE_PUBLIC_ENDPOINT"] = "voice.example:17449"
                 if path.name == "docker-compose.admin.yml":
                     inputs["RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT"] = "59487"
+                if path.name == "docker-compose.router-admin.yml":
+                    inputs["RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT"] = "59488"
                 if path.name == "docker-compose.itest.custody-quota.yml":
                     inputs["RF_COMPOSE_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY"] = "16"
                 unset = self.render(command, files, inputs)
                 if path.name == "docker-compose.admin.yml":
+                    self.assertNotIn("ports", unset["services"]["ramflux-router"])
+                if path.name == "docker-compose.router-admin.yml":
                     ports = unset["services"]["ramflux-router"]["ports"]
                     def port_tuple(port):
                         if isinstance(port, dict):

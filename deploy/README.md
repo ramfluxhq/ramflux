@@ -524,12 +524,20 @@ For temporary administration, set `DEMO_ADMIN_LOOPBACK_PORT=59487` in the operat
 env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
 `DEMO_BIND_ADDR`, and can be reached through an SSH tunnel. Unset it and run `up`
 to remove the mapping. Production installs can use `docker-compose.admin.yml`
-with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. The same opt-in overlay publishes
-the router's authenticated mesh administration listener on loopback TCP 59488
-(`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` for the demo wrapper,
-`RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` for direct Compose use). This is separate
-from the federation listener. Both ports must be distinct from the other demo
-ports; the router still requires a trusted mesh certificate and its admin token. See
+with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. Router administration has an independent opt-in, off by default:
+set `RAMFLUX_ROUTER_ADMIN_ENABLED=1` in the demo operator env and run `up`.
+`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` defaults to 59488 only when enabled. It must
+be 1024–65535 and distinct from the other configured ports. The wrapper refuses
+an occupied port before changing managed state, while allowing the existing
+owned router's mapping. Disabled ports are neither validated nor written to
+`runtime.env`. The enabled selection, port and separate overlay survive
+snapshots, rollback and recovery. Set the flag to 0 and run `up` to remove it.
+
+Direct Compose operators explicitly add `docker-compose.router-admin.yml` and
+set `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT`; selecting the federation overlay alone
+never publishes the router, including on upgrade. The new overlay requires an
+explicit port. It binds only loopback TCP and the router still requires a trusted
+mesh certificate and its admin token. See
 [listener configuration, bounds and SSH commands](../docs/federation_http.md).
 
 For upgrades from tooling older than this snapshot workflow, first save the complete

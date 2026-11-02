@@ -82,6 +82,7 @@ pub struct BornAccount {
     stored: StoredAuthority,
     verified: VerifiedRecord,
     authority_blocked: bool,
+    networking_path: PathBuf,
 }
 impl BornAccount {
     pub(crate) fn group_primary(
@@ -214,9 +215,12 @@ impl BornAccount {
     }
     #[must_use]
     pub fn summary(&self) -> serde_json::Value {
+        self.summary_at(super::capacity_hint::unix_now())
+    }
+    pub(crate) fn summary_at(&self, now: u64) -> serde_json::Value {
         serde_json::json!({"local_account_id":self.local_account_id(),"principal_id":self.stored.record.body.principal_id,
             "account_anchor":self.stored.record.body.account_anchor,"kind":self.stored.record.body.principal_kind,"display_name":self.stored.record.body.profile.display_name,
-            "state":self.state(),"networking_reason":self.presented_networking_reason(super::capacity_hint::unix_now()),"authority_blocked":self.authority_blocked,"custody_v3_observed":true,"vault_class":self.stored.vault_class,"custodian_account_id":self.stored.custodian_account_id})
+            "state":self.state(),"networking_reason":self.networking_view(now),"authority_blocked":self.authority_blocked,"custody_v3_observed":true,"vault_class":self.stored.vault_class,"custodian_account_id":self.stored.custodian_account_id})
     }
 }
 fn directory(root: &Path, id: &str) -> Result<PathBuf, SdkError> {
@@ -241,7 +245,7 @@ pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Val
         if entry.file_type()?.is_dir() {
             let id = entry.file_name().into_string().map_err(|_| invalid())?;
             let summary = if let Ok(account) = load_data_account(root, &id, now) {
-                account.summary()
+                account.summary_at(now)
             } else {
                 let failed = failed_setup(root, &id)?;
                 serde_json::json!({"local_account_id":id,"state":CreationState::NetworkingPending,
@@ -320,7 +324,10 @@ fn read_account(
     if require_current {
         stored.pins.require_current(&verified)?;
     }
-    Ok(BornAccount { stored, verified, authority_blocked })
+    let account =
+        BornAccount { stored, verified, authority_blocked, networking_path: directory(root, id)? };
+    let _ = account.networking_view(now);
+    Ok(account)
 }
 fn load_human(root: &Path, id: &str, now: u64) -> Result<VerifiedRecord, SdkError> {
     // Decode directly and reject nonhuman evidence before following any custodian reference.
@@ -466,7 +473,7 @@ pub(super) fn persist(
             &ramflux_protocol::canonical_json_bytes(&stored)?,
         )?;
         fs::File::open(&dir)?.sync_all()?;
-        Ok(BornAccount { stored, verified, authority_blocked: false })
+        Ok(BornAccount { stored, verified, authority_blocked: false, networking_path: dir.clone() })
     })();
     if result.is_err() {
         // Attempt both deletions even if one provider operation fails. The reservation remains

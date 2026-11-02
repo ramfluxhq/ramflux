@@ -232,3 +232,16 @@ The admin hop still uses a bearer token over plaintext HTTP inside the Compose
 network. Thread caps and timeouts do not provide transport confidentiality or peer
 authentication. Keep network membership restricted; authenticated TLS for this hop
 remains separate follow-up work and is not implemented by these limits.
+
+
+Router mesh administration is a separate opt-in. `docker-compose.admin.yml`
+only publishes federation administration. Direct Compose operators explicitly
+add `docker-compose.router-admin.yml` and supply
+`RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT`. The demo wrapper instead uses
+`RAMFLUX_ROUTER_ADMIN_ENABLED=1` (default 0) and
+`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` (default 59488 when enabled). The port is
+validated only when enabled, is absent from disabled runtime.env files, and must
+be 1024–65535 and distinct from the other configured ports. `up` refuses a busy
+port unless it belongs to the existing running, owned router mapping. Saved
+snapshots include the independent selection and overlay for rollback/recovery.
+The listener remains loopback-only and requires mesh mTLS plus its admin token.

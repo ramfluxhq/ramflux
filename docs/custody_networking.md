@@ -456,7 +456,10 @@ set +a
 "$DEMO_TOOL" custody-budgets 127.0.0.1:59488 "$DEMO_DATA_DIR/certs" router
 ```
 
-Enable the production private administration overlay first. Its router listener
+Enable the independent router administration opt-in first: set
+`RAMFLUX_ROUTER_ADMIN_ENABLED=1` for the demo wrapper, or explicitly select
+`docker-compose.router-admin.yml` with `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT`
+for direct Compose. The federation admin overlay does not publish this port. The router listener
 uses loopback TCP 59488 (`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` for the demo wrapper;
 `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` for direct Compose). `DEMO_MESH_PORT` reaches
 federation and does not serve this router route. The tool
@@ -478,19 +481,28 @@ and includes `capacity: { scope, resets_at_unix }`. The scope is `prefix_daily`
 or `global_daily`; the reset is copied from the durable UTC-day window. Minute,
 lease, byte, listener, and other capacity refusals omit this field.
 
-The client accepts daily resets no more than two days ahead of its wall clock.
-It logs a discarded out-of-range value and falls back to the 300-second cooldown.
-Past resets also retain that floor. Saved deadlines are bound to both the node
-id and its pinned public key; changing either clears the old node's hint.
-Old saved hints without a node binding are discarded on the first connection.
-The client shows the network's new-account quota and the accepted UTC reset in
-`rf account status` and in the error text. It waits until that reset, with the
-existing 300-second cooldown as a minimum. The remaining delay is derived at
-status time, expired hint text disappears, and blocked retries do not rewrite
-the account authority file or extend its saved deadline. Repeated status calls do not extend
-or bypass the deadline; monotonic time and wall time both gate expiry. Pending
-accounts retain the hint across daemon restarts. Without a hint, the generic
-Capacity message remains and the client makes no midnight-reset claim.
+The client accepts daily resets strictly in the future and no more than two days
+ahead of its wall clock. It logs discarded past or out-of-range reset values and
+falls back to the generic 300-second cooldown; CLI errors never repeat a past
+reset time. Saved deadlines are bound to both the node id and pinned public key;
+changing either clears the old cause. Old unbound hints are discarded on bind.
+
+A loaded or persisted deadline beyond the writer's bound (two days with a usable
+hint, 300 seconds without one) is clamped to a 300-second fallback and logged
+once at info with `clamped: true`. The derived view retains that marker for the
+captured cooldown. An unhinted cooldown uses a shared monotonic anchor during
+this process, including across account reloads; changing the wall clock cannot
+renew or bypass it. After restart, the saved wall-clock value is advisory and
+bounded again. No additional storage field or custody wire field is introduced.
+
+Account status, account lists and `account.networking.changed` serialize the same
+`networking_view(now)`: the cause keeps the existing `kind`, `retry_after_ms` and
+optional `capacity` fields; capacity deadlines additionally expose `remaining_ms`,
+a future-only `resets_at`, and `clamped: true` when repaired. Expired capacity
+causes disappear. The event captures its view at event time, while later status
+reads derive the current view. Local blocked retries do not extend the captured
+deadline or repeatedly rewrite authority.json. A valid daily hint still waits
+until the server's reset; the networking backoff also retains its monotonic floor.
 
 This is a breaking development v3 wire change: older strict decoders reject a
 refusal carrying `capacity`. Rebuild clients and node services together; the

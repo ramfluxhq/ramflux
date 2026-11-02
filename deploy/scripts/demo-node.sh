@@ -58,7 +58,9 @@ export DEMO_NODE_ID DEMO_GATEWAY_PORT DEMO_RELAY_PORT DEMO_HTTP_PORT DEMO_TURN_P
 export DEMO_MESH_PORT DEMO_BIND_ADDR DEMO_VERSION
 DEMO_ADMIN_LOOPBACK_PORT=${DEMO_ADMIN_LOOPBACK_PORT:-}
 DEMO_ROUTER_ADMIN_LOOPBACK_PORT=${DEMO_ROUTER_ADMIN_LOOPBACK_PORT:-59488}
-export DEMO_ADMIN_LOOPBACK_PORT DEMO_ROUTER_ADMIN_LOOPBACK_PORT
+RAMFLUX_ROUTER_ADMIN_ENABLED=${RAMFLUX_ROUTER_ADMIN_ENABLED:-0}
+case "$RAMFLUX_ROUTER_ADMIN_ENABLED" in 0|1) ;; *) fail 'RAMFLUX_ROUTER_ADMIN_ENABLED must be 0 or 1' ;; esac
+export DEMO_ADMIN_LOOPBACK_PORT DEMO_ROUTER_ADMIN_LOOPBACK_PORT RAMFLUX_ROUTER_ADMIN_ENABLED
 case "$DEMO_HOST" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'DEMO_HOST must be a DNS name or IPv4 address' ;; esac
 case "$DEMO_NODE_ID" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'invalid DEMO_NODE_ID' ;; esac
 case "$DEMO_PROJECT" in [a-z0-9]*) ;; *) fail 'invalid DEMO_PROJECT' ;; esac
@@ -71,17 +73,20 @@ for port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TUR
   [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || fail 'ports must be between 1024 and 65535'
 done
 if [ -n "$DEMO_ADMIN_LOOPBACK_PORT" ]; then
-  case "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" in 0*|*[!0-9]*) fail 'router admin loopback port must be an integer' ;; esac
-  [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -ge 1024 ] && [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -le 65535 ] || fail 'router admin loopback port must be 1024..65535'
-  for tcp_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TURN_PORT" "$DEMO_MESH_PORT" "$DEMO_ADMIN_LOOPBACK_PORT"; do
-    [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -ne "$tcp_port" ] || fail 'router admin loopback port conflicts with another demo port'
-  done
   case "$DEMO_ADMIN_LOOPBACK_PORT" in 0*|*[!0-9]*) fail 'admin loopback port must be an integer' ;; esac
   [ "$DEMO_ADMIN_LOOPBACK_PORT" -ge 1024 ] && [ "$DEMO_ADMIN_LOOPBACK_PORT" -le 65535 ] || fail 'admin loopback port must be 1024..65535'
   for tcp_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TURN_PORT" "$DEMO_MESH_PORT"; do
     [ "$DEMO_ADMIN_LOOPBACK_PORT" -ne "$tcp_port" ] || fail 'admin loopback port conflicts with another demo port'
   done
 fi
+if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ]; then
+  case "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" in 0*|*[!0-9]*) fail 'router admin loopback port must be an integer' ;; esac
+  [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -ge 1024 ] && [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -le 65535 ] || fail 'router admin loopback port must be 1024..65535'
+  for tcp_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TURN_PORT" "$DEMO_MESH_PORT" ${DEMO_ADMIN_LOOPBACK_PORT:+"$DEMO_ADMIN_LOOPBACK_PORT"}; do
+    [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -ne "$tcp_port" ] || fail 'router admin loopback port conflicts with another demo port'
+  done
+fi
+
 RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS=${RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS-64}
 case "$RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS" in ''|0*|*[!0-9]*) fail 'public max connections must be an integer in 1..4096' ;; esac
 [ "${#RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS}" -le 4 ] && [ "$RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS" -le 4096 ] || fail 'public max connections must be 1..4096'
@@ -140,6 +145,9 @@ if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
   for udp_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_TURN_PORT" "$DEMO_MESH_PORT"; do
     [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -ne "$udp_port" ] || fail 'voice UDP port conflicts with another demo UDP port'
   done
+fi
+if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ] && [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
+  [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -ne "$RAMFLUX_DEMO_VOICE_UDP_PORT" ] || fail 'router admin loopback port conflicts with another demo port'
 fi
 export RAMFLUX_DEMO_VOICE_UDP_PORT
 case "$DEMO_DATA_DIR" in /*) ;; *) fail 'DEMO_DATA_DIR must be absolute' ;; esac
@@ -364,6 +372,9 @@ compose() (
   if [ -n "$DEMO_ADMIN_LOOPBACK_PORT" ]; then
     set -- "$@" -f "$state/compose.admin.yml"
   fi
+  if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ]; then
+    set -- "$@" -f "$state/compose.router-admin.yml"
+  fi
   set -- "$@" -f "$state/demo-override.json"
   clean_env python3 "$script_dir/compose-preflight.py" \
     --provider "$preflight_provider" "$@" || exit 1
@@ -490,7 +501,9 @@ load_applied_overlays() {
   DEMO_ADMIN_LOOPBACK_PORT=$(sed -n 's/^RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=//p' "$state/runtime.env" | tail -n 1)
   DEMO_ROUTER_ADMIN_LOOPBACK_PORT=$(sed -n 's/^RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=//p' "$state/runtime.env" | tail -n 1)
   DEMO_ROUTER_ADMIN_LOOPBACK_PORT=${DEMO_ROUTER_ADMIN_LOOPBACK_PORT:-59488}
-  export RAMFLUX_DEMO_VOICE_UDP_PORT DEMO_ADMIN_LOOPBACK_PORT DEMO_ROUTER_ADMIN_LOOPBACK_PORT
+  RAMFLUX_ROUTER_ADMIN_ENABLED=$(sed -n 's/^RAMFLUX_ROUTER_ADMIN_ENABLED=//p' "$state/runtime.env" | tail -n 1)
+  RAMFLUX_ROUTER_ADMIN_ENABLED=${RAMFLUX_ROUTER_ADMIN_ENABLED:-0}
+  export RAMFLUX_DEMO_VOICE_UDP_PORT DEMO_ADMIN_LOOPBACK_PORT DEMO_ROUTER_ADMIN_LOOPBACK_PORT RAMFLUX_ROUTER_ADMIN_ENABLED
 }
 # Inspect the intended images before prepare/recover can write any managed state.
 case "$command" in
@@ -505,6 +518,12 @@ esac
 if [ "$command" != recover ]; then
   # Refused resource adoption must leave every managed file and marker untouched.
   check_resources
+  if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ] && { [ "$command" = up ] || [ "$command" = upgrade ]; }; then
+    router_ids=$(runtime ps -aq --filter "label=com.docker.compose.project=$DEMO_PROJECT" --filter 'label=com.docker.compose.service=ramflux-router')
+    router_inspection='[]'
+    if [ -n "$router_ids" ]; then router_inspection=$(runtime inspect $router_ids); fi
+    printf '%s' "$router_inspection" | python3 "$script_dir/router-admin-port.py" "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" "$DEMO_PROJECT" "$owner"
+  fi
 fi
 if [ "$command" = recover ]; then
   [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
@@ -587,7 +606,7 @@ RAMFLUX_FEDERATION_ADMIN_MAX_BODY_BYTES=$RAMFLUX_FEDERATION_ADMIN_MAX_BODY_BYTES
 RAMFLUX_FEDERATION_ADMIN_REQUEST_TIMEOUT_SECONDS=$RAMFLUX_FEDERATION_ADMIN_REQUEST_TIMEOUT_SECONDS
 RAMFLUX_FEDERATION_PUBLIC_PORT=$DEMO_BIND_ADDR:$DEMO_HTTP_PORT
 RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=$DEMO_ADMIN_LOOPBACK_PORT
-RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=$DEMO_ROUTER_ADMIN_LOOPBACK_PORT
+RAMFLUX_ROUTER_ADMIN_ENABLED=$RAMFLUX_ROUTER_ADMIN_ENABLED
 RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS=$RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS
 RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS=$RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS
 RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=$RAMFLUX_FEDERATION_PER_SOURCE_LIMITS
@@ -610,6 +629,9 @@ RAMFLUX_CLIENT_RELAY_SERVER_NAME=ramflux-relay
 RAMFLUX_CLIENT_PREKEY_HTTP_URL=$origin
 RAMFLUX_CLIENT_SIGNALING_TURN_ADDR=$DEMO_HOST:$DEMO_TURN_PORT
 ENV
+      if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ]; then
+        printf '%s\n' "RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" >> "$runtime_pending"
+      fi
       if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
         cat >> "$runtime_pending" <<ENV
 RAMFLUX_RELAY_VOICE_UDP_ADDR=0.0.0.0:17449

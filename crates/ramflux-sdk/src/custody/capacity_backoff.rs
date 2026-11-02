@@ -31,8 +31,8 @@ impl Deadline {
         self.until.is_none_or(|until| now < until)
             || self.hint.is_some_and(|hint| wall < hint.resets_at_unix)
     }
-    fn error(&self) -> SdkError {
-        self.hint.map_or_else(
+    fn error(&self, wall: u64) -> SdkError {
+        self.hint.filter(|hint| hint.resets_at_unix > wall).map_or_else(
             || CustodyRefusal::Capacity.into(),
             |capacity| SdkError::CustodyCapacity { capacity },
         )
@@ -43,7 +43,7 @@ struct Cooldowns(BTreeMap<String, Deadline>);
 impl Cooldowns {
     fn check(&mut self, key: &str, now: Instant, wall: u64) -> Result<(), SdkError> {
         self.0.retain(|_, deadline| deadline.active(now, wall));
-        self.0.get(key).map_or(Ok(()), |deadline| Err(deadline.error()))
+        self.0.get(key).map_or(Ok(()), |deadline| Err(deadline.error(wall)))
     }
     fn record(&mut self, key: String, now: Instant, wall: u64, hint: Option<CapacityHint>) {
         let hint = hint.and_then(|hint| super::capacity_hint::accepted(hint, wall));
@@ -179,7 +179,7 @@ mod tests {
                 .check("bounded", now + Duration::from_secs(299), 1299)
                 .err()
                 .ok_or(SdkError::CustodySetupInvalid)?;
-            assert_eq!(error.capacity_hint().is_some(), reset == 999);
+            assert_eq!(error.capacity_hint(), None);
             state.check("bounded", now + COOLDOWN, 1300)?;
         }
         Ok(())
