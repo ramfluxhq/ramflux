@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accept hyphen-leading CLI identifiers and free-text bodies/names, and normalize
   native group selectors to their signed thread. Repair saved group links before
   networking at account unlock while preserving metadata and older history.
+- Replicate sent plain-text DMs and group messages to active sibling devices as
+  outgoing rows. Copies are best effort, released after confirmed submission and
+  deduplicated against original delivery and explicit history import. Native
+  copies retain custody scope and freshness checks; deletion erases attribution
+  while preserving private replay claims.
 
 - Upgrade SHA-2, HMAC, HKDF, and X25519 dependencies without changing stored or wire formats.
 - Prepare task courier routes outside the account synchronization loop, isolate

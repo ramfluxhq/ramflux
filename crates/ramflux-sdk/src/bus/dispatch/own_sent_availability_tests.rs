@@ -322,6 +322,62 @@ async fn a_rejected_primary_dm_discards_its_staged_copy() -> TestResult {
     f.cleanup()
 }
 #[tokio::test]
+async fn a_rejected_primary_group_discards_its_staged_copy() -> TestResult {
+    let mut f = Fixture::new("own-copy-group-reject").await?;
+    f.source.client.create_group("group-reject", "device-sender")?;
+    let peer = f.source.client.account_db()?.client_record("identity", "peer")?.ok_or("peer")?;
+    f.source
+        .client
+        .cache_verified_device_manifest(
+            &f.config,
+            peer["contact_identity_commitment"].as_str().ok_or("peer root")?,
+            "rejected_group_fixture",
+        )
+        .await?;
+    f.source.client.add_group_member_with_root(
+        "group-reject",
+        "device-peer-one",
+        "member",
+        peer["contact_identity_commitment"].as_str().ok_or("peer root")?,
+    )?;
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    gateway.fail_after = Some(0);
+    let own = Arc::clone(&gateway.own);
+    f.source
+        .put_engine(GatewaySessionEngine::with_test_transport(f.config.clone(), Box::new(gateway)));
+    let request = LocalBusFrame::request(
+        "reject-group",
+        Some("sender".into()),
+        "group",
+        "group.send",
+        json!({"group_id":"group-reject","conversation_id":"rejected-group-thread",
+            "message_id":"rejected-group","sender_id":"device-sender",
+            "encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"not accepted")}),
+    );
+    let result = super::super::group::dispatch_group_send_request(&request, &mut f.source).await;
+    let error = result.err().ok_or("group send unexpectedly succeeded")?;
+    assert!(error.to_string().contains("injected submit failure"), "{error}");
+    let local = f.source.client.owned_device_identity()?;
+    let id = ramflux_protocol::group_message_id(
+        "group-reject",
+        local.root_commitment(),
+        local.device_id(),
+        "rejected-group",
+    )?;
+    assert_eq!(
+        f.source.client.account_db()?.client_record("message", &id)?.ok_or("status")?["own_device_copy_state"],
+        "failed"
+    );
+    assert_eq!(
+        f.source.client.account_db()?.load_actor_state::<u64>("own-device/sent-failures")?,
+        None
+    );
+    assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
+    assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
+    assert!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
+    f.cleanup()
+}
+#[tokio::test]
 async fn offline_authored_dates_do_not_expire_freshly_staged_live_copies() -> TestResult {
     let mut f = Fixture::new("own-copy-offline-date").await?;
     let mut message = f.message("offline")?;
@@ -342,7 +398,12 @@ async fn offline_authored_dates_do_not_expire_freshly_staged_live_copies() -> Te
         .client
         .receive_own_device_message(
             &f.receiver,
-            &GatewayInboxEntry { inbox_seq: 1, target_delivery_id: "sibling".into(), envelope },
+            &GatewayInboxEntry {
+                forwarded: false,
+                inbox_seq: 1,
+                target_delivery_id: "sibling".into(),
+                envelope,
+            },
         )
         .await?;
     let rows = f.sibling.client.direct_messages("thread")?;
@@ -546,4 +607,73 @@ async fn legacy_plain_copy_intents_without_submission_confirmation_are_not_assum
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
     assert!(f.source.client.direct_message_by_id("legacy")?.is_some());
     f.cleanup()
+}
+
+#[tokio::test]
+async fn deleting_a_sent_message_erases_held_and_prepared_copy_work() -> TestResult {
+    for prepared in [false, true] {
+        let mut f = Fixture::new("own-copy-delete-work").await?;
+        let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+        gateway.fail_own_ack = true;
+        f.source.put_engine(GatewaySessionEngine::with_test_transport(
+            f.config.clone(),
+            Box::new(gateway),
+        ));
+        f.source.client.send_direct_message(
+            "thread",
+            "delete-copy-message",
+            "device-sender",
+            b"cipher",
+        )?;
+        f.source.client.stage_own_sent_message(crate::client::own_sent_message::OwnSentInput {
+            envelope: "distinct-copy-envelope",
+            conversation: "thread",
+            message: "delete-copy-message",
+            sender: "device-sender",
+            original_recipients: &[],
+            group: None,
+            peer: Some("peer"),
+            body: b"private queued sent text",
+            ciphertext: b"cipher",
+            at: now_unix_timestamp(),
+        })?;
+        if prepared {
+            f.source.client.finish_own_sent_copy(
+                "delete-copy-message",
+                Some("distinct-copy-envelope"),
+                true,
+            );
+            assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
+            let work =
+                f.source.client.account_db()?.list_actor_states::<Value>("own-device/send/")?;
+            assert_eq!(work.len(), 1);
+            assert!(!work[0]["packet"].is_null());
+        }
+        assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
+        f.source.client.account_db()?.delete_direct_message(
+            "thread",
+            "delete-copy-message",
+            "self",
+            "delete",
+        )?;
+        assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
+        assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/status/")?.0, 0);
+        let deleted = f
+            .source
+            .client
+            .direct_message_by_id("delete-copy-message")?
+            .ok_or("deleted message")?;
+        assert_eq!(
+            f.source
+                .client
+                .account_db()?
+                .client_record("message", "delete-copy-message")?
+                .ok_or("deleted status")?,
+            json!({"message_id":"delete-copy-message","deleted":true,"created_at":deleted.created_at,
+                "conversation_id":"thread","is_own":true}),
+        );
+        assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
+        f.cleanup()?;
+    }
+    Ok(())
 }

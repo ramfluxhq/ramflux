@@ -920,6 +920,7 @@ pub(crate) mod tests {
             encrypted_body: vec![1, 2, 3],
             metadata: MessageMetadata::default(),
             deleted: false,
+            is_own: true,
             created_at: 1,
             receipts: Vec::new(),
         };
@@ -950,6 +951,7 @@ pub(crate) mod tests {
             encrypted_body: vec![1, 2, 3],
             metadata: MessageMetadata::default(),
             deleted: false,
+            is_own: true,
             created_at: 1,
             receipts: Vec::new(),
         };
@@ -1147,6 +1149,7 @@ pub(crate) mod tests {
             encrypted_body: Vec::new(),
             metadata: MessageMetadata::default(),
             deleted: false,
+            is_own: true,
             created_at: 1,
             receipts: Vec::new(),
         };

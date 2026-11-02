@@ -111,20 +111,35 @@ impl Drop for PrivateContext {
 #[derive(Serialize, Deserialize)]
 struct Receipt {
     fingerprint: String,
-    source: String,
-    target: String,
+    #[serde(flatten)]
+    scope: ReceiptScope,
     valid_until: i64,
     expires_at: i64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ReceiptScope {
+    Names { source: String, target: String },
+    Private { private_scope: String },
 }
 impl Receipt {
     fn validate(
         &self,
+        db: &ramflux_storage::AccountDb,
         source: &str,
         target: &str,
         fingerprint: &str,
         now: i64,
     ) -> Result<(), SdkError> {
-        if self.valid_until < now || self.source != source || self.target != target {
+        let matches = match &self.scope {
+            ReceiptScope::Names { source: old_source, target: old_target } => {
+                old_source == source && old_target == target
+            }
+            ReceiptScope::Private { private_scope } => {
+                *private_scope == db.own_sent_receipt_scope(source, target)?
+            }
+        };
+        if self.valid_until < now || !matches {
             return Err(invalid("own-device replay scope or lifetime mismatch"));
         }
         if self.fingerprint != fingerprint {
@@ -296,9 +311,11 @@ impl RamfluxClient {
         source_identity: &ramflux_crypto::RootQualifiedDeviceRef,
         context: &PrivateContext,
         body: &[u8],
-    ) -> Result<(), SdkError> {
-        if !self.receive_own_group_consent(source_identity, body)?
-            && !self.receive_own_sent_message(
+        target: &str,
+    ) -> Result<ReceiptScope, SdkError> {
+        let consent = self.receive_own_group_consent(source_identity, body)?;
+        let sent = !consent
+            && self.receive_own_sent_message(
                 source_identity,
                 OwnMessageInput {
                     id: &context.message,
@@ -307,7 +324,9 @@ impl RamfluxClient {
                     created_at: context.created_at,
                     body,
                 },
-            )?
+            )?;
+        if !consent
+            && !sent
             && !self.receive_own_contact(body)?
             && !self.receive_surface_control_from(
                 entry,
@@ -319,6 +338,33 @@ impl RamfluxClient {
         {
             return Err(invalid("unsupported own-device control"));
         }
+        Ok(if sent {
+            ReceiptScope::Private {
+                private_scope: self
+                    .account_db()?
+                    .own_sent_receipt_scope(&context.source, target)?,
+            }
+        } else {
+            ReceiptScope::Names { source: context.source.clone(), target: target.into() }
+        })
+    }
+    fn persist_own_device_receipt(
+        &self,
+        key: &str,
+        context: &PrivateContext,
+        fingerprint: String,
+        scope: ReceiptScope,
+    ) -> Result<(), SdkError> {
+        self.account_db()?.persist_message_actor_state(
+            &context.message,
+            key,
+            &Receipt {
+                fingerprint,
+                scope,
+                valid_until: context.expires_at,
+                expires_at: context.expires_at.saturating_add(300),
+            },
+        )?;
         Ok(())
     }
     pub(crate) async fn receive_own_device_message(
@@ -348,7 +394,13 @@ impl RamfluxClient {
         let receipt_key = format!("{RECEIPTS}{}", packet.id);
         let fingerprint = ramflux_protocol::hash_base64url(DOMAIN, &bytes);
         if let Some(old) = db.load_actor_state::<Receipt>(&receipt_key)? {
-            old.validate(&entry.envelope.source_device_id, &local.device_id, &fingerprint, now)?;
+            old.validate(
+                db,
+                &entry.envelope.source_device_id,
+                &local.device_id,
+                &fingerprint,
+                now,
+            )?;
             return Ok(true);
         }
         let manifest = self
@@ -406,19 +458,15 @@ impl RamfluxClient {
             // generic envelope signatures are not the own-device packet's signature scheme.
             let source_identity =
                 self.device_identity_for_root(&root, &entry.envelope.source_device_id)?;
-            self.apply_own_device_control(entry, &source_identity, &context, &body)?;
-            self.commit_inline_pair_key_slot(&slot, &key)?;
-            db.persist_message_actor_state(
-                &context.message,
-                &receipt_key,
-                &Receipt {
-                    fingerprint,
-                    source: context.source.clone(),
-                    target: local.device_id.clone(),
-                    valid_until: context.expires_at,
-                    expires_at: context.expires_at.saturating_add(300),
-                },
+            let scope = self.apply_own_device_control(
+                entry,
+                &source_identity,
+                &context,
+                &body,
+                &local.device_id,
             )?;
+            self.commit_inline_pair_key_slot(&slot, &key)?;
+            self.persist_own_device_receipt(&receipt_key, &context, fingerprint, scope)?;
             db.retain_expiring_actor_states(RECEIPTS, now, 4096)?;
             Ok::<_, SdkError>(())
         })?;

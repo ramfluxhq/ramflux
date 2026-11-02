@@ -117,8 +117,12 @@ fn enrich_message_origin(
     }
     let origin = client.message_origin(conversation, message)?.unwrap_or(Value::Null);
     for field in [
-        "sender_device_id", "sender_root_commitment", "sender_device_display",
-        "direction", "original_message_id", "envelope_id",
+        "sender_device_id",
+        "sender_root_commitment",
+        "sender_device_display",
+        "direction",
+        "original_message_id",
+        "envelope_id",
     ] {
         row[field] = origin[field].clone();
     }

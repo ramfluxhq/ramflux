@@ -167,7 +167,7 @@ impl RamfluxClient {
             return Ok(id);
         }
         let id = crate::new_surface_message_id()?;
-        db.persist_actor_state(&key, &id)?;
+        db.persist_message_actor_state(message, &key, &id)?;
         Ok(id)
     }
     fn record_own_sent_projection(
@@ -179,7 +179,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         self.index_own_sent_projection(source, input.envelope, id, ciphertext_hash)?;
-        db.persist_actor_state(&super::delivery_receipts::origin_key(input.conversation, id)?,
+        db.persist_message_actor_state(id, &super::delivery_receipts::origin_key(input.conversation, id)?,
             &json!({"sender_device_id":source.device_id(),"sender_root_commitment":source.root_commitment(),
                 "sender_device_display":source.storage_key(),"direction":"outgoing",
                 "original_message_id":input.message,"envelope_id":input.envelope}))?;
@@ -196,18 +196,16 @@ impl RamfluxClient {
         db.persist_actor_state(&alias_key(&own_row_id(source, envelope)?), &id)?;
         if let Some(hash) = ciphertext_hash {
             let key = ciphertext_index_key(hash);
+            let claim = db.own_sent_replay_claim(source, envelope)?;
             let existing = db.load_actor_state::<serde_json::Value>(&key)?;
-            let value = if existing.as_ref().is_some_and(|old| {
-                old["id"] != id
-                    || old["source"] != source.storage_key()
-                    || old["envelope_id"] != envelope
-            }) {
-                // History without an authenticated per-row source must never select one of
-                // several claimants to the same ciphertext. Exact source/envelope aliases remain.
-                json!({"ambiguous":true})
-            } else {
-                json!({"id":id,"source":source.storage_key(),"envelope_id":envelope})
-            };
+            let value =
+                if existing.as_ref().is_some_and(|old| old["id"] != id || old["claim"] != claim) {
+                    // History without an authenticated per-row source must never select one of
+                    // several claimants to the same ciphertext. Exact source/envelope aliases remain.
+                    json!({"ambiguous":true})
+                } else {
+                    json!({"id":id,"claim":claim})
+                };
             db.persist_actor_state(&key, &value)?;
         }
         Ok(())
@@ -390,14 +388,14 @@ impl RamfluxClient {
                 .map(|hash| db.load_actor_state::<serde_json::Value>(&ciphertext_index_key(hash)))
                 .transpose()?
                 .flatten();
+            let expected = db.own_sent_replay_claim(source, envelope)?;
             // An imported digest must not override an authenticated source or an ambiguity fence.
-            claim.as_ref().is_none_or(|claim| {
-                claim["id"] == row.message_id
-                    && claim["source"] == source.storage_key()
-                    && claim["envelope_id"] == envelope
-            }) && (imported_id == Some(row.message_id.as_str())
-                || (!row.encrypted_body.is_empty()
-                    && hash == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str())))
+            claim
+                .as_ref()
+                .is_none_or(|claim| claim["id"] == row.message_id && claim["claim"] == expected)
+                && (imported_id == Some(row.message_id.as_str())
+                    || (!row.encrypted_body.is_empty()
+                        && hash == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str())))
         };
         if source_matches
             && (row.deleted || db.message_content(&row.message_id)?.as_deref() == Some(body))

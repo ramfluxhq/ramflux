@@ -19,6 +19,36 @@ fn canonical_envelope(entry: &[u8]) -> Result<Option<(String, Vec<u8>)>, Storage
 }
 
 impl AccountDb {
+    /// Binds a sent-copy replay claim without retaining its source identity or envelope id.
+    ///
+    /// # Errors
+    /// Returns canonical encoding or account-key derivation errors.
+    pub fn own_sent_replay_claim(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: &str,
+    ) -> Result<String, StorageError> {
+        self.account_mac(
+            b"ramflux/own-sent-replay/v1",
+            &ramflux_protocol::canonical_json_bytes(&(source.storage_key(), envelope))?,
+        )
+    }
+
+    /// Binds a consumed sent-copy packet to its source and recipient without storing names.
+    ///
+    /// # Errors
+    /// Returns canonical encoding or account-key derivation errors.
+    pub fn own_sent_receipt_scope(
+        &self,
+        source: &str,
+        target: &str,
+    ) -> Result<String, StorageError> {
+        self.account_mac(
+            b"ramflux/own-sent-receipt/v1",
+            &ramflux_protocol::canonical_json_bytes(&(source, target))?,
+        )
+    }
+
     /// Derives a private marker from the SHA-256 digest of canonical envelope bytes.
     ///
     /// # Errors

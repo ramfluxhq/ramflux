@@ -68,7 +68,8 @@ impl RamfluxClient {
         message: &str,
         entry: &GatewayInboxEntry,
         ciphertext: &[u8],
-    ) -> Result<(), SdkError> {        if self.account_db()?.message_is_deleted(message)? {
+    ) -> Result<(), SdkError> {
+        if self.account_db()?.message_is_deleted(message)? {
             return Ok(());
         }
         let Some(local_branch) = self.device_branch.as_ref() else {
@@ -86,7 +87,7 @@ impl RamfluxClient {
         let device = self.trusted_device(&source)?;
         let root = Some(source.root_commitment().to_owned());
         if source.root_commitment() == local.root_commitment() {
-            db.persist_actor_state(&origin_key(conversation, message)?, &json!({
+            db.persist_message_actor_state(message, &origin_key(conversation, message)?, &json!({
                 "sender_device_id":source.device_id(),"sender_root_commitment":source.root_commitment(),
                 "sender_device_display":source.storage_key(),"direction":"outgoing",
                 "envelope_id":entry.envelope.envelope_id

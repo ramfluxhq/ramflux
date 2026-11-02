@@ -111,7 +111,11 @@ fn stage_inner(
             .ok_or_else(|| SdkError::LocalBus("own-device queue sequence exhausted".into()))?;
         work.intent.sequence = sequence;
         db.persist_actor_state("own-device/sequence", &sequence)?;
-        db.persist_actor_state(&key, &work)?;
+        if let Some(message) = message_owner(&work) {
+            db.persist_message_actor_state(message, &key, &work)?;
+        } else {
+            db.persist_actor_state(&key, &work)?;
+        }
         state(client, &work, "pending", true)
     })
 }
@@ -314,11 +318,20 @@ async fn send(
 fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Result<(), SdkError> {
     let id = &work.intent.copy_id;
     let db = client.account_db()?;
-    db.persist_actor_state(&format!("own-device/status/{id}"),&json!({"state":value,"conversation_id":work.intent.conversation,"message_id":work.intent.id,"expires_at":work.intent.created_at.saturating_add(900)}))?;
+    let key = format!("own-device/status/{id}");
+    let status = json!({"state":value,"conversation_id":work.intent.conversation,"message_id":work.intent.id,"expires_at":work.intent.created_at.saturating_add(900)});
+    if let Some(message) = message_owner(work) {
+        db.persist_message_actor_state(message, &key, &status)?;
+    } else {
+        db.persist_actor_state(&key, &status)?;
+    }
     db.retain_expiring_actor_states("own-device/status/", now_unix_timestamp(), 2048)?;
     if let Some((directory, record)) = &work.intent.owner_record
         && matches!(directory.as_str(), "surface" | "message")
-        && let Some(mut row) = db.client_record(directory, record)?
+        && let Some(mut row) = db.client_record(directory, record)?.or_else(|| {
+            (directory == "message")
+                .then(|| json!({"id":record,"conversation_id":work.intent.conversation}))
+        })
         && (latest || row["own_copy_message_id"].as_str() == Some(id.as_str()))
     {
         row["own_copy_message_id"] = json!(id);
@@ -326,6 +339,13 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
         db.persist_client_record(directory, record, &row)?;
     }
     Ok(())
+}
+
+fn message_owner(work: &Work) -> Option<&str> {
+    work.intent
+        .owner_record
+        .as_ref()
+        .and_then(|(directory, message)| (directory == "message").then_some(message.as_str()))
 }
 
 fn work_bytes(work: &Work) -> Result<u64, SdkError> {

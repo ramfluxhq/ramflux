@@ -52,7 +52,12 @@ async fn sent_dm_arrives_on_an_active_sibling_as_one_outgoing_row_despite_retrie
     crate::bus::own_device_copy::flush(&mut source).await?;
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     assert!(!envelope.encrypted_payload.contains("sent to peer"));
-    let entry = GatewayInboxEntry { inbox_seq: 1, target_delivery_id: "sibling".into(), envelope };
+    let entry = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: "sibling".into(),
+        envelope,
+    };
     assert!(sibling.client.receive_own_device_message(&receiver, &entry).await?);
     assert!(sibling.client.receive_own_device_message(&receiver, &entry).await?);
     let rows = sibling.client.direct_messages("thread")?;
@@ -71,6 +76,14 @@ async fn sent_dm_arrives_on_an_active_sibling_as_one_outgoing_row_despite_retrie
         sibling.client.account_db()?.actor_state_usage(crate::client::delivery_receipts::PREFIX)?.0,
         0
     );
+    assert_private_replay_after_delete(
+        &sibling,
+        &receiver,
+        &entry,
+        &source.client.owned_device_identity()?,
+        &rows[0].message_id,
+    )
+    .await?;
     directory.abort();
     drop((source, sibling));
     std::fs::remove_dir_all(root)?;
@@ -112,7 +125,12 @@ async fn sent_group_message_creates_an_outgoing_sibling_row_without_history_impo
     assert_eq!(result.response_body["client_message_id"], "group-message");
     crate::bus::own_device_copy::flush(&mut source).await?;
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    let entry = GatewayInboxEntry { inbox_seq: 1, target_delivery_id: "sibling".into(), envelope };
+    let entry = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: "sibling".into(),
+        envelope,
+    };
     assert!(sibling.client.receive_own_device_message(&receiver, &entry).await?);
     assert!(sibling.client.receive_own_device_message(&receiver, &entry).await?);
     let snapshot = crate::bus::readers::read(
@@ -182,12 +200,17 @@ async fn an_original_self_dm_and_its_pair_encrypted_copy_produce_one_outgoing_ro
     source.put_engine(engine);
     crate::bus::own_device_copy::flush(&mut source).await?;
     let copy = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    let copy =
-        GatewayInboxEntry { inbox_seq: 2, target_delivery_id: "sibling".into(), envelope: copy };
+    let copy = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 2,
+        target_delivery_id: "sibling".into(),
+        envelope: copy,
+    };
     assert!(sibling.client.receive_own_device_message(&receiver, &copy).await?);
     assert_eq!(sibling.client.direct_messages("self-thread")?.len(), 0);
     let original = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     let original = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "sibling".into(),
         envelope: original,
@@ -218,5 +241,39 @@ async fn an_original_self_dm_and_its_pair_encrypted_copy_produce_one_outgoing_ro
     directory.abort();
     drop((source, sibling));
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+async fn assert_private_replay_after_delete(
+    sibling: &LocalBusAccountState,
+    receiver: &GatewaySessionConfig,
+    entry: &GatewayInboxEntry,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    id: &str,
+) -> TestResult {
+    let db = sibling.client.account_db()?;
+    assert_eq!(db.actor_state_usage("own-device/message-receipt/")?.0, 1);
+    db.delete_direct_message("thread", id, "self", "delete")?;
+    assert!(sibling.client.receive_own_device_message(receiver, entry).await?);
+    let mut forged = entry.clone();
+    forged.envelope.source_device_id = "forged-copy-source".into();
+    assert!(sibling.client.receive_own_device_message(receiver, &forged).await.is_err());
+    let rows = sibling.client.direct_messages("thread")?;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].deleted);
+    assert!(rows[0].is_own);
+    assert!(sibling.client.message_origin("thread", id)?.is_none());
+    assert!(db.message_content(id)?.is_none());
+    let retained =
+        serde_json::to_string(&db.list_actor_states::<serde_json::Value>("own-device/")?)?;
+    for forbidden in [
+        source.device_id(),
+        source.storage_key(),
+        source.root_commitment(),
+        "sent-envelope",
+        "sent to peer",
+    ] {
+        assert!(!retained.contains(forbidden), "deleted copy retained {forbidden}");
+    }
     Ok(())
 }

@@ -19,7 +19,17 @@ impl RamfluxClient {
                 SdkError::InboundPending("own-device local manifest unavailable".into())
             })?;
         super::identity_authority::verify_manifest(&manifest, local.root_commitment())?;
-        if manifest.signed_device_set != self.observed_device_set(local.root_commitment())? {
+        if let Some(native) = &manifest.custody {
+            let current = self
+                .current_custody_authority(local.root_commitment(), crate::custody::network_now()?)?
+                .ok_or(SdkError::NetworkingPending)?;
+            if current.envelope() != &native.publication.record {
+                return Err(SdkError::InboundPending(
+                    "own-device local manifest needs refresh".into(),
+                ));
+            }
+            self.require_cached_root_authority(&local)?;
+        } else if manifest.signed_device_set != self.observed_device_set(local.root_commitment())? {
             return Err(SdkError::InboundPending("own-device local manifest needs refresh".into()));
         }
         Ok(manifest)
@@ -32,8 +42,15 @@ impl RamfluxClient {
             return Ok(manifest);
         }
         let local = self.owned_device_identity()?;
-        let epoch =
-            self.observed_device_set(local.root_commitment())?.map(|set| set.device_set_epoch);
+        let epoch = if let Some(current) =
+            self.current_custody_authority(local.root_commitment(), crate::custody::network_now()?)?
+        {
+            json!(ramflux_protocol::custody::object_hash(current.envelope())?)
+        } else {
+            json!(
+                self.observed_device_set(local.root_commitment())?.map(|set| set.device_set_epoch)
+            )
+        };
         let db = self.account_db()?;
         let now = now_unix_timestamp();
         let old = db.load_actor_state::<serde_json::Value>("own-device/manifest-refresh")?;
@@ -56,6 +73,30 @@ impl RamfluxClient {
     }
     pub(super) fn own_sent_has_siblings(&self) -> Result<bool, SdkError> {
         let local = self.owned_device_identity()?;
+        let now = crate::custody::network_now()?;
+        if let Some(current) = self.current_custody_authority(local.root_commitment(), now)? {
+            return Ok(current.envelope().body.devices.iter().any(|device| {
+                device.device_id != local.device_id()
+                    && current
+                        .authorize(
+                            &ramflux_protocol::custody::DeviceRef {
+                                account_anchor: local.root_commitment().into(),
+                                device_id: device.device_id.clone(),
+                                device_epoch: device.device_epoch,
+                            },
+                            "sync",
+                            now,
+                        )
+                        .is_ok()
+            }));
+        }
+        if self.born_v3_account.is_some()
+            || self.custody_epoch_floor(local.root_commitment())?.is_some()
+        {
+            return Err(SdkError::InboundPending(
+                "own-device custody authority unavailable".into(),
+            ));
+        }
         let set = self
             .observed_device_set(local.root_commitment())?
             .ok_or_else(|| SdkError::InboundPending("own-device signed set unavailable".into()))?;
@@ -141,3 +182,7 @@ impl RamfluxClient {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "own_sent_native_tests.rs"]
+mod native_tests;

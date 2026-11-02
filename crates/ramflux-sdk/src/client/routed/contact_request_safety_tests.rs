@@ -12,6 +12,8 @@ fn signed_profiles(directory: &Directory, alice: &Fixture, bob: &Fixture) -> Res
         for device in &mut manifest.devices {
             device
                 .branch_proof
+                .as_mut()
+                .ok_or_else(|| invalid("proof"))?
                 .key_binding
                 .as_mut()
                 .ok_or_else(|| invalid("binding"))?
@@ -56,6 +58,7 @@ async fn inbound_acceptance_exposes_verified_kind_routes_and_symmetric_safety_di
         }
         pending(&mut state, &directory).await?;
         contact(&mut state, "bob", "contact.accept", json!({"principal_id":"alice"})).await?;
+        contact(&mut state, "alice", "contact.accept", json!({"principal_id":"bob"})).await?;
         for refresh in [false, true] {
             if refresh {
                 let bob = state.accounts.get("bob").ok_or_else(|| invalid("bob"))?;
@@ -89,7 +92,7 @@ async fn inbound_acceptance_exposes_verified_kind_routes_and_symmetric_safety_di
 }
 
 #[tokio::test]
-async fn missing_forged_or_stale_cached_authority_cannot_supply_contact_safety_digits()
+async fn missing_forged_or_stale_cached_authority_cannot_synthesize_uncached_safety_digits()
 -> Result<(), SdkError> {
     let mut alice = Fixture::new("alice", 111)?;
     let mut bob = Fixture::new("bob", 121)?;
@@ -123,6 +126,16 @@ async fn missing_forged_or_stale_cached_authority_cannot_supply_contact_safety_d
             // The old signed cache remains valid cryptographically, but is no longer current.
             db.persist_actor_state(&key, &original)?;
         }
+        // Explicit acceptance caches digits on current accounts. Directory polling must not
+        // synthesize an absent cache from any of these incomplete authority snapshots.
+        let mut identity =
+            db.client_record("identity", "alice")?.ok_or_else(|| invalid("identity"))?;
+        identity.as_object_mut().ok_or_else(|| invalid("identity object"))?.remove("safety_number");
+        identity
+            .as_object_mut()
+            .ok_or_else(|| invalid("identity object"))?
+            .remove("safety_number_algorithm_version");
+        db.persist_client_record("identity", "alice", &identity)?;
         let row = peer_row(receiver, "alice")?;
         assert_eq!(
             row["kind_verified"],
