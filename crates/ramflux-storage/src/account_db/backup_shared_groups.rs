@@ -38,10 +38,19 @@ impl BackupDatabase {
     fn backup_shared_states(
         &self,
         incoming: bool,
+        mode: BackupMergeMode<'_>,
     ) -> Result<BTreeMap<String, VerifiedGroupState>, StorageError> {
         let table =
             if incoming { "incoming.runtime_actor_state" } else { "main.runtime_actor_state" };
-        let mut query=self.db.prepare(&format!("SELECT state_kind,state_json FROM {table} WHERE state_kind LIKE 'group-state/%' AND substr(state_kind,13) NOT LIKE '%/%'"))?;
+        // Native daemons persist these two operational cursors alongside the signed states.
+        // Exclude only those reserved records; every selected snapshot remains strictly decoded.
+        let cursor_filter = match mode {
+            BackupMergeMode::NativeDataOnly => {
+                " AND state_kind NOT IN ('group-state/driver-progress','group-state/recovery-progress')"
+            }
+            BackupMergeMode::FullAccount(_) => "",
+        };
+        let mut query=self.db.prepare(&format!("SELECT state_kind,state_json FROM {table} WHERE state_kind LIKE 'group-state/%' AND substr(state_kind,13) NOT LIKE '%/%'{cursor_filter}"))?;
         let mut states = BTreeMap::new();
         for row in query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))? {
             let (key, bytes) = row?;
@@ -98,8 +107,8 @@ impl BackupDatabase {
         &self,
         mode: BackupMergeMode<'_>,
     ) -> Result<Vec<GroupMerge>, StorageError> {
-        let live = self.backup_shared_states(false)?;
-        let incoming = self.backup_shared_states(true)?;
+        let live = self.backup_shared_states(false, mode)?;
+        let incoming = self.backup_shared_states(true, mode)?;
         if live.is_empty() && incoming.is_empty() {
             return Ok(Vec::new());
         }

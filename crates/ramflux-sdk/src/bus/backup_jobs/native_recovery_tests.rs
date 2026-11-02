@@ -215,6 +215,19 @@ async fn native_fresh_restore_requires_phrase_recovery_and_exact_ack_before_live
         .await
 }
 
+fn persist_group_driver_progress(data: &RamfluxClient) -> TestResult {
+    // A drained native daemon retains operational cursors beside signed group snapshots.
+    let db = data.account_db()?;
+    db.persist_actor_state("group-state/driver-progress", &"group-state/send/cmVzdG9yZS1ncm91cA")?;
+    db.persist_actor_state(
+        "group-state/recovery-progress",
+        &json!({
+            "device_set_epoch": 1, "after": "restore-group", "complete": true,
+        }),
+    )?;
+    Ok(())
+}
+
 fn history_manifest(
     data: &RamfluxClient,
     account: &crate::custody::BornAccount,
@@ -305,6 +318,7 @@ async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account
                 "group-history",
                 b"restored group history",
             )?;
+            persist_group_driver_progress(&data)?;
             let expected_group = group.snapshot().clone();
             drop(data);
             // A distinct empty vault has no source signing credential and no configured node.

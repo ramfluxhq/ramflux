@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep native group delivery and recovery cursors out of signed-snapshot selection
+  during offline backup restore. Strict snapshot validation and full-account merge
+  behavior remain unchanged.
+
 - Restore signed native group data offline without requiring a local actor before
   attended recovery. Preserve signed state selection, member data and removal
   floors; report rejected archive authorization as `authorization_rejected`.

@@ -48,6 +48,15 @@ fn native_backup_fresh_group_restores_state_members_and_removal_floors() -> Test
     for state in [&initial, &joined, &removed] {
         source.commit_shared_group_state(state, &actor)?;
     }
+    for db in [&source, &target] {
+        db.persist_actor_state("group-state/driver-progress", &"group-state/send/Z3JvdXA")?;
+        db.persist_actor_state(
+            "group-state/recovery-progress",
+            &serde_json::json!({
+                "device_set_epoch": 1, "after": "group", "complete": true,
+            }),
+        )?;
+    }
     let (mut merged, archive, incoming) = copies(&source, &target, &root)?;
     merged.merge_native_backup(&incoming, &archive.key, || Ok(()))?;
     let bytes: Vec<u8> = merged.db.query_row(
@@ -117,6 +126,50 @@ fn non_native_backup_with_a_group_still_requires_a_local_actor() -> TestResult {
     let groups: u64 =
         merged.db.query_row("SELECT count(*) FROM group_projection", [], |r| r.get(0))?;
     assert_eq!(groups, 0);
+    drop((merged, source, target));
+    std::fs::remove_dir_all(root)?;
+    std::fs::remove_dir_all(target_root)?;
+    Ok(())
+}
+
+#[test]
+fn native_backup_cursor_exclusion_still_rejects_invalid_signed_group_state() -> TestResult {
+    let (root, source) = test_db("native-backup-invalid-source")?;
+    let (target_root, target) = test_db("native-backup-invalid-target")?;
+    let (identity, branch, actor) = person("owner", "phone", 10)?;
+    let state = create(&identity, &branch, &actor)?;
+    source.commit_shared_group_state(&state, &actor)?;
+    let mut snapshot = state.snapshot().clone();
+    snapshot.signature = ramflux_protocol::encode_base64url([0; 64]);
+    source.persist_actor_state(
+        &format!("group-state/{}", ramflux_protocol::encode_base64url("group")),
+        &snapshot,
+    )?;
+    source.persist_actor_state("group-state/driver-progress", &"cursor")?;
+    let (mut merged, archive, incoming) = copies(&source, &target, &root)?;
+    assert!(matches!(
+        merged.merge_native_backup(&incoming, &archive.key, || Ok(())),
+        Err(StorageError::Crypto(_))
+    ));
+    let groups: u64 =
+        merged.db.query_row("SELECT count(*) FROM group_projection", [], |r| r.get(0))?;
+    assert_eq!(groups, 0);
+    drop((merged, source, target));
+    std::fs::remove_dir_all(root)?;
+    std::fs::remove_dir_all(target_root)?;
+    Ok(())
+}
+
+#[test]
+fn native_backup_cursor_exclusion_does_not_ignore_unknown_invalid_records() -> TestResult {
+    let (root, source) = test_db("native-backup-unknown-source")?;
+    let (target_root, target) = test_db("native-backup-unknown-target")?;
+    source.persist_actor_state("group-state/unknown", &"not a signed snapshot")?;
+    let (mut merged, archive, incoming) = copies(&source, &target, &root)?;
+    assert!(matches!(
+        merged.merge_native_backup(&incoming, &archive.key, || Ok(())),
+        Err(StorageError::Protocol(_))
+    ));
     drop((merged, source, target));
     std::fs::remove_dir_all(root)?;
     std::fs::remove_dir_all(target_root)?;
