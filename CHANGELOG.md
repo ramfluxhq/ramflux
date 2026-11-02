@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoint regressions.
 - Cap queued DNS resolver work after timeouts and test sender-field binding by
   recomputing canonical bytes from altered envelopes.
+- Skip malformed individual contact records during legacy verification migration
+  without blocking account unlock. Markerless legacy archive merges baseline only
+  imported verifications that still match their observed signed authority; sealed
+  local verifications and existing authority stamps remain unchanged.
 
 - Bound custody capacity reset hints to two days, keep node-bound retry deadlines
   without repeated status writes, and expose router budget inspection through
@@ -211,9 +215,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intents with confirmation saved locally do not overwrite later sibling renames.
 - Legacy v0.1.0 manual contact verifications acquire a signed-authority stamp on
   the first writer unlock after upgrade when the active-device hash is unchanged;
-  contacts without signed
-  authority can still verify synthetic safety material without authenticating a
-  kind. Hash or later stamped-authority changes require explicit re-verification.
+  contacts without signed authority can still verify synthetic safety material
+  without authenticating a kind. Hash or later stamped-authority changes require explicit re-verification.
 - Refine the proposed root-custody design with proxy exporter receipts, bounded
   revocation deltas, pre-recovery time pins and inherited private group restrictions.
   These specifications do not enable custody support.

@@ -243,48 +243,225 @@ async fn sealed_migration_never_absorbs_new_unstamped_records_or_rescans_on_read
     Ok(())
 }
 
+#[derive(Clone, Default)]
+struct MigrationLogs(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+impl tracing::Subscriber for MigrationLogs {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                let _ = write!(self.0, "{field}={value:?} ");
+            }
+        }
+        if *event.metadata().level() != tracing::Level::WARN {
+            return;
+        }
+        let mut fields = Fields(String::new());
+        event.record(&mut fields);
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(fields.0);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 #[test]
-fn migration_failure_rolls_back_prior_stamps_and_completion_marker() -> TestResult {
+fn legacy_unlock_skips_corrupt_contact_warns_once_and_migrates_healthy_contact() -> TestResult {
     let alpha = Actor::new("alpha", "phone", 121, 122, 1)?;
     let beta = Actor::new("beta", "phone", 123, 124, 1)?;
-    let peer = Actor::new("peer", "peer", 125, 126, 1)?;
+    let mut peer = Actor::new("peer", "peer", 125, 126, 1)?;
     let a = with_profile(&alpha, alpha.manifest()?, "Alpha", 1, 1)?;
     let b = with_profile(&beta, beta.manifest()?, "Beta", 1, 1)?;
     for manifest in [&a, &b] {
         observe(&peer.client, manifest)?;
         legacy_record(&peer.client, manifest)?;
     }
+    peer.client.account_db()?.remove_actor_state(MIGRATION_MARKER)?;
+    peer.client.account_db()?.persist_actor_state(
+        &record_key(&b.principal_commitment),
+        &json!({"record-body-canary":"invalid"}),
+    )?;
+    let logs = MigrationLogs::default();
+    tracing::subscriber::with_default(logs.clone(), || peer.reopen())?;
     let db = peer.client.account_db()?;
-    db.remove_actor_state(MIGRATION_MARKER)?;
-    db.persist_actor_state(&record_key(&b.principal_commitment), &json!({"invalid":"authority"}))?;
-    assert!(
-        migrate_legacy_contact_verifications(db).is_err(),
-        "invalid legacy authority must leave migration incomplete"
+    assert_eq!(db.load_actor_state::<bool>(MIGRATION_MARKER)?, Some(true));
+    assert_eq!(
+        db.load_actor_state::<String>(&format!(
+            "identity/safety_verified_set/{}",
+            a.principal_commitment
+        ))?,
+        Some(set_fingerprint(a.signed_device_set.as_ref().ok_or("set")?)?)
     );
-    assert!(db.load_actor_state::<bool>(MIGRATION_MARKER)?.is_none());
-    for manifest in [&a, &b] {
+    assert!(
+        db.load_actor_state::<String>(&format!(
+            "identity/safety_verified_set/{}",
+            b.principal_commitment
+        ))?
+        .is_none()
+    );
+    let healthy = db.client_record("identity", "alpha")?.ok_or("alpha")?;
+    assert_eq!(
+        peer.client.contact_safety_verification_state(
+            &a.principal_commitment,
+            healthy["device_set_hash"].as_str()
+        )?,
+        "verified"
+    );
+    assert!(matches!(
+        peer.client.contact_safety_verification_state(&b.principal_commitment, Some("hash")),
+        Err(SdkError::Storage(ramflux_storage::StorageError::Serde(_)))
+    ));
+    assert!(matches!(
+        peer.client.verified_principal_kind("beta"),
+        Err(SdkError::Storage(ramflux_storage::StorageError::Serde(_)))
+    ));
+    tracing::subscriber::with_default(logs.clone(), || peer.reopen())?;
+    let entries = logs.0.lock().map_err(|_| "log lock")?;
+    let warnings = entries
+        .iter()
+        .filter(|e| e.contains("skipping legacy contact verification migration"))
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1, "{entries:?}");
+    assert!(warnings[0].contains("contact_id=\"beta\""));
+    assert!(warnings[0].contains("error_class=\"record_decode\""));
+    assert!(!warnings[0].contains("record-body-canary"));
+    Ok(())
+}
+
+fn merge_verification_reader(
+    source: &Actor,
+    target: &Actor,
+    native_data_only: bool,
+) -> Result<RamfluxClient, Box<dyn std::error::Error>> {
+    use ramflux_storage::{AccountDb, AccountIndex, BackupDatabase};
+    let archive = source.path.join("archive.db");
+    let saved = source.client.account_db()?.write_backup_snapshot(&archive)?;
+    let staging = target.path.join("merged.db");
+    let copied = target.client.account_db()?.write_backup_snapshot(&staging)?;
+    let mut merged = BackupDatabase::open(&staging, &copied.key)?;
+    if native_data_only {
+        merged.merge_native_backup(&archive, &saved.key, || Ok(()))?;
+    } else {
+        merged.merge_backup(&archive, &saved.key, || Ok(()))?;
+    }
+    drop(merged);
+    // Reopen the production merge's durable generation and use the SDK verification reader.
+    let installed = AccountIndex::open(target.path.join("installed"))?;
+    let row = installed.create_account("peer", "peer")?;
+    std::fs::copy(&staging, installed.root().join(row.db_relative_path))?;
+    let db = AccountDb::open(&installed, "peer", &copied.key)?;
+    let mut reader = RamfluxClient::new();
+    reader.active_account_db = Some(db);
+    Ok(reader)
+}
+
+#[test]
+fn markerless_backup_merge_baselines_only_winning_imported_verified_rows() -> TestResult {
+    // Full legacy merge, modern full merge, and data-only merge use the real encrypted merger.
+    for mode in ["legacy", "marked", "native", "stamped"] {
+        let owner = Actor::new("owner", "phone", 131, 132, 1)?;
+        let other = Actor::new("other", "phone", 133, 134, 1)?;
+        let conflict = Actor::new("conflict", "phone", 137, 138, 1)?;
+        let source = Actor::new("peer", "peer", 135, 136, 1)?;
+        let target = Actor::new("peer", "peer", 135, 136, 1)?;
+        let incoming = with_profile(&owner, owner.manifest()?, "Owner", 1, 1)?;
+        let unrelated = with_profile(&other, other.manifest()?, "Other", 1, 1)?;
+        let rejected = with_profile(&conflict, conflict.manifest()?, "Conflict", 1, 1)?;
+        observe(&source.client, &incoming)?;
+        legacy_record(&source.client, &incoming)?;
+        for client in [&source.client, &target.client] {
+            observe(client, &rejected)?;
+            legacy_record(client, &rejected)?;
+        }
+        let row =
+            target.client.account_db()?.client_record("identity", "conflict")?.ok_or("conflict")?;
+        target.client.account_db()?.mark_contact_verified(
+            ramflux_storage::ContactVerificationUpdate {
+                contact_identity_commitment: &rejected.principal_commitment,
+                safety_number_hash: "local-newer",
+                device_set_hash: row["device_set_hash"].as_str().ok_or("hash")?,
+                lineage_head: "local",
+                verified_at: 999,
+                verified_by_device_id: "peer",
+            },
+        )?;
+        if mode != "marked" {
+            source.client.account_db()?.remove_actor_state(MIGRATION_MARKER)?;
+        }
+        observe(&target.client, &unrelated)?;
+        legacy_record(&target.client, &unrelated)?;
+        // An existing stamp survives even when another imported verification wins.
+        let preserved = "identity/safety_verified_set/preserved-root";
+        source.client.account_db()?.persist_actor_state(preserved, &"incoming-stamp")?;
+        target.client.account_db()?.persist_actor_state(preserved, &"local-stamp")?;
+        let imported_stamp =
+            format!("identity/safety_verified_set/{}", incoming.principal_commitment);
+        if mode == "stamped" {
+            target
+                .client
+                .account_db()?
+                .persist_actor_state(&imported_stamp, &"previous-authority")?;
+        }
+        let reader = merge_verification_reader(&source, &target, mode == "native")?;
+        let db = reader.account_db()?;
+        assert_eq!(db.load_actor_state::<bool>(MIGRATION_MARKER)?, Some(true));
+        assert_eq!(db.load_actor_state::<String>(preserved)?.as_deref(), Some("local-stamp"));
         assert!(
             db.load_actor_state::<String>(&format!(
                 "identity/safety_verified_set/{}",
-                manifest.principal_commitment
+                unrelated.principal_commitment
             ))?
             .is_none()
         );
-    }
-    db.persist_actor_state(
-        &record_key(&b.principal_commitment),
-        b.signed_device_set.as_ref().ok_or("set")?,
-    )?;
-    migrate_legacy_contact_verifications(db)?;
-    assert_eq!(db.load_actor_state::<bool>(MIGRATION_MARKER)?, Some(true));
-    for manifest in [&a, &b] {
+        let local = db.client_record("identity", "other")?.ok_or("other")?;
         assert_eq!(
+            reader.contact_safety_verification_state(
+                &unrelated.principal_commitment,
+                local["device_set_hash"].as_str()
+            )?,
+            "verification_stale"
+        );
+        assert!(
             db.load_actor_state::<String>(&format!(
                 "identity/safety_verified_set/{}",
-                manifest.principal_commitment
-            ))?,
-            Some(set_fingerprint(manifest.signed_device_set.as_ref().ok_or("set")?)?)
+                rejected.principal_commitment
+            ))?
+            .is_none(),
+            "a losing imported row cannot baseline the local winner"
         );
+        assert_eq!(
+            db.contact_verification(&rejected.principal_commitment)?
+                .ok_or("verification")?
+                .verified_at,
+            999
+        );
+        if mode == "stamped" {
+            assert_eq!(
+                db.load_actor_state::<String>(&imported_stamp)?.as_deref(),
+                Some("previous-authority")
+            );
+        }
+        let imported = db.client_record("identity", "owner")?;
+        if mode == "native" {
+            assert!(imported.is_none());
+        } else {
+            let imported = imported.ok_or("imported")?;
+            assert_eq!(
+                reader.contact_safety_verification_state(
+                    &incoming.principal_commitment,
+                    imported["device_set_hash"].as_str()
+                )?,
+                if mode == "legacy" { "verified" } else { "verification_stale" }
+            );
+        }
     }
     Ok(())
 }

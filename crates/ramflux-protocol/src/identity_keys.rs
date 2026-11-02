@@ -99,3 +99,20 @@ pub fn signed_device_set_signing_bytes(
         profile: record.profile.as_deref(),
     })
 }
+
+/// Fingerprints the complete authority that a manual safety confirmation observed.
+/// Profiles and active-device hashes alone do not describe revocation or kind changes.
+/// # Errors
+/// Rejects authority records that cannot be represented as canonical protocol JSON.
+pub fn device_set_authority_fingerprint(
+    record: &SignedDeviceSetRecord,
+) -> Result<String, crate::ProtocolError> {
+    Ok(crate::hash_base64url(
+        "ramflux.sdk.verified_device_authority.v1",
+        &crate::canonical_json_bytes(&(
+            &record.principal_commitment,
+            record.principal_kind,
+            &record.devices,
+        ))?,
+    ))
+}

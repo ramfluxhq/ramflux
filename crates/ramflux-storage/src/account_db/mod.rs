@@ -61,6 +61,7 @@ pub mod read_model;
 pub mod recovery;
 mod replay_markers;
 pub mod runtime;
+pub(crate) mod safety_verification;
 mod shared_group_delivery;
 mod shared_group_floor_index;
 mod shared_group_heads;
@@ -272,3 +273,6 @@ mod backup_consent_tests;
 
 #[cfg(test)]
 mod backup_missing_tests;
+
+#[cfg(test)]
+mod backup_verification_tests;

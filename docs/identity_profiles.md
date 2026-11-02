@@ -73,16 +73,25 @@ signed set can remain `verified` for its synthetic safety material; this does no
 authenticate a kind. Legacy v0.1.0 verifications without an authority stamp are
 baselined once per account at the first writer unlock after upgrade, only when the
 current active-device hash still matches the verified one. Eligible stamps and
-`identity/safety-verification-migration/v1` commit atomically; a failed migration
-leaves no completion marker and can be retried. Reader pools check that marker
-before opening query-only snapshots and do not repeat a completed scan.
+`identity/safety-verification-migration/v1` commit atomically. A malformed individual
+contact is skipped with one warning containing its contact id and a fixed error
+class (`record_decode`, `authority_state`, or `storage`), never the record body.
+It stays unstamped, and its own command path still refuses malformed authority;
+healthy contacts migrate and unlock succeeds. Enumeration or account-wide
+transaction failures leave no completion marker and can be retried. Reader pools
+check that marker before opening query-only snapshots and do not repeat a completed scan.
 Verification reads never write stamps. After migration, an unstamped record with
 observed signed authority is `verification_stale` until explicit re-verification;
 new confirmation writers persist their authority stamp in the verification
 transaction. An existing stamp is never replaced by migration, and later authority
 changes remain stale. A mismatched active-device hash cannot acquire a migration
-stamp. Legacy verifications imported after a completed migration also require
-explicit confirmation when they lack signed-authority stamps.
+stamp. A legacy archive without the migration marker receives the same baselining
+only for verification rows that win import during a full-account merge, even when
+the target account is already sealed. Unrelated local unstamped contacts are not
+baselined, existing stamps are never replaced, and mismatches remain stale.
+Archives that already carry the marker do not gain new stamps. Fresh restores
+still migrate on their next unlock; native data-only merges do not import contact
+authority or verification rows.
 
 Without an observed signed set, all views compare the synthetic safety-material
 hash, ignoring a legacy card row's historical device hash. This can preserve

@@ -31,14 +31,7 @@ pub(crate) fn record_key(commitment: &str) -> String {
     format!("identity/signed_set/{commitment}")
 }
 pub(crate) fn set_fingerprint(record: &SignedDeviceSetRecord) -> Result<String, SdkError> {
-    Ok(ramflux_protocol::hash_base64url(
-        "ramflux.sdk.verified_device_authority.v1",
-        &ramflux_protocol::canonical_json_bytes(&(
-            &record.principal_commitment,
-            record.principal_kind,
-            &record.devices,
-        ))?,
-    ))
+    Ok(ramflux_protocol::device_set_authority_fingerprint(record)?)
 }
 impl RamfluxClient {
     /// Returns an authenticated root assertion. It does not attest that a root holder is human.
