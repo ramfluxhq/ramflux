@@ -154,6 +154,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQLite automatic rollback preserve managed transaction state without stale
   guards affecting a replacement transaction. CI rejects raw account transaction
   and savepoint bypasses, with explicit private-staging exceptions.
+- Writer contention reports retryable `account_busy` on backup and local-bus
+  surfaces (bus retry after 1000 ms), with C ABI `RAMFLUX_ERR_ACCOUNT_BUSY = 18`;
+  lock/index I/O reports `unreadable` / `storage_unavailable`, and unlock now says
+  "wrong passphrase or damaged local key" for local-key verification failures.
 
 - Demo node deployments can opt into the voice UDP overlay with an env setting
   or command-line port, retaining the existing base deployment when unset. Voice

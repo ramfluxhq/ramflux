@@ -5,7 +5,7 @@
 use super::{AccountDbKey, BackupJobs, DataIdentity, Identity, Metadata, RamfluxClient};
 use crate::storage_failure_fixture::{Fault, TestResult, apply_fault};
 
-fn check(fault: Fault) -> TestResult {
+fn fixture() -> TestResult<(crate::custody::tests::Root, ramflux_storage::AccountIndex, Metadata)> {
     let root = crate::custody::tests::Root::new()?;
     let vault = crate::custody::tests::TestVault::default();
     let account =
@@ -19,8 +19,6 @@ fn check(fault: Fault) -> TestResult {
     )?;
     let index = client.account_index()?.clone();
     drop(client);
-    let _holder = apply_fault(&index, fault)?;
-    let jobs = BackupJobs::new(&root.0, index.clone())?;
     let metadata = Metadata {
         identity: Identity::Native {
             native: Box::new(DataIdentity {
@@ -35,6 +33,17 @@ fn check(fault: Fault) -> TestResult {
         database_key: [0; 32],
         ca_pem: Vec::new(),
     };
+    Ok((root, index, metadata))
+}
+
+fn check(fault: Fault) -> TestResult {
+    let (root, index, metadata) = fixture()?;
+    let _holder = apply_fault(&index, fault)?;
+    let jobs = BackupJobs::new(&root.0, index.clone())?;
+    let Identity::Native { native } = &metadata.identity else {
+        return Err("native fixture".into());
+    };
+    let anchor = native.anchor().to_owned();
     let mut client = RamfluxClient::new();
     client.open_account_index(&root.0)?;
     let error =
@@ -45,14 +54,18 @@ fn check(fault: Fault) -> TestResult {
         Fault::Integrity => "ValidationFailed",
     };
     assert_eq!(crate::bus::io::local_bus_error_code(&error), expected_bus);
-    let preview = jobs.check_existing_identity(
+    let preview = jobs.archive_preview(
         &metadata,
         &root.0.join("unused"),
         &AccountDbKey::from_bytes([0; 32]),
+        0,
+        "native-writer-preview",
     );
     if matches!(fault, Fault::Integrity) {
         // Native preview checks independent public evidence, without unwrapping local data keys.
-        assert_eq!(preview, Ok(true));
+        let preview = preview.map_err(|failure| format!("public preview failed: {failure:?}"))?;
+        assert!(preview.merge);
+        assert_eq!(preview.local_account_id, "acct");
         return Ok(());
     }
     let expected = if matches!(fault, Fault::Busy) {
@@ -81,7 +94,7 @@ fn check(fault: Fault) -> TestResult {
         .ok_or("failure")?;
     assert_eq!(failure.code, expected);
     assert_eq!(failure.retryable, matches!(fault, Fault::Busy));
-    assert_eq!(index.account("acct")?.principal_commitment, account.record().body.account_anchor);
+    assert_eq!(index.account("acct")?.principal_commitment, anchor);
     Ok(())
 }
 
@@ -98,4 +111,27 @@ fn native_writer_io_is_unreadable_on_preview_and_install() -> TestResult {
 #[test]
 fn native_local_key_failure_blocks_unlock_without_invalidating_public_preview() -> TestResult {
     check(Fault::Integrity)
+}
+
+#[test]
+fn native_preview_index_read_failure_is_unreadable() -> TestResult {
+    let (root, index, metadata) = fixture()?;
+    let jobs = BackupJobs::new(&root.0, index.clone())?;
+    let connection = rusqlite::Connection::open(root.0.join(ramflux_storage::ACCOUNT_INDEX_FILE))?;
+    // A real missing index table makes the production target lookup fail before taking a lease.
+    connection.execute_batch("ALTER TABLE local_account RENAME TO unavailable_local_account")?;
+    assert!(matches!(index.known_account_ids(), Err(ramflux_storage::StorageError::Sqlite(_))));
+    let error = jobs
+        .archive_preview(
+            &metadata,
+            &root.0.join("unused"),
+            &AccountDbKey::from_bytes([0; 32]),
+            0,
+            "native-index-read-preview",
+        )
+        .err()
+        .ok_or("native preview must refuse an unreadable index")?;
+    assert_eq!(error.code, crate::backup::BackupFailureCode::Unreadable);
+    assert!(!error.retryable);
+    Ok(())
 }

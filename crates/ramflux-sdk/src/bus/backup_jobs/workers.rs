@@ -396,7 +396,7 @@ impl BackupJobs {
         .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         Ok(())
     }
-    fn archive_preview(
+    pub(super) fn archive_preview(
         &self,
         metadata: &Metadata,
         incoming: &std::path::Path,
@@ -405,9 +405,7 @@ impl BackupJobs {
         job_id: &str,
     ) -> Result<BackupArchivePreview, BackupFailure> {
         let (id, merge) = if let format::Identity::Native { native } = &metadata.identity {
-            let target = self
-                .native_restore_target(native)
-                .map_err(|_| failure(BackupFailureCode::RootConflict))?;
+            let target = self.check_existing_native_identity(native)?;
             let merge = target.is_some();
             (
                 target.unwrap_or_else(|| {
@@ -440,9 +438,6 @@ impl BackupJobs {
         incoming: &std::path::Path,
         key: &AccountDbKey,
     ) -> Result<bool, BackupFailure> {
-        if let format::Identity::Native { native } = &metadata.identity {
-            return self.check_existing_native_identity(native);
-        }
         let manifest =
             metadata.identity.legacy().map_err(|_| failure(BackupFailureCode::RootConflict))?;
         let id = &manifest.local_account_id;
@@ -491,7 +486,7 @@ impl BackupJobs {
     fn check_existing_native_identity(
         &self,
         native: &super::native::DataIdentity,
-    ) -> Result<bool, BackupFailure> {
+    ) -> Result<Option<String>, BackupFailure> {
         let lookup = || {
             self.native_restore_target(native).map_err(|error| match error {
                 SdkError::Storage(error) => storage_error(&error),
@@ -499,13 +494,13 @@ impl BackupJobs {
                 _ => failure(BackupFailureCode::RootConflict),
             })
         };
-        let Some(id) = lookup()? else { return Ok(false) };
+        let Some(id) = lookup()? else { return Ok(None) };
         let _writer =
             self.index.acquire_account_writer(&id).map_err(|error| storage_error(&error))?;
         if lookup()?.as_deref() != Some(id.as_str()) {
             return Err(failure(BackupFailureCode::RootConflict));
         }
-        Ok(true)
+        Ok(Some(id))
     }
 }
 
