@@ -430,8 +430,9 @@ async fn attachment_valid_grant_completes_remaining_cached_acks()
     assert_eq!(acknowledgements, (1..f.reference.total_chunks).collect::<Vec<_>>());
     assert_eq!(receipt["transfer_state"], "available");
     assert!(f.client.object_key_slot_committed(&f.reference.key_slot)?);
-    assert!(
-        f.client.account_db()?.actor_state_keys(&ack_progress_prefix(&f.reference)?)?.is_empty()
+    assert_eq!(
+        f.client.account_db()?.actor_state_keys(&ack_progress_prefix(&f.reference)?)?,
+        Vec::<String>::new()
     );
     Ok(())
 }
