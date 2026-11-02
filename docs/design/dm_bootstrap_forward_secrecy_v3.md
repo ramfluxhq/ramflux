@@ -94,7 +94,7 @@ future timestamp is refused, not treated as an early erasure instruction. Bounda
 | SPK private retention | Keep through public expiry + 30 days; erase only strictly after that deadline, including on read. At weekly rotation retain at most 10 keys, counting current. |
 | OPK initial pool | 8 independently generated keys with fresh IDs. The signature binds the qualified branch and pool generation. |
 | OPK replenishment | Below 2 directory-unleased keys, add enough fresh keys to restore 8, subject to the private-state bound. Never replace outstanding keys with a freshly generated pool. |
-| Private OPK bound | 200 per qualified branch, including retained pool generations and leased keys awaiting delivery. Process authenticated expiry/consumption first, then replenish. At the bound remain reachable through a valid SPK-only result. |
+| Private OPK bound | 200 per qualified branch, including retained pool generations, leased keys awaiting delivery and erasure-pending slots. Process authenticated expiry/consumption first, then replenish. At the bound remain reachable through a valid SPK-only result. |
 | OPK successful consumption | Delete after first-message authentication in the same transaction as the advanced ratchet and replay/ordering state. |
 | Unused leased OPK | Delete individually only when `now > leased_at + 30 days`; exactly 30 days, 29 days, unleased and missing timestamps survive this rule. |
 | Bootstrap delivery | A new-profile packet has a bound delivery deadline no later than SPK expiry + 30 days and, when leased, lease time + 30 days. The receiver enforces it. |
@@ -136,10 +136,11 @@ outcomes, never an excuse to choose legacy authority.
 | `SignedNativePrekeyBase` | Profile, qualified branch reference and commitments, agreement identity public key, pool generation, SPK sequence/ID/public key, issued/expiry times, bundle counter, signed bootstrap capabilities, branch signature. No OPK pool is needed to verify this base. |
 | `SignedNativeOpk` | Domain, qualified branch and pool generation, increasing OPK serial, fresh OPK ID/public key, branch signature. It is independently verifiable and cannot be substituted between branches or pool generations. |
 | `NativePrekeyPublication` | Signed base plus additive public OPK records. Owner upload only, with the complete action hash covered by the registration proof. No private bytes. |
+| `OwnerPrekeyUpdate` | Public publication plus idempotent retirement acknowledgements for known OPK serials whose local storage retirement completed. Control metadata is covered by the owner proof/signed request, independently of public-bundle counter identity. |
 | `PublicPrekeyView` | Signed base only, plus current native authority evidence. Safe for ordinary lookup, manifests, discovery, anonymous prekey fetch and compatibility projections. |
 | `PrekeyLeaseIntent` | Requester qualified branch, target qualified branch, expected base hash/profile, issue time, selection expiry, random 32-byte nonce, operation ID. The ID hashes the preceding intent fields, excluding itself, with a domain separator; the outer signed-request nonce is separate. |
 | `PrekeyLeaseResult` | Verified base, zero or one independently signed OPK, target and requester binding, operation ID, selected-base hash, lease time and delivery deadline when leased; otherwise a bounded fallback reason. No pool or owner ledger. |
-| `OwnerPrekeyStatus` | Publication counter/hash acknowledged, unleased count and a bounded per-ID `Unleased` / `LeasedAt` ledger for the owner's requested local IDs only. No private key or other requester's identity. |
+| `OwnerPrekeyStatus` | Publication counter/hash acknowledged, retirement-ack digest, unleased count and a bounded per-ID `Unleased` / `LeasedAt` ledger for the owner's requested local IDs only. No private key or other requester's identity. |
 
 Define `base_hash` over the canonical signed base with its own domain. Define the new
 profile's `prekey_bundle_hash` over that base hash, the canonical selected OPK record or
@@ -156,20 +157,26 @@ key/ID rebinding, counter overflow, malformed times and mismatched signatures ex
 
 Proposed operations reuse the current native transport and proof boundary:
 
-1. `CustodyProofAction::Register { prekey_bundle: NativePrekeyPublication }` uses the
+1. `CustodyProofAction::Register { prekey_bundle: OwnerPrekeyUpdate }` uses the
    existing `register` capability and action-hash proof. A versioned registered response
    includes the acknowledged hash/counter and owner status. Reconnect sends the exact same
    committed publication until its acknowledgement is durable.
 2. `CustodySessionAction::PrekeyLease { intent }` uses an established message-capable
    requester session. The result contains at most one OPK. Ordinary `Lookup` stays read-only.
-3. `CustodySessionAction::PrekeyPublish { publication }` updates the owner's pool while
+3. `CustodySessionAction::PrekeyPublish { update }` updates the owner's pool while
    live. Reauthorize the current branch's `register` capability, verify its publication
-   signature and signed request, and apply the same idempotent durable publication rules
+   signature, retirement acknowledgements and signed request, and apply the same durable publication rules
    as initial Register. A message-only capability does not authorize owner publication.
 4. `CustodySessionAction::PrekeyStatus { pool_generation, opk_ids, known_publication_counter }`
    returns only the authenticated connection owner's ledger, restricted to at most 200
-   named local IDs. A branch cannot request another branch's private status. Publication
-   and status use explicit operation tags and do not masquerade as Submit.
+   named local IDs. A branch cannot request another branch's private status.
+5. An owner-only `CustodyProofAction::PrekeyStatus` with the same bounded status arguments
+   uses the current branch's `register` proof/capability before OpenSession. It resolves
+   lost publication acknowledgements or expired-SPK cold starts without first requiring
+   fresh registered prekeys. It reports durable floors and retained status, not private
+   material or permission to reconstruct missing keys. Ordinary unexpired reconnects may
+   use the Register acknowledgement instead. Publication/status have explicit operation
+   tags and do not masquerade as Submit.
 
 Preserve current authority verification, branch certificate authorization, node pins,
 TLS holder/exporter or explicitly selected existing proxy binding, session proof hash,
@@ -221,7 +228,8 @@ All ordinary public surfaces must construct `PublicPrekeyView`: custody `Peer`,
 acknowledgement public fields, identity discovery and any manifest nested in another
 response. No serializer may accidentally forward the owner upload value unchanged.
 Only the authenticated lease result exposes an individual OPK. Owner acknowledgements
-may expose IDs/status, but never public OPK material through the public projection.
+may expose IDs/status and a retirement-ack digest, but never public OPK material through
+the public projection.
 
 New nodes recognize the versioned Register body; old nodes cannot accept it. The SDK
 surfaces update-required rather than falling back to credential-derived registration.
@@ -266,7 +274,7 @@ A single durable redb write transaction must:
 The lease is assignment, not a reservation later recycled to another caller. A lost reply
 or sender crash may burn a key until its 30-day expiry; it must never put that ID back in
 the pool. Publication unions fresh unleased IDs with the existing ledger. Repeating the
-same hash/counter is idempotent; the same counter with different bytes or an older counter
+same hash/counter is idempotent; the same counter with different public publication bytes or an older counter
 is refused. Reuploading a leased or consumed ID cannot reset it. Unchanged publication
 must not rewrite the whole identity registry. Durable selection remains serialized only
 for the per-target commit; keep unrelated directory work outside that critical section.
@@ -296,8 +304,34 @@ six target leases per hour, a 30-day result window holds at most 4320 results pe
 this is distinct from the 200-key current pool. Owner-status requests name at most 200 local
 IDs, so old consumed results do not make owner replies grow without bound.
 
-Expired result rows can be compacted only after their delivery deadline; publication
-floors and retired-ID protection survive compaction. On node data loss or rollback, do
+Lease-result GC and owner-status retention are different. A receiver returning at day
+31 still needs authenticated `leased_at` values to erase its 200 expired private keys.
+Keep the owner ledger until an authenticated retirement acknowledgement, even after a
+requester's result was compacted. Retained generations remain queryable for the original
+owner/requester within their respective status/delivery purpose; a generation floor
+refuses new publication/selection, not legitimate retained status.
+
+Bound unretired owner slots at 200 on both node and device. A consumed/expired OPK frees
+its slot only after local storage retirement completes. The device durably queues a
+public retirement acknowledgement, and the node atomically applies acknowledged retirements
+before accepting newly uploaded keys. Lost acknowledgements are retried idempotently.
+Allow one outstanding public publication until its acknowledgement or an authenticated
+owner-status reconciliation is durable. A new counter is not fabricated on every retry.
+Bound retirement metadata at 400 IDs: one unacknowledged batch plus the current at-most-200
+slots. Send at most 400 compact generation/serial references per owner update and confirm
+them by a digest of that exact batch; the status ledger still has at most 200 entries.
+Queue pressure blocks new publication preparation, not logical deletion or checkpoint
+completion. A blocked checkpoint can force SPK-only fallback rather than unbounded retained
+private WAL copies. After a long offline period, proof-based owner status reconciles the
+pending publication/floors and expired leases before fresh registration. It may acknowledge
+an existing expired publication as history; it never selects that SPK for a new lease or
+marks networking live without a fresh valid SPK. The acknowledgement
+is an owner assertion, not cryptographic proof of endpoint erasure. It is not served to
+other requesters and cannot reset an OPK serial floor. Compare equal publication counters
+against the signed base/public-key upload, separately from these idempotent control acks.
+
+Expired requester-result rows can be compacted only after their delivery deadline;
+publication floors and retired-ID protection survive compaction. On node data loss or rollback, do
 not reopen an old pool with an empty cursor. Refuse new leases for that incarnation until
 a fresh fenced generation is authorized. Restoring a node backup must restore the ledger
 and floors together or trigger this refusal. Existing signed current-head pins and owner
@@ -377,7 +411,7 @@ unauthenticated input cannot delete an OPK or commit a consumption marker.
 
 After authentication, the account-writer transaction atomically persists the advanced
 receive ratchet, existing replay/ordering and message outcome, removes the consumed OPK,
-and writes a nonsecret erasure-pending record. A rollback retains the OPK and prior session
+and writes a nonsecret erasure-pending record that still charges an OPK capacity slot. A rollback retains the OPK and prior session
 and emits no ACK. Duplicate delivery uses the committed receive/replay outcome without
 trying to consume again. Concurrent first packets for the same OPK cannot both commit.
 The receive session must already have replaced the SPK used as its initial DH ratchet key;
@@ -398,7 +432,9 @@ absence; physical WAL retirement is a separate completion condition. A busy chec
 or pinned reader keeps erasure pending and schedules a later attempt through the existing
 checkpoint coordinator. A coalesced/rate-limited request is not evidence that TRUNCATE
 completed. After a crash, reopen resumes pending checkpoint work without restoring the
-key. Never clear the durable erasure-pending marker merely because a request was queued.
+key. Never clear the durable erasure-pending marker merely because a request was queued. Only
+completed retirement frees that slot and queues the owner acknowledgement; restart must
+retain both the pending slot and any unacknowledged retirement metadata.
 
 These are software storage guarantees, not proof of SSD block erasure or destruction of
 an older filesystem snapshot. SQLite documents the scope of
@@ -531,10 +567,11 @@ assertion; a compiler error, timeout, skipped case or substituted mock ledger is
 | SDK WAL retirement | Pinned reader yields pending, not complete; after release a real TRUNCATE succeeds and reopen cannot load the key. | Count queued/coalesced/busy checkpoint as successful or clear the durable pending marker early. |
 | SDK rotation and read expiry | Fresh randomness, weekly rotation, old SPK readable through its full deadline, strict expiry on read, at most 10 retained keys and no clock-rollback resurrection. | Derive SPKs, erase after only two days, skip read-time expiry, or discard the matching SPK for a valid queued OPK. |
 | SDK additive pool | Seven queued bootstrap leases across the target quota window, followed by replenishment and restart, keep every required private OPK; current unleased keys survive SPK rotation. Advance an injected trusted test clock for the seventh lease; restart must not reset the limit. | Replace the private pool wholesale, tie unleased OPKs to a discarded SPK, or reuse an ID. |
-| SDK 200-key lifecycle | 200 unused leases at 31 days are individually erased before refill; 29-day, exactly-30-day, unleased and missing-time keys survive. Expired bootstrap fails after reopen. | Skip expiry at capacity; use `>= 30 days`; clear the whole pool; erase a missing-time entry. |
+| SDK 200-key lifecycle | 200 unused leases at 31 days are individually erased before refill even when requester results were GC'd; owner-status timestamps survive until retirement acknowledgement; 29-day, exactly-30-day, unleased and missing-time keys survive. Expired bootstrap fails after reopen. | Skip expiry at capacity; GC owner timestamps with reply results; release pending slots/acks early; use `>= 30 days`; clear the whole pool; erase a missing-time entry. |
 | SDK authentic owner status | Real Register/Status acknowledgements drive expiry; foreign IDs, stale home, missing ledger, regressed counter and conflicting times cannot cause early deletion. | Inject a foreign ledger, accept unauthenticated status, or shorten a known lease from a conflicting ack. |
 | Node atomic lease | Concurrent authenticated native requests get distinct keys; fail commit -> no key response; lost reply/restart -> same operation returns the same OPK without extra quota. | Return before commit; remove transaction/selection serialization; omit durable result/cursor. |
 | Node publish/restart/GC | Same publication is idempotent, lower/conflicting counters fail, leased IDs never return, old operation cannot lease again after result GC. | Clear consumed state on republish/restart; delete counter floor; accept stale intent after GC. |
+| SDK cold owner reconciliation | Expired current SPK, 200 old leases and a lost publication acknowledgement recover through real owner proof/status; keys expire/checkpoint, acknowledgements retry and fresh registration succeeds without a session/registration deadlock. | Require OpenSession before owner status; discard old lease times at day 30; fabricate fresh counters on every retry. |
 | Native transport authentication | Real SDK -> gateway -> authenticated mesh -> router tests cover current branch proof, session, holder, source and body hash; anonymous/forged/stale/revoked callers cannot lease. | Remove each current-authority/revocation, capability, connection/session or action binding in turn. |
 | SDK/gateway handoff reachability | Actual ordinary first DM leases an OPK after handoff; same socket/session owner survives until close, interleaved deliveries arrive, expiry reconnect preserves operation ID, and a one-session-per-principal limit still works. | Leave proxy Disconnect at handoff; use ordinary read-only PrekeyFetch for bootstrap; accept a foreign connection/session or drop a Deliver frame while waiting. |
 | Native quota isolation | One account with three devices gets one target OPK per day; another account can lease; target/requester/prefix limits persist across restart; 5000 valid pairs do not globally starve a newcomer. | Key by device; share gateway prefix; reset durable charges; replace target limit with a global full-table denial. |
