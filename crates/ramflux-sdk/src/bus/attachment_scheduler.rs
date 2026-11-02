@@ -26,7 +26,7 @@ pub(super) async fn run_next(account: &mut LocalBusAccountState) -> Result<bool,
     attempt.next_at = now.saturating_add(2_i64.pow(attempt.attempts));
     account.client.account_db()?.persist_actor_state(&key, &attempt)?;
     if let Err(error) = fetch(account, &id).await {
-        crate::client::attachment_diagnostics::failed(&id, "background_fetch", &error);
+        crate::client::attachment_diagnostics::context(&id, "background_fetch", &error);
     }
     Ok(true)
 }

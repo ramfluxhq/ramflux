@@ -188,6 +188,12 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         self.commit_pair_key_slot(slot, key, true)
     }
+    pub(crate) fn pair_object_slot_committed(
+        &self,
+        slot: &SdkObjectKeySlot,
+    ) -> Result<bool, SdkError> {
+        Ok(self.account_db()?.load_actor_state::<bool>(&slot_receipt(slot)?)?.unwrap_or(false))
+    }
     pub(crate) fn commit_inline_pair_key_slot(
         &self,
         slot: &SdkObjectKeySlot,

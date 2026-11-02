@@ -365,3 +365,5 @@ fn a_received_object_selector_resolves_only_its_expected_manifest() -> Result<()
 
 #[path = "tests/ack_progress.rs"]
 mod ack_progress;
+
+mod cached_commit;

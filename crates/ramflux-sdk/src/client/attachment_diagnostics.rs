@@ -21,6 +21,23 @@ pub(super) fn checked<T>(
     result.inspect_err(|error| failed(object_id, check, error))
 }
 
+pub(crate) fn context(object_id: &str, check: &'static str, error: &SdkError) {
+    tracing::debug!(
+        object_id,
+        check,
+        error_code = crate::bus::io::local_bus_error_code(error),
+        "attachment fetch context"
+    );
+}
+
+pub(super) fn checked_context<T>(
+    result: Result<T, SdkError>,
+    object_id: &str,
+    check: &'static str,
+) -> Result<T, SdkError> {
+    result.inspect_err(|error| context(object_id, check, error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,7 +70,7 @@ mod tests {
             let mut fields = Fields(String::new());
             event.record(&mut fields);
             if let Ok(mut lines) = self.0.lock() {
-                lines.push(fields.0);
+                lines.push(format!("{} {}", event.metadata().level(), fields.0));
             }
         }
     }
@@ -75,6 +92,33 @@ mod tests {
             assert!(lines[0].contains(field), "missing {field}: {}", lines[0]);
         }
         assert!(!lines[0].contains("PRIVATE_GRANT_AND_KEY_MARKER"));
+        Ok(())
+    }
+
+    #[test]
+    fn attachment_failure_emits_one_warning_across_all_outer_contexts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let result = tracing::subscriber::with_default(Capture(lines.clone()), || {
+            let inner = checked::<()>(
+                Err(SdkError::CapabilityDenied("PRIVATE_DIAGNOSTIC_MARKER".into())),
+                "object-1",
+                "manifest_hash",
+            );
+            let imported = checked_context(inner, "object-1", "verify_and_persist");
+            let fetched = checked_context(imported, "object-1", "attachment_fetch");
+            if let Err(error) = &fetched {
+                context("object-1", "background_fetch", error);
+            }
+            fetched
+        });
+        assert!(
+            matches!(result, Err(SdkError::CapabilityDenied(text)) if text == "PRIVATE_DIAGNOSTIC_MARKER")
+        );
+        let lines = lines.lock().map_err(|_| "capture lock")?;
+        assert_eq!(lines.iter().filter(|line| line.starts_with("WARN ")).count(), 1);
+        assert_eq!(lines.iter().filter(|line| line.starts_with("DEBUG ")).count(), 3);
+        assert!(lines.iter().all(|line| !line.contains("PRIVATE_DIAGNOSTIC_MARKER")));
         Ok(())
     }
 }

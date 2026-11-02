@@ -32,40 +32,52 @@ pub(crate) async fn dispatch_until(
     };
     let connect_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     let connect_deadline = deadline.map_or(connect_deadline, |at| at.min(connect_deadline));
-    let mut engine =
-        match tokio::time::timeout_at(connect_deadline, account.take_live_engine()).await {
-            Ok(Ok(engine)) => engine,
-            Ok(Err(error)) => {
-                crate::client::attachment_diagnostics::failed(
-                    &body.object_id,
-                    "gateway_session",
-                    &error,
-                );
-                return failed(account, &body).await;
-            }
-            Err(_) => {
-                crate::client::attachment_diagnostics::failed(
-                    &body.object_id,
-                    "gateway_session_deadline",
-                    &SdkError::GatewaySessionNotEstablished,
-                );
-                return failed(account, &body).await;
-            }
-        };
-    // Ownership stays outside the timed future. A cancelled frame read must retire its stream,
-    // but keep the updated gateway resume credentials and verified attachment progress.
-    let fetch = account.client.fetch_received_attachment(
-        &mut engine,
-        &pool,
-        &body.object_id,
-        &body.operation_id,
-    );
+    let engine = match tokio::time::timeout_at(connect_deadline, account.take_live_engine()).await {
+        Ok(Ok(engine)) => engine,
+        Ok(Err(error)) => {
+            crate::client::attachment_diagnostics::failed(
+                &body.object_id,
+                "gateway_session",
+                &error,
+            );
+            return failed(account, &body).await;
+        }
+        Err(_) => {
+            crate::client::attachment_diagnostics::failed(
+                &body.object_id,
+                "gateway_session_deadline",
+                &SdkError::GatewaySessionNotEstablished,
+            );
+            return failed(account, &body).await;
+        }
+    };
+    run_fetch(account, engine, &body.object_id, deadline, async |client, engine| {
+        client.fetch_received_attachment(engine, &pool, &body.object_id, &body.operation_id).await
+    })
+    .await
+}
+
+async fn run_fetch<F>(
+    account: &mut LocalBusAccountState,
+    mut engine: GatewaySessionEngine,
+    object_id: &str,
+    deadline: Option<tokio::time::Instant>,
+    fetch: F,
+) -> Result<LocalBusDispatchResult, SdkError>
+where
+    F: for<'a> std::ops::AsyncFnOnce(
+            &'a mut RamfluxClient,
+            &'a mut GatewaySessionEngine,
+        ) -> Result<serde_json::Value, SdkError>,
+{
+    // The engine remains owned outside either timed future, including a simultaneous expiry.
+    let fetch = fetch(&mut account.client, &mut engine);
     let result = if let Some(deadline) = deadline {
         tokio::time::timeout_at(deadline, fetch).await
     } else {
         Ok(fetch.await)
     };
-    finish_fetch(account, engine, &body.object_id, result)
+    finish_fetch(account, engine, object_id, result, deadline)
 }
 
 fn finish_fetch(
@@ -73,18 +85,34 @@ fn finish_fetch(
     engine: GatewaySessionEngine,
     object_id: &str,
     result: Result<Result<serde_json::Value, SdkError>, tokio::time::error::Elapsed>,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let Ok(result) = result else {
+    let available = result.as_ref().is_ok_and(|result| {
+        result.as_ref().is_ok_and(|receipt| receipt["transfer_state"] == "available")
+    });
+    let expired = result.is_err()
+        || (!available && deadline.is_some_and(|at| tokio::time::Instant::now() >= at));
+    if expired {
         let error = SdkError::LocalBus("attachment fetch deferred; retry object.fetch".into());
-        crate::client::attachment_diagnostics::failed(
-            object_id,
-            "scheduler_fetch_deadline",
-            &error,
-        );
+        if result.is_err() {
+            crate::client::attachment_diagnostics::failed(
+                object_id,
+                "scheduler_fetch_deadline",
+                &error,
+            );
+        } else {
+            // An inner failure already emitted its warning before the shared deadline was observed.
+            crate::client::attachment_diagnostics::context(
+                object_id,
+                "scheduler_fetch_deadline",
+                &error,
+            );
+        }
         account.retire_engine(engine)?;
         account.client.recover_received_attachment_fetches()?;
         return Err(error);
-    };
+    }
+    let result = result.map_err(|_| SdkError::LocalBus("attachment deadline elapsed".into()))?;
     if result.as_ref().is_ok_and(|receipt| {
         receipt["last_error"] == "attachment fetch deadline exceeded; retry object.fetch"
     }) {

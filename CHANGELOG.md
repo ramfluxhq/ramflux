@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expose the restored local id, networking state and attended recovery command;
   locked native account status remains readable before recovery and admission.
 
+- Complete verified cached DM attachments after upload-grant expiry, and remove
+  relay ACK progress atomically with the successful import commit.
+- Add `rf dm read --wait SECS` for bounded deferred-fetch polling (default 0);
+  retain gateway resume state at simultaneous fetch deadlines and emit one
+  warning per attachment failure with debug context for outer callers.
+
 - Resume born-v3 DM attachment downloads and confirmed relay ACKs across bounded
   fetch windows; expose safe fetch diagnostics and daemon readiness in SDK logs.
 - CLI compatibility: `rf object list` now returns paginated metadata instead of

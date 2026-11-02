@@ -42,6 +42,9 @@ pub(crate) struct DmRead {
     pub(crate) conversation: String,
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) relay_service_key: Option<String>,
+    /// Wait for deferred attachment fetches for at most this many seconds.
+    #[arg(long, value_name = "SECS", default_value_t = 0)]
+    pub(crate) wait: u64,
 }
 
 #[derive(Args)]
@@ -212,4 +215,41 @@ pub(crate) struct DmMute {
     pub(crate) unmute: bool,
     #[arg(long)]
     pub(crate) mute_until: Option<i64>,
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_read_wait_defaults_to_zero_and_parses_seconds() -> Result<(), clap::Error> {
+        for (extra, expected) in [(vec![], 0), (vec!["--wait", "240"], 240)] {
+            let mut args = vec!["rf", "dm", "read", "--account", "bob", "--conversation", "thread"];
+            args.extend(extra);
+            let cli = Cli::try_parse_from(args)?;
+            if let Command::Dm(DmCommand { action: DmAction::Read(read) }) = cli.command {
+                assert_eq!(read.wait, expected);
+            } else {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::InvalidSubcommand,
+                    "expected dm read",
+                ));
+            }
+        }
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "dm",
+                "read",
+                "--account",
+                "bob",
+                "--conversation",
+                "thread",
+                "--wait",
+                "-1"
+            ])
+            .is_err()
+        );
+        Ok(())
+    }
 }

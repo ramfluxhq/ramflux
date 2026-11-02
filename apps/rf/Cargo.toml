@@ -51,6 +51,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 
 [dev-dependencies]
+tokio = { version = "1.42", features = ["test-util"] }
 tracing = { workspace = true }
 ramflux-node-core = { workspace = true }
 

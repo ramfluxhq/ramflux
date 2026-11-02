@@ -33,11 +33,20 @@ not equal the node id. Do not substitute the discovery HTTP or gateway address.
 The receiver runs `rf dm read --account=ACCOUNT --conversation=CONVERSATION`.
 It automatically fetches, verifies and decrypts received attachments, returning
 their bytes in `decrypted_messages[].attachments[].plaintext_base64` (base64url).
-Repeat `dm read` after a fetch failure to retry; SDK clients can also invoke
-`object.fetch`. Automatic reads have a bounded work window. A deferred fetch
-resumes verified chunks and confirmed relay acknowledgements on the next read;
-it does not restart the acknowledgement pass. The daemon logs
-`scheduler_fetch_deadline` when that window expires.
+Pass `--wait 240` to poll deferred fetches within a caller-owned budget in seconds.
+The default, `--wait 0`, makes one read. While waiting, a generic failure exits
+immediately; `attachment fetch deferred; retry object.fetch` exits with status 1
+only when the wait budget ends. Each daemon page remains bounded to 20 seconds,
+and each SDK fetch to 60 seconds. Deferred fetches resume verified chunks and
+confirmed relay acknowledgements. The daemon logs `scheduler_fetch_deadline`
+when a page window expires.
+
+An upload grant expires 240 seconds after it is issued at upload, rather than
+240 seconds after the recipient starts reading. Missing bytes still require a
+valid grant. Once all encrypted chunks are cached, the receiver can verify and
+finish locally even after expiry, without contacting the relay or renewing the
+grant. A completed import removes its durable ACK progress rows. Repeat a read
+or invoke SDK `object.fetch` to resume after a failed attempt.
 `rf object list --account=ACCOUNT` lists available metadata on either side, using
 bounded directory pages rather than embedding ciphertext.
 Existing object data and attachment references remain readable.

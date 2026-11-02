@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use std::ops::{AsyncFnMut, AsyncFnOnce};
 use std::time::Duration;
 
+mod cached_import;
+
 #[derive(Clone, Copy)]
 pub(crate) struct ReferenceContext<'a> {
     pub owner: &'a str,
@@ -64,11 +66,13 @@ impl RamfluxClient {
     where
         F: AsyncFnMut(u32) -> Result<(), SdkError>,
     {
+        if self.object_key_slot_committed(&reference.key_slot)?
+            && self.received_attachment_is_local(reference)?
+        {
+            return Ok(());
+        }
         // Bind progress to the exact relay, grant, manifest and key slot, not a reusable object id.
-        let hash = ramflux_crypto::blake3_256_base64url(
-            "ramflux.attachment.ack.progress.v1",
-            &ramflux_protocol::canonical_json_bytes(reference)?,
-        );
+        let prefix = ack_progress_prefix(reference)?;
         let db = self.account_db()?;
         let selector = db
             .load_actor_state::<String>(&slot_reference_key(reference)?)?
@@ -76,7 +80,7 @@ impl RamfluxClient {
         let resumable =
             db.load_actor_state::<ReceivedAttachment>(&reference_key(&selector))?.is_some();
         for index in 0..total_chunks {
-            let key = format!("attachment/ack/{hash}/{index}");
+            let key = format!("{prefix}{index}");
             if resumable
                 && db
                     .load_actor_state::<AckProgress>(&key)?
@@ -203,7 +207,7 @@ impl RamfluxClient {
     }
 
     pub(crate) fn received_attachment_receipt(
-        &self,
+        &mut self,
         object_id: &str,
         operation_id: &str,
     ) -> Result<Option<Value>, SdkError> {
@@ -218,6 +222,26 @@ impl RamfluxClient {
             if old.transfer_state == "available" {
                 return Ok(Some(public_receipt(&old)));
             }
+        }
+        let Some(stored) =
+            self.account_db()?.load_actor_state::<ReceivedAttachment>(&reference_key(object_id))?
+        else {
+            return Ok(None);
+        };
+        if validate_reference(&stored.reference).is_ok()
+            && self.try_import_cached_attachment(&stored.reference)?.is_some()
+        {
+            let state = FetchState {
+                object_id: object_id.to_owned(),
+                operation_id: operation_id.to_owned(),
+                transfer_state: "available".into(),
+                last_error: None,
+                attempts: self
+                    .attachment_fetch_state(object_id)?
+                    .map_or(1, |old| old.attempts.saturating_add(1)),
+            };
+            self.persist_attachment_fetch_state(&state)?;
+            return Ok(Some(public_receipt(&state)));
         }
         Ok(None)
     }
@@ -264,7 +288,11 @@ impl RamfluxClient {
         };
         self.persist_attachment_fetch_state(&state)?;
         let outcome = async {
-            validate_reference(&stored.reference)?;
+            super::attachment_diagnostics::checked(
+                validate_reference(&stored.reference),
+                object_id,
+                "attachment_reference",
+            )?;
             if self.object_store_object(object_id)?.is_some_and(|object| object.tombstoned) {
                 return Err(SdkError::LocalBus("attachment was deleted".to_owned()));
             }
@@ -275,7 +303,16 @@ impl RamfluxClient {
             )? && self.received_attachment_is_local(&stored.reference)?;
             if !imported {
                 tokio::time::timeout(timeout, fetch(self, &stored.reference)).await.map_err(
-                    |_| SdkError::LocalBus("attachment fetch deadline exceeded".to_owned()),
+                    |_| {
+                        let error =
+                            SdkError::LocalBus("attachment fetch deadline exceeded".to_owned());
+                        super::attachment_diagnostics::failed(
+                            object_id,
+                            "attachment_fetch_deadline",
+                            &error,
+                        );
+                        error
+                    },
                 )??;
             }
             if !self.received_attachment_is_local(&stored.reference)? {
@@ -287,7 +324,7 @@ impl RamfluxClient {
         match outcome {
             Ok(()) => "available".clone_into(&mut state.transfer_state),
             Err(error) => {
-                super::attachment_diagnostics::failed(object_id, "attachment_fetch", &error);
+                super::attachment_diagnostics::context(object_id, "attachment_fetch", &error);
                 "failed".clone_into(&mut state.transfer_state);
                 // Fixed diagnostic categories never echo grants, key slots or transport bodies.
                 state.last_error = Some(
@@ -317,7 +354,14 @@ impl RamfluxClient {
         let Some(object) = self.object_store_object(&reference.object_id)? else {
             return Ok(false);
         };
-        if object.tombstoned || object.manifest_hash != reference.manifest_hash {
+        if object.tombstoned
+            || object.manifest_hash != reference.manifest_hash
+            || u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX) != reference.cipher_size
+            || ramflux_crypto::blake3_256_base64url(
+                ramflux_protocol::domain::OBJECT_MANIFEST,
+                &object.ciphertext,
+            ) != reference.manifest_hash
+        {
             return Ok(false);
         }
         let plaintext = self.decrypt_object(&reference.object_id)?;
@@ -425,6 +469,13 @@ impl RamfluxClient {
 
 fn reference_key(object_id: &str) -> String {
     format!("attachment/reference/{object_id}")
+}
+fn ack_progress_prefix(reference: &SdkDmAttachmentRef) -> Result<String, SdkError> {
+    let hash = ramflux_crypto::blake3_256_base64url(
+        "ramflux.attachment.ack.progress.v1",
+        &ramflux_protocol::canonical_json_bytes(reference)?,
+    );
+    Ok(format!("attachment/ack/{hash}/"))
 }
 fn chunk_key(reference: &SdkDmAttachmentRef, index: u32) -> String {
     format!("attachment/chunk/{}/{}/{index}", reference.object_id, reference.manifest_hash)

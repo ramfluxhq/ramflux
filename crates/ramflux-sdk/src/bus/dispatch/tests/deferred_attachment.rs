@@ -189,7 +189,7 @@ async fn scheduler_deadline_preserves_resume_before_retiring_the_borrowed_gatewa
         std::future::pending::<Result<serde_json::Value, SdkError>>(),
     )
     .await;
-    let error = finish_fetch(&mut account, engine, "object", result)
+    let error = finish_fetch(&mut account, engine, "object", result, None)
         .err()
         .ok_or_else(|| SdkError::LocalBus("deadline unexpectedly succeeded".into()))?;
     assert!(
@@ -206,6 +206,72 @@ async fn scheduler_deadline_preserves_resume_before_retiring_the_borrowed_gatewa
     assert_eq!(saved["previous_session_id"], "current-session");
     assert_eq!(saved["resume_token"], "current-resume");
     drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn simultaneous_attachment_and_engine_deadlines_preserve_resume_and_retry()
+-> Result<(), SdkError> {
+    let root = test_root();
+    let mut account = crate::bus::runtime_tests::account(
+        &root,
+        "race",
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    let engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let inner_expired = std::cell::Cell::new(false);
+    let result = run_fetch(&mut account, engine, "object", Some(deadline), async |client, engine| {
+        engine.config.previous_session_id = Some("same-tick-session".into());
+        engine.config.resume_token = Some("same-tick-resume".into());
+        client.account_db()?.persist_actor_state("attachment/fetch/object", &json!({
+            "object_id":"object","operation_id":"fetch-op","transfer_state":"fetching",
+            "last_error":null,"attempts":1,
+        }))?;
+        let engine_timeout = tokio::time::timeout_at(
+            deadline, std::future::pending::<Result<(), SdkError>>(),
+        ).await;
+        inner_expired.set(engine_timeout.is_err());
+        Ok(json!({"transfer_state":"failed","last_error":"attachment transport failed; retry object.fetch"}))
+    }).await;
+    assert!(inner_expired.get(), "the engine timeout must win the inner-first poll");
+    assert!(
+        matches!(result, Err(SdkError::LocalBus(text)) if text == "attachment fetch deferred; retry object.fetch")
+    );
+    assert!(!account.has_pooled_engine(), "a timed-out stream must be retired");
+    assert_eq!(account.gateway_config.previous_session_id.as_deref(), Some("same-tick-session"));
+    assert_eq!(account.gateway_config.resume_token.as_deref(), Some("same-tick-resume"));
+    let state: serde_json::Value = account
+        .client
+        .account_db()?
+        .load_actor_state("attachment/fetch/object")?
+        .ok_or(SdkError::AccountDbNotUnlocked)?;
+    assert_eq!(state["transfer_state"], "failed");
+    let mut spare = crate::bus::runtime_tests::account(
+        &root.join("spare"),
+        "race",
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    let mut resumed = spare.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    resumed.config = account.gateway_config.clone();
+    let retry = run_fetch(
+        &mut account,
+        resumed,
+        "object",
+        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(20)),
+        async |_, engine| {
+            assert_eq!(engine.config.resume_token.as_deref(), Some("same-tick-resume"));
+            Ok(json!({"transfer_state":"available"}))
+        },
+    )
+    .await?;
+    assert_eq!(retry.response_body["transfer_state"], "available");
+    assert!(account.has_pooled_engine());
+    drop(account);
+    drop(spare);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

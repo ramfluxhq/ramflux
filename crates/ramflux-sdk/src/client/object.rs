@@ -7,6 +7,8 @@ use crate::prelude::*;
 #[cfg(test)]
 #[path = "object_cache_tests.rs"]
 mod cache_tests;
+#[path = "object_cached_download.rs"]
+mod cached_download;
 #[cfg(test)]
 #[path = "object_listing_tests.rs"]
 mod listing_tests;
@@ -283,9 +285,9 @@ impl RamfluxClient {
     }
 
     /// Commits the advanced attachment key-slot recv session. T21-A2a: only called once the whole
-    /// attachment import (download, persist, plaintext verification, and every ACK) has succeeded.
+    /// attachment content is durable and verified, including verified local-cache completion.
     pub(crate) fn commit_object_key_slot_session(
-        &mut self,
+        &self,
         deferred: &DeferredObjectKeySlot,
     ) -> Result<(), SdkError> {
         if let Some(slot) = deferred.pair_slot.as_ref() {
@@ -317,6 +319,20 @@ impl RamfluxClient {
                 .ok_or_else(|| SdkError::LocalBus("legacy slot session missing".to_owned()))?
         };
         self.persist_dm_session(&deferred.conversation_id, &deferred.commit_label, "recv", session)
+    }
+
+    pub(super) fn object_key_slot_committed(
+        &self,
+        slot: &SdkObjectKeySlot,
+    ) -> Result<bool, SdkError> {
+        if slot.version == 2 {
+            self.pair_object_slot_committed(slot)
+        } else {
+            self.recv_session_checkpoint_at(
+                &slot.conversation_id,
+                &format!("object-slot:{}", slot.object_id),
+            )
+        }
     }
 
     #[cfg(feature = "itest-local-mint")]
@@ -376,7 +392,7 @@ impl RamfluxClient {
             return Err(SdkError::LocalBus("DM attachment plaintext hash mismatch".to_owned()));
         }
         // T21-A2a: the object is durable and verified; only now commit the slot recv checkpoint.
-        self.commit_object_key_slot_session(&key_slot)?;
+        self.commit_received_attachment_import(attachment, &key_slot)?;
         Ok(SdkDmAttachmentImportResult {
             object_id: attachment.object_id.clone(),
             manifest_hash: attachment.manifest_hash.clone(),
@@ -401,6 +417,10 @@ impl RamfluxClient {
                     attachment.schema
                 )));
             }
+            check = "verified_local_cache";
+            if let Some(imported) = self.try_import_cached_attachment(attachment)? {
+                return Ok(imported);
+            }
             check = "prepared_key_slot";
             let key_slot = if let Some(slot) = self.received_attachment_prepared_slot(attachment)? {
                 slot
@@ -420,7 +440,8 @@ impl RamfluxClient {
                 )
                 .await?;
             check = "verify_and_persist";
-            let verified = self.verify_persist_dm_attachment(attachment, &download, object_key)?;
+            let verified =
+                self.verify_persist_dm_attachment(attachment, &download, object_key, &mut check)?;
             let object = &verified.object;
             #[cfg(feature = "itest-rfd-fault")]
             crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::GranteeImport).await?;
@@ -462,27 +483,14 @@ impl RamfluxClient {
                         expires_at: download.expires_at,
                     };
                     check = "relay_ack";
-                    self.acknowledge_received_attachment_with(
-                        attachment,
-                        download.manifest.total_chunks,
-                        async |chunk_index| {
-                            ack_dm_attachment_chunk_via_relay_quic(
-                                engine,
-                                pool,
-                                &ack_ctx,
-                                chunk_index,
-                            )
-                            .await?;
-                            Ok(())
-                        },
-                    )
-                    .await?;
+                    self.acknowledge_dm_attachment_chunks(engine, pool, attachment, &ack_ctx)
+                        .await?;
                 }
             }
             // T21-A2a: every chunk was downloaded, persisted, plaintext-verified, and ACKed; only now
             // commit the slot recv checkpoint so a failed ACK above leaves the slot ratchet re-usable.
             check = "key_slot_commit";
-            self.commit_object_key_slot_session(&key_slot)?;
+            self.commit_received_attachment_import(attachment, &key_slot)?;
             Ok(SdkDmAttachmentImportResult {
                 object_id: attachment.object_id.clone(),
                 manifest_hash: attachment.manifest_hash.clone(),
@@ -492,7 +500,29 @@ impl RamfluxClient {
             })
         })
         .await;
-        super::attachment_diagnostics::checked(outcome, &attachment.object_id, check)
+        if check == "verified_local_cache" {
+            super::attachment_diagnostics::checked_context(outcome, &attachment.object_id, check)
+        } else {
+            super::attachment_diagnostics::checked(outcome, &attachment.object_id, check)
+        }
+    }
+
+    async fn acknowledge_dm_attachment_chunks(
+        &self,
+        engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
+        attachment: &SdkDmAttachmentRef,
+        context: &DmAttachmentFetch<'_>,
+    ) -> Result<(), SdkError> {
+        self.acknowledge_received_attachment_with(
+            attachment,
+            context.manifest.total_chunks,
+            async |index| {
+                ack_dm_attachment_chunk_via_relay_quic(engine, pool, context, index).await?;
+                Ok(())
+            },
+        )
+        .await
     }
 
     fn verify_persist_dm_attachment(
@@ -500,49 +530,46 @@ impl RamfluxClient {
         attachment: &SdkDmAttachmentRef,
         download: &DmAttachmentDownload,
         object_key: [u8; 32],
+        check: &mut &'static str,
     ) -> Result<VerifiedAttachmentImport, SdkError> {
-        let mut check = "manifest_hash";
-        let outcome = (|| {
-            let ciphertext = &download.ciphertext;
-            check = "manifest_hash";
-            let assembled_hash = ramflux_crypto::blake3_256_base64url(
-                ramflux_protocol::domain::OBJECT_MANIFEST,
-                ciphertext,
-            );
-            if assembled_hash != attachment.manifest_hash {
-                return Err(SdkError::LocalBus("DM attachment manifest hash mismatch".to_owned()));
-            }
-            let object = self.object_store.put_received_encrypted_object_with_key(
-                &attachment.object_id,
-                &attachment.manifest_hash,
-                ciphertext,
-                &attachment.plaintext_hash,
-                object_key,
-            );
-            check = "object_persist";
-            self.persist_object_if_unlocked(&object, Some(&object_key))?;
-            check = "transfer_persist";
-            self.persist_object_transfer(ObjectTransferPersist {
-                transfer_id: &download.transfer_id,
-                object: &object,
-                direction: OBJECT_TRANSFER_DOWNLOAD,
-                relay_endpoint: Some(&download.relay_endpoint),
-                chunk_size: download.manifest.chunk_size,
-                total_chunks: download.manifest.total_chunks,
-                completed: &download.completed,
-                done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
-                state: "complete",
-                last_error: None,
-                resume_token: None,
-                expires_at: Some(i64::try_from(download.expires_at).unwrap_or(i64::MAX)),
-            })?;
-            check = "content_decrypt";
-            let plaintext = self.decrypt_object(&attachment.object_id)?;
-            check = "plaintext_hash";
-            let plaintext_hash = verify_attachment_plaintext(attachment, &plaintext)?;
-            Ok(VerifiedAttachmentImport { object, plaintext, plaintext_hash })
-        })();
-        super::attachment_diagnostics::checked(outcome, &attachment.object_id, check)
+        let ciphertext = &download.ciphertext;
+        *check = "manifest_hash";
+        let assembled_hash = ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::OBJECT_MANIFEST,
+            ciphertext,
+        );
+        if assembled_hash != attachment.manifest_hash {
+            return Err(SdkError::LocalBus("DM attachment manifest hash mismatch".to_owned()));
+        }
+        let object = self.object_store.put_received_encrypted_object_with_key(
+            &attachment.object_id,
+            &attachment.manifest_hash,
+            ciphertext,
+            &attachment.plaintext_hash,
+            object_key,
+        );
+        *check = "object_persist";
+        self.persist_object_if_unlocked(&object, Some(&object_key))?;
+        *check = "transfer_persist";
+        self.persist_object_transfer(ObjectTransferPersist {
+            transfer_id: &download.transfer_id,
+            object: &object,
+            direction: OBJECT_TRANSFER_DOWNLOAD,
+            relay_endpoint: Some(&download.relay_endpoint),
+            chunk_size: download.manifest.chunk_size,
+            total_chunks: download.manifest.total_chunks,
+            completed: &download.completed,
+            done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
+            state: "complete",
+            last_error: None,
+            resume_token: None,
+            expires_at: Some(i64::try_from(download.expires_at).unwrap_or(i64::MAX)),
+        })?;
+        *check = "content_decrypt";
+        let plaintext = self.decrypt_object(&attachment.object_id)?;
+        *check = "plaintext_hash";
+        let plaintext_hash = verify_attachment_plaintext(attachment, &plaintext)?;
+        Ok(VerifiedAttachmentImport { object, plaintext, plaintext_hash })
     }
 
     #[cfg(feature = "itest-local-mint")]
@@ -834,7 +861,7 @@ impl RamfluxClient {
         }))
     }
 
-    fn object_content_key(&self, object_id: &str) -> Result<[u8; 32], SdkError> {
+    pub(super) fn object_content_key(&self, object_id: &str) -> Result<[u8; 32], SdkError> {
         if let Ok(key) = self.object_store.object_key(object_id) {
             return Ok(key);
         }
@@ -2534,7 +2561,7 @@ mod t21a1_tests {
     #[test]
     fn decrypt_object_key_slot_defers_slot_session_commit_until_committed() -> Result<(), SdkError>
     {
-        let (root, mut client) = slot_test_client("defer-commit")?;
+        let (root, client) = slot_test_client("defer-commit")?;
         let object_id = "object_slot_defer";
         let slot_conversation_id = "conv_slot_defer";
         let recipient_device_id = "recipient_device_slot";

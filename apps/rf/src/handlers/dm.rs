@@ -5,6 +5,9 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
+#[path = "dm/wait.rs"]
+mod wait;
+
 pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
@@ -114,19 +117,22 @@ async fn handle_dm_list(
 
 async fn handle_dm_read(bus: &mut LocalBusClient, read: DmRead) -> Result<(), RfError> {
     let request = LocalBusConversationRequest { conversation_id: read.conversation };
-    let received = bus
-        .request(
-            Some(read.account.clone()),
-            "message",
-            "message.receive",
-            serde_json::json!({
-                "limit": 100,
-                "conversation_id": request.conversation_id,
-                "auto_fetch_attachments": true,
-                "relay_service_key_base64": null,
-            }),
-        )
-        .await?;
+    let received = wait::receive(std::time::Duration::from_secs(read.wait), async || {
+        Ok(bus
+            .request(
+                Some(read.account.clone()),
+                "message",
+                "message.receive",
+                serde_json::json!({
+                    "limit": 100,
+                    "conversation_id": request.conversation_id,
+                    "auto_fetch_attachments": true,
+                    "relay_service_key_base64": null,
+                }),
+            )
+            .await?)
+    })
+    .await?;
     let mut value = bus
         .request(Some(read.account), "message", "message.read", serde_json::to_value(request)?)
         .await?;
