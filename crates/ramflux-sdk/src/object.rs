@@ -5,7 +5,7 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 #[cfg(feature = "itest-local-mint")]
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "itest-local-mint")]
 use sha2::Sha256;

@@ -127,7 +127,7 @@ impl NodeSecret {
     #[must_use]
     pub fn pseudonym(&self, domain: &str, value: &[u8]) -> String {
         use hmac::{Hmac, Mac};
-        let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(self.0.as_ref())
+        let mut mac = <Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(self.0.as_ref())
             .unwrap_or_else(|_| std::process::abort());
         mac.update(domain.as_bytes());
         mac.update(&[0]);

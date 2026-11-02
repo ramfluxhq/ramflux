@@ -7,7 +7,7 @@ use crate::{
     NodeCoreError, SIGNALING_STATE_KEY, SIGNALING_STATE_TABLE, load_snapshot, open_redb_with_table,
     save_snapshot,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

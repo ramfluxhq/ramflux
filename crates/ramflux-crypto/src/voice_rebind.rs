@@ -3,7 +3,7 @@
 
 //! Canonical address-bound, truncated HMAC proof for opaque voice relay rebinding.
 use crate::CryptoError;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::net::SocketAddr;
 fn mac(

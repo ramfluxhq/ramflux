@@ -12,7 +12,7 @@ use crate::{
     PreAuthChallenge, load_snapshot, open_redb_with_table, save_snapshot, save_snapshot_batch,
     serialize_snapshot_value,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;

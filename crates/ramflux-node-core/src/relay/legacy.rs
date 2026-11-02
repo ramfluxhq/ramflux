@@ -8,7 +8,7 @@ use super::{
     ObjectRelayTombstone, Serialize, clamp_relay_chunk_expires_at, object_relay_chunk_cipher_hash,
 };
 
-use hmac::Mac;
+use hmac::{KeyInit, Mac};
 
 pub(super) type HmacSha256 = Hmac<sha2::Sha256>;
 pub const OBJECT_RELAY_CLOCK_SKEW_LEEWAY_SECONDS: u64 = 60;

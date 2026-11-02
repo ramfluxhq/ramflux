@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use ramflux_core::DomainTag;
 use secrecy::Secret;
 use sha2::Sha256;
@@ -178,15 +178,15 @@ pub(crate) fn hkdf_sha256(
     output: &mut [u8],
 ) -> Result<(), CryptoError> {
     let mut extract =
-        <HmacSha256 as Mac>::new_from_slice(salt).map_err(|_err| CryptoError::HmacFailed)?;
+        <HmacSha256 as KeyInit>::new_from_slice(salt).map_err(|_err| CryptoError::HmacFailed)?;
     extract.update(ikm);
     let prk = extract.finalize().into_bytes();
     let mut previous = Vec::new();
     let mut offset = 0usize;
     let mut counter = 1u8;
     while offset < output.len() {
-        let mut expand =
-            <HmacSha256 as Mac>::new_from_slice(&prk).map_err(|_err| CryptoError::HmacFailed)?;
+        let mut expand = <HmacSha256 as KeyInit>::new_from_slice(&prk)
+            .map_err(|_err| CryptoError::HmacFailed)?;
         expand.update(&previous);
         expand.update(info);
         expand.update(&[counter]);

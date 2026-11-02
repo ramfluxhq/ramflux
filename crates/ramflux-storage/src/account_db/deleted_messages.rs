@@ -5,7 +5,7 @@
 
 use super::AccountDb;
 use crate::StorageError;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::Sha256;
