@@ -6,7 +6,8 @@ use rusqlite::Connection;
 use std::fmt::Write as _;
 
 pub(crate) fn install(db: &Connection) -> rusqlite::Result<()> {
-    db.execute_batch(SCHEMA)
+    db.execute_batch(SCHEMA)?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS object_key_slot_wire ON object_key_slot(object_id); CREATE INDEX IF NOT EXISTS object_transfer_wire ON object_transfer_state(object_id); CREATE INDEX IF NOT EXISTS object_tombstone_target ON object_tombstone(target_kind,target_id);")
 }
 
 pub(crate) const SCHEMA: &str = r"
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS object_identity_replacement(commitment TEXT PRIMARY K
 CREATE TABLE IF NOT EXISTS object_erasure_fence(commitment TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS object_erasure_lookup(lookup TEXT PRIMARY KEY,commitment TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS object_erasure_work(commitment TEXT PRIMARY KEY,wire_id TEXT NOT NULL,manifest_hash TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS object_erasure_work_wire ON object_erasure_work(wire_id,manifest_hash);
 CREATE TABLE IF NOT EXISTS object_projection_erasure_work(selector TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS object_reference_erasure_work(reference_hash TEXT PRIMARY KEY,selector TEXT NOT NULL,selector_lookup TEXT NOT NULL,commitment TEXT NOT NULL);
 CREATE TRIGGER IF NOT EXISTS object_fence_no_update BEFORE UPDATE ON object_erasure_fence BEGIN SELECT RAISE(ABORT,'object erasure fences are append-only'); END;
@@ -63,12 +65,15 @@ pub(crate) fn erasure_body(db: &Connection) -> rusqlite::Result<String> {
 }
 
 pub(crate) fn payload_erasure_body(db: &Connection) -> rusqlite::Result<String> {
-    let mut body = String::from(PAYLOAD_ERASE);
+    let mut body = String::from(
+        "UPDATE account_erasure_generation SET generation=generation+1 WHERE singleton=1 AND EXISTS(SELECT 1 FROM object_erasure_work w JOIN object_retention_payload p USING(commitment));",
+    );
+    body.push_str(PAYLOAD_ERASE);
     body.push_str(&payload_cleanup(db)?);
     Ok(body)
 }
 
-fn payload_cleanup(db: &Connection) -> rusqlite::Result<String> {
+pub(super) fn payload_cleanup(db: &Connection) -> rusqlite::Result<String> {
     let mut body = String::new();
     let wires = "SELECT w.wire_id FROM object_erasure_work w WHERE EXISTS(SELECT 1 FROM object_index o WHERE o.object_id=w.wire_id AND CAST(o.manifest_hash AS TEXT)=w.manifest_hash) OR NOT EXISTS(SELECT 1 FROM object_retention_payload p WHERE p.wire_id=w.wire_id AND p.commitment NOT IN (SELECT commitment FROM object_erasure_work))";
     for table in [
@@ -86,7 +91,7 @@ fn payload_cleanup(db: &Connection) -> rusqlite::Result<String> {
                 "object_key_slot"|"object_chunk"=>format!("EXISTS(SELECT 1 FROM object_manifest m JOIN object_erasure_work w ON w.wire_id=m.object_id WHERE m.object_id={table}.object_id AND (w.manifest_hash=CAST(m.manifest_hash AS TEXT) OR w.manifest_hash=CAST(m.chunk_manifest_hash AS TEXT)))"),
                 _=>"0".into(),
             };
-            write!(&mut body, "DELETE FROM {table} WHERE object_id IN ({wires}) OR {exact};")
+            write!(&mut body, "DELETE FROM {table} WHERE object_id IN (SELECT wire_id FROM object_erasure_work) AND (object_id IN ({wires}) OR {exact});")
                 .map_err(|_| rusqlite::Error::InvalidQuery)?;
         }
     }
@@ -95,12 +100,11 @@ fn payload_cleanup(db: &Connection) -> rusqlite::Result<String> {
         "DELETE FROM object_tombstone WHERE target_kind='object' AND target_id IN ({wires});"
     )
     .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    body.push_str("DELETE FROM object_index WHERE EXISTS(SELECT 1 FROM object_erasure_work w WHERE w.wire_id=object_index.object_id AND w.manifest_hash=CAST(object_index.manifest_hash AS TEXT)); DELETE FROM object_retention_payload WHERE commitment IN (SELECT commitment FROM object_erasure_work); DELETE FROM object_erasure_work;");
+    body.push_str("DELETE FROM object_index WHERE object_id IN (SELECT wire_id FROM object_erasure_work) AND EXISTS(SELECT 1 FROM object_erasure_work w WHERE w.wire_id=object_index.object_id AND w.manifest_hash=CAST(object_index.manifest_hash AS TEXT)); DELETE FROM object_retention_payload WHERE commitment IN (SELECT commitment FROM object_erasure_work); DELETE FROM object_erasure_work;");
     Ok(body)
 }
 
 const ERASE: &str = r"
- UPDATE account_erasure_generation SET generation=generation+1 WHERE singleton=1;
  DELETE FROM object_reference_erasure_work;
  DELETE FROM object_projection_erasure_work;
  DELETE FROM object_erasure_work;
@@ -110,6 +114,7 @@ const ERASE: &str = r"
  WHERE m.message_id=NEW.message_id;
  INSERT INTO object_projection_erasure_work SELECT DISTINCT selector FROM object_reference_erasure_work;
  DELETE FROM object_message_reference WHERE message_id=NEW.message_id;
+ UPDATE account_erasure_generation SET generation=generation+1 WHERE singleton=1 AND changes()>0;
  DELETE FROM object_legacy_reference_context WHERE message_id=NEW.message_id;
  DELETE FROM object_reference_erasure_work WHERE EXISTS(SELECT 1 FROM object_message_reference m WHERE m.reference_hash=object_reference_erasure_work.reference_hash);
  INSERT INTO object_erasure_lookup SELECT selector_lookup,commitment FROM object_reference_erasure_work WHERE 1 ON CONFLICT DO NOTHING;
@@ -125,7 +130,6 @@ const ERASE: &str = r"
 ";
 
 const PAYLOAD_ERASE: &str = r#"
- UPDATE account_erasure_generation SET generation=generation+1 WHERE singleton=1 AND EXISTS(SELECT 1 FROM object_erasure_work);
  INSERT INTO object_erasure_work WITH RECURSIVE retired(commitment) AS (SELECT commitment FROM object_erasure_work UNION SELECT d.parent_commitment FROM object_payload_dependency d JOIN retired r ON r.commitment=d.child_commitment) SELECT p.commitment,p.wire_id,p.manifest_hash FROM object_retention_payload p JOIN retired r USING(commitment) WHERE p.retention_class='transport' ON CONFLICT DO NOTHING;
  DELETE FROM object_message_reference WHERE reference_hash IN (SELECT reference_hash FROM object_retention_reference WHERE commitment IN (SELECT commitment FROM object_erasure_work));
  DELETE FROM object_retention_reference WHERE commitment IN (SELECT commitment FROM object_erasure_work);

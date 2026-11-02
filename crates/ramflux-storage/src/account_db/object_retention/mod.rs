@@ -85,12 +85,12 @@ impl AccountDb {
         if !self.connection.is_autocommit()? {
             return Ok(());
         }
-        generation::retire(
-            &self.object_retirement.generations,
-            self.privacy_erasure_generation()?,
-        )?;
         let callback = self.object_retirement.callback.borrow().clone();
         let result = (|| -> Result<(), StorageError> {
+            generation::retire(
+                &self.object_retirement.generations,
+                self.privacy_erasure_generation()?,
+            )?;
             loop {
                 let mut statement = self.connection.prepare("SELECT rowid,commitment FROM object_erasure_fence WHERE rowid>?1 ORDER BY rowid LIMIT 256")?;
                 let rows = statement
@@ -243,6 +243,8 @@ impl AccountDb {
             self.connection.execute("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class) VALUES(?1,?2,?3,?4,CASE WHEN EXISTS(SELECT 1 FROM object_index WHERE object_id=?2) THEN 'legacy' ELSE 'imported' END) ON CONFLICT(commitment) DO UPDATE SET retention_class=CASE WHEN object_retention_payload.retention_class='pre_send' THEN 'imported' ELSE object_retention_payload.retention_class END,hold_expires_at=CASE WHEN object_retention_payload.retention_class='transport' THEN object_retention_payload.hold_expires_at ELSE NULL END", params![digest, owner.wire_id, owner.manifest_hash, object_erasure_lookup(&self.principal_commitment, owner.wire_id)])?;
             self.connection.execute("INSERT INTO object_retention_reference(reference_hash,commitment,selector,selector_lookup,reference_json) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(reference_hash) DO NOTHING", params![owner.reference_hash,digest,owner.selector,object_erasure_lookup(&self.principal_commitment, owner.selector),serde_json::to_vec(owner.reference)?])?;
             self.connection.execute("INSERT INTO object_message_reference(message_id,reference_hash,metadata_json) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING", params![owner.message_id,owner.reference_hash,serde_json::to_vec(owner.metadata)?])?;
+            // Newly authenticated ownership is also sufficient to promote a discovered legacy payload.
+            self.connection.execute("UPDATE object_retention_payload SET retention_class='imported' WHERE commitment=?1 AND retention_class='legacy'", params![digest])?;
             self.connection.execute("INSERT INTO message_copy_binding VALUES(?1,?2) ON CONFLICT DO NOTHING", params![format!("object:{}",owner.selector),owner.message_id])?;
             self.connection.execute("INSERT INTO message_copy_binding VALUES(?1,?2) ON CONFLICT DO NOTHING", params![format!("object:{}",owner.wire_id),owner.message_id])?;
             // Copies already associated with the shared selector must gain the new owner too.
@@ -257,3 +259,6 @@ mod tests;
 
 #[cfg(test)]
 mod upgrade_tests;
+
+#[cfg(test)]
+mod review_tests;

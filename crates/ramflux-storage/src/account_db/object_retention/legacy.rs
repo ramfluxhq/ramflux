@@ -173,6 +173,8 @@ fn discover_reference(
         &ramflux_protocol::canonical_json_bytes(reference)?,
     );
     db.execute("INSERT INTO object_message_reference SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM direct_message_projection WHERE message_id=?1 AND deleted=0) ON CONFLICT DO NOTHING",params![message,hash,metadata])?;
+    // A discovered live owner proves import provenance; zero-reference legacy rows stay ambiguous.
+    db.execute("UPDATE object_retention_payload SET retention_class='imported' WHERE commitment=?1 AND retention_class='legacy' AND EXISTS(SELECT 1 FROM object_message_reference WHERE message_id=?2 AND reference_hash=?3)",params![digest,message,hash])?;
     Ok(())
 }
 

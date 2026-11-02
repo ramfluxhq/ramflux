@@ -369,7 +369,7 @@ fn backup_authorization_rejection_has_specific_job_and_bus_codes() -> TestResult
 async fn backup_publication_erasure_generation_orders_both_deletion_races() -> TestResult {
     use super::test_install::InstallPoint;
     LocalSet::new().run_until(Box::pin(async {
-        for (authorization_first, shared_owner) in [(false,false),(true,false),(false,true)] {
+        for (authorization_first, shared_owner, attachment) in [(false,false,true),(true,false,true),(false,true,true),(false,false,false)] {
             let root=Root::new()?;
             let vault=TestVault::default();
             let account=create(&root.0,"account",&vault,crate::custody::network_now()?)?;
@@ -379,6 +379,7 @@ async fn backup_publication_erasure_generation_orders_both_deletion_races() -> T
             client.unlock_account("account",LOCAL_SECRET.as_bytes())?;
             let db=client.account_db()?;
             db.send_direct_message("thread","message","peer",b"body")?;
+            if attachment {
             let mut donor=ramflux_sync::ObjectStore::new();
             let object=donor.put_encrypted_object("publication-wire",b"publication-private-body")?;
             let key=donor.object_key(&object.object_id)?;
@@ -398,6 +399,7 @@ async fn backup_publication_erasure_generation_orders_both_deletion_races() -> T
                 ciphertext:&object.ciphertext,plaintext_hash:&object.plaintext_hash,tombstoned:false,
                 backup_excluded:false,content_key:Some(&key),object:&object,updated_at:1,
             })?;
+            }
             drop(client);
             let supervisor=supervisor(&root.0)?;
             let (started,ready)=tokio::sync::oneshot::channel();
@@ -421,9 +423,9 @@ async fn backup_publication_erasure_generation_orders_both_deletion_races() -> T
             connection.attended_account_id=Some("account".into());
             supervisor.request(LocalBusFrame::request("delete",Some("account".into()),"message","message.delete",json!({"conversation_id":"thread","message_id":"message","delete_scope":"local"})),&connection).await?;
             release.send(())?;
-            let expected=if authorization_first {crate::backup::BackupJobState::Done}else{crate::backup::BackupJobState::Failed};
+            let expected=if authorization_first || !attachment {crate::backup::BackupJobState::Done}else{crate::backup::BackupJobState::Failed};
             let job=finished(&supervisor,id,expected).await?;
-            if authorization_first { assert!(path.is_file()); } else {
+            if authorization_first || !attachment { assert!(path.is_file()); } else {
                 assert_eq!(job.error.ok_or("failure")?.code,crate::backup::BackupFailureCode::ObjectErased);
                 assert!(!path.exists());
                 assert!(!root.0.join(format!(".ramflux-backup-{id}.partial")).exists());

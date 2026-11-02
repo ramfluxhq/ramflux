@@ -307,3 +307,18 @@ an intact source if ownership remains ambiguous.
 A fresh restore using only a pre-delete archive has no newer erasure fence.
 Deletion does not revoke another device's data, relay copies, user-owned exports
 or bytes already returned to callers. Those copies are outside local erasure.
+
+
+Upgrade ownership discovery promotes a legacy payload to imported in the same
+transaction that proves a live message owner. A newly authenticated message owner
+also promotes an existing legacy payload. Explicit standalone retention remains
+standalone. Only rows that remain ambiguous without a proven owner retain the
+legacy preservation policy; a proven pre-upgrade attachment is erased after its
+last message owner is deleted, including its ciphertext and content key.
+
+Two remaining crash/upgrade limitations are tracked separately: task fallback
+metadata written before message-footprint enrollment can remain after deletion;
+and a sender process dying after successful delivery but before recording the
+sender-side attachment owner can lose its own copy when the send hold expires.
+Receiver ownership is durable before import, so an interrupted receive can retry
+without orphan reclamation fencing its attachment.

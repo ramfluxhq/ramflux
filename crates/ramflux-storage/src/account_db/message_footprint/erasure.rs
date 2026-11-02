@@ -5,8 +5,8 @@
 use rusqlite::Connection;
 
 pub(super) fn install(db: &Connection) -> rusqlite::Result<()> {
-    let mut body = super::super::object_retention::erasure_body(db)?;
-    body.push_str(BODY);
+    let objects = super::super::object_retention::erasure_body(db)?;
+    let mut body = String::from(BODY);
     for (table, kind) in [
         ("backup_archived_actor_state", "archived_actor"),
         ("backup_archived_local_event", "archived_event"),
@@ -16,6 +16,8 @@ pub(super) fn install(db: &Connection) -> rusqlite::Result<()> {
         }
     }
     db.execute_batch(&format!("DROP TRIGGER IF EXISTS footprint_erase_message; CREATE TRIGGER footprint_erase_message AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 BEGIN {body} END;"))?;
+    // Keep object work behind the indexed message edge, including on deletion re-fires.
+    db.execute_batch(&format!("DROP TRIGGER IF EXISTS object_erase_message; CREATE TRIGGER object_erase_message AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 AND EXISTS(SELECT 1 FROM object_message_reference WHERE message_id=NEW.message_id) BEGIN {objects} END;"))?;
     Ok(())
 }
 const BODY: &str = r"

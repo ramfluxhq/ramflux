@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Upgrade Web Push P-256 ECDH to p256 0.14 and crypto-bigint 0.7.10, preserving
   RFC encryption bytes and removing the RUSTSEC-2026-0387 audit exceptions.
+- Erase proven pre-upgrade attachments after their last message owner is removed;
+  preserve only ambiguous legacy payloads. Probe object cleanup through indexes,
+  bind legacy receive owners before import, and advance backup privacy generation
+  only for actual object/reference erasure. Post-commit notification failures no
+  longer report a committed deletion as failed. Pre-enrollment task metadata and
+  the sender delivery/owner crash window remain follow-up limitations.
+
 - Bound custody capacity reset hints to two days, keep node-bound retry deadlines
   without repeated status writes, and expose router budget inspection through
   the operator-only loopback administration overlay.

@@ -799,7 +799,23 @@ fn r8_backup_actor_uses_the_manifests_current_branch_epoch() -> TestResult {
 async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestResult {
     LocalSet::new().run_until(async {
         let root = crate::bus::runtime_tests::root("backup-diagnostic-erasure");
-        let supervisor = source_supervisor(&root, SMALL)?;
+        let config = LocalBusConfig::new(root.join("bus.sock"), &root);
+        let source = root.clone();
+        let initialize: AccountInitializer = Box::new(move |index| {
+            let state = initialized_at_scale(&source, index, SMALL)?;
+            let db = state.client.account_db()?;
+            let (object, _) = db.load_object::<ramflux_sync::EncryptedObject>("file")?
+                .ok_or_else(|| SdkError::LocalBus("diagnostic fixture attachment missing".into()))?;
+            db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
+                reference_hash: "diagnostic-reference", wire_id: &object.object_id,
+                manifest_hash: &object.manifest_hash, selector: "file", message_id: "m0",
+                reference: &json!({"object_id":"file","manifest_hash":object.manifest_hash}),
+                metadata: &json!({"message_id":"m0"}),
+            })?;
+            Ok(state)
+        });
+        let supervisor = Supervisor::from_initializers(&config,
+            vec![("alice".into(), initialize)], Some("alice".into()))?;
         call(&supervisor, "account.status", Some("alice"), json!({})).await?;
         let captured = supervisor.account_actor("alice").ok_or("actor")?.capture_backup().await?;
         let jobs = &supervisor.backup_jobs;

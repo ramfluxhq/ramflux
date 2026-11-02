@@ -148,7 +148,10 @@ impl AccountDb {
         let transaction = self.connection.immediate_transaction().map_err(StorageError::from)?;
         let value = write()?;
         transaction.commit().map_err(StorageError::from)?;
-        self.notify_object_retirement().map_err(E::from)?;
+        if let Err(error) = self.notify_object_retirement() {
+            // The write is committed. Notification already invalidated the cache conservatively.
+            tracing::warn!(%error, "committed write retirement notification failed");
+        }
         Ok(value)
     }
 }

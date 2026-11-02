@@ -295,41 +295,7 @@ fn attachment_erasure_canary_covers_payload_legacy_tables_archives_journal_and_w
         &json!({"payload":"private-canary","key":"body-canary"}),
     )?;
     db.delete_direct_message("thread", "one", "local", "delete")?;
-    db.connection.call(|sql| {
-        let names = sql
-            .prepare(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-            )?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for name in names {
-            let quoted = name.replace('"', "\"\"");
-            let mut query = sql.prepare(&format!("SELECT * FROM \"{quoted}\""))?;
-            let columns = query.column_count();
-            let mut rows = query.query([])?;
-            while let Some(row) = rows.next()? {
-                for column in 0..columns {
-                    let (rusqlite::types::ValueRef::Text(bytes)
-                    | rusqlite::types::ValueRef::Blob(bytes)) = row.get_ref(column)?
-                    else {
-                        continue;
-                    };
-                    for canary in [
-                        b"private-canary".as_slice(),
-                        b"cipher-canary",
-                        b"body-canary",
-                        &[7_u8; 32],
-                    ] {
-                        assert!(
-                            !bytes.windows(canary.len()).any(|part| part == canary),
-                            "secret retained in {name} column {column}"
-                        );
-                    }
-                }
-            }
-        }
-        Ok(())
-    })?;
+    assert_erasure_canary_absent(&db)?;
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -367,5 +333,44 @@ fn shared_reference_erasure_invalidates_snapshot_resources_without_retiring_payl
     drop(reader);
     drop(db);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+pub(super) fn assert_erasure_canary_absent(db: &AccountDb) -> Result<(), StorageError> {
+    db.connection.call(|sql| {
+        let names = sql
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for name in names {
+            let quoted = name.replace('"', "\"\"");
+            let mut query = sql.prepare(&format!("SELECT * FROM \"{quoted}\""))?;
+            let columns = query.column_count();
+            let mut rows = query.query([])?;
+            while let Some(row) = rows.next()? {
+                for column in 0..columns {
+                    let (rusqlite::types::ValueRef::Text(bytes)
+                    | rusqlite::types::ValueRef::Blob(bytes)) = row.get_ref(column)?
+                    else {
+                        continue;
+                    };
+                    for canary in [
+                        b"private-canary".as_slice(),
+                        b"cipher-canary",
+                        b"body-canary",
+                        &[7_u8; 32],
+                    ] {
+                        assert!(
+                            !bytes.windows(canary.len()).any(|part| part == canary),
+                            "secret retained in {name} column {column}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
     Ok(())
 }

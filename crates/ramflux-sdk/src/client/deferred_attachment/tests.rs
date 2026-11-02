@@ -11,6 +11,16 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Result<Self, SdkError> {
+        let fixture = Self::without_owner()?;
+        fixture.client.persist_received_attachment_reference(
+            &fixture.reference,
+            "owner",
+            "conversation",
+            "message",
+        )?;
+        Ok(fixture)
+    }
+    fn without_owner() -> Result<Self, SdkError> {
         static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -67,12 +77,6 @@ impl Fixture {
             object,
             key_slot: slot,
         };
-        client.persist_received_attachment_reference(
-            &reference,
-            "owner",
-            "conversation",
-            "message",
-        )?;
         Ok(Self { client, root, reference, package })
     }
 }
@@ -408,5 +412,62 @@ async fn attachment_ack_completion_after_deletion_returns_object_erased_without_
         ),
         Err(SdkError::ObjectErased)
     ));
+    Ok(())
+}
+
+// Mutation: skip the owner registration in prepare_legacy_attachment_imports before import.
+#[tokio::test]
+async fn legacy_attachment_half_import_survives_reopen_and_receive_retry() -> Result<(), SdkError> {
+    let mut f = Fixture::without_owner()?;
+    f.client.prepare_legacy_attachment_imports(
+        std::slice::from_ref(&f.reference),
+        "owner",
+        "conversation",
+        "message",
+    )?;
+    let slot = f.client.decrypt_object_key_slot(&f.reference.key_slot)?;
+    let db = f.client.account_db()?;
+    db.retain_object(
+        &f.reference.object_id,
+        &f.reference.manifest_hash,
+        ramflux_storage::ObjectRetention::Imported,
+    )?;
+    let object = &f.package.object;
+    db.upsert_object(&ramflux_storage::ObjectWrite {
+        object_id: &object.object_id,
+        manifest_hash: &object.manifest_hash,
+        nonce: &object.nonce,
+        ciphertext: &object.ciphertext,
+        plaintext_hash: &object.plaintext_hash,
+        tombstoned: false,
+        backup_excluded: false,
+        content_key: Some(&slot.object_key),
+        object,
+        updated_at: 1,
+    })?;
+    // Simulate death after payload commit, before message projection, receive ratchet or cursor.
+    assert!(f.client.direct_message_by_id("message")?.is_none());
+    drop(std::mem::replace(&mut f.client, RamfluxClient::new()));
+    f.client = open(&f.root, false)?;
+    assert_eq!(
+        f.client.decrypt_object("remote-object").ok().as_deref(),
+        Some(b"received attachment".as_slice()),
+        "reopen fenced the half-imported attachment"
+    );
+    f.client.prepare_legacy_attachment_imports(
+        std::slice::from_ref(&f.reference),
+        "owner",
+        "conversation",
+        "message",
+    )?;
+    let package = f.package.clone();
+    let retry = f
+        .client
+        .fetch_received_with("remote-object", "receive-retry", FETCH_TIMEOUT, async |client, _| {
+            client.import_shared_object(&package)?;
+            Ok(())
+        })
+        .await?;
+    assert_eq!(retry["transfer_state"], "available");
     Ok(())
 }
