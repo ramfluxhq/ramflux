@@ -46,7 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outgoing rows. Copies are best effort, released after confirmed submission and
   deduplicated against original delivery and explicit history import. Native
   copies retain custody scope and freshness checks; deletion erases attribution
-  while preserving private replay claims.
+  while preserving private replay claims. Sibling history tombstones erase live
+  sent-copy rows and prevent late copies from reviving deleted own messages.
 
 - Upgrade SHA-2, HMAC, HKDF, and X25519 dependencies without changing stored or wire formats.
 - Prepare task courier routes outside the account synchronization loop, isolate

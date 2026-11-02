@@ -95,3 +95,41 @@ fn replay_reference_rejects_raw_keys_missing_targets_and_malformed_bindings()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn original_replay_targets_require_two_private_digests_and_track_each_deleted_row()
+-> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("replay-original-targets")?;
+    let original = db.own_sent_index_digest("original", "conversation-and-original")?;
+    let mut keys = Vec::new();
+    for id in ["first", "second"] {
+        db.send_direct_message("thread", id, "sender", b"private body")?;
+        let target = db.own_sent_index_digest("original-target", id)?;
+        let key = format!("own-device/sent-original/{original}/{target}");
+        db.persist_message_replay_reference(&key, Some(id), None, None)?;
+        db.delete_direct_message("thread", id, "self", &format!("delete-{id}"))?;
+        keys.push(key);
+    }
+    for key in keys {
+        assert!(matches!(
+            db.load_actor_state::<MessageReplayReference>(&key)?,
+            Some(MessageReplayReference::Target { deleted: true, .. })
+        ));
+    }
+    for suffix in
+        [original.clone(), format!("{original}/raw-target"), format!("{original}/{original}/extra")]
+    {
+        assert!(
+            db.persist_message_replay_reference(
+                &format!("own-device/sent-original/{suffix}"),
+                Some("first"),
+                None,
+                None
+            )
+            .is_err()
+        );
+    }
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

@@ -7,9 +7,14 @@ use crate::{MessageReplayReference, StorageError};
 use rusqlite::params;
 
 fn replay_key(key: &str) -> Option<&str> {
-    ["own-device/sent-alias/", "own-device/sent-ciphertext/", "own-device/imported-ciphertext/"]
-        .into_iter()
-        .find_map(|prefix| key.strip_prefix(prefix))
+    [
+        "own-device/sent-alias/",
+        "own-device/sent-ciphertext/",
+        "own-device/imported-ciphertext/",
+        "own-device/sent-original/",
+    ]
+    .into_iter()
+    .find_map(|prefix| key.strip_prefix(prefix))
 }
 fn require_digest(value: &str) -> Result<(), StorageError> {
     let decoded = ramflux_protocol::decode_base64url(value)
@@ -19,13 +24,23 @@ fn require_digest(value: &str) -> Result<(), StorageError> {
     }
     Ok(())
 }
+fn require_replay_digest(key: &str, digest: &str) -> Result<(), StorageError> {
+    if key.starts_with("own-device/sent-original/") {
+        let (original, target) =
+            digest.split_once('/').ok_or(StorageError::AuthorizationRejected)?;
+        require_digest(original)?;
+        require_digest(target)
+    } else {
+        require_digest(digest)
+    }
+}
 pub(super) fn register(
     db: &AccountDb,
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
     let Some(digest) = replay_key(key) else { return Ok(()) };
-    require_digest(digest)?;
+    require_replay_digest(key, digest)?;
     let reference: MessageReplayReference = serde_json::from_value(value.clone())?;
     // Replacing a target with an ambiguity fence must detach its old owner as well.
     db.connection.execute(
@@ -60,7 +75,7 @@ impl AccountDb {
         binding: Option<&str>,
         scope: Option<&str>,
     ) -> Result<(), StorageError> {
-        require_digest(replay_key(key).ok_or(StorageError::AuthorizationRejected)?)?;
+        require_replay_digest(key, replay_key(key).ok_or(StorageError::AuthorizationRejected)?)?;
         self.write_transaction(|| {
             let reference = if let Some(id) = message {
                 let target =

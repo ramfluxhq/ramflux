@@ -691,6 +691,9 @@ impl RamfluxClient {
         let mut imported_messages = 0_usize;
         for message in &bundle.messages {
             let content = bundle.contents.get(&message.message_id).map(|bytes| bytes.as_slice());
+            if message.deleted && message.is_own {
+                self.erase_own_sent_copies_of_original(message)?;
+            }
             if self.already_projected_own_sent_message(message, content)? {
                 continue;
             }
@@ -1026,8 +1029,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_late_live_copy_reuses_history_preserves_deletion_and_distinguishes_source_devices()
-    -> Result<(), SdkError> {
+    fn a_late_live_copy_reuses_history_and_preserves_account_deletion() -> Result<(), SdkError> {
         let (client, root) =
             client_with_account("history-first", "principal_sync", "target_device_sync")?;
         client.send_direct_message("direct", "live-message", "source_device_sync", &[1, 2, 3])?;
@@ -1107,8 +1109,8 @@ pub(crate) mod tests {
         )?;
         assert_eq!(
             client.direct_messages("direct")?.len(),
-            2,
-            "equal envelope ids from different devices are distinct"
+            1,
+            "an own-account tombstone fences late copies even from another device"
         );
         drop(client);
         std::fs::remove_dir_all(root)?;
@@ -1962,3 +1964,7 @@ mod backup_page_shape_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "own_device_sync/deletion_tests.rs"]
+mod deletion_tests;

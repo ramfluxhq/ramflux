@@ -215,6 +215,52 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    fn index_own_sent_original(
+        &self,
+        conversation: &str,
+        original: &str,
+        id: &str,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let prefix = original_index_prefix(db, conversation, original)?;
+        // Separate targets keep same-id copies from different devices independently erasable.
+        let key = format!("{prefix}{}", db.own_sent_index_digest("original-target", id)?);
+        db.persist_message_replay_reference(&key, Some(id), None, None)?;
+        Ok(())
+    }
+
+    pub(super) fn erase_own_sent_copies_of_original(
+        &self,
+        original: &DirectMessageRecord,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let prefix = original_index_prefix(db, &original.conversation_id, &original.message_id)?;
+        let mut after = String::new();
+        loop {
+            let keys = db.actor_state_key_page_after(&prefix, &after, 128)?;
+            if keys.is_empty() {
+                break;
+            }
+            for key in keys {
+                if let Some(reference) =
+                    db.load_actor_state::<ramflux_storage::MessageReplayReference>(&key)?
+                    && let Some(id) = reference.message_id()
+                    && let Some(row) = self.direct_message_by_id(id)?
+                    && row.conversation_id == original.conversation_id
+                {
+                    db.import_deleted_message_projection(
+                        &row.conversation_id,
+                        id,
+                        true,
+                        row.created_at,
+                    )?;
+                }
+                after = key;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn index_imported_own_sent_ciphertext(
         &self,
         message: &DirectMessageRecord,
@@ -343,6 +389,7 @@ impl RamfluxClient {
                 created_at: packet.authored_at.unwrap_or(at),
             })?;
         }
+        self.index_own_sent_original(conversation, &packet.message_id, &id)?;
         if history.as_ref().is_some_and(|row| row.deleted) {
             // Keep authenticated replay aliases without restoring deleted content or attribution.
             self.index_own_sent_projection(source, envelope, &id, ciphertext_hash)?;
@@ -377,6 +424,13 @@ impl RamfluxClient {
         body: &[u8],
     ) -> Result<Option<DirectMessageRecord>, SdkError> {
         let db = self.account_db()?;
+        if let Some(row) = self.direct_message_by_id(&packet.message_id)?
+            && row.conversation_id == conversation
+            && row.is_own
+            && row.deleted
+        {
+            return Ok(Some(row));
+        }
         let known = db
             .load_actor_state::<ramflux_storage::MessageReplayReference>(&alias_key(
                 db,
@@ -473,4 +527,13 @@ fn imported_ciphertext_key(
     hash: &str,
 ) -> Result<String, ramflux_storage::StorageError> {
     Ok(format!("own-device/imported-ciphertext/{}", db.own_sent_index_digest("imported", hash)?))
+}
+
+fn original_index_prefix(
+    db: &ramflux_storage::AccountDb,
+    conversation: &str,
+    original: &str,
+) -> Result<String, SdkError> {
+    let selector = serde_json::to_string(&(conversation, original))?;
+    Ok(format!("own-device/sent-original/{}/", db.own_sent_index_digest("original", &selector)?))
 }
