@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expose the restored local id, networking state and attended recovery command;
   locked native account status remains readable before recovery and admission.
 
+- Resolve `rf account export-agent-credentials` through the agent's recorded
+  human custodian regardless of the active account. Add `--custodian` for explicit
+  selection and name missing-custodian and wrong-custodian refusals.
+
 - Complete verified cached DM attachments after upload-grant expiry, and remove
   relay ACK progress atomically with the successful import commit.
 - Add `rf dm read --wait SECS` for bounded deferred-fetch polling (default 0);

@@ -1057,3 +1057,69 @@ async fn native_fenced_account_opens_data_actor_and_refuses_legacy_proof_after_r
     flow?;
     Ok(())
 }
+
+#[tokio::test]
+async fn custody_agent_export_uses_recorded_owner_while_agent_is_active() -> Result {
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let vault: Arc<dyn crate::custody::PrimaryVault + Send + Sync> = Arc::new(TestVault::default());
+    for (id, kind, owner) in [
+        ("owner", ramflux_protocol::PrincipalKind::Human, None),
+        ("agent", ramflux_protocol::PrincipalKind::HeadlessAi, Some("owner")),
+    ] {
+        create_refusal_account(&root.0, vault.as_ref(), now, id, kind, owner)?;
+        crate::custody::tests::mark_live(&root.0, id, now)?;
+    }
+    let socket = root.0.join("agent-export.sock");
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.custody_vault = Some(vault);
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _stop = Stop(stop);
+        let mut bus = connect(&socket).await?;
+        for id in ["owner", "agent"] {
+            bus.request(
+                Some(id.into()),
+                "account",
+                "account.unlock",
+                json!({"passphrase":format!("{id}-secret")}),
+            )
+            .await?;
+        }
+        bus.request(Some("agent".into()), "account", "account.switch", json!({})).await?;
+        let listed = bus.request(None, "account", "account.list", json!({})).await?;
+        assert_eq!(listed["active_account_id"], "agent");
+        let agent = listed["account_details"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == "agent"))
+            .ok_or("agent record missing")?;
+        let owner = agent["custodian_account_id"].as_str().ok_or("custodian record missing")?;
+        bus.request(
+            Some(owner.into()),
+            "stream",
+            "subscription.open",
+            json!({"topics":[],"attended_frontend":true}),
+        )
+        .await?;
+        let path = root.0.join("export.bundle");
+        let result = bus
+            .request(
+                Some(owner.into()),
+                "account",
+                "account.export_agent_credentials",
+                json!({"account":"agent","path":path}),
+            )
+            .await?;
+        assert_eq!(result["exported"], true);
+        let bundle: crate::custody::AgentProvisioningBundle =
+            serde_json::from_slice(&std::fs::read(path)?)?;
+        assert_eq!(bundle.account_id, "agent");
+        assert_eq!(bundle.data_passphrase, "agent-secret");
+        let listed = bus.request(None, "account", "account.list", json!({})).await?;
+        assert_eq!(listed["active_account_id"], "agent", "export must not switch accounts");
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    accept_refusal_server(server, "agent export server failed")?;
+    flow
+}

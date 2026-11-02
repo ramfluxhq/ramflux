@@ -77,6 +77,8 @@ fn itest_legacy_creation_is_a_separate_feature_gated_command() -> Result<(), cla
         "export-agent-credentials",
         "--account",
         "agent",
+        "--custodian",
+        "-owner-id",
         "--out",
         "/tmp/agent.bundle",
     ])?;

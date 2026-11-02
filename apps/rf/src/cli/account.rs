@@ -75,6 +75,9 @@ pub(crate) enum AccountKind {
 pub(crate) struct AccountExportAgentCredentials {
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
+    /// Select the agent's human custodian explicitly instead of resolving its custody record.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) custodian: Option<String>,
     #[arg(long)]
     pub(crate) out: PathBuf,
 }

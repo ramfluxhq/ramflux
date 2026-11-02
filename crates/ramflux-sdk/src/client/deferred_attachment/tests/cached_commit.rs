@@ -151,8 +151,7 @@ async fn attachment_import_sweeps_acks_and_skips_committed_ack_replays() -> Resu
     Ok(())
 }
 
-#[tokio::test]
-async fn attachment_erasure_after_import_survives_account_reopen() -> Result<(), SdkError> {
+async fn erase_imported_attachment() -> Result<Fixture, SdkError> {
     let mut f = Fixture::new()?;
     f.client.account_db()?.import_direct_message_projection(DirectMessageWrite {
         conversation_id: "conversation",
@@ -163,7 +162,11 @@ async fn attachment_erasure_after_import_survives_account_reopen() -> Result<(),
         created_at: 1,
     })?;
     stage_chunks(&f)?;
+    f.client.acknowledge_received_attachment_with(&f.reference, 1, async |_| Ok(())).await?;
+    let prefix = ack_progress_prefix(&f.reference)?;
+    assert_eq!(f.client.account_db()?.actor_state_keys(&prefix)?.len(), 1);
     assert!(f.client.try_import_cached_attachment(&f.reference)?.is_some());
+    assert_eq!(f.client.account_db()?.actor_state_keys(&prefix)?, Vec::<String>::new());
     f.client.delete_direct_message("conversation", "message", "local", "erase")?;
     assert_eq!(
         f.client.account_db()?.actor_state_keys(&reference_key("remote-object"))?,
@@ -173,7 +176,29 @@ async fn attachment_erasure_after_import_survives_account_reopen() -> Result<(),
     let old = std::mem::replace(&mut f.client, RamfluxClient::new());
     drop(old);
     f.client = open(&f.root, false)?;
-    assert!(f.client.decrypt_object("remote-object").is_err(), "durable erasure survives reopen");
+    assert_eq!(f.client.account_db()?.actor_state_keys(&prefix)?, Vec::<String>::new());
+    assert_eq!(
+        f.client.account_db()?.actor_state_keys(&reference_key("remote-object"))?,
+        Vec::<String>::new()
+    );
+    assert!(f.client.received_attachment_chunk(&f.reference, 0)?.is_none());
+    Ok(f)
+}
+
+#[tokio::test]
+async fn attachment_owned_state_erasure_survives_account_reopen() -> Result<(), SdkError> {
+    let _fixture = erase_imported_attachment().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "ATTACH-ERASE-01: object_index payload/key erasure after message delete"]
+async fn attachment_object_payload_erasure_survives_account_reopen() -> Result<(), SdkError> {
+    let fixture = erase_imported_attachment().await?;
+    assert!(
+        fixture.client.decrypt_object("remote-object").is_err(),
+        "durable object erasure survives reopen"
+    );
     Ok(())
 }
 

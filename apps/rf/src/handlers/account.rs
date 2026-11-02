@@ -39,7 +39,7 @@ pub(crate) async fn handle_account(
             print_json(&bus.request(None, "account", "account.list", serde_json::json!({})).await?)
         }
         AccountAction::ExportAgentCredentials(export) => {
-            export_agent_credentials(&mut bus, export).await
+            super::agent_export::export(&mut bus, export).await
         }
         AccountAction::Lock(lock) => {
             let account = lock.account;
@@ -79,35 +79,6 @@ pub(crate) async fn handle_account(
             "Account ceremonies require the exclusive ceremony client.".into(),
         )),
     }
-}
-
-async fn export_agent_credentials(
-    bus: &mut LocalBusClient,
-    export: AccountExportAgentCredentials,
-) -> Result<(), RfError> {
-    let listed = bus.request(None, "account", "account.list", serde_json::json!({})).await?;
-    let owner = listed["active_account_id"]
-        .as_str()
-        .ok_or_else(|| {
-            RfError::Message("An unlocked active custodian account is required.".into())
-        })?
-        .to_owned();
-    bus.request(
-        Some(owner.clone()),
-        "stream",
-        "subscription.open",
-        serde_json::json!({"topics":[],"attended_frontend":true}),
-    )
-    .await?;
-    print_json(
-        &bus.request(
-            Some(owner),
-            "account",
-            "account.export_agent_credentials",
-            serde_json::json!({"account":export.account,"path":export.out}),
-        )
-        .await?,
-    )
 }
 
 async fn handle_account_unlock(

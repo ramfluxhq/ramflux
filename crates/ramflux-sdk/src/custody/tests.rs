@@ -367,6 +367,13 @@ fn agent_bundle_is_private_custodian_bound_and_one_shot() -> Result {
     let secret = b"daemon-generated-agent-data-passphrase";
     ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, secret)?;
     mark_live(&root.0, "agent", now)?;
+    let listed = super::store::list_accounts(&root.0, now)?;
+    let agent = listed
+        .iter()
+        .find(|row| row["local_account_id"] == "agent")
+        .ok_or("agent summary missing")?;
+    assert_eq!(agent["custodian_account_id"], "human");
+    assert!(!agent.to_string().contains("provisioning_vault_ref"));
     let path = root.0.join("agent.bundle");
     super::store::export_agent_credentials(&root.0, "human", "agent", &path, &vault, now)?;
     assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);

@@ -144,8 +144,14 @@ run `rf account create --display-name "Service" --kind headless_ai --custodian <
 The same attended terminal displays and clears the service phrase, while rfd generates
 the data passphrase. Once registration is Live, run
 `rf account export-agent-credentials --account <agent> --out <private-path>`. The export
-uses the active owner session and is refused for a different, locked, pending, or
-non-human custodian.
+resolves the human custodian from the agent's durable custody record, regardless
+of which account is active. The owner must remain unlocked and Live; export does
+not switch the active account. Pass `--custodian <owner>` to select that custodian
+explicitly. A different custodian is refused with its recorded-owner mismatch;
+a missing custodian record names the agent and directs the operator to the owner
+account or `--custodian`. The daemon still checks attended access, custody binding,
+account kind, networking state and the one-use credential. A locked, pending or
+non-human custodian remains refused.
 
 Integration builds can explicitly select `rf daemon start --itest-memory-vault`
 only when compiled with the gated `itest-memory-vault` feature. Credentials then

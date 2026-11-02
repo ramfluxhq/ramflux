@@ -133,3 +133,16 @@ undo the offline import. Inspect `account status` and retry ordinary activation
 with `rf account unlock --account=RESTORED_ACCOUNT
 --passphrase-env=RESTORED_LOCAL_PASSPHRASE` after resolving node availability.
 Never enter recovery words in response to an unsolicited network prompt.
+
+## Agent credentials
+
+After creating a headless participant, export its one-use data credential with
+`rf account export-agent-credentials --account=AGENT --out=PRIVATE_PATH`.
+The CLI resolves the human owner from the agent's custody record; the agent may
+be active. Keep the owner unlocked and Live. Export does not switch accounts.
+Use `--custodian=OWNER` for explicit selection; a different recorded custodian
+is refused by name. If the record cannot name a custodian, the error identifies
+the agent and suggests selecting the owner or passing `--custodian`.
+The daemon retains its custody and attended-access checks. Export creates a
+private file, refuses to overwrite it, and consumes the credential once.
+Account backup export keeps its existing explicit `--account` selection.

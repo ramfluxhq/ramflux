@@ -210,7 +210,7 @@ impl BornAccount {
     pub fn summary(&self) -> serde_json::Value {
         serde_json::json!({"local_account_id":self.local_account_id(),"principal_id":self.stored.record.body.principal_id,
             "account_anchor":self.stored.record.body.account_anchor,"kind":self.stored.record.body.principal_kind,"display_name":self.stored.record.body.profile.display_name,
-            "state":self.state(),"networking_reason":self.networking_reason(),"authority_blocked":self.authority_blocked,"custody_v3_observed":true,"vault_class":self.stored.vault_class})
+            "state":self.state(),"networking_reason":self.networking_reason(),"authority_blocked":self.authority_blocked,"custody_v3_observed":true,"vault_class":self.stored.vault_class,"custodian_account_id":self.stored.custodian_account_id})
     }
 }
 fn directory(root: &Path, id: &str) -> Result<PathBuf, SdkError> {
