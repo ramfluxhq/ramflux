@@ -19,6 +19,16 @@ fn canonical_envelope(entry: &[u8]) -> Result<Option<(String, Vec<u8>)>, Storage
 }
 
 impl AccountDb {
+    /// Derives an account-private sent-copy index selector or conversation scope.
+    ///
+    /// # Errors
+    /// Returns canonical encoding or account-key derivation errors.
+    pub fn own_sent_index_digest(&self, kind: &str, value: &str) -> Result<String, StorageError> {
+        self.account_mac(
+            b"ramflux/own-sent-index/v1",
+            &ramflux_protocol::canonical_json_bytes(&(kind, value))?,
+        )
+    }
     /// Binds a sent-copy replay claim without retaining its source identity or envelope id.
     ///
     /// # Errors

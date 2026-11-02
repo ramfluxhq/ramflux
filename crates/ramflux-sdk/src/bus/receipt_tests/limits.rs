@@ -358,6 +358,12 @@ async fn own_principal_messages_never_stage_a_peer_delivery_receipt() -> TestRes
         source.client.owned_device_identity()?.root_commitment()
     );
     assert_eq!(origin["sender_device_id"], entry.envelope.source_device_id);
+    let db = source.client.account_db()?;
+    assert_eq!(db.actor_state_usage("own-device/sent-alias/")?.0, 0);
+    db.send_direct_message("thread", "own-message", "alice", b"body")?;
+    source.client.stage_delivery_receipt("thread", "own-message", &entry)?;
+    assert_eq!(db.actor_state_usage(PREFIX)?.0, 0);
+    assert_eq!(db.actor_state_usage("own-device/sent-alias/")?.0, 1);
 
     drop(engine);
     drop(source);

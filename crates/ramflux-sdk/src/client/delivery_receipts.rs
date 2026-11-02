@@ -92,14 +92,18 @@ impl RamfluxClient {
                 "sender_device_display":source.storage_key(),"direction":"outgoing",
                 "envelope_id":entry.envelope.envelope_id
             }))?;
-            let digest = (!ciphertext.is_empty())
-                .then(|| super::own_sent_message::own_sent_ciphertext_hash(ciphertext));
-            self.index_own_sent_projection(
-                &source,
-                &entry.envelope.envelope_id,
-                message,
-                digest.as_deref(),
-            )?;
+            // Receipt staging can also precede projection in callers that only record provenance.
+            // A replay reference must describe an existing timeline row and its deletion state.
+            if db.direct_message_by_id(message)?.is_some() {
+                let digest = (!ciphertext.is_empty())
+                    .then(|| super::own_sent_message::own_sent_ciphertext_hash(ciphertext));
+                self.index_own_sent_projection(
+                    &source,
+                    &entry.envelope.envelope_id,
+                    message,
+                    digest.as_deref(),
+                )?;
+            }
             return Ok(());
         }
         if entry.envelope.source_principal_id == local_branch.principal_id {

@@ -730,7 +730,6 @@ impl RamfluxClient {
             if self.skip_owned_surface_message(bundle, &message.message_id, floor_by_group)? {
                 continue;
             }
-            self.index_imported_own_sent_ciphertext(message)?;
             if message.deleted {
                 self.account_db()?.import_deleted_message_projection(
                     &message.conversation_id,
@@ -755,6 +754,7 @@ impl RamfluxClient {
                     )?;
                 }
             }
+            self.index_imported_own_sent_ciphertext(message)?;
             imported_messages = imported_messages.saturating_add(1);
         }
         Ok(imported_messages)

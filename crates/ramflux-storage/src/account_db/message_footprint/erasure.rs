@@ -25,6 +25,8 @@ const BODY: &str = r"
  ON CONFLICT(singleton) DO UPDATE SET erasure_pending=1;
  UPDATE runtime_actor_state SET state_json=CAST(json_object('message_id',NEW.message_id,'deleted',json('true'),'created_at',NEW.created_at,'conversation_id',NEW.conversation_id,'is_own',json(CASE WHEN NEW.is_own=1 THEN 'true' ELSE 'false' END)) AS BLOB)
  WHERE state_kind='directory/message/'||NEW.message_id;
+ UPDATE runtime_actor_state SET state_json=CAST(json_set(CAST(state_json AS TEXT),'$.deleted',json('true')) AS BLOB)
+ WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='replay_actor');
  DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND row_id IN
   (SELECT a.rowid FROM runtime_actor_state a JOIN message_footprint f
    ON f.kind='actor' AND f.locator=a.state_kind WHERE f.message_id=NEW.message_id);
@@ -39,7 +41,8 @@ const BODY: &str = r"
     CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id);
  DELETE FROM runtime_outbox WHERE table_name='direct_message_projection' AND row_id=NEW.rowid;
  DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor');
- DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor') AND state_kind<>'directory/message/'||NEW.message_id AND NOT EXISTS(SELECT 1 FROM message_footprint shared WHERE shared.kind='actor' AND shared.locator=runtime_actor_state.state_kind AND shared.message_id<>NEW.message_id AND shared.message_id NOT GLOB 'copy:*');
+ DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor') AND state_kind<>'directory/message/'||NEW.message_id AND NOT EXISTS(SELECT 1 FROM message_footprint shared WHERE shared.kind='actor' AND shared.locator=runtime_actor_state.state_kind AND shared.message_id<>NEW.message_id AND shared.message_id NOT GLOB 'copy:*')
+  AND state_kind NOT IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='replay_actor');
  DELETE FROM runtime_outbox WHERE sequence IN (
   SELECT outbox.sequence FROM message_footprint footprint
   CROSS JOIN runtime_outbox outbox INDEXED BY runtime_outbox_actor_kind

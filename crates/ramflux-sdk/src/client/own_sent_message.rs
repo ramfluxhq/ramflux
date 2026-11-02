@@ -193,20 +193,25 @@ impl RamfluxClient {
         ciphertext_hash: Option<&str>,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        db.persist_actor_state(&alias_key(&own_row_id(source, envelope)?), &id)?;
+        db.persist_message_replay_reference(
+            &alias_key(db, &own_row_id(source, envelope)?)?,
+            Some(id),
+            None,
+            None,
+        )?;
         if let Some(hash) = ciphertext_hash {
-            let key = ciphertext_index_key(hash);
-            let claim = db.own_sent_replay_claim(source, envelope)?;
-            let existing = db.load_actor_state::<serde_json::Value>(&key)?;
-            let value =
-                if existing.as_ref().is_some_and(|old| old["id"] != id || old["claim"] != claim) {
-                    // History without an authenticated per-row source must never select one of
-                    // several claimants to the same ciphertext. Exact source/envelope aliases remain.
-                    json!({"ambiguous":true})
-                } else {
-                    json!({"id":id,"claim":claim})
-                };
-            db.persist_actor_state(&key, &value)?;
+            let key = ciphertext_index_key(db, hash)?;
+            let binding = db.own_sent_replay_claim(source, envelope)?;
+            let existing = db.load_actor_state::<ramflux_storage::MessageReplayReference>(&key)?;
+            let ambiguous = existing.as_ref().is_some_and(|old| {
+                old.message_id() != Some(id) || old.binding() != Some(binding.as_str())
+            });
+            db.persist_message_replay_reference(
+                &key,
+                (!ambiguous).then_some(id),
+                (!ambiguous).then_some(binding.as_str()),
+                None,
+            )?;
         }
         Ok(())
     }
@@ -218,16 +223,19 @@ impl RamfluxClient {
             return Ok(());
         }
         let db = self.account_db()?;
-        let key = imported_ciphertext_key(&own_sent_ciphertext_hash(&message.encrypted_body));
-        let old = db.load_actor_state::<serde_json::Value>(&key)?;
-        let record = if old.as_ref().is_some_and(|row| {
-            row["id"] != message.message_id || row["conversation"] != message.conversation_id
-        }) {
-            json!({"ambiguous":true})
-        } else {
-            json!({"id":message.message_id,"conversation":message.conversation_id})
-        };
-        db.persist_actor_state(&key, &record)?;
+        let key = imported_ciphertext_key(db, &own_sent_ciphertext_hash(&message.encrypted_body))?;
+        let scope = db.own_sent_index_digest("conversation", &message.conversation_id)?;
+        let old = db.load_actor_state::<ramflux_storage::MessageReplayReference>(&key)?;
+        let ambiguous = old.as_ref().is_some_and(|row| {
+            row.message_id() != Some(message.message_id.as_str())
+                || row.scope() != Some(scope.as_str())
+        });
+        db.persist_message_replay_reference(
+            &key,
+            (!ambiguous).then_some(message.message_id.as_str()),
+            None,
+            (!ambiguous).then_some(scope.as_str()),
+        )?;
         Ok(())
     }
     pub(crate) fn already_projected_own_sent_message(
@@ -236,15 +244,25 @@ impl RamfluxClient {
         content: Option<&[u8]>,
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
-        let alias = db.load_actor_state::<String>(&alias_key(&message.message_id))?;
+        let alias = db.load_actor_state::<ramflux_storage::MessageReplayReference>(&alias_key(
+            db,
+            &message.message_id,
+        )?)?;
         let digest = (!message.encrypted_body.is_empty())
             .then(|| own_sent_ciphertext_hash(&message.encrypted_body));
         let indexed = digest
             .as_deref()
-            .map(|hash| db.load_actor_state::<serde_json::Value>(&ciphertext_index_key(hash)))
+            .map(|hash| {
+                db.load_actor_state::<ramflux_storage::MessageReplayReference>(
+                    &ciphertext_index_key(db, hash)?,
+                )
+            })
             .transpose()?
             .flatten();
-        let Some(id) = alias.as_deref().or_else(|| indexed.as_ref().and_then(|v| v["id"].as_str()))
+        let Some(id) =
+            alias.as_ref().and_then(ramflux_storage::MessageReplayReference::message_id).or_else(
+                || indexed.as_ref().and_then(ramflux_storage::MessageReplayReference::message_id),
+            )
         else {
             return Ok(false);
         };
@@ -359,14 +377,25 @@ impl RamfluxClient {
         body: &[u8],
     ) -> Result<Option<DirectMessageRecord>, SdkError> {
         let db = self.account_db()?;
-        let known = db.load_actor_state::<String>(&alias_key(&own_row_id(source, envelope)?))?;
+        let known = db
+            .load_actor_state::<ramflux_storage::MessageReplayReference>(&alias_key(
+                db,
+                &own_row_id(source, envelope)?,
+            )?)?
+            .and_then(|reference| reference.message_id().map(str::to_owned));
         let hash = packet.ciphertext_hash.as_deref();
+        let scope = db.own_sent_index_digest("conversation", conversation)?;
         let imported = hash
-            .map(|hash| db.load_actor_state::<serde_json::Value>(&imported_ciphertext_key(hash)))
+            .map(|hash| {
+                db.load_actor_state::<ramflux_storage::MessageReplayReference>(
+                    &imported_ciphertext_key(db, hash)?,
+                )
+            })
             .transpose()?
             .flatten()
-            .filter(|record| record["conversation"] == conversation);
-        let imported_id = imported.as_ref().and_then(|record| record["id"].as_str());
+            .filter(|record| record.scope() == Some(scope.as_str()));
+        let imported_id =
+            imported.as_ref().and_then(ramflux_storage::MessageReplayReference::message_id);
         let Some(row) = self
             .direct_message_by_id(known.as_deref().or(imported_id).unwrap_or(&packet.message_id))?
         else {
@@ -375,28 +404,31 @@ impl RamfluxClient {
         if row.conversation_id != conversation {
             return Ok(None);
         }
-        let source_matches = if let Some(origin) =
-            self.message_origin(conversation, &row.message_id)?
-        {
-            origin["sender_root_commitment"] == source.root_commitment()
-                && origin["sender_device_id"] == source.device_id()
-                && origin["envelope_id"] == envelope
-        } else if known.as_deref() == Some(row.message_id.as_str()) {
-            true
-        } else {
-            let claim = hash
-                .map(|hash| db.load_actor_state::<serde_json::Value>(&ciphertext_index_key(hash)))
-                .transpose()?
-                .flatten();
-            let expected = db.own_sent_replay_claim(source, envelope)?;
-            // An imported digest must not override an authenticated source or an ambiguity fence.
-            claim
-                .as_ref()
-                .is_none_or(|claim| claim["id"] == row.message_id && claim["claim"] == expected)
-                && (imported_id == Some(row.message_id.as_str())
+        let source_matches =
+            if let Some(origin) = self.message_origin(conversation, &row.message_id)? {
+                origin["sender_root_commitment"] == source.root_commitment()
+                    && origin["sender_device_id"] == source.device_id()
+                    && origin["envelope_id"] == envelope
+            } else if known.as_deref() == Some(row.message_id.as_str()) {
+                true
+            } else {
+                let claim = hash
+                    .map(|hash| {
+                        db.load_actor_state::<ramflux_storage::MessageReplayReference>(
+                            &ciphertext_index_key(db, hash)?,
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
+                let expected = db.own_sent_replay_claim(source, envelope)?;
+                // An imported digest must not override an authenticated source or an ambiguity fence.
+                claim.as_ref().is_none_or(|claim| {
+                    claim.message_id() == Some(row.message_id.as_str())
+                        && claim.binding() == Some(expected.as_str())
+                }) && (imported_id == Some(row.message_id.as_str())
                     || (!row.encrypted_body.is_empty()
                         && hash == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str())))
-        };
+            };
         if source_matches
             && (row.deleted || db.message_content(&row.message_id)?.as_deref() == Some(body))
         {
@@ -413,8 +445,11 @@ fn invalid(message: &str) -> SdkError {
 pub(super) fn own_sent_ciphertext_hash(ciphertext: &[u8]) -> String {
     ramflux_crypto::blake3_256_base64url("ramflux.own-sent-ciphertext.v1", ciphertext)
 }
-fn ciphertext_index_key(hash: &str) -> String {
-    format!("own-device/sent-ciphertext/{hash}")
+fn ciphertext_index_key(
+    db: &ramflux_storage::AccountDb,
+    hash: &str,
+) -> Result<String, ramflux_storage::StorageError> {
+    Ok(format!("own-device/sent-ciphertext/{}", db.own_sent_index_digest("ciphertext", hash)?))
 }
 
 fn own_row_id(
@@ -426,10 +461,16 @@ fn own_row_id(
         super::own_device_copy::copy_id(source.root_commitment(), source.device_id(), envelope)?
     ))
 }
-fn alias_key(message: &str) -> String {
-    format!("own-device/sent-alias/{message}")
+fn alias_key(
+    db: &ramflux_storage::AccountDb,
+    message: &str,
+) -> Result<String, ramflux_storage::StorageError> {
+    Ok(format!("own-device/sent-alias/{}", db.own_sent_index_digest("alias", message)?))
 }
 
-fn imported_ciphertext_key(hash: &str) -> String {
-    format!("own-device/imported-ciphertext/{hash}")
+fn imported_ciphertext_key(
+    db: &ramflux_storage::AccountDb,
+    hash: &str,
+) -> Result<String, ramflux_storage::StorageError> {
+    Ok(format!("own-device/imported-ciphertext/{}", db.own_sent_index_digest("imported", hash)?))
 }

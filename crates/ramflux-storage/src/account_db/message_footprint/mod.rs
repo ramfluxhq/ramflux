@@ -3,6 +3,7 @@
 
 //! Write-time ownership of per-message copies; deletion visits indexed locators only.
 mod erasure;
+mod replay_reference;
 mod schema;
 
 use super::AccountDb;
@@ -29,6 +30,7 @@ impl AccountDb {
         if drop_actor_registration_for_mutation_test() {
             return Ok(());
         }
+        replay_reference::register(self, key, value)?;
         let registration = actor_registration(key, value);
         self.connection.execute(
             "INSERT INTO message_footprint_actor_stage VALUES(?1,?2,?3,?4)",

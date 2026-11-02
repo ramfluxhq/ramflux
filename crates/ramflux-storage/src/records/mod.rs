@@ -10,6 +10,7 @@ pub mod group;
 pub mod identity;
 pub mod mcp;
 pub mod message;
+mod message_replay;
 pub mod object;
 pub mod recovery;
 
@@ -22,6 +23,7 @@ pub use group::*;
 pub use identity::*;
 pub use mcp::*;
 pub use message::*;
+pub use message_replay::MessageReplayReference;
 pub use object::*;
 pub use recovery::*;
 mod contact_requests;
