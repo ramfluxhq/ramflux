@@ -40,6 +40,8 @@ impl GroupOperation {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("object erased")]
+    ObjectErased,
     #[error("home migration refused: {0:?}")]
     HomeMigrationRefused(ramflux_protocol::home_migration::Refusal),
     #[error("custody networking refused: {0}")]
@@ -121,9 +123,9 @@ pub enum SdkError {
     #[error("crypto error: {0}")]
     Crypto(#[from] CryptoError),
     #[error("storage error: {0}")]
-    Storage(#[from] StorageError),
+    Storage(#[source] StorageError),
     #[error("sync error: {0}")]
-    Sync(#[from] SyncError),
+    Sync(#[source] SyncError),
     #[error("transport error: {0}")]
     Transport(#[from] ramflux_transport::TransportError),
     #[error("protocol error: {0}")]
@@ -177,5 +179,22 @@ impl SdkError {
     #[must_use]
     pub const fn capacity_hint(&self) -> Option<ramflux_protocol::custody::CapacityHint> {
         if let Self::CustodyCapacity { capacity } = self { Some(*capacity) } else { None }
+    }
+}
+
+impl From<StorageError> for SdkError {
+    fn from(error: StorageError) -> Self {
+        match error {
+            StorageError::ObjectErased => Self::ObjectErased,
+            other => Self::Storage(other),
+        }
+    }
+}
+impl From<SyncError> for SdkError {
+    fn from(error: SyncError) -> Self {
+        match error {
+            SyncError::ObjectErased => Self::ObjectErased,
+            other => Self::Sync(other),
+        }
     }
 }

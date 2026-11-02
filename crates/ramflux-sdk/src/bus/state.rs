@@ -63,8 +63,15 @@ pub(crate) struct ObjectGetSpoolSession {
     pub(crate) total_len: usize,
     pub(crate) plaintext_hash: String,
     pub(crate) path: PathBuf,
-    pub(crate) file: std::fs::File,
+    pub(crate) file: std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>,
     pub(crate) read_offset: usize,
+}
+
+impl Drop for ObjectGetSpoolSession {
+    fn drop(&mut self) {
+        self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 pub(crate) struct LocalBusAccountState {

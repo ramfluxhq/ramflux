@@ -190,21 +190,24 @@ impl RamfluxClient {
         include_franking_ext: bool,
     ) -> Result<GatewayInboxEntry, SdkError> {
         let mut refs = Vec::with_capacity(attachments.len());
+        let mut holds = Vec::with_capacity(attachments.len());
         for attachment in attachments {
-            let attachment_plaintext = ramflux_protocol::decode_base64url(
-                &attachment.plaintext_base64,
-            )
-            .map_err(|error| SdkError::LocalBus(format!("invalid attachment body: {error}")))?;
-            refs.push(
-                self.dm_attachment_ref_for_recipient(
+            let attachment_plaintext = zeroize::Zeroizing::new(
+                ramflux_protocol::decode_base64url(&attachment.plaintext_base64).map_err(
+                    |error| SdkError::LocalBus(format!("invalid attachment body: {error}")),
+                )?,
+            );
+            let (reference, hold) = self
+                .dm_attachment_ref_for_recipient(
                     engine,
                     pool,
                     &message,
                     attachment,
                     &attachment_plaintext,
                 )
-                .await?,
-            );
+                .await?;
+            refs.push(reference);
+            holds.push(hold);
         }
         let envelope = SdkDmAttachmentEnvelope {
             schema: "ramflux.sdk.dm_attachment_envelope.v1".to_owned(),
@@ -212,15 +215,37 @@ impl RamfluxClient {
             body_base64: ramflux_protocol::encode_base64url(plaintext),
             attachments: refs,
         };
-        let envelope_plaintext = serde_json::to_vec(&envelope)?;
-        self.send_plaintext_direct_message_via_gateway_inner(
-            engine,
-            message,
-            &envelope_plaintext,
-            include_franking_ext,
-            crate::client::routed::Route::attachments(),
-        )
-        .await
+        let envelope_plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&envelope)?);
+        let conversation = message.conversation_id.clone();
+        let message_id = message.message_id.clone();
+        let owner = message.sender_id.clone();
+        let result = self
+            .send_plaintext_direct_message_via_gateway_inner(
+                engine,
+                message,
+                &envelope_plaintext,
+                include_franking_ext,
+                crate::client::routed::Route::attachments(),
+            )
+            .await;
+        if result.is_ok() {
+            self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+                for reference in &envelope.attachments {
+                    self.persist_received_reference_prepared(
+                        reference,
+                        &owner,
+                        &conversation,
+                        &message_id,
+                        None,
+                    )?;
+                }
+                Ok(())
+            })?;
+        }
+        for hold in holds {
+            hold.release()?;
+        }
+        result
     }
 
     /// # Errors

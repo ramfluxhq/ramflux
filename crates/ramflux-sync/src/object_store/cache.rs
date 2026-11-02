@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Optional bounded LRU for persisted account objects. Default in-process stores retain all data.
-
-use super::{EncryptedObject, ObjectStore};
+//! Optional bounded LRU for persisted account objects. Default stores retain all data.
+use super::{EncryptedObject, ObjectStore, retirement::ObjectData};
 use std::collections::VecDeque;
-use zeroize::Zeroize;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CachePolicy {
@@ -16,64 +14,58 @@ pub(super) struct CachePolicy {
 impl ObjectStore {
     /// Bounds this store's rebuildable cache. Callers must provide durable fallback on a miss.
     pub fn set_cache_capacity(&mut self, capacity: usize) {
-        self.cache = std::cell::RefCell::new(Some(CachePolicy {
+        let mut data = self.data();
+        data.cache = Some(CachePolicy {
             capacity: capacity.max(1),
-            recent: self.objects.keys().cloned().collect(),
-        }));
-        self.evict_cached();
+            recent: data.objects.keys().cloned().collect(),
+        });
+        data.evict_cached();
     }
 
     #[must_use]
     pub fn cache_capacity(&self) -> Option<usize> {
-        self.cache.borrow().as_ref().map(|cache| cache.capacity)
+        self.data().cache.as_ref().map(|cache| cache.capacity)
     }
 
     #[must_use]
-    pub fn cached_object(&self, id: &str) -> Option<&EncryptedObject> {
-        let object = self.objects.get(id)?;
-        self.touch_cached(id);
-        Some(object)
+    pub fn cached_object(&self, id: &str) -> Option<EncryptedObject> {
+        let mut data = self.data();
+        data.touch_cached(id);
+        data.objects.get(id).cloned()
     }
 
     pub fn cache_persisted_object(&mut self, object: EncryptedObject, key: Option<[u8; 32]>) {
+        let mut data = self.data();
         let id = object.object_id.clone();
-        self.objects.insert(id.clone(), object);
+        data.remove(&id);
+        data.retired.remove(&id);
+        data.objects.insert(id.clone(), object);
         if let Some(key) = key {
-            self.object_keys.insert(id.clone(), key);
+            data.object_keys.insert(id.clone(), key);
         }
-        self.touch_cached(&id);
-        self.evict_cached();
+        data.touch_cached(&id);
+        data.evict_cached();
     }
+}
 
-    pub(super) fn touch_cached(&self, id: &str) {
+impl ObjectData {
+    pub(super) fn touch_cached(&mut self, id: &str) {
         if !self.objects.contains_key(id) {
             return;
         }
-        if let Some(cache) = self.cache.borrow_mut().as_mut() {
+        if let Some(cache) = self.cache.as_mut() {
             cache.recent.retain(|existing| existing != id);
             cache.recent.push_back(id.to_owned());
         }
     }
 
     pub(super) fn evict_cached(&mut self) {
-        if let Some(cache) = self.cache.get_mut().as_mut() {
-            while self.objects.len() > cache.capacity {
-                let Some(id) = cache.recent.pop_front() else {
-                    break;
-                };
-                self.objects.remove(&id);
-                if let Some(mut key) = self.object_keys.remove(&id) {
-                    key.zeroize();
-                }
-            }
-            self.object_keys.retain(|id, key| {
-                if self.objects.contains_key(id) {
-                    true
-                } else {
-                    key.zeroize();
-                    false
-                }
-            });
+        let Some(capacity) = self.cache.as_ref().map(|cache| cache.capacity) else { return };
+        while self.objects.len() > capacity {
+            let Some(id) = self.cache.as_mut().and_then(|cache| cache.recent.pop_front()) else {
+                break;
+            };
+            self.remove(&id);
         }
     }
 }
@@ -97,9 +89,27 @@ mod tests {
         for index in 0..100 {
             assert!(store.object_key(&format!("missing-{index}")).is_err());
         }
-        assert_eq!(store.objects.len(), 2);
-        assert_eq!(store.object_keys.len(), 2);
-        assert_eq!(store.cache.borrow().as_ref().map(|cache| cache.recent.len()), Some(2));
+        let data = store.data();
+        assert_eq!(data.objects.len(), 2);
+        assert_eq!(data.object_keys.len(), 2);
+        assert_eq!(data.cache.as_ref().map(|cache| cache.recent.len()), Some(2));
+        Ok(())
+    }
+
+    // Mutation: omit key eviction in ObjectRetirementHandle::retire.
+    #[test]
+    fn retirement_handle_erases_only_matching_cached_identity() -> Result<(), crate::SyncError> {
+        let mut store = ObjectStore::new();
+        let object = store.put_encrypted_object("wire", b"private")?;
+        store.put_encrypted_object("shared", b"retained")?;
+        let handle = store.retirement_handle("root");
+        let commitment =
+            ramflux_crypto::object_erasure_commitment("root", "wire", &object.manifest_hash);
+        handle.retire(&[commitment]);
+        assert!(matches!(store.decrypt_object("wire"), Err(crate::SyncError::ObjectErased)));
+        assert!(store.cached_object("wire").is_none());
+        assert!(!store.data().object_keys.contains_key("wire"));
+        assert_eq!(store.decrypt_object("shared")?, b"retained");
         Ok(())
     }
 }

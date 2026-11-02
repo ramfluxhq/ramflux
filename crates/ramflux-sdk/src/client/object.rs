@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+use ramflux_storage::ObjectRetention;
 #[cfg(test)]
 #[path = "object_cache_tests.rs"]
 mod cache_tests;
@@ -25,9 +26,15 @@ pub(crate) struct DeferredObjectKeySlot {
     pub(super) legacy_slot: Option<SdkObjectKeySlot>,
 }
 
+impl Drop for DeferredObjectKeySlot {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.object_key);
+    }
+}
+
 struct VerifiedAttachmentImport {
     object: EncryptedObject,
-    plaintext: Vec<u8>,
+    plaintext: zeroize::Zeroizing<Vec<u8>>,
     plaintext_hash: String,
 }
 
@@ -36,23 +43,34 @@ impl RamfluxClient {
         &self,
         object: &EncryptedObject,
         content_key: Option<&[u8; 32]>,
+        retention: ObjectRetention,
     ) -> Result<(), SdkError> {
+        let actual = ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::OBJECT_MANIFEST,
+            &object.ciphertext,
+        );
+        if actual != object.manifest_hash {
+            return Err(SdkError::LocalBus("object ciphertext manifest mismatch".to_owned()));
+        }
         let Some(db) = self.active_account_db.as_ref() else {
             return Ok(());
         };
-        db.upsert_object(&ObjectWrite {
-            object_id: &object.object_id,
-            manifest_hash: &object.manifest_hash,
-            nonce: &object.nonce,
-            ciphertext: &object.ciphertext,
-            plaintext_hash: &object.plaintext_hash,
-            tombstoned: object.tombstoned,
-            backup_excluded: object.backup_excluded,
-            content_key,
-            object: &persisted_descriptor(object),
-            updated_at: now_unix_timestamp(),
-        })?;
-        Ok(())
+        db.write_transaction(|| -> Result<(), SdkError> {
+            db.retain_object(&object.object_id, &object.manifest_hash, retention)?;
+            db.upsert_object(&ObjectWrite {
+                object_id: &object.object_id,
+                manifest_hash: &object.manifest_hash,
+                nonce: &object.nonce,
+                ciphertext: &object.ciphertext,
+                plaintext_hash: &object.plaintext_hash,
+                tombstoned: object.tombstoned,
+                backup_excluded: object.backup_excluded,
+                content_key,
+                object: &persisted_descriptor(object),
+                updated_at: now_unix_timestamp(),
+            })?;
+            Ok(())
+        })
     }
 
     pub(crate) fn hydrate_object_store_from_account_db(&mut self) -> Result<(), SdkError> {
@@ -62,6 +80,19 @@ impl RamfluxClient {
             self.account_db()?.load_objects::<EncryptedObject>()?
         };
         self.object_store.replace_persisted(objects, object_keys);
+        self.bind_object_retirement()
+    }
+
+    pub(super) fn bind_object_retirement(&self) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let handle = self.object_store.retirement_handle(db.object_erasure_root());
+        db.observe_object_retirement(std::sync::Arc::new(move |commitments| {
+            if let Some(commitments) = commitments {
+                handle.retire(commitments);
+            } else {
+                handle.clear();
+            }
+        }))?;
         Ok(())
     }
 
@@ -127,7 +158,7 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         attachment: &LocalBusMessageAttachmentInput,
         plaintext: &[u8],
-    ) -> Result<SdkDmAttachmentRef, SdkError> {
+    ) -> Result<(SdkDmAttachmentRef, ramflux_storage::PreSendObjectHold), SdkError> {
         let mut message = message.clone();
         self.resolve_message_recipient(&engine.config, &mut message).await?;
         let message = &message;
@@ -140,9 +171,18 @@ impl RamfluxClient {
             .ok_or_else(|| {
                 SdkError::LocalBus("DM attachment requires relay endpoint".to_owned())
             })?;
-        let object = self.object_store.put_encrypted_object(&attachment.object_id, plaintext)?;
-        let object_key = self.object_content_key(&object.object_id)?;
-        self.persist_object_if_unlocked(&object, Some(&object_key))?;
+        let prepared =
+            self.object_store.prepare_encrypted_object(&attachment.object_id, plaintext)?;
+        let hold = self
+            .account_db()?
+            .pre_send_object_hold(&prepared.object().object_id, &prepared.object().manifest_hash)?;
+        let object_key = zeroize::Zeroizing::new(*prepared.object_key());
+        self.persist_object_if_unlocked(
+            prepared.object(),
+            Some(&object_key),
+            ObjectRetention::PreSend { expires_at: now_unix_timestamp().saturating_add(600) },
+        )?;
+        let object = self.object_store.install_prepared_object(prepared);
         self.upload_object_to_relay_inner_via_gateway(
             engine,
             pool,
@@ -189,32 +229,35 @@ impl RamfluxClient {
             u64::try_from(now_unix_timestamp()).unwrap_or(0),
             relay_expires_at(),
         )?;
-        Ok(SdkDmAttachmentRef {
-            schema: "ramflux.sdk.dm_attachment_ref.v1".to_owned(),
-            version: 1,
-            object_id: object.object_id.clone(),
-            manifest_hash: object.manifest_hash.clone(),
-            plaintext_hash: object.plaintext_hash.clone(),
-            cipher_size: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
-            chunk_size: manifest.chunk_size,
-            total_chunks: manifest.total_chunks,
-            relay_endpoint: attachment.relay_endpoint.clone(),
-            // T21-A2: explicit per-message override wins; a None input is fixed to the lineage this
-            // upload actually used (effective relay options); an explicit empty string is preserved
-            // and fails closed downstream. See `effective_attachment_lineage`.
-            owner_home_node_id: effective_attachment_lineage(
-                attachment.owner_home_node_id.clone(),
-                relay_options.relay_owner_home_node_id.clone(),
-            ),
-            relay_audience_node_id: effective_attachment_lineage(
-                attachment.relay_audience_node_id.clone(),
-                relay_options.relay_audience_node_id.clone(),
-            ),
-            owner_principal_id: owner_branch.principal_id.clone(),
-            owner_device_epoch: owner_branch.device_epoch,
-            access_grant: Some(access_grant),
-            key_slot,
-        })
+        Ok((
+            SdkDmAttachmentRef {
+                schema: "ramflux.sdk.dm_attachment_ref.v1".to_owned(),
+                version: 1,
+                object_id: object.object_id.clone(),
+                manifest_hash: object.manifest_hash.clone(),
+                plaintext_hash: object.plaintext_hash.clone(),
+                cipher_size: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
+                chunk_size: manifest.chunk_size,
+                total_chunks: manifest.total_chunks,
+                relay_endpoint: attachment.relay_endpoint.clone(),
+                // T21-A2: explicit per-message override wins; a None input is fixed to the lineage this
+                // upload actually used (effective relay options); an explicit empty string is preserved
+                // and fails closed downstream. See `effective_attachment_lineage`.
+                owner_home_node_id: effective_attachment_lineage(
+                    attachment.owner_home_node_id.clone(),
+                    relay_options.relay_owner_home_node_id.clone(),
+                ),
+                relay_audience_node_id: effective_attachment_lineage(
+                    attachment.relay_audience_node_id.clone(),
+                    relay_options.relay_audience_node_id.clone(),
+                ),
+                owner_principal_id: owner_branch.principal_id.clone(),
+                owner_device_epoch: owner_branch.device_epoch,
+                access_grant: Some(access_grant),
+                key_slot,
+            },
+            hold,
+        ))
     }
 
     /// # Errors
@@ -229,18 +272,23 @@ impl RamfluxClient {
                 package.schema
             )));
         }
+        if let Some(db) = self.active_account_db.as_ref() {
+            db.check_object_identity(&package.object.object_id, &package.object.manifest_hash)?;
+        }
         let deferred = self.decrypt_object_key_slot(&package.key_slot)?;
         let object_key = deferred.object_key;
         let ciphertext = ramflux_protocol::decode_base64url(&package.ciphertext_base64)
             .map_err(|error| SdkError::LocalBus(format!("invalid object ciphertext: {error}")))?;
-        let object = self.object_store.put_received_encrypted_object_with_key(
+        let mut staged = ObjectStore::new();
+        let object = staged.put_received_encrypted_object_with_key(
             &package.object.object_id,
             &package.object.manifest_hash,
             &ciphertext,
             &package.object.plaintext_hash,
             object_key,
         );
-        self.persist_object_if_unlocked(&object, Some(&object_key))?;
+        self.persist_object_if_unlocked(&object, Some(&object_key), ObjectRetention::Standalone)?;
+        self.object_store.cache_persisted_object(object.clone(), Some(object_key));
         self.commit_object_key_slot_session(&deferred)?;
         Ok(object)
     }
@@ -270,8 +318,10 @@ impl RamfluxClient {
             &key_slot.conversation_id,
             &key_slot.recipient_device_id,
         );
-        let plaintext_key = session.decrypt(&key_slot.ciphertext, &associated_data)?;
+        let plaintext_key =
+            zeroize::Zeroizing::new(session.decrypt(&key_slot.ciphertext, &associated_data)?);
         let object_key: [u8; 32] = plaintext_key
+            .as_slice()
             .try_into()
             .map_err(|_err| SdkError::LocalBus("invalid object key length".to_owned()))?;
         Ok(DeferredObjectKeySlot {
@@ -363,14 +413,16 @@ impl RamfluxClient {
         if assembled_hash != attachment.manifest_hash {
             return Err(SdkError::LocalBus("DM attachment manifest hash mismatch".to_owned()));
         }
-        let object = self.object_store.put_received_encrypted_object_with_key(
+        let mut staged = ObjectStore::new();
+        let object = staged.put_received_encrypted_object_with_key(
             &attachment.object_id,
             &attachment.manifest_hash,
             &ciphertext,
             &attachment.plaintext_hash,
             object_key,
         );
-        self.persist_object_if_unlocked(&object, Some(&object_key))?;
+        self.persist_object_if_unlocked(&object, Some(&object_key), ObjectRetention::Imported)?;
+        self.object_store.cache_persisted_object(object.clone(), Some(object_key));
         self.persist_object_transfer(ObjectTransferPersist {
             transfer_id: &download.transfer_id,
             object: &object,
@@ -417,6 +469,8 @@ impl RamfluxClient {
                     attachment.schema
                 )));
             }
+            self.account_db()?
+                .check_object_identity(&attachment.object_id, &attachment.manifest_hash)?;
             check = "verified_local_cache";
             if let Some(imported) = self.try_import_cached_attachment(attachment)? {
                 return Ok(imported);
@@ -490,7 +544,11 @@ impl RamfluxClient {
             // T21-A2a: every chunk was downloaded, persisted, plaintext-verified, and ACKed; only now
             // commit the slot recv checkpoint so a failed ACK above leaves the slot ratchet re-usable.
             check = "key_slot_commit";
-            self.commit_received_attachment_import(attachment, &key_slot)?;
+            self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+                self.account_db()?
+                    .check_object_identity(&attachment.object_id, &attachment.manifest_hash)?;
+                self.commit_received_attachment_import(attachment, &key_slot)
+            })?;
             Ok(SdkDmAttachmentImportResult {
                 object_id: attachment.object_id.clone(),
                 manifest_hash: attachment.manifest_hash.clone(),
@@ -532,44 +590,49 @@ impl RamfluxClient {
         object_key: [u8; 32],
         check: &mut &'static str,
     ) -> Result<VerifiedAttachmentImport, SdkError> {
-        let ciphertext = &download.ciphertext;
-        *check = "manifest_hash";
-        let assembled_hash = ramflux_crypto::blake3_256_base64url(
-            ramflux_protocol::domain::OBJECT_MANIFEST,
-            ciphertext,
-        );
-        if assembled_hash != attachment.manifest_hash {
-            return Err(SdkError::LocalBus("DM attachment manifest hash mismatch".to_owned()));
-        }
-        let object = self.object_store.put_received_encrypted_object_with_key(
-            &attachment.object_id,
-            &attachment.manifest_hash,
-            ciphertext,
-            &attachment.plaintext_hash,
-            object_key,
-        );
-        *check = "object_persist";
-        self.persist_object_if_unlocked(&object, Some(&object_key))?;
-        *check = "transfer_persist";
-        self.persist_object_transfer(ObjectTransferPersist {
-            transfer_id: &download.transfer_id,
-            object: &object,
-            direction: OBJECT_TRANSFER_DOWNLOAD,
-            relay_endpoint: Some(&download.relay_endpoint),
-            chunk_size: download.manifest.chunk_size,
-            total_chunks: download.manifest.total_chunks,
-            completed: &download.completed,
-            done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
-            state: "complete",
-            last_error: None,
-            resume_token: None,
-            expires_at: Some(i64::try_from(download.expires_at).unwrap_or(i64::MAX)),
-        })?;
-        *check = "content_decrypt";
-        let plaintext = self.decrypt_object(&attachment.object_id)?;
-        *check = "plaintext_hash";
-        let plaintext_hash = verify_attachment_plaintext(attachment, &plaintext)?;
-        Ok(VerifiedAttachmentImport { object, plaintext, plaintext_hash })
+        let outcome = (|| {
+            let ciphertext = &download.ciphertext;
+            *check = "manifest_hash";
+            let assembled_hash = ramflux_crypto::blake3_256_base64url(
+                ramflux_protocol::domain::OBJECT_MANIFEST,
+                ciphertext,
+            );
+            if assembled_hash != attachment.manifest_hash {
+                return Err(SdkError::LocalBus("DM attachment manifest hash mismatch".to_owned()));
+            }
+            let mut staged = ObjectStore::new();
+            let object = staged.put_received_encrypted_object_with_key(
+                &attachment.object_id,
+                &attachment.manifest_hash,
+                ciphertext,
+                &attachment.plaintext_hash,
+                object_key,
+            );
+            *check = "object_persist";
+            self.persist_object_if_unlocked(&object, Some(&object_key), ObjectRetention::Imported)?;
+            self.object_store.cache_persisted_object(object.clone(), Some(object_key));
+            *check = "transfer_persist";
+            self.persist_object_transfer(ObjectTransferPersist {
+                transfer_id: &download.transfer_id,
+                object: &object,
+                direction: OBJECT_TRANSFER_DOWNLOAD,
+                relay_endpoint: Some(&download.relay_endpoint),
+                chunk_size: download.manifest.chunk_size,
+                total_chunks: download.manifest.total_chunks,
+                completed: &download.completed,
+                done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
+                state: "complete",
+                last_error: None,
+                resume_token: None,
+                expires_at: Some(i64::try_from(download.expires_at).unwrap_or(i64::MAX)),
+            })?;
+            *check = "content_decrypt";
+            let plaintext = zeroize::Zeroizing::new(self.decrypt_object(&attachment.object_id)?);
+            *check = "plaintext_hash";
+            let plaintext_hash = verify_attachment_plaintext(attachment, &plaintext)?;
+            Ok(VerifiedAttachmentImport { object, plaintext, plaintext_hash })
+        })();
+        outcome
     }
 
     #[cfg(feature = "itest-local-mint")]
@@ -777,10 +840,82 @@ impl RamfluxClient {
         object_id: &str,
         plaintext: &[u8],
     ) -> Result<EncryptedObject, SdkError> {
-        let object = self.object_store.put_encrypted_object(object_id, plaintext)?;
-        let object_key = self.object_content_key(&object.object_id)?;
-        self.persist_object_if_unlocked(&object, Some(&object_key))?;
-        Ok(object)
+        let prepared = self.object_store.prepare_encrypted_object(object_id, plaintext)?;
+        self.persist_object_if_unlocked(
+            prepared.object(),
+            Some(prepared.object_key()),
+            ObjectRetention::Standalone,
+        )?;
+        Ok(self.object_store.install_prepared_object(prepared))
+    }
+
+    /// Replaces only an explicitly expected, unowned identity. Existing message owners refuse it.
+    /// # Errors
+    /// Returns typed erasure/conflict errors or encryption/storage failures.
+    pub fn replace_encrypted_object(
+        &mut self,
+        object_id: &str,
+        expected_manifest: Option<&str>,
+        plaintext: &[u8],
+    ) -> Result<EncryptedObject, SdkError> {
+        let prepared = self.object_store.prepare_encrypted_object(object_id, plaintext)?;
+        let object = prepared.object();
+        self.account_db()?.replace_object(
+            expected_manifest,
+            &ObjectWrite {
+                object_id: &object.object_id,
+                manifest_hash: &object.manifest_hash,
+                nonce: &object.nonce,
+                ciphertext: &object.ciphertext,
+                plaintext_hash: &object.plaintext_hash,
+                tombstoned: false,
+                backup_excluded: false,
+                content_key: Some(prepared.object_key()),
+                object: &persisted_descriptor(object),
+                updated_at: now_unix_timestamp(),
+            },
+        )?;
+        Ok(self.object_store.install_prepared_object(prepared))
+    }
+
+    pub(super) fn prepare_history_transport(
+        &mut self,
+        object_id: &str,
+        plaintext: &[u8],
+        messages: &[DirectMessageRecord],
+    ) -> Result<EncryptedObject, SdkError> {
+        let prepared = self.object_store.prepare_encrypted_object(object_id, plaintext)?;
+        let object = prepared.object();
+        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            self.persist_object_if_unlocked(
+                object,
+                Some(prepared.object_key()),
+                ObjectRetention::OwnDeviceTransport,
+            )?;
+            for message in messages.iter().filter(|message| !message.deleted) {
+                let hash = ramflux_crypto::blake3_256_base64url(
+                    "ramflux.object.transport.owner.v1",
+                    &ramflux_protocol::canonical_json_bytes(&(
+                        object_id,
+                        &object.manifest_hash,
+                        &message.message_id,
+                    ))?,
+                );
+                self.account_db()?.register_object_reference(
+                    &ramflux_storage::ObjectReferenceOwner {
+                        reference_hash: &hash,
+                        wire_id: object_id,
+                        manifest_hash: &object.manifest_hash,
+                        selector: object_id,
+                        message_id: &message.message_id,
+                        reference: &serde_json::json!({}),
+                        metadata: &serde_json::json!({}),
+                    },
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(self.object_store.install_prepared_object(prepared))
     }
 
     /// T25-A2 (OBJ-IPC-01) P0-1: prepare the whole-object encryption (fresh key + AEAD seal)
@@ -847,6 +982,9 @@ impl RamfluxClient {
         &self,
         object_id: &str,
     ) -> Result<Option<EncryptedObject>, SdkError> {
+        if let Some(db) = self.active_account_db.as_ref() {
+            db.check_object_access(object_id)?;
+        }
         let alias = self.received_object_alias(object_id)?;
         let wire = alias.as_ref().map_or(object_id, |(wire, _)| wire);
         let object = if let Some(object) = self.object_store.cached_object(wire) {
@@ -862,6 +1000,9 @@ impl RamfluxClient {
     }
 
     pub(super) fn object_content_key(&self, object_id: &str) -> Result<[u8; 32], SdkError> {
+        if let Some(db) = self.active_account_db.as_ref() {
+            db.check_object_access(object_id)?;
+        }
         if let Ok(key) = self.object_store.object_key(object_id) {
             return Ok(key);
         }
@@ -906,6 +1047,9 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn decrypt_object(&self, object_id: &str) -> Result<Vec<u8>, SdkError> {
+        if let Some(db) = self.active_account_db.as_ref() {
+            db.check_object_access(object_id)?;
+        }
         let alias = self.received_object_alias(object_id)?;
         if alias.is_some() && self.object_store_object(object_id)?.is_none() {
             return Err(SyncError::ObjectNotFound.into());

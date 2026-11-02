@@ -10,6 +10,10 @@ pub enum StorageError {
     /// Authentication or integrity verification failed; never used for local I/O.
     #[error("{0}")]
     Integrity(&'static str),
+    #[error("object erased")]
+    ObjectErased,
+    #[error("object identity conflict; explicit verified replacement is required")]
+    ObjectIdentityConflict,
     #[error("protocol error: {0}")]
     Protocol(#[from] ramflux_protocol::ProtocolError),
     #[error("ambiguous device ID: {0}; root-qualified address required")]

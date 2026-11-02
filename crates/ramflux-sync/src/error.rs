@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    #[error("object erased")]
+    ObjectErased,
     #[error("core error: {0}")]
     Core(#[from] ramflux_core::CoreError),
     #[error("object not found")]

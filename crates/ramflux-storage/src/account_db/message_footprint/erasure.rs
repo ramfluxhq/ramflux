@@ -5,7 +5,8 @@
 use rusqlite::Connection;
 
 pub(super) fn install(db: &Connection) -> rusqlite::Result<()> {
-    let mut body = String::from(BODY);
+    let mut body = super::super::object_retention::erasure_body(db)?;
+    body.push_str(BODY);
     for (table, kind) in [
         ("backup_archived_actor_state", "archived_actor"),
         ("backup_archived_local_event", "archived_event"),
@@ -36,7 +37,7 @@ const BODY: &str = r"
     CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id);
  DELETE FROM runtime_outbox WHERE table_name='direct_message_projection' AND row_id=NEW.rowid;
  DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor');
- DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor') AND state_kind<>'directory/message/'||NEW.message_id;
+ DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor') AND state_kind<>'directory/message/'||NEW.message_id AND NOT EXISTS(SELECT 1 FROM message_footprint shared WHERE shared.kind='actor' AND shared.locator=runtime_actor_state.state_kind AND shared.message_id<>NEW.message_id AND shared.message_id NOT GLOB 'copy:*');
  DELETE FROM runtime_outbox WHERE sequence IN (
   SELECT outbox.sequence FROM message_footprint footprint
   CROSS JOIN runtime_outbox outbox INDEXED BY runtime_outbox_actor_kind

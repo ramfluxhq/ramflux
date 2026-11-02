@@ -148,6 +148,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         return code;
     }
     match error {
+        SdkError::ObjectErased => "ObjectErased",
         SdkError::Crypto(CryptoError::GroupLeaseUnavailable) => "GroupLeaseUnavailable",
         SdkError::ContactInput(crate::ContactReason::AnchorMismatch) => "AnchorMismatch",
         SdkError::NetworkingPending
@@ -571,5 +572,14 @@ mod http_client_refusal_tests {
         assert_eq!(local_bus_error_code(&SdkError::Transport(error.into())), "Unavailable");
         drop(listener);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod object_erasure_tests {
+    // Mutation: let the new typed outcome fall through to ValidationFailed.
+    #[test]
+    fn object_erasure_has_a_stable_nonfatal_bus_code() {
+        assert_eq!(super::local_bus_error_code(&crate::SdkError::ObjectErased), "ObjectErased");
     }
 }

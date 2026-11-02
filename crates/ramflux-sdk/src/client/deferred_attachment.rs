@@ -46,6 +46,12 @@ struct PreparedSlot {
     pair_slot: Option<SdkObjectKeySlot>,
 }
 
+impl Drop for PreparedSlot {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.object_key);
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct FetchState {
     object_id: String,
@@ -93,6 +99,7 @@ impl RamfluxClient {
             let confirmed = std::time::Instant::now();
             if resumable {
                 // object_id also registers the erasure footprint, including sender-scoped aliases.
+                db.check_object_identity(&reference.object_id, &reference.manifest_hash)?;
                 db.persist_actor_state(
                     &key,
                     &AckProgress { object_id: selector.clone(), acknowledged: true },
@@ -147,17 +154,14 @@ impl RamfluxClient {
         let ReferenceContext { owner, conversation, message } = context;
         let db = self.account_db()?;
         let key = reference_key(selector);
-        if db.load_actor_state::<ReceivedAttachment>(&key)?.is_some() {
-            // Replayed receipt must not replace access material or reset a failed/complete fetch.
-            return Ok(());
-        }
+        let existing = db.load_actor_state::<ReceivedAttachment>(&key)?.is_some();
         // Extract the content key while receive-time private prekeys are available, without
         // advancing its durable slot checkpoint. A bad slot must not block message receipt.
-        let prepared_slot = prepared.map(|slot| PreparedSlot {
+        let prepared_slot = prepared.map(|mut slot| PreparedSlot {
             object_key: slot.object_key,
-            conversation_id: slot.conversation_id,
-            commit_label: slot.commit_label,
-            pair_slot: slot.pair_slot,
+            conversation_id: std::mem::take(&mut slot.conversation_id),
+            commit_label: std::mem::take(&mut slot.commit_label),
+            pair_slot: slot.pair_slot.take(),
         });
         let metadata = json!({
             "name":null,"mime":null,"size":reference.cipher_size.checked_sub(16),
@@ -165,17 +169,33 @@ impl RamfluxClient {
             "message_id":message,"relay_endpoint":reference.relay_endpoint,
             "manifest_hash":reference.manifest_hash,"plaintext_hash":reference.plaintext_hash,
         });
-        db.persist_actor_state_batch(&[
-            (
-                key,
-                json!(ReceivedAttachment {
-                    reference: reference.clone(),
-                    prepared_slot,
-                    authenticated_sender: None
-                }),
-            ),
-            (format!("directory/object/{selector}"), metadata),
-        ])?;
+        let received = json!(ReceivedAttachment {
+            reference: reference.clone(),
+            prepared_slot,
+            authenticated_sender: None,
+        });
+        let hash = ramflux_crypto::blake3_256_base64url(
+            "ramflux.attachment.reference.v1",
+            &ramflux_protocol::canonical_json_bytes(reference)?,
+        );
+        db.write_transaction(|| -> Result<(), SdkError> {
+            db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
+                reference_hash: &hash,
+                wire_id: &reference.object_id,
+                manifest_hash: &reference.manifest_hash,
+                selector,
+                message_id: message,
+                reference: &received,
+                metadata: &metadata,
+            })?;
+            if !existing {
+                db.persist_actor_state_batch(&[
+                    (key, received),
+                    (format!("directory/object/{selector}"), metadata),
+                ])?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -214,6 +234,7 @@ impl RamfluxClient {
     ) -> Result<Option<Value>, SdkError> {
         validate_id(object_id)?;
         validate_id(operation_id)?;
+        self.account_db()?.check_object_access(object_id)?;
         let old: Option<FetchState> =
             self.account_db()?.load_actor_state(&format!("attachment/operation/{operation_id}"))?;
         if old.as_ref().is_some_and(|old| old.object_id != object_id) {
@@ -347,6 +368,7 @@ impl RamfluxClient {
         .await;
         match outcome {
             Ok(()) => "available".clone_into(&mut state.transfer_state),
+            Err(SdkError::ObjectErased) => return Err(SdkError::ObjectErased),
             Err(error) => {
                 super::attachment_diagnostics::context(object_id, "attachment_fetch", &error);
                 "failed".clone_into(&mut state.transfer_state);
@@ -445,7 +467,7 @@ impl RamfluxClient {
         }
         stored
             .prepared_slot
-            .map(|slot| {
+            .map(|mut slot| {
                 Ok(DeferredObjectKeySlot {
                     object_key: slot.object_key,
                     session: None,
@@ -454,9 +476,9 @@ impl RamfluxClient {
                     } else {
                         None
                     },
-                    conversation_id: slot.conversation_id,
-                    commit_label: slot.commit_label,
-                    pair_slot: slot.pair_slot,
+                    conversation_id: std::mem::take(&mut slot.conversation_id),
+                    commit_label: std::mem::take(&mut slot.commit_label),
+                    pair_slot: slot.pair_slot.take(),
                 })
             })
             .transpose()
@@ -587,7 +609,13 @@ impl RamfluxClient {
         stored.authenticated_sender = Some(sender.to_owned());
         db.persist_actor_state(&reference_key(&selector), &stored)?;
         db.persist_actor_state(&scoped_key, &selector)?;
-        db.persist_actor_state(&slot_reference_key(reference)?, &selector)?;
+        let slot_key = slot_reference_key(reference)?;
+        db.persist_actor_state(&slot_key, &selector)?;
+        let hash = ramflux_crypto::blake3_256_base64url(
+            "ramflux.attachment.reference.v1",
+            &ramflux_protocol::canonical_json_bytes(reference)?,
+        );
+        db.register_object_reference_actor(&hash, &slot_key)?;
         Ok(())
     }
 }

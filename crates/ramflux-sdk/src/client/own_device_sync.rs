@@ -109,9 +109,9 @@ impl RamfluxClient {
             manifest.devices.iter().find(|d| d.device_id == target_device_id).ok_or_else(|| {
                 SdkError::InboundRejected("own history target unavailable".into())
             })?;
-        let plaintext = serde_json::to_vec(&bundle)?;
+        let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&bundle)?);
         let object_id = format!("own-device-sync:{snapshot_id}");
-        let object = self.put_encrypted_object(&object_id, &plaintext)?;
+        let object = self.prepare_history_transport(&object_id, &plaintext, &bundle.messages)?;
         let relay_options = self.own_history_relay_options(relay_endpoint, options.service_key)?;
         let transfer = self
             .upload_object_to_relay_inner_via_gateway(

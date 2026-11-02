@@ -43,6 +43,7 @@ pub enum RamfluxErrorCode {
     PanicAborted = 17,
     /// Another process owns the account writer. Retry after the owner releases it.
     AccountBusy = 18,
+    ObjectErased = 19,
 }
 
 /// Retryable account writer contention (18). Existing `StorageFailed` (8) remains
@@ -67,6 +68,7 @@ impl RamfluxErrorCode {
             Self::PermissionDenied => "PermissionDenied",
             Self::McpGrantRejected => "McpGrantRejected",
             Self::ObjectTransferFailed => "ObjectTransferFailed",
+            Self::ObjectErased => "ObjectErased",
             Self::RateLimited => "RateLimited",
             Self::Internal => "Internal",
             Self::PanicAborted => "PanicAborted",
@@ -824,6 +826,7 @@ fn clear_optional_out_error(out_error_json: *mut *mut RamfluxBuffer) {
 fn map_sdk_error(error: &SdkError) -> CAbiError {
     let message = error.to_string();
     let code = match error {
+        SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
         SdkError::HomeMigrationRefused(reason) => match reason {
             ramflux_protocol::home_migration::Refusal::RateLimited => RamfluxErrorCode::RateLimited,
             ramflux_protocol::home_migration::Refusal::StorageUnavailable => {
@@ -983,3 +986,15 @@ fn backup_authorization_rejection_maps_to_c_abi_permission_denied() {
 
 #[cfg(test)]
 mod storage_error_tests;
+
+#[cfg(test)]
+mod object_erasure_tests {
+    // Mutation: map ObjectErased to an existing generic or panic status.
+    #[test]
+    fn erased_object_maps_to_a_distinct_nonfatal_abi_status() {
+        let error = super::map_sdk_error(&crate::SdkError::ObjectErased);
+        assert_eq!(error.code, super::RamfluxErrorCode::ObjectErased);
+        assert_eq!(error.code.name(), "ObjectErased");
+        assert_eq!(error.code as i32, 19);
+    }
+}

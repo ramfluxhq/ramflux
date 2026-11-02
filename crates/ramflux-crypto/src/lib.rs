@@ -6,8 +6,10 @@
 pub mod backup_stream;
 pub mod custody;
 mod device_reference;
+mod object_erasure;
 pub mod object_verification;
 pub use device_reference::RootQualifiedDeviceRef;
+pub use object_erasure::{object_erasure_commitment, object_erasure_lookup};
 mod double_ratchet;
 mod error;
 mod franking;

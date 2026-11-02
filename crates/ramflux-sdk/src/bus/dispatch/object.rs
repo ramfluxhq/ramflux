@@ -1148,6 +1148,9 @@ fn object_get_spool_path(data_root: &Path, account_id: &str, operation_id: &str)
 /// Idempotent — returns `false` for an unknown `operation_id`. This is the single fail-closed cleanup
 /// used on begin re-entry, any begin error, and every finish.
 fn object_get_spool_discard(account: &mut LocalBusAccountState, operation_id: &str) -> bool {
+    if let Ok(db) = account.client.account_db() {
+        db.unregister_object_resource(&format!("download:{operation_id}"));
+    }
     if let Some(session) = account.object_get_spools.remove(operation_id) {
         let path = session.path.clone();
         drop(session);
@@ -1188,12 +1191,12 @@ async fn object_get_begin(
     )?;
     // A4 accepts an O(16 MiB) resident plaintext at the decrypt boundary (A5 will optimize); the
     // whole-object AEAD / relay wire is UNCHANGED — this is the same decrypt the one-shot GET used.
-    let plaintext = if let Some(options) = relay_options.as_ref() {
+    let plaintext = zeroize::Zeroizing::new(if let Some(options) = relay_options.as_ref() {
         dispatch_object_download_from_relay(account, &body.object_id, options, body.relay_ack)
             .await?
     } else {
         account.client.decrypt_object(&body.object_id)?
-    };
+    });
     if plaintext.len() > MAX_LOCAL_BUS_OBJECT_BYTES {
         return Err(SdkError::LocalBus(format!(
             "object too large for local-bus download: {} > {MAX_LOCAL_BUS_OBJECT_BYTES}",
@@ -1223,17 +1226,35 @@ async fn object_get_begin(
     #[cfg(feature = "object-ipc-crash-seam")]
     crate::itest_crash_seam::maybe_abort_download_after_write();
 
-    account.object_get_spools.insert(
-        body.operation_id.clone(),
-        ObjectGetSpoolSession {
-            object_id: body.object_id.clone(),
-            total_len,
-            plaintext_hash: plaintext_hash.clone(),
-            path,
-            file,
-            read_offset: 0,
-        },
-    );
+    let file = std::sync::Arc::new(std::sync::Mutex::new(Some(file)));
+    let session = ObjectGetSpoolSession {
+        object_id: body.object_id.clone(),
+        total_len,
+        plaintext_hash: plaintext_hash.clone(),
+        path: path.clone(),
+        file: std::sync::Arc::clone(&file),
+        read_offset: 0,
+    };
+    let object =
+        account.client.object_store_object(&body.object_id)?.ok_or(SyncError::ObjectNotFound)?;
+    let weak = std::sync::Arc::downgrade(&file);
+    account.client.account_db()?.register_object_resource(
+        &format!("download:{}", body.operation_id),
+        &object.object_id,
+        &object.manifest_hash,
+        std::sync::Arc::new(move || {
+            if let Some(file) = weak.upgrade() {
+                file.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok(())
+        }),
+    )?;
+    account.object_get_spools.insert(body.operation_id.clone(), session);
     Ok(local_bus_ok(serde_json::json!({
         "operation_id": body.operation_id,
         "object_id": body.object_id,
@@ -1302,9 +1323,12 @@ fn object_get_read(
             session.total_len
         )));
     }
-    let mut buffer = vec![0_u8; body.len];
-    std::io::Seek::seek(&mut session.file, std::io::SeekFrom::Start(body.offset as u64))?;
-    std::io::Read::read_exact(&mut session.file, &mut buffer)?;
+    account.client.account_db()?.check_object_access(&session.object_id)?;
+    let mut buffer = zeroize::Zeroizing::new(vec![0_u8; body.len]);
+    let mut file = session.file.lock().map_err(|_| SdkError::ObjectErased)?;
+    let file = file.as_mut().ok_or(SdkError::ObjectErased)?;
+    std::io::Seek::seek(file, std::io::SeekFrom::Start(body.offset as u64))?;
+    std::io::Read::read_exact(file, &mut buffer)?;
     session.read_offset = end;
     let eof = end == session.total_len;
     let response = serde_json::json!({
@@ -1326,6 +1350,10 @@ fn object_get_status(
     let body: LocalBusObjectGetStatusRequest = serde_json::from_value(request.body.clone())?;
     let response = match account.object_get_spools.get(&body.operation_id) {
         Some(session) => {
+            account.client.account_db()?.check_object_access(&session.object_id)?;
+            if session.file.lock().map_err(|_| SdkError::ObjectErased)?.is_none() {
+                return Err(SdkError::ObjectErased);
+            }
             let state =
                 if session.read_offset == session.total_len { "complete" } else { "reading" };
             serde_json::json!({

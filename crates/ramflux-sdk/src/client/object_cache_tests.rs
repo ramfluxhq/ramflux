@@ -113,3 +113,102 @@ async fn cached_attachment_retry_keeps_completed_download_state_without_rewritin
     assert_eq!(after, before, "a retry must not reset durable completion before resuming ACKs");
     Ok(())
 }
+
+// Mutation: return a cache hit before consulting the durable object fence.
+#[tokio::test]
+async fn attachment_last_owner_erasure_invalidates_cached_keys_and_reopen_reads() -> TestResult {
+    let mut fixture = Fixture::new("attachment-erasure").await?;
+    let mut donor = ObjectStore::new();
+    let object = donor.put_encrypted_object("erasure-wire", b"attachment-private-body")?;
+    let key = donor.object_key(&object.object_id)?;
+    let manifest = chunk_manifest_for_object(&object.object_id, &object.ciphertext, 1024, None);
+    let reference = reference(&fixture.client, &object, &manifest)?;
+    for message in ["first", "last"] {
+        fixture.client.send_direct_message("thread", message, "peer", b"body")?;
+        fixture
+            .client
+            .persist_received_attachment_reference(&reference, "peer", "thread", message)?;
+    }
+    let download = DmAttachmentDownload {
+        ciphertext: object.ciphertext.clone(),
+        manifest,
+        transfer_id: "download-erasure".into(),
+        relay_endpoint: reference.relay_endpoint.clone(),
+        completed: vec![0],
+        expires_at: u64::MAX,
+    };
+    fixture.client.verify_persist_dm_attachment(&reference, &download, key)?;
+    assert_eq!(fixture.client.decrypt_object(&object.object_id)?, b"attachment-private-body");
+    fixture.client.delete_direct_message("thread", "first", "local", "first-delete")?;
+    assert_eq!(fixture.client.decrypt_object(&object.object_id)?, b"attachment-private-body");
+    fixture.client.delete_direct_message("thread", "last", "local", "last-delete")?;
+    assert!(fixture.client.object_store.cached_object(&object.object_id).is_none());
+    assert!(matches!(
+        fixture.client.object_store.object_key(&object.object_id),
+        Err(SyncError::ObjectErased)
+    ));
+    assert!(matches!(
+        fixture.client.decrypt_object(&object.object_id),
+        Err(SdkError::ObjectErased)
+    ));
+    assert!(matches!(
+        fixture.client.object_store_object(&object.object_id),
+        Err(SdkError::ObjectErased)
+    ));
+    assert!(fixture.client.persisted_objects()?.is_empty());
+    assert!(matches!(
+        fixture.client.verify_persist_dm_attachment(&reference, &download, key),
+        Err(SdkError::ObjectErased)
+    ));
+    assert!(matches!(
+        fixture.client.fail_received_attachment_fetch(&object.object_id, "stale-fetch").await,
+        Err(SdkError::ObjectErased)
+    ));
+    fixture.client.active_account_db.take();
+    fixture.client.unlock_account("attachment-erasure", b"native fixture data passphrase")?;
+    assert!(matches!(
+        fixture.client.decrypt_object(&object.object_id),
+        Err(SdkError::ObjectErased)
+    ));
+    assert!(fixture.client.account_db()?.client_directory_ids("object", "", 128)?.is_empty());
+    Ok(())
+}
+
+// Mutation: permit the ordinary put path to overwrite an erased wire id with a new manifest.
+#[tokio::test]
+async fn attachment_erasure_requires_explicit_conflict_checked_replacement() -> TestResult {
+    let mut fixture = Fixture::new("attachment-replacement").await?;
+    let original = fixture.client.put_encrypted_object("replace-wire", b"original")?;
+    assert!(matches!(
+        fixture.client.put_encrypted_object("replace-wire", b"implicit"),
+        Err(SdkError::Storage(StorageError::ObjectIdentityConflict))
+    ));
+    assert_eq!(fixture.client.decrypt_object("replace-wire")?, b"original");
+    let replacement = fixture.client.replace_encrypted_object(
+        "replace-wire",
+        Some(&original.manifest_hash),
+        b"replacement",
+    )?;
+    assert_ne!(original.manifest_hash, replacement.manifest_hash);
+    assert!(matches!(
+        fixture.client.account_db()?.check_object_identity("replace-wire", &original.manifest_hash),
+        Err(StorageError::ObjectErased)
+    ));
+    assert_eq!(fixture.client.decrypt_object("replace-wire")?, b"replacement");
+    fixture.client.send_direct_message("thread", "message", "peer", b"body")?;
+    let manifest = chunk_manifest_for_object("replace-wire", &replacement.ciphertext, 1024, None);
+    let reference = reference(&fixture.client, &replacement, &manifest)?;
+    fixture
+        .client
+        .persist_received_attachment_reference(&reference, "peer", "thread", "message")?;
+    assert!(matches!(
+        fixture.client.replace_encrypted_object(
+            "replace-wire",
+            Some(&replacement.manifest_hash),
+            b"blocked"
+        ),
+        Err(SdkError::Storage(StorageError::ObjectIdentityConflict))
+    ));
+    assert_eq!(fixture.client.decrypt_object("replace-wire")?, b"replacement");
+    Ok(())
+}

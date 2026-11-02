@@ -12,6 +12,9 @@ use ramflux_crypto::DeviceBranch;
 use ramflux_protocol::{decode_base64url, encode_base64url};
 
 mod cache;
+mod retirement;
+use retirement::ObjectData;
+pub use retirement::ObjectRetirementHandle;
 
 const OBJECT_SYNC_V1: &str = "object_sync_v1";
 const DEFAULT_SYNC_SESSION_ID: &str = "local_object_sync_session";
@@ -62,11 +65,9 @@ impl PreparedEncryptedObject {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Default)]
 pub struct ObjectStore {
-    cache: std::cell::RefCell<Option<cache::CachePolicy>>,
-    objects: BTreeMap<String, EncryptedObject>,
-    object_keys: BTreeMap<String, [u8; 32]>,
+    data: std::sync::Arc<std::sync::Mutex<ObjectData>>,
 }
 
 impl ObjectStore {
@@ -93,7 +94,7 @@ impl ObjectStore {
         plaintext: &[u8],
     ) -> Result<PreparedEncryptedObject, SyncError> {
         let object_id = ObjectId::new(object_id)?;
-        let object_key = ramflux_crypto::random_32()?;
+        let object_key = zeroize::Zeroizing::new(ramflux_crypto::random_32()?);
         let nonce = object_nonce(object_id.as_str());
         let ciphertext = encrypt_aead(&object_key, &nonce, object_id.as_str(), plaintext)?;
         let object_id = object_id.into_string();
@@ -113,7 +114,7 @@ impl ObjectStore {
                 tombstoned: false,
                 backup_excluded: false,
             },
-            object_key: zeroize::Zeroizing::new(object_key),
+            object_key,
         })
     }
 
@@ -125,11 +126,14 @@ impl ObjectStore {
         &mut self,
         prepared: PreparedEncryptedObject,
     ) -> EncryptedObject {
+        let mut data = self.data();
         let PreparedEncryptedObject { object, object_key } = prepared;
-        self.objects.insert(object.object_id.clone(), object.clone());
-        self.object_keys.insert(object.object_id.clone(), *object_key);
-        self.touch_cached(&object.object_id);
-        self.evict_cached();
+        data.remove(&object.object_id);
+        data.retired.remove(&object.object_id);
+        data.objects.insert(object.object_id.clone(), object.clone());
+        data.object_keys.insert(object.object_id.clone(), *object_key);
+        data.touch_cached(&object.object_id);
+        data.evict_cached();
         object
     }
 
@@ -153,7 +157,8 @@ impl ObjectStore {
     ) -> Result<EncryptedObject, SyncError> {
         let mut object = self.put_encrypted_object(object_id, plaintext)?;
         object.backup_excluded = true;
-        self.objects.insert(object_id.to_owned(), object.clone());
+        let mut data = self.data();
+        data.objects.insert(object_id.to_owned(), object.clone());
         Ok(object)
     }
 
@@ -165,6 +170,7 @@ impl ObjectStore {
         ciphertext: &[u8],
         plaintext_hash: &str,
     ) -> EncryptedObject {
+        let mut data = self.data();
         let object = EncryptedObject {
             object_id: object_id.to_owned(),
             manifest_hash: manifest_hash.to_owned(),
@@ -174,7 +180,7 @@ impl ObjectStore {
             tombstoned: false,
             backup_excluded: false,
         };
-        self.objects.insert(object_id.to_owned(), object.clone());
+        data.objects.insert(object_id.to_owned(), object.clone());
         object
     }
 
@@ -193,20 +199,24 @@ impl ObjectStore {
             ciphertext,
             plaintext_hash,
         );
-        self.object_keys.insert(object_id.to_owned(), object_key);
-        self.touch_cached(object_id);
-        self.evict_cached();
+        let mut data = self.data();
+        data.object_keys.insert(object_id.to_owned(), object_key);
+        data.touch_cached(object_id);
+        data.evict_cached();
         object
     }
 
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn decrypt_object(&self, object_id: &str) -> Result<Vec<u8>, SyncError> {
-        let object = self.cached_object(object_id).ok_or(SyncError::ObjectNotFound)?;
+        let mut data = self.data();
+        data.check_retired(object_id)?;
+        data.touch_cached(object_id);
+        let object = data.objects.get(object_id).ok_or(SyncError::ObjectNotFound)?;
         if object.tombstoned {
             return Err(SyncError::ObjectTombstoned);
         }
-        let object_key = self.object_keys.get(object_id).ok_or(SyncError::ObjectKeyMissing)?;
+        let object_key = data.object_keys.get(object_id).ok_or(SyncError::ObjectKeyMissing)?;
         let nonce = decode_nonce(&object.nonce)?;
         decrypt_aead(object_key, &nonce, object_id, &object.ciphertext)
     }
@@ -214,13 +224,16 @@ impl ObjectStore {
     /// # Errors
     /// Returns an error when the object key is missing.
     pub fn object_key(&self, object_id: &str) -> Result<[u8; 32], SyncError> {
-        self.touch_cached(object_id);
-        self.object_keys.get(object_id).copied().ok_or(SyncError::ObjectKeyMissing)
+        let mut data = self.data();
+        data.check_retired(object_id)?;
+        data.touch_cached(object_id);
+        data.object_keys.get(object_id).copied().ok_or(SyncError::ObjectKeyMissing)
     }
 
     #[must_use]
     pub fn objects(&self) -> Vec<EncryptedObject> {
-        self.objects.values().cloned().collect()
+        let data = self.data();
+        data.objects.values().cloned().collect()
     }
 
     pub fn replace_persisted(
@@ -228,24 +241,27 @@ impl ObjectStore {
         objects: Vec<EncryptedObject>,
         object_keys: BTreeMap<String, [u8; 32]>,
     ) {
-        self.objects =
+        let mut data = self.data();
+        data.clear();
+        data.objects =
             objects.into_iter().map(|object| (object.object_id.clone(), object)).collect();
-        self.object_keys = object_keys;
-        if let Some(cache) = self.cache.get_mut().as_mut() {
-            cache.recent.clear();
+        data.object_keys = object_keys;
+        data.retired.clear();
+        let recent = data.objects.keys().cloned().collect();
+        if let Some(cache) = data.cache.as_mut() {
+            cache.recent = recent;
         }
-        for id in self.objects.keys() {
-            self.touch_cached(id);
-        }
-        self.evict_cached();
+        data.evict_cached();
     }
 
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn sync_to_peer(&self, object_id: &str, peer: &mut Self) -> Result<(), SyncError> {
-        let object = self.objects.get(object_id).ok_or(SyncError::ObjectNotFound)?;
+        let data = self.data();
+        data.check_retired(object_id)?;
+        let object = data.objects.get(object_id).ok_or(SyncError::ObjectNotFound)?;
         let object_key =
-            self.object_keys.get(object_id).copied().ok_or(SyncError::ObjectKeyMissing)?;
+            data.object_keys.get(object_id).copied().ok_or(SyncError::ObjectKeyMissing)?;
         let manifest = chunk_manifest_for_object(object_id, &object.ciphertext, 64 * 1024, None);
         let mut session = ObjectSyncSession::new(manifest.clone(), object_key);
         for chunk_index in 0..manifest.total_chunks {
@@ -285,7 +301,8 @@ impl ObjectStore {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn tombstone(&mut self, object_id: &str) -> Result<(), SyncError> {
-        let object = self.objects.get_mut(object_id).ok_or(SyncError::ObjectNotFound)?;
+        let mut data = self.data();
+        let object = data.objects.get_mut(object_id).ok_or(SyncError::ObjectNotFound)?;
         object.tombstoned = true;
         Ok(())
     }
@@ -293,7 +310,8 @@ impl ObjectStore {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn exclude_from_backup(&mut self, object_id: &str) -> Result<(), SyncError> {
-        let object = self.objects.get_mut(object_id).ok_or(SyncError::ObjectNotFound)?;
+        let mut data = self.data();
+        let object = data.objects.get_mut(object_id).ok_or(SyncError::ObjectNotFound)?;
         object.backup_excluded = true;
         Ok(())
     }
@@ -305,8 +323,9 @@ impl ObjectStore {
         source: &Self,
         object_id: &str,
     ) -> Result<(), SyncError> {
-        let source_object = source.objects.get(object_id).ok_or(SyncError::ObjectNotFound)?;
-        if source_object.tombstoned { self.tombstone(object_id) } else { Ok(()) }
+        let tombstoned =
+            source.cached_object(object_id).ok_or(SyncError::ObjectNotFound)?.tombstoned;
+        if tombstoned { self.tombstone(object_id) } else { Ok(()) }
     }
 
     #[cfg(test)]
@@ -319,9 +338,10 @@ impl ObjectStore {
     }
 
     fn backup_manifest_unsigned(&self, request: BackupManifestRequest) -> BackupManifest {
+        let data = self.data();
         let mut object_manifest_hashes = Vec::new();
         let mut object_tombstone_heads = Vec::new();
-        for object in self.objects.values() {
+        for object in data.objects.values() {
             if object.tombstoned {
                 object_tombstone_heads.push(object_tombstone_head(object));
             } else if !object.backup_excluded {

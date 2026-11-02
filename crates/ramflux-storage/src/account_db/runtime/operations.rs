@@ -34,7 +34,11 @@ impl AccountDb {
                 StorageError::EventIdConflict(format!("operation requires reconciliation: {id}"))
             })?;
             transaction.commit()?;
-            return Ok(Some(serde_json::from_str(&response)?));
+            let response: serde_json::Value = serde_json::from_str(&response)?;
+            if response.get("object_erased").and_then(serde_json::Value::as_bool) == Some(true) {
+                return Err(StorageError::ObjectErased);
+            }
+            return Ok(Some(response));
         }
         self.connection.execute(
             "INSERT INTO runtime_operation(operation_id,fingerprint) VALUES(?1,?2)",
@@ -51,10 +55,13 @@ impl AccountDb {
         id: &str,
         response: &serde_json::Value,
     ) -> Result<(), StorageError> {
+        let transaction = self.connection.immediate_transaction()?;
+        self.register_object_response(id, response)?;
         self.connection.execute(
             "UPDATE runtime_operation SET response_json=?2 WHERE operation_id=?1",
             params![id, serde_json::to_string(response)?],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 }

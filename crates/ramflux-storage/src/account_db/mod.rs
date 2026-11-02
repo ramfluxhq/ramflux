@@ -52,6 +52,7 @@ mod message_footprint;
 pub mod messages;
 pub mod object;
 mod object_payload;
+pub mod object_retention;
 pub mod read_model;
 pub mod recovery;
 mod replay_markers;
@@ -76,6 +77,7 @@ pub struct AccountDb {
     current_key: AccountDbKey,
     device_signer: Option<ramflux_crypto::DeviceBranch>,
     clock: AccountClock,
+    object_retirement: object_retention::RetirementObserver,
     pub(crate) connection: Connection,
     volatile_typing: RefCell<BTreeMap<(String, String), TypingStateRecord>>,
     volatile_presence: RefCell<BTreeMap<String, ContactPresenceRecord>>,
@@ -109,6 +111,7 @@ impl AccountDb {
             current_key: key.clone(),
             device_signer: None,
             clock: AccountClock::real(),
+            object_retirement: object_retention::RetirementObserver::default(),
             connection,
             volatile_typing: RefCell::new(BTreeMap::new()),
             volatile_presence: RefCell::new(BTreeMap::new()),

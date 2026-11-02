@@ -19,7 +19,7 @@ async fn native_received_attachment_listing_avoids_ciphertext_frame_overflow() -
         &object.plaintext_hash,
         key,
     );
-    receiver.client.persist_object_if_unlocked(&blob, Some(&key))?;
+    receiver.client.persist_object_if_unlocked(&blob, Some(&key), ObjectRetention::Imported)?;
     receiver.client.account_db()?.persist_client_record(
         "object",
         &object.object_id,

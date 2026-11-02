@@ -14,12 +14,80 @@ pub type StoredObject<T> = (T, Option<[u8; 32]>);
 pub type StoredObjects<T> = (Vec<T>, BTreeMap<String, [u8; 32]>);
 
 impl AccountDb {
-    pub fn upsert_object<T>(&self, write: &ObjectWrite<'_, T>) -> Result<(), StorageError>
+    pub fn upsert_object<T: Serialize>(
+        &self,
+        write: &ObjectWrite<'_, T>,
+    ) -> Result<(), StorageError> {
+        self.upsert_object_checked(write, false)
+    }
+
+    /// # Errors
+    /// Replaces only the expected unowned identity; an erased wire id requires explicit absence.
+    pub fn replace_object<T: Serialize>(
+        &self,
+        expected_manifest: Option<&str>,
+        write: &ObjectWrite<'_, T>,
+    ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            let previous: Option<Vec<u8>> = self.connection.query_row("SELECT manifest_hash FROM object_index WHERE object_id=?1", params![write.object_id], |row| row.get(0)).optional()?;
+            if previous.as_deref() != expected_manifest.map(str::as_bytes) { return Err(StorageError::ObjectIdentityConflict); }
+            let owned: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM object_retention_payload p JOIN object_retention_reference r USING(commitment) JOIN object_message_reference m USING(reference_hash) WHERE p.wire_id=?1)", params![write.object_id], |r| r.get(0))?;
+            if owned { return Err(StorageError::ObjectIdentityConflict); }
+            let verified = ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT_MANIFEST, write.ciphertext);
+            if verified != write.manifest_hash { return Err(StorageError::ObjectIdentityConflict); }
+            if let Some(expected) = expected_manifest {
+                if expected == write.manifest_hash { return Err(StorageError::ObjectIdentityConflict); }
+                self.retain_object(write.object_id, expected, super::object_retention::ObjectRetention::Standalone)?;
+                let digest = ramflux_crypto::object_erasure_commitment(&self.principal_commitment, write.object_id, expected);
+                self.connection.execute("INSERT INTO object_erasure_work VALUES(?1,?2,?3)", params![digest,write.object_id,expected])?;
+                let sql = self.connection.call(|db| super::object_retention::payload_erasure_body(db))?;
+                self.connection.execute_batch(&sql)?;
+            }
+            self.upsert_object_checked(write, true)?;
+            self.retain_object(write.object_id, write.manifest_hash, super::object_retention::ObjectRetention::Standalone)
+        })
+    }
+
+    fn upsert_object_checked<T>(
+        &self,
+        write: &ObjectWrite<'_, T>,
+        replacement: bool,
+    ) -> Result<(), StorageError>
     where
         T: Serialize,
     {
-        self.connection.execute(
-            "INSERT OR REPLACE INTO object_index (
+        self.write_transaction(|| {
+            self.check_object_identity(write.object_id, write.manifest_hash)?;
+            let previous: Option<Vec<u8>> = self
+                .connection
+                .query_row(
+                    "SELECT manifest_hash FROM object_index WHERE object_id=?1",
+                    params![write.object_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if previous.is_none() && !replacement {
+                let lookup = ramflux_crypto::object_erasure_lookup(
+                    &self.principal_commitment,
+                    write.object_id,
+                );
+                let retired: bool = self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM object_erasure_lookup WHERE lookup=?1)",
+                    params![lookup],
+                    |r| r.get(0),
+                )?;
+                if retired {
+                    return Err(StorageError::ObjectIdentityConflict);
+                }
+            }
+            if previous
+                .as_deref()
+                .is_some_and(|previous| previous != write.manifest_hash.as_bytes())
+            {
+                return Err(StorageError::ObjectIdentityConflict);
+            }
+            self.connection.execute(
+                "INSERT OR REPLACE INTO object_index (
                 object_id, chunk_manifest_hash, object_created_group_key_epoch, object_state,
                 total_cipher_size, chunk_count, created_at, updated_at, manifest_hash, nonce,
                 ciphertext, plaintext_hash, tombstoned, backup_excluded, object_content_key,
@@ -27,22 +95,23 @@ impl AccountDb {
              ) VALUES (
                 ?1, ?2, NULL, ?3, ?4, 1, ?5, ?5, ?2, ?6, ?7, ?8, ?9, ?10, ?11, ?12
              )",
-            params![
-                write.object_id,
-                write.manifest_hash.as_bytes(),
-                if write.tombstoned { "tombstoned" } else { "available" },
-                i64::try_from(write.ciphertext.len()).unwrap_or(i64::MAX),
-                write.updated_at,
-                write.nonce,
-                write.ciphertext,
-                write.plaintext_hash,
-                i64::from(write.tombstoned),
-                i64::from(write.backup_excluded),
-                write.content_key.map(<[u8; 32]>::as_slice),
-                serde_json::to_vec(write.object)?
-            ],
-        )?;
-        Ok(())
+                params![
+                    write.object_id,
+                    write.manifest_hash.as_bytes(),
+                    if write.tombstoned { "tombstoned" } else { "available" },
+                    i64::try_from(write.ciphertext.len()).unwrap_or(i64::MAX),
+                    write.updated_at,
+                    write.nonce,
+                    write.ciphertext,
+                    write.plaintext_hash,
+                    i64::from(write.tombstoned),
+                    i64::from(write.backup_excluded),
+                    write.content_key.map(<[u8; 32]>::as_slice),
+                    serde_json::to_vec(write.object)?
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn set_object_tombstoned(&self, object_id: &str) -> Result<(), StorageError> {
@@ -159,6 +228,7 @@ impl AccountDb {
         &self,
         object_id: &str,
     ) -> Result<Option<StoredObject<T>>, StorageError> {
+        self.check_object_access(object_id)?;
         let row: Option<(i64, Vec<u8>, Option<Vec<u8>>)> = self.connection.query_row(
             "SELECT rowid,object_body,object_content_key FROM object_index WHERE object_id=?1 AND object_body IS NOT NULL",
             params![object_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))
@@ -420,6 +490,11 @@ impl AccountDb {
         T: Serialize,
     {
         let transaction = self.connection.immediate_transaction()?;
+        self.retain_object(
+            object.object_id,
+            object.manifest_hash,
+            super::object_retention::ObjectRetention::Standalone,
+        )?;
         self.upsert_object(object)?;
         self.upsert_object_operation(operation)?;
         transaction.commit()?;

@@ -86,6 +86,7 @@ impl AccountDb {
             current_key: self.current_key.clone(),
             device_signer: self.device_signer.clone(),
             clock: self.clock.clone(),
+            object_retirement: super::super::object_retention::RetirementObserver::default(),
             connection,
             volatile_typing: RefCell::new(BTreeMap::new()),
             volatile_presence: RefCell::new(BTreeMap::new()),
@@ -141,6 +142,7 @@ impl AccountDb {
         let transaction = self.connection.immediate_transaction().map_err(StorageError::from)?;
         let value = write()?;
         transaction.commit().map_err(StorageError::from)?;
+        self.notify_object_retirement().map_err(E::from)?;
         Ok(value)
     }
 }

@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 pub(super) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
+    super::object_retention::install(db)?;
     schema::install(db)
 }
 
@@ -21,6 +22,7 @@ impl AccountDb {
         key: &str,
         value: &Value,
     ) -> Result<(), StorageError> {
+        self.guard_object_actor(key, value)?;
         if !actor_state_may_reference_message(key) {
             return Ok(());
         }
@@ -349,3 +351,7 @@ impl AccountDb {
 
 #[cfg(test)]
 mod tests;
+
+pub(super) fn table_exists(db: &rusqlite::Connection, table: &str) -> rusqlite::Result<bool> {
+    schema::exists(db, table)
+}
