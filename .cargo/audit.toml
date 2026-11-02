@@ -1,0 +1,5 @@
+# cargo-audit (RustSec advisories job) reads this file, not deny.toml.
+# RUSTSEC-2026-0387: crypto-bigint 0.5 is pinned by p256 0.13 (ramflux-notify Web Push ECDSA);
+# fix needs the elliptic-curve 0.14 generation - tracked in DEPS-CRYPTO-02; expires 2026-12-15.
+[advisories]
+ignore = ["RUSTSEC-2026-0387"]
