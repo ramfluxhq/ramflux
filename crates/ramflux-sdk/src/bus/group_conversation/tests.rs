@@ -5,6 +5,7 @@
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::sync::{Arc, atomic::AtomicBool};
 
 fn create_group(owner: &Fixture, group: &str, thread: &str) -> TestResult {
@@ -131,6 +132,128 @@ async fn native_group_link_repairs_before_rename_and_preserves_metadata_on_secon
         let db = state.accounts.get("native-link-rename").ok_or("account")?.client.account_db()?;
         assert_eq!(db.client_record("group", "group")?, Some(expected.clone()));
         assert!(db.client_record("conversation", "operator-thread")?.is_some());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Default)]
+struct StartupWarnings(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for StartupWarnings {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.level() == &tracing::Level::WARN
+            && metadata.target() == "ramflux_sdk::bus::group_conversation"
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields<'a>(&'a mut String);
+        impl tracing::field::Visit for Fields<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                let _ = write!(self.0, " {field}={value:?}");
+            }
+        }
+        if self.enabled(event.metadata()) {
+            let mut line = event.metadata().level().to_string();
+            event.record(&mut Fields(&mut line));
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(line);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn native_group_link_open_isolates_corrupt_groups_and_keeps_command_errors() -> TestResult {
+    let id = "native-link-corrupt";
+    let owner = Fixture::new(id).await?;
+    for group in ["a-corrupt-state", "b-forged-state", "z-healthy"] {
+        create_group(&owner, group, &format!("signed-{group}"))?;
+        polluted_link(owner.client.account_db()?, group, &format!("signed-{group}"))?;
+    }
+    let db = owner.client.account_db()?;
+    // The healthy group sorts onto page two, after both failing groups and old unsigned ones.
+    for index in 0..98 {
+        db.create_group(&format!("m-page-{index:03}"), "old-owner")?;
+    }
+    let corrupt_links = [
+        db.client_record("group", "a-corrupt-state")?,
+        db.client_record("group", "b-forged-state")?,
+    ];
+    let expected = polluted_link(db, "z-healthy", "signed-z-healthy")?;
+    let corrupt_key =
+        format!("group-state/{}", ramflux_protocol::encode_base64url("a-corrupt-state"));
+    let private_body = "private-record-body-sentinel";
+    db.persist_actor_state(&corrupt_key, &private_body)?;
+    let forged_key =
+        format!("group-state/{}", ramflux_protocol::encode_base64url("b-forged-state"));
+    let mut forged =
+        db.shared_group_state("b-forged-state")?.ok_or("signed state")?.snapshot().clone();
+    forged.signature = ramflux_protocol::encode_base64url([0; 64]);
+    db.persist_actor_state(&forged_key, &forged)?;
+    let root = owner.root.0.clone();
+    drop(owner.client);
+    let mut reopened = RamfluxClient::new();
+    reopened.open_account_index(&root)?;
+    let logs = StartupWarnings::default();
+    tracing::subscriber::with_default(logs.clone(), || {
+        reopened.unlock_account(id, b"native fixture data passphrase")
+    })?;
+    let db = reopened.account_db()?;
+    assert_eq!(db.client_record("group", "z-healthy")?, Some(expected));
+    assert_eq!(db.client_record("group", "a-corrupt-state")?, corrupt_links[0]);
+    assert_eq!(db.client_record("group", "b-forged-state")?, corrupt_links[1]);
+    assert_eq!(db.load_actor_state::<String>(&corrupt_key)?.as_deref(), Some(private_body));
+    {
+        let warnings = logs.0.lock().map_err(|_| "warning log lock")?;
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("group_id=a-corrupt-state"), "{warnings:?}");
+        assert!(warnings[0].contains("error_class=\"record_decode\""), "{warnings:?}");
+        assert!(warnings[1].contains("group_id=b-forged-state"), "{warnings:?}");
+        assert!(warnings[1].contains("error_class=\"state_verification\""), "{warnings:?}");
+        assert!(warnings.iter().all(|line| !line.contains(private_body)), "{warnings:?}");
+    }
+    let mut setup = LocalBusConfig::new(root.join("bus.sock"), &root);
+    setup.custody_vault = Some(owner.vault);
+    let mut account = LocalBusAccountState::disconnected(
+        reopened,
+        owner.config,
+        owner.manifest.principal_commitment,
+    );
+    account.native_setup = Some(setup.clone());
+    let mut state = LocalBusDaemonState {
+        account_index: None,
+        nodes: crate::node::NodeStore::default(),
+        config: setup,
+        accounts: BTreeMap::from([(id.into(), account)]),
+        active_account_id: Some(id.into()),
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    };
+    for group in ["a-corrupt-state", "b-forged-state"] {
+        let request = LocalBusFrame::request(
+            group,
+            Some(id.into()),
+            "ramflux.sdk.v1",
+            "group.name.set",
+            json!({"group_id":group,"name":"Must not be applied"}),
+        );
+        let error = crate::bus::dispatch::group::dispatch_group_bus_request(&request, &mut state)
+            .await
+            .err()
+            .ok_or("corrupt group command unexpectedly succeeded")?;
+        let SdkError::GroupRefused { operation, source } = error else {
+            return Err("expected typed group refusal".into());
+        };
+        assert_eq!(operation, crate::GroupOperation::Rename);
+        if group == "a-corrupt-state" {
+            assert!(matches!(*source, SdkError::Storage(StorageError::Serde(_))), "{source:?}");
+        } else {
+            assert!(matches!(*source, SdkError::Storage(StorageError::Crypto(_))), "{source:?}");
+        }
     }
     Ok(())
 }

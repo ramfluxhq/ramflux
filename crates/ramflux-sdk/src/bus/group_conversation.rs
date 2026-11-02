@@ -5,14 +5,30 @@
 use crate::prelude::*;
 use ramflux_storage::AccountDb;
 
+/// Repair saved links independently; per-group errors warn and leave that group unchanged.
+/// Directory-list errors remain fatal because the remaining groups cannot be enumerated.
 pub(crate) fn repair_on_open(db: &AccountDb) -> Result<(), SdkError> {
     let mut after = String::new();
     loop {
         let groups = db.client_directory_ids("group", &after, 100)?;
         let Some(last) = groups.last() else { return Ok(()) };
         for group in &groups {
-            if let Some(state) = db.shared_group_state(group)? {
-                repair_link(db, group, &state.view().conversation_id)?;
+            let repaired = db.shared_group_state(group).map_err(SdkError::from).and_then(|state| {
+                state.map_or(Ok(()), |state| repair_link(db, group, &state.view().conversation_id))
+            });
+            if let Err(error) = repaired {
+                let error_class = match error {
+                    SdkError::Storage(StorageError::Serde(_)) => "record_decode",
+                    SdkError::Storage(StorageError::Crypto(_) | StorageError::Protocol(_)) => {
+                        "state_verification"
+                    }
+                    _ => "storage",
+                };
+                tracing::warn!(
+                    group_id = %group,
+                    error_class,
+                    "native group link startup repair skipped"
+                );
             }
         }
         after.clone_from(last);
