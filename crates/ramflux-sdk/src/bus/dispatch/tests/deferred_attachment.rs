@@ -7,10 +7,12 @@ use crate::bus::actor::AccountCommand;
 use serde_json::json;
 
 fn test_root() -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
-    std::env::temp_dir().join(format!("rf-fetch-bus-{}-{unique}", std::process::id()))
+    std::env::temp_dir().join(format!("rf-fetch-bus-{}-{unique}-{sequence}", std::process::id()))
 }
 
 fn make_state(root: &Path) -> Result<LocalBusDaemonState, SdkError> {
