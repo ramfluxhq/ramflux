@@ -487,20 +487,25 @@ fn hinted_busy_does_not_install_a_shared_capacity_deadline() -> TestResult {
     let now = capacity_hint::unix_now();
     let mut first = create(&root.0, "hinted-busy", &TestVault::default(), now)?;
     first.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
-    let error = SdkError::CustodyAdmission {
-        code: CustodyRefusal::Busy,
-        retry: ramflux_protocol::custody::RetryHint::new(
-            ramflux_protocol::custody::RetryScope::PreAuthSource,
-            30_000,
-        ),
-    };
-    first.set_networking_error_at(
-        &root.0,
-        Some(AccountNetworkingReason::NodeBusy { retry_after_ms: 30_000, capacity: None }),
-        &error,
-        now,
-    )?;
-    assert_eq!(first.stored.capacity_retry_at, None);
-    load_account(&root.0, "hinted-busy", now)?.check_capacity_deadline(now)?;
+    for retry_after_ms in [16_000, 30_000, 300_000] {
+        let error = SdkError::CustodyAdmission {
+            code: CustodyRefusal::Busy,
+            retry: ramflux_protocol::custody::RetryHint::new(
+                ramflux_protocol::custody::RetryScope::PreAuthSource,
+                retry_after_ms,
+            ),
+        };
+        first.set_networking_error_at(
+            &root.0,
+            Some(AccountNetworkingReason::NodeBusy {
+                retry_after_ms: u64::from(retry_after_ms),
+                capacity: None,
+            }),
+            &error,
+            now,
+        )?;
+        assert_eq!(first.stored.capacity_retry_at, None);
+        load_account(&root.0, "hinted-busy", now)?.check_capacity_deadline(now)?;
+    }
     Ok(())
 }

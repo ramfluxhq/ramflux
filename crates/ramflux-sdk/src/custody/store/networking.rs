@@ -60,7 +60,10 @@ impl BornAccount {
         reason: Option<AccountNetworkingReason>,
         now: u64,
     ) -> Result<(), SdkError> {
-        self.persist_networking_reason_at(root, reason, now, false)
+        let shared_capacity = matches!(reason.as_ref(),
+            Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity })
+                if capacity.is_some() || *retry_after_ms == CAPACITY_RETRY_AFTER_MS);
+        self.persist_networking_reason_at(root, reason, now, shared_capacity)
     }
 
     pub(crate) fn set_networking_error_at(
@@ -70,14 +73,15 @@ impl BornAccount {
         error: &SdkError,
         now: u64,
     ) -> Result<(), SdkError> {
-        let hinted_capacity = matches!(
+        let shared_capacity = matches!(
             error,
             SdkError::CustodyAdmission {
                 code: ramflux_protocol::custody::CustodyRefusal::Capacity,
                 ..
-            }
+            } | SdkError::CustodyCapacity { .. }
+                | SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::Capacity)
         );
-        self.persist_networking_reason_at(root, reason, now, hinted_capacity)
+        self.persist_networking_reason_at(root, reason, now, shared_capacity)
     }
 
     fn persist_networking_reason_at(
@@ -85,7 +89,7 @@ impl BornAccount {
         root: &Path,
         mut reason: Option<AccountNetworkingReason>,
         now: u64,
-        hinted_capacity: bool,
+        shared_capacity: bool,
     ) -> Result<(), SdkError> {
         if let Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity: Some(hint) }) =
             reason.as_mut()
@@ -99,10 +103,8 @@ impl BornAccount {
                 });
             }
         }
-        let share_deadline = hinted_capacity
-            || matches!(reason.as_ref(),
-            Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity })
-                if capacity.is_some() || *retry_after_ms == CAPACITY_RETRY_AFTER_MS);
+        let share_deadline = shared_capacity
+            && matches!(reason.as_ref(), Some(AccountNetworkingReason::NodeBusy { .. }));
         self.update_networking(root, now, |current| {
             if share_deadline
                 && current.stored.capacity_retry_at.is_some()
