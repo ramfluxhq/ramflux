@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey, verify_batch};
+use ramflux_crypto::{
+    CanonicalSignatureSingleKeyBatchItem, verify_canonical_signatures_batch_single_key,
+};
 use std::error::Error;
 use std::time::Instant;
 
@@ -42,6 +45,85 @@ fn verify_batch64_bench() -> Result<(), Box<dyn Error>> {
 #[test]
 fn verify_batch256_bench() -> Result<(), Box<dyn Error>> {
     run_batch_bench("verify_batch256", 256)
+}
+
+#[ignore = "microbenchmark; run explicitly with --ignored --nocapture"]
+#[test]
+fn single_key_wrapper_batch64_bench() -> Result<(), Box<dyn Error>> {
+    run_wrapper_bench(false)
+}
+
+#[ignore = "microbenchmark; run explicitly with --ignored --nocapture"]
+#[test]
+fn old_single_key_wrapper_batch64_bench() -> Result<(), Box<dyn Error>> {
+    run_wrapper_bench(true)
+}
+
+fn run_wrapper_bench(old: bool) -> Result<(), Box<dyn Error>> {
+    let total = bench_usize_env(TOTAL_ENV, DEFAULT_TOTAL);
+    let batch_size = bench_usize_env(BATCH_ENV, DEFAULT_BATCH);
+    let fixture = verify_fixture(total);
+    let public = fixture.verifying_keys[0].to_bytes();
+    let signatures = fixture.signatures.iter().map(Signature::to_bytes).collect::<Vec<_>>();
+    let items = fixture
+        .messages
+        .iter()
+        .zip(&signatures)
+        .map(|(canonical, signature_bytes)| CanonicalSignatureSingleKeyBatchItem {
+            canonical,
+            signature_bytes,
+        })
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    for chunk in items.chunks(batch_size) {
+        if old {
+            old_single_key_wrapper(&public, chunk)?;
+        } else {
+            verify_canonical_signatures_batch_single_key(&public, chunk)
+                .map_err(|indices| format!("wrapper rejected benchmark indices {indices:?}"))?;
+        }
+    }
+    print_result(
+        if old { "old_single_key_wrapper_batch64" } else { "single_key_wrapper_batch64" },
+        total,
+        started,
+    );
+    Ok(())
+}
+
+// Preserve the pre-change wrapper here to measure its allocations and parsing on the same host.
+fn old_single_key_wrapper(
+    public: &[u8; 32],
+    items: &[CanonicalSignatureSingleKeyBatchItem<'_>],
+) -> Result<(), Box<dyn Error>> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let key = VerifyingKey::from_bytes(public)?;
+    let mut keys = Vec::with_capacity(items.len());
+    let mut signatures = Vec::with_capacity(items.len());
+    let mut messages = Vec::with_capacity(items.len());
+    for item in items {
+        keys.push(key);
+        signatures.push(Signature::from_bytes(item.signature_bytes));
+        messages.push(item.canonical);
+    }
+    if verify_batch(&messages, &signatures, &keys).is_ok() {
+        return Ok(());
+    }
+    let failures = messages
+        .iter()
+        .zip(&signatures)
+        .enumerate()
+        .filter_map(|(index, (message, signature))| {
+            key.verify_strict(message, signature).is_err().then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("old wrapper rejected {failures:?}").into())
+    }
 }
 
 fn run_batch_bench(label: &str, batch_size: usize) -> Result<(), Box<dyn Error>> {
@@ -92,9 +174,10 @@ fn print_result(label: &str, total: usize, started: Instant) {
     let elapsed_secs = elapsed.as_secs_f64();
     let total_f64 = u32::try_from(total).map_or(f64::from(u32::MAX), f64::from);
     let ops_per_sec = if elapsed_secs > 0.0 { total_f64 / elapsed_secs } else { f64::INFINITY };
+    let ns_per_sig = elapsed.as_secs_f64() * 1_000_000_000.0 / total_f64;
     let us_per_sig = if total > 0 { elapsed.as_secs_f64() * 1_000_000.0 / total_f64 } else { 0.0 };
     eprintln!(
-        "VERIFY_BENCH label={label} total={total} elapsed_ms={} ops_per_sec={ops_per_sec:.2} us_per_sig={us_per_sig:.3}",
+        "VERIFY_BENCH label={label} total={total} elapsed_ms={} ops_per_sec={ops_per_sec:.2} us_per_sig={us_per_sig:.3} ns_per_sig={ns_per_sig:.2}",
         elapsed.as_millis()
     );
 }

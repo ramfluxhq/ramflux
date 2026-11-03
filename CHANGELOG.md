@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Ed25519 batch wrappers now use per-signature verify_strict, eliminating batch/strict acceptance differences.
+
+### Changed
+
 - Upgrade Ed25519 to dalek 3 and share curve25519-dalek 5 with X25519 while
   preserving RFC 8032 signatures and node identity record encodings.
 - Preserve same-cycle delivery receipts with an eight-second priority admission

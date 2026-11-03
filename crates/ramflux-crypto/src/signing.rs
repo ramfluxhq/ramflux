@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey, verify_batch};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use ramflux_protocol::{decode_base64url, encode_base64url, signed_bytes};
 use serde::Serialize;
 use std::time::{Duration, Instant};
@@ -142,57 +142,36 @@ pub struct CanonicalSignatureSingleKeyBatchItem<'a> {
     pub signature_bytes: &'a [u8; 64],
 }
 
-/// Verifies a batch of canonical Ed25519 signatures.
+/// Verifies canonical Ed25519 signatures with per-signature `verify_strict`, eliminating
+/// batch/strict acceptance differences. The returned indices are identical to running
+/// `verify_canonical_signature` on each item.
 ///
 /// # Errors
-/// Returns the item indices that failed strict verification. If the optimistic batch check fails,
-/// each item is rechecked with `verify_strict` to identify the failing indices.
+/// Returns the item indices that failed key parsing or strict verification, in input order.
 pub fn verify_canonical_signatures_batch(
     items: &[CanonicalSignatureBatchItem<'_>],
 ) -> Result<(), Vec<usize>> {
-    if items.is_empty() {
-        return Ok(());
-    }
-    let mut failures = Vec::new();
-    let mut original_indices = Vec::with_capacity(items.len());
-    let mut verifying_keys = Vec::with_capacity(items.len());
-    let mut signatures = Vec::with_capacity(items.len());
-    let mut messages = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
-        match VerifyingKey::from_bytes(item.public_key_bytes) {
-            Ok(verifying_key) => {
-                original_indices.push(index);
-                verifying_keys.push(verifying_key);
-                signatures.push(Signature::from_bytes(item.signature_bytes));
-                messages.push(item.canonical);
-            }
-            Err(_error) => failures.push(index),
-        }
-    }
-    if messages.is_empty() {
-        return Err(failures);
-    }
-    if verify_batch(&messages, &signatures, &verifying_keys).is_ok() {
-        return if failures.is_empty() { Ok(()) } else { Err(failures) };
-    }
-    for ((local_index, message), (signature, verifying_key)) in
-        messages.iter().enumerate().zip(signatures.iter().zip(verifying_keys.iter()))
-    {
-        if verifying_key.verify_strict(message, signature).is_err() {
-            failures.push(original_indices[local_index]);
-        }
-    }
-    failures.sort_unstable();
-    failures.dedup();
+    let failures = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let valid = VerifyingKey::from_bytes(item.public_key_bytes).is_ok_and(|key| {
+                key.verify_strict(item.canonical, &Signature::from_bytes(item.signature_bytes))
+                    .is_ok()
+            });
+            (!valid).then_some(index)
+        })
+        .collect::<Vec<_>>();
     if failures.is_empty() { Ok(()) } else { Err(failures) }
 }
 
-/// Verifies a batch of canonical Ed25519 signatures signed by one public key.
+/// Verifies signatures signed by one public key with per-signature `verify_strict`, eliminating
+/// batch/strict acceptance differences. The key is parsed once; the returned indices are
+/// identical to running `verify_canonical_signature` on each item.
 ///
 /// # Errors
-/// Returns the item indices that failed strict verification. An invalid public key marks every
-/// item as failed. If the optimistic batch check fails, each item is rechecked with
-/// `verify_strict` to identify the failing indices.
+/// Returns the item indices that failed strict verification, in input order. An invalid
+/// public key marks every item as failed.
 pub fn verify_canonical_signatures_batch_single_key(
     public_key_bytes: &[u8; 32],
     items: &[CanonicalSignatureSingleKeyBatchItem<'_>],
@@ -203,23 +182,14 @@ pub fn verify_canonical_signatures_batch_single_key(
     let Ok(verifying_key) = VerifyingKey::from_bytes(public_key_bytes) else {
         return Err((0..items.len()).collect());
     };
-    let mut verifying_keys = Vec::with_capacity(items.len());
-    let mut signatures = Vec::with_capacity(items.len());
-    let mut messages = Vec::with_capacity(items.len());
-    for item in items {
-        verifying_keys.push(verifying_key);
-        signatures.push(Signature::from_bytes(item.signature_bytes));
-        messages.push(item.canonical);
-    }
-    if verify_batch(&messages, &signatures, &verifying_keys).is_ok() {
-        return Ok(());
-    }
-    let failures = messages
+    let failures = items
         .iter()
-        .zip(signatures.iter())
         .enumerate()
-        .filter_map(|(index, (message, signature))| {
-            verifying_key.verify_strict(message, signature).is_err().then_some(index)
+        .filter_map(|(index, item)| {
+            verifying_key
+                .verify_strict(item.canonical, &Signature::from_bytes(item.signature_bytes))
+                .is_err()
+                .then_some(index)
         })
         .collect::<Vec<_>>();
     if failures.is_empty() { Ok(()) } else { Err(failures) }

@@ -162,7 +162,7 @@ impl NodeServiceSigningKey {
 
     /// # Errors
     /// Returns the wake indices that fail key-id, algorithm, canonicalization, signature parsing,
-    /// or strict Ed25519 batch verification.
+    /// or per-signature Ed25519 `verify_strict`. Batch and single-wake acceptance agree.
     pub fn verify_notification_wakes_batch(
         &self,
         wakes: &[&ramflux_protocol::NotificationWake],
@@ -374,6 +374,54 @@ mod tests {
 
         assert_eq!(key.verify_notification_wakes_batch(&wake_refs), Err(vec![2, 5]));
         Ok(())
+    }
+
+    #[test]
+    fn batch_wake_with_small_order_r_signed_by_the_node_key_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use curve25519_dalek::{constants::EIGHT_TORSION, scalar::Scalar};
+        use ed25519_dalek::{Signature, SigningKey, verify_batch};
+        use sha2::{Digest, Sha512};
+
+        let key = NodeServiceSigningKey::from_seed([7_u8; 32]);
+        let signing = SigningKey::from_bytes(&[7_u8; 32]);
+        let public = signing.verifying_key();
+        let r = EIGHT_TORSION[1].compress().to_bytes();
+        let mut wakes = signed_test_wakes(&key, 4)?;
+        for counter in 0..4096_u32 {
+            wakes[2].wake_id = format!("wake_small_order_r_{counter}");
+            let canonical = ramflux_protocol::signed_bytes(&wakes[2])?;
+            let hash = Sha512::new()
+                .chain_update(r)
+                .chain_update(public.to_bytes())
+                .chain_update(&canonical)
+                .finalize();
+            let k = Scalar::from_bytes_mod_order_wide(&hash.into());
+            let mut forged = [0; 64];
+            forged[..32].copy_from_slice(&r);
+            forged[32..].copy_from_slice(&(k * signing.to_scalar()).to_bytes());
+            wakes[2].signed.signature = ramflux_protocol::encode_base64url(forged);
+            let messages =
+                wakes.iter().map(ramflux_protocol::signed_bytes).collect::<Result<Vec<_>, _>>()?;
+            let signatures = wakes
+                .iter()
+                .map(notification_wake_signature_bytes)
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .map(Signature::from_bytes)
+                .collect::<Vec<_>>();
+            let refs = messages.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            if verify_batch(&refs, &signatures, &[public; 4]).is_ok() {
+                assert!(public.verify_strict(&canonical, &Signature::from_bytes(&forged)).is_err());
+                assert!(key.verify_notification_wake(&wakes[2]).is_err());
+                assert_eq!(
+                    key.verify_notification_wakes_batch(&wakes.iter().collect::<Vec<_>>()),
+                    Err(vec![2])
+                );
+                return Ok(());
+            }
+        }
+        Err("no raw-batch small-order wake witness in 4096 tries".into())
     }
 
     #[ignore = "microbenchmark; run explicitly with --ignored --nocapture"]

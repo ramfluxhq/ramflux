@@ -50,3 +50,6 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
+
+[dev-dependencies]
+curve25519-dalek = "5.0.0"
