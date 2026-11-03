@@ -48,3 +48,6 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
+
+[dev-dependencies]
+rusqlite = { version = "0.37", default-features = false, features = ["trace"] }

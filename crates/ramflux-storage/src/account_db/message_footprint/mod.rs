@@ -100,6 +100,33 @@ impl AccountDb {
             .collect()
     }
 
+    /// Rewrites an existing receipt with its original erasure owner, including private scopes.
+    /// Unbound legacy receipts retain their existing registration behavior.
+    /// # Errors
+    /// Returns SQLite, serialization or transaction errors.
+    pub fn persist_bound_message_actor_state(
+        &self,
+        key: &str,
+        value: &impl serde::Serialize,
+    ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            use rusqlite::OptionalExtension;
+            let message: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT message_id FROM message_copy_binding WHERE copy_id=?1 LIMIT 1",
+                    params![format!("actor:{key}")],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(message) = message {
+                self.persist_message_actor_state(&message, key, value)
+            } else {
+                self.persist_actor_state(key, value)
+            }
+        })
+    }
+
     /// Persists an opaque message copy and its erasure locator atomically.
     ///
     /// # Errors

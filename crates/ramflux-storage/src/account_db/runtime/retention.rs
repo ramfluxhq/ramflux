@@ -21,6 +21,9 @@ impl AccountDb {
         if limit > 32_768 {
             return Err(StorageError::AuthorizationRejected);
         }
+        if self.retain_indexed_own_copy_states(prefix, now, limit)? {
+            return Ok(());
+        }
         self.retain_actor_states(prefix, now, limit, true)
     }
 

@@ -59,6 +59,7 @@ fn skip_merge_table(table: &str) -> bool {
             "object_message_reference" | "object_payload_actor" | "object_runtime_response"
         )
         || table.starts_with("runtime_home_migration_")
+        || table.starts_with("runtime_own_copy_")
         || table.starts_with("backup_archived_")
         || table == "account_key_check"
         || table.starts_with("schema_")

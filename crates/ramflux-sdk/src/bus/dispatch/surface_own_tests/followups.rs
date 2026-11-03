@@ -3,6 +3,8 @@
 
 //! Delivery-confirmed context, independent target retries and exact committed replay coverage.
 use super::*;
+#[path = "retry.rs"]
+mod retry;
 use crate::client::surface::{CONTROL_PREFIX, ControlKind, SurfaceControl};
 
 fn due(client: &RamfluxClient) -> Result<(), SdkError> {
@@ -196,6 +198,7 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
     assert!(targets.iter().any(|target| target["device"] == "dead-sibling"
         && target["acknowledged"] == false
         && target["next_at"].as_i64().is_some_and(|at| at > attempted_at)));
+    retry::exhaust_parked_target(&mut source, &key, &own).await?;
     directory.abort();
     drop(sibling);
     drop(source);

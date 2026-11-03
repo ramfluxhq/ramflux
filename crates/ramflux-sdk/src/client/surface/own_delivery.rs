@@ -59,16 +59,11 @@ impl RamfluxClient {
             included: true,
         };
         let now = crate::prelude::now_unix_timestamp();
-        self.account_db()?.retain_expiring_actor_states(
-            "surface/own_context_announced/",
-            now,
-            0,
-        )?;
         if self
             .account_db()?
             .load_actor_state::<serde_json::Value>(&delivery.key(self.account_db()?)?)?
             .and_then(|row| row["expires_at"].as_i64())
-            .is_some_and(|expires| expires > crate::prelude::now_unix_timestamp())
+            .is_some_and(|expires| expires > now)
         {
             control.context = None;
             delivery.included = false;
@@ -91,7 +86,6 @@ impl RamfluxClient {
                 &key,
                 &serde_json::json!({"expires_at":now.saturating_add(600)}),
             )?;
-            db.retain_expiring_actor_states("own-device/context-delivered/", now, 1024)?;
         }
         Ok(())
     }

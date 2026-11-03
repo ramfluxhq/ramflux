@@ -229,6 +229,20 @@ impl RamfluxClient {
         Ok(())
     }
 
+    pub(super) fn own_sent_receipt_owner(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: &str,
+    ) -> Result<Option<String>, SdkError> {
+        let db = self.account_db()?;
+        Ok(db
+            .load_actor_state::<ramflux_storage::MessageReplayReference>(&alias_key(
+                db,
+                &own_row_id(source, envelope)?,
+            )?)?
+            .and_then(|reference| reference.message_id().map(str::to_owned)))
+    }
+
     pub(super) fn erase_own_sent_copies_of_original(
         &self,
         original: &DirectMessageRecord,

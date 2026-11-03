@@ -76,13 +76,13 @@ pub(super) fn remember(
     now: i64,
 ) -> Result<(), SdkError> {
     db.write_transaction(|| {
-        db.retain_delivery_actor_states(REPLAYS, now, MAX_DELIVERY_ROWS)?;
+        db.maintain_own_copy_delivery(now, MAX_DELIVERY_ROWS)?;
         let old = db.load_actor_state::<Committed>(key)?;
         if old.as_ref().is_some_and(|old| old.fingerprint != fingerprint) {
             return Err(invalid("own-device message id conflict"));
         }
         let acknowledged = acknowledged || old.as_ref().is_some_and(|old| old.acknowledged);
-        if old.is_none() && db.actor_state_usage(REPLAYS)?.0 >= u64::from(MAX_DELIVERY_ROWS) {
+        if old.is_none() && db.own_copy_actor_usage(REPLAYS)?.0 >= u64::from(MAX_DELIVERY_ROWS) {
             return Err(SdkError::InboundPending(
                 "own-device replay window full; retry later".into(),
             ));
@@ -115,7 +115,6 @@ impl RamfluxClient {
         now: i64,
     ) -> Result<Replay, SdkError> {
         let db = self.account_db()?;
-        db.retain_delivery_actor_states(RECEIPTS, now, MAX_DELIVERY_ROWS)?;
         let target = self.owned_device_identity()?;
         let key = replay_key(db, &target, entry, &packet.id)?;
         let wire_fingerprint = ramflux_protocol::hash_base64url(DOMAIN, bytes);
@@ -173,7 +172,7 @@ impl RamfluxClient {
         let receipt_key = format!("{RECEIPTS}{}", packet.id);
         if let Some(mut receipt) = db.load_actor_state::<Receipt>(&receipt_key)? {
             receipt.acknowledged = true;
-            db.persist_actor_state(&receipt_key, &receipt)?;
+            db.persist_bound_message_actor_state(&receipt_key, &receipt)?;
         }
         Ok(())
     }

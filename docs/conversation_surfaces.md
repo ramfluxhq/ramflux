@@ -216,9 +216,15 @@ Conversation, group, principal/root, original timestamps and logical message con
 are inside authenticated encryption; slots contain no conversation ID. Routing
 identity and fresh outer envelope timestamps remain available to the node.
 Eligible retries are considered in creation order, while parked targets do not
-block later copies. Disposable receipts and statuses each retain at most 18,000
+block later copies. A non-due target that rides along on another target's fanout
+is re-parked from RPC completion without charging an attempt, still bounded by
+the 600-second item lifetime. Disposable receipts and statuses each retain at most 18,000
 rows: a capacity budget of 10 events/second over the existing 900-second retention
 window, multiplied by two. This is a cache budget, not a throughput promise.
+Expiry and retry admission use transactionally maintained indexes and row/byte
+counters. Cleanup runs at most once per second below the cap and on capacity
+pressure, reading bounded expiry/confirmation ranges with one delete step.
+Idle sender passes load only due work; held copies remain unprepared.
 Expired rows are removed first; among live rows, pending work is preferred and
 the oldest acknowledged or completed rows are evicted first. A separate bounded
 account-keyed marker of the exact authenticated packet and source/recipient scope

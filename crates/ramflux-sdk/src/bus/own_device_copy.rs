@@ -105,7 +105,7 @@ fn stage_inner(
         context_delivery: None,
     };
     db.write_transaction(|| {
-        let (rows, bytes) = db.actor_state_usage(PREFIX)?;
+        let (rows, bytes) = db.own_copy_actor_usage(PREFIX)?;
         if input.body.len() > crate::client::own_device_copy::MAX_PACKET_BYTES
             || rows >= u64::from(MAX_PENDING)
             || bytes.saturating_add(work_bytes(&work)?) > MAX_PENDING_BYTES
@@ -127,8 +127,8 @@ fn stage_inner(
         state(client, &work, "pending", true)
     })
 }
-fn pending_ordered(client: &RamfluxClient) -> Result<Vec<(String, Work)>, SdkError> {
-    let keys = client.account_db()?.actor_state_key_page(PREFIX, MAX_PENDING)?;
+fn pending_ordered(client: &RamfluxClient, now: i64) -> Result<Vec<(String, Work)>, SdkError> {
+    let keys = client.account_db()?.due_own_copy_keys(now, MAX_PENDING)?;
     let mut ordered = Vec::new();
     for id in keys {
         if let Some(work) = client.account_db()?.load_actor_state::<Work>(&id)? {
@@ -150,7 +150,7 @@ fn persist_work(client: &RamfluxClient, key: &str, work: &Work) -> Result<bool, 
         let Some(old) = db.load_actor_state::<serde_json::Value>(key)? else { return Ok(false) };
         let old_bytes = u64::try_from(serde_json::to_vec(&old)?.len())
             .map_err(|_| SdkError::LocalBus("own-device record size overflow".into()))?;
-        let (_, bytes) = db.actor_state_usage(PREFIX)?;
+        let (_, bytes) = db.own_copy_actor_usage(PREFIX)?;
         if bytes.saturating_sub(old_bytes).saturating_add(work_bytes(work)?) > MAX_PENDING_BYTES {
             return Ok(false);
         }
@@ -244,7 +244,7 @@ fn finish_attempt(
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     let now = now_unix_timestamp();
     let started = std::time::Instant::now();
-    let ordered = pending_ordered(&account.client)?;
+    let ordered = pending_ordered(&account.client, now)?;
     let mut sent = 0;
     for (id, mut work) in ordered {
         if started.elapsed() >= Duration::from_millis(250) {
@@ -423,7 +423,10 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
     } else {
         db.persist_actor_state(&key, &status)?;
     }
-    db.retain_delivery_actor_states("own-device/status/", now_unix_timestamp(), crate::client::own_device_copy::MAX_DELIVERY_ROWS)?;
+    db.maintain_own_copy_delivery(
+        now_unix_timestamp(),
+        crate::client::own_device_copy::MAX_DELIVERY_ROWS,
+    )?;
     if let Some((directory, record)) = &work.intent.owner_record
         && matches!(directory.as_str(), "surface" | "message")
         && let Some(mut row) = db.client_record(directory, record)?.or_else(|| {

@@ -395,9 +395,15 @@ impl RamfluxClient {
         context: &PrivateContext,
         fingerprint: String,
         scope: ReceiptScope,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), SdkError> {
+        let owner = if matches!(scope, ReceiptScope::Private { .. }) {
+            self.own_sent_receipt_owner(source, &context.message)?
+        } else {
+            None
+        };
         self.account_db()?.persist_message_actor_state(
-            &context.message,
+            owner.as_deref().unwrap_or(&context.message),
             key,
             &Receipt {
                 fingerprint,
@@ -498,8 +504,13 @@ impl RamfluxClient {
                 &local.device_id,
             )?;
             self.commit_inline_pair_key_slot(&slot, &key)?;
-            self.persist_own_device_receipt(&receipt_key, &context, fingerprint, scope)?;
-            db.retain_delivery_actor_states(RECEIPTS, now, MAX_DELIVERY_ROWS)?;
+            self.persist_own_device_receipt(
+                &receipt_key,
+                &context,
+                fingerprint,
+                scope,
+                &source_identity,
+            )?;
             Ok::<_, SdkError>(())
         })?;
         Ok(true)
@@ -510,4 +521,33 @@ pub(crate) fn copy_id(root: &str, source: &str, message: &str) -> Result<String,
         DOMAIN,
         &ramflux_protocol::canonical_json_bytes(&(root, source, message))?,
     ))
+}
+
+#[cfg(test)]
+mod receipt_compatibility {
+    use super::*;
+    #[test]
+    fn names_and_private_receipts_default_acknowledgement_without_changing_scope()
+    -> Result<(), SdkError> {
+        for scope in
+            [json!({"source":"source","target":"target"}), json!({"private_scope":"opaque"})]
+        {
+            for acknowledged in [None, Some(false), Some(true)] {
+                let mut value = scope.clone();
+                value["fingerprint"] = json!("fingerprint");
+                value["valid_until"] = json!(600);
+                value["expires_at"] = json!(900);
+                if let Some(acknowledged) = acknowledged {
+                    value["acknowledged"] = json!(acknowledged);
+                }
+                let receipt: Receipt = serde_json::from_value(value)?;
+                assert_eq!(receipt.acknowledged, acknowledged.unwrap_or(false));
+                let roundtrip = serde_json::to_value(receipt)?;
+                for (key, value) in scope.as_object().ok_or_else(|| invalid("scope"))? {
+                    assert_eq!(&roundtrip[key], value);
+                }
+            }
+        }
+        Ok(())
+    }
 }

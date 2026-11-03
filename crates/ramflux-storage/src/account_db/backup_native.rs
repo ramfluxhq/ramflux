@@ -98,12 +98,24 @@ mod tests {
         source.persist_actor_state("dm-pair/active/imported", &"imported")?;
         source.persist_actor_state("dm-pair/bootstrap/imported", &json!({"seed":"saved"}))?;
         source.store_message_content("thread", "history", b"inbound history")?;
+        source.persist_actor_state("own-device/status/imported", &json!({"expires_at":900}))?;
+        local.persist_actor_state("own-device/status/local", &json!({"expires_at":900}))?;
         let incoming = root.join("incoming.db");
         let snapshot = source.write_backup_snapshot(&incoming)?;
         let target = root.join("merged.db");
         let copied = local.write_backup_snapshot(&target)?;
         let mut merged = BackupDatabase::open(&target, &copied.key)?;
         merged.merge_native_backup(&incoming, &snapshot.key, || Ok(()))?;
+        assert!(!merged.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_own_copy_state WHERE state_kind='own-device/status/imported')", [], |row| row.get::<_,bool>(0))?, "derived own-copy state must not be imported without its actor row");
+        assert!(merged.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_own_copy_state WHERE state_kind='own-device/status/local')", [], |row| row.get::<_,bool>(0))?);
+        assert_eq!(
+            merged.db.query_row(
+                "SELECT rows FROM runtime_own_copy_usage WHERE namespace='own-device/status/'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )?,
+            1
+        );
         for (key, value) in &retained {
             let bytes: Vec<u8> = merged.db.query_row(
                 "SELECT state_json FROM runtime_actor_state WHERE state_kind=?1",

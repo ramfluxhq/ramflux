@@ -76,6 +76,11 @@ async fn sent_dm_arrives_on_an_active_sibling_as_one_outgoing_row_despite_retrie
         sibling.client.account_db()?.actor_state_usage(crate::client::delivery_receipts::PREFIX)?.0,
         0
     );
+    sibling.client.record_own_copy_ack(&entry)?;
+    assert_eq!(
+        sibling.client.account_db()?.own_copy_actor_usage("own-device/committed-packet/")?.0,
+        1
+    );
     assert_private_replay_after_delete(
         &sibling,
         &receiver,
@@ -254,7 +259,18 @@ async fn assert_private_replay_after_delete(
     let db = sibling.client.account_db()?;
     assert_eq!(db.actor_state_usage("own-device/message-receipt/")?.0, 1);
     db.delete_direct_message("thread", id, "self", "delete")?;
+    assert_eq!(
+        db.actor_state_usage("own-device/message-receipt/")?.0,
+        0,
+        "ACK must preserve receipt erasure binding"
+    );
+    assert_eq!(db.own_copy_actor_usage("own-device/committed-packet/")?.0, 1);
     assert!(sibling.client.receive_own_device_message(receiver, entry).await?);
+    assert_eq!(
+        db.actor_state_usage("own-device/message-receipt/")?.0,
+        0,
+        "committed replay must short-circuit before projection and ratchet use"
+    );
     let mut forged = entry.clone();
     forged.envelope.source_device_id = "forged-copy-source".into();
     assert!(sibling.client.receive_own_device_message(receiver, &forged).await.is_err());
