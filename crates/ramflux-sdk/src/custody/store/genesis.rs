@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Durable, no-replace publication of complete local custody authority.
+use super::{directory, private_directory};
 use crate::SdkError;
 use std::{
     fs::{self, File, OpenOptions},
@@ -9,6 +10,31 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
+
+pub(super) fn reserve_account(root: &Path, id: &str, anchor: &str) -> Result<PathBuf, SdkError> {
+    let parent = root.join("custody_accounts");
+    if !parent.try_exists()? {
+        private_directory(&parent)?;
+        fs::File::open(root)?.sync_all()?;
+    }
+    let dir = directory(root, id)?;
+    private_directory(&dir)?; // Exclusive reservation is itself a fail-closed mode latch.
+    fs::File::open(&parent)?.sync_all()?;
+    // Create the crash marker before the insert-only index reservation. Startup can remove
+    // a marker with neither an index row nor authority without retiring the account id.
+    let index = ramflux_storage::AccountIndex::open(root)?;
+    if let Err(error) = index.reserve_account(id, anchor) {
+        fs::remove_dir(&dir)?;
+        fs::File::open(&parent)?.sync_all()?;
+        return match error {
+            ramflux_storage::StorageError::AccountAlreadyExists(_) => {
+                Err(SdkError::CustodyAccountConflict)
+            }
+            error => Err(error.into()),
+        };
+    }
+    Ok(dir)
+}
 
 pub(super) fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     let parent = path.parent().ok_or_else(super::super::invalid)?;
@@ -45,6 +71,7 @@ impl Drop for TemporaryPublication {
 
 #[cfg(test)]
 mod checkpoints {
+    use super::{directory, private_directory};
     use crate::SdkError;
     use std::cell::RefCell;
 

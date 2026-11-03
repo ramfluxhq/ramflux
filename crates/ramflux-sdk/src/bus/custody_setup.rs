@@ -146,62 +146,7 @@ async fn apply(
         return Err(SdkError::CustodySetupInvalid);
     }
     match request.method.as_str() {
-        "account.create" | "account.create.begin" => {
-            #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Input {
-                display_name: String,
-                principal_kind: ramflux_protocol::PrincipalKind,
-                #[serde(default)]
-                node_id: Option<String>,
-                #[serde(default)]
-                custodian_account: Option<String>,
-            }
-            *ceremony = None;
-            let input: Input = serde_json::from_value(std::mem::take(&mut request.body))
-                .map_err(|_| SdkError::CustodySetupInvalid)?;
-            let valid = match input.principal_kind {
-                ramflux_protocol::PrincipalKind::Human => input.custodian_account.is_none(),
-                ramflux_protocol::PrincipalKind::HeadlessAi => {
-                    request.method == "account.create.begin"
-                        && input.custodian_account.is_some()
-                        && request.account_id.as_deref() == input.custodian_account.as_deref()
-                }
-                _ => false,
-            };
-            if !valid {
-                return Err(SdkError::CustodySetupInvalid);
-            }
-            let display_name =
-                ramflux_protocol::normalize_profile_display_name(&input.display_name)?;
-            let home_node_id = input
-                .node_id
-                .map(|node_id| {
-                    crate::node::NodeStore::load(&config.data_root, &config.builtin_nodes)?
-                        .confirmed_for_new_account(&node_id)
-                        .map(|profile| profile.node_id)
-                })
-                .transpose()?;
-            let vault = primary_provider(config);
-            tokio::task::spawn_blocking(move || vault.preflight())
-                .await
-                .map_err(|_| SdkError::CustodyVaultUnavailable)??;
-            let pending = CreationCeremony::begin_account(
-                &config.data_root,
-                display_name,
-                input.principal_kind,
-                input.custodian_account,
-                home_node_id,
-                now()?,
-            )?;
-            let prepared = ResultBody::Prepared {
-                account_anchor: pending.account_anchor().into(),
-                ceremony_id: pending.ceremony_id().into(),
-                expires_in_ms: pending.expires_in_ms(),
-            };
-            *ceremony = Some(pending);
-            Ok(prepared)
-        }
+        "account.create" | "account.create.begin" => begin_native(request, config, ceremony).await,
         "account.custody.begin" => {
             *ceremony = None;
             let input: CreateInput = serde_json::from_value(std::mem::take(&mut request.body))
@@ -252,6 +197,66 @@ async fn apply(
         _ => Err(SdkError::CustodySetupInvalid),
     }
 }
+async fn begin_native(
+    request: &mut LocalBusFrame,
+    config: &LocalBusConfig,
+    ceremony: &mut Option<CreationCeremony>,
+) -> Result<ResultBody, SdkError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input {
+        display_name: String,
+        principal_kind: ramflux_protocol::PrincipalKind,
+        #[serde(default)]
+        node_id: Option<String>,
+        #[serde(default)]
+        custodian_account: Option<String>,
+    }
+    *ceremony = None;
+    let input: Input = serde_json::from_value(std::mem::take(&mut request.body))
+        .map_err(|_| SdkError::CustodySetupInvalid)?;
+    let valid = match input.principal_kind {
+        ramflux_protocol::PrincipalKind::Human => input.custodian_account.is_none(),
+        ramflux_protocol::PrincipalKind::HeadlessAi => {
+            request.method == "account.create.begin"
+                && input.custodian_account.is_some()
+                && request.account_id.as_deref() == input.custodian_account.as_deref()
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(SdkError::CustodySetupInvalid);
+    }
+    let display_name = ramflux_protocol::normalize_profile_display_name(&input.display_name)?;
+    let home_node_id = input
+        .node_id
+        .map(|node_id| {
+            crate::node::NodeStore::load(&config.data_root, &config.builtin_nodes)?
+                .confirmed_for_new_account(&node_id)
+                .map(|profile| profile.node_id)
+        })
+        .transpose()?;
+    let vault = primary_provider(config);
+    tokio::task::spawn_blocking(move || vault.preflight())
+        .await
+        .map_err(|_| SdkError::CustodyVaultUnavailable)??;
+    let pending = CreationCeremony::begin_account(
+        &config.data_root,
+        display_name,
+        input.principal_kind,
+        input.custodian_account,
+        home_node_id,
+        now()?,
+    )?;
+    let prepared = ResultBody::Prepared {
+        account_anchor: pending.account_anchor().into(),
+        ceremony_id: pending.ceremony_id().into(),
+        expires_in_ms: pending.expires_in_ms(),
+    };
+    *ceremony = Some(pending);
+    Ok(prepared)
+}
+
 async fn confirm(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,

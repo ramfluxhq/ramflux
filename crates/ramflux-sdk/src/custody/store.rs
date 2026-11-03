@@ -449,28 +449,7 @@ pub(super) fn persist(
     let mut pins = AuthorityPins::default();
     pins.observe(&verified)?;
     pins.discard_retained_records();
-    let parent = root.join("custody_accounts");
-    if !parent.try_exists()? {
-        private_directory(&parent)?;
-        fs::File::open(root)?.sync_all()?;
-    }
-    let dir = directory(root, &input.local_account_id)?;
-    private_directory(&dir)?; // Exclusive reservation is itself a fail-closed mode latch.
-    fs::File::open(&parent)?.sync_all()?;
-    // Create the crash marker before the insert-only index reservation. Startup can remove
-    // a marker with neither an index row nor authority without retiring the account id.
-    let index = ramflux_storage::AccountIndex::open(root)?;
-    if let Err(error) = index.reserve_account(&input.local_account_id, &record.body.account_anchor)
-    {
-        fs::remove_dir(&dir)?;
-        fs::File::open(&parent)?.sync_all()?;
-        return match error {
-            ramflux_storage::StorageError::AccountAlreadyExists(_) => {
-                Err(SdkError::CustodyAccountConflict)
-            }
-            error => Err(error.into()),
-        };
-    }
+    let dir = genesis::reserve_account(root, &input.local_account_id, &record.body.account_anchor)?;
     let reference = ramflux_protocol::hash_base64url(
         "ramflux.local.custody_vault_reference.v1",
         &[
