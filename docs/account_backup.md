@@ -263,7 +263,10 @@ references and progress in the message deletion transaction. Cached keys are wip
 and runtime-owned download spools are closed and unlinked before successful
 completion. Later get, fetch, share, decrypt and export requests report
 `ObjectErased`; `rf` reports that code and exits unsuccessfully without terminating
-the daemon. Cached operation responses become compact erased receipts.
+the daemon. The C ABI uses `RAMFLUX_ERR_OBJECT_ERASED` (19), while account
+writer contention remains `RAMFLUX_ERR_ACCOUNT_BUSY` (18). Object identity
+conflicts and unverifiable ownership use codes 20 and 21 respectively. Cached
+operation responses become compact erased receipts.
 
 Portable fences contain only a domain-separated BLAKE3 commitment to the account
 root, wire object id and verified ciphertext manifest, plus opaque lookup indexes.

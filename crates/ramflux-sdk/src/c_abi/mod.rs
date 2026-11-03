@@ -52,6 +52,9 @@ pub enum RamfluxErrorCode {
 /// the code for local lock/I/O failures and integrity failures.
 pub const RAMFLUX_ERR_ACCOUNT_BUSY: i32 = 18;
 
+/// Local attachment erasure; this outcome does not terminate the client or daemon.
+pub const RAMFLUX_ERR_OBJECT_ERASED: i32 = 19;
+
 impl RamfluxErrorCode {
     const fn name(self) -> &'static str {
         match self {
@@ -924,6 +927,10 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
     use ramflux_storage::StorageError as E;
     match error {
         E::AccountWriterBusy(_) => RamfluxErrorCode::AccountBusy,
+        E::ObjectErased => RamfluxErrorCode::ObjectErased,
+        E::ObjectIdentityConflict => RamfluxErrorCode::ObjectIdentityConflict,
+        E::ObjectOwnershipUnverified { .. } => RamfluxErrorCode::ObjectOwnershipUnverified,
+        E::AccountSchemaTooNew { .. } => RamfluxErrorCode::UnsupportedVersion,
         E::Integrity(_)
         | E::Protocol(_)
         | E::AmbiguousDeviceId(_)
@@ -1006,5 +1013,13 @@ mod object_erasure_tests {
         assert_eq!(error.code, super::RamfluxErrorCode::ObjectErased);
         assert_eq!(error.code.name(), "ObjectErased");
         assert_eq!(error.code as i32, 19);
+        assert_eq!(super::RAMFLUX_ERR_OBJECT_ERASED, 19);
+        assert_eq!(super::RamfluxErrorCode::AccountBusy as i32, 18);
+        assert_eq!(super::RamfluxErrorCode::ObjectIdentityConflict as i32, 20);
+        assert_eq!(super::RamfluxErrorCode::ObjectOwnershipUnverified as i32, 21);
+        assert_eq!(
+            super::storage_error_code(&ramflux_storage::StorageError::ObjectErased),
+            error.code
+        );
     }
 }

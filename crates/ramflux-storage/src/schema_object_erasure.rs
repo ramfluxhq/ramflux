@@ -94,8 +94,8 @@ pub(crate) fn install_sentinel(db: &Connection) -> Result<(), StorageError> {
 }
 
 /// Private archives use the same floor before any payload/actor import.
-pub(crate) fn upgrade_private(db: &Connection) -> Result<(), StorageError> {
-    validate(db)?;
+pub(crate) fn upgrade_private(db: &crate::database::Connection) -> Result<(), StorageError> {
+    db.call(|raw| Ok(validate(raw)))??;
     let current: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM schema_migration WHERE schema_version=?1 AND checksum=?2)",
         params![VERSION, CHECKSUM],
@@ -104,9 +104,9 @@ pub(crate) fn upgrade_private(db: &Connection) -> Result<(), StorageError> {
     if current {
         return Ok(());
     }
-    let transaction = db.unchecked_transaction()?;
+    let transaction = db.immediate_transaction()?;
     db.execute_batch(crate::account_db::object_retention::SCHEMA)?;
-    install_sentinel(db)?;
+    db.call(|raw| Ok(install_sentinel(raw)))??;
     db.execute("INSERT INTO schema_migration VALUES(?1,?2,'v1-object-erasure',?3,'portable attachment erasure writer floor')",params![VERSION,crate::unix_now(),CHECKSUM])?;
     transaction.commit()?;
     Ok(())

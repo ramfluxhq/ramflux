@@ -15,16 +15,18 @@ fn r4_twenty_thousand_downloaded_references_are_scanned_with_bounded_work()
     let index = AccountIndex::open(&root)?;
     index.create_account("a", "root")?;
     let db = AccountDb::open(&index, "a", &AccountDbKey::generate()?)?;
-    db.connection.execute_batch("BEGIN;
+    db.write_transaction(|| db.connection.execute_batch("
         WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<20000)
         INSERT INTO object_index(object_id,chunk_manifest_hash,object_state,total_cipher_size,chunk_count,created_at,updated_at,manifest_hash,plaintext_hash)
         SELECT printf('object-%d',i),x'00','complete',0,0,0,0,CASE WHEN i%2=0 THEN printf('manifest-%d',i) ELSE CAST(printf('manifest-%d',i) AS BLOB) END,'same-plaintext' FROM n;
         WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<20000)
         INSERT INTO runtime_actor_state SELECT printf('attachment/reference/%08d',i),CAST(json_object('reference',json_object('object_id',printf('object-%d',i),'manifest_hash',printf('manifest-%d',i),'plaintext_hash','same-plaintext')) AS BLOB) FROM n;
-        COMMIT;")?;
+        ").map_err(crate::StorageError::from))?;
     db.send_direct_message("thread", "fixture-owner", "peer", b"body")?;
     let owner_root = db.object_erasure_root().to_owned();
-    db.connection.call(move |connection| Ok(bind_metadata_owners(connection, &owner_root)))??;
+    db.write_transaction(|| {
+        db.connection.call(move |connection| Ok(bind_metadata_owners(connection, &owner_root)))?
+    })?;
     let started = std::time::Instant::now();
     assert_eq!(db.backup_missing_count()?, 0);
     let elapsed = started.elapsed();
@@ -60,13 +62,12 @@ fn bind_metadata_owners(
     db: &mut rusqlite::Connection,
     root: &str,
 ) -> Result<(), crate::StorageError> {
-    let transaction = db.transaction()?;
     {
-        let mut payload = transaction.prepare("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class) VALUES(?1,?2,?3,?4,'legacy')")?;
+        let mut payload = db.prepare("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class) VALUES(?1,?2,?3,?4,'legacy')")?;
         let mut reference =
-            transaction.prepare("INSERT INTO object_retention_reference VALUES(?1,?2,?3,?4,?5)")?;
-        let mut edge = transaction
-            .prepare("INSERT INTO object_message_reference VALUES('fixture-owner',?1,x'7b7d')")?;
+            db.prepare("INSERT INTO object_retention_reference VALUES(?1,?2,?3,?4,?5)")?;
+        let mut edge =
+            db.prepare("INSERT INTO object_message_reference VALUES('fixture-owner',?1,x'7b7d')")?;
         for number in 1..=20_001 {
             let (selector, wire, manifest, plaintext) = if number == 20_001 {
                 ("unavailable".into(), "missing-wire".into(), "missing".into(), "missing")
@@ -100,6 +101,5 @@ fn bind_metadata_owners(
             edge.execute([&hash])?;
         }
     }
-    transaction.commit()?;
     Ok(())
 }

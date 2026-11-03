@@ -74,10 +74,14 @@ impl AccountDb {
     /// # Errors
     /// Returns an error when opening or authenticating the read connection fails.
     pub fn open_reader(&self) -> Result<Self, StorageError> {
-        let connection = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        apply_key(&connection, &self.current_key)?;
-        verify_or_install_key_fingerprint(&connection, &self.current_key)?;
-        connection.execute_batch("PRAGMA query_only=ON; PRAGMA synchronous=FULL;")?;
+        let connection = self.open_query_only_connection()?;
+        // Fence checks must see fresh commits while a backup reader pins an older snapshot.
+        // The authority is read-only too: readers never keep the account writer lease alive.
+        let erasure_authority = if let Some(authority) = &self.erasure_authority {
+            authority.clone()
+        } else {
+            self.open_query_only_connection()?
+        };
         Ok(Self {
             local_account_id: self.local_account_id.clone(),
             principal_commitment: self.principal_commitment.clone(),
@@ -91,12 +95,18 @@ impl AccountDb {
                 ..Default::default()
             },
             connection,
-            erasure_authority: Some(
-                self.erasure_authority.as_ref().unwrap_or(&self.connection).clone(),
-            ),
+            erasure_authority: Some(erasure_authority),
             volatile_typing: RefCell::new(BTreeMap::new()),
             volatile_presence: RefCell::new(BTreeMap::new()),
         })
+    }
+
+    fn open_query_only_connection(&self) -> Result<Connection, StorageError> {
+        let connection = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        apply_key(&connection, &self.current_key)?;
+        verify_or_install_key_fingerprint(&connection, &self.current_key)?;
+        connection.execute_batch("PRAGMA query_only=ON; PRAGMA synchronous=FULL;")?;
+        Ok(connection)
     }
 
     /// Whether this connection enforces query-only access.

@@ -212,6 +212,10 @@ fn storage_error_code(error: &StorageError) -> &'static str {
     use StorageError as E;
     match error {
         E::AccountWriterBusy(_) => "account_busy",
+        E::ObjectErased => "ObjectErased",
+        E::ObjectIdentityConflict => "ObjectIdentityConflict",
+        E::ObjectOwnershipUnverified { .. } => "ObjectOwnershipUnverified",
+        E::AccountSchemaTooNew { .. } => "AccountSchemaTooNew",
         E::Io(_) | E::Sqlite(_) => "storage_unavailable",
         E::Integrity(_)
         | E::Protocol(_)

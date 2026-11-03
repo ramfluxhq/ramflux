@@ -33,7 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their cached chunks, and finish pending relay ACKs while their grant is valid.
 - Erase imported attachment ciphertext and content keys after the final message
   owner is deleted, with shared-reference retention, cache/spool invalidation and
-  typed `ObjectErased` outcomes. Preserve portable erasure fences across backup
+  typed `ObjectErased` outcomes (C ABI 19; account writer contention stays 18,
+  object identity conflict is 20 and unverified ownership is 21). Preserve portable
+  erasure fences across backup
   merge, native/full restore and rekey; authorize archive publication against the
   current erasure generation. Schema 12 refuses older writers through a versioned
   checksum sentinel. Bounded legacy discovery preserves ambiguous zero-reference

@@ -232,3 +232,38 @@ fn pinned_backup_reader_cannot_read_erased_payload_and_keeps_wal_retirement_pend
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn erasure_maintenance_rejects_deferred_promotion_without_advancing_discovery()
+-> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("erasure-managed-read")?;
+    let before: (i64, i64, i64) = db.connection.query_row(
+        "SELECT phase,cursor,rows_scanned FROM object_retention_upgrade WHERE singleton=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    assert!(db.read_snapshot(|| db.maintain_object_retention()).is_err());
+    assert!(db.read_snapshot(|| db.maintain_expired_object_holds()).is_err());
+    let after = db.connection.query_row(
+        "SELECT phase,cursor,rows_scanned FROM object_retention_upgrade WHERE singleton=1",
+        [],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+    )?;
+    assert_eq!(before, after);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn erasure_maintenance_nests_in_an_owned_immediate_writer() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("erasure-managed-writer")?;
+    db.write_transaction(|| {
+        db.maintain_object_retention()?;
+        db.maintain_expired_object_holds()
+    })?;
+    assert!(db.connection.is_autocommit()?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

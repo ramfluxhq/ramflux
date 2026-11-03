@@ -3,7 +3,7 @@
 
 //! Resumable metadata discovery never infers imported ownership from a missing reference.
 use super::*;
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::Connection;
 
 const ROW_BUDGET: usize = 256;
 const BYTE_BUDGET: usize = 1024 * 1024;
@@ -30,8 +30,9 @@ impl AccountDb {
     /// Reclaims at most one expired hold without advancing the per-open metadata discovery cursor.
     pub fn maintain_expired_object_holds(&self) -> Result<(), StorageError> {
         let now = self.now_unix();
-        self.connection.call(move |db| Ok(reclaim_one(db, now, false)))??;
-        self.notify_object_retirement()
+        self.write_transaction(|| {
+            self.connection.call(move |db| Ok(reclaim_one(db, now, false)))?
+        })
     }
 
     /// # Errors
@@ -39,14 +40,20 @@ impl AccountDb {
     pub fn maintain_object_retention(&self) -> Result<(), StorageError> {
         let root = self.principal_commitment.clone();
         let now = self.now_unix();
-        self.connection.call(move |db| Ok(step(db, &root, now)))??;
-        self.notify_object_retirement()
+        let complete =
+            self.write_transaction(|| self.connection.call(move |db| Ok(step(db, &root)))?)?;
+        // Reclamation remains a separate bounded writer phase after discovery commits.
+        if complete {
+            self.write_transaction(|| {
+                self.connection.call(move |db| Ok(reclaim_one(db, now, true)))?
+            })?;
+        }
+        Ok(())
     }
 }
 
-fn step(db: &mut Connection, root: &str, now: i64) -> Result<(), StorageError> {
-    let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (mut phase, mut cursor): (i64, i64) = transaction.query_row(
+fn step(db: &Connection, root: &str) -> Result<bool, StorageError> {
+    let (mut phase, mut cursor): (i64, i64) = db.query_row(
         "SELECT phase,cursor FROM object_retention_upgrade WHERE singleton=1",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -55,7 +62,7 @@ fn step(db: &mut Connection, root: &str, now: i64) -> Result<(), StorageError> {
     let mut bytes = 0_usize;
     while phase < COMPLETE && rows < ROW_BUDGET && bytes < BYTE_BUDGET {
         if phase == 0 {
-            let row: Option<(i64,Option<String>,Option<String>,i64)> = transaction.query_row("SELECT rowid,CASE WHEN length(CAST(object_id AS BLOB))+COALESCE(length(CAST(manifest_hash AS BLOB)),0)<=?2 THEN object_id END,CASE WHEN length(CAST(object_id AS BLOB))+COALESCE(length(CAST(manifest_hash AS BLOB)),0)<=?2 THEN CAST(manifest_hash AS TEXT) END,length(CAST(object_id AS BLOB))+COALESCE(length(CAST(manifest_hash AS BLOB)),0) FROM object_index WHERE rowid>?1 ORDER BY rowid LIMIT 1", params![cursor,BYTE_BUDGET-bytes], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+            let row: Option<(i64,Option<String>,Option<String>,i64)> = db.query_row("SELECT rowid,CASE WHEN length(CAST(object_id AS BLOB))+COALESCE(length(CAST(manifest_hash AS BLOB)),0)<=?2 THEN object_id END,CASE WHEN length(CAST(object_id AS BLOB))+COALESCE(length(CAST(manifest_hash AS BLOB)),0)<=?2 THEN CAST(manifest_hash AS TEXT) END,length(CAST(object_id AS BLOB))+COALESCE(length(CAST(manifest_hash AS BLOB)),0) FROM object_index WHERE rowid>?1 ORDER BY rowid LIMIT 1", params![cursor,BYTE_BUDGET-bytes], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
             let Some((id, wire, manifest, size)) = row else {
                 phase += 1;
                 cursor = 0;
@@ -66,7 +73,7 @@ fn step(db: &mut Connection, root: &str, now: i64) -> Result<(), StorageError> {
             }
             if let (Some(wire), Some(manifest)) = (wire, manifest) {
                 bytes += wire.len() + manifest.len();
-                transaction.execute("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class) VALUES(?1,?2,?3,?4,'legacy') ON CONFLICT DO NOTHING",params![object_erasure_commitment(root,&wire,&manifest),wire,manifest,object_erasure_lookup(root,&wire)])?;
+                db.execute("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class) VALUES(?1,?2,?3,?4,'legacy') ON CONFLICT DO NOTHING",params![object_erasure_commitment(root,&wire,&manifest),wire,manifest,object_erasure_lookup(root,&wire)])?;
             }
             cursor = id;
             rows += 1;
@@ -75,13 +82,13 @@ fn step(db: &mut Connection, root: &str, now: i64) -> Result<(), StorageError> {
         let archive = phase == 2 || phase == 4;
         let directory = phase <= 2;
         let table = if archive { "backup_archived_actor_state" } else { "runtime_actor_state" };
-        if archive && !super::super::message_footprint::table_exists(&transaction, table)? {
+        if archive && !super::super::message_footprint::table_exists(db, table)? {
             phase += 1;
             cursor = 0;
             continue;
         }
         let prefix = if directory { "directory/object/*" } else { "attachment/reference/*" };
-        let row: Option<LegacyActorMetadata> = transaction.query_row(&format!("SELECT rowid,CASE WHEN state_kind GLOB ?3 AND length(CAST(state_kind AS BLOB))+length(state_json)<=?2 THEN state_kind END,CASE WHEN state_kind GLOB ?3 THEN length(CAST(state_kind AS BLOB))+length(state_json) ELSE 0 END,CASE WHEN state_kind GLOB ?3 AND length(CAST(state_kind AS BLOB))+length(state_json)<=?2 THEN state_json END FROM {table} WHERE rowid>?1 ORDER BY rowid LIMIT 1"),params![cursor,BYTE_BUDGET-bytes,prefix], |r|Ok(LegacyActorMetadata { row_id:r.get(0)?,kind:r.get(1)?,size:r.get(2)?,encoded:r.get(3)? })).optional()?;
+        let row: Option<LegacyActorMetadata> = db.query_row(&format!("SELECT rowid,CASE WHEN state_kind GLOB ?3 AND length(CAST(state_kind AS BLOB))+length(state_json)<=?2 THEN state_kind END,CASE WHEN state_kind GLOB ?3 THEN length(CAST(state_kind AS BLOB))+length(state_json) ELSE 0 END,CASE WHEN state_kind GLOB ?3 AND length(CAST(state_kind AS BLOB))+length(state_json)<=?2 THEN state_json END FROM {table} WHERE rowid>?1 ORDER BY rowid LIMIT 1"),params![cursor,BYTE_BUDGET-bytes,prefix], |r|Ok(LegacyActorMetadata { row_id:r.get(0)?,kind:r.get(1)?,size:r.get(2)?,encoded:r.get(3)? })).optional()?;
         let Some(LegacyActorMetadata { row_id: id, kind, size, encoded }) = row else {
             phase += 1;
             cursor = 0;
@@ -99,26 +106,21 @@ fn step(db: &mut Connection, root: &str, now: i64) -> Result<(), StorageError> {
             if let Ok(value) = serde_json::from_slice::<LegacyDirectory>(&encoded)
                 && let (Some(message), Some(manifest)) = (value.message_id, value.manifest_hash)
             {
-                transaction.execute("INSERT INTO object_legacy_reference_context(selector,message_id,manifest_hash,metadata_json) VALUES(?1,?2,?3,?4) ON CONFLICT(selector) DO NOTHING",params![kind.trim_start_matches("directory/object/"),message,manifest,encoded.as_slice()])?;
+                db.execute("INSERT INTO object_legacy_reference_context(selector,message_id,manifest_hash,metadata_json) VALUES(?1,?2,?3,?4) ON CONFLICT(selector) DO NOTHING",params![kind.trim_start_matches("directory/object/"),message,manifest,encoded.as_slice()])?;
             }
         } else if let Ok(value) = serde_json::from_slice::<LegacyReference>(&encoded)
             && let Some(reference) = value.reference
         {
-            discover_reference(&transaction, root, &kind, &reference, &encoded)?;
+            discover_reference(db, root, &kind, &reference, &encoded)?;
         } else {
-            transaction.execute("UPDATE object_retention_upgrade SET unsafe_references=unsafe_references+1 WHERE singleton=1",[])?;
+            db.execute("UPDATE object_retention_upgrade SET unsafe_references=unsafe_references+1 WHERE singleton=1",[])?;
         }
     }
-    transaction.execute("UPDATE object_retention_upgrade SET phase=?1,cursor=?2,rows_scanned=rows_scanned+?3,decoded_bytes=decoded_bytes+?4 WHERE singleton=1",params![phase,cursor,rows,bytes])?;
+    db.execute("UPDATE object_retention_upgrade SET phase=?1,cursor=?2,rows_scanned=rows_scanned+?3,decoded_bytes=decoded_bytes+?4 WHERE singleton=1",params![phase,cursor,rows,bytes])?;
     if phase == COMPLETE {
-        transaction.execute("DELETE FROM object_legacy_reference_context", [])?;
+        db.execute("DELETE FROM object_legacy_reference_context", [])?;
     }
-    transaction.commit()?;
-    // Reclamation is its own bounded writer phase and is never attempted before discovery ends.
-    if phase == COMPLETE {
-        reclaim_one(db, now, true)?;
-    }
-    Ok(())
+    Ok(phase == COMPLETE)
 }
 
 fn discover_reference(
@@ -178,19 +180,13 @@ fn discover_reference(
     Ok(())
 }
 
-fn reclaim_one(
-    db: &mut Connection,
-    now: i64,
-    discovery_complete: bool,
-) -> Result<(), StorageError> {
-    let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute("DELETE FROM object_erasure_work", [])?;
-    transaction.execute("INSERT INTO object_erasure_work SELECT p.commitment,p.wire_id,p.manifest_hash FROM object_retention_payload p LEFT JOIN object_index o ON o.object_id=p.wire_id AND CAST(o.manifest_hash AS TEXT)=p.manifest_hash WHERE ((p.retention_class='imported' AND ?3 AND p.owner_count=0) OR (p.retention_class='pre_send' AND p.hold_expires_at<=?1 AND p.owner_count=0) OR (p.retention_class='transport' AND p.hold_expires_at<=?1)) AND COALESCE(length(o.ciphertext),0)<=?2 AND COALESCE(length(o.object_body),0)<=?2 ORDER BY p.commitment LIMIT 1",params![now,MAX_PAYLOAD,discovery_complete])?;
-    let inconsistent:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM object_erasure_work w JOIN object_retention_payload p USING(commitment) WHERE p.retention_class<>'transport' AND EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.commitment=w.commitment))",[],|r|r.get(0))?;
+fn reclaim_one(db: &Connection, now: i64, discovery_complete: bool) -> Result<(), StorageError> {
+    db.execute("DELETE FROM object_erasure_work", [])?;
+    db.execute("INSERT INTO object_erasure_work SELECT p.commitment,p.wire_id,p.manifest_hash FROM object_retention_payload p LEFT JOIN object_index o ON o.object_id=p.wire_id AND CAST(o.manifest_hash AS TEXT)=p.manifest_hash WHERE ((p.retention_class='imported' AND ?3 AND p.owner_count=0) OR (p.retention_class='pre_send' AND p.hold_expires_at<=?1 AND p.owner_count=0) OR (p.retention_class='transport' AND p.hold_expires_at<=?1)) AND COALESCE(length(o.ciphertext),0)<=?2 AND COALESCE(length(o.object_body),0)<=?2 ORDER BY p.commitment LIMIT 1",params![now,MAX_PAYLOAD,discovery_complete])?;
+    let inconsistent:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM object_erasure_work w JOIN object_retention_payload p USING(commitment) WHERE p.retention_class<>'transport' AND EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.commitment=w.commitment))",[],|r|r.get(0))?;
     if inconsistent {
         return Err(StorageError::ObjectOwnershipUnverified { schema_version: 12 });
     }
-    transaction.execute_batch(&schema::payload_erasure_body(&transaction)?)?;
-    transaction.commit()?;
+    db.execute_batch(&schema::payload_erasure_body(db)?)?;
     Ok(())
 }

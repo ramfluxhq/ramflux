@@ -41,7 +41,12 @@ impl BackupDatabase {
             [],
             |r| r.get(0),
         )?;
-        crate::schema_object_erasure::upgrade_private(&db)?;
+        crate::schema_object_erasure::validate(&db)?;
+        if input_version < crate::schema_object_erasure::VERSION {
+            let writer = crate::database::Connection::open(path)?;
+            crate::encryption::apply_key(&writer, key)?;
+            crate::schema_object_erasure::upgrade_private(&writer)?;
+        }
         db.execute_batch(super::event_counter::SCHEMA)?;
         super::message_footprint::install(&db)?;
         let unsafe_references:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22)))",[],|r|r.get(0))?;

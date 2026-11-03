@@ -87,6 +87,7 @@ const C_SMOKE_SOURCE: &str = r#"
 #include <string.h>
 
 _Static_assert(RAMFLUX_ERR_ACCOUNT_BUSY == 18, "account busy ABI must stay additive");
+_Static_assert(RAMFLUX_ERR_OBJECT_ERASED == 19, "object erased ABI must remain distinct");
 
 static int contains(struct RamfluxBuffer *buffer, const char *needle) {
   if (buffer == NULL || buffer->ptr == NULL) {
