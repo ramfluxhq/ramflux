@@ -291,7 +291,9 @@ pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Val
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
-            let Some(id) = entry.file_name().to_str().map(str::to_owned).filter(|id| valid_id(id).is_ok()) else {
+            let Some(id) =
+                entry.file_name().to_str().map(str::to_owned).filter(|id| valid_id(id).is_ok())
+            else {
                 continue;
             };
             let summary = if let Ok(account) = load_data_account(root, &id, now) {
@@ -458,11 +460,14 @@ pub(super) fn persist(
     // Create the crash marker before the insert-only index reservation. Startup can remove
     // a marker with neither an index row nor authority without retiring the account id.
     let index = ramflux_storage::AccountIndex::open(root)?;
-    if let Err(error) = index.reserve_account(&input.local_account_id, &record.body.account_anchor) {
+    if let Err(error) = index.reserve_account(&input.local_account_id, &record.body.account_anchor)
+    {
         fs::remove_dir(&dir)?;
         fs::File::open(&parent)?.sync_all()?;
         return match error {
-            ramflux_storage::StorageError::AccountAlreadyExists(_) => Err(SdkError::CustodyAccountConflict),
+            ramflux_storage::StorageError::AccountAlreadyExists(_) => {
+                Err(SdkError::CustodyAccountConflict)
+            }
             error => Err(error.into()),
         };
     }

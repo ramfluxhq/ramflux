@@ -55,7 +55,9 @@ impl RamfluxClient {
                         .map(|entry| entry.device_id.clone())
                         .collect()
                 });
-            let outcome = state.pins.observe_with_previous(&verified, state.publication.as_ref().map(|p| &p.record))?;
+            let outcome = state
+                .pins
+                .observe_with_previous(&verified, state.publication.as_ref().map(|p| &p.record))?;
             if outcome == PinOutcome::Advanced
                 || (outcome == PinOutcome::Unchanged && state.publication.is_none())
             {

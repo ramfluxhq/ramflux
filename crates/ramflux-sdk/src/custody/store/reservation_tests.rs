@@ -2,11 +2,18 @@
 // Copyright (c) 2026 Span Brain
 
 //! Native creation must not replace an account reserved after ceremony preparation.
-use crate::{SdkError, custody::{CreationCeremony, tests::{Root, TestVault, input, words}}};
+use crate::{
+    SdkError,
+    custody::{
+        CreationCeremony,
+        tests::{Root, TestVault, input, words},
+    },
+};
 use ramflux_storage::{AccountIndex, WrappedAccountDbKey};
 
 #[test]
-fn custody_reservation_cannot_replace_an_initialized_native_account() -> Result<(), Box<dyn std::error::Error>> {
+fn custody_reservation_cannot_replace_an_initialized_native_account()
+-> Result<(), Box<dyn std::error::Error>> {
     let root = Root::new()?;
     let vault = TestVault::default();
     let mut ceremony = CreationCeremony::begin(&root.0, input("collision"), 100)?;
@@ -21,7 +28,10 @@ fn custody_reservation_cannot_replace_an_initialized_native_account() -> Result<
         wrapped_key: vec![5; 48],
     };
     index.store_wrapped_db_key("collision", &wrapped)?;
-    assert!(matches!(ceremony.confirm(&answers, &vault, 100), Err(SdkError::CustodyAccountConflict)));
+    assert!(matches!(
+        ceremony.confirm(&answers, &vault, 100),
+        Err(SdkError::CustodyAccountConflict)
+    ));
     assert_eq!(index.account("collision")?, before);
     assert_eq!(index.load_wrapped_db_key("collision")?, Some(wrapped));
     assert_eq!(index.known_account_ids()?, ["collision"]);

@@ -509,7 +509,8 @@ async fn custody_native_shutdown_retains_root_lease_and_cancels_uncommitted_auth
                 Err(error) => break Err(error),
             }
         }
-    }).await??;
+    })
+    .await??;
     let ids = ramflux_storage::AccountIndex::open(&root.0)?.known_account_ids()?;
     assert_eq!(ids.len(), 1);
     assert!(!root.0.join("custody_accounts").join(&ids[0]).join("authority.json").exists());

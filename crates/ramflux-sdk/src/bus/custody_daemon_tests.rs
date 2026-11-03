@@ -79,7 +79,9 @@ async fn custody_inconsistent_and_invalidly_named_markers_leave_other_accounts_a
             .find(|r| r["local_account_id"] == "broken")
             .ok_or("broken account missing")?;
         assert_eq!(row["setup_error"], "CustodySetupInvalid");
-        assert!(crate::custody::load_account(&root.0, "broken", super::custody_setup::now()?).is_err());
+        assert!(
+            crate::custody::load_account(&root.0, "broken", super::custody_setup::now()?).is_err()
+        );
         assert!(crate::custody::account_exists(&root.0, "broken")?);
         let response = bus
             .request_frame_response(LocalBusFrame::request(

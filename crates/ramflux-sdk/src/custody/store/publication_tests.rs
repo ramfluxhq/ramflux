@@ -179,7 +179,10 @@ async fn native_fenced_authority_preserves_data_unlock_without_granting_credenti
     body.profile.display_name = "Conflicting same-epoch name".into();
     conflict.publication.record = primary.sign_record(body)?;
     let now = crate::custody::network_now()?;
-    assert!(matches!(accept_publication(&fixture.root.0, &id, &conflict, now)?, PinOutcome::Fenced(_)));
+    assert!(matches!(
+        accept_publication(&fixture.root.0, &id, &conflict, now)?,
+        PinOutcome::Fenced(_)
+    ));
     drop(fixture.client);
     let mut reopened = crate::RamfluxClient::new();
     reopened.open_account_index(&fixture.root.0)?;

@@ -27,7 +27,10 @@ impl AccountIndex {
         )
     }
 
-    fn prepare_account_directories(&self, local_account_id: &str) -> Result<std::sync::Arc<crate::account_writer::AccountWriter>, StorageError> {
+    fn prepare_account_directories(
+        &self,
+        local_account_id: &str,
+    ) -> Result<std::sync::Arc<crate::account_writer::AccountWriter>, StorageError> {
         let account_dir = self.root.join(format!("accounts/{local_account_id}"));
         fs::create_dir_all(account_dir.join("objects"))?;
         let writer = crate::account_writer::AccountWriter::acquire(&self.root, local_account_id)?;

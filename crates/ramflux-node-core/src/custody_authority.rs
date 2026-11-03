@@ -118,7 +118,8 @@ impl IdentityRegistry {
         let mut pins = self.custody.pins_for(anchor);
         let previous = self.custody.records.get(anchor).map(|entry| &entry.record);
         let pruned_before = pins.pruned_evidence(anchor);
-        let outcome = pins.observe_with_previous(&verified, previous).map_err(|error| crypto(&error))?;
+        let outcome =
+            pins.observe_with_previous(&verified, previous).map_err(|error| crypto(&error))?;
         log_pruned_evidence(anchor, pruned_before, pins.pruned_evidence(anchor));
         let custody = Arc::make_mut(&mut self.custody);
         custody.account_pins.insert(anchor.clone(), pins);
@@ -212,7 +213,8 @@ impl RouterCore {
         let mut pins = registry.custody.pins_for(anchor);
         let previous = registry.custody.records.get(anchor).map(|entry| &entry.record);
         let pruned_before = pins.pruned_evidence(anchor);
-        let outcome = pins.observe_with_previous(&verified, previous).map_err(|error| crypto(&error))?;
+        let outcome =
+            pins.observe_with_previous(&verified, previous).map_err(|error| crypto(&error))?;
         if outcome == PinOutcome::Unchanged {
             return Ok(publication.record.clone());
         }
