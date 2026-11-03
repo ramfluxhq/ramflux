@@ -282,15 +282,25 @@ key supplied by the reporter.
 
 ### Decision 6 — ephemeral delivery (Q5, D9)
 
-Every outer envelope has `delivery_mode = durable | ephemeral`; there is no
-plaintext typing flag. S6 must support generic ephemeral transport before S10a
+The final outer envelope has named `delivery_mode = durable | ephemeral`;
+there is no plaintext typing flag. Until S10a introduces that named field, S6
+uses the sender-signed `Envelope.ext.delivery_mode` bridge. In this bridge,
+absent or `durable` selects durable delivery, `ephemeral` selects transient
+delivery, and any unknown value is invalid at every hop. Mode is verified as
+part of the sender signature before routing; it is not mutable hop metadata.
+S10a replaces this bridge with the required named sender-signed/AEAD-bound
+outer field under the envelope/profile reset in section 9.1. It removes bridge
+emission and parsing; the new profile rejects ext.delivery_mode, including
+dual-field input, instead of resolving precedence or retaining a second mode
+transport. Both stages use the same signed-clock and no-persistence contract. S6 must support generic ephemeral transport before S10a
 is dispatched. The leak is explicit: a node can distinguish transient traffic
 and its short TTL. It cannot distinguish Typing from another permitted transient
 control by decrypting it. Hiding this mode while requiring the node not to store
 it is impossible without another private-delivery protocol; that alternative
 is rejected here.
 
-Ephemeral TTL is 1..5 seconds (default 5) and priority low. The lifetime uses
+Ephemeral TTL has the explicit bound `1 <= ttl_seconds <= 5` (default 5),
+in integer seconds, and priority low. The lifetime uses
 sender-signed Unix-second `created_at` and `ttl_seconds`: compute the checked
 sum D = created_at + ttl_seconds and checked expires_at_ms = D * 1000. Reject
 overflow, TTL outside 1..5, created_at > node_now + 2 seconds, or now_ms >=
@@ -314,9 +324,14 @@ can expose duplicates within the remaining signed lifetime: there is no bound
 of at most one duplicate. All copies are rejected at or after D. A sender clock
 lagging the node by its TTL can lose transient delivery; never retry durably.
 
-Endpoints accept Typing only in this mode, keep the indicator in memory for at
-most the remaining signed lifetime, clearing at D even after restart or replay,
-and never create history, own-history, backup or journal body
+Endpoints accept Typing only in this mode. The typing indicator lifetime is
+**at most 5 s**, bounded by the signed interval `[created_at, D)`: it is visible
+only when created_at*1000 <= now_ms < expires_at_ms, and clears at D even
+after restart or replay. The 2-second future tolerance permits early transport
+acceptance, not early display or a longer indicator lifetime; any early input
+stays only in bounded transient memory until its signed start, or is dropped.
+Late arrival shortens the indicator lifetime; duplicate/reconnect never renews
+the signed interval. Never create history, own-history, backup or journal body
 rows for known Typing. Drop superseded indicators. Receiver typing consent and
 rate limits are per authenticated peer/conversation. A malicious durable Typing
 is not displayed as history; its typed policy refusal is not an unknown-schema
@@ -3188,7 +3203,7 @@ node's appended receipt is independently signed.
 | session_id, counter, ratchet_public_key, previous_chain_length | Move from readable DmCiphertext serialization into header AEAD | Not node routing inputs |
 | device hashes, epoch, event id, key/header/franking semantic commitments | Move into encrypted header/body or remove redundant serialization | The uniform opaque reporting commitment is the explicit outer exception |
 | collapse_tag | Add, always present | 32 bytes; per-recipient session/conversation HMAC or random cover value |
-| delivery_mode | Add, always present | durable or generic ephemeral; transient classification is an admitted leak |
+| delivery_mode | S10a adds required named field, replacing the signed ext.delivery_mode bridge | durable or generic ephemeral; transient classification is an admitted leak; new profile rejects bridge/dual-field input |
 | node_report_receipt | Add, explicit null before acceptance / receipt after | Independently authenticated acceptance evidence; never alter the sender-signed source claim |
 
 `source_authority` carries existing independently verified native evidence when
@@ -3961,6 +3976,13 @@ retained in section 8 keep their meanings. A same-generation backup may restore
 history after deletion reconciliation; it never restores live authority pins,
 leases, active layer declarations or publishable prekey private material.
 
+S10a also replaces S6's signed `Envelope.ext.delivery_mode` bridge with the
+named outer delivery_mode field. Update SDK producers, gateway signature/AD
+validation, router/federation/live writers and receiver ingress together under
+the profile reset; remove bridge parsing/emission, reject old/dual-field input
+on the new profile, and retain no compatibility or field-precedence shim.
+Do not migrate queued ephemeral content into an inbox or durable retry.
+
 ### 9.2 Reader inventory before changing stored bytes
 
 These are consumers, not merely writers. Inventory both the named keys and
@@ -4133,8 +4155,13 @@ an authenticated incoming call. FCM high and APNs VoIP are not a delivery promis
 Whole provider payload <=3,072 bytes or use generic wake/cursor fetch. Default
 preview remains off. Local device decryption produces opt-in preview.
 
-S6 receives `delivery_mode = durable | ephemeral` on every client envelope. For
-ephemeral, enforce low priority and signed TTL 1..5 seconds (default 5).
+S6 initially receives the signed `Envelope.ext.delivery_mode` bridge defined
+in Decision 6 (absent/durable -> durable; ephemeral -> transient; unknown ->
+invalid). S10a replaces it with the required named signed/AEAD-bound outer
+`delivery_mode = durable | ephemeral` field and removes the bridge at its
+profile reset (section 9.1); no dual-field precedence or parallel transport.
+For ephemeral, enforce low priority and the explicit signed bound
+`1 <= ttl_seconds <= 5` integer seconds (default 5).
 Decision 6 defines D = checked(created_at + ttl_seconds), exclusive deadline
 D*1000, 2-second future tolerance and no grace; every hop/receiver verifies the
 unchanged deadline before enqueue and again before delivery. Restarts never
@@ -4145,7 +4172,9 @@ be created. Return a typed transient accepted/dropped outcome with no durability
 claim; no scoped inbox ACK is allocated. Fields are sender signed/AEAD bound.
 No plaintext typing bit, and no third class. Rate/admission limits still apply.
 TTL validation occurs before any storage/enqueue decision. Receiver recognizes
-Typing only after authentication/decryption; at now_ms >= D*1000 it emits a clear-state
+Typing only after authentication/decryption. Its indicator lifetime is at most
+5 s inside `[created_at, D)`; early transport acceptance within future tolerance
+never starts display before created_at. At now_ms >= D*1000 emit a clear-state
 transient update. Generic ephemeral mode leaks liveness urgency, not a claimed
 application constructor. This node contract must be merged before S10a dispatch.
 
@@ -4280,8 +4309,8 @@ Completion definition (every row required):
 | Semantics | All 12 kinds send/receive through generated dispatch; Edit/Delete/Reaction enforce authorization/revision/tombstone rules; same Message/Service identity/order; attachments, groups, receipts, calls, tasks and own history still work |
 | Unknown input | Unknown kind, field, entity, nested signed payload or high layer commits Unsupported plus exact raw and provenance before ACK; bounded quota; no dead letter, NACK or action execution |
 | Privacy | Every raw copy registers transactionally; crash/absence/race tests cover active, prepared, journal, nested group, archived and restored paths; history-container invalidation and object last-owner rules both pass |
-| Typing acceptance | End-to-end typing send/receive uses S6 ephemeral mode, low priority and five-second expiry; offline/drop/expiry produce no inbox, WAL, spool, retry, dead-letter or push rows |
-| Outer and reports | Exactly message/call_wake, uniform collapse_tag/report_commitment, updated producers and consumers; node receipt and opt-in accepted/tamper-refused report flow |
+| Typing acceptance | End-to-end typing send/receive uses S6 ephemeral mode, low priority, signed TTL bound 1..5 s and indicator lifetime at most 5 s inside the signed interval; offline/drop/expiry produce no inbox, WAL, spool, retry, dead-letter or push rows |
+| Outer and reports | Exactly message/call_wake, uniform collapse_tag/report_commitment, named signed/AEAD-bound delivery_mode replaces the signed ext.delivery_mode bridge at reset; new profile rejects bridge/dual-field input; updated producers/consumers and node report flow |
 | Local surface | Generated requests/updates on bus, CLI/TUI and exported bindings; stale cursor resync and tombstone cache invalidation, typed errors, no JSON sniff fallback |
 
 S10a cannot be READY or merge until every completion row passes. Its schema
@@ -4401,6 +4430,8 @@ fresh target directories per mutation and restore the original source afterward.
 | D7/Q7, S10b | he_bootstrap_both_modes_and_capsule_ad_binding | Reuse E as R0, swap capsule/header/outer fields, omit a transcript binding or expose bootstrap header in plaintext |
 | D7/Q7, S10b | he_vectors_cross_implementation_and_no_failed_commit | Reuse header nonce; change one KDF label; advance receiver after body tag failure; expected vectors/state snapshots differ |
 | D9/Q5, S10a with S6 | typing_live_offline_expiry_has_no_persistent_artifacts | Route ephemeral through inbox/WAL or create push/retry row; query all relevant node tables after live/offline/saturated/expired cases |
+| r3-L6/D9/Q5, S10a with S6 | typing_lifetime_at_most_five_seconds_and_ttl_is_bounded | Accept TTL 0 or 6, display future-dated input early, keep visible past D, or reset its interval on duplicate; ttl=1/5, ttl=0/6 refusal, future-tolerance and late-arrival assertions fail |
+| r3-L6/Q5, S10a | named_delivery_mode_replaces_signed_ext_bridge_at_reset | Ignore the bridge signature, route unknown bridge value durably, retain bridge parsing after reset, or accept both fields with precedence; pre-reset absent/durable/ephemeral/invalid and post-reset bridge/dual-field rejection assertions fail |
 | r3-S6/D9/Q5, S10a with S6 | ephemeral_signed_deadline_is_exclusive_across_hops_and_restarts | Renew TTL at a hop/restart, add grace at D, allow created_at > now+2, wrap deadline arithmetic, or promise at most one duplicate across repeated router/receiver restarts; boundary, skew and restart traces fail |
 | D9/Q5, S10a | typing_is_generated_transient_content_not_plaintext_kind | Add plaintext typing field or third class; persist known Typing in history or retain it at/after the signed deadline |
 | Q8/S11, S10b consumer | push_embedding_measures_complete_padded_provider_payload | Exclude base64/authority/receipt/wrapper bytes from 3,072-byte measurement; oversized provider payload must fall back to wake |
