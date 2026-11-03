@@ -698,7 +698,13 @@ async fn bridge_hello_refusal_backs_off_and_logs_once_per_window() -> TestResult
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     tokio::time::resume();
     server.wait_method("bridge.hello", after).await?;
-    let stopped = host.stop().await?;
+    let mut stopped = host.stop().await?;
+    crate::EngineProvider::poll(&mut stopped.host.engine, crate::bus::now_ms()).await?;
+    assert_eq!(
+        stopped.host.engine.stats()["retry_delay_s"],
+        60,
+        "refused hello must actually schedule the one-minute window"
+    );
     assert!(stopped.host.engine.stats()["hello_refused"]["-32004"].as_u64().unwrap_or(0) >= 1);
     Ok(())
 }

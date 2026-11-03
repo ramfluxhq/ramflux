@@ -31,6 +31,7 @@ pub(super) enum Event {
     Connected,
     Disconnected,
     HelloRefused(i64),
+    Backoff(u64),
     Request { generation: u64, frame: Value },
     Response { tag: String, result: Value, error: Option<i64> },
     Rejected { oversize: bool },
@@ -115,6 +116,9 @@ async fn run(
             if events.send(Event::Disconnected).await.is_err() {
                 return;
             }
+        }
+        if events.send(Event::Backoff(delay)).await.is_err() {
+            return;
         }
         eprintln!("agent host bridge reconnecting; retry in {delay}s");
         tokio::time::sleep(Duration::from_secs(delay)).await;

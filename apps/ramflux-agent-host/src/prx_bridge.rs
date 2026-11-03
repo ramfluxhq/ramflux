@@ -95,7 +95,7 @@ impl PrxBridgeEngine {
                 "stream_appends_sent":0,"stream_gap":0,"stream_capped":0,
                 "approvals":{"requested":0,"approved":0,"denied":0,"expired":0,"refused_device":0,"refused_unverified":0},
                 "erases":{"sent":0,"acked":0,"retried":0},"erase_outbox_len":0,
-                "frames_rejected":{"oversize":0,"parse":0},"late_acks":0,"controls":{"agent_revoked":0,"agent_offline":0,"turn_cancel":0}}),
+                "frames_rejected":{"oversize":0,"parse":0},"late_acks":0,"retry_delay_s":0,"controls":{"agent_revoked":0,"agent_offline":0,"turn_cancel":0}}),
             stats_at: 0,
             stats_dirty: false,
             warnings: HashMap::new(),
@@ -488,6 +488,10 @@ impl PrxBridgeEngine {
                     }
                     self.inflight.clear();
                     self.count(&["disconnects"]);
+                }
+                Event::Backoff(delay) => {
+                    self.stats["retry_delay_s"] = json!(delay);
+                    self.stats_dirty = true;
                 }
                 Event::HelloRefused(code) => {
                     let code = match code {
