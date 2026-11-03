@@ -9,6 +9,7 @@ mod backup_jobs;
 pub mod client;
 mod connection;
 mod control_state;
+mod courier_cycle;
 mod creation_client;
 mod creation_confirm;
 mod recovery;

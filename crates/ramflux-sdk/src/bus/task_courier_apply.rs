@@ -20,6 +20,7 @@ pub(super) async fn apply(
     account.task_prepared_only = false;
     match result {
         Ok(sent) => Ok(sent),
+        Err(SdkError::TaskForwardWorkerCapacity) => Ok(false),
         Err(error) if stop_class(&error) => Err(error),
         Err(_) => {
             tracing::warn!(item_id = item.key, "task courier item application failed");

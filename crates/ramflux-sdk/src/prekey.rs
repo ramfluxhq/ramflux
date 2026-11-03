@@ -302,12 +302,32 @@ where
         "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
         sdk_http_host_port(base_url)?
     );
-    sdk_http_json_request_with_deadline(base_url, request.as_bytes(), deadline)
+    sdk_http_json_request_with_deadline(base_url, request.as_bytes(), None, deadline)
+}
+
+pub(crate) fn sdk_http_post_json_with_deadline<T, R>(
+    base_url: &str,
+    path: &str,
+    value: &T,
+    deadline: std::time::Instant,
+) -> Result<R, SdkError>
+where
+    T: serde::Serialize,
+    R: serde::de::DeserializeOwned,
+{
+    let body = serde_json::to_vec(value)?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        sdk_http_host_port(base_url)?,
+        body.len()
+    );
+    sdk_http_json_request_with_deadline(base_url, request.as_bytes(), Some(&body), deadline)
 }
 
 fn sdk_http_json_request_with_deadline<R>(
     base_url: &str,
     request_head: &[u8],
+    request_body: Option<&[u8]>,
     deadline: std::time::Instant,
 ) -> Result<R, SdkError>
 where
@@ -338,6 +358,9 @@ where
     })?;
     let mut stream = DeadlineStream { stream, deadline };
     stream.write_all(request_head)?;
+    if let Some(body) = request_body {
+        stream.write_all(body)?;
+    }
     stream.flush()?;
     let (status_line, body) = read_sdk_http_response(&mut stream)?;
     if !status_line.contains(" 200 ") {

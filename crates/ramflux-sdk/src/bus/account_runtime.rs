@@ -32,6 +32,7 @@ struct AccountRuntime {
     events: mpsc::Sender<EventBatch>,
     shutdown: watch::Receiver<bool>,
     courier: Option<super::task_courier::TaskCourier>,
+    courier_cycle: super::courier_cycle::Cycle,
     #[cfg(test)]
     courier_events: Option<mpsc::UnboundedSender<tests::CourierEvent>>,
 }
@@ -71,6 +72,7 @@ pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
             events,
             shutdown,
             courier: None,
+            courier_cycle: super::courier_cycle::Cycle::default(),
             #[cfg(test)]
             courier_events: None,
         };
@@ -123,6 +125,7 @@ impl AccountRuntime {
         }
         match outcome {
             super::task_courier::Outcome::Requested { job_id } => {
+                self.courier_cycle = super::courier_cycle::Cycle::default();
                 tracing::trace!(job_id, "task courier pass requested");
                 let requests = if let Some(account) = self
                     .state
@@ -147,7 +150,13 @@ impl AccountRuntime {
             }
             super::task_courier::Outcome::Item { item, preparation } => {
                 if let Some(account) = self.state.accounts.get_mut(&self.id)
-                    && super::task_courier_apply::apply(account, item, preparation).await?
+                    && self
+                        .courier_cycle
+                        .apply(&mut super::courier_cycle::Task {
+                            account,
+                            item: Some((item, preparation)),
+                        })
+                        .await?
                     && let Some(courier) = &self.courier
                 {
                     courier.signal();
@@ -285,9 +294,6 @@ impl AccountRuntime {
             return Ok(false);
         };
         let result = tokio::time::timeout(Duration::from_secs(20), async {
-            if let Err(error) = super::own_contact_backfill::drive(account).await {
-                tracing::debug!(%error, "own-device contact backfill deferred");
-            }
             super::sync_driver::run(account).await
         })
         .await;

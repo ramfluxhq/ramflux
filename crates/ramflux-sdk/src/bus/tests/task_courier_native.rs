@@ -48,6 +48,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 events,
                 shutdown,
                 courier: None,
+                courier_cycle: crate::bus::courier_cycle::Cycle::default(),
                 courier_events: None,
             };
             private_unlock(&mut runtime).await?;

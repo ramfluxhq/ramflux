@@ -7,6 +7,10 @@ use serde_json::json;
 
 type PendingEntryId = (String, u64, String);
 
+#[cfg(test)]
+#[path = "tests/sync_courier_budget.rs"]
+mod budget_tests;
+
 pub(super) struct Schedule {
     pub min: Duration,
     pub max: Duration,
@@ -50,6 +54,9 @@ async fn run_with_receive_clock(
     account: &mut LocalBusAccountState,
     receive_now: impl FnOnce() -> i64,
 ) -> Result<usize, SdkError> {
+    let deadline = tokio::time::Instant::now() + super::courier_cycle::LIMIT;
+    // Service critical couriers before receive or any lower-priority network work can use the cycle.
+    let mut priority_sent = super::courier_cycle::priority(account).await;
     account.client.account_db()?.expire_backup_pairs(now_unix_timestamp())?;
     if let Err(error) = account.client.account_db().and_then(|db| {
         db.retain_delivery_receipts(now_unix_timestamp(), 128).map_err(SdkError::from)
@@ -63,22 +70,29 @@ async fn run_with_receive_clock(
     account.put_engine(engine);
     let (received, replies) = result?;
     for reply in replies {
+        if deadline.saturating_duration_since(tokio::time::Instant::now()) < Duration::from_secs(1)
+        {
+            break;
+        }
         if let Err(error) =
             super::dispatch::surface_transport::send_resync_reply(account, &reply).await
         {
             tracing::warn!(%error,"surface resync reply failed; requester may retry next window");
         }
     }
-    if let Err(error) = super::own_device_copy::flush(account).await {
-        tracing::warn!(%error, "own-device message copy deferred");
+    if deadline.saturating_duration_since(tokio::time::Instant::now()) >= Duration::from_secs(1)
+        && let Err(error) = super::own_contact_backfill::drive(account).await
+    {
+        tracing::debug!(%error, "own-device contact backfill deferred");
     }
-    let contacts = match Box::pin(crate::client::contact_requests::flush(account)).await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error,"contact control delivery deferred");
-            0
-        }
-    };
+    courier_count(deadline, "own-device copy", Box::pin(super::own_device_copy::flush(account)))
+        .await;
+    let contacts = courier_count(
+        deadline,
+        "contact control",
+        Box::pin(crate::client::contact_requests::flush(account)),
+    )
+    .await;
     let group_staged = match super::shared_group_sync::stage(account) {
         Ok(count) => count,
         Err(error) => {
@@ -86,44 +100,45 @@ async fn run_with_receive_clock(
             0
         }
     };
-    let group_controls = match Box::pin(super::shared_group_sync::flush_requests(account)).await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error,"group request courier deferred");
-            0
-        }
-    };
-    let group_sent = match Box::pin(super::shared_group_sync::flush(account)).await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error, "group state delivery deferred");
-            0
-        }
-    };
+    let group_controls = courier_count(
+        deadline,
+        "group request",
+        Box::pin(super::shared_group_sync::flush_requests(account)),
+    )
+    .await;
+    let group_sent =
+        courier_count(deadline, "group state", Box::pin(super::shared_group_sync::flush(account)))
+            .await;
     account.signal_task_courier();
     let tasks_applied = account.client.retry_pending_tasks(now_unix_timestamp())?;
-    let receipts = match super::delivery_receipts::flush(account).await {
-        Ok(n) => n,
-        Err(error) => {
-            tracing::warn!(%error,"delivery receipt courier deferred");
-            0
-        }
-    };
-    let voice = match super::dispatch::call::drive(account).await {
-        Ok(n) => n,
-        Err(error) => {
-            tracing::warn!(%error,"call signaling deferred");
-            0
-        }
-    };
+    // Newly received messages can enqueue receipts; keep same-cycle delivery when time remains.
+    if deadline.saturating_duration_since(tokio::time::Instant::now()) >= Duration::from_secs(8) {
+        priority_sent += super::courier_cycle::priority(account).await;
+    }
     Ok(received
         + tasks_applied
-        + receipts
-        + voice
+        + priority_sent
         + contacts
         + group_staged
         + group_sent
         + group_controls)
+}
+
+async fn courier_count(
+    deadline: tokio::time::Instant,
+    courier: &'static str,
+    future: impl std::future::Future<Output = Result<usize, SdkError>>,
+) -> usize {
+    if deadline.saturating_duration_since(tokio::time::Instant::now()) < Duration::from_secs(1) {
+        return 0;
+    }
+    match future.await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error, courier, "lower-priority courier deferred");
+            0
+        }
+    }
 }
 
 /// Projection is best-effort; the durable message remains available when its claim cannot be written.

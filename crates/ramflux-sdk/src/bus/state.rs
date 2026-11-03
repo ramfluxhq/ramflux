@@ -443,6 +443,13 @@ impl LocalBusAccountState {
     pub(crate) fn retire_engine(&mut self, engine: GatewaySessionEngine) -> Result<(), SdkError> {
         self.gateway_config = engine.config.clone();
         engine.target_delivery_id().clone_into(&mut self.target_delivery_id);
+        self.checkpoint_gateway_resume()?;
+        self.engine = None;
+        drop(engine);
+        Ok(())
+    }
+
+    pub(super) fn checkpoint_gateway_resume(&self) -> Result<(), SdkError> {
         let persisted = PersistedGatewayResume {
             previous_session_id: self.gateway_config.previous_session_id.clone(),
             resume_token: self.gateway_config.resume_token.clone(),
@@ -452,8 +459,6 @@ impl LocalBusAccountState {
             Self::GATEWAY_RESUME_CHECKPOINT,
             &serde_json::to_string(&persisted)?,
         )?;
-        self.engine = None;
-        drop(engine);
         Ok(())
     }
 

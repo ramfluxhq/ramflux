@@ -95,7 +95,7 @@ accepting the grant. The grant signature also binds the task intervention;
 a changed task or opening revision cannot reuse it. Pending requests and
 decisions are stored in the encrypted account database before acknowledgement.
 Private tool arguments are never published to other group members or journals.
-Courier attempts are bounded (two per sync tick, eight attempts, capped
+Courier attempts are bounded (two per queue per result pass, eight attempts, capped
 exponential backoff), with expiry and bounded encrypted storage. Request and
 decision queues have separate budgets; a peer cannot consume the requester's
 decision-return headroom. Incoming requests allow 64 rows / 384 KiB overall and
@@ -105,6 +105,33 @@ Decisions without a matching executor-owned request are rejected before storage.
 The executor compares requests using RFC 8785 canonical bytes and applies its own
 stored request. A malformed row is rejected independently of other decisions,
 cleanup and new-request admission.
+
+Task preparation workers remain separate from the account actor. Each result pass
+has a 20-second active actor budget: receipt and call couriers run first, with up
+to four seconds each. Every task application charges its complete elapsed time,
+including submits and failures. Another task starts only with seven seconds left
+(five for preparation, one for submit and one for local bookkeeping). Budget
+exhaustion leaves the queued row, attempts and backoff unchanged for the next pass.
+Background preparation does not own the account or a gateway session.
+
+The periodic 20-second sync cycle also services receipts and calls before receive
+and lower-priority transfers. Lower-priority network couriers need at least one
+second remaining before starting. Newly received receipts can still be sent in
+the same cycle when eight seconds remain for another priority pass. A timed-out
+priority operation retains pending work and checkpoints the gateway resume state
+before reconnecting; it never clears a pending call merely because time ran out.
+
+Task federation forwarding uses the same one-second submit deadline as local
+confirmation forwarding. It returns `TaskDeliveryTimeout` when that deadline
+expires; worker-capacity refusal is retryable `Unavailable`. At most four blocking
+forward workers run process-wide, separately from manifest workers. Socket connect,
+write and response reads share one deadline. A platform DNS resolver can outlive
+the caller, so the worker retains its permit until it actually exits; it owns no
+account, database, signing state or gateway engine. Other synchronous federation
+APIs retain their existing behavior. A timeout does not prove remote rejection;
+retries retain the logical task/control identity. As before, a later job attempt
+can reseal into a fresh outer envelope; post-submit bookkeeping and receiver
+deduplication behavior are unchanged.
 
 Each receiver assigns a local expiry no later than receipt time plus 24 hours
 (the MCP grant lifetime), without changing signed bytes or request identity.

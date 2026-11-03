@@ -5,6 +5,8 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+mod forward;
+
 struct FederatedSendOptions {
     franking: bool,
     route: crate::client::routed::Route,
@@ -211,20 +213,27 @@ fn post_federated_envelope_forward(
     sdk_http_post_json(
         &federation.federation_url,
         "/s8/federation/forward",
-        &SdkFederatedEnvelopeForwardRequest {
-            signed: ramflux_protocol::SignedFields {
-                signing_key_id: format!("{}#federation", federation.source_node_id),
-                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
-                signature: String::new(),
-            },
-            admin_token: federation.admin_token.clone(),
-            source_node_id: federation.source_node_id.clone(),
-            target_node_id: federation.target_node_id.clone(),
-            delivery_class: "opaque_event".to_owned(),
-            required_capability: federation.required_capability.clone(),
-            envelope,
-        },
+        &forward_request(federation, envelope),
     )
+}
+
+fn forward_request(
+    federation: &LocalBusFederationRoute,
+    envelope: ramflux_protocol::Envelope,
+) -> SdkFederatedEnvelopeForwardRequest {
+    SdkFederatedEnvelopeForwardRequest {
+        signed: ramflux_protocol::SignedFields {
+            signing_key_id: format!("{}#federation", federation.source_node_id),
+            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+            signature: String::new(),
+        },
+        admin_token: federation.admin_token.clone(),
+        source_node_id: federation.source_node_id.clone(),
+        target_node_id: federation.target_node_id.clone(),
+        delivery_class: "opaque_event".to_owned(),
+        required_capability: federation.required_capability.clone(),
+        envelope,
+    }
 }
 
 #[cfg(test)]

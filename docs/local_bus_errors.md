@@ -7,6 +7,7 @@ not prove that a remote mutation was never committed.
 
 | Code | Meaning | Automatic retry |
 | --- | --- | --- |
+| `TaskDeliveryTimeout` | A task federation submit exceeded its shared deadline; remote acceptance may be unknown | Bounded courier retry preserving the logical task/control identity |
 | `Unavailable` | Transient QUIC or I/O failure, HTTP client timeout/connect/body failure, unopened transport, backpressure, draining/shutdown timeout, exhausted transport retries, or HTTP 408/429/5xx | Bounded retry after connectivity recovers |
 | `Unauthenticated` | Transport refused an unauthenticated session | Authenticate before retrying |
 | `TransportSecurity` | TLS verification or certificate pin failure | Stop; repair the trusted binding before retrying |

@@ -120,6 +120,10 @@ pub enum SdkError {
     CallControlReceiptCapacity { limit: u64 },
     #[error("task manifest worker capacity is full")]
     TaskManifestWorkerCapacity,
+    #[error("task federation forward deadline exceeded")]
+    TaskDeliveryTimeout,
+    #[error("task federation forward worker capacity is full")]
+    TaskForwardWorkerCapacity,
     #[error("crypto error: {0}")]
     Crypto(#[from] CryptoError),
     #[error("storage error: {0}")]

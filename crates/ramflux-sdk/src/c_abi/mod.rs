@@ -886,7 +886,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::NodeUnreachable { .. }
         | SdkError::NodeTimeout { .. }
         | SdkError::GatewaySessionRejected(_)
-        | SdkError::GatewaySessionNotEstablished => RamfluxErrorCode::TransportUnavailable,
+        | SdkError::GatewaySessionNotEstablished
+        | SdkError::TaskDeliveryTimeout => RamfluxErrorCode::TransportUnavailable,
         SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => {
             RamfluxErrorCode::InvalidCanonicalJson
         }
@@ -900,7 +901,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
         | SdkError::ContactRequestCapacity(_)
         | SdkError::CallControlReceiptCapacity { .. }
-        | SdkError::TaskManifestWorkerCapacity => RamfluxErrorCode::RateLimited,
+        | SdkError::TaskManifestWorkerCapacity
+        | SdkError::TaskForwardWorkerCapacity => RamfluxErrorCode::RateLimited,
         SdkError::RestoreSetupRequired
         | SdkError::CustodySetupInvalid
         | SdkError::CustodyExpired
