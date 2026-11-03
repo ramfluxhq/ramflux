@@ -79,3 +79,39 @@ async fn direct_full_handshake_pool_closes_newcomer_and_deadline_makes_slot_reus
     })
     .await?
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn disconnect_cleanup_waits_off_listener_thread_and_revokes_immediately() -> anyhow::Result<()>
+{
+    let limiter = ramflux_node_core::CustodyIngressLimiter::with_authenticated_limit(256, 1);
+    let permit =
+        Arc::new(limiter.acquire("192.0.2.1".parse()?, None, std::time::Instant::now())?);
+    permit.mark_authenticated("one")?;
+    let listener_thread = std::thread::current().id();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let cleanup = Disconnect {
+        permit: Arc::clone(&permit),
+        cleanup: Some(move || {
+            let thread = std::thread::current().id();
+            let _ = started_tx.send(thread);
+            // A watchdog bounds even a mutation that runs this on the listener thread.
+            let released = release_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            let _ = done_tx.send(released);
+        }),
+    };
+    drop(cleanup);
+    assert!(permit.is_revoked(), "holder revocation must remain synchronous");
+    let replacement = limiter.acquire("192.0.2.1".parse()?, None, std::time::Instant::now())?;
+    replacement.mark_authenticated("two")?;
+    let cleanup_thread = tokio::time::timeout(Duration::from_secs(2), started_rx).await??;
+    let separate_thread = cleanup_thread != listener_thread;
+    // This timer must progress while service cleanup is parked.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let _ = release_tx.send(());
+    let released = tokio::time::timeout(Duration::from_secs(2), done_rx).await??;
+    assert!(separate_thread, "disconnect took the service admission lock on the listener thread");
+    assert!(released, "listener could not progress while disconnect cleanup waited");
+    Ok(())
+}

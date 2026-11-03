@@ -385,7 +385,7 @@ async fn custody_capacity_server_retry_hint_is_shared_by_two_store_handles() -> 
             retry_after_ms: u64::from(error.retry_hint().ok_or("retry hint")?.retry_after_ms),
             capacity: None,
         });
-        first.set_networking_reason_at(&root.0, cause, now)?;
+        first.set_networking_error_at(&root.0, cause, &error, now)?;
         // A second process has no in-memory monotonic anchor from the writer.
         clock::begin_refusal(&first.networking_path);
         let mut second = load_account(&root.0, "shared-short-hint", now)?;
@@ -423,9 +423,16 @@ async fn custody_capacity_short_hint_keeps_anchor_across_clock_rollback() -> Tes
     let now = capacity_hint::unix_now();
     let mut first = create(&root.0, "short-clock", &TestVault::default(), now - 7 * 86_400)?;
     first.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
-    first.set_networking_reason_at(
+    first.set_networking_error_at(
         &root.0,
         Some(AccountNetworkingReason::NodeBusy { retry_after_ms: 30_000, capacity: None }),
+        &SdkError::CustodyAdmission {
+            code: CustodyRefusal::Capacity,
+            retry: ramflux_protocol::custody::RetryHint::new(
+                ramflux_protocol::custody::RetryScope::NodeCapacity,
+                30_000,
+            ),
+        },
         now,
     )?;
     assert_eq!(first.networking_view(now).ok_or("missing hint")?.remaining_ms, Some(30_000));
@@ -437,5 +444,62 @@ async fn custody_capacity_short_hint_keeps_anchor_across_clock_rollback() -> Tes
     assert_eq!(restored.networking_view(backwards).ok_or("hint lost")?.remaining_ms, Some(1000));
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     restored.check_capacity_deadline(backwards)?;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn unhinted_busy_has_no_shared_deadline_or_decaying_view() -> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut first = create(&root.0, "unhinted-busy", &TestVault::default(), now)?;
+    first.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let error = SdkError::CustodyNetwork(CustodyRefusal::Busy);
+    let cause = AccountNetworkingReason::NodeBusy { retry_after_ms: 16_000, capacity: None };
+    // A new Busy at the same wall second must also clear an old hinted deadline.
+    let capacity = SdkError::CustodyAdmission {
+        code: CustodyRefusal::Capacity,
+        retry: ramflux_protocol::custody::RetryHint::new(
+            ramflux_protocol::custody::RetryScope::NodeCapacity,
+            16_000,
+        ),
+    };
+    first.set_networking_error_at(&root.0, Some(cause.clone()), &capacity, now)?;
+    assert_eq!(first.stored.capacity_retry_at, Some(now + 16));
+    first.set_networking_error_at(&root.0, Some(cause.clone()), &error, now)?;
+    let path = directory(&root.0, "unhinted-busy")?.join("authority.json");
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    assert!(saved.get("capacity_retry_at").is_none_or(serde_json::Value::is_null));
+    assert_eq!(first.stored.capacity_retry_at, None);
+    clock::begin_refusal(&first.networking_path);
+    tokio::time::advance(std::time::Duration::from_secs(4)).await;
+    let second = load_account(&root.0, "unhinted-busy", now + 4)?;
+    second.check_capacity_deadline(now + 4)?;
+    let view = serde_json::to_value(second.networking_view(now + 4).ok_or("missing Busy")?)?;
+    assert_eq!(view, serde_json::to_value(&cause)?);
+    assert_eq!(error.custody_refusal(), Some(CustodyRefusal::Busy));
+    Ok(())
+}
+
+#[test]
+fn hinted_busy_does_not_install_a_shared_capacity_deadline() -> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut first = create(&root.0, "hinted-busy", &TestVault::default(), now)?;
+    first.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let error = SdkError::CustodyAdmission {
+        code: CustodyRefusal::Busy,
+        retry: ramflux_protocol::custody::RetryHint::new(
+            ramflux_protocol::custody::RetryScope::PreAuthSource,
+            30_000,
+        ),
+    };
+    first.set_networking_error_at(
+        &root.0,
+        Some(AccountNetworkingReason::NodeBusy { retry_after_ms: 30_000, capacity: None }),
+        &error,
+        now,
+    )?;
+    assert_eq!(first.stored.capacity_retry_at, None);
+    load_account(&root.0, "hinted-busy", now)?.check_capacity_deadline(now)?;
     Ok(())
 }

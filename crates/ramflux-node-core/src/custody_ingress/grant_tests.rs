@@ -106,3 +106,23 @@ fn expiry_during_callback_rolls_back_reserved_capacity() -> Result {
     assert_eq!((state.handshakes, state.authenticated), (0, 0));
     Ok(())
 }
+
+#[test]
+fn second_grant_on_a_granting_holder_has_its_own_refusal_label() -> Result {
+    if crate::custody_budget_log::tests::run_isolated()? {
+        return Ok(());
+    }
+    let limiter = CustodyIngressLimiter::with_authenticated_limit(256, 1);
+    let permit = limiter.acquire("192.0.2.1".parse()?, None, Instant::now())?;
+    permit.grant("one", || {
+        let refusal =
+            crate::custody_budget_log::tests::assert_warning("grant_in_progress", 1, 0, || {
+                permit.grant("one", || panic!("a second grant must not execute"))
+            })
+            .expect_err("second grant admitted");
+        assert_eq!(refusal.code, ramflux_protocol::custody::CustodyRefusal::Busy);
+        assert_eq!(refusal.retry, None);
+    })?;
+    assert_eq!(limiter.state.lock().map_err(|_| "state")?.authenticated, 1);
+    Ok(())
+}

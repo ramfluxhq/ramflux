@@ -109,10 +109,11 @@ async fn serve(
     };
     let mode = *mode;
     let connection = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+    let cleanup_router = Arc::clone(&router);
+    let cleanup_connection = connection.clone();
     let _cleanup = Disconnect {
-        router: Arc::clone(&router),
-        connection: connection.clone(),
         permit: Arc::clone(&permit),
+        cleanup: Some(move || cleanup_router.custody_disconnected(&cleanup_connection)),
     };
     let mut authenticated = false;
     let response = router.custody_tls(frame, &connection, peer, mode, (None, Some(&permit)));
@@ -196,15 +197,17 @@ impl Drop for RevokeOnDrop {
     }
 }
 
-struct Disconnect {
+struct Disconnect<F: FnOnce() + Send + 'static> {
     permit: Arc<ramflux_node_core::CustodyIngressPermit>,
-    router: Arc<RouterHandle>,
-    connection: String,
+    cleanup: Option<F>,
 }
-impl Drop for Disconnect {
+impl<F: FnOnce() + Send + 'static> Drop for Disconnect<F> {
     fn drop(&mut self) {
         self.permit.revoke();
-        self.router.custody_disconnected(&self.connection);
+        if let Some(cleanup) = self.cleanup.take() {
+            // Service admission may wait for a durable grant on another connection.
+            tokio::task::spawn_blocking(cleanup);
+        }
     }
 }
 

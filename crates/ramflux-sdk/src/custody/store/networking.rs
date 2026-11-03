@@ -53,11 +53,39 @@ impl BornAccount {
         self.set_networking_reason_at(root, reason, capacity_hint::unix_now())
     }
 
+    #[cfg(test)]
     pub(crate) fn set_networking_reason_at(
+        &mut self,
+        root: &Path,
+        reason: Option<AccountNetworkingReason>,
+        now: u64,
+    ) -> Result<(), SdkError> {
+        self.persist_networking_reason_at(root, reason, now, false)
+    }
+
+    pub(crate) fn set_networking_error_at(
+        &mut self,
+        root: &Path,
+        reason: Option<AccountNetworkingReason>,
+        error: &SdkError,
+        now: u64,
+    ) -> Result<(), SdkError> {
+        let hinted_capacity = matches!(
+            error,
+            SdkError::CustodyAdmission {
+                code: ramflux_protocol::custody::CustodyRefusal::Capacity,
+                ..
+            }
+        );
+        self.persist_networking_reason_at(root, reason, now, hinted_capacity)
+    }
+
+    fn persist_networking_reason_at(
         &mut self,
         root: &Path,
         mut reason: Option<AccountNetworkingReason>,
         now: u64,
+        hinted_capacity: bool,
     ) -> Result<(), SdkError> {
         if let Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity: Some(hint) }) =
             reason.as_mut()
@@ -71,8 +99,13 @@ impl BornAccount {
                 });
             }
         }
+        let share_deadline = hinted_capacity
+            || matches!(reason.as_ref(),
+            Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity })
+                if capacity.is_some() || *retry_after_ms == CAPACITY_RETRY_AFTER_MS);
         self.update_networking(root, now, |current| {
-            if current.stored.capacity_retry_at.is_some()
+            if share_deadline
+                && current.stored.capacity_retry_at.is_some()
                 && current.networking_view(now).is_some_and(|view| {
                     view.remaining_ms.is_some_and(|remaining| remaining > 0)
                         && Some(&view.cause) == reason.as_ref()
@@ -81,7 +114,9 @@ impl BornAccount {
                 return false;
             }
             let deadline = match reason.as_ref() {
-                Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity }) => {
+                Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity })
+                    if share_deadline =>
+                {
                     let active = current
                         .networking_view(now)
                         .and_then(|view| view.remaining_ms)

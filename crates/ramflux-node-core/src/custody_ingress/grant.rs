@@ -72,7 +72,10 @@ impl CustodyIngressPermit {
                     None,
                 ));
             }
-            if h.principal.as_ref().is_some_and(|current| current != principal) || h.granting {
+            if h.granting {
+                return Err(refuse("grant_in_progress", 1, 0, CustodyRefusal::Busy, None));
+            }
+            if h.principal.as_ref().is_some_and(|current| current != principal) {
                 return Err(refuse("principal_binding_mismatch", 1, 0, CustodyRefusal::Busy, None));
             }
             let reserved = h.principal.is_none();

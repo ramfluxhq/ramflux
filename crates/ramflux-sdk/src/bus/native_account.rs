@@ -405,7 +405,7 @@ pub(super) fn record_networking_at(
             native.bind_capacity_node(&root, &config.node_id, &config.node_public_key, now)?;
         }
         if let Some(error) = error {
-            native.set_networking_reason_at(&root, networking_reason(error), now)?;
+            native.set_networking_error_at(&root, networking_reason(error), error, now)?;
         }
         native = crate::custody::load_account(&root, &id, now)?;
     }
