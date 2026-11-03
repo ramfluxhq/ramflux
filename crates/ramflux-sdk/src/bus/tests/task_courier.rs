@@ -175,6 +175,8 @@ fn runtime(
         courier: Some(TaskCourier::start()),
         courier_cycle: crate::bus::courier_cycle::Cycle::default(),
         courier_events: Some(observations),
+        networking_expiry_pending: false,
+        networking_expiry_warned: false,
     };
     (runtime, sender, stop, observed)
 }

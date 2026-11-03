@@ -36,6 +36,8 @@ struct AccountRuntime {
     shutdown: watch::Receiver<bool>,
     courier: Option<super::task_courier::TaskCourier>,
     courier_cycle: super::courier_cycle::Cycle,
+    networking_expiry_pending: bool,
+    networking_expiry_warned: bool,
     #[cfg(test)]
     courier_events: Option<mpsc::UnboundedSender<tests::CourierEvent>>,
 }
@@ -76,6 +78,8 @@ pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
             shutdown,
             courier: None,
             courier_cycle: super::courier_cycle::Cycle::default(),
+            networking_expiry_pending: false,
+            networking_expiry_warned: false,
             #[cfg(test)]
             courier_events: None,
         };
@@ -210,7 +214,16 @@ impl AccountRuntime {
             if let Some(pool) = self.readers.lock().map_err(|_| stopped())?.as_ref() {
                 pool.set_identity(account.client.owned_device_identity().ok())?;
             }
-            super::events::publish(&account.client, &self.id, request, &self.events).await?;
+            // A deferred expiry retains runtime attribution when another publication retries it.
+            let expiry = self.networking_expiry_pending.then(|| self.networking_expiry_request());
+            super::events::publish(
+                &account.client,
+                &self.id,
+                request,
+                expiry.as_ref(),
+                &self.events,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -293,14 +306,7 @@ impl AccountRuntime {
     }
 
     async fn sync(&mut self) -> Result<bool, SdkError> {
-        let request = LocalBusFrame::request(
-            "networking-expiry",
-            Some(self.id.clone()),
-            "sync",
-            "sync.run",
-            serde_json::json!({}),
-        );
-        self.publish_networking_expiry(&request).await?;
+        self.refresh_networking_expiry().await;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };
@@ -364,14 +370,44 @@ impl AccountRuntime {
         self.state.accounts.remove(&self.id);
     }
 
-    async fn publish_networking_expiry(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
+    fn networking_expiry_request(&self) -> LocalBusFrame {
+        LocalBusFrame::request(
+            "networking-expiry",
+            Some(self.id.clone()),
+            "runtime",
+            "account.networking.expired",
+            serde_json::json!({"cause":"runtime"}),
+        )
+    }
+
+    async fn refresh_networking_expiry(&mut self) {
+        match self.publish_networking_expiry().await {
+            Ok(true) => self.networking_expiry_warned = false,
+            Ok(false) => {}
+            Err(error) => {
+                if !self.networking_expiry_warned {
+                    tracing::warn!(account_id = %self.id,
+                        error_code = local_bus_error_code(&error),
+                        "networking expiry publication deferred; account remains open");
+                    self.networking_expiry_warned = true;
+                }
+            }
+        }
+    }
+
+    async fn publish_networking_expiry(&mut self) -> Result<bool, SdkError> {
         if let Some(account) = self.state.accounts.get(&self.id)
             && super::networking_events::refresh_expired(account)?
         {
-            // Project expiry before another attempt can replace the actor-state snapshot.
-            self.publish(request).await?;
+            self.networking_expiry_pending = true;
         }
-        Ok(())
+        if !self.networking_expiry_pending {
+            return Ok(false);
+        }
+        // Project expiry before another attempt can replace the actor-state snapshot.
+        self.publish(&self.networking_expiry_request()).await?;
+        self.networking_expiry_pending = false;
+        Ok(true)
     }
 
     fn authorize_backup(&self, generation: i64) -> Result<(), SdkError> {
@@ -400,7 +436,7 @@ impl AccountRuntime {
     }
 
     async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
-        self.publish_networking_expiry(&command.request).await?;
+        self.refresh_networking_expiry().await;
         if let Some(backup) = command.private.take() {
             match backup {
                 super::actor::PrivateCommand::NativeUnlock { passphrase, home_node_id, reply } => {
@@ -503,3 +539,7 @@ fn stopped() -> SdkError {
 #[cfg(test)]
 #[path = "tests/task_courier.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/networking_expiry.rs"]
+mod expiry_tests;
