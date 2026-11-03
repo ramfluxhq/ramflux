@@ -23,10 +23,27 @@ pub fn custody_listener_resources(
                     ))
                 })?;
         }
+        let soft = getrlimit(Resource::Nofile).current.unwrap_or(u64::MAX);
+        let reservation = |count: usize| {
+            count.checked_mul(listeners).ok_or_else(|| {
+                NodeCoreError::InvalidConfiguration(
+                    "custody descriptor reservation overflows".into(),
+                )
+            })
+        };
+        if settings.authenticated.is_none() {
+            static LOG: std::sync::Once = std::sync::Once::new();
+            LOG.call_once(|| {
+                tracing::info!(
+                    soft_nofile = soft,
+                    "custody authenticated ceiling is RLIMIT_NOFILE; no configured session cap"
+                );
+            });
+        }
         validate_nofile(
-            settings.handshakes * listeners,
-            settings.authenticated * listeners,
-            getrlimit(Resource::Nofile).current.unwrap_or(u64::MAX),
+            reservation(settings.handshakes)?,
+            reservation(settings.authenticated.unwrap_or(0))?,
+            soft,
         )
     }
     #[cfg(not(unix))]
@@ -73,7 +90,7 @@ pub async fn custody_accept_tcp(
 ) -> (tokio::net::TcpStream, std::net::SocketAddr, crate::CustodyIngressPermit) {
     loop {
         let (socket, peer) = custody_accept(|| listener.accept(), backoff).await;
-        if let Some(permit) = limiter.acquire(peer.ip(), None, std::time::Instant::now()) {
+        if let Ok(permit) = limiter.acquire(peer.ip(), None, std::time::Instant::now()) {
             return (socket, peer, permit);
         }
     }

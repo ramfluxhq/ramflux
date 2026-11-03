@@ -34,8 +34,12 @@ fn full_pool(
     Arc<ramflux_node_core::CustodyIngressLimiter>,
     Vec<ramflux_node_core::CustodyIngressPermit>,
 )> {
-    let limiter =
-        ramflux_node_core::CustodyIngressLimiter::with_pools(256, 1024, 4, Duration::from_secs(10));
+    let limiter = ramflux_node_core::CustodyIngressLimiter::with_pools(
+        256,
+        Some(1024),
+        4,
+        Duration::from_secs(10),
+    );
     let tick = Instant::now();
     let mut held = Vec::new();
     // Model 64 distinct source /24s, four idle custody holders each. Only source
@@ -44,10 +48,10 @@ fn full_pool(
         let source =
             if same_ip && share == 0 { "127.0.0.1".to_owned() } else { format!("192.0.{share}.1") };
         for _ in 0..4 {
-            held.push(limiter.acquire(source.parse()?, None, tick).ok_or("custody holder")?);
+            held.push(limiter.acquire(source.parse()?, None, tick)?);
         }
     }
-    assert!(limiter.acquire("203.0.113.1".parse()?, None, tick).is_none());
+    assert!(limiter.acquire("203.0.113.1".parse()?, None, tick).is_err());
     Ok((limiter, held))
 }
 
@@ -133,7 +137,7 @@ async fn requests(
         GatewayQuicResponse { status: 404, body: serde_json::json!({"error":"not found"}) };
     let custody_open =
         CustodyClientFrame::CustodyOpen { binding_mode: BindingMode::HomeRelayReceipt };
-    let refused = CustodyServerFrame::Refused { code: refusal, capacity: None };
+
     let (_, mut stream) = ramflux_transport::TcpTlsGatewayClient::connect(
         "127.0.0.1:0".parse()?,
         tcp_address,
@@ -163,7 +167,7 @@ async fn requests(
     )
     .await?;
     let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut stream).await?;
-    assert_eq!(serde_json::from_slice::<CustodyServerFrame>(&bytes)?, refused);
+    check_refusal(&serde_json::from_slice::<CustodyServerFrame>(&bytes)?, &refusal)?;
     // Use the exact pooled client API used by the relay; eight simultaneous
     // streams exceed the custody per-connection cap even without a full H.
     let client = Arc::new(
@@ -199,7 +203,7 @@ async fn requests(
     )
     .await?;
     let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut stream).await?;
-    assert_eq!(serde_json::from_slice::<CustodyServerFrame>(&bytes)?, refused);
+    check_refusal(&serde_json::from_slice::<CustodyServerFrame>(&bytes)?, &refusal)?;
     assert_eq!(
         client
             .request_pooled(&request)
@@ -208,4 +212,20 @@ async fn requests(
         expected
     );
     Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+}
+
+fn check_refusal(frame: &CustodyServerFrame, expected: &CustodyRefusal) -> Result {
+    let CustodyServerFrame::Refused { code, capacity, retry } = frame else {
+        return Err(format!("expected refusal, received {frame:?}").into());
+    };
+    assert_eq!(code, expected);
+    assert!(capacity.is_none());
+    if *expected == CustodyRefusal::Busy {
+        let hint = retry.as_ref().ok_or("Busy must carry the full-H retry hint")?;
+        assert_eq!(hint.scope, ramflux_protocol::custody::RetryScope::NodeCapacity);
+        assert!((1000..=10_000).contains(&hint.retry_after_ms));
+    } else {
+        assert!(retry.is_none());
+    }
+    Ok(())
 }

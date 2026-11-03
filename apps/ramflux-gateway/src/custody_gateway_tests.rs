@@ -142,7 +142,7 @@ impl Gateway {
         Ok(())
     }
 }
-fn start_mesh(
+pub(super) fn start_mesh(
     root: &Path,
     router: Arc<RouterCore>,
     store: Arc<RouterRedbStore>,

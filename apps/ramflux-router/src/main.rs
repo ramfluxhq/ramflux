@@ -51,6 +51,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
         let pools = ramflux_node_core::CustodyPoolSettings::from_env()?;
+        ramflux_node_core::CustodyIssuanceSettings::from_env()?;
         ramflux_node_core::custody_listener_resources(pools, 0)?;
         let redb_path = ramflux_node_core::effective_redb_path(&config);
         if checkpoint_only || discard_stale {

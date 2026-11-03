@@ -132,6 +132,10 @@ else:
                          "RAMFLUX_CUSTODY_HANDSHAKE_POOL=128\n"
                          "RAMFLUX_CUSTODY_AUTHENTICATED_POOL=512\n"
                          "RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS=5000\n"
+                         "RAMFLUX_CUSTODY_PREAUTH_HANDSHAKES_PER_SOURCE=4\n"
+                         "RAMFLUX_CUSTODY_CHALLENGES_PER_IP_PER_MINUTE=16\n"
+                         "RAMFLUX_CUSTODY_CHALLENGES_PER_PREFIX_PER_MINUTE=32\n"
+                         "RAMFLUX_CUSTODY_CHALLENGES_PER_NODE_PER_MINUTE=1024\n"
                          "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY=1024\n"
                          "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY=128\n")
         self.run_script("up")
@@ -141,7 +145,12 @@ else:
                               ("PROXY_SIGNING_SEED", "test-proxy-seed"),
                               ("NODE_RECORD_FILE", "/etc/ramflux/custody/node-record.json"),
                               ("HANDSHAKE_POOL", "128"), ("AUTHENTICATED_POOL", "512"),
-                              ("AUTH_TIMEOUT_MS", "5000"), ("NEW_PRINCIPALS_PER_DAY", "1024"),
+                              ("AUTH_TIMEOUT_MS", "5000"),
+                              ("PREAUTH_HANDSHAKES_PER_SOURCE", "4"),
+                              ("CHALLENGES_PER_IP_PER_MINUTE", "16"),
+                              ("CHALLENGES_PER_PREFIX_PER_MINUTE", "32"),
+                              ("CHALLENGES_PER_NODE_PER_MINUTE", "1024"),
+                              ("NEW_PRINCIPALS_PER_DAY", "1024"),
                               ("NEW_PRINCIPALS_PER_PREFIX_PER_DAY", "128")):
             self.assertIn(f"RAMFLUX_CUSTODY_{suffix}={value}\n", runtime)
             self.assertIn(f"RF_COMPOSE_CUSTODY_{suffix}={value}\n", runtime)
@@ -171,6 +180,8 @@ else:
                                           if not line.startswith("RAMFLUX_CUSTODY_")) +
                                  "\nDEMO_VERSION=demo-v2\n")
         record.unlink()
+        with (self.state / "runtime.env").open("a") as output:
+            output.write("RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL=4\n")
         self.run_script("upgrade")
         self.assertEqual((self.state / "runtime.env").read_text(),
                          runtime.replace("RAMFLUX_VERSION=demo-test", "RAMFLUX_VERSION=demo-v2"))

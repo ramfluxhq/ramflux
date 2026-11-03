@@ -71,9 +71,7 @@ impl Client {
         node: &VerifiedNodeRecord,
     ) -> Result<Self> {
         let (tls, observed) = tcp_pair(fixture).await?;
-        let permit = limiter
-            .acquire("127.0.0.1".parse()?, None, Instant::now())
-            .ok_or("handshake pool refusal")?;
+        let permit = limiter.acquire("127.0.0.1".parse()?, None, Instant::now())?;
         Ok(Self {
             tls,
             observed,
@@ -152,7 +150,7 @@ impl Client {
                 | CustodyServerFrame::SessionEstablished { .. }
         ) {
             assert!(
-                self.permit.mark_authenticated(&account.reference().account_anchor),
+                self.permit.mark_authenticated(&account.reference().account_anchor).is_ok(),
                 "authenticated limiter refused"
             );
         }
@@ -168,7 +166,7 @@ async fn id02_nine_same_ip_challenges_succeed_without_a_retry_wait() -> Result {
     let node = authority(ramflux_node_core::now_unix_seconds())?.node;
     let service =
         CustodyService::new(node.clone(), false, &store, ramflux_node_core::now_unix_seconds())?;
-    let limiter = CustodyIngressLimiter::with_pools(256, 1024, 4, Duration::from_secs(10));
+    let limiter = CustodyIngressLimiter::with_pools(256, Some(1024), 4, Duration::from_secs(10));
     let started = Instant::now();
     let alice = Account::new("alice", 20)?;
     let bob = Account::new("bob", 40)?;
@@ -190,7 +188,11 @@ async fn id02_nine_same_ip_challenges_succeed_without_a_retry_wait() -> Result {
     let attempt = Client::connect(&fixture, &limiter, &node).await?;
     assert_eq!(
         attempt.prove(&impostor, impostor.actions()?[0].clone(), &service, &router, &store)?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::PrincipalIdTaken, capacity: None }
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::PrincipalIdTaken,
+            capacity: None,
+            retry: None,
+        }
     );
     service.disconnect("ramflux-gateway", &attempt.proxy.connection);
     drop(attempt);
@@ -228,9 +230,8 @@ async fn id02_nine_same_ip_challenges_succeed_without_a_retry_wait() -> Result {
         ),
         CustodyServerFrame::Challenge { .. }
     ));
-    let fresh =
-        limiter.acquire("127.0.0.1".parse()?, None, Instant::now()).ok_or("H unexpectedly full")?;
-    assert!(fresh.mark_authenticated("independent-account"), "A unexpectedly full");
+    let fresh = limiter.acquire("127.0.0.1".parse()?, None, Instant::now())?;
+    assert!(fresh.mark_authenticated("independent-account").is_ok(), "A unexpectedly full");
     eprintln!(
         "tiered source window: all nine same-IP challenges succeed without retry; H and A have room; fresh IP in same /24 admitted"
     );
@@ -239,3 +240,6 @@ async fn id02_nine_same_ip_challenges_succeed_without_a_retry_wait() -> Result {
 
 #[path = "custody_gateway_tests.rs"]
 mod gateway;
+
+#[path = "custody_admission_hint_tests.rs"]
+mod hints;

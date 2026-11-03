@@ -35,8 +35,8 @@ mod custody_authority;
 mod custody_ingress;
 mod custody_listener_resources;
 pub use custody_ingress::{
-    CustodyIngressLimiter, CustodyIngressPermit, CustodyPoolSettings, custody_auth_timeout,
-    custody_authenticated_session_limit, custody_source_prefixes,
+    CustodyIngressLimiter, CustodyIngressPermit, CustodyIssuanceSettings, CustodyPoolSettings,
+    custody_auth_timeout, custody_source_prefixes,
 };
 pub use custody_listener_resources::{
     ListenerAcceptBackoff, custody_accept, custody_accept_tcp, custody_listener_resources,
@@ -174,3 +174,4 @@ mod custody_service;
 pub use custody_service::{CustodyService, CustodyTlsContext};
 
 mod custody_budget_log;
+pub use custody_budget_log::CustodyAdmissionRefusal;

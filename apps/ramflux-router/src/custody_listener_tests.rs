@@ -50,13 +50,11 @@ async fn direct_full_handshake_pool_closes_newcomer_and_deadline_makes_slot_reus
         let address = listener.local_addr()?;
         let limiter = ramflux_node_core::CustodyIngressLimiter::with_pools(
             1,
-            1,
+            Some(1),
             4,
             Duration::from_millis(100),
         );
-        let held = limiter
-            .acquire("192.0.2.1".parse()?, None, std::time::Instant::now())
-            .ok_or_else(|| anyhow::anyhow!("holder"))?;
+        let held = limiter.acquire("192.0.2.1".parse()?, None, std::time::Instant::now())?;
         let server = async {
             let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
             let (_socket, _peer, permit) =
@@ -76,7 +74,7 @@ async fn direct_full_handshake_pool_closes_newcomer_and_deadline_makes_slot_reus
         s?;
         c?;
         assert!(held.is_revoked());
-        assert!(!held.mark_authenticated("late"));
+        assert!(held.mark_authenticated("late").is_err());
         Ok(())
     })
     .await?

@@ -146,7 +146,11 @@ impl Proxy {
             Ok(request) => request,
             Err(error) => {
                 if let Some(code) = error.downcast_ref::<CustodyRefusal>() {
-                    return Ok(CustodyServerFrame::Refused { code: code.clone(), capacity: None });
+                    return Ok(CustodyServerFrame::Refused {
+                        code: code.clone(),
+                        capacity: None,
+                        retry: None,
+                    });
                 }
                 return Err(error);
             }
@@ -159,8 +163,8 @@ impl Proxy {
                 | CustodyServerFrame::SessionEstablished { .. }
         ) {
             let principal = principal.ok_or_else(|| anyhow::anyhow!("unexpected proof result"))?;
-            if !permit.mark_authenticated(&principal) {
-                return Ok(busy());
+            if let Err(refusal) = permit.mark_authenticated(&principal) {
+                return Ok(refusal.into_frame());
             }
             self.authenticated = true;
         }
@@ -273,7 +277,7 @@ fn initialize_if_configured(
     initialize().map(Some)
 }
 pub(crate) fn unavailable() -> CustodyServerFrame {
-    CustodyServerFrame::Refused { code: CustodyRefusal::Unsupported, capacity: None }
+    CustodyServerFrame::Refused { code: CustodyRefusal::Unsupported, capacity: None, retry: None }
 }
 pub(crate) async fn admit_tcp(
     stream: &mut GatewayTcpTlsStream,
@@ -281,10 +285,10 @@ pub(crate) async fn admit_tcp(
     pools: Option<&Pools>,
 ) -> anyhow::Result<Option<ramflux_node_core::CustodyIngressPermit>> {
     let response = if let Some(pools) = pools {
-        if let Some(permit) = pools.tcp.acquire(source, None, std::time::Instant::now()) {
-            return Ok(Some(permit));
+        match pools.tcp.acquire(source, None, std::time::Instant::now()) {
+            Ok(permit) => return Ok(Some(permit)),
+            Err(refusal) => refusal.into_frame(),
         }
-        busy()
     } else {
         unavailable()
     };
@@ -301,21 +305,21 @@ pub(crate) async fn admit_quic(
     limiter: &Limiter,
     started: std::time::Instant,
 ) -> anyhow::Result<Option<ramflux_node_core::CustodyIngressPermit>> {
-    if let Some(permit) =
-        limiter.acquire(connection.remote_address().ip(), Some(connection.stable_id()), started)
-    {
-        return Ok(Some(permit));
-    }
+    let refusal = match limiter.acquire(
+        connection.remote_address().ip(),
+        Some(connection.stable_id()),
+        started,
+    ) {
+        Ok(permit) => return Ok(Some(permit)),
+        Err(refusal) => refusal.into_frame(),
+    };
     tokio::time::timeout(
         Duration::from_secs(1),
-        write_custody_tcp_frame(send, &serde_json::to_vec(&busy())?),
+        write_custody_tcp_frame(send, &serde_json::to_vec(&refusal)?),
     )
     .await??;
     send.finish()?;
     Ok(None)
-}
-fn busy() -> CustodyServerFrame {
-    CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None }
 }
 impl Proxy {
     fn handoff(&mut self, session_id: &str) -> anyhow::Result<GatewayGrant> {
@@ -405,10 +409,8 @@ async fn tcp_inner(
                 proxy.frame(&context, frame, observed.as_deref(), &capacity),
             )
             .await??;
-            let saturated = matches!(
-                response,
-                CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None }
-            );
+            let saturated =
+                matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy, .. });
             tokio::time::timeout_at(
                 deadline,
                 write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
@@ -478,10 +480,8 @@ async fn quic_inner(
                 proxy.frame(&context, frame, observed.as_deref(), &capacity),
             )
             .await??;
-            let saturated = matches!(
-                response,
-                CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None }
-            );
+            let saturated =
+                matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy, .. });
             tokio::time::timeout_at(
                 deadline,
                 write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?),

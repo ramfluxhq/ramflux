@@ -211,6 +211,7 @@ impl RouterCore {
                 registry.custody.records.len(),
                 65_536,
                 ramflux_protocol::custody::CustodyRefusal::Capacity,
+                None,
             );
             return Err(crate::NodeCoreError::Capacity { resource: "custody account count" });
         }

@@ -34,14 +34,15 @@ fn holder_prefix_and_global_refusals_log_the_exhausted_counter() -> Result {
                 100,
                 tick + Duration::from_secs(128)
             )
-            .err(),
+            .err()
+            .map(|e| e.code),
             Some(CustodyRefusal::Capacity)
         );
     });
-    pool.pending_count = GLOBAL_LIMIT;
-    assert_warning("global", GLOBAL_LIMIT, GLOBAL_LIMIT, || {
+    pool.pending_count = PENDING_CHALLENGE_LIMIT;
+    assert_warning("global", PENDING_CHALLENGE_LIMIT, PENDING_CHALLENGE_LIMIT, || {
         assert_eq!(
-            pool.issue(intent("203.0.113.1".into(), "new".into()), 100, tick).err(),
+            pool.issue(intent("203.0.113.1".into(), "new".into()), 100, tick).err().map(|e| e.code),
             Some(CustodyRefusal::Busy)
         );
     });
@@ -71,20 +72,16 @@ fn replay_session_and_request_refusals_log_the_exhausted_counter() -> Result {
     }
     assert_warning("replay", REPLAY_LIMIT, REPLAY_LIMIT, || {
         assert_eq!(
-            pool.consume(&challenge.challenge_nonce, "fresh", tick),
+            pool.consume(&challenge.challenge_nonce, "fresh", tick).map_err(|e| e.code),
             Err(CustodyRefusal::Capacity)
         );
     });
-    for index in 0..GLOBAL_LIMIT {
+    // The former authenticated session ceiling is gone; pending/replay bounds remain.
+    for index in 0..5000 {
         pool.open(session(), format!("holder-{index}"), 100, tick)?;
     }
-    assert_warning("session", GLOBAL_LIMIT, GLOBAL_LIMIT, || {
-        assert_eq!(
-            pool.open(session(), "fresh".into(), 100, tick).err(),
-            Some(CustodyRefusal::Capacity)
-        );
-    });
-    pool.sessions.clear();
+    assert_eq!(pool.sessions.len(), 5000);
+    let mut pool = CustodyLeases::default();
     let session = pool.open(session(), "fresh".into(), 100, tick)?;
     for index in 0..REQUEST_LIMIT {
         pool.request(

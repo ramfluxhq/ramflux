@@ -125,8 +125,9 @@ where
     Fut: std::future::Future<Output = Result<(T, SessionStream), SdkError>>,
 {
     let Prepared { network, vault } = *prepared;
+    let mut retry = crate::custody::retry::AdmissionRetry::default();
     let (transport, connection) =
-        Box::pin(CustodyConnection::connect_with(network, vault, open)).await?;
+        Box::pin(CustodyConnection::connect_with(network, vault, &mut retry, open)).await?;
     let (stream, account, reference, credentials) = connection.into_gateway_parts().await?;
     let source = ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
         account.verified(),

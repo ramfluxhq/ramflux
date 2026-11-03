@@ -2,16 +2,45 @@
 // Copyright (c) 2026 Span Brain
 
 //! Refusals describe only budget counters, never client identities or transport addresses.
-use ramflux_protocol::custody::CustodyRefusal;
+use ramflux_protocol::custody::{CustodyRefusal, CustodyServerFrame, RetryHint, RetryScope};
+
+/// Retry interval for bounded node state without a meaningful release-time prediction.
+pub(crate) const NODE_CAPACITY_RETRY_AFTER_MS: u32 = 30_000;
+
+/// A listener/admission refusal preserves the typed server retry interval to the wire.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("custody admission refused: {code}")]
+pub struct CustodyAdmissionRefusal {
+    pub code: CustodyRefusal,
+    pub retry: Option<RetryHint>,
+}
+impl From<CustodyRefusal> for CustodyAdmissionRefusal {
+    fn from(code: CustodyRefusal) -> Self {
+        Self { code, retry: None }
+    }
+}
+impl CustodyAdmissionRefusal {
+    #[must_use]
+    pub fn into_frame(self) -> CustodyServerFrame {
+        CustodyServerFrame::Refused { code: self.code, capacity: None, retry: self.retry }
+    }
+}
+pub(crate) fn node_retry() -> RetryHint {
+    RetryHint::new(RetryScope::NodeCapacity, NODE_CAPACITY_RETRY_AFTER_MS)
+}
+pub(crate) fn source_retry() -> RetryHint {
+    RetryHint::new(RetryScope::PreAuthSource, NODE_CAPACITY_RETRY_AFTER_MS)
+}
 
 pub(crate) fn refuse(
     budget: &str,
     count: usize,
     limit: usize,
     code: CustodyRefusal,
-) -> CustodyRefusal {
+    retry: Option<RetryHint>,
+) -> CustodyAdmissionRefusal {
     tracing::warn!(budget, count, limit, refusal = ?code, "custody admission refused");
-    code
+    CustodyAdmissionRefusal { code, retry: retry.map(RetryHint::clamped) }
 }
 
 #[cfg(test)]
@@ -69,12 +98,7 @@ pub(crate) mod tests {
         assert!(status.success(), "isolated warning assertions failed: {name}: {status}");
         Ok(true)
     }
-    pub(crate) fn assert_warning<T>(
-        budget: &str,
-        count: usize,
-        limit: usize,
-        operation: impl FnOnce() -> T,
-    ) -> T {
+    pub(crate) fn capture_warnings<T>(operation: impl FnOnce() -> T) -> (T, Vec<String>) {
         // Retain one dispatcher across parallel tests so callsite interest cannot become
         // stale as short-lived scoped subscribers are created and dropped on other threads.
         static DISPATCH: OnceLock<tracing::Dispatch> = OnceLock::new();
@@ -82,6 +106,15 @@ pub(crate) mod tests {
         LINES.with(|lines| *lines.borrow_mut() = Some(Vec::new()));
         let result = tracing::dispatcher::with_default(dispatch, operation);
         let lines = LINES.with(|lines| lines.borrow_mut().take().unwrap_or_default());
+        (result, lines)
+    }
+    pub(crate) fn assert_warning<T>(
+        budget: &str,
+        count: usize,
+        limit: usize,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let (result, lines) = capture_warnings(operation);
         assert_eq!(lines.len(), 1, "one warning per {budget} refusal: {lines:?}");
         for expected in
             [format!("budget={budget:?}"), format!("count={count} "), format!("limit={limit} ")]

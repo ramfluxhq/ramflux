@@ -39,6 +39,7 @@ async fn custody_capacity_wire_ingestion_rejects_past_and_equal_resets() -> Test
             response: serde_json::to_vec(&CustodyServerFrame::Refused {
                 code: CustodyRefusal::Capacity,
                 capacity: Some(hint),
+                retry: None,
             })?,
             sent: Vec::new(),
         };

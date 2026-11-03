@@ -12,16 +12,16 @@ fn counts(l: &CustodyIngressLimiter) -> (usize, usize) {
     let s = l.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(s.handshakes + s.authenticated, s.holders.len());
     assert!(s.handshakes <= l.handshake_limit);
-    assert!(s.authenticated <= l.authenticated_limit);
+    assert!(l.authenticated_limit.is_none_or(|limit| s.authenticated <= limit));
     (s.handshakes, s.authenticated)
 }
 #[test]
 fn two_hundred_fifty_six_shares_never_exceed_authenticated_ceiling() -> Result {
-    let l = CustodyIngressLimiter::with_pools(256, 64, 4, Duration::from_secs(10));
+    let l = CustodyIngressLimiter::with_pools(256, Some(64), 4, Duration::from_secs(10));
     let mut held = Vec::new();
     for n in 0..256 {
-        let p = l.acquire(ip(n, 1), None, Instant::now()).ok_or("handshake")?;
-        assert_eq!(p.mark_authenticated(&format!("principal-{n}")), n < 64);
+        let p = l.acquire(ip(n, 1), None, Instant::now())?;
+        assert_eq!(p.mark_authenticated(&format!("principal-{n}")).is_ok(), n < 64);
         held.push(p);
         counts(&l);
     }
@@ -31,71 +31,69 @@ fn two_hundred_fifty_six_shares_never_exceed_authenticated_ceiling() -> Result {
 }
 #[test]
 fn wall_and_eight_churn_shares_cannot_revoke_an_honest_handshake() -> Result {
-    let l = CustodyIngressLimiter::with_pools(256, 512, 4, Duration::from_secs(10));
+    let l = CustodyIngressLimiter::with_pools(256, Some(512), 4, Duration::from_secs(10));
     let mut wall = Vec::new();
     for share in 0..31 {
         for n in 0..16 {
-            let p = l.acquire(ip(share, n + 1), None, Instant::now()).ok_or("wall")?;
-            assert!(p.mark_authenticated(&format!("wall-{share}-{}", n / 4)));
+            let p = l.acquire(ip(share, n + 1), None, Instant::now())?;
+            assert!(p.mark_authenticated(&format!("wall-{share}-{}", n / 4)).is_ok());
             wall.push(p);
         }
     }
-    let honest = l.acquire(ip(999, 1), None, Instant::now()).ok_or("honest")?;
+    let honest = l.acquire(ip(999, 1), None, Instant::now())?;
     let mut churn = Vec::new();
     for share in 100..108 {
         for host in 1..=2 {
-            let p =
-                l.acquire(ip(share, host), None, Instant::now()).ok_or("authenticated churn")?;
-            assert!(p.mark_authenticated(&format!("churn-{share}-{host}")));
+            let p = l.acquire(ip(share, host), None, Instant::now())?;
+            assert!(p.mark_authenticated(&format!("churn-{share}-{host}")).is_ok());
             churn.push(p);
         }
     }
     assert_eq!(counts(&l), (1, 512));
     for n in 0..1024 {
-        let p = l.acquire(ip(100 + n % 8, 3), None, Instant::now()).ok_or("churn")?;
-        assert!(!p.mark_authenticated(&format!("incoming-{n}")));
+        let p = l.acquire(ip(100 + n % 8, 3), None, Instant::now())?;
+        assert!(p.mark_authenticated(&format!("incoming-{n}")).is_err());
         assert!(!honest.is_revoked());
         counts(&l);
     }
     drop(churn);
-    assert!(honest.mark_authenticated("honest"));
+    assert!(honest.mark_authenticated("honest").is_ok());
     assert_eq!(counts(&l), (0, 497));
     assert!(wall.iter().all(|p| !p.is_revoked()));
     Ok(())
 }
 #[test]
 fn full_handshake_pool_refuses_without_revoking_and_deadline_releases_slot() -> Result {
-    let l = CustodyIngressLimiter::with_pools(256, 1024, 4, Duration::from_secs(10));
+    let l = CustodyIngressLimiter::with_pools(256, Some(1024), 4, Duration::from_secs(10));
     let tick = Instant::now();
     let mut held = Vec::new();
     for share in 0..64 {
         for _ in 0..4 {
-            held.push(l.acquire(ip(share, 1), None, tick).ok_or("holder")?);
+            held.push(l.acquire(ip(share, 1), None, tick)?);
         }
     }
-    assert!(l.acquire(ip(999, 1), None, tick).is_none());
+    assert!(l.acquire(ip(999, 1), None, tick).is_err());
     assert_eq!(counts(&l), (256, 0));
     assert!(held.iter().all(|p| !p.is_revoked()));
-    let fresh =
-        l.acquire(ip(999, 1), None, tick + Duration::from_secs(11)).ok_or("expired slot")?;
+    let fresh = l.acquire(ip(999, 1), None, tick + Duration::from_secs(11))?;
     assert!(!fresh.is_revoked());
     assert!(held.iter().all(CustodyIngressPermit::is_revoked));
-    assert!(!held[0].mark_authenticated("late"));
+    assert!(held[0].mark_authenticated("late").is_err());
     assert_eq!(counts(&l), (1, 0));
     Ok(())
 }
 #[test]
 fn full_authenticated_pool_retains_handshake_until_busy_connection_closes() -> Result {
-    let l = CustodyIngressLimiter::with_pools(1, 1, 4, Duration::from_secs(10));
-    let first = l.acquire(ip(1, 1), None, Instant::now()).ok_or("first")?;
-    assert!(first.mark_authenticated("first"));
-    let next = l.acquire(ip(2, 1), None, Instant::now()).ok_or("next")?;
+    let l = CustodyIngressLimiter::with_pools(1, Some(1), 4, Duration::from_secs(10));
+    let first = l.acquire(ip(1, 1), None, Instant::now())?;
+    assert!(first.mark_authenticated("first").is_ok());
+    let next = l.acquire(ip(2, 1), None, Instant::now())?;
     let mut granted = false;
     assert!(
         next.grant("next", || {
             granted = true;
         })
-        .is_none()
+        .is_err()
     );
     assert!(!granted);
     assert_eq!(counts(&l), (1, 1));
@@ -107,9 +105,9 @@ fn full_authenticated_pool_retains_handshake_until_busy_connection_closes() -> R
 }
 #[test]
 fn handshake_to_authenticated_transition_is_atomic_with_revocation_and_grant() -> Result {
-    let l = CustodyIngressLimiter::with_pools(256, 1, 4, Duration::from_secs(10));
+    let l = CustodyIngressLimiter::with_pools(256, Some(1), 4, Duration::from_secs(10));
     let permits: Vec<_> = (0..64)
-        .map(|n| l.acquire(ip(n, 1), None, Instant::now()).ok_or("permit"))
+        .map(|n| l.acquire(ip(n, 1), None, Instant::now()))
         .collect::<std::result::Result<_, _>>()?;
     let barrier = std::sync::Barrier::new(permits.len());
     let winners = std::sync::atomic::AtomicUsize::new(0);
@@ -119,7 +117,7 @@ fn handshake_to_authenticated_transition_is_atomic_with_revocation_and_grant() -
             let winners = &winners;
             scope.spawn(move || {
                 barrier.wait();
-                if p.grant(&format!("p-{n}"), || winners.fetch_add(1, Ordering::SeqCst)).is_some() {
+                if p.grant(&format!("p-{n}"), || winners.fetch_add(1, Ordering::SeqCst)).is_ok() {
                     assert!(!p.is_revoked());
                 }
             });
@@ -130,27 +128,27 @@ fn handshake_to_authenticated_transition_is_atomic_with_revocation_and_grant() -
     let late = &permits[0];
     late.revoke();
     let mut executed = false;
-    assert!(late.grant("late", || executed = true).is_none());
+    assert!(late.grant("late", || executed = true).is_err());
     assert!(!executed);
     counts(&l);
     Ok(())
 }
 #[test]
 fn authenticated_share_principal_and_mapped_ipv4_limits_are_independent() -> Result {
-    let l = CustodyIngressLimiter::with_pools(256, 1024, 4, Duration::from_secs(10));
+    let l = CustodyIngressLimiter::with_pools(256, Some(1024), 4, Duration::from_secs(10));
     let mut held = Vec::new();
     for n in 0..8 {
         let host = n / 4 + 1;
         let address =
             if n % 2 == 0 { format!("192.0.2.{host}") } else { format!("::ffff:192.0.2.{host}") };
-        let p = l.acquire(address.parse()?, None, Instant::now()).ok_or("holder")?;
-        assert!(p.mark_authenticated(&format!("p-{}", n / 4)));
+        let p = l.acquire(address.parse()?, None, Instant::now())?;
+        assert!(p.mark_authenticated(&format!("p-{}", n / 4)).is_ok());
         held.push(p);
     }
-    assert!(l.acquire("192.0.2.3".parse()?, None, Instant::now()).is_none());
-    let other = l.acquire("198.51.100.1".parse()?, None, Instant::now()).ok_or("other")?;
-    assert!(!other.mark_authenticated("p-0"));
-    assert!(other.mark_authenticated("new"));
+    assert!(l.acquire("192.0.2.3".parse()?, None, Instant::now()).is_ok());
+    let other = l.acquire("198.51.100.1".parse()?, None, Instant::now())?;
+    assert!(other.mark_authenticated("p-0").is_ok());
+    assert!(other.mark_authenticated("new").is_err(), "principal binding remains fixed");
     Ok(())
 }
 #[test]
@@ -158,12 +156,12 @@ fn per_ip_prefix_and_quic_caps_release_on_disconnect() -> Result {
     let l = CustodyIngressLimiter::new(256);
     let tick = Instant::now();
     let held: Vec<_> = (0..4)
-        .map(|_| l.acquire(ip(1, 1), Some(1), tick).ok_or("permit"))
+        .map(|_| l.acquire(ip(1, 1), Some(1), tick))
         .collect::<std::result::Result<_, _>>()?;
-    assert!(l.acquire(ip(2, 1), Some(1), tick).is_none());
-    assert!(l.acquire(ip(1, 1), Some(2), tick).is_none());
+    assert!(l.acquire(ip(2, 1), Some(1), tick).is_err());
+    assert!(l.acquire(ip(1, 1), Some(2), tick).is_err());
     drop(held);
-    assert!(l.acquire(ip(1, 1), Some(1), tick).is_some());
+    assert!(l.acquire(ip(1, 1), Some(1), tick).is_ok());
     Ok(())
 }
 
@@ -179,43 +177,46 @@ fn fifth_handshake_in_a_prefix_is_refused_without_revoking_existing_holders() ->
                 1 => format!("2001:db8:1::{host}"),
                 _ => format!("2001:db8:1:{host}::1"),
             };
-            held.push(l.acquire(address.parse()?, None, tick).ok_or("handshake")?);
+            held.push(l.acquire(address.parse()?, None, tick)?);
         }
         let fifth = match family {
             0 => "192.0.2.5",
             1 => "2001:db8:1::5",
             _ => "2001:db8:1:5::1",
         };
-        assert!(l.acquire(fifth.parse()?, None, tick).is_none());
+        assert!(l.acquire(fifth.parse()?, None, tick).is_err());
         if family == 0 {
-            assert!(l.acquire("::ffff:192.0.2.6".parse()?, None, tick).is_none());
+            assert!(l.acquire("::ffff:192.0.2.6".parse()?, None, tick).is_err());
         }
         let fresh = if family == 0 { "198.51.100.1" } else { "2001:db8:2::1" };
-        let honest = l.acquire(fresh.parse()?, None, tick).ok_or("fresh share")?;
+        let honest = l.acquire(fresh.parse()?, None, tick)?;
         assert!(!honest.is_revoked());
         assert!(held.iter().all(|p| !p.is_revoked()));
-        assert!(held[0].mark_authenticated("principal"));
-        assert!(l.acquire(fifth.parse()?, None, tick).is_some(), "H-to-A frees handshake share");
+        assert!(held[0].mark_authenticated("principal").is_ok());
+        assert!(l.acquire(fifth.parse()?, None, tick).is_ok(), "H-to-A frees handshake share");
     }
     Ok(())
 }
 #[test]
-fn listener_outer_ipv6_limits_count_authenticated_holders_across_both_pools() -> Result {
+fn listener_outer_ipv6_limits_exclude_authenticated_holders() -> Result {
     let l = CustodyIngressLimiter::new(256);
     let mut held = Vec::new();
     for host in 1..=16 {
-        let p = l.acquire(ip(1, host), None, Instant::now()).ok_or("holder")?;
-        assert!(p.mark_authenticated(&format!("principal-{host}")));
+        let p = l.acquire(ip(1, host), None, Instant::now())?;
+        assert!(p.mark_authenticated(&format!("principal-{host}")).is_ok());
         held.push(p);
         if host == 8 {
             assert!(
-                l.acquire("2001:db8:1::9".parse()?, None, Instant::now()).is_none(),
-                "/64 outer cap"
+                l.acquire("2001:db8:1::9".parse()?, None, Instant::now()).is_ok(),
+                "/64 authenticated holders do not consume pre-auth capacity"
             );
         }
     }
-    assert!(l.acquire("2001:db8:1:2::1".parse()?, None, Instant::now()).is_none(), "/48 outer cap");
-    assert!(l.acquire(ip(2, 1), None, Instant::now()).is_some());
+    assert!(
+        l.acquire("2001:db8:1:2::1".parse()?, None, Instant::now()).is_ok(),
+        "/48 authenticated holders do not consume pre-auth capacity"
+    );
+    assert!(l.acquire(ip(2, 1), None, Instant::now()).is_ok());
     assert_eq!(counts(&l), (0, 16));
     Ok(())
 }
@@ -235,14 +236,14 @@ fn challenge_ip_and_share_tiers_cover_mapped_ipv4_and_both_ipv6_prefixes() -> Re
         };
         for host in 1..=2 {
             for _ in 0..16 {
-                assert!(budget.admit(source(host).parse()?, tick).is_some());
+                assert!(budget.admit(source(host).parse()?, tick).is_ok());
             }
-            assert!(budget.admit(source(host).parse()?, tick).is_none(), "IP tier");
+            assert!(budget.admit(source(host).parse()?, tick).is_err(), "IP tier");
         }
-        assert!(budget.admit(source(3).parse()?, tick).is_none(), "share tier");
+        assert!(budget.admit(source(3).parse()?, tick).is_err(), "share tier");
         let fresh = if family == 0 { "198.51.100.1" } else { "2001:db8:2::1" };
-        assert!(budget.admit(fresh.parse()?, tick).is_some());
-        assert!(budget.admit(source(1).parse()?, tick + Duration::from_secs(60)).is_some());
+        assert!(budget.admit(fresh.parse()?, tick).is_ok());
+        assert!(budget.admit(source(1).parse()?, tick + Duration::from_secs(60)).is_ok());
     }
     Ok(())
 }
@@ -254,15 +255,15 @@ fn one_ip_cannot_spend_the_other_ips_challenge_share_and_mapped_addresses_do_not
         let mut budget = CustodySourceBudget::default();
         let attacker = if family == 0 { "192.0.2.1" } else { "2001:db8:1::1" };
         for _ in 0..16 {
-            assert!(budget.admit(attacker.parse()?, tick).is_some());
+            assert!(budget.admit(attacker.parse()?, tick).is_ok());
         }
-        assert!(budget.admit(attacker.parse()?, tick).is_none());
+        assert!(budget.admit(attacker.parse()?, tick).is_err());
         if family == 0 {
-            assert!(budget.admit("::ffff:192.0.2.1".parse()?, tick).is_none());
+            assert!(budget.admit("::ffff:192.0.2.1".parse()?, tick).is_err());
         }
         let honest = if family == 0 { "192.0.2.2" } else { "2001:db8:1:1::1" };
         for _ in 0..3 {
-            assert!(budget.admit(honest.parse()?, tick).is_some());
+            assert!(budget.admit(honest.parse()?, tick).is_ok());
         }
     }
     Ok(())
@@ -274,12 +275,12 @@ fn filling_the_challenge_window_requires_at_least_32_shares_and_two_ips_per_shar
     for share in 0..32 {
         for host in 1..=2 {
             for _ in 0..16 {
-                assert!(budget.admit(ip(share, host), tick).is_some());
+                assert!(budget.admit(ip(share, host), tick).is_ok());
             }
         }
     }
-    assert!(budget.admit(ip(999, 1), tick).is_none());
-    assert!(budget.admit(ip(999, 1), tick + Duration::from_secs(60)).is_some());
+    assert!(budget.admit(ip(999, 1), tick).is_err());
+    assert!(budget.admit(ip(999, 1), tick + Duration::from_secs(60)).is_ok());
 }
 
 #[test]
@@ -301,13 +302,13 @@ fn reviewer_window_probe_records_the_32_share_threshold_for_ten_minutes() -> Res
                         } else {
                             format!("198.18.{share}.{host}")
                         };
-                        if budget.admit(source.parse()?, tick).is_some() {
+                        if budget.admit(source.parse()?, tick).is_ok() {
                             issued += 1;
                         }
                     }
                 }
                 for _ in 0..3 {
-                    if budget.admit("203.0.113.1".parse()?, tick).is_some() {
+                    if budget.admit("203.0.113.1".parse()?, tick).is_ok() {
                         honest += 1;
                     } else {
                         busy += 1;
@@ -333,7 +334,7 @@ fn nine_same_ip_challenges_succeed_within_one_window_without_retry_wait() -> Res
         let mut budget = CustodySourceBudget::default();
         for challenge in 1..=9 {
             assert!(
-                budget.admit(source.parse()?, tick).is_some(),
+                budget.admit(source.parse()?, tick).is_ok(),
                 "challenge {challenge} must succeed at the same monotonic instant"
             );
         }
@@ -342,43 +343,84 @@ fn nine_same_ip_challenges_succeed_within_one_window_without_retry_wait() -> Res
 }
 
 #[test]
-fn issuance_and_listener_refusals_emit_one_budget_warning() -> Result {
+fn refuse_warning_lines_unchanged_and_secret_free() -> Result {
     use crate::custody_budget_log::tests::assert_warning;
     if crate::custody_budget_log::tests::run_isolated()? {
         return Ok(());
+    }
+    let (result, lines) = crate::custody_budget_log::tests::capture_warnings(
+        crate::custody_sessions::hint_tests::every_admission_budget_refusal_carries_a_hint,
+    );
+    result?;
+    for budget in [
+        "handshake",
+        "connection_stream",
+        "listener_source_handshake",
+        "authenticated",
+        "principal_bytes",
+        "principal_binding_mismatch",
+        "revoked_holder",
+        "unavailable_holder",
+        "source_ip_rate",
+        "source_prefix_rate",
+        "source_global_rate",
+        "source_bucket",
+        "holder_bytes",
+        "holder",
+        "prefix",
+        "global",
+        "replay",
+    ] {
+        let entries: Vec<_> =
+            lines.iter().filter(|line| line.contains(&format!("budget={budget:?} "))).collect();
+        assert_eq!(entries.len(), 1, "one warning for {budget}: {lines:?}");
+        for field in ["count=", "limit=", "refusal="] {
+            assert!(entries[0].contains(field));
+        }
+        for forbidden in [
+            "192.0.2.1",
+            "connection_id",
+            "challenge_nonce",
+            "proof_id",
+            "account_anchor",
+            "one",
+            "two",
+        ] {
+            assert!(!entries[0].contains(forbidden), "{budget}: {}", entries[0]);
+        }
     }
     let now = Instant::now();
     let source: IpAddr = "192.0.2.1".parse()?;
     let mut budget = CustodySourceBudget::default();
     for _ in 0..16 {
-        assert!(budget.admit(source, now).is_some());
+        assert!(budget.admit(source, now).is_ok());
     }
-    assert_warning("source_ip_rate", 16, 16, || assert!(budget.admit(source, now).is_none()));
+    assert_warning("source_ip_rate", 16, 16, || assert!(budget.admit(source, now).is_err()));
     for host in ["192.0.2.2", "192.0.2.3"] {
         let ip = host.parse()?;
         if host.ends_with('2') {
             for _ in 0..16 {
-                assert!(budget.admit(ip, now).is_some());
+                assert!(budget.admit(ip, now).is_ok());
             }
         } else {
             assert_warning("source_prefix_rate", 32, 32, || {
-                assert!(budget.admit(ip, now).is_none());
+                assert!(budget.admit(ip, now).is_err());
             });
         }
     }
-    let limiter = CustodyIngressLimiter::with_pools(1, 1, 1, Duration::from_secs(10));
-    let _permit = limiter.acquire(source, None, now).ok_or("first handshake")?;
-    assert_warning("handshake", 1, 1, || assert!(limiter.acquire(ip(2, 1), None, now).is_none()));
-    let limiter = CustodyIngressLimiter::with_pools(4, 1, 1, Duration::from_secs(10));
-    let first = limiter.acquire(source, None, now).ok_or("first")?;
-    let second = limiter.acquire(ip(2, 1), None, now).ok_or("second")?;
-    assert!(first.mark_authenticated("one"));
-    assert_warning("authenticated", 1, 1, || assert!(!second.mark_authenticated("two")));
-    let limiter = CustodyIngressLimiter::with_pools(4, 4, 1, Duration::from_secs(10));
-    let first = limiter.acquire(source, None, now).ok_or("first")?;
-    let second = limiter.acquire(ip(2, 1), None, now).ok_or("second")?;
-    assert!(first.mark_authenticated("one"));
-    assert_warning("principal_session", 1, 1, || assert!(!second.mark_authenticated("one")));
+    let limiter = CustodyIngressLimiter::with_pools(1, Some(1), 1, Duration::from_secs(10));
+    let _permit = limiter.acquire(source, None, now)?;
+    assert_warning("handshake", 1, 1, || assert!(limiter.acquire(ip(2, 1), None, now).is_err()));
+    let limiter = CustodyIngressLimiter::with_pools(4, Some(1), 1, Duration::from_secs(10));
+    let first = limiter.acquire(source, None, now)?;
+    let second = limiter.acquire(ip(2, 1), None, now)?;
+    assert!(first.mark_authenticated("one").is_ok());
+    assert_warning("authenticated", 1, 1, || assert!(second.mark_authenticated("two").is_err()));
+    let limiter = CustodyIngressLimiter::with_pools(4, Some(4), 1, Duration::from_secs(10));
+    let first = limiter.acquire(source, None, now)?;
+    let second = limiter.acquire(ip(2, 1), None, now)?;
+    assert!(first.mark_authenticated("one").is_ok());
+    assert!(second.mark_authenticated("one").is_ok(), "same principal is unlimited");
     Ok(())
 }
 
@@ -389,14 +431,16 @@ fn unavailable_or_mismatched_grants_log_once_without_disclosing_principals() -> 
         return Ok(());
     }
     let now = Instant::now();
-    let limiter = CustodyIngressLimiter::with_pools(4, 4, 4, Duration::from_secs(10));
-    let permit = limiter.acquire(ip(1, 1), None, now).ok_or("permit")?;
-    assert_warning("principal_bytes", 0, 1, || assert!(!permit.mark_authenticated("")));
-    assert!(permit.mark_authenticated("one"));
+    let limiter = CustodyIngressLimiter::with_pools(4, Some(4), 4, Duration::from_secs(10));
+    let permit = limiter.acquire(ip(1, 1), None, now)?;
+    assert_warning("principal_bytes", 0, 1, || assert!(permit.mark_authenticated("").is_err()));
+    assert!(permit.mark_authenticated("one").is_ok());
     assert_warning("principal_binding_mismatch", 1, 0, || {
-        assert!(!permit.mark_authenticated("two"));
+        assert!(permit.mark_authenticated("two").is_err());
     });
     permit.revoke();
-    assert_warning("unavailable_holder", 1, 0, || assert!(!permit.mark_authenticated("one")));
+    assert_warning("unavailable_holder", 1, 0, || {
+        assert!(permit.mark_authenticated("one").is_err());
+    });
     Ok(())
 }

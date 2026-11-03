@@ -52,6 +52,11 @@ pub enum SdkError {
     CustodyNetwork(#[from] ramflux_protocol::custody::CustodyRefusal),
     #[error("custody networking refused: Capacity; {}", crate::custody::capacity_hint::message(.capacity))]
     CustodyCapacity { capacity: ramflux_protocol::custody::CapacityHint },
+    #[error("custody networking refused: {code}; retry after {}ms", .retry.clamped().retry_after_ms)]
+    CustodyAdmission {
+        code: ramflux_protocol::custody::CustodyRefusal,
+        retry: ramflux_protocol::custody::RetryHint,
+    },
     #[error("born-v3 network registration is pending; legacy proofs are forbidden")]
     NetworkingPending,
     #[error(
@@ -175,12 +180,18 @@ impl SdkError {
     #[must_use]
     pub fn custody_refusal(&self) -> Option<ramflux_protocol::custody::CustodyRefusal> {
         match self {
-            Self::CustodyNetwork(code) => Some(code.clone()),
+            Self::CustodyNetwork(code) | Self::CustodyAdmission { code, .. } => Some(code.clone()),
             Self::CustodyCapacity { .. } => {
                 Some(ramflux_protocol::custody::CustodyRefusal::Capacity)
             }
             _ => None,
         }
+    }
+
+    /// Server admission interval, clamped before exposing it to callers or scheduling.
+    #[must_use]
+    pub const fn retry_hint(&self) -> Option<ramflux_protocol::custody::RetryHint> {
+        if let Self::CustodyAdmission { retry, .. } = self { Some(retry.clamped()) } else { None }
     }
 
     /// Daily reset metadata supplied by the receiving node, if present.

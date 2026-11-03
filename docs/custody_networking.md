@@ -52,8 +52,12 @@ Provision its node-root signature separately from the gateway's proxy credential
 | `RAMFLUX_CUSTODY_TLS_CERT_FILE`, `RAMFLUX_CUSTODY_TLS_KEY_FILE` | router | Public client-facing certificate chain/key, separate from mesh TLS. The signed node record pins the leaf DER SHA-256 hash as canonical base64url in `client_tls_certificate_sha256`. Shared mesh signing keys are refused, including differently encoded certificates using the same key. |
 | `RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS` | gateway, router | Whole custody exchange deadline (from CustodyOpen on shared gateway listeners; from accept on the dedicated router listener), default 10000 ms; accepted range 1–10000; empty selects the default. Frame activity never renews it. |
 | `RAMFLUX_CUSTODY_HANDSHAKE_POOL` | gateway, router | Per-listener unauthenticated ceiling H, default 256; accepted range 1–65536, empty selects default. |
-| `RAMFLUX_CUSTODY_AUTHENTICATED_POOL` | gateway, router | Per-listener authenticated ceiling A, default 1024; accepted range 1–65536, empty selects default. |
-| `RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL` | gateway, router | Authenticated sessions per account anchor per listener, default 4; accepted range 1–64. |
+| `RAMFLUX_CUSTODY_AUTHENTICATED_POOL` | gateway, router | Per-listener authenticated ceiling A, empty/unset = unlimited (default); a finite value accepts 1–1048576. |
+| `RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL` | gateway, router | Removed. A nonempty old value is ignored with one process-wide warning; authenticated sessions are not capped per principal. |
+| `RAMFLUX_CUSTODY_PREAUTH_HANDSHAKES_PER_SOURCE` | gateway, router | Concurrent pre-authentication holders per IP and each prefix tier; default 4, range 1–4096. |
+| `RAMFLUX_CUSTODY_CHALLENGES_PER_IP_PER_MINUTE` | router | Challenge issuance per source IP; default 16, range 1–65536. |
+| `RAMFLUX_CUSTODY_CHALLENGES_PER_PREFIX_PER_MINUTE` | router | Challenge issuance per IPv4 /24, IPv6 /64 and IPv6 /48; default 32, range 1–65536. |
+| `RAMFLUX_CUSTODY_CHALLENGES_PER_NODE_PER_MINUTE` | router | Node challenge issuance/reservation budget; default 1024, range 1–65536. Startup requires IP <= PREFIX <= NODE. |
 | `RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING` | participating services | Explicit operator opt-in (`1`); the signed node record must independently advertise this mode. |
 | `RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_MINUTE` | router | Global new-principal burst budget, default 16; capped by the daily value. |
 | `RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY` | router | Global daily new-principal budget, default 256; accepted runtime value is clamped to 32–65536. |
@@ -112,8 +116,8 @@ The pending challenge ceiling is 4096; saturation returns a retryable `Busy`.
 Only expiry, consumption and holder disconnect release outstanding challenges.
 Expired source windows are pruned; source tracking is bounded at 8192 entries.
 Consumed nonce/proof tables separately retain up to 12288 entries, above the
-maximum eleven issuance windows across their 600-second horizon. Sessions cap
-admitted work at 4096. No live replay evidence is discarded; a holder
+maximum eleven default issuance windows across their 600-second horizon.
+Authenticated sessions have no separate 4096 ceiling. No live replay evidence is discarded; a holder
 replaces its previous session when it authenticates again.
 Sessions permit 256 request nonces and require branch signatures, the holding
 connection, the exact current unfenced head and live capabilities.
@@ -123,33 +127,35 @@ markers. Gateway disconnect notification is best effort over authenticated mesh;
 missed notifications remain unusable from another holder and expire monotonically.
 Router restart invalidates every grant. No grants are serialized, backed up or
 restored. Durable registration and `Live` survive, but reconnect authenticates again.
-Each listener has separate handshake (H) and authenticated (A) pools, defaulting
-to 256 and 1024. Neither ceiling is ever exceeded. There is no arrival-driven
-revocation. On the dedicated direct router listener, full H closes a new TCP
-socket before
-TLS work. Shared gateway TCP and QUIC listeners acquire H only after TLS and a
-first `CustodyOpen` frame; full H returns typed retryable `Busy` on that custody
-connection/stream. Ordinary connections and streams never touch custody pools
-and keep the existing generic ingress behavior. Full A replies `Busy` to Prove
-and closes the
-connection, releasing H. The first successful Prove (publication, registration or
-session opening) moves H to A under one limiter lock; the authenticated count,
-per-principal limit and source-share limit are checked
-in that same critical section. Direct session creation also checks its holder
-under that lock, so a closed or revoked holder cannot recreate a grant.
+Each listener has a handshake pool H (default 256) and an optional authenticated
+pool A (unlimited by default). No arrival revokes an existing holder. Full H on
+the dedicated direct router listener closes a new TCP socket before TLS; that
+path cannot send a retry frame. Shared gateway TCP/QUIC listeners acquire H after
+TLS and `CustodyOpen`; full H returns `Busy` with a `node_capacity` retry hint.
+Ordinary connections and streams do not consume custody pools. A configured full
+A refuses Prove with `Busy` and a 30000 ms `node_capacity` hint, then releases H
+when the connection closes. Clear or raise `RAMFLUX_CUSTODY_AUTHENTICATED_POOL`
+and restart to recover from a finite authenticated ceiling.
 
-The handshake pool permits at most four holders per IP, IPv4 /24, IPv6 /64 and
-IPv6 /48, including IPv4-mapped addresses. Across both pools, the listener-wide
-outer limits remain four per IP, eight per IPv4 /24 or IPv6 /64 and sixteen per
-IPv6 /48. A QUIC connection permits at most four custody streams across both
-pools. The entire
+The first successful Prove moves H to A under the limiter mutex, ordered against
+revocation. The existing synchronous publication/prekey callback is the sole
+local durable-write exception inside that transaction; it never awaits network
+I/O and must not re-enter. Limiter/index bookkeeping performs only in-memory
+operations. Deadline indexes prune expired holders/sessions without scanning
+all authenticated holders; pre-auth counters are removed exactly once on
+promotion or unauthenticated removal. Direct session creation is fenced by its
+holder, so a closed/revoked holder cannot recreate a grant.
+
+Only unauthenticated holders consume the per-source handshake counters (default
+four per IP, IPv4 /24, IPv6 /64 and IPv6 /48). IPv4-mapped IPv6 normalizes to IPv4.
+A QUIC connection allows four unauthenticated custody streams; authenticated
+streams do not consume those slots. Authenticated sessions have no source,
+prefix, principal or default node-wide count cap. The entire
 custody exchange, starting with direct-listener TCP accept (including TLS) or
 the first `CustodyOpen` frame on a shared gateway listener, has a single deadline
 of at most ten seconds. TLS and frame activity never renew it.
-Authenticated holders are limited to sixteen per IPv4 /24 or IPv6 /48, and four
-per principal by default (configurable from 1 to 64). IPv4-mapped IPv6 uses the
-IPv4 share. Disconnect, the handshake deadline, explicit revoke/fence and the
-fifteen-minute transport lifetime cancel the holder; a new arrival cannot.
+Disconnect, the handshake deadline, explicit revoke/fence and the unchanged
+fifteen-minute transport lifetime cancel a holder; a new arrival cannot.
 Gateway disconnect notices and router proof handling serialize with session
 creation. Cleanup removes unconsumed challenges and sessions under the same
 service admission lock used by proof execution, so queued proofs cannot recreate
@@ -157,7 +163,9 @@ a disconnected grant.
 
 At startup each custody-enabled binary raises its soft `RLIMIT_NOFILE` to its
 hard limit and
-requires total H + total A + 512 descriptors, summed over its listeners. An
+requires total H + configured total A + 512 descriptors, summed over its listeners.
+With A unlimited it reserves H * listeners + 512 only and logs the effective soft
+limit once at info; descriptors and memory then bound authenticated population. An
 insufficient limit refuses startup with all three values. Gateway TCP and QUIC
 have independent pools; the optional direct router listener has one pair.
 A gateway without a receiving-node key does not parse custody pool settings or
@@ -177,11 +185,11 @@ IPs per share to fill it. Each IP can spend only sixteen challenges per minute;
 an IP alone cannot consume its /24 or /48 share, and the same 32 cap applies
 to IPv6 /64. Two-slot reservations for new shares also count toward the
 node-wide bound; reservations are never retired by other sources. These custody
-bounds do not gate ordinary gateway ingress. Filling the authenticated
-pool requires at least ceil(A/16) source shares and, with the default four sessions
-per principal, ceil(A/4) registered accounts. The listener-wide source caps may
-raise those minimums. Attacks beyond these bounds are network-layer DoS, outside
-this profile's admission guarantees.
+bounds do not gate ordinary gateway ingress. Authenticated fill is bounded by A
+when configured, otherwise by process descriptors and memory; there is no
+minimum source-share or principal count. The 8192 issuance-bucket table remains
+fail-closed when full and drops only expired windows. Attacks beyond these bounds
+are network-layer DoS, outside this profile's admission guarantees.
 
 Compose interpolation uses `RF_COMPOSE_CUSTODY_*` inputs; the container's runtime
 settings retain their `RAMFLUX_CUSTODY_*` names. The mapping in
@@ -345,18 +353,26 @@ awaiting native migration; native account scenarios keep the normal ceremony.
 
 ## Retrying custody admission
 
-The SDK retries only typed `Busy` during custody open, challenge or proof admission.
-Nominal exponential delays are 1, 2, 4, 8 and 16 seconds, with jitter in the upper
-quarter of each interval (one-second floor, sixteen-second ceiling). The whole
-connection attempt, including account-flight waits and transport setup, has a
-90-second deadline; exhaustion returns typed `Busy`. Other refusals and transport
-errors remain immediate, with no legacy, unbound-mode or trust-anchor fallback.
-A server `Capacity` refusal starts a 300-second monotonic cooldown shared by new
-connections for the same account directory, account, receiving-node pin and
-endpoint within the client process. During that interval commands return the
-same typed `Capacity` without opening another custody transport. Local retries
-do not extend the deadline. Other accounts and nodes remain independent. A
-client process restart loses this local cooldown.
+Every admission budget refusal with `Busy`/`Capacity` supplies
+`retry: {scope, retry_after_ms}` unless it already supplies a daily `capacity`
+hint. Scope is `pre_auth_source` or `node_capacity`. The node clamps to 1000–3600000
+ms, and the SDK clamps again. Busy retries wait that value plus 0–10% added jitter,
+never less than the node minimum. Without a retry hint, the legacy 1/2/4/8/16-second
+schedule remains (upper-quarter jitter, one-second floor). Each attempt has a
+90-second budget including account-flight and transport setup. A hinted wait
+that would exhaust the budget returns the Busy error carrying the hint immediately.
+
+`AdmissionRetry` retains a monotonic `not_before` across attempts. Read-only status
+peeks never move it; the next attempt waits before obtaining a fresh 90-second
+budget and account-local `.network.lock` lease. One-shot callers create one state
+per call; a persistent background connection manager is a separate feature.
+Capacity with `retry` and no daily metadata starts a shared cooldown of the hint
+(for example 5000 ms), while unhinted Capacity retains 300 seconds. Daily reset
+metadata keeps its existing reset/floor policy. Local cooldown checks do not move
+the deadline. Other accounts/nodes remain independent; restart loses local state.
+
+BREAKING wire change: older strict decoders reject a refusal carrying `retry`;
+rebuild clients and node services together. Non-refused frames are unchanged.
 
 Ordinary native gateway sessions use this same retry path and account lease, including TCP-TLS
 and QUIC. Their outer connection deadline is ninety seconds as well; the shorter timeout used by
@@ -372,13 +388,19 @@ action is retried with the same payload. This also handles a gateway refusal aft
 a durable operation: a retry does not reuse its old nonce or proof. `Live` is
 persisted only after publication, registration and session authentication complete.
 
-Sources behind one NAT share sixteen challenges per minute. The initial native
-bootstrap needs three; a reconnect needs three fresh challenges as well. The
-nine-challenge registration/reconnect sequence fits in one issuance window without
-a rate-limit retry. A group of ten clients needs two issuance windows, even when the /24 share
-has spare capacity. The per-call retry deadline does not promise that an arbitrary
-concurrent batch can all complete in ninety seconds. Durable new-principal quotas
-remain separate; reconnecting known principals does not consume that quota.
+Sources behind one NAT share the configured per-IP challenge window (default
+sixteen per minute). Initial bootstrap and reconnect each need three fresh
+challenges. For N accounts, `windows = ceil(3 * N / challenges_per_ip_per_minute)`;
+20 accounts take four windows at defaults, with refusal hints naming the remaining
+window wait. This does not promise any arbitrary batch completes within one
+90-second attempt. The full fast-bootstrap tuple IP=128, PREFIX=128, NODE=1024
+admits 60 challenges in one window; raising IP alone above PREFIX refuses startup.
+Durable new-principal quotas remain separate and are not spent by known principals.
+
+A forward that does not preserve source addresses collapses all clients onto one
+pre-auth source budget. Preserve the actual transport source or deliberately
+raise the pre-auth knobs together. Forwarded header claims cannot supply trusted
+transport identity and do not bypass normalization or proof binding.
 
 ## Operator admission diagnostics
 
@@ -386,11 +408,14 @@ Each custody `Capacity` or `Busy` budget refusal emits one warning named
 `custody admission refused` with `budget`, `count`, `limit` and `refusal` fields.
 Warnings contain no credential material, nonces, account identifiers or full
 client addresses. `holder` and `prefix` identify outstanding-challenge ceilings;
-`global` is the global outstanding ceiling; `replay`, `session` and `request`
-identify successful-proof markers, active sessions and per-session request
-nonces. `source_*_rate` means issuance rate, while `handshake`, `authenticated`,
-`listener_source`, `principal_session` and `authenticated_prefix` describe
-listener admission. Durable publication and consent-history warnings identify
+`global` is the global pending ceiling; `replay` and `request`
+identify the unchanged 12288 proof-marker and 256 per-session nonce safety bounds. `source_*_rate` means issuance rate, while `handshake`, `authenticated`,
+`connection_stream` and `listener_source_handshake` describe pre-auth listener
+admission. `authenticated` appears only with a configured finite A. Removed
+`listener_source`, `principal_session` and `authenticated_prefix` budgets no longer
+refuse authenticated sessions. State-bound retry hints are 30000 ms; handshake
+hints use the earliest relevant pre-auth deadline; rate hints use the remaining
+60-second window. Missing/revoked/invalid-principal holder errors carry no hint. Durable publication and consent-history warnings identify
 their own budget and scope separately.
 
 A pending challenge expires after 300 seconds and is removed from admission
@@ -406,15 +431,12 @@ account-count or byte ceiling. Use the warning's budget before choosing a remedy
 
 The outstanding source ceiling remains 64, independent of successful issuance:
 N well-behaved bootstrap flows use three challenges each in sequence, with at
-most one pending per flow. Each listener pool admits at most four concurrent
-connections per source IP, including authenticated connections. One gateway has
-independent TCP and QUIC pools, so its admitted flows can hold at most eight
-pending challenges from that NAT. Additional gateway instances multiply that
-bound; an exposed direct-router listener adds its own pool. For N honest flows,
-G gateways and D direct-router pools, the bound is min(N, 8G + 4D, 64).
-The shared 16-per-minute issuance budget may delay the 3N bootstrap challenges.
-Neither increasing the 64-pending ceiling nor restarting a node increases that
-issuance rate.
+most one pending per flow. Only unauthenticated flows consume per-source listener
+slots. Promoted connections can continue sequential challenge work without
+consuming H or source handshake slots, so authenticated population does not imply
+the old eight-flows-per-gateway bound. The independent 64-outstanding-per-prefix
+bound and issuance windows still apply. Increasing the pending ceiling or
+restarting a node does not increase the configured issuance rate.
 
 ### Daily new-principal quotas and operator inspection
 

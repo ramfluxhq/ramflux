@@ -29,7 +29,12 @@ row expose `networking` plus optional `networking_reason`. A reason is represent
 `{"kind":"custody_expired"}`. The daemon derives these only from typed selection,
 transport, and custody errors; it does not classify log strings. The value is null
 when no typed cause is available or networking is live. The displayed
-`retry_after_ms` intervals are SDK retry defaults; gateways do not supply them.
+`retry_after_ms` for hinted custody Busy/Capacity comes from the node, clamped to
+1000–3600000 ms. Legacy unhinted refusals and transport errors retain SDK defaults.
+Bus error bodies preserve the existing error code, expose `retry_after_ms`, and
+include `details.retry` with `scope` (`pre_auth_source`/`node_capacity`) and
+`retry_after_ms`. Status polling does not extend admission deadlines. Desktop
+countdown rendering and persistent background retry ownership are separate changes.
 
 The resumable topic `account.networking.changed` carries `account_id`, `state`, and
 `networking_reason`. It is appended only when the networking state or reason changes,

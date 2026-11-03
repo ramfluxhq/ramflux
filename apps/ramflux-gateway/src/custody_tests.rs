@@ -108,6 +108,9 @@ fn authority(now: u64) -> Result<AuthorityFixture> {
     };
     Ok(AuthorityFixture { node, proxy_key, branch, publication })
 }
+fn unhinted_refusal(code: CustodyRefusal) -> CustodyServerFrame {
+    CustodyServerFrame::Refused { code, capacity: None, retry: None }
+}
 fn exercise(
     fixture: &Fixture,
     client: impl Fn(&[u8; 32]) -> Result<[u8; 32]>,
@@ -196,20 +199,20 @@ fn exercise(
     if let CustodyMeshRequest::Prove { connection_id, .. } = &mut other_connection {
         *connection_id = ramflux_protocol::encode_base64url([13; 32]);
     }
-    assert!(matches!(
+    assert_eq!(
         service.mesh(&router, &store, other_connection, "ramflux-gateway", now),
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
-    ));
+        unhinted_refusal(CustodyRefusal::BindingRefused)
+    );
     assert!(matches!(
         service.mesh(&router, &store, request, "ramflux-gateway", now),
         CustodyServerFrame::Published { .. }
     ));
     let request =
         proxy.prepare(frame, Some(&branch_exporter_hash(&server)), "127.0.0.1".parse()?)?;
-    assert!(matches!(
+    assert_eq!(
         service.mesh(&router, &store, request, "ramflux-gateway", now),
-        CustodyServerFrame::Refused { code: CustodyRefusal::Replay, capacity: None }
-    ));
+        unhinted_refusal(CustodyRefusal::Replay)
+    );
     Ok(())
 }
 async fn tcp_pair(fixture: &Fixture) -> Result<(GatewayTcpTlsStream, GatewayTcpTlsStream)> {
@@ -296,11 +299,13 @@ async fn dedicated_custody_tcp_accept_helper_closes_newcomer_before_tls_and_reus
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
             ramflux_transport::tcp_gateway_server_config(&fixture.tls)?,
         ));
-        let limiter =
-            ramflux_node_core::CustodyIngressLimiter::with_pools(1, 1, 4, Duration::from_secs(10));
-        let held = limiter
-            .acquire("192.0.2.1".parse()?, None, std::time::Instant::now())
-            .ok_or("holder")?;
+        let limiter = ramflux_node_core::CustodyIngressLimiter::with_pools(
+            1,
+            Some(1),
+            4,
+            Duration::from_secs(10),
+        );
+        let held = limiter.acquire("192.0.2.1".parse()?, None, std::time::Instant::now())?;
         let server = async {
             let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
             let (socket, _, permit) =
@@ -342,6 +347,9 @@ async fn dedicated_custody_tcp_accept_helper_closes_newcomer_before_tls_and_reus
 #[tokio::test]
 async fn gateway_quic_full_handshake_pool_replies_busy_without_revoking_and_reuses_slot() -> Result
 {
+    quic_refusal_hint_and_slot_reuse().await
+}
+async fn quic_refusal_hint_and_slot_reuse() -> Result {
     tokio::time::timeout(Duration::from_secs(5), async {
         let fixture = Fixture::new()?;
         let server = quinn::Endpoint::server(
@@ -360,7 +368,7 @@ async fn gateway_quic_full_handshake_pool_replies_busy_without_revoking_and_reus
         let limiter = ramflux_node_core::CustodyIngressLimiter::new(1);
         let held = limiter
             .acquire("192.0.2.1".parse()?, None, std::time::Instant::now())
-            .ok_or("holder")?;
+            ?;
         let (mut tx, mut rx) = outgoing.open_bi().await?;
         tx.write_all(&[1]).await?;
         let (mut send, _recv) = incoming.accept_bi().await?;
@@ -368,7 +376,7 @@ async fn gateway_quic_full_handshake_pool_replies_busy_without_revoking_and_reus
             admit_quic(&mut send, &incoming, &limiter, std::time::Instant::now()).await?.is_none()
         );
         let refused: CustodyServerFrame = decode(&read_custody_tcp_frame(&mut rx).await?, 4096)?;
-        assert_eq!(refused, busy());
+        assert!(matches!(refused, CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None, retry: Some(retry) } if retry.scope == ramflux_protocol::custody::RetryScope::NodeCapacity && (1000..=10_000).contains(&retry.retry_after_ms)));
         assert_eq!(rx.read(&mut [0]).await?, None);
         assert!(!held.is_revoked());
         drop(held);

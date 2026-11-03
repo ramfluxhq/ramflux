@@ -97,7 +97,8 @@ impl CustodyConnection<GatewayTcpTlsStream> {
             config.ca_certificate.clone(),
             config.timeout,
         );
-        let ((), connection) = Box::pin(Self::connect_with(config, vault, || async {
+        let mut retry = super::retry::AdmissionRetry::default();
+        let ((), connection) = Box::pin(Self::connect_with(config, vault, &mut retry, || async {
             let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
                 "0.0.0.0:0".parse().map_err(|_| invalid())?,
                 endpoint.0,
@@ -116,7 +117,25 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     pub(crate) async fn connect_with<T, F, Fut>(
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
+        retry: &mut super::retry::AdmissionRetry,
+        open: F,
+    ) -> Result<(T, Self), SdkError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(T, S), SdkError>>,
+    {
+        let mut budget = retry.begin_attempt().await;
+        let result = Self::connect_attempt(config, vault, open, &mut budget).await;
+        if let Err(error) = &result {
+            retry.record(error, tokio::time::Instant::now());
+        }
+        result
+    }
+    async fn connect_attempt<T, F, Fut>(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
         mut open: F,
+        budget: &mut super::retry::Budget,
     ) -> Result<(T, Self), SdkError>
     where
         F: FnMut() -> Fut,
@@ -128,12 +147,10 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         }
         let capacity_key = super::capacity_backoff::key(&config);
         super::capacity_backoff::check(&capacity_key)?;
-        let mut budget = super::retry::Budget::new();
         let _flight =
-            super::retry::single_flight(&config.account_root, &config.account_id, &mut budget)
-                .await?;
+            super::retry::single_flight(&config.account_root, &config.account_id, budget).await?;
         super::capacity_backoff::check(&capacity_key)?;
-        let result = Self::connect_admitted(&config, vault, &mut open, &mut budget).await;
+        let result = Self::connect_admitted(&config, vault, &mut open, budget).await;
         if let Err(error) = &result {
             super::capacity_backoff::record_error(capacity_key, error);
         }
@@ -499,7 +516,7 @@ pub(super) async fn exchange<S: ramflux_transport::GatewaySessionTransport + ?Si
         stream.send_frame(&bytes).await?;
         let bytes = stream.recv_custody_frame().await?;
         let response: CustodyServerFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
-        if let CustodyServerFrame::Refused { code, capacity } = response {
+        if let CustodyServerFrame::Refused { code, capacity, retry } = response {
             if matches!(code, CustodyRefusal::Capacity | CustodyRefusal::Busy) {
                 let (phase, action) = match request {
                     CustodyClientFrame::CustodyOpen { .. } => ("open", "identity"),
@@ -520,6 +537,9 @@ pub(super) async fn exchange<S: ramflux_transport::GatewaySessionTransport + ?Si
                 && let Some(capacity) = super::capacity_hint::accepted(capacity, now()?)
             {
                 return Err(SdkError::CustodyCapacity { capacity });
+            }
+            if let Some(retry) = retry {
+                return Err(SdkError::CustodyAdmission { code, retry: retry.clamped() });
             }
             return Err(code.into());
         }

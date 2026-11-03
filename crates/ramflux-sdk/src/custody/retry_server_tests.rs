@@ -28,6 +28,7 @@ struct Script {
     proofs: Vec<(String, String, String)>,
     busy_at: Vec<Point>,
     capacity: bool,
+    retry: Option<RetryHint>,
 }
 struct Fixture {
     _root: tempfile::TempDir,
@@ -238,7 +239,8 @@ fn scripted_refusal(context: &Context) -> Result<CustodyServerFrame> {
     } else {
         CustodyRefusal::Busy
     };
-    Ok(CustodyServerFrame::Refused { code, capacity: None })
+    let retry = context.script.lock().map_err(|_| "script lock")?.retry;
+    Ok(CustodyServerFrame::Refused { code, capacity: None, retry })
 }
 
 #[tokio::test]
@@ -301,3 +303,6 @@ async fn capacity_is_shared_across_new_connections_and_blocks_network_retries() 
     fixture.server.abort();
     Ok(())
 }
+
+#[path = "admission_retry_tests.rs"]
+mod admission;

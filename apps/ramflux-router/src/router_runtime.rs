@@ -250,7 +250,14 @@ impl RouterHandle {
             now,
         )?;
         let allow = std::env::var("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING").as_deref() == Ok("1");
-        let service = ramflux_node_core::CustodyService::new(node, allow, self.store(), now)?;
+        let settings = ramflux_node_core::CustodyIssuanceSettings::from_env()?;
+        let service = ramflux_node_core::CustodyService::with_issuance_settings(
+            node,
+            allow,
+            self.store(),
+            now,
+            settings,
+        )?;
         match self {
             Self::Tokio(runtime) => runtime
                 .custody
@@ -268,6 +275,7 @@ impl RouterHandle {
             ramflux_protocol::custody::CustodyServerFrame::Refused {
                 code: ramflux_protocol::custody::CustodyRefusal::Unsupported,
                 capacity: None,
+                retry: None,
             },
             |service| {
                 service.mesh(
@@ -315,6 +323,7 @@ impl RouterHandle {
             ramflux_protocol::custody::CustodyServerFrame::Refused {
                 code: ramflux_protocol::custody::CustodyRefusal::Unsupported,
                 capacity: None,
+                retry: None,
             },
             |service| {
                 service.tls_with_permit(

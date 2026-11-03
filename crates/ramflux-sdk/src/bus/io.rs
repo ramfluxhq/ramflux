@@ -93,6 +93,9 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
     }
     LocalBusErrorBody {
         details: match error {
+            SdkError::CustodyAdmission { retry, .. } => {
+                Some(Box::new(serde_json::json!({"retry": retry.clamped()})))
+            }
             SdkError::CustodyCapacity { capacity } => {
                 Some(Box::new(serde_json::json!({"capacity": capacity})))
             }
@@ -120,6 +123,9 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
             error.to_string()
         },
         retry_after_ms: match error {
+            SdkError::CustodyAdmission { retry, .. } => {
+                Some(u64::from(retry.clamped().retry_after_ms))
+            }
             SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some(1_000),
             SdkError::CustodyCapacity { capacity } => {
                 Some(crate::custody::capacity_hint::retry_after_ms(

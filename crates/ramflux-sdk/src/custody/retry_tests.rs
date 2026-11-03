@@ -89,3 +89,17 @@ async fn account_single_flight_is_shared_across_handles_and_released_on_cancella
 
 #[path = "retry_server_tests.rs"]
 mod server;
+
+#[test]
+fn admission_error_is_busy_for_all_existing_predicates() {
+    use ramflux_protocol::custody::{RetryHint, RetryScope};
+    for code in [CustodyRefusal::Busy, CustodyRefusal::Capacity, CustodyRefusal::BindingRefused] {
+        let error = SdkError::CustodyAdmission {
+            code: code.clone(),
+            retry: RetryHint::new(RetryScope::NodeCapacity, 2000),
+        };
+        assert_eq!(is_busy(&error), code == CustodyRefusal::Busy);
+        assert_eq!(error.custody_refusal(), Some(code));
+        assert!(error.capacity_hint().is_none());
+    }
+}

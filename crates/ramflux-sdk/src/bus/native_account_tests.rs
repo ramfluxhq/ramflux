@@ -58,6 +58,7 @@ enum GatewayCause {
     PoolBusy,
     Refused(CustodyRefusal),
     DailyQuota(ramflux_protocol::custody::CapacityHint),
+    Admission(CustodyRefusal, ramflux_protocol::custody::RetryHint),
     ShortExpiry,
 }
 
@@ -91,10 +92,15 @@ impl CauseGateway {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let limiter = matches!(cause, GatewayCause::PoolBusy).then(|| {
-            ramflux_node_core::CustodyIngressLimiter::with_pools(1, 1, 1, Duration::from_secs(300))
+            ramflux_node_core::CustodyIngressLimiter::with_pools(
+                1,
+                Some(1),
+                1,
+                Duration::from_secs(300),
+            )
         });
         let held = limiter.as_ref().and_then(|pool| {
-            pool.acquire("127.0.0.1".parse().ok()?, None, std::time::Instant::now())
+            pool.acquire("127.0.0.1".parse().ok()?, None, std::time::Instant::now()).ok()
         });
         let task = tokio::spawn(async move {
             let _held = held;
@@ -129,17 +135,18 @@ async fn serve_cause(
     }
     let _: ramflux_protocol::custody::CustodyClientFrame = serde_json::from_slice(&bytes)?;
     let capacity = if let GatewayCause::DailyQuota(hint) = &cause { Some(*hint) } else { None };
+    let retry = if let GatewayCause::Admission(_, retry) = &cause { Some(*retry) } else { None };
     let code = match cause {
         GatewayCause::BlackHole => return std::future::pending().await,
         GatewayCause::NoCustody => CustodyRefusal::Unsupported,
         GatewayCause::PoolBusy => {
             let pool = limiter.ok_or("missing test pool")?;
-            if pool.acquire("127.0.0.1".parse()?, None, std::time::Instant::now()).is_some() {
+            if pool.acquire("127.0.0.1".parse()?, None, std::time::Instant::now()).is_ok() {
                 return Err("test custody pool was not saturated".into());
             }
             CustodyRefusal::Busy
         }
-        GatewayCause::Refused(code) => code,
+        GatewayCause::Refused(code) | GatewayCause::Admission(code, _) => code,
         GatewayCause::DailyQuota(_) => CustodyRefusal::Capacity,
         GatewayCause::ShortExpiry => {
             let valid_until = tokio::time::Instant::now() + Duration::from_millis(1);
@@ -153,6 +160,7 @@ async fn serve_cause(
         &serde_json::to_vec(&ramflux_protocol::custody::CustodyServerFrame::Refused {
             code,
             capacity,
+            retry,
         })?,
     )
     .await?;
@@ -1212,5 +1220,40 @@ async fn custody_networking_event_status_and_list_share_the_same_derived_view() 
     assert_eq!(event["networking_reason"]["remaining_ms"], 300_000);
     assert!(event["networking_reason"].get("capacity").is_none());
     assert!(event["networking_reason"].get("resets_at").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn networking_view_and_bus_error_report_server_retry_after() -> Result {
+    use ramflux_protocol::custody::{RetryHint, RetryScope};
+    for code in [CustodyRefusal::Busy, CustodyRefusal::Capacity] {
+        let retry = RetryHint::new(RetryScope::NodeCapacity, 120_000);
+        let started = std::time::Instant::now();
+        let status =
+            status_from_gateway_cause(GatewayCause::Admission(code.clone(), retry)).await?;
+        assert_eq!(status["networking_reason"]["kind"], "node_busy");
+        let remaining =
+            status["networking_reason"]["retry_after_ms"].as_u64().ok_or("missing server wait")?;
+        assert!(remaining <= 120_000);
+        assert!(
+            remaining.saturating_add(u64::try_from(started.elapsed().as_millis())?) >= 120_000,
+            "status must count down from the server hint: remaining={remaining}"
+        );
+        let hinted = crate::SdkError::CustodyAdmission { code: code.clone(), retry };
+        assert_eq!(
+            super::native_account::networking_reason(&hinted),
+            Some(crate::AccountNetworkingReason::NodeBusy {
+                retry_after_ms: 120_000,
+                capacity: None
+            })
+        );
+        let body = super::io::local_bus_error_body(&hinted);
+        assert_eq!(body.retry_after_ms, Some(120_000));
+        assert_eq!(serde_json::to_value(&body)?["details"]["retry"], serde_json::to_value(retry)?);
+        assert_eq!(
+            body.code,
+            super::io::local_bus_error_code(&crate::SdkError::CustodyNetwork(code))
+        );
+    }
     Ok(())
 }

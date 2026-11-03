@@ -318,6 +318,16 @@ const NODE_BUSY_RETRY_AFTER_MS: u64 = 16_000;
 const NODE_UNREACHABLE_RETRY_AFTER_MS: u64 = 5_000;
 
 pub(super) fn networking_reason(error: &SdkError) -> Option<AccountNetworkingReason> {
+    if let SdkError::CustodyAdmission { code, retry } = error {
+        return if matches!(code, CustodyRefusal::Busy | CustodyRefusal::Capacity) {
+            Some(AccountNetworkingReason::NodeBusy {
+                retry_after_ms: u64::from(retry.clamped().retry_after_ms),
+                capacity: None,
+            })
+        } else {
+            networking_reason(&SdkError::CustodyNetwork(code.clone()))
+        };
+    }
     match error {
         SdkError::NoNodeSelected => Some(AccountNetworkingReason::NoNodeSelected),
         SdkError::NodeUnreachable { retry_after_ms, .. }

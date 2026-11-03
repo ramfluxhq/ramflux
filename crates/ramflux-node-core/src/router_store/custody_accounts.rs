@@ -230,6 +230,7 @@ impl RouterRedbStore {
                 bytes.len(),
                 16 * 1024 * 1024,
                 ramflux_protocol::custody::CustodyRefusal::Capacity,
+                None,
             );
             return Err(NodeCoreError::Capacity { resource: "custody account authority bytes" });
         }
@@ -346,16 +347,18 @@ mod tests {
                     .check_custody_new_principal_budget("192.0.2.1".parse()?, 86_400)
                     .err()
                     .ok_or("expected refusal")?;
-                let frame = crate::custody_service::publication_failure(error)
-                    .response()
-                    .unwrap_or_else(|code| CustodyServerFrame::Refused { code, capacity: None });
+                let frame =
+                    crate::custody_service::publication_failure(error).response().unwrap_or_else(
+                        |code| CustodyServerFrame::Refused { code, capacity: None, retry: None },
+                    );
                 let expected =
                     expected.map(|scope| CapacityHint { scope, resets_at_unix: 172_800 });
                 assert_eq!(
                     frame,
                     CustodyServerFrame::Refused {
                         code: CustodyRefusal::Capacity,
-                        capacity: expected
+                        capacity: expected,
+                        retry: None,
                     }
                 );
                 if let Some(hint) = expected {

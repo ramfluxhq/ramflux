@@ -33,10 +33,13 @@ fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
             let admitted = Driver::new(&format!("final-admitted-{index}"), 150 + index)?;
             router.publish_custody_record_from(&admitted.publication, now, &store, source)?;
         }
-        let pool =
-            crate::CustodyIngressLimiter::with_pools(1, 1, 1, std::time::Duration::from_secs(300));
-        let permit =
-            pool.acquire(source, None, std::time::Instant::now()).ok_or("permit missing")?;
+        let pool = crate::CustodyIngressLimiter::with_pools(
+            1,
+            Some(1),
+            1,
+            std::time::Duration::from_secs(300),
+        );
+        let permit = pool.acquire(source, None, std::time::Instant::now())?;
         let scope = Scope {
             router: &router,
             store: &store,
@@ -68,14 +71,15 @@ fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
                 capacity: Some(CapacityHint {
                     scope: CapacityScope::PrefixDaily,
                     resets_at_unix: (now / 86_400 + 1) * 86_400
-                })
+                }),
+                retry: None,
             }
         );
         assert!(router.custody_record(&refused.reference.account_anchor, now)?.is_none());
         assert!(
             matches!(
                 permit.try_grant("actual-principal", || Ok::<_, CustodyRefusal>(())),
-                Some(Ok(()))
+                Ok(Ok(()))
             ),
             "a refused frame must not have authenticated its principal"
         );

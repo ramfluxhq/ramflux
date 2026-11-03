@@ -55,16 +55,26 @@ pub struct CustodyService {
 pub(crate) struct ProofFailure {
     code: CustodyRefusal,
     capacity: Option<ramflux_protocol::custody::CapacityHint>,
+    retry: Option<ramflux_protocol::custody::RetryHint>,
 }
 impl From<CustodyRefusal> for ProofFailure {
     fn from(code: CustodyRefusal) -> Self {
-        Self { code, capacity: None }
+        Self { code, capacity: None, retry: None }
+    }
+}
+impl From<crate::CustodyAdmissionRefusal> for ProofFailure {
+    fn from(refusal: crate::CustodyAdmissionRefusal) -> Self {
+        Self { code: refusal.code, capacity: None, retry: refusal.retry }
     }
 }
 impl ProofFailure {
     pub(crate) fn response(self) -> Result<CustodyServerFrame, CustodyRefusal> {
-        if self.capacity.is_some() {
-            Ok(CustodyServerFrame::Refused { code: self.code, capacity: self.capacity })
+        if self.capacity.is_some() || self.retry.is_some() {
+            Ok(CustodyServerFrame::Refused {
+                code: self.code,
+                capacity: self.capacity,
+                retry: self.retry,
+            })
         } else {
             Err(self.code)
         }
@@ -73,7 +83,7 @@ impl ProofFailure {
 pub(crate) fn publication_failure(error: crate::NodeCoreError) -> ProofFailure {
     match error {
         crate::NodeCoreError::CustodyDailyCapacity(capacity) => {
-            ProofFailure { code: CustodyRefusal::Capacity, capacity: Some(capacity) }
+            ProofFailure { code: CustodyRefusal::Capacity, capacity: Some(capacity), retry: None }
         }
         crate::NodeCoreError::Capacity { .. } => CustodyRefusal::Capacity.into(),
         crate::NodeCoreError::PrincipalIdTaken => CustodyRefusal::PrincipalIdTaken.into(),
@@ -100,6 +110,24 @@ impl CustodyService {
         store: &RouterRedbStore,
         now: u64,
     ) -> Result<Self, CustodyRefusal> {
+        Self::with_issuance_settings(
+            node,
+            allow_unbound,
+            store,
+            now,
+            crate::CustodyIssuanceSettings::default(),
+        )
+    }
+    /// Configure validated router-only issuance limits without reading gateway settings.
+    /// # Errors
+    /// Rejects unadvertised binding modes and persistence/continuity failures.
+    pub fn with_issuance_settings(
+        node: VerifiedNodeRecord,
+        allow_unbound: bool,
+        store: &RouterRedbStore,
+        now: u64,
+        settings: crate::CustodyIssuanceSettings,
+    ) -> Result<Self, CustodyRefusal> {
         if allow_unbound
             && !node.envelope().body.channel_binding_modes.contains(&BindingMode::NoChannelBinding)
         {
@@ -111,7 +139,7 @@ impl CustodyService {
             node,
             audience,
             allow_unbound,
-            leases: Mutex::new(CustodyLeases::default()),
+            leases: Mutex::new(CustodyLeases::with_issuance_settings(settings)),
             admission: Mutex::new(()),
         })
     }
@@ -151,6 +179,7 @@ impl CustodyService {
             return CustodyServerFrame::Refused {
                 code: CustodyRefusal::BindingRefused,
                 capacity: None,
+                retry: None,
             };
         }
         match self.dispatch(
@@ -166,7 +195,7 @@ impl CustodyService {
             },
         ) {
             Ok(frame) => frame,
-            Err(code) => CustodyServerFrame::Refused { code, capacity: None },
+            Err(code) => CustodyServerFrame::Refused { code, capacity: None, retry: None },
         }
     }
     fn dispatch(
@@ -181,6 +210,22 @@ impl CustodyService {
             tick: Instant::now(),
             ..scope
         };
+        self.dispatch_locked(request, scope)
+    }
+    #[cfg(test)]
+    fn dispatch_at(
+        &self,
+        request: CustodyMeshRequest,
+        scope: Scope<'_>,
+    ) -> Result<CustodyServerFrame, CustodyRefusal> {
+        let _admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.dispatch_locked(request, scope)
+    }
+    fn dispatch_locked(
+        &self,
+        request: CustodyMeshRequest,
+        scope: Scope<'_>,
+    ) -> Result<CustodyServerFrame, CustodyRefusal> {
         match request {
             CustodyMeshRequest::Disconnect { connection_id } => {
                 self.leases().disconnect(&holder(scope.peer, &connection_id)?);
@@ -348,7 +393,7 @@ impl CustodyService {
         })();
         match result {
             Ok(frame) => frame,
-            Err(code) => CustodyServerFrame::Refused { code, capacity: None },
+            Err(code) => CustodyServerFrame::Refused { code, capacity: None, retry: None },
         }
     }
 }

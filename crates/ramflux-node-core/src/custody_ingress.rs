@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Hard-capped listener pools; arrivals never revoke existing holders.
-use crate::custody_budget_log::refuse;
-use ramflux_protocol::custody::CustodyRefusal;
+//! Pre-authentication listener bounds and optional authenticated node capacity; no eviction.
+use crate::custody_budget_log::{CustodyAdmissionRefusal, node_retry, refuse};
+use ramflux_protocol::custody::{CustodyRefusal, RetryHint, RetryScope};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     sync::{
         Arc, Mutex,
@@ -15,10 +15,9 @@ use std::{
 };
 use tokio::sync::Notify;
 mod settings;
-pub use settings::{
-    CustodyPoolSettings, custody_auth_timeout, custody_authenticated_session_limit,
-};
-const DEFAULT_AUTHENTICATED_SESSIONS_PER_PRINCIPAL: usize = 4;
+pub use settings::{CustodyIssuanceSettings, CustodyPoolSettings, custody_auth_timeout};
+mod source_budget;
+pub(crate) use source_budget::CustodySourceBudget;
 /// Simultaneous IP and network-prefix budgets, normalizing IPv4-mapped IPv6.
 #[must_use]
 pub fn custody_source_prefixes(source: IpAddr) -> Vec<String> {
@@ -41,62 +40,8 @@ pub fn custody_source_prefixes(source: IpAddr) -> Vec<String> {
     }
 }
 
-struct Bucket {
-    started: Instant,
-    count: u32,
-}
-#[derive(Default)]
-pub(crate) struct CustodySourceBudget {
-    buckets: BTreeMap<String, Bucket>,
-}
-impl CustodySourceBudget {
-    pub(crate) fn admit(&mut self, source: IpAddr, tick: Instant) -> Option<()> {
-        self.buckets
-            .retain(|_, b| tick.saturating_duration_since(b.started) < Duration::from_secs(60));
-        let keys = custody_source_prefixes(source);
-        for (n, key) in keys.iter().enumerate() {
-            let count = self.buckets.get(key).map_or(0, |b| b.count);
-            let limit = [16, 32, 32][n];
-            if count >= limit {
-                refuse(
-                    if n == 0 { "source_ip_rate" } else { "source_prefix_rate" },
-                    count as usize,
-                    limit as usize,
-                    CustodyRefusal::Busy,
-                );
-                return None;
-            }
-        }
-        let share = keys.last()?;
-        let incoming = self.buckets.get(share).map_or(0, |b| b.count);
-        // Reserve the second challenge when admitting a new prefix. Neither reservation nor
-        // live challenges can be retired by another prefix. Refuse new work at the hard bound.
-        let reserved: u32 = self
-            .buckets
-            .iter()
-            .filter(|(k, _)| k.ends_with("/24") || k.ends_with("/48"))
-            .map(|(_, b)| b.count.max(2))
-            .sum();
-        let extra = if incoming == 0 { 2 } else { u32::from(incoming != 1) };
-        if reserved + extra > 1024 {
-            refuse("source_global_rate", reserved as usize, 1024, CustodyRefusal::Busy);
-            return None;
-        }
-        let incoming_keys = keys.iter().filter(|key| !self.buckets.contains_key(*key)).count();
-        if self.buckets.len() + incoming_keys > 8192 {
-            refuse("source_bucket", self.buckets.len(), 8192, CustodyRefusal::Busy);
-            return None;
-        }
-        for key in keys {
-            let b = self.buckets.entry(key).or_insert(Bucket { started: tick, count: 0 });
-            b.count += 1;
-        }
-        Some(())
-    }
-}
 struct ActiveHolder {
     keys: Vec<String>,
-    share: String,
     connection: Option<usize>,
     principal: Option<String>,
     deadline: Instant,
@@ -104,18 +49,40 @@ struct ActiveHolder {
     revocation: Arc<Notify>,
 }
 #[derive(Default)]
+struct PreAuthBudget {
+    count: usize,
+    deadlines: BTreeSet<(Instant, u64)>,
+}
+impl PreAuthBudget {
+    fn insert(&mut self, deadline: Instant, holder: u64) {
+        self.count += 1;
+        self.deadlines.insert((deadline, holder));
+    }
+    fn remove(&mut self, deadline: Instant, holder: u64) {
+        self.count -= 1;
+        self.deadlines.remove(&(deadline, holder));
+    }
+}
+#[derive(Default)]
 struct State {
-    connections: BTreeMap<usize, usize>,
+    connections: BTreeMap<usize, PreAuthBudget>,
+    sources: BTreeMap<String, PreAuthBudget>,
+    preauth_deadlines: BTreeSet<(Instant, u64)>,
+    deadlines: BTreeSet<(Instant, u64)>,
     holders: BTreeMap<u64, ActiveHolder>,
     sequence: u64,
     handshakes: usize,
     authenticated: usize,
+    #[cfg(test)]
+    holder_visits: usize,
+    #[cfg(test)]
+    callback_holds: Vec<Duration>,
 }
-/// Owned permits keep both pools within their ceilings until disconnect or expiry.
+/// Owned permits bound pre-authentication work; authenticated capacity is optional.
 pub struct CustodyIngressLimiter {
     handshake_limit: usize,
-    authenticated_limit: usize,
-    authenticated_per_principal: usize,
+    authenticated_limit: Option<usize>,
+    preauth_per_source: usize,
     auth_timeout: Duration,
     state: Mutex<State>,
 }
@@ -128,82 +95,112 @@ pub struct CustodyIngressPermit {
 }
 impl CustodyIngressLimiter {
     #[must_use]
-    pub fn new(limit: usize) -> Arc<Self> {
-        Self::with_pools(
-            limit,
-            limit,
-            DEFAULT_AUTHENTICATED_SESSIONS_PER_PRINCIPAL,
-            Duration::from_secs(10),
-        )
+    pub fn new(handshakes: usize) -> Arc<Self> {
+        Self::with_pools(handshakes, None, 4, Duration::from_secs(10))
     }
     #[must_use]
-    pub fn with_authenticated_limit(limit: usize, principal: usize) -> Arc<Self> {
-        Self::with_pools(limit, limit, principal, Duration::from_secs(10))
+    pub fn with_authenticated_limit(handshakes: usize, authenticated: usize) -> Arc<Self> {
+        Self::with_pools(handshakes, Some(authenticated), 4, Duration::from_secs(10))
     }
     #[must_use]
     pub fn with_pools(
         handshakes: usize,
-        authenticated: usize,
-        principal: usize,
+        authenticated: Option<usize>,
+        preauth_per_source: usize,
         timeout: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             handshake_limit: handshakes,
             authenticated_limit: authenticated,
-            authenticated_per_principal: principal,
+            preauth_per_source,
             auth_timeout: timeout,
             state: Mutex::new(State::default()),
         })
     }
+    #[cfg(test)]
+    pub(crate) fn operation_count(&self, reset: bool) -> usize {
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = state.holder_visits;
+        if reset {
+            state.holder_visits = 0;
+        }
+        count
+    }
+    #[cfg(test)]
+    pub(crate) fn callback_hold_times(&self) -> Vec<Duration> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).callback_holds.clone()
+    }
     fn prune(state: &mut State, tick: Instant) {
-        let expired: Vec<_> =
-            state.holders.iter().filter(|(_, h)| h.deadline <= tick).map(|(id, _)| *id).collect();
-        for id in expired {
-            Self::remove_holder(state, id);
+        while let Some((deadline, holder)) = state.deadlines.first().copied() {
+            if deadline > tick {
+                break;
+            }
+            state.deadlines.pop_first();
+            Self::remove_holder(state, holder);
         }
     }
-    /// Reserve H on entry to the custody protocol, at most four handshakes per IP and prefix.
-    /// Listener-wide source limits include both pools. IPv4-mapped addresses use IPv4 shares.
-    #[must_use]
+    fn remaining(
+        &self,
+        scope: RetryScope,
+        first: Option<&(Instant, u64)>,
+        tick: Instant,
+    ) -> RetryHint {
+        let deadline = first.map_or(tick + self.auth_timeout, |(deadline, _)| *deadline);
+        RetryHint::new(
+            scope,
+            u32::try_from(deadline.saturating_duration_since(tick).as_millis()).unwrap_or(u32::MAX),
+        )
+    }
+    /// Reserve pre-authentication capacity only; authenticated holders do not consume it.
+    /// # Errors
+    /// Returns the refused budget's server retry hint without displacing any holder.
     pub fn acquire(
         self: &Arc<Self>,
         source: IpAddr,
         connection: Option<usize>,
         tick: Instant,
-    ) -> Option<CustodyIngressPermit> {
+    ) -> Result<CustodyIngressPermit, CustodyAdmissionRefusal> {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::prune(&mut state, tick);
         if state.handshakes >= self.handshake_limit {
-            refuse("handshake", state.handshakes, self.handshake_limit, CustodyRefusal::Busy);
-            return None;
+            return Err(refuse(
+                "handshake",
+                state.handshakes,
+                self.handshake_limit,
+                CustodyRefusal::Busy,
+                Some(self.remaining(
+                    RetryScope::NodeCapacity,
+                    state.preauth_deadlines.first(),
+                    tick,
+                )),
+            ));
         }
-        let streams = connection.and_then(|id| state.connections.get(&id)).copied().unwrap_or(0);
-        if streams >= 4 {
-            refuse("connection_stream", streams, 4, CustodyRefusal::Busy);
-            return None;
+        if let Some(budget) = connection.and_then(|id| state.connections.get(&id))
+            && budget.count >= 4
+        {
+            return Err(refuse(
+                "connection_stream",
+                budget.count,
+                4,
+                CustodyRefusal::Busy,
+                Some(self.remaining(RetryScope::PreAuthSource, budget.deadlines.first(), tick)),
+            ));
         }
         let keys = custody_source_prefixes(source);
-        for (n, key) in keys.iter().enumerate() {
-            let total = state.holders.values().filter(|holder| holder.keys.contains(key)).count();
-            let handshakes = state
-                .holders
-                .values()
-                .filter(|holder| holder.principal.is_none() && holder.keys.contains(key))
-                .count();
-            if total >= [4, 8, 16][n] {
-                refuse("listener_source", total, [4, 8, 16][n], CustodyRefusal::Busy);
-                return None;
-            }
-            if handshakes >= 4 {
-                refuse("listener_source_handshake", handshakes, 4, CustodyRefusal::Busy);
-                return None;
+        for key in &keys {
+            if let Some(budget) = state.sources.get(key)
+                && budget.count >= self.preauth_per_source
+            {
+                return Err(refuse(
+                    "listener_source_handshake",
+                    budget.count,
+                    self.preauth_per_source,
+                    CustodyRefusal::Busy,
+                    Some(self.remaining(RetryScope::PreAuthSource, budget.deadlines.first(), tick)),
+                ));
             }
         }
-        let share = keys.last()?.clone();
-        if let Some(id) = connection {
-            *state.connections.entry(id).or_default() += 1;
-        }
-        state.sequence = state.sequence.checked_add(1).or_else(|| {
+        state.sequence = state.sequence.checked_add(1).ok_or_else(|| {
             tracing::warn!(
                 budget = "holder_sequence",
                 count = state.sequence,
@@ -211,17 +208,24 @@ impl CustodyIngressLimiter {
                 refusal = "Busy",
                 "custody admission refused"
             );
-            None
+            CustodyAdmissionRefusal { code: CustodyRefusal::Busy, retry: Some(node_retry()) }
         })?;
         let holder = state.sequence;
         let revoked = Arc::new(AtomicBool::new(false));
         let revocation = Arc::new(Notify::new());
         let deadline = tick + self.auth_timeout;
+        if let Some(id) = connection {
+            state.connections.entry(id).or_default().insert(deadline, holder);
+        }
+        for key in &keys {
+            state.sources.entry(key.clone()).or_default().insert(deadline, holder);
+        }
+        state.preauth_deadlines.insert((deadline, holder));
+        state.deadlines.insert((deadline, holder));
         state.holders.insert(
             holder,
             ActiveHolder {
                 keys,
-                share,
                 connection,
                 principal: None,
                 deadline,
@@ -230,7 +234,7 @@ impl CustodyIngressLimiter {
             },
         );
         state.handshakes += 1;
-        Some(CustodyIngressPermit {
+        Ok(CustodyIngressPermit {
             limiter: Arc::clone(self),
             holder,
             revoked,
@@ -238,22 +242,39 @@ impl CustodyIngressLimiter {
             deadline,
         })
     }
+    fn untrack_preauth(state: &mut State, id: u64, h: &ActiveHolder) {
+        state.handshakes -= 1;
+        state.preauth_deadlines.remove(&(h.deadline, id));
+        for key in &h.keys {
+            if let Some(budget) = state.sources.get_mut(key) {
+                budget.remove(h.deadline, id);
+                if budget.count == 0 {
+                    state.sources.remove(key);
+                }
+            }
+        }
+        if let Some(connection) = h.connection
+            && let Some(budget) = state.connections.get_mut(&connection)
+        {
+            budget.remove(h.deadline, id);
+            if budget.count == 0 {
+                state.connections.remove(&connection);
+            }
+        }
+    }
     fn remove_holder(state: &mut State, id: u64) {
+        #[cfg(test)]
+        {
+            state.holder_visits += 1;
+        }
         let Some(h) = state.holders.remove(&id) else { return };
+        state.deadlines.remove(&(h.deadline, id));
         h.revoked.store(true, Ordering::Release);
         h.revocation.notify_one();
         if h.principal.is_some() {
             state.authenticated -= 1;
         } else {
-            state.handshakes -= 1;
-        }
-        if let Some(id) = h.connection
-            && let Some(n) = state.connections.get_mut(&id)
-        {
-            *n -= 1;
-            if *n == 0 {
-                state.connections.remove(&id);
-            }
+            Self::untrack_preauth(state, id, &h);
         }
     }
 }
@@ -268,96 +289,108 @@ impl CustodyIngressPermit {
     }
     /// Fence a holder before disconnect cleanup; queued work cannot recreate its grant.
     pub fn revoke(&self) {
-        let mut s = self.limiter.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        CustodyIngressLimiter::remove_holder(&mut s, self.holder);
+        let mut state =
+            self.limiter.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        CustodyIngressLimiter::remove_holder(&mut state, self.holder);
     }
-    /// Move H to A, checking both ceilings and ownership under one critical section.
-    #[must_use]
-    pub fn mark_authenticated(&self, principal: &str) -> bool {
-        self.grant(principal, || ()).is_some()
+    /// # Errors
+    /// Returns a typed refusal for a missing holder or finite authenticated node capacity.
+    pub fn mark_authenticated(&self, principal: &str) -> Result<(), CustodyAdmissionRefusal> {
+        self.grant(principal, || ())
     }
-    /// Execute a session grant under the same lock as the H-to-A transition and revocation.
-    /// The callback must not re-enter this limiter.
-    pub fn grant<T>(&self, principal: &str, grant: impl FnOnce() -> T) -> Option<T> {
+    /// Execute a grant atomically with the H-to-A transition and revocation.
+    /// The existing durable grant callback remains inside this transaction and must not re-enter.
+    /// # Errors
+    /// Returns the admission refusal without executing the callback when capacity is unavailable.
+    pub fn grant<T>(
+        &self,
+        principal: &str,
+        grant: impl FnOnce() -> T,
+    ) -> Result<T, CustodyAdmissionRefusal> {
         self.try_grant(principal, || Ok::<T, std::convert::Infallible>(grant())).map(|r| match r {
             Ok(value) => value,
             Err(never) => match never {},
         })
     }
-    /// Grant only a successful operation; failed validation leaves the holder in H.
-    /// Returns `None` when the holder is revoked, expired or has no authenticated capacity.
+    /// Failed callbacks retain the original pre-authentication holder and deadline.
     /// # Errors
-    /// Propagates the callback error without moving the holder between pools.
+    /// Returns admission refusals with their hints; the nested result preserves callback errors.
     pub fn try_grant<T, E>(
         &self,
         principal: &str,
         grant: impl FnOnce() -> Result<T, E>,
-    ) -> Option<Result<T, E>> {
-        let mut s = self.limiter.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        CustodyIngressLimiter::prune(&mut s, Instant::now());
-        let Some(h) = s.holders.get(&self.holder) else {
-            refuse("unavailable_holder", 1, 0, CustodyRefusal::Busy);
-            return None;
+    ) -> Result<Result<T, E>, CustodyAdmissionRefusal> {
+        self.try_grant_at(principal, Instant::now(), grant)
+    }
+    fn try_grant_at<T, E>(
+        &self,
+        principal: &str,
+        tick: Instant,
+        grant: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, CustodyAdmissionRefusal> {
+        let mut state =
+            self.limiter.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        CustodyIngressLimiter::prune(&mut state, tick);
+        #[cfg(test)]
+        {
+            state.holder_visits += 1;
+        }
+        let Some(h) = state.holders.get(&self.holder) else {
+            return Err(refuse("unavailable_holder", 1, 0, CustodyRefusal::Busy, None));
         };
         if self.is_revoked() {
-            refuse("revoked_holder", 1, 0, CustodyRefusal::Busy);
-            return None;
+            return Err(refuse("revoked_holder", 1, 0, CustodyRefusal::Busy, None));
         }
         if principal.is_empty() || principal.len() > 512 {
-            refuse(
+            return Err(refuse(
                 "principal_bytes",
                 principal.len(),
                 if principal.is_empty() { 1 } else { 512 },
                 CustodyRefusal::Busy,
-            );
-            return None;
+                None,
+            ));
         }
         if let Some(current) = &h.principal {
             if current != principal {
-                refuse("principal_binding_mismatch", 1, 0, CustodyRefusal::Busy);
-                return None;
+                return Err(refuse("principal_binding_mismatch", 1, 0, CustodyRefusal::Busy, None));
             }
-            return Some(grant());
+            #[cfg(test)]
+            let callback_started = Instant::now();
+            let result = grant();
+            #[cfg(test)]
+            state.callback_holds.push(callback_started.elapsed());
+            return Ok(result);
         }
-        if s.authenticated >= self.limiter.authenticated_limit {
-            refuse(
+        if let Some(limit) = self.limiter.authenticated_limit
+            && state.authenticated >= limit
+        {
+            return Err(refuse(
                 "authenticated",
-                s.authenticated,
-                self.limiter.authenticated_limit,
+                state.authenticated,
+                limit,
                 CustodyRefusal::Busy,
-            );
-            return None;
+                Some(node_retry()),
+            ));
         }
-        let principal_count =
-            s.holders.values().filter(|h| h.principal.as_deref() == Some(principal)).count();
-        if principal_count >= self.limiter.authenticated_per_principal {
-            refuse(
-                "principal_session",
-                principal_count,
-                self.limiter.authenticated_per_principal,
-                CustodyRefusal::Busy,
-            );
-            return None;
-        }
-        let share_count = s
-            .holders
-            .values()
-            .filter(|other| other.principal.is_some() && other.share == h.share)
-            .count();
-        if share_count >= 16 {
-            refuse("authenticated_prefix", share_count, 16, CustodyRefusal::Busy);
-            return None;
-        }
+        #[cfg(test)]
+        let callback_started = Instant::now();
         let result = grant();
+        #[cfg(test)]
+        state.callback_holds.push(callback_started.elapsed());
         if result.is_err() {
-            return Some(result);
+            return Ok(result);
         }
-        let h = s.holders.get_mut(&self.holder)?;
+        let Some(mut h) = state.holders.remove(&self.holder) else {
+            return Err(CustodyRefusal::Busy.into());
+        };
+        state.deadlines.remove(&(h.deadline, self.holder));
+        CustodyIngressLimiter::untrack_preauth(&mut state, self.holder, &h);
         h.principal = Some(principal.to_owned());
-        h.deadline = Instant::now() + Duration::from_mins(15);
-        s.handshakes -= 1;
-        s.authenticated += 1;
-        Some(result)
+        h.deadline = tick + Duration::from_mins(15);
+        state.deadlines.insert((h.deadline, self.holder));
+        state.holders.insert(self.holder, h);
+        state.authenticated += 1;
+        Ok(result)
     }
     pub async fn revoked(&self) {
         loop {
@@ -375,3 +408,8 @@ impl Drop for CustodyIngressPermit {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod admission_tests;
+#[cfg(test)]
+pub(crate) mod hint_tests;

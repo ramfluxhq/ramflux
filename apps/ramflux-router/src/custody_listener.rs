@@ -152,11 +152,8 @@ async fn serve(
         if let ramflux_protocol::custody::CustodyServerFrame::SessionEstablished { session } =
             &response
         {
-            if !permit.mark_authenticated(&session.device_ref.account_anchor) {
-                let busy = ramflux_protocol::custody::CustodyServerFrame::Refused {
-                    code: ramflux_protocol::custody::CustodyRefusal::Busy,
-                    capacity: None,
-                };
+            if let Err(refusal) = permit.mark_authenticated(&session.device_ref.account_anchor) {
+                let busy = refusal.into_frame();
                 tokio::time::timeout_at(
                     deadline,
                     write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&busy)?),
@@ -177,7 +174,7 @@ async fn serve(
             response,
             ramflux_protocol::custody::CustodyServerFrame::Refused {
                 code: ramflux_protocol::custody::CustodyRefusal::Busy,
-                capacity: None
+                ..
             }
         );
         tokio::time::timeout_at(

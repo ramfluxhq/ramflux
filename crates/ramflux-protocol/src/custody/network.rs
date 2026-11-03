@@ -65,6 +65,43 @@ pub struct CapacityHint {
     pub resets_at_unix: u64,
 }
 
+/// The admission resource whose server-owned retry interval must be respected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryScope {
+    PreAuthSource,
+    NodeCapacity,
+}
+
+/// Admission retry interval; receivers clamp untrusted values again before waiting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryHint {
+    pub scope: RetryScope,
+    pub retry_after_ms: u32,
+}
+impl RetryHint {
+    pub const MIN_RETRY_AFTER_MS: u32 = 1_000;
+    pub const MAX_RETRY_AFTER_MS: u32 = 3_600_000;
+
+    #[must_use]
+    pub const fn new(scope: RetryScope, retry_after_ms: u32) -> Self {
+        Self { scope, retry_after_ms }.clamped()
+    }
+
+    #[must_use]
+    pub const fn clamped(self) -> Self {
+        let retry_after_ms = if self.retry_after_ms < Self::MIN_RETRY_AFTER_MS {
+            Self::MIN_RETRY_AFTER_MS
+        } else if self.retry_after_ms > Self::MAX_RETRY_AFTER_MS {
+            Self::MAX_RETRY_AFTER_MS
+        } else {
+            self.retry_after_ms
+        };
+        Self { scope: self.scope, retry_after_ms }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodyClientFrame {
@@ -196,6 +233,8 @@ pub enum CustodyServerFrame {
         code: CustodyRefusal,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capacity: Option<CapacityHint>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry: Option<RetryHint>,
     },
 }
 /// Authenticated internal mesh request. Direct-exporter evidence is deliberately
@@ -261,13 +300,18 @@ mod capacity_hint_tests {
         let absent: CustodyServerFrame = serde_json::from_value(old.clone())?;
         assert_eq!(
             absent,
-            CustodyServerFrame::Refused { code: CustodyRefusal::Capacity, capacity: None }
+            CustodyServerFrame::Refused {
+                code: CustodyRefusal::Capacity,
+                capacity: None,
+                retry: None,
+            }
         );
         assert_eq!(serde_json::to_value(&absent)?, old);
         for scope in [CapacityScope::PrefixDaily, CapacityScope::GlobalDaily] {
             let frame = CustodyServerFrame::Refused {
                 code: CustodyRefusal::Capacity,
                 capacity: Some(CapacityHint { scope, resets_at_unix: 172_800 }),
+                retry: None,
             };
             let bytes = serde_json::to_vec(&frame)?;
             assert_eq!(serde_json::from_slice::<CustodyServerFrame>(&bytes)?, frame);
@@ -278,6 +322,52 @@ mod capacity_hint_tests {
                 if scope == CapacityScope::PrefixDaily { "prefix_daily" } else { "global_daily" }
             );
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod retry_hint_tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OldRefusal {
+        frame_type: String,
+        code: CustodyRefusal,
+    }
+
+    #[test]
+    fn refused_retry_hint_roundtrip_and_strict_decode() -> Result<(), Box<dyn std::error::Error>> {
+        let vector = br#"{"frame_type":"refused","code":"busy","retry":{"scope":"pre_auth_source","retry_after_ms":2000}}"#;
+        let frame: CustodyServerFrame = super::super::decode(vector, 4096)?;
+        assert_eq!(
+            frame,
+            CustodyServerFrame::Refused {
+                code: CustodyRefusal::Busy,
+                capacity: None,
+                retry: Some(RetryHint { scope: RetryScope::PreAuthSource, retry_after_ms: 2000 }),
+            }
+        );
+        assert_eq!(serde_json::to_value(&frame)?, serde_json::from_slice::<Value>(vector)?);
+        let old = br#"{"frame_type":"refused","code":"busy"}"#;
+        assert_eq!(
+            super::super::decode::<CustodyServerFrame>(old, 4096)?,
+            CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None, retry: None }
+        );
+        for field in [
+            serde_json::json!({"scope":"account","retry_after_ms":2000}),
+            serde_json::json!({"scope":"node_capacity","retry_after_ms":2000,"unknown":true}),
+        ] {
+            let bytes = serde_json::to_vec(
+                &serde_json::json!({"frame_type":"refused","code":"busy","retry":field}),
+            )?;
+            assert!(super::super::decode::<CustodyServerFrame>(&bytes, 4096).is_err());
+        }
+        let legacy: OldRefusal = serde_json::from_slice(old)?;
+        assert_eq!(legacy.frame_type, "refused");
+        assert_eq!(legacy.code, CustodyRefusal::Busy);
+        assert!(serde_json::from_slice::<OldRefusal>(vector).is_err());
         Ok(())
     }
 }

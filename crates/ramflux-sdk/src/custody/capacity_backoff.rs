@@ -4,7 +4,7 @@
 //! Share Capacity cooldowns across reconnects and retain server-owned daily reset deadlines.
 use super::CustodyNetworkConfig;
 use crate::SdkError;
-use ramflux_protocol::custody::{CapacityHint, CustodyRefusal};
+use ramflux_protocol::custody::{CapacityHint, CustodyRefusal, RetryHint};
 use std::{
     collections::BTreeMap,
     sync::{Mutex, OnceLock},
@@ -17,6 +17,7 @@ const COOLDOWN: Duration = Duration::from_millis(RETRY_AFTER_MS);
 struct Deadline {
     until: Option<Instant>,
     hint: Option<CapacityHint>,
+    retry: Option<RetryHint>,
 }
 impl Deadline {
     fn new(now: Instant, wall: u64, hint: Option<CapacityHint>) -> Self {
@@ -25,25 +26,57 @@ impl Deadline {
             .map_or(COOLDOWN.as_secs(), |h| h.resets_at_unix.saturating_sub(wall))
             .max(COOLDOWN.as_secs());
         // Unrepresentable server deadlines remain blocked instead of wrapping or panicking.
-        Self { until: now.checked_add(Duration::from_secs(wait)), hint }
+        Self { until: now.checked_add(Duration::from_secs(wait)), hint, retry: None }
     }
     fn active(&self, now: Instant, wall: u64) -> bool {
         self.until.is_none_or(|until| now < until)
             || self.hint.is_some_and(|hint| wall < hint.resets_at_unix)
     }
-    fn error(&self, wall: u64) -> SdkError {
-        self.hint.filter(|hint| hint.resets_at_unix > wall).map_or_else(
-            || CustodyRefusal::Capacity.into(),
-            |capacity| SdkError::CustodyCapacity { capacity },
-        )
+    fn error(&self, now: Instant, wall: u64) -> SdkError {
+        if let Some(capacity) = self.hint.filter(|hint| hint.resets_at_unix > wall) {
+            return SdkError::CustodyCapacity { capacity };
+        }
+        if let Some(retry) = self.retry {
+            let remaining = self.until.map_or(u64::from(retry.retry_after_ms), |until| {
+                u64::try_from(until.saturating_duration_since(now).as_millis()).unwrap_or(u64::MAX)
+            });
+            return SdkError::CustodyAdmission {
+                code: CustodyRefusal::Capacity,
+                retry: RetryHint::new(retry.scope, u32::try_from(remaining).unwrap_or(u32::MAX)),
+            };
+        }
+        CustodyRefusal::Capacity.into()
     }
 }
 #[derive(Default)]
 struct Cooldowns(BTreeMap<String, Deadline>);
 impl Cooldowns {
+    fn record_retry(&mut self, key: String, now: Instant, wall: u64, retry: RetryHint) {
+        self.0.retain(|_, deadline| deadline.active(now, wall));
+        let retry = retry.clamped();
+        let next = Deadline {
+            until: now.checked_add(Duration::from_millis(u64::from(retry.retry_after_ms))),
+            hint: None,
+            retry: Some(retry),
+        };
+        match self.0.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(next);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let current = entry.get_mut();
+                if current.hint.is_none()
+                    && (current.retry.is_none()
+                        || current.until.is_some_and(|old| next.until.is_none_or(|new| new > old)))
+                {
+                    *current = next;
+                }
+            }
+        }
+    }
     fn check(&mut self, key: &str, now: Instant, wall: u64) -> Result<(), SdkError> {
         self.0.retain(|_, deadline| deadline.active(now, wall));
-        self.0.get(key).map_or(Ok(()), |deadline| Err(deadline.error(wall)))
+        self.0.get(key).map_or(Ok(()), |deadline| Err(deadline.error(now, wall)))
     }
     fn record(&mut self, key: String, now: Instant, wall: u64, hint: Option<CapacityHint>) {
         let hint = hint.and_then(|hint| super::capacity_hint::accepted(hint, wall));
@@ -60,6 +93,7 @@ impl Cooldowns {
                 _ => None,
             };
             entry.hint = Some(hint);
+            entry.retry = None;
         }
     }
 }
@@ -86,12 +120,13 @@ pub(super) fn check(key: &str) -> Result<(), SdkError> {
 }
 pub(super) fn record_error(key: String, error: &SdkError) {
     if error.custody_refusal() == Some(CustodyRefusal::Capacity) {
-        state().record(
-            key,
-            Instant::now(),
-            super::capacity_hint::unix_now(),
-            error.capacity_hint(),
-        );
+        let now = Instant::now();
+        let wall = super::capacity_hint::unix_now();
+        if let Some(retry) = error.retry_hint() {
+            state().record_retry(key, now, wall, retry);
+        } else {
+            state().record(key, now, wall, error.capacity_hint());
+        }
     }
 }
 #[cfg(test)]
@@ -104,6 +139,25 @@ mod tests {
     use super::*;
     use ramflux_protocol::custody::CapacityScope;
 
+    #[tokio::test(start_paused = true)]
+    async fn capacity_cooldown_uses_server_hint() -> Result<(), SdkError> {
+        let mut state = Cooldowns::default();
+        let now = Instant::now();
+        let retry = RetryHint::new(ramflux_protocol::custody::RetryScope::NodeCapacity, 5000);
+        state.record_retry("hinted".into(), now, 1000, retry);
+        assert_eq!(
+            state
+                .check("hinted", now, 1000)
+                .err()
+                .ok_or(SdkError::CustodySetupInvalid)?
+                .retry_hint(),
+            Some(retry)
+        );
+        assert!(state.check("hinted", now + Duration::from_millis(4999), 1004).is_err());
+        state.check("hinted", now + Duration::from_secs(5), 1005)?;
+        assert!(state.0.is_empty());
+        Ok(())
+    }
     #[tokio::test(start_paused = true)]
     async fn capacity_waits_three_hundred_seconds_without_extending_on_local_retries()
     -> Result<(), SdkError> {

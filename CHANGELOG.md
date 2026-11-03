@@ -29,6 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files and systemd installs must supply writable storage or the explicit key path.
   Source-IP pseudonym keys persist across services and restarts at mode 0600.
   Existing address-hash buckets age out normally; no quota migration is attempted.
+- BREAKING: custody authenticated capacity defaults to unlimited (empty
+  `RAMFLUX_CUSTODY_AUTHENTICATED_POOL`); finite values accept 1–1048576. Remove
+  authenticated source/principal/stream ceilings and the 4096 active-session cap.
+  The removed `RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL` is ignored
+  with one warning; existing finite A=512 remains honored. Add configurable
+  `RAMFLUX_CUSTODY_PREAUTH_HANDSHAKES_PER_SOURCE` and router-only
+  `RAMFLUX_CUSTODY_CHALLENGES_PER_{IP,PREFIX,NODE}_PER_MINUTE` with strict ordered
+  validation. Admission refusals carry typed `retry` scope/time honored by SDK
+  retries and read models. Older strict decoders reject a refusal carrying
+  `retry`; rebuild clients and node services together. Legacy unhinted and daily
+  reset policies remain available. Deadline indexes keep admission work independent
+  of authenticated population.
+
 - Upgrade Web Push P-256 ECDH to p256 0.14 and crypto-bigint 0.7.10, preserving
   RFC encryption bytes and removing the RUSTSEC-2026-0387 audit exceptions.
 - Erase proven pre-upgrade attachments after their last message owner is removed;

@@ -427,7 +427,9 @@ receipt mode requires the dedicated node-authorized seed described in
 
 The wrapper keeps a private managed copy of the signed record, mounts it read-only
 into the router, and retains the custody public key, configured proxy seed and
-`RAMFLUX_CUSTODY_{HANDSHAKE_POOL,AUTHENTICATED_POOL,AUTH_TIMEOUT_MS}` inputs in
+`RAMFLUX_CUSTODY_{HANDSHAKE_POOL,AUTHENTICATED_POOL,AUTH_TIMEOUT_MS}` inputs,
+`RAMFLUX_CUSTODY_PREAUTH_HANDSHAKES_PER_SOURCE`, and
+`RAMFLUX_CUSTODY_CHALLENGES_PER_{IP,PREFIX,NODE}_PER_MINUTE` in
 `runtime.env` with their Compose aliases. A version-only upgrade reuses these
 retained inputs when the operator env omits them. Replacing or clearing a retained
 custody public key or proxy seed refuses with `DEMO_CUSTODY_INPUT_CHANGED: <key>`;
@@ -437,6 +439,36 @@ the exact snapshot inputs and record bytes, without consulting the operator's
 current custody settings or the original record path. Service startup still
 performs signed-record and pool validation; wrapper validation is not a signature
 or authorization check.
+
+Authenticated sessions have no per-source or per-principal cap. An empty/unset
+`RAMFLUX_CUSTODY_AUTHENTICATED_POOL` now means unlimited; 1–1048576 sets a finite
+ceiling. The removed `RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL` is ignored
+with one warning per process. An old configuration with A=512 still starts and
+honors 512. For a full finite A, raise or clear that input and restart; the node
+reports `node_capacity` with a retry interval. Unlimited capacity is bounded by
+process descriptors and memory; startup reserves H * listeners + 512 descriptors
+and logs the effective soft limit.
+
+Pre-auth handshakes default to four per source (range 1–4096), independent of
+already authenticated sessions. Router-only challenge knobs default to IP=16,
+PREFIX=32, NODE=1024 per minute, each in 1–65536. Startup requires IP <= PREFIX <=
+NODE. To bootstrap 20 accounts in one window use the complete tuple:
+
+```sh
+RAMFLUX_CUSTODY_CHALLENGES_PER_IP_PER_MINUTE=128
+RAMFLUX_CUSTODY_CHALLENGES_PER_PREFIX_PER_MINUTE=128
+RAMFLUX_CUSTODY_CHALLENGES_PER_NODE_PER_MINUTE=1024
+```
+
+Raising IP above 32 also requires raising PREFIX; the same prefix knob applies
+to IPv4 /24 and both IPv6 /64 and /48. Malformed/zero/out-of-range settings refuse
+startup naming the key. A non-source-preserving forward combines all clients'
+pre-auth work into one source: preserve the actual source or raise the knobs
+with that shared budget in mind. Headers do not replace transport identity.
+
+BREAKING: refusal frames now carry typed retry scope/time; older strict decoders
+reject them. Rebuild node services and clients together. The SDK honors server
+waits, while unhinted legacy and daily-reset behavior retain their existing policy.
 
 A same-version `up` accepts a renewed signed record under the retained node pin
 and proxy seed. When its bytes change, the wrapper prints

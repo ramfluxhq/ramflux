@@ -867,6 +867,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
         SdkError::CustodyConfirmationFailed
         | SdkError::CustodyCapacity { .. }
+        | SdkError::CustodyAdmission { .. }
         | SdkError::CustodyNetwork(_)
         | SdkError::IdentityRootMissing
         | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => RamfluxErrorCode::AuthFailed,
@@ -1024,5 +1025,26 @@ mod object_erasure_tests {
             super::storage_error_code(&ramflux_storage::StorageError::ObjectErased),
             error.code
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[test]
+    fn admission_error_is_busy_for_all_existing_predicates() {
+        use ramflux_protocol::custody::{CustodyRefusal, RetryHint, RetryScope};
+        for code in [CustodyRefusal::Busy, CustodyRefusal::Capacity, CustodyRefusal::BindingRefused]
+        {
+            let hinted = SdkError::CustodyAdmission {
+                code: code.clone(),
+                retry: RetryHint::new(RetryScope::NodeCapacity, 2000),
+            };
+            assert_eq!(
+                map_sdk_error(&hinted).code,
+                map_sdk_error(&SdkError::CustodyNetwork(code)).code
+            );
+            assert_eq!(map_sdk_error(&hinted).code, RamfluxErrorCode::AuthFailed);
+        }
     }
 }

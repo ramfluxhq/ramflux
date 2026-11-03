@@ -54,7 +54,7 @@ impl CustodyService {
             return Err(CustodyRefusal::BindingRefused);
         } // Mesh is never the client-facing hop.
         let holder = holder(peer, &connection_id)?;
-        let challenge = self.leases().issue(
+        let challenge = match self.leases().issue(
             crate::custody_sessions::ChallengeIntent {
                 device: device_ref,
                 action_hash: custody_action_hash(&action).map_err(invalid)?,
@@ -65,7 +65,10 @@ impl CustodyService {
             },
             now,
             tick,
-        )?;
+        ) {
+            Ok(challenge) => challenge,
+            Err(refusal) => return Ok(refusal.into_frame()),
+        };
         Ok(CustodyServerFrame::Challenge { challenge })
     }
     pub(super) fn prove(
@@ -149,11 +152,13 @@ impl CustodyService {
         }
         // Refused new-principal budgets cannot fill successful-proof replay storage.
         // No durable write precedes possession and single-use admission.
-        self.leases().consume(
+        if let Err(refusal) = self.leases().consume(
             &proof.body.challenge_nonce,
             &proof.body.proof_id,
-            std::time::Instant::now(),
-        )?;
+            tick + tick.elapsed(),
+        ) {
+            return Ok(refusal.into_frame());
+        }
         self.finish_proof(
             scope,
             attempt,
@@ -170,9 +175,12 @@ impl CustodyService {
         // A hinted refusal is a response frame, but is never successful authentication.
         let result = if let Some(permit) = scope.permit {
             let principal = attempt.proof.body.device_ref.account_anchor.clone();
-            permit
+            match permit
                 .try_grant(&principal, || self.finish_admitted_proof(scope, attempt, possession))
-                .ok_or(CustodyRefusal::Busy)?
+            {
+                Ok(result) => result,
+                Err(refusal) => return Ok(refusal.into_frame()),
+            }
         } else {
             self.finish_admitted_proof(scope, attempt, possession)
         };
@@ -187,7 +195,7 @@ impl CustodyService {
         let Possession { publication, authority, holder, source } = possession;
         let Scope { router, store, now, tick, .. } = scope;
         let now = now.saturating_add(tick.elapsed().as_secs());
-        let tick = std::time::Instant::now();
+        let tick = tick + tick.elapsed();
         let proof = attempt.proof;
         match attempt.action {
             CustodyProofAction::HomeMigration { .. } => Err(CustodyRefusal::Unsupported.into()),
@@ -407,3 +415,6 @@ impl CustodyService {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod population_tests;
