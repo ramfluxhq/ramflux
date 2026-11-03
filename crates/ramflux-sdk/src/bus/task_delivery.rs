@@ -36,9 +36,10 @@ async fn submit(
     delivery: &Delivery,
     deadline: tokio::time::Instant,
 ) -> Result<(), SdkError> {
-    let mut engine = match tokio::time::timeout_at(deadline, account.take_live_engine()).await {
-        Ok(result) => result?,
-        Err(_) => {
+    let mut engine =
+        if let Ok(result) = tokio::time::timeout_at(deadline, account.take_live_engine()).await {
+            result?
+        } else {
             if let Some(engine) = account.engine.take() {
                 account.retire_engine(engine)?;
             }
@@ -47,8 +48,7 @@ async fn submit(
             } else {
                 SdkError::InboundPending("task delivery tick budget exhausted".into())
             });
-        }
-    };
+        };
     let result = if let Some(destination) = &delivery.federation {
         match federated_envelope(&engine, delivery, destination) {
             Ok(envelope) => RamfluxClient::forward_task_envelope_until(
