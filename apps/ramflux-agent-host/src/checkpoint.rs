@@ -10,6 +10,14 @@ use std::{
     path::PathBuf,
 };
 pub(crate) const MAX_STATE_BYTES: u64 = 524_288;
+const MAX_BRIDGE_STATE_BYTES: u64 = 16_777_216;
+fn state_limit(state: &Checkpoint) -> u64 {
+    if state.engine.as_ref().is_some_and(|e| e["kind"] == "ramflux.agent.prx_bridge.v1") {
+        MAX_BRIDGE_STATE_BYTES
+    } else {
+        MAX_STATE_BYTES
+    }
+}
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Checkpoint {
@@ -31,6 +39,15 @@ pub struct Checkpoint {
     pub(crate) engine: Option<Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) approvals: BTreeMap<String, ApprovalBridge>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) visible_failures: BTreeMap<String, VisibleFailure>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VisibleFailure {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub reason: crate::EngineFailure,
 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -150,18 +167,24 @@ impl CheckpointStore {
             Err(_) => return Err(Error::Storage),
         };
         let mut bytes = Vec::new();
-        file.take(MAX_STATE_BYTES + 1).read_to_end(&mut bytes).map_err(|_| Error::Storage)?;
-        if bytes.len() > usize::try_from(MAX_STATE_BYTES).map_err(|_| Error::Limit)? {
+        file.take(MAX_BRIDGE_STATE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Storage)?;
+        if bytes.len() > usize::try_from(MAX_BRIDGE_STATE_BYTES).map_err(|_| Error::Limit)? {
             return Err(Error::Storage);
         }
-        serde_json::from_slice(&bytes).map_err(|_| Error::Storage)
+        let state: Checkpoint = serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?;
+        if bytes.len() > usize::try_from(state_limit(&state)).map_err(|_| Error::Limit)? {
+            return Err(Error::Storage);
+        }
+        Ok(state)
     }
     /// # Errors
     /// Writes with owner-only permissions, fsync, atomic rename and a synced parent directory.
     pub fn save(&self, state: &Checkpoint) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         let bytes = serde_json::to_vec(state).map_err(|_| Error::Storage)?;
-        if bytes.len() > usize::try_from(MAX_STATE_BYTES).map_err(|_| Error::Limit)? {
+        if bytes.len() > usize::try_from(state_limit(state)).map_err(|_| Error::Limit)? {
             return Err(Error::Limit);
         }
         let parent = self

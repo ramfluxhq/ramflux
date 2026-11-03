@@ -207,10 +207,31 @@ impl<E: EngineProvider> AgentHost<E> {
                 }
             }
             ApprovalPhase::AwaitingDecision => {
-                if terminal(&view) {
+                let channel_denied = self.engine.bridge().is_some()
+                    && terminal(&view)
+                    && decision(&view, bridge).is_ok_and(|approved| !approved);
+                if terminal(&view) && !channel_denied {
                     self.retire_terminal_approval(bridge, &view, now_ms, &mut events).await?;
-                } else if resolved(&view, bridge) {
+                } else if resolved(&view, bridge) || channel_denied {
                     let approved = decision(&view, bridge)?;
+                    if let Err(error) = self.bridge_decider(bus, &view, &bridge.grant_id).await {
+                        if error.stops_host() || matches!(error, Error::Bus | Error::Resync) {
+                            return Err(error);
+                        }
+                        if let Some(provider) = self.engine.bridge() {
+                            provider.refuse_decider(&conversation_id);
+                        }
+                        self.fail_approval(
+                            bus,
+                            bridge,
+                            &view,
+                            EngineFailure::ApprovalUnavailable,
+                            &mut events,
+                        )
+                        .await?;
+                        return Ok(events);
+                    }
+                    let channel_bridge = self.engine.bridge().is_some();
                     match self
                         .engine
                         .decide(
@@ -222,7 +243,7 @@ impl<E: EngineProvider> AgentHost<E> {
                         )
                         .await
                     {
-                        Ok(()) if approved => {
+                        Ok(()) if approved || channel_bridge => {
                             if let Some(saved) = self.state.approvals.get_mut(&conversation_id) {
                                 saved.phase = ApprovalPhase::Resuming;
                             }
@@ -253,9 +274,35 @@ impl<E: EngineProvider> AgentHost<E> {
                     }
                 }
             }
-            ApprovalPhase::Resuming => {}
+            ApprovalPhase::Resuming => self.complete_bridge_task(bus, bridge, &view).await?,
         }
         Ok(events)
+    }
+
+    async fn complete_bridge_task(
+        &mut self,
+        bus: &mut impl AgentBus,
+        bridge: &ApprovalBridge,
+        view: &Value,
+    ) -> Result<()> {
+        let conversation_id = &bridge.conversation_id;
+        if let Some(succeeded) = self.engine.bridge().and_then(|b| b.terminal(conversation_id)) {
+            if terminal(view) {
+                self.state.approvals.remove(conversation_id);
+                return self.save_state();
+            }
+            self.update_task(
+                bus,
+                bridge,
+                view,
+                if succeeded { "done" } else { "failed" },
+                if succeeded { "PRX turn completed" } else { "PRX turn failed" },
+            )
+            .await?;
+            self.state.approvals.remove(conversation_id);
+            self.save_state()?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn abandon_approval(
@@ -842,7 +889,7 @@ mod tests {
             approval_timeout_s: 600,
         };
         config.rules.clear();
-        config.engine = Some(crate::EngineConfig { prx: prx.clone() });
+        config.engine = Some(crate::EngineConfig { prx: Some(prx.clone()), prx_bridge: None });
         let engine = crate::PrxEngine::new(&prx, 8)?;
         let mut host = AgentHost::new(config, engine)?;
         host.state.principal_id = "agent-principal".into();
@@ -994,8 +1041,10 @@ mod tests {
         let first_task = bus.task["task_id"].clone();
         let config = host.config.clone();
         drop(host);
-        let engine =
-            crate::PrxEngine::new(&config.engine.as_ref().ok_or("missing engine config")?.prx, 8)?;
+        let engine = crate::PrxEngine::new(
+            config.engine.as_ref().and_then(|e| e.prx.as_ref()).ok_or("missing engine config")?,
+            8,
+        )?;
         let mut host = AgentHost::new(config, engine)?;
         assert!(host.state.approvals["conversation"].phase == ApprovalPhase::AwaitingDecision);
         assert_eq!(host.state.approvals["conversation"].deadline_ms, 300_000);
@@ -1206,7 +1255,10 @@ mod tests {
         host.save_state()?;
         let config = host.config.clone();
         drop(host);
-        let engine = crate::PrxEngine::new(&config.engine.as_ref().ok_or("config")?.prx, 8)?;
+        let engine = crate::PrxEngine::new(
+            config.engine.as_ref().and_then(|e| e.prx.as_ref()).ok_or("config")?,
+            8,
+        )?;
         let before = crate::bus::now_ms();
         let host = AgentHost::new(config, engine)?;
         let deadline = host.state.approvals["conversation"].deadline_ms;

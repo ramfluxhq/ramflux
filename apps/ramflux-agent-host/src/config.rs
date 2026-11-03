@@ -43,7 +43,57 @@ const fn approval_timeout() -> u64 {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineConfig {
-    pub prx: PrxConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prx: Option<PrxConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prx_bridge: Option<PrxBridgeConfig>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrxBridgeConfig {
+    pub socket_path: PathBuf,
+    #[serde(default)]
+    pub authorization: PrxAuthorization,
+    #[serde(default = "bridge_turn_timeout")]
+    pub turn_timeout_s: u64,
+    #[serde(default = "approval_timeout")]
+    pub approval_timeout_s: u64,
+    #[serde(default = "stream_flush")]
+    pub stream_flush_ms: u64,
+    #[serde(default = "stream_bytes")]
+    pub stream_max_bytes: usize,
+    #[serde(default = "inbound_queue")]
+    pub max_queued_inbound: usize,
+}
+const fn bridge_turn_timeout() -> u64 {
+    150
+}
+const fn stream_flush() -> u64 {
+    500
+}
+const fn stream_bytes() -> usize {
+    15_360
+}
+const fn inbound_queue() -> usize {
+    64
+}
+impl PrxBridgeConfig {
+    pub(crate) fn valid(&self) -> bool {
+        self.socket_path.is_absolute()
+            && (1..=3600).contains(&self.turn_timeout_s)
+            && (1..=3600).contains(&self.approval_timeout_s)
+            && (100..=5000).contains(&self.stream_flush_ms)
+            && (1..=16_000).contains(&self.stream_max_bytes)
+            && (1..=256).contains(&self.max_queued_inbound)
+    }
+}
+impl EngineConfig {
+    pub(crate) fn approval_timeout_s(&self) -> u64 {
+        self.prx.as_ref().map_or_else(
+            || self.prx_bridge.as_ref().map_or(600, |p| p.approval_timeout_s),
+            |p| p.approval_timeout_s,
+        )
+    }
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -135,11 +185,16 @@ impl Config {
     /// # Errors
     /// Enforces finite rule, reply, polling, identifier and state budgets.
     pub fn validate(&self) -> Result<()> {
-        let prx = self.engine.as_ref().map(|engine| &engine.prx);
+        let prx = self.engine.as_ref().and_then(|engine| engine.prx.as_ref());
+        let bridge = self.engine.as_ref().and_then(|engine| engine.prx_bridge.as_ref());
         if self.account_id.is_empty()
             || self.account_id.len() > 256
             || self.socket == self.state_file
-            || prx.is_some() != self.rules.is_empty()
+            || usize::from(prx.is_some())
+                + usize::from(bridge.is_some())
+                + usize::from(!self.rules.is_empty())
+                != 1
+            || bridge.is_some_and(|bridge| !bridge.valid() || bridge.socket_path == self.state_file)
             || self.rules.len() > 64
             || !(50..=60_000).contains(&self.poll_interval_ms)
             || !(100..=3_600_000).contains(&self.per_conversation_interval_ms)

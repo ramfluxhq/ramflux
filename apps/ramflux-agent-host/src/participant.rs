@@ -4,7 +4,7 @@
 use crate::{AgentBus, Checkpoint, Error, Result};
 use serde_json::{Value, json};
 
-async fn directory_find(
+pub(crate) async fn directory_find(
     bus: &mut impl AgentBus,
     method: &str,
     field: &str,

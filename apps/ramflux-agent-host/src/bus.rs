@@ -10,6 +10,12 @@ use std::{
 };
 
 pub trait AgentBus {
+    /// Wall-clock milliseconds used by host scheduling; defaults to the production clock.
+    #[must_use]
+    fn now_ms(&self) -> u64 {
+        now_ms()
+    }
+
     /// # Errors
     /// Reports an rfd failure without exposing response bodies or secrets.
     fn request(

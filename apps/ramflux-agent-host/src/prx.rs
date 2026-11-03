@@ -661,6 +661,7 @@ impl EngineProvider for PrxEngine {
 impl PrxCompleted {
     fn from_event(event: &EngineEvent) -> Result<Self> {
         Ok(match event {
+            EngineEvent::BridgeWork { .. } => return Err(Error::State),
             EngineEvent::Intents { message_id, intents, .. } => match intents.as_slice() {
                 [Intent::ReplyText(reply)] => {
                     Self::Reply { message_id: message_id.clone(), reply: reply.clone() }
@@ -729,7 +730,8 @@ impl PrxCompleted {
 
 fn event_conversation(event: &EngineEvent) -> &str {
     match event {
-        EngineEvent::Intents { conversation_id, .. }
+        EngineEvent::BridgeWork { conversation_id, .. }
+        | EngineEvent::Intents { conversation_id, .. }
         | EngineEvent::ApprovalRequired { conversation_id, .. }
         | EngineEvent::VisibleFailure { conversation_id, .. } => conversation_id,
     }

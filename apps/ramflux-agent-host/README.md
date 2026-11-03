@@ -3,10 +3,10 @@
 `ramflux-agent-host` is an ordinary native headless participant. rfd retains authority
 keys and performs normal authenticated message delivery. On first start the host may
 consume the daemon-generated one-use provisioning bundle; it never receives a recovery
-phrase, master key, branch key, human credential, or grant confirmation. Rules match
-trimmed whole messages exactly and return one text reply or one bounded
+phrase, master key, branch key, human credential, or grant confirmation. Choose exactly
+one engine: deterministic rules, the local PRX HTTP console API, or the PRX Unix channel.
+Rules match trimmed whole messages exactly and return one text reply or one bounded
 surface batch.
-The host can use either deterministic rules or a local PRX console API.
 
 The live native human owner creates the `headless_ai` account through the local-bus
 ceremony in an unlocked owner session documented in `docs/local_bus_account_creation.md`, saves the service phrase,
@@ -64,7 +64,7 @@ is not supported until `ID-02-VAULT-LINUX-01`; do not copy the
 bundle to the Linux service host. Integration tests compile the explicit
 `--itest-memory-vault` alternative, which is volatile and unavailable in production.
 
-## PRX engine
+## PRX HTTP engine
 
 PRX can provide the model and tool-execution layer while rfd remains responsible for identity,
 membership, signed delivery, and human approval evidence. Initialize PRX, then edit its active
@@ -119,7 +119,7 @@ Do not put the bearer in the agent configuration. Select PRX instead of `rules` 
 }
 ```
 
-For native headless account provisioning and the one-shot bundle flow, see AGENT-V3-01.
+Use the native headless provisioning and one-shot bundle flow above.
 After the account is provisioned and unlocked, launch with the PRX configuration above.
 The bundle and the PRX bearer are separate credentials and neither belongs in the checkpoint.
 
@@ -153,7 +153,7 @@ For full authorization, set `authorization: "full"` here and `[autonomy] level =
 PRX must execute within its own configured scopes without asking the bridge for human approval.
 An unexpected `awaiting_approval` is declined with `authorization_mismatch` and a fixed diagnostic
 logged once per host process. This configuration setting is the interim authorization control;
-the per-account bus switch/standing grant is deferred to PRX-BRIDGE-02.
+the per-account runtime bus switch remains a separate feature.
 
 Every detached job, including a resumed job, has a persisted wall-clock deadline set by
 `turn_timeout_s` (default 120 seconds). At expiry the host cancels the job, returns
@@ -164,7 +164,7 @@ PRX decisions, and removes local session mappings. PRX's console API exposes no 
 endpoint, so remote console history remains under PRX's retention policy.
 
 PRX `[IMAGE:path]` markers are removed from text replies and no attachment is sent in this release.
-Attachment transfer and externally streamed turns are deferred to PRX-BRIDGE-02. PRX network
+Attachment transfer remains unsupported. The separate Unix channel engine below streams turns. PRX network
 failures are silent with one log per 60-second window. A message whose submission fails while PRX
 is unavailable is dropped after the host advances its cursor; it is not retried automatically.
 Other terminal failures produce one short typed reply. The owner-only token file is read at
@@ -175,6 +175,151 @@ owner credential. Supervised human decisions or the deliberately selected full m
 PRX tool scopes, define the execution authority; a prompt header is only context and conveys no
 permission. Headers include only the bounded sender display label, chat kind and mention flag,
 never group member lists.
+
+## PRX Unix channel engine
+
+The channel adapter targets PRX bridge protocol v1 at revision
+`0785e3f82c87da243b6fd1e64c9a9ba3769d17f7`. Run PRX separately as the same Unix
+user as agent-host. The host connects to PRX; it does not launch it, edit its config,
+read its secret store or use an HTTP bearer. Start rfd, unlock/provision the native
+agent account, start PRX, then start agent-host. Keep the socket directory on a local
+private volume. PRX creates the socket mode 0600 inside a directory mode 0700;
+both must belong to the host's effective uid. Symlinks are refused.
+
+Configure PRX's SQLite memory backend (required for erase), encrypted channel
+storage, the actual agent account identifier and an operator-reviewed tool scope.
+Use local autonomy that allows the intended tools so the channel gate is the only
+human approval path. Local PRX durable approvals cannot be resolved over this channel.
+A supervised example, added to an initialized PRX config, is:
+
+```toml
+[memory]
+backend = "sqlite"
+
+[autonomy]
+level = "full"
+workspace_only = true
+
+[channels_config]
+cli = false
+
+[channels_config.ramflux]
+socket_path = "/private/path/prx-run/ramflux.sock"
+authorization_mode = "follow_rf"
+max_in_flight_per_conversation = 1
+on_new_message = "queue"
+turn_wall_clock_secs = 300
+encrypt_at_rest = true
+
+[channels_config.ramflux.accounts."agent-account"]
+cross_conversation_retrieval = false
+```
+
+```sh
+prx --config-dir /private/path/prx-config channel start
+```
+
+Select the channel provider instead of `rules` or `engine.prx`:
+
+```json
+{
+  "socket": "/private/path/rfd.sock",
+  "state_file": "/private/path/agent-state.json",
+  "account_id": "agent-account",
+  "engine": {
+    "prx_bridge": {
+      "socket_path": "/private/path/prx-run/ramflux.sock",
+      "authorization": "supervised",
+      "turn_timeout_s": 330,
+      "approval_timeout_s": 600,
+      "stream_flush_ms": 500,
+      "stream_max_bytes": 15360,
+      "max_queued_inbound": 64
+    }
+  }
+}
+```
+
+`authorization` is the interim per-account configuration control, not a runtime bus
+switch or standing grant. In supervised mode every channel tool request needs a fresh
+signed decision. On the agent's authenticated bus, use `contact.safety_number` and
+`contact.verify` to verify the initiating human's current safety number; compare it
+through an authenticated operator channel first. The human accepts the proposed task,
+then approves or denies its fresh grant. Decide on the **same device that sent the
+message**. A verified different device or a different group member cannot decide this
+PRX turn. The bridge requires rfd's authenticated decision signer principal and device;
+missing provenance, stale verification or a device mismatch returns `approval_unavailable`
+and forwards no human decision. Re-verify changed safety numbers and send a new command
+from the device that will decide. Never alter the checkpoint or substitute a device id.
+The lower of PRX's expiry and `approval_timeout_s` wins; no action defaults to deny
+and produces `approval_timeout`. A late approval never starts a tool.
+
+For full authorization set the host `authorization` to `full`; PRX's channel mode must
+be `follow_rf` or `full`. Use a 120-second PRX turn budget and a host timeout of at
+least 150 seconds. Tools still emit progress but no grant is opened. An unexpected
+channel approval expires with `authorization_mismatch`: correct both configurations
+and send a new command. `prx_internal_approval_unavailable` means PRX asked its local
+durable approval plane; configure the intended local tool scope to allow it before
+retrying. Full authorization deliberately allows all tools within that PRX scope.
+The host cannot enforce the PRX turn budget from its own config: keep
+`turn_timeout_s` at least PRX's budget, preferably 30 seconds higher. Scripted tests use
+45 seconds in PRX and at least 75 in the host; this is not the operator example.
+
+Streaming synthesizes a StatusPanel, coalesces deltas at the configured interval,
+rolls ordered blocks at 15 KiB, and bounds the whole turn to 60 appends. Final text is
+one logical signed message per turn, across all recipient devices. Text above 16 KiB
+is split into at most four messages and then truncated. Non-streamed turns use PRX's
+final-surface fallback. Generic surfaces degrade to fallback text. Attachments and
+surface actions are unsupported; typing is acknowledged but not displayed. Tool events
+update an existing human-started/accepted running task only when the agent is assignee;
+otherwise they appear as progress on the stream. The agent never starts audit tasks.
+
+There is one active turn per conversation. Pending input is checkpointed until PRX
+acknowledges it; reconnect resends the same turn and idempotency keys. Queues admit at
+most eight inputs per conversation and 64 overall by default (configurable up to 256).
+A full queue returns `engine_busy`. Queued inputs older than ten minutes are discarded
+silently apart from a fixed diagnostic. A turn without terminal status is cancelled
+at `turn_timeout_s` and returns `engine_turn_timeout`. PRX reply replay is process-local:
+a PRX restart can lose unacknowledged output; such turns end at the host timeout.
+
+Group deletion, disappearing-message expiry and local deletion on the agent's account
+forward every tombstone to PRX. An erase stays in the durable outbox until PRX answers
+`erased:true`, retrying errors with 1–60 second backoff. Queued input, local turn text,
+stream buffers and pending notices for that message are cleared. Later inputs in that
+conversation wait behind the erase. Deleting a human DM only tombstones the human's
+local account; it does **not** retract that message on the agent or erase PRX memory.
+Deleting the agent's own reply does not erase its input context. Removing the agent
+sends `agent_revoked`, which erases PRX's scope, while Ramflux retains its existing
+conversation data and removal marker. The host sends no Ramflux erase on removal.
+
+Recovery is explicit:
+
+- Socket ownership, mode or symlink failure stops startup with `invalid host configuration`.
+  Stop both processes, restore the private directory and correct user, and restart PRX
+  to recreate its socket. Do not relax the permissions.
+- A missing/unreachable socket leaves the host running and retries with 1–60 second
+  backoff. Restore PRX as the same user. A refused hello backs off for a minute;
+  correct protocol version, account, authorization or the competing connection first.
+- A paused or missing-hello erase waits for a fresh handshake; storage failure keeps
+  retrying. Repair PRX storage and allow the outbox to drain. At 1024 erases the bridge
+  stops new forwarding; it never evicts an erase to make space.
+- Corrupt/bound-exceeding state or a checkpoint from another engine fails closed.
+  Stop the host, preserve then move `state_file` aside and restart. Engine changes need
+  the same procedure. Fresh state subscribes at the journal head: messages sent while
+  down are not replayed. Never run two hosts against one account.
+- An rfd disconnect while a human approval is pending retains the existing fail-safe
+  policy: abandon/decline that approval rather than resume it after a bounded reconnect.
+  A failed visible notice is checkpointed and delivered after reconnect; send a new
+  command to request another decision. HTTP resume-POST idempotency remains an HTTP-only
+  concern and is not supplied by this channel.
+
+Only the existing atomic checkpoint writer persists bridge state; the file contains
+queued plaintext and in-progress reply buffers, so protect its directory. Dedupe keys
+are bounded to 512 per turn through ten minutes after terminal status. Socket queues
+are bounded to 256 in each direction. Frame processing performs no bus reads; ordinary
+periodic inbox/approval maintenance is separate. Changed body-free counters are printed
+every minute and at shutdown as `agent host bridge stats {...}`. No input text, delta,
+fallback, tool arguments, summaries or display names belong in diagnostics.
 
 For remote rfd, supply an operator-managed authenticated Unix-socket forward, such as
 OpenSSH StreamLocal forwarding, as `socket`. The host speaks the existing local bus;
@@ -204,7 +349,7 @@ counter/directory limit is exhausted the host stops, requiring operator review. 
 never evicts counters to bypass rate limits. Directory scans cap total response bytes
 at 1 MiB and rows at the configured conversation bound (identity scans: 1024 rows).
 Config is capped at 64 KiB, rules at 64, input/reply text at 16 KiB, and checkpoint at
-512 KiB. The SDK bounds individual wire frames and its event queue.
+512 KiB for rules/HTTP, or 16 MiB for the bounded Unix bridge state. The SDK bounds individual wire frames and its event queue.
 
 `EngineProvider` receives approved conversation text and returns typed `Intent`s:
 `ReplyText`, `CreateSurface`, `StreamAppend`, `PatchSurface`, and `CloseSurface`.
@@ -282,7 +427,7 @@ Configuration rejects unsafe reply and choice-label text before connecting. Fres
 only already prepared work resumes. The host has no automatic executor takeover. Its PRX adapter
 uses only the bounded provider and approval operations described below.
 
-Run unit/fake-bus tests with `cargo test -p ramflux-agent-host`. Native `account.status`
+Run unit/fake-bus, fake-HTTP and fake-Unix-channel tests with `cargo test -p ramflux-agent-host`. Native `account.status`
 requires a Live networking state (and no networking refusal reason when supplied), an
 unlocked local account, an unfenced authority, and a verified headless self identity.
 The companion integration

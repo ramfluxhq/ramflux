@@ -24,6 +24,7 @@ pub enum EngineFailure {
     ApprovalTimeout,
     ApprovalDeclined,
     AuthorizationMismatch,
+    PrxInternalApprovalUnavailable,
 }
 impl EngineFailure {
     /// Short visible status with a stable failure code and no remote response text.
@@ -39,6 +40,9 @@ impl EngineFailure {
             }
             Self::ApprovalTimeout => "The approval request timed out. [approval_timeout]",
             Self::ApprovalDeclined => "The requested operation was declined. [approval_declined]",
+            Self::PrxInternalApprovalUnavailable => {
+                "PRX requires a local approval that the bridge cannot resolve. [prx_internal_approval_unavailable]"
+            }
             Self::AuthorizationMismatch => {
                 "PRX requested approval in full authorization mode. [authorization_mismatch]"
             }
@@ -97,6 +101,10 @@ impl Intent {
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EngineEvent {
+    BridgeWork {
+        key: String,
+        conversation_id: String,
+    },
     Intents {
         conversation_id: String,
         message_id: String,
@@ -115,6 +123,22 @@ pub enum EngineEvent {
     },
 }
 pub trait EngineProvider {
+    /// Wake the runner for detached frames without adding rfd reads per frame.
+    fn wake(&self) -> impl Future<Output = ()> {
+        std::future::pending()
+    }
+
+    /// Bridge-specific transport state, absent for HTTP and deterministic providers.
+    fn bridge(&mut self) -> Option<&mut crate::PrxBridgeEngine> {
+        None
+    }
+    /// Called only after the host checkpoint has been durably saved.
+    /// # Errors
+    /// Rejects invalid provider state.
+    fn persisted(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Whether a conversation has provider work that needs a busy hint rather than a new turn.
     #[must_use]
     fn is_busy(&self, _conversation_id: &str) -> bool {
@@ -141,6 +165,12 @@ pub trait EngineProvider {
                 .into_iter()
                 .collect())
         }
+    }
+    /// Periodic maintenance, separate from socket-frame dispatch.
+    /// # Errors
+    /// Rejects invalid durable provider state.
+    fn maintenance(&mut self, _now_ms: u64) -> Result<()> {
+        Ok(())
     }
     /// Poll detached provider work.
     ///
@@ -172,6 +202,12 @@ pub trait EngineProvider {
         _conversation_id: &'a str,
     ) -> impl Future<Output = Result<()>> + 'a {
         async { Ok(()) }
+    }
+    /// Revoke conversation access, including provider-side removal semantics.
+    /// # Errors
+    /// Reports invalid local state; default providers use their normal cancellation.
+    fn revoke<'a>(&'a mut self, conversation_id: &'a str) -> impl Future<Output = Result<()>> + 'a {
+        self.cancel(conversation_id)
     }
     /// Restore provider-owned durable state from the agent-host checkpoint.
     ///

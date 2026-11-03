@@ -92,9 +92,13 @@ impl<E: EngineProvider> AgentHost<E> {
             }
         }
         self.recover_pending(bus).await?;
+        self.recover_visible_failures(bus, now_ms).await?;
         let seq = self.state.cursor.unwrap_or(0);
+        self.engine.maintenance(now_ms)?;
         let provider_events = self.engine.poll(now_ms).await?;
-        self.save_engine_state_if_changed()?;
+        if !provider_events.iter().any(|e| matches!(e, crate::EngineEvent::BridgeWork { .. })) {
+            self.save_engine_state_if_changed()?;
+        }
         self.handle_engine_events(bus, provider_events, seq, now_ms).await?;
         let approval_events = self.drive_approvals(bus, now_ms).await?;
         self.handle_engine_events(bus, approval_events, seq, now_ms).await?;

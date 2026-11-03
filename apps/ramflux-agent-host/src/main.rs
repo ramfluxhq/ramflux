@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Span Brain
 use clap::Parser;
 use ramflux_agent_host::{
-    AgentHost, Config, CredentialVault, EngineProvider, Error, PrxEngine, RfdBus, RuleEngine,
-    import_provisioning_bundle, unlock_provisioned_account,
+    AgentHost, Config, CredentialVault, EngineProvider, Error, PrxBridgeEngine, PrxEngine, RfdBus,
+    RuleEngine, import_provisioning_bundle, unlock_provisioned_account,
 };
 use std::path::PathBuf;
 mod reconnect;
@@ -43,8 +43,11 @@ async fn run() -> ramflux_agent_host::Result<()> {
         import_provisioning_bundle(&vault, path, &config.account_id)?;
     }
     unlock_provisioned_account(&vault, &config.socket, &config.account_id).await?;
-    if let Some(engine) = &config.engine {
-        let provider = PrxEngine::new(&engine.prx, config.max_conversations)?;
+    if let Some(bridge) = config.engine.as_ref().and_then(|e| e.prx_bridge.as_ref()) {
+        let provider = PrxBridgeEngine::new(bridge, &config.account_id, config.max_conversations)?;
+        run_provider(config, provider).await
+    } else if let Some(prx) = config.engine.as_ref().and_then(|e| e.prx.as_ref()) {
+        let provider = PrxEngine::new(prx, config.max_conversations)?;
         run_provider(config, provider).await
     } else {
         let provider = RuleEngine::new(&config)?;
