@@ -566,11 +566,11 @@ fn test_wake() -> ramflux_protocol::NotificationWake {
 }
 
 fn test_webpush_subscription() -> (String, String) {
-    use p256::elliptic_curve::rand_core::OsRng;
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::Generate;
+    use p256::elliptic_curve::sec1::ToSec1Point;
 
-    let key = p256::SecretKey::random(&mut OsRng);
-    let public = key.public_key().to_encoded_point(false);
+    let key = p256::SecretKey::generate();
+    let public = key.public_key().to_sec1_point(false);
     (
         ramflux_protocol::encode_base64url(public.as_bytes()),
         ramflux_protocol::encode_base64url([0x5a; 16]),

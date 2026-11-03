@@ -4,7 +4,7 @@
 //! Public test vectors from RFC 8291 section 5 / Appendix A and RFC 5903 section 8.1.
 use super::{encrypt_webpush_aes128gcm, encrypt_webpush_aes128gcm_with};
 use aes_gcm::aead::{Aead, KeyInit};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 
 const RECEIVER_PRIVATE: &str = "q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94";
 const RECEIVER_PUBLIC: &str = concat!(
@@ -26,13 +26,11 @@ fn rfc8291_section5_webpush_body_is_byte_exact() -> Result<(), Box<dyn std::erro
         p256::SecretKey::from_slice(&ramflux_protocol::decode_base64url(RECEIVER_PRIVATE)?)?;
     let sender = p256::SecretKey::from_slice(&ramflux_protocol::decode_base64url(SENDER_PRIVATE)?)?;
     assert_eq!(
-        ramflux_protocol::encode_base64url(
-            receiver.public_key().to_encoded_point(false).as_bytes()
-        ),
+        ramflux_protocol::encode_base64url(receiver.public_key().to_sec1_point(false).as_bytes()),
         RECEIVER_PUBLIC
     );
     assert_eq!(
-        ramflux_protocol::encode_base64url(sender.public_key().to_encoded_point(false).as_bytes()),
+        ramflux_protocol::encode_base64url(sender.public_key().to_sec1_point(false).as_bytes()),
         SENDER_PUBLIC
     );
     let shared =
@@ -116,7 +114,7 @@ fn decrypt_webpush_body(
     let shared = p256::ecdh::diffie_hellman(receiver.to_nonzero_scalar(), sender.as_affine());
     let auth = ramflux_protocol::decode_base64url(AUTH_SECRET)?;
     let mut info = b"WebPush: info\0".to_vec();
-    info.extend_from_slice(receiver.public_key().to_encoded_point(false).as_bytes());
+    info.extend_from_slice(receiver.public_key().to_sec1_point(false).as_bytes());
     info.extend_from_slice(&header[21..]);
     let key_hkdf = hkdf::Hkdf::<sha2::Sha256>::new(Some(&auth), shared.raw_secret_bytes());
     let mut ikm = [0_u8; 32];

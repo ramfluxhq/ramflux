@@ -2808,11 +2808,19 @@ fn encrypt_webpush_aes128gcm(
     auth_secret_base64url: &str,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, ramflux_node_core::NodeCoreError> {
-    use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+    use p256::elliptic_curve::Generate;
 
-    let server_secret = p256::SecretKey::random(&mut OsRng);
+    let server_secret = p256::SecretKey::try_generate().map_err(|source| {
+        ramflux_node_core::NodeCoreError::ItestHttp(format!(
+            "WebPush key generation failed: {source}"
+        ))
+    })?;
     let mut salt = [0_u8; 16];
-    OsRng.fill_bytes(&mut salt);
+    getrandom::fill(&mut salt).map_err(|source| {
+        ramflux_node_core::NodeCoreError::ItestHttp(format!(
+            "WebPush salt generation failed: {source}"
+        ))
+    })?;
     encrypt_webpush_aes128gcm_with(
         &server_secret,
         salt,
@@ -2830,7 +2838,7 @@ fn encrypt_webpush_aes128gcm_with(
     plaintext: &[u8],
 ) -> Result<Vec<u8>, ramflux_node_core::NodeCoreError> {
     use aes_gcm::aead::{Aead, KeyInit};
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::sec1::ToSec1Point;
 
     const WEBPUSH_RECORD_SIZE: u32 = 4096;
     const WEBPUSH_KEY_ID_LEN: u8 = 65;
@@ -2867,7 +2875,7 @@ fn encrypt_webpush_aes128gcm_with(
             ))
         })?;
     let server_public = server_secret.public_key();
-    let server_public_bytes = server_public.to_encoded_point(false);
+    let server_public_bytes = server_public.to_sec1_point(false);
     let server_public_bytes = server_public_bytes.as_bytes();
     let shared_secret =
         p256::ecdh::diffie_hellman(server_secret.to_nonzero_scalar(), client_public.as_affine());

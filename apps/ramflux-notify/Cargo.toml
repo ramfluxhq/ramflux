@@ -21,6 +21,7 @@ compio = { version = "=0.19.1", optional = true }
 anyhow = { workspace = true }
 aes-gcm = { workspace = true }
 bytes = { workspace = true }
+getrandom = { workspace = true }
 h2 = { workspace = true }
 hkdf = { workspace = true }
 http = { workspace = true }
