@@ -16,9 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Charge complete task courier submissions to the actor cycle budget, service
   receipt and call couriers first, and bound federated task forwarding with
   deadline-aware HTTP workers and typed timeout/capacity results.
-
-- Persist private source-IP pseudonym keys beside node identity configuration,
-  share them across configured services and restarts, and retain mode 0600.
+- **BREAKING (operators):** Service starts with `--config` now need a writable
+  `node-identity/` directory under the configuration directory, unless
+  `RAMFLUX_NODE_PRIVACY_KEY_FILE` points to an existing private key. The repository
+  Compose files provide the persistent `node-privacy` volume; copied/custom Compose
+  files and systemd installs must supply writable storage or the explicit key path.
+  Source-IP pseudonym keys persist across services and restarts at mode 0600.
   Existing address-hash buckets age out normally; no quota migration is attempted.
 - Upgrade Web Push P-256 ECDH to p256 0.14 and crypto-bigint 0.7.10, preserving
   RFC encryption bytes and removing the RUSTSEC-2026-0387 audit exceptions.

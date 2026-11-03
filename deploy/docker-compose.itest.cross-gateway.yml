@@ -42,6 +42,7 @@ services:
       RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON: "${RAMFLUX_GATEWAY_B_ITEST_CAPTURE_JSON:-/tmp/ramflux-gateway-b-itest-capture.jsonl}"
     volumes:
       - ./config/gateway.toml:/etc/ramflux/config/gateway.toml:ro
+      - node-privacy:/etc/ramflux/config/node-identity
       - ${RAMFLUX_CERTS_DIR:-./certs}/gateway:/etc/ramflux/mesh:ro
       - gateway-b-redb:/var/lib/ramflux/gateway
     depends_on: [ramflux-router, ramflux-retention]

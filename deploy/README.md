@@ -243,6 +243,21 @@ and other named volumes when backing up or rolling back. Reusing the key keeps
 source buckets stable across restarts; a replacement key cannot match old buckets.
 See [source-IP key storage and upgrade policy](../docs/server-data.md).
 
+Rolling back to a snapshot from before `node-privacy` was introduced restores an
+override that does not declare that volume. A subsequent `down --purge` can leave
+`${DEMO_PROJECT}_node-privacy` behind with its original `org.ramflux.demo.owner`
+label. A fresh setup with a different owner token then refuses the retained volume
+as foreign. Keep the existing state and owner token when continuing that node.
+For an intentional fresh setup, first stop the old project, preserve the privacy
+volume with the old identity backup, and inspect that exact volume with
+`podman volume inspect "${DEMO_PROJECT}_node-privacy"` (or `docker volume inspect`).
+Verify its owner label against the old private state's `owner.token` and confirm
+that no container uses it. Only then remove that exact unused owned volume with
+`podman volume rm "${DEMO_PROJECT}_node-privacy"` (or `docker volume rm`) before
+starting with the new owner. Do not relabel it, use a global volume prune, or remove
+another project's volume. Replacing the key starts new source buckets; old quota
+rows still expire naturally. Rollback/purge does not automatically sweep this residue.
+
 The desktop adds the printed `http://DEMO_HOST:DEMO_HTTP_PORT` URL, then confirms
 the node using the expected public key over a trusted channel. Discovery and
 prekey HTTP use the same explicit LAN HTTP origin as the s72 fixture; gateway and

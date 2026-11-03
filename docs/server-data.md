@@ -40,6 +40,10 @@ Files are published complete without replacing a concurrent creator's key, with
 Unix mode 0600. New identity directories use mode 0700; existing directories must
 not be writable by group or other users. Missing write access, malformed keys,
 permissive modes and symlink substitution refuse startup instead of changing the key.
+Initialization refusals name the identity directory and advise mounting writable
+storage there or setting `RAMFLUX_NODE_PRIVACY_KEY_FILE` to an existing private key.
+At startup, abandoned staging files for the same node are removed after one hour.
+Published keys, recent staging files, links and unrelated files are preserved.
 
 The default Compose files mount the persistent `node-privacy` volume at
 `/etc/ramflux/config/node-identity` in every service, including read-only containers.

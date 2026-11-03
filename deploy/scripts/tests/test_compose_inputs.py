@@ -85,6 +85,28 @@ class RenderedComposeInputTests(unittest.TestCase):
         self.assertEqual(unresolved_paths(config), [], output.stderr)
         return config
 
+    def test_cross_gateway_replicas_share_private_source_key_volume(self):
+        provider = os.environ.get("DEMO_TEST_PODMAN_COMPOSE") or shutil.which("podman-compose")
+        if not provider:
+            self.skipTest("set DEMO_TEST_PODMAN_COMPOSE for config-only provider testing")
+        config = self.render(shlex.split(provider) + ["--podman-path", str(self.runtime)], [
+            DEPLOY / "docker-compose.itest.yml", DEPLOY / "docker-compose.itest.cross-gateway.yml",
+        ], {"RF_COMPOSE_ROUTER_ADMIN_TOKEN": "fixture-token",
+            "RF_COMPOSE_FEDERATION_ADMIN_TOKEN": "fixture-token"})
+        for name in ("ramflux-gateway", "ramflux-gateway-b"):
+            shared = []
+            for mount in config["services"][name]["volumes"]:
+                if isinstance(mount, dict):
+                    source, target = mount["source"], mount["target"]
+                    read_only = mount.get("read_only", False)
+                else:
+                    source, target, *options = mount.split(":")
+                    read_only = "ro" in options
+                if target == "/etc/ramflux/config/node-identity":
+                    self.assertFalse(read_only, name)
+                    shared.append(source)
+            self.assertEqual(shared, ["node-privacy"], name)
+
     def check_provider(self, command):
         required = {
             "RAMFLUX_FEDERATION_TRUST_ENDPOINT": "federation.example:7443",

@@ -4,18 +4,25 @@
 //! Exercise configured process startup, rather than an injected in-memory hash key.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 const HASH_PREFIX: &str = "SOURCE_PRIVACY_HASH=";
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("rf-source-privacy-{}-{nonce}", std::process::id()));
-        std::fs::create_dir(&path)?;
-        Ok(Self(path))
+        loop {
+            let nonce = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("rf-source-privacy-{}-{nonce}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
     fn config(&self, file: &str, node: &str, service: &str) -> Result<PathBuf, std::io::Error> {
         let path = self.0.join(file);
@@ -217,5 +224,66 @@ fn explicit_mounted_key_is_preserved_and_missing_mounts_are_refused() -> TestRes
     let output = probe(&config, "ramflux-gateway", Some(&key))?;
     assert!(!output.status.success());
     assert!(!key.exists());
+    Ok(())
+}
+
+#[test]
+fn startup_error_names_the_identity_directory_and_recovery_options() -> TestResult {
+    let fixture = Fixture::new()?;
+    let config = fixture.config("gateway.toml", "node_a", "ramflux-gateway")?;
+    let directory = fixture.0.join("node-identity");
+    // A file at the directory path fails deterministically, even for privileged test users.
+    std::fs::write(&directory, b"not a directory")?;
+    let output = probe(&config, "ramflux-gateway", None)?;
+    assert!(!output.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains(&directory.display().to_string()), "{diagnostic}");
+    assert!(diagnostic.contains("mount a writable volume"), "{diagnostic}");
+    assert!(diagnostic.contains("RAMFLUX_NODE_PRIVACY_KEY_FILE"), "{diagnostic}");
+    assert_eq!(std::fs::read(&directory)?, b"not a directory");
+    Ok(())
+}
+
+#[test]
+fn startup_removes_only_old_staged_keys_without_changing_the_published_key() -> TestResult {
+    let fixture = Fixture::new()?;
+    let config = fixture.config("gateway.toml", "node_a", "ramflux-gateway")?;
+    let initial = hash(&probe(&config, "ramflux-gateway", None)?)?;
+    let key = fixture.keys()?.pop().ok_or("missing key")?;
+    let original = std::fs::read(&key)?;
+    let old = key.with_extension(format!("{}.tmp", ramflux_protocol::encode_base64url([1_u8; 32])));
+    let recent =
+        key.with_extension(format!("{}.tmp", ramflux_protocol::encode_base64url([2_u8; 32])));
+    let unrelated = key.parent().ok_or("missing directory")?.join("unrelated.tmp");
+    let other_node = fixture.config("other.toml", "node_b", "ramflux-gateway")?;
+    hash(&probe(&other_node, "ramflux-gateway", None)?)?;
+    let other_key = fixture.keys()?.into_iter().find(|path| path != &key).ok_or("other key")?;
+    let other_stage =
+        other_key.with_extension(format!("{}.tmp", ramflux_protocol::encode_base64url([3_u8; 32])));
+    let old_time = std::time::SystemTime::now() - std::time::Duration::from_hours(2);
+    for path in [&old, &unrelated, &other_stage] {
+        let file = std::fs::File::create(path)?;
+        file.set_times(std::fs::FileTimes::new().set_modified(old_time))?;
+    }
+    std::fs::write(&recent, b"active staging file")?;
+    #[cfg(unix)]
+    let link = {
+        let link =
+            key.with_extension(format!("{}.tmp", ramflux_protocol::encode_base64url([4_u8; 32])));
+        std::os::unix::fs::symlink(&unrelated, &link)?;
+        link
+    };
+    assert_eq!(initial, hash(&probe(&config, "ramflux-gateway", None)?)?);
+    assert!(!old.exists());
+    assert_eq!(std::fs::read(&recent)?, b"active staging file");
+    assert!(unrelated.exists());
+    assert!(other_stage.exists());
+    #[cfg(unix)]
+    assert!(std::fs::symlink_metadata(link)?.file_type().is_symlink());
+    assert_eq!(std::fs::read(&key)?, original);
     Ok(())
 }
