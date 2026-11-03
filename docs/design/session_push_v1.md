@@ -1,6 +1,6 @@
 # Session push v1
 
-Design revision 4. Proposal for review; no implementation or runtime acceptance is
+Design revision 5. Proposal for review; no implementation or runtime acceptance is
 claimed. All decisions below supersede the earlier S6 implementation-card recipes.
 The implementation must be dispatched from approved dependency SHAs, not from this
 proposal's source baseline.
@@ -10,7 +10,7 @@ proposal's source baseline.
 ### 1.1 Reproducible baseline
 
 Product source baseline: `0d6da88fb189201a44eefe611d5e79c39ef77661`, fetched
-`origin/main` for revision 4. The design branch retains its original parent;
+`origin/main` for revision 5. The design branch retains its original parent;
 all source citations below were rechecked at this newer immutable baseline.
 All product file:line citations throughout this document refer to that immutable
 object, except the explicitly pinned dependency references in section 1.2.
@@ -392,7 +392,12 @@ boundaries, not next_seq-1 when pending happens to be empty. Publish S=min(R,P)
 under the same lock as P; therefore 0<=S<=P=issued by construction. A newly
 allocated guard with empty pending cannot advance R or S. Durable tombstones can
 advance R only after their terminal commit; no tentative absence counts as settled.
-S maps to this corrected published CursorAckState.settled_inbox_seq, not inbox_seq.
+The persisted CursorAckState.settled_inbox_seq IS the committed R, never raw A
+or an out-of-order ACK maximum. S is the wire projection min(R,P), not a repair
+for an unsafe stored value. WAL replay uses the persisted R as deletion authority;
+therefore every ACK/NACK, retention and startup checkpoint writer must obey the
+same R boundary (section 3.2). Neither page clamping nor merge_cursor(max) can
+repair an over-advanced durable cursor. S does not map to inbox_seq.
 The existing advance_settled also crosses expiry/dead-letter retirements
 (`crates/ramflux-node-core/src/inbox.rs:32-46`,
 `crates/ramflux-node-core/src/inbox.rs:561-583`,
@@ -556,8 +561,12 @@ S6 adds a batch operation, not a second router receive ledger. Apply a candidate
 ACK batch on a cloned affected shard state; accumulate ALL acknowledged and
 retired sequences across individual ACK calls, then commit once and publish the
 new in-memory shard. Hold that shard's mutation serialization through publication.
-On storage error publish nothing, return no success and retire the request/session;
-if durable commit outcome is uncertain, take the fail-stop path below before serving another response.
+On storage error publish nothing and return no success. An error proved before
+commit in a caller-owned transaction can discard that candidate and retire the
+request/session. Once handed off to a writer, or once commit/sync was invoked,
+every non-success takes the fail-stop path below before serving another response.
+These rules also govern NACK, retention/cursor checkpoint, inbox E creation and
+rotation, control-save and tombstone writes; uncertainty is not submission-only.
 
 The page/issued APIs read only the durable published shard view. For each (T,E),
 track assigned sequences still in flight in an in-memory ordered set. Let A be
@@ -590,21 +599,73 @@ Each descriptor has one serialized persistence state:
 | State / evidence | Cancellation, error or Drop disposition |
 | --- | --- |
 | ReservedNoWrite: store append/commit has never been issued | The store-owned resolver may durably write `(T,E,s,aborted)` |
-| DefiniteNonWrite: validation rejected before any append/write hand-off | Same aborted transition, with an explicit store-issued never-written proof |
-| HandedOff: ownership transferred to WAL writer or redb write operation | Request Drop only signals detachment. It cannot authorize a tombstone; the store operation remains owned and resolves independently |
+| DefiniteNonWrite: typed caller-side preflight rejected BEFORE enqueue or direct write hand-off | Same aborted transition, with an explicit store-issued never-written proof; encode, size and frame checks qualify only when completed on this side of hand-off |
+| HandedOff: ownership transferred to WAL/redb writer queue or direct write operation | Request Drop only signals detachment. Positive durability resolves accepted; EVERY non-success resolves FatalUncertain for EVERY member of the affected batch, never a tombstone |
 | AcceptedDurable: positive durable completion | Publish accepted when predecessors permit; detaching the request cannot change it |
 | AbortedDurable: proved non-write plus positive durable tombstone completion | Publish aborted and release tentative replay/index state atomically |
-| FatalUncertain: WAL sync error, writer reply channel closed/dead writer, redb commit error, or panic inside the write | Freeze publication/admission immediately, log typed fatal and fail-stop the process; NEVER write an aborted tombstone |
+| FatalUncertain: ANY non-success after HandedOff, including write, conversion/serialization/size, segment roll, sync, begin/apply/commit, index update, channel loss or panic | The detecting writer sets the process-wide fatal fence before any error reply/notification, poisons further work and triggers fail-stop for the whole batch; NEVER write an aborted tombstone |
 
 No generic Err or unwind is a never-written proof. A panic strictly before any
 store call may abandon ReservedNoWrite; a panic inside the redb write closure is
 FatalUncertain even if rollback seems likely. Mark HandedOff BEFORE issuing the
-write. Accepted and aborted cannot race as independent writes: an atomic state
+write/enqueue, not after it returns. A preflight proof must be issued before
+that transition. An in-writer validation/serialization error is never that proof,
+even if its error type says SnapshotSerialization or Redb and even if the failed
+member wrote nothing: earlier batch members may already have bytes on disk.
+Accepted and aborted cannot race as independent writes: an atomic state
 transition grants either the accepted hand-off or the proved-non-write resolver,
 never both. A late request continuation cannot change that state. Pre-allocation
 refusal/replay/forward-only outcomes need no guard. Audit every
 should_persist_submission=false branch, including an injected allocated branch;
 if it owns an allocation with no write issued, the resolver persists aborted.
+
+The source error-site inventory below is exhaustive for the cited append and
+commit batch bodies at the baseline. Its classification follows ownership and
+batch scope, never an error enum or a guessed rollback. S6a re-enumerates these
+sites at dispatch; any additional post-hand-off non-success follows the same rule.
+
+| Existing error site at baseline | Required classification after hand-off |
+| --- | --- |
+| `crates/ramflux-node-core/src/router_wal.rs:907-919`, `:940-953` | StoredRouterWalPayload::try_from, postcard serialization, checked frame length: FatalUncertain for the whole batch, including earlier written members. To offer DefiniteNonWrite instead, finish these checks on the caller before enqueue and return a typed proof there; redundant in-writer checks remain fatal on error |
+| `crates/ramflux-node-core/src/router_wal.rs:920-938`, `:954-964` | Pre-roll sync, roll_segment, write_record and final sync: every non-success is batch-wide FatalUncertain in both ordinary and pipeline modes |
+| `crates/ramflux-node-core/src/router_wal.rs:967-990`, `crates/ramflux-node-core/src/router_wal.rs:1400-1410` | Record length conversion, segment open, magic write, length/CRC/payload write_all (including partial writes): batch-wide FatalUncertain |
+| `crates/ramflux-node-core/src/router_wal.rs:1006-1044`, `:1046-1098`, `:1100-1142` | Ordinary writer, pipeline enqueue to fsync (including fsync writer stopped), and fsync group failure: detecting thread fences before any reply; every member of each affected group is uncertain |
+| `crates/ramflux-node-core/src/router_wal.rs:1144-1178`, `crates/ramflux-node-core/src/router_wal.rs:783-802` | Post-write index lock/update failure, dead writer or lost completion: FatalUncertain; no positive publication without the final fence recheck. Caller detachment alone remains store-owned work, not a storage error |
+| `crates/ramflux-node-core/src/router_store.rs:133-144`, `:185-219` | Redb writer send/reply loss, begin_write, router_apply_commit_op and commit share batch-wide FatalUncertain, including batch mates; no per-member rollback inference from NodeCoreError::Redb |
+| `crates/ramflux-node-core/src/router_store.rs:853-904`, `crates/ramflux-node-core/src/router_store/retention.rs:63-97` | ACK/NACK and cursor checkpoints: enqueued operation failure or any direct commit/sync/reply uncertainty fences and fail-stops. Only an error BEFORE commit in the caller's own uncommitted transaction proves that candidate absent; it never tombstones an already accepted entry |
+
+**Writer-owned fatal fence:** the WAL shard writer, pipeline writer, fsync thread,
+redb commit writer and direct store-write adapter each set the SAME process-wide
+fatal fence in their own thread at the first observed post-hand-off non-success,
+BEFORE sending any error reply or notifying the supervisor. Panic guards in those
+threads fence during unwind; dead-writer/completion-channel detection fences at
+the store adapter before propagating it. This cannot depend on a request task
+being scheduled. An unsuccessful tombstone operation uses this fence too.
+
+After fencing, every writer is poisoned: no further batch dequeue/admission,
+append, sync or Ok acknowledgement. Already queued and in-progress groups are
+not retried, tombstoned or acknowledged. An unavoidable syscall already in flight
+may return, but its completion cannot publish or send Ok. Any batch whose write
+began after the first observed error is FatalUncertain too; all unpublished
+completions are suppressed across targets and shards. The process then aborts.
+In pipeline mode the fsync thread must fence before releasing a failed group;
+the append thread checks that shared fence before each further write/roll, and
+the success path checks it before every group acknowledgement. A success on a
+later sync cannot clear the fence or validate bytes after a torn frame.
+
+The short final publication gate serializes the fatal transition against release
+of a success. It is distinct from the async mutation serialization lease used
+for cursor commits: the fatal setter never acquires that lease, a DB/shard lock
+or any lock held during I/O. No await or blocking write runs under this final gate. After receiving Ok, recheck the fence UNDER the publication lock
+before advancing P, exposing any read/push or releasing a reply; a stale prior
+check is insufficient. Fence setting never waits for DB I/O or a request's
+progress. Admission and writer success paths share this ordering; no new success
+is released after the fatal transition. Already released pre-fence successes
+must survive recovery. The supervisor aborts independently of DB/shard locks.
+This is needed because WAL recovery truncates at its first invalid frame
+(`crates/ramflux-node-core/src/router_wal.rs:1223-1245`, `:1263-1283`): appending
+and acknowledging a later batch behind a torn frame would lose accepted content
+under the same E. Incarnation checks cannot repair that failure.
 
 Guard Drop is nonblocking: set its preallocated descriptor's detached/resolution
 flag and notify the store-owned resolver thread. No fsync, wait, transaction,
@@ -616,9 +677,10 @@ store-owned fatal supervisor consumes FatalUncertain notifications and aborts
 without acquiring a DB/shard lock or joining the failed writer/resolver. Unwind
 inside a write signals this supervisor directly; it never opens a nested redb
 transaction. Resolver failure or tombstone storage failure signals the same
-fatal supervisor. Admission/read/reply publication checks a shared fatal fence
-set before notification. Shutdown drains owned descriptors or fail-stops; it
-cannot detach cleanup and continue serving an unresolved store.
+fatal supervisor. Admission/read/reply publication checks the writer-set shared
+fatal fence under the final publication gate as specified above. Shutdown drains
+owned descriptors or fail-stops; it cannot detach cleanup and continue serving
+an unresolved store.
 
 Fail-stop is the recovery trigger, not an indefinitely quarantined inbox or a
 background retry policy. The supervisor logs `fatal_durability_uncertain` with
@@ -660,6 +722,36 @@ same immutable envelope/id. Capacity refusal uses `capacity_retry_after` above.
 Neither maps to rejected_security. Fail-stop gives connection loss, not a typed
 negative result for a possibly durable acceptance. S2/session reconnect retries
 unchanged content, not a new envelope ID that could duplicate accepted delivery.
+
+**Unresolved identical retries:** before replay rejection, consult an in-memory
+assignment registry keyed by the SAME authenticated source-qualified replay
+identity and target as the replay guard, with its normalized immutable content
+digest. Register its descriptor atomically with the tentative replay reservation
+and allocation; there is no replay-key-without-descriptor window. On Gateway,
+Federation, own-device fan-out and custody paths an identical authenticated retry
+attaches an extra cancellation-safe async waiter to the ORIGINAL descriptor,
+including ReservedNoWrite, HandedOff and accepted-durable-but-not-yet-published
+states. It never allocates a second sequence and never returns rejected_security.
+A different digest returns idempotency_conflict without attaching or allocating.
+
+Attachment, accepted-index installation and aborted replay/index release share
+the assignment/publication synchronization. Lookup sees either the original
+descriptor (retained until terminal index/publication is installed), its accepted
+durable index, or the fully released aborted identity; recheck before allocation
+after any external durable lookup. No gap while an in-memory index is being
+installed can fall through to generic replay rejection. Waiters all receive the
+original terminal outcome: accepted ORIGINAL (T,E,s) only after P>=s,
+aborted_retry_safe on proved abandonment, or connection loss on fail-stop.
+A fresh allocation after abort is allowed only by a later retry after release,
+not by duplicating an unresolved original. Cancelling one waiter detaches only
+that waiter and cannot cancel the descriptor or its other waiters. Every waiter
+consumes the existing bounded request/ingress admission; lack of capacity returns
+capacity_retry_after with no allocation or effect, never an unbounded waiter list.
+A fan-out retry attaches to each existing child and preserves accepted siblings.
+The current in-memory replay path must change
+(`crates/ramflux-node-core/src/router.rs:936-952`,
+`crates/ramflux-node-core/src/router.rs:1544-1557`); durable lookup alone cannot
+resolve this race.
 
 Extend the existing durable local-delivery idempotency index to retain the
 original `(T,E,s,retain_until)` and authenticated content digest for each
@@ -728,6 +820,30 @@ EntryGone; it is never a live Deliver. Do not reuse any durably assigned sequenc
 after failure/restart. Recover the durable high-water counter, and prevent
 old-process callbacks from publishing into a recovered incarnation.
 
+**Durable settled-cursor authority:** every persisted settled_inbox_seq equals
+the committed R for its (T,E); it NEVER contains raw A/next_seq-1. Compute and
+validate the candidate under the publication lock against in-flight guards and
+live durable rows, persist only that candidate, then publish the committed R.
+The cursor mutation owns the publication serialization lease through commit and
+publication, with store work off runtime workers and short data-lock sections;
+no blocking mutex is held across I/O/await. This lease does not serialize
+submission I/O: s+1 may still become durable behind unresolved s, and neither
+allocation nor pending-row absence is settlement evidence. A lifecycle retirement
+advances R only with its durable retirement/checkpoint commit, never from a
+sweep's tentative memory deletion. Sparse durable boundaries and guard state
+remain authoritative even when pending is empty.
+
+ACK, NACK, retention-sweep and startup checkpoint writers below all use this
+same authority. merge_cursor may take max only of validated committed-R values
+within the same E, preserving a newer valid checkpoint without importing A;
+acknowledged out-of-order sets and issued high-water remain separate metadata.
+Persist the R checkpoint before pruning the tombstones it subsumes. Startup
+finalizes replay/guards/absent historical intervals before computing R, then
+checkpoints it before readiness. Control save cannot write any delivery cursor;
+bootstrap/restore use the serialized recovery path. Tests read the redb cursor
+directly, since S=min(R,P) can mask an unsafe stored value, and reopen WAL after
+a later accepted s to prove the deletion authority did not discard it.
+
 | Assignment / read site at source baseline | S6a disposition |
 | --- | --- |
 | `apps/ramflux-router/src/router_engine.rs:61-103`, `apps/ramflux-router/src/router_engine.rs:182-225` | Sync/async submit, local completion of forwarding and fan-out: allocator guard, terminal persist, wait P>=s before response; audit `apps/ramflux-router/src/router_engine.rs:448-459` non-persisting outcomes |
@@ -741,6 +857,10 @@ old-process callbacks from publishing into a recovered incarnation.
 | `apps/ramflux-router/src/lifecycle.rs:88-112`, `crates/ramflux-node-core/src/router_store.rs:521-533`, `crates/ramflux-node-core/src/router_store.rs:1315-1388` | save_router migration/route-update callers persist control state only; no clear/rewrite of authoritative delivery/replay/recovery tables |
 | `crates/ramflux-node-core/src/router.rs:221-224`, `crates/ramflux-node-core/src/router.rs:1267-1300` | inbox_snapshot and RouterCore::snapshot export only the synchronized published prefix, including tombstones, excluding unresolved replay reservations and accepted rows above P |
 | `apps/ramflux-router/src/handlers.rs:409-413`, `apps/ramflux-router/src/handlers.rs:598-600`, `crates/ramflux-node-core/src/router_store.rs:742-772`, `crates/ramflux-node-core/src/router_wal.rs:783-802` | Async fan-out dispatch and await-only response gates; submission/WAL queue permits precede allocation, storage blocking work stays off runtime workers; closed writer reply is uncertain |
+| `crates/ramflux-node-core/src/router_store.rs:853-904` | record_ack_increment / record_nack_increment and new batch ACK write only the committed R candidate under publication serialization; row retirements and cursor commit together, never raw tentative advance_settled |
+| `apps/ramflux-router/src/retention.rs:13-25`, `crates/ramflux-node-core/src/router/retention.rs:12-27`, `crates/ramflux-node-core/src/inbox.rs:591-621` | Periodic/explicit sweep and take_retention_checkpoints snapshot only validated R; no in-flight guard is bypassed by expiry or empty pending. Never requeue/retry an uncertain commit and continue serving; apply the fatal rule |
+| `crates/ramflux-node-core/src/router_store/retention.rs:57-116`, `:121-132` | retain_cursor_checkpoint(s), merge_cursor and cursor_bytes are the common persistence boundary: validate R and E before max merge, with no public raw-cursor bypass |
+| `crates/ramflux-node-core/src/router_store.rs:1185-1187`, `crates/ramflux-node-core/src/router_store.rs:1297-1303` | Startup checkpoint computes R only after finalized recovery, before readiness. WAL exclusion consumes exactly that persisted R, so a guard-era checkpoint can never remove later accepted s |
 | `apps/ramflux-gateway/src/session.rs:1272-1343`, `apps/ramflux-gateway/src/session.rs:1444-1468` | Gateway reply-driven push/fan-out needs no separate watermark cache; actual pushed frame is the enforcement oracle |
 
 The two-submission test holds s's write, completes s+1's own write, and captures
@@ -763,15 +883,15 @@ names the independent mutations and distinguishes liveness from process death.
 | R0 before durable submission, after in-memory preparation | no committed WAL record | no committed redb submission | No successful acceptance sent; restart has only prior durable state |
 | R1 submission commit | append+sync submission, including E and acceptance time; may have no redb inbox row | one redb transaction: E+counter+replay tuple+inbox/deadline indexes/local-delivery metadata | Reply only after durable success AND P>=s for each target; crash before reply may be sender retry; preserve replay behavior |
 | RA proved-non-write guard abandonment | store-owned resolver syncs aborted record and counter before P publication | resolver commits aborted+counter outside the request transaction | Drop only signals; atomic replay/index release precedes P; typed aborted_retry_safe; uncertain writes cannot enter RA |
-| RF uncertain accepted/tombstone write | partial or complete durable bytes possible; never append aborted to resolve uncertainty | commit may be durable despite Err/panic; never attempt nested tombstone transaction | Fatal fence, typed log and store-owned supervisor abort; connection loss; restart disk is authority, idempotent accepted retries await P |
+| RF ANY post-hand-off non-success, accepted/tombstone or other store write | partial or complete durable bytes possible for ANY member of the failed batch; never append aborted to resolve uncertainty | begin/apply/commit, channel loss and panic are all batch-wide uncertain after enqueue; never attempt nested tombstone transaction | Detecting writer fences before reply, poisons all further acknowledgements and triggers supervisor abort; connection loss; restart disk is authority, identical waiters retry original accepted assignments gated on P |
 | RS control save / published snapshot | control-only save leaves WAL/redb delivery and recovery state untouched | control-only save leaves incremental delivery/replay/tombstone/index tables untouched | Export <=P under publication synchronization; never clear/rewrite from raw/stale memory or lower durable recovery counters |
 | R1 then crash before sweep/checkpoint, restart before expiry | merge WAL with redb cursor exclusions | restore redb pending rows | Entry live in both modes |
 | R1 then crash, restart past expiry before sweep | WAL replay/retention filters may remove entry, issued watermark remains | restored expired row remains, with deadline | Page omits live entry; WAL can give unknown, redb derives expired; client suppresses gap when W0 exists |
-| WR batch ACK commit | redb cursor checkpoint plus union of all row/index retirements; WAL records remain, excluded on merge | same redb atomic operation | Before commit all old; after commit all settled. No cursor-only or last-ACK-only retirement |
+| WR batch ACK commit | redb cursor checkpoint stores R plus union of all row/index retirements; WAL records remain, excluded by committed R/ACK set on merge | same redb atomic operation | Candidate R validated under publication authority; before commit all old, after commit all settled. No cursor-only or last-ACK-only retirement; uncertain failure uses RF |
 | WR then crash before in-memory publication/reply | redb cursor controls WAL merge | redb cursor and row deletion restored | Resend returns already_settled/not_found; no duplicate content application |
-| RN NACK commit | existing redb cursor/attempts/retirements | same | Async handler responds after commit; third NACK retirement preserved |
+| RN NACK commit | redb R/attempts/retirements | same | Same R authority; async handler responds after commit; third NACK retirement preserved; uncertain failure uses RF |
 | RE retention deletion commit | remove due durable rows/replay indexes, retain/checkpoint issued state; WAL memory prune is separate | remove due rows/indexes, keep watermarks | Crash before commit may restore expired rows; readers still hide them. No exact reason persistence is promised |
-| RC cursor checkpoint commit | preserve recovered issued watermark before WAL segment retirement | retain issued watermark after expiry of last row | Crash yields old/new complete checkpoint; do not reuse issued sequences |
+| RC retention/startup cursor checkpoint commit | persist R and preserve recovered issued high-water before WAL segment retirement | persist R and retain issued high-water after expiry of last row | Under publication authority; never raw A. Crash yields old/new complete checkpoint; uncertain failure uses RF; no accepted s is excluded by a guard-era checkpoint |
 | RP WAL memory prune / closed-segment unlink | volatile record pruning is not a new durable transaction; unlink only under existing retention margin after durable watermark recovery/checkpoint | not applicable | After restart exact expiry reason can be unknown; coverage still includes issued seq. Tests include another restart after pruning |
 | Page/FetchEntry/issued probe | no write | no write | One locked consistent view; cannot manufacture durable loss history |
 | Ephemeral routing, marker insertion, enqueue, expiry | no durable write | no durable write | After restart transient state is absent, never reconstructed from WAL/redb |
@@ -1270,7 +1390,7 @@ authority before any outgoing ACK frame; direct engine calls cannot bypass the
 guard. Raw transport Resume cannot apply messages or move C.
 
 The newer own-copy ACK hook parses entry content
-(`crates/ramflux-sdk/src/client/own_device_copy/receipts.rs:143-183`), while W2
+(`crates/ramflux-sdk/src/client/own_device_copy/receipts.rs:143-179`), while W2
 removes terminal work. S6b must not put that content or packet ID into a
 sequence-only ACK intent. W1 instead attaches an indexed (T,E,s) locator to the
 existing message-linked own-copy committed/receipt state, registered for footprint
@@ -1383,7 +1503,7 @@ card. Controller writes new cards from this approved design with explicit SHAs.
 
 | Card | Complete scope and principal files | Dependency / enablement | Affected slices |
 | --- | --- | --- | --- |
-| S6a node durable session protocol | node-core gateway_frames, inbox_page, entry_bound, inbox sparse index; router handlers/router_engine/router_store/router_wal incarnation lifecycle, settled cursor, WAL identity, tombstones, published snapshot/control-save isolation, idempotent accepted retries, async reply gates, store-owned resolver/fatal supervisor and ACK batch; node-core custody_delivery and custody_service/admission guard/read/reply paths; gateway push_queue, issued_probe, session, state, clients, serve; compact reply split, FetchEntry and capabilities, async ACK/NACK; node docs | Current main; no S2 dependency. Advertise capability only after the entire durable protocol exists. Legacy clients remain supported | id02, s39a, s51, s35, call01, s50 plus node protocol fixtures |
+| S6a node durable session protocol | node-core gateway_frames, inbox_page, entry_bound, inbox sparse index; router handlers/router_engine/router_store/router_wal incarnation lifecycle, settled cursor, WAL identity, tombstones, published snapshot/control-save isolation, unresolved retry attachment and durable idempotency, async reply gates, writer-owned fatal fence and store-owned resolver/fatal supervisor and ACK batch; node-core custody_delivery and custody_service/admission guard/read/reply paths; gateway push_queue, issued_probe, session, state, clients, serve; compact reply split, FetchEntry and capabilities, async ACK/NACK; node docs | Current main; no S2 dependency. Advertise capability only after the entire durable protocol exists. Legacy clients remain supported | id02, s39a, s51, s35, call01, s50 plus node protocol fixtures |
 | S6b SDK durable receive ledger | storage account_db/receive/{schema,stage,cover,settle,privacy}, schema migration, footprint and backup paths; SDK bus/push_receiver/{apply,reorder,ack_batch,compat,keepalive}, S2 host dispatch/read timestamp and actor arm; bus/sync_driver and contact_backpressure; bus/dispatch/{group,a2i_a2ui,message}; client/{account,dm,a2i,group_quarantine,own_device_copy,own_device_copy/receipts,routed/{receive,committed},surface/resync_request}; storage journal/{quarantine,inbox_failure,inbox_legacy,inbox_policy}; exact stage/entrypoint adaptations in sections 3.1/7.1, events/status, docs and CHANGELOG | S6a + merged S2/S3. Adapts provisional interfaces; no changes in S2 work-in-progress branch. Complete push and compat receive at delivery | id02, contact02, s74, s39a, s51, s35, call01, s50; push01 durable cases |
 | S6c ephemeral transport | gateway ephemeral validation/queue/mesh result; router ephemeral_route and volatile replay; SDK transient API/dispatch/channel; durable-origin refusal; ephemeral docs | S6a/S6b; S0 dependency satisfied by approved complete Decision6 at 61d96751, including section8.2. Advertise separate `gateway.ephemeral.v1` signed/echoed capability only when the full path exists; session_push alone never implies it during staged merge | push01 transient case, id02, s50, s51 refusal fixtures |
 | S6d acceptance harness | itest src/tests/push01_session_push.rs and realnet.yml; mixed-version fixtures, ledger crash scenarios in product test modules if fixtures need shared plumbing | S6b/c delivered, exact published product pin; all three push01 cases execute green before this card READY | all selectors below |
@@ -1426,10 +1546,12 @@ a minimum acceptance set; functionality without its stated oracle is incomplete.
 | S6a guard_drop_tombstone | Early return, cancellation, pre-write panic, pre-write validation Err and injected allocated should_persist=false each prove no hand-off, resolve aborted on store thread with process alive; accepted-vs-drop hand-off race has one winner; s+1 progresses, reopen aborted in both modes; oldest live guard>30s WARN/metric | Omit resolver signal; P/reply watchdog stalls. Independently permit accepted hand-off after abort claim or omit WARN; terminal-state/metric assertion fails |
 | S6a guard_tombstone_storage_fault | Fail tombstone write in child process: P frozen, fatal_tombstone_persistence and supervisor abort without DB/shard lock; no success or quarantine left serving; reopen follows durable bytes, no fabricated aborted on failed write | Keep serving after resolver storage error; child stays alive or publication crosses unresolved s; outer watchdog/state oracle fails |
 | S6a published_snapshot_control_save | Hold never-written s, durably complete s+1, invoke both lifecycle save_router callers and inbox_snapshot/RouterCore::snapshot; exported bytes have only <=P dispositions and no unresolved replay key; abort s, save again, reopen both modes: aborted s with no content/replay/index, accepted s+1/high counter intact, s cannot reappear live below C | Export raw shard/replay state; s appears in serialized snapshot. Independently restore clear/rewrite from filtered snapshot; reopened s+1/high-water or tombstone disappears |
-| S6a uncertain_write_fail_stop | Separate child cases for bytes durable then WAL sync Err, writer commits then reply closes, redb commit Err after durability, panic inside redb write closure: each logs fatal_durability_uncertain and aborts promptly without aborted write; restart returns accepted assignment where durable and correct disk outcome otherwise; client never covers aborted s then finds live s below C | Tombstone on any Err/panic, suppressing required fail-stop: death/no-tombstone oracle fails immediately; reopen plus captured C also detects a stranded live row if it published aborted |
+| S6a uncertain_write_fail_stop | Child cases per section 3.2 error-site class: batch of 3 fails conversion, postcard or frame-length check at record k after earlier members wrote; partial length/CRC/payload write_all, pre-roll sync, roll open/magic, final/pipeline fsync, fsync-channel loss, index update/lock, writer reply loss, redb begin/apply/commit and panic. Every affected member fails uncertain, writer fences before reply, logs fatal_durability_uncertain and aborts promptly; no aborted write, no live frozen-P process. Reopen actual files equals disk truth (earlier complete members may be accepted), with every pre-fence success preserved. Exercise ACK/NACK, retention/startup checkpoint and E rotation uncertainty too | Map in-writer serialization/size error to DefiniteNonWrite; death/no-tombstone oracle fails, and reopen may find accepted batch mates under a published tombstone. Independently tombstone any other post-hand-off Err/panic; same oracles fail |
+| S6a writer_fence_blocks_later_batch | Ordinary WAL, pipeline WAL and redb group writer child cases: batch1 T1 fails partial write or sync/commit; batch2 T2 is queued, and separately pipeline-appended but awaiting fsync. Park the error notification/request task and briefly hold supervisor abort at a test barrier. Writer fence is already set; batch2 has no Ok reply, publication, push or issued advance, and no further write/sync starts after fence. An already-Ok completion parked before publication is also refused by the lock-time fence recheck. Release abort, reopen and assert every success released before the fault is live/settled as expected, no acknowledged row truncated | Set fence only in the request task/supervisor; parked notification lets batch2 succeed (partial-frame recovery then truncates it). Independently omit publication recheck and release the parked Ok; forbidden success/push is observed |
+| S6a unresolved_identical_retry | Hold predecessor s, hand off s+1, resend identical authenticated s+1 on a new connection before release, also in ReservedNoWrite and accepted-durable/index-install windows: one allocation/store operation, neither call returns rejected_security, both await original P then return the SAME E/s+1 and one recipient effect. Different digest conflicts. Repeat original abort (all waiters aborted_retry_safe), fail-stop (connection loss), waiter cancellation and fan-out/custody paths; bounded waiter admission has zero extra allocation | Keep in-memory replay rejection; second caller returns rejected_security while original delivers. Independently skip attach/recheck and allocate anew in index-install window; allocation count or returned E/s differs |
 | S6a aborted_and_durable_sender_retry | Abort s before hand-off: live sender sees aborted_retry_safe, same envelope accepts once at new seq before AND after restart, no stale replay/index key. Fail-stop while s+1 durable but held: connection loss, retry original authenticated content returns original E/s+1 after P recovery, never rejected_security or second allocation; fan-out mixed accepted/aborted children preserve accepted siblings | Keep aborted replay/index reservation; same-process retry rejects. Independently keep Gateway persistent replay rejection or allocate anew; durable retry outcome/sequence/effect-count assertion fails |
-| S6a single_worker_reply_and_drop | One-worker Tokio runtime parks s after allocation before hand-off using an explicit test-only barrier with permits pre-reserved; async fan-out s+1 to same T does not block worker, heartbeat and s continuation poll, fan-out reaches its held P gate while s is parked, both replies finish after release in WAL and redb-only modes. Separately pre-write unwind resolves off-worker; panic inside held redb closure fail-stops without nested begin_write deadlock | Blocking condvar in fan-out; independent wall-clock watchdog observes stalled heartbeat/replies. Independently fsync/nested transaction in Drop; blocked abort/tombstone watchdog fails |
-| S6a settled_prefix_bounded_by_publication | Empty pending with in-flight s and durable s+1: page S<=P and no first-page rejection; raw A cannot advance settled. Abort s then retire s+1: durable prefix advances in both modes and after reopen | Use original next_seq-1/raw settled when pending empty; captured S>P or durable settled jumps an in-flight guard |
+| S6a single_worker_reply_and_drop | One-worker Tokio runtime parks s after allocation before hand-off with permits pre-reserved; async fan-out s+1 reaches held P gate, heartbeat and s continuation poll, both replies finish after release in WAL and redb-only modes. Pre-write unwind resolves off-worker; a tombstone submission hook must run on the registered resolver thread; physical transaction/append/sync hooks must run only on registered resolver/WAL/commit store threads, never the captured Drop-caller thread or inline inside its Drop span. Panic inside held redb closure fail-stops without nested begin_write deadlock | Blocking condvar in fan-out stalls heartbeat/replies under independent wall-clock watchdog. Independently put even a fast fsync/transaction in Drop; thread-ID/inline-write assertion fails without relying on slow storage; instrument the actual store file/transaction boundary, not a caller-supplied label. Nested begin_write inside a panicking write closure fails abort watchdog |
+| S6a settled_prefix_bounded_by_publication | WAL mode, s allocated and in flight: independently empty pending and only live s+1 pending, with expired s-1 to trigger a real sweep; separately ACK an earlier row while s held. Read redb settled_inbox_seq directly after EACH checkpoint/ACK commit: equals expected R<s (not merely page S<=P). Accept s, capture successful reply, kill without Drop and reopen before TTL: s remains live, no false settled exclusion. Exercise NACK retirement with the same held-s boundary. After accepting s, hook the startup checkpoint on reopen, assert R<s, then reopen a second time with s still live; page S<=P throughout. Repeat redb-only boundary check; abort s then retire later rows and verify legitimate R advancement after reopen | Restore next_seq-1/raw settled, or omit guard from earliest-pending boundary, in ANY ACK/sweep/startup writer; direct durable value exceeds expected R while page clamp may still pass, and WAL reopen loses successfully accepted s. Mutation must hit the actual writer commit, never just the wire S expression |
 | S6a aborted_slot_capacity | Offline pending head pins settled; reserve/commit 4,096 noncoalescing aborted ranges, next submit promptly returns capacity_retry_after with retry_after_ms=1000 and zero allocation/replay/index/content effects; settlement/checkpoint releases slots and retry progresses | Wait indefinitely or allocate with no reason slot; watchdog or exact counter/index/capacity assertion fails |
 | S6a out_of_order_process_crash | Complete s+1 while s uncommitted, no replies beyond P, kill process without Drop, restart with durable s+1/high counter; missing s emits unavailable/unknown once, never expired or aborted, sender retry remains safe | Fabricate expired or aborted for absent never-accepted s; exact gap-reason assertion fails |
 | S6a wal_identity_and_restore_rotation | Explicit snapshot recovery rotates E before traffic in both modes; independently delete/recreate WAL directory, change identity and remove required segment/anchor; first request observes new E, old intent cannot ACK reused seq; ordinary complete restart retains E | Skip recovery rotation or accept empty/mismatched WAL under old E; new-E assertion fails even if cursor_ahead freeze otherwise prevents delivery |
@@ -1663,13 +1785,28 @@ All tests in this table and section 9.2 are specifications, not executed results
 | Finding | Design answer and implementation oracle |
 | --- | --- |
 | design-r3-M1 snapshot durability bypass | Section 3.2 snapshot/inbox export <=P under publication synchronization, no unresolved replay keys; save_router control-only, no live delivery table replacement; published_snapshot_control_save and raw/filtered rewrite mutations |
-| design-r3-M2 uncertain durability | Section 3.2 explicit never-written proof and HandedOff state; all four uncertain classes fail-stop, no tombstone; uncertain_write_fail_stop child-process/disk/C oracles |
+| design-r3-M2 uncertain durability | Section 3.2 explicit never-written proof and HandedOff state; every post-hand-off non-success is batch-wide fatal (four r3 examples are not a closed list), no tombstone; uncertain_write_fail_stop child-process/disk/C oracles |
 | design-r3-M3 replay reservation / sender | Section 3.2 atomic assignment-owned replay/index release; aborted_retry_safe, fail-stop connection loss, durable idempotent retry with original assignment gated on P; aborted_and_durable_sender_retry |
 | design-r3-M4 runtime deadlock | Section 3.2 pre-allocation permits, async fan-out/reply waits, bounded off-runtime storage, nonblocking Drop and store-owned resolver/fatal supervisor; single_worker_reply_and_drop plus redb-closure panic child |
 | design-r3-L1 S<=P | Sections 2.5/5.1 corrected durable R stops at in-flight guards, S=min(R,P); settled_prefix_bounded_by_publication |
 | design-r3-L2 exhausted abort slots | Section 3.2 capacity_retry_after with retry_after_ms=1000 before allocation/effects; aborted_slot_capacity |
 | design-r3-L3 migration precedence | Section 2.4 direct old-SDK DB upgrade uses migration, retains C and issued fence; existing ledger U->E alone resets/imports S; legacy_prior_crash_classification |
 | design-r3-L4 recovery trigger | Section 3.2 uncertain/tombstone failure immediately fatal-fences then supervisor aborts, restart recovery before readiness; no quarantine-without-recovery; guard_tombstone_storage_fault |
+
+### 10.4 Design r4 review closure (round r5)
+
+Controller r5 decisions extend the r4 examples to every post-hand-off failure;
+these normative rules supersede any narrower historical summary. All acceptance
+tests/mutations remain unexecuted implementation requirements.
+
+| Finding | Design answer and implementation oracle |
+| --- | --- |
+| design-r4-N-M1 incomplete uncertain classes | Section 3.2 complete WAL/redb error-site inventory: ANY post-hand-off non-success is FatalUncertain for EVERY batch member; only typed caller pre-enqueue checks prove non-write. Applies to ACK/NACK/checkpoint/E writes too; uncertain_write_fail_stop adds record-k serialization/size, partial writes, roll and all other class injections, no-tombstone/reopen oracles |
+| design-r4-N-M2 late fatal fence | Section 3.2 detecting writer/fsync/commit thread fences process-wide BEFORE error reply, poisons further batches/Ok, publication rechecks under lock after Ok; writer_fence_blocks_later_batch parks the notification task and captures T2 replies/push plus post-abort disk, with request-task-fence and omitted-recheck mutations |
+| design-r4-N-M3 unresolved identical retry | Section 3.2 registry atomically binds tentative replay key to descriptor; identical retry attaches across prewrite/hand-off/index-install windows, gets original gated assignment or abort/loss, no duplicate allocation; unresolved_identical_retry rejects in-memory replay/second-allocation mutations |
+| design-r4-N-M4 durable cursor authority | Sections 2.5/3.2 persist committed R under publication authority; ACK/NACK, sweep, common merge and startup writers inventoried; settled_prefix_bounded_by_publication directly reads durable R during in-flight s, then accepts s and reopens WAL to detect deletion, independently of wire clamp |
+| design-r4-L1 Drop mutation oracle | Section 9.2 single_worker_reply_and_drop captures resolver-submission and physical-write thread IDs plus inline Drop hook: even a healthy fast synchronous write fails store-thread identity, while nested closure write still fails watchdog |
+| design-r4-L2 own-copy citation | Section 7.1 cites record_own_copy_ack at receipts.rs:143-179, ending at the function boundary rather than entering tests |
 
 ## 11. Residuals and owner questions
 
