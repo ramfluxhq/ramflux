@@ -131,7 +131,9 @@ match; an authority refresh during the wait is never rolled back.
 Task federation forwarding uses the same one-second submit deadline as local
 confirmation forwarding. It returns `TaskDeliveryTimeout` when that deadline
 expires; worker-capacity refusal is retryable `Unavailable`. At most four blocking
-forward workers run process-wide, separately from manifest workers. Socket connect,
+forward workers run process-wide, separately from manifest workers. After sealing,
+capacity refusal uses the ordinary bounded attempts and backoff, rather than free
+retries that could repeatedly advance the sender ratchet. Socket connect,
 write and response reads share one deadline. A platform DNS resolver can outlive
 the caller, so the worker retains its permit until it actually exits; it owns no
 account, database, signing state or gateway engine. Other synchronous federation

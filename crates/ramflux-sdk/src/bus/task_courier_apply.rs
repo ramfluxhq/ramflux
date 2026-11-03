@@ -18,13 +18,20 @@ pub(super) async fn apply(
     let result = apply_item(account, &item, preparation).await;
     account.task_prepared_manifests.clear();
     account.task_prepared_only = false;
+    apply_result(account, &item, result)
+}
+
+fn apply_result(
+    account: &LocalBusAccountState,
+    item: &Item,
+    result: Result<bool, SdkError>,
+) -> Result<bool, SdkError> {
     match result {
         Ok(sent) => Ok(sent),
-        Err(SdkError::TaskForwardWorkerCapacity) => Ok(false),
         Err(error) if stop_class(&error) => Err(error),
         Err(_) => {
             tracing::warn!(item_id = item.key, "task courier item application failed");
-            match charge(account, &item, Failure::Application) {
+            match charge(account, item, Failure::Application) {
                 Err(error) if stop_class(&error) => Err(error),
                 _ => Ok(false),
             }
@@ -154,4 +161,56 @@ fn charge(account: &LocalBusAccountState, item: &Item, reason: Failure) -> Resul
     })?;
     tracing::warn!(item_id = item.key, "task courier item charged");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::task::control::ForwardJob;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    #[tokio::test]
+    async fn post_seal_worker_capacity_refusal_records_a_bounded_application_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::bus::runtime_tests::root("post-seal-capacity-retry");
+        let account = crate::bus::runtime_tests::account(
+            &root,
+            "sender",
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )?;
+        let db = account.client.account_db()?;
+        let key = "task/forward/capacity";
+        let now = now_unix_timestamp();
+        db.persist_actor_state(
+            key,
+            &ForwardJob {
+                conversation_id: "thread".into(),
+                task_id: "task".into(),
+                attempts: 0,
+                next_at: 0,
+                created_at: now,
+            },
+        )?;
+        let (_, revision) = queue::load(&account, key)?.ok_or("job")?;
+        let item = Item { key: key.into(), revision, requests: Vec::new(), failure: None };
+        assert!(!apply_result(&account, &item, Err(SdkError::TaskForwardWorkerCapacity))?);
+        tokio::task::yield_now().await;
+        let saved = db.load_actor_state::<ForwardJob>(key)?.ok_or("saved job")?;
+        assert_eq!(
+            saved.attempts, 1,
+            "post-seal refusal must not enable an unbounded free resealing loop"
+        );
+        assert!(saved.next_at >= now + 2);
+        let failure = db
+            .actor_state_key_page("task/courier_failure/", 1)?
+            .into_iter()
+            .next()
+            .ok_or("failure record")?;
+        let record =
+            db.load_actor_state::<serde_json::Value>(&failure)?.ok_or("failure metadata")?;
+        assert_eq!(record["reason"], "application");
+        assert_eq!(record["attempts"], 1);
+        Ok(())
+    }
 }
