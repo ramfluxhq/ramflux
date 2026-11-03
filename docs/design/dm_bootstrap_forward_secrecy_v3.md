@@ -3,7 +3,7 @@
 
 # Born-v3 DM bootstrap forward secrecy
 
-**Design revision 2, 2026-11-03. Proposal; no production implementation or runtime
+**Design revision 3, 2026-11-03. Proposal; no production implementation or runtime
 acceptance is implied.** Rotating private prekeys belong exclusively to unlocked account
 data. The vault supplies long-term branch agreement authority for individual bootstraps,
 but contains no prekey derivation API. New bootstrap requires the signed
@@ -13,8 +13,8 @@ requests use the existing authenticated gateway grant; the custody session is no
 Policy is settled: weekly SPK rotation, 14-day public validity, at most 21 days of normal
 private SPK retention, seven-day delivery, durable account/pair/target/prefix lease quotas,
 strict directory lease-time expiry, and a bounded receive-only old-format activation grace.
-The constants and failure policies below are contracts for the subsequent implementation
-cards. Every future test and mutation in this note remains unexecuted in this design round.
+The constants and failure policies below describe the activated end state. Section 13
+defines the exact dormant/interim behavior after each separately merged card. Every future test and mutation in this note remains unexecuted in this design round.
 
 ## 1. Source baseline and write-path inventory
 
@@ -39,7 +39,9 @@ native acceptance evidence.
 | [Envelope limits](../../crates/ramflux-protocol/src/replay.rs), [inbox retention](../../crates/ramflux-node-core/src/inbox.rs) | `MAX_ENVELOPE_TTL_SECONDS = 604_800`; `inbox_retain_until` caps at `min(created_at + ttl, accepted_at + 7 days)`. This determines the delivery horizon. |
 | [Custody limits](../../crates/ramflux-protocol/src/custody/mod.rs), [account admission storage](../../crates/ramflux-node-core/src/router_store/custody_accounts.rs) | Roster ceiling 1024, ordinary enrollment ceiling 960, skew 300 seconds; node admission ceiling 65,536 accounts and existing authority-row ceiling 16 MiB. Prekey accounting must be added explicitly. |
 
-Only native DM bootstrap is activated by this design. Established ratchets and legitimate
+Only native DM bootstrap is supported after this design is activated. The non-native
+manifest/mvp1 SDK path is removed in card 03 and refused by the node in card 04; it is
+not a second supported bootstrap profile. Established ratchets and legitimate
 historical message access remain intact. This is X25519/X3DH, with no post-quantum claim.
 Native home migration remains unavailable until its authority fence exists.
 
@@ -51,13 +53,17 @@ It is keyed by account anchor, device ID, epoch and signing/agreement commitment
 generation has an increasing ordinal plus fresh incarnation tag; SPKs and OPKs have their
 own monotone serials and fresh IDs. None of these identifiers derives a private key.
 
-The vault retains long-term signing/agreement authority only. Delete
+In the activated state the vault retains long-term signing/agreement authority only. Delete
 `BranchCredentials::signed_prekey_seed`, `BranchCredentials::prekey_bundle`, the fixed
 `custody-prekey-v1` constructor ID, and `custody/network.rs::prekey_bundle`. Registration
 must accept only a committed public `PrekeyPublicationSnapshot` from the unlocked provider.
 Do not replace these methods with a renamed deterministic helper or a native call into
 `identity.rs::create_and_store_prekey_bundle`. The removal must compile with all native
 callers adapted; production-source inventory also checks for reintroduced rebuild APIs.
+Section 13 schedules physical deletion with card 05's activation: card 03's new provider
+path never calls them, but the existing builders remain unchanged only on the dormant
+old-format native path until 05. This temporary staging does not claim non-resurrection
+or the new FS guarantee for pre-activation traffic; no renamed replacement builder is added.
 
 **Long-term agreement source: load branch credentials from the vault per new bootstrap.**
 Send DH1 and receive DH2 borrow `BranchCredentials.agreement` in a zeroizing operation
@@ -68,13 +74,23 @@ cancellation. Transport retains no agreement key and no SPK/OPK private bytes.
 
 Perform a blocking vault load outside the account writer. Recheck the account unlock
 and vault unlock epochs, selected owner and authority before entering the writer/crypto
-operation and committing its result;
-a lock racing the load invalidates it and drops the credentials. No writer guard spans a
+operation and committing its result; a lock racing the load invalidates it and drops the credentials. No writer guard spans a
 network await. An explicit data/vault lock suspends maintenance and new bootstraps and
 closes the corresponding networking path through the existing lock lifecycle. A vault
 access refusal is temporary, not permission to use a cached agreement secret. History
 remains readable whenever account data itself is unlocked; no locked-data networking mode
 or authority-only connection mode is added.
+
+On supported Apple keychains, branch items use
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. A locked device can therefore leave
+account history readable while a first-contact send is pending and a first-contact
+receive is retained without ACK. This is an explicit change from the DB-held agreement
+seed. A blocked first packet can delay later ordered packets from that sender/session;
+other independently schedulable senders continue under the existing inbox scheduler,
+with bounded retries until unlock or TTL. No new out-of-order decrypt or locked-device
+key cache is introduced. A 61-target first-contact fan-out uses 61 separately scoped
+vault loads, not a batch-held agreement secret. Paired same-window timing must measure
+keychain load count/latency and the resulting fan-out and locked-inbox delay explicitly.
 
 `initialize_born_v3_branch` becomes verified signer/provider loading. It must never write
 an actor from credentials. Fresh authorized branch creation explicitly provisions CSPRNG
@@ -89,6 +105,21 @@ actor stores only the vault reference and public agreement commitment. Verify de
 storage-API absence, secure deletion, actual checkpoint completion and reopen; an encrypted
 file byte scan is not an agreement-secret erasure proof.
 
+The v3-only cleanup is explicit: card 03 deletes the non-native manifest bootstrap in
+[bus/state.rs](../../crates/ramflux-sdk/src/bus/state.rs) (`!native` in
+`ensure_gateway_live_inner`), legacy activation publication in
+[bus/dispatch/device.rs](../../crates/ramflux-sdk/src/bus/dispatch/device.rs), and the
+legacy publication call in
+[bus/dispatch/identity_authority.rs](../../crates/ramflux-sdk/src/bus/dispatch/identity_authority.rs).
+Remove their `identity.rs::create_and_store_prekey_bundle` production callers and helper;
+non-native dispatch returns typed `native_account_required` before networking or secret
+persistence. Card 04 refuses non-native manifest/mvp1 prekey publication/fetch/lease with
+the same typed scope outcome. Native accounts using the pre-activation old wire format
+are distinct from non-native identities and remain usable as section 13 specifies.
+No dual production `identity_seed` path remains after activation. Feature-only legacy
+identity/proof-negative fixtures may remain offline; they cannot authorize production
+DM networking. Section 13 inventories and assigns replacement of realnet legacy fixtures.
+
 ## 3. Time, rotation and delivery contract
 
 Let `T = MAX_ENVELOPE_TTL_SECONDS = 604_800` seconds and
@@ -100,9 +131,10 @@ fail with `prekey_clock_untrusted` until time is usable, while history stays rea
 
 | Item | Contract |
 | --- | --- |
-| SPK generation | Independent CSPRNG, fresh ID/serial; rotate every `T` while online. |
+| SPK generation | Independent CSPRNG, fresh ID/serial; rotate every `T` while online, never more often than `T` unless forced by expiry or authority change. Restart/reconnect alone is not a rotation reason. |
 | SPK signed validity | `expires_at <= created_at + 2T` (14 days); reject a new selection at expiry. |
 | SPK private bound | Retire at `expires_at + T`, no later than `created_at + 3T` (21 days). Four total private/pending SPK slots, including any temporary old-format receive slot. Expiry is enforced on reads. |
+| Old-format receive-only SPK | A migrated already-owned deterministic SPK expires exclusively at `A + T`, independent of its original creation time or absent public expiry. It is exempt from the new random-SPK `created_at + 3T` read rule, occupies one of the four slots and is excluded from the FS claim. |
 | OPK pool | Start with 8; below 2 directory-unleased keys, add fresh IDs to restore 8. Preserve outstanding private keys. |
 | OPK private bound | 200 slots across retained generations, including erasure-pending keys. Process retirement before refill; at the bound use a valid new-profile SPK-only result. |
 | Consumed OPK | After successful authentication, remove in the advanced-ratchet/replay transaction. Complete storage retirement before releasing its slot. |
@@ -120,6 +152,14 @@ most another `T`. The additional OPK skew margin is a retirement safeguard, not 
 message-validity time. Normal canonical SPK access ends at 21 days; a blocked WAL checkpoint
 remains visibly erasure-pending and cannot be advertised as completed forward secrecy.
 
+When all four SPK slots are live or erasure-pending, run due retirement/checkpoint work
+first. Never evict a still-deliverable random key before `expires_at + T`, shorten the
+receive-only slot's grace, or free a pending slot early just to rotate. If no slot becomes
+available, report typed `prekey_capacity`: continue with an authorized unexpired published
+base where allowed; mandatory expiry/authority-change refresh stays pending and new
+bootstrap fails closed. Authority changes fence old work rather than reusing an old key.
+The four-slot bound spans retained generations; a forced rotation is not a reset loophole.
+
 Before transmitting or retrying a frozen packet, check `D`. If it expired before emission,
 retire that unsent bootstrap operation/session, retain the application's pending message,
 and obtain a new lease/operation with new `E`, `R0`, envelope and increasing bootstrap
@@ -127,6 +167,14 @@ sequence. Never resend the expired ciphertext or reuse its lease under a new hea
 If prior emission is uncertain, preserve existing delivery/idempotency evidence while
 settling the old attempt; a fresh attempt cannot rewind replay/ordering floors or duplicate
 the application's send. The receiver refuses an expired `D` even if a private key remains.
+
+Leasing early consumes the real delivery window: a lease at t0 first emitted at t0 + 6
+days has at most one day left, possibly less because of envelope TTL or SPK expiry.
+There is no proactive re-lease threshold in v1; emit a still-valid frozen operation under
+its original deadline, or replace it only after expiry as above. A receiver's local
+`bootstrap_key_unavailable` terminal event/ACK is not a signed loss notification to the
+sender. The sender gets only existing delivery/receipt/timeout evidence and must not
+infer successful decryption from inbox acknowledgement.
 
 OPKs belong to the pool generation, not one SPK rotation. Unleased keys can remain through
 rotation; the lease binds one to the then-current SPK. Lease times come only from the
@@ -153,6 +201,14 @@ A replayed older public base or deterministic bundle is refused even if branch-s
 The new signed ordinary owner frame is a custody-authorized operation; it is distinct from
 this old public-bundle publish endpoint.
 
+Put the refusal in common `handle_mvp1_prekey_publish` before either
+`publish_custody_prekey` or `mvp1_publish_prekey`: both router dispatch sites
+(`handlers.rs` around 103 and 652), gateway TCP (`session.rs` around 823), gateway QUIC
+(`quic_dispatch.rs` around 44), and itest HTTP (`itest_http.rs` around 235) converge there.
+Resolve native identity using device ID and the claimed principal/commitment together;
+checking `bundle.identity_commitment` alone is insufficient. Negative replay tests drive
+each carrier and assert unchanged native state, not just the common function in isolation.
+
 | Proposed type | Contents / visibility |
 | --- | --- |
 | `SignedNativePrekeyBase` | Profile, qualified branch and commitments, agreement public key, generation, SPK ID/serial/public key, times, public counter/capabilities and branch signature. At most 2 KiB encoded. |
@@ -170,8 +226,20 @@ old whole-pool publication. Length-prefix variable fields and fix canonical vect
 Ordinary GET/Lookup, custody Peer, nested manifests, SDK projections, discovery and public
 acknowledgement fields all use `PublicPrekeyView`, never the upload object unchanged.
 
-Initial custody operations are versioned Register with `OwnerPrekeyUpdate` and owner-only
-proof `PrekeyStatus` before OpenSession (register capability). Cold status reconciles a
+The activated connect order is authority publication/reconciliation as already required,
+then authenticated read-only proof `PrekeyStatus`, then versioned Register with
+`OwnerPrekeyUpdate` **only if stale**, then OpenSession. Owner status needs register
+capability but does not charge the publish/rotate budget. Compare qualified epoch,
+generation, publication counter and base hash against the committed local snapshot;
+matching current unexpired publication skips Register entirely. A pending retirement
+acknowledgement is a separate coalesced owner update, not a reason to republish on every
+connect. Status failure/Busy does not manufacture freshness: OpenSession may still
+succeed against the node's current validated base at the known floor; otherwise remain
+pending. Busy on Register likewise permits OpenSession only if the node already has a
+valid matching authorized base; an expired/stale-only base never passes. Do not block
+an unchanged reconnect for an hour to obtain optional maintenance.
+
+Cold status reconciles a
 lost acknowledgement, expired SPK or full old lease pool without requiring an existing
 messaging session. It can acknowledge historical expired publication bytes but cannot
 make them a fresh base. `OpenSession` requires a current native-authorized, correctly
@@ -192,6 +260,13 @@ Add ordinary `NativePrekeyLease`, `NativePrekeyPublish` and `NativePrekeyStatus`
 carrying a branch-signed `NativePrekeyRequest`; use a correlated bounded result frame.
 This is not the old unauthenticated `PrekeyPublish` and not a generic `CustodyRequest`
 wrapper. Initial Register/cold proof status still use the custody connection before handoff.
+
+Leasing v1 is local-home only: the requester gateway's authenticated local router must
+also be the target's current home. For any different home/generation, return typed
+`prekey_cross_home_unavailable`; do not forward, fetch a foreign OPK, or silently use a
+public SPK-only response. The signed target/home field is an authorization fence, not a
+promise of inter-home routing. Public discovery cannot substitute for an authorized
+remote lease. A later multi-home card must define authenticated routing and quotas.
 No additional live custody-session action or second control connection is needed.
 
 The outer signed body binds a domain/profile, operation kind and canonical argument hash,
@@ -211,12 +286,23 @@ and expiry. Lease needs `message`; owner publish/status need `register` and exac
 scope. The node applies its existing ingress prefix masking to the verified source; the
 shared gateway address and caller-selected prefixes never become quota identities.
 
-Request nonce admission and the action's state changes commit together. Keep bounded
-nonce markers through the full possible request lifetime (600 seconds), including restart;
+For mutating lease/publication operations, request nonce admission and the action's
+state changes commit together. Keep bounded nonce markers through the full possible
+request lifetime (600 seconds), including restart;
 a duplicate outer envelope is Replay. A legitimate retry signs a fresh outer nonce and
 session binding but keeps the lease operation ID. Durable idempotency returns its original
-OPK without another charge. This adds small nonce writes even for read/fallback operations;
-owner rate limits and the global prekey request budget below bound the cost. No TLS-binding
+OPK without another charge. Fallback lease requests still incur bounded nonce writes;
+owner publication limits and
+the global request budget below bound the cost. Read-only owner status is the explicit
+exception: current authority, nonce/expiry and source admission still apply, with bounded
+in-memory proof/session replay checks; it makes no durable prekey write. A restart may
+repeat an authorized read, never a mutation, without resetting any floor or lease. It
+cannot carry a retirement acknowledgement, publish or rotate as a disguised status.
+An exact already-applied owner-update retry is also a read-only acknowledgement: verify
+the complete update/ack digest and current authority, require no new OPK/retirement
+effect, then use the same bounded non-mutating replay treatment without a durable nonce
+write. An equal base counter alone never makes a changing retirement/control batch free.
+No TLS-binding
 mode is weakened, and no credential-derived or legacy-authority fallback is introduced.
 
 SDK replies use existing ordinary response serialization/Deliver buffering; test that a
@@ -227,8 +313,11 @@ restart, a one-session-per-principal setting and multiple devices without raisin
 
 ## 6. Atomic leasing, publication and bounded retirement
 
-A native write transaction rechecks current authority/home fences and admits the fresh
-request nonce. For owner operations it also checks the owner rate/storage reservation.
+Recheck current authority/home fences first. Read-only status and a fully matched
+already-applied owner-update retry return without entering a durable prekey write
+transaction. A genuinely changing publication/rotation checks the owner rate/storage
+reservation, then atomically admits its fresh request nonce with the state changes.
+Lease/fallback requests retain the durable nonce treatment from section 5.
 Publications accept increasing counters/generations and serials; equal counter plus equal
 public bytes is idempotent, conflicting/lower values fail. Persist a serial high-water
 mark: an absent serial at or below it is retired, not a candidate to upload again.
@@ -288,11 +377,17 @@ account's budget. Exceeding these limits yields SPK-only, not account admission 
 | Requester-target | 1/24 hours by requester account and complete qualified target branch. |
 | Target | 6/hour across requesters by complete qualified target. |
 | Verified source prefix | 120/hour, using current ingress masks and observed client provenance. |
-| Owner operations | 12/hour combined per qualified branch for Register, proof status and signed publish/status, including admitted no-op retries. Durable across reconnect/restart. Over limit: Busy with a bounded node-bound retry hint, no write/false acknowledgement. |
+| Owner publication / rotation | 12/hour combined per qualified branch for admitted changing Register or signed publication/rotation; retirement acknowledgements coalesce in that update. Durable across reconnect/restart. Status is read-only and uncharged. Exact same counter/epoch/full-update-and-ack-digest retries are idempotent, uncharged and make no prekey-state write. Over limit: Busy with a bounded node-bound retry hint, no write/false acknowledgement. |
 
 The client coalesces owner work every 30 minutes plus startup/read-time maintenance and
 batches retirement acknowledgements with publication. Node enforcement is independent of
-that cadence. Owner limits do not reset when credentials/grants are reloaded. Busy on an
+that cadence. Owner limits do not reset when credentials/grants are reloaded. Connect
+follows status → Register only if stale → OpenSession as specified in section 4. Read-only
+proof/live status stays under authenticated ingress, global request/byte limits and bounded
+in-memory replay admission; it is excluded only from the 12/hour mutation budget. A
+reconnect storm of more than six (test at least twenty) successful same-epoch connects
+per hour must cause no Register and no extra durable prekey writes after the first current
+publication, while status/connection admission remains authenticated and bounded. Busy on an
 optional owner read does not burn an hour inside the 90-second connection flight: schedule
 the hinted retry; a mandatory refresh remains pending, while a still-valid base can open.
 
@@ -305,7 +400,7 @@ New prekey resource ceilings below are design limits, not claims about existing 
 | Per branch | At most 200 unretired slots, 1008 live requester results, 400 retirement references, one current base plus at most 1008 result-referenced bases; no history row for an unreferenced idempotent publication. |
 | Global request work | At most 1024 prekey request admissions/minute and 256 in flight, in addition to existing authenticated ingress/source controls. Verify identity before allocating per-owner durable state. Pressure returns Busy, not weaker authentication. |
 | Request replay storage | At most 16,384 nonce markers of at most 128 bytes through the 600-second horizon; no eviction of live markers to admit replay. Full cache returns Busy. |
-| Account/node byte budgets | Charge keys, values and explicit indexes atomically: 4 MiB/branch, aggregate `D × 4 MiB`/account where `D <= MAX_ROSTER = 1024` counts active and retained branch-state slots; 64 GiB/node for all new prekey state, including a reserved 32 MiB global-control allowance. These do not enlarge existing authority/admission limits. |
+| Account/node byte budgets | Charge keys, values and explicit indexes atomically: 4 MiB/branch, aggregate `D × 4 MiB`/account where `D <= MAX_ROSTER = 1024` counts active and retained branch-state slots; Node-configured `node.prekey_lease.max_state_bytes` for all new prekey state (default 64 MiB, minimum 40 MiB), including a reserved 32 MiB global-control allowance; 64 GiB is an optional operator ceiling example, not a fixed allocation. These do not enlarge existing authority/admission limits. |
 
 Worst-case logical per-branch payload is explicitly bounded:
 
@@ -326,7 +421,7 @@ The protocol's 1024 roster ceiling is conservative (ordinary enrollment is 960);
 record limits can admit fewer. At the ceiling, new prekey state is at most 4 GiB/account.
 The account budget is shared, so it does not promise simultaneous maximum branch payloads,
 all possible terminal floors and every optional index without admission checks.
-A theoretical 65,536 full accounts would request 256 TiB, so the separate 64 GiB node cap
+A theoretical 65,536 full accounts would request 256 TiB, so the separately configured node cap
 is essential, not an allocation promise. Requester-account pair indexes are charged to that account, not a global cache: at
 60 leases/hour for 24 hours, at most 1440 live outgoing pair records of at most 256
 bytes require 368,640 bytes/account, within the remaining branch-budget slack even for
@@ -343,6 +438,15 @@ budgets stay separate and are never multiplied away or reset by prekey publicati
 both old limits and new prekey reservations before committing. Charge retained branch slots
 until cleanup; compact terminal floors share the account allowance. New-account admission
 must reserve minimum prekey/cleanup headroom as part of usable networking admission.
+
+The node configuration documents the proposed 64 MiB default and 40 MiB minimum (32 MiB control,
+4 MiB branch and 4 MiB shared cleanup reservation). Startup rejects malformed/out-of-range
+configuration or a cap that cannot fit the filesystem together with configured backend
+headroom. The default disk-headroom floor is 64 MiB; check actual free space before new
+admission/reservation and leave existing reads/status and retirement recovery available
+under pressure. A 64 GiB setting requires adequate host storage and is never inferred
+from the account/roster ceiling. Tests set the cap to 40 MiB and exercise exact/max+1,
+new-account admission, backend-space shortage and cleanup without allocating a large DB.
 
 These are serialized logical budgets, not a claim that redb COW/page/WAL overhead or disk
 usage equals them. Reserve backend/disk headroom and handle storage errors before accepting
@@ -495,28 +599,31 @@ These are required future tests, not results from this document change. A mutati
 compile and fail a meaningful assertion; a compiler error, timeout, skipped case or mocked
 owner ledger is not a kill. Independent mutations exercise independent rebuild paths.
 
-| Scenario / layer | Required assertion | Compiling mutation to kill |
+| Card owner / scenario / layer | Required assertion | Compiling mutation to kill |
 | --- | --- | --- |
-| Initializer non-resurrection (SDK) | Real initialized actor/key retirement, same-vault restart, missing marker/actor combinations: history unlock succeeds, no derivation/write/Register. | Reintroduce derivation in `initialize_born_v3_branch`; fails its own runtime non-resurrection test. |
-| Registration non-resurrection (SDK/transport) | Different provider snapshot and vault legacy material; actual Register uses only the provider's public bytes. Removed APIs/fixed production ID absent. | Re-add the credential prekey builder and call it from `registration_actions`; compile, then fail the separate snapshot-only regression. |
-| Agreement-source migration (SDK/storage) | Send DH1/receive DH2 work through vault loads; decoded actor/events/checkpoints/archives contain no agreement seed after retirement/checkpoint/reopen. Vault/data lock blocks bootstrap with no persisted fallback. | Keep/select `identity_seed`, skip an archive/event retirement, or use a cached agreement key after vault refusal. |
-| Native ordinary-publish replay (router/gateway) | Older public base and old deterministic bundle via HTTP and old PrekeyPublish frame produce `native_publication_requires_custody`; rows/floors unchanged, including fenced/unavailable native authority. | Re-enable `publish_custody_prekey` write or return None into the legacy writer; each route's negative test fails. |
-| Register/common writer (node) | Proof Register and signed publish enforce identical monotone/profile/byte rules. | Restore admission's direct row overwrite or skip the floor transaction. |
-| Deadline/TTL boundaries (unit/SDK) | `D-1` accepted, `D`/`D+1` refused; over-seven-day TTL refused/capped by node policy; expired unsent operation re-leases with new keys/sequence, no old emission. | Extend deadline on retry, skip receive expiry, exceed T, or reuse the old operation/ciphertext. |
-| Rotation / retained keys (SDK) | Seven-day rotation, 14-day public expiry, 21-day private limit, four total slots, matching SPK for every valid queued OPK. Clock rollback cannot resurrect or erase early. | Keep old longer windows, skip read expiry, derive SPKs, or delete matching SPK too soon. |
-| OPK lifecycle (SDK/native node) | Seven queued leases across valid target windows survive additive refill/restart. At 200, real owner status after `T+S` frees expired keys before refill; exact threshold, just-before, unleased and missing-time survive. | Replace pool, use `>=` for lease GC, skip expiry at cap or GC owner timestamps with requester results. |
-| Consumption / WAL (SDK/storage) | Authenticate before atomic advanced state/key removal; crash/rollback/concurrent use/duplicate/failed commit safe. Busy reader remains pending until actual TRUNCATE/reopen absence. | Delete before auth, split commits, skip erasure, mark queued checkpoint complete or free slots early. |
-| Reconstruction/call controls (SDK) | Native equivalent of `client/routed/call_tests.rs::committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_message_keys` inverts its current reconstructible-static-prekey assertion: retained vault/advanced state cannot decrypt the captured new-profile bootstrap after retirement. | Retain OPK or E/original root; the native negative-decryption assertion fails. Keep a positive reconstruction control so the oracle is not vacuous. |
-| Atomic leases and replay (node/real transport) | Concurrent leases distinct; failed durable write exposes no key; lost reply/restart returns same live result without charge. Fresh outer nonce required; old intent after GC cannot lease again. | Reply before commit, omit result/counter/nonce durability, reset selection on restart or accept expired intent. |
-| Owner bounds (node) | Combined 12/hour across Register/proof/live operations, persisted over reconnect/restart; over-limit Busy/hint, no write. | Count only client cadence, key by session, or skip proof-status charging. |
-| Byte/account/node bounds (node) | Exact/max+1 encoded update and row sizes, 200 slots, 1008 results, roster/retired generations, account aggregate and node byte reservations; cleanup/rotation still progress. | Omit a write path/counter, duplicate full bases in results, omit retired slots or bypass byte cap with character counts. |
-| Current authority/source/handshake (native transport) | Actual gateway grant + branch signature, node audience/session/action binding, current head/cert/revocation and observed-prefix provenance. Proxy still Disconnects at handoff; ordinary lease works at session limit 1 with Deliver interleaving. | Accept client-made grant/prefix, skip signature/current head/audience, retain a stale OpenSession base, or drop Deliver while awaiting result. |
-| Quota isolation (node/SDK) | Account with three devices shares one pair lease/day; other accounts work; 60/1/6/120 survive restart; 5000 valid pairs under admitted resources/clock windows do not globally starve a newcomer. | Key by device, use gateway shared prefix, reset durable ledgers, or use a global 4096-pair full-table denial. |
-| Own-device sync (SDK/integration) | `own_device_sync.rs` calls the same lease helper: self-account target gets OPK or counted new-profile SPK-only, without sync failure or private-key transfer. | Bypass leasing for self-account, allocate separate requester quota, or export the private actor. |
-| Group first-contact fan-out (SDK/native integration) | 61 distinct targets through the group paths used by k2b/k5a: first 60 eligible account leases, subsequent counted SPK-only, no send failure; existing source/target limits remain. | Turn requester quota fallback into an error, skip the helper for distributions or reset account quota per target transport. |
-| Public carriers / strict profile (node/SDK) | Every GET/Lookup/Peer/manifest/ack verifies a base without OPKs/ledger; unknown/old profile is update-required. | Forward upload unchanged, bypass native freshness, add legacy projection or send old E=R0 header. |
-| Restore / activation / grace (SDK) | Fresh restore pending; attended new branch random; live merge keeps floors; old receive only before A+T, no grace reset across restart/archive/pool change; history/established sessions preserved. | Restore private rows or active bootstrap, reset A/floor, re-enable old send, accept old header after grace or rebuild a same-branch missing actor. |
-| Failure-policy matrix (SDK/bus) | Each row in section 8: unlock/history success where specified, networking refusal, maintenance warning, no infinite unavailable-key retries, terminal record then ACK, temporary lock no ACK. | Propagate optional prekey repair as unlock failure; swallow repair into success; ACK before commit or repeatedly retain permanent missing-key packets. |
+| **02** — Shared wire/crypto vectors (protocol/crypto) | Fixed canonical encode/decode/signature/transcript vectors for every section 4 type, request/frame and OPK/SPK-only header; independent E/R0, deadlines, unknown/extra-field and tamper rejection. | Change a domain/length/order, omit a bound field, reuse E as R0 or accept a mutated signature. |
+| **03** — Non-native removal and fixture conversion (SDK/itest) | All named production SDK manifest/prekey call sites refuse non-native accounts with native_account_required before persistence/network; converted born-v3 fixtures keep prior business assertions. | Restore one non-native dispatch/helper call, select legacy daemon bootstrap, or silently skip a replaced fixture. |
+| **05** — Connect/reconnect and activation (SDK/native transport) | At least twenty same-epoch reconnects/hour use status, skip unchanged Register and make no new durable prekey writes. Busy with a valid current base can OpenSession; stale-only base cannot. Each section 13 interim state stays compatible; both defaults flip only at 05 and rollback cannot clear floors. | Register/charge on every connect, write on status, make Busy unconditionally fatal or activate either flag before complete wiring. |
+| **03** — Initializer non-resurrection (SDK) | Real initialized actor/key retirement, same-vault restart, missing marker/actor combinations: history unlock succeeds, no derivation/write/Register. | Reintroduce derivation in `initialize_born_v3_branch`; fails its own runtime non-resurrection test. |
+| **05** — Registration non-resurrection (SDK/transport) | Different provider snapshot and vault legacy material; actual Register uses only the provider's public bytes. Removed APIs/fixed production ID absent. | Re-add the credential prekey builder and call it from `registration_actions`; compile, then fail the separate snapshot-only regression. |
+| **03** — Agreement-source migration (SDK/storage) | Send DH1/receive DH2 work through vault loads; decoded actor/events/checkpoints/archives contain no agreement seed after retirement/checkpoint/reopen. Vault/data lock blocks bootstrap with no persisted fallback; first-contact send stays pending, receive retains without ACK, and head-of-line delay/61 distinct vault-load costs are measured. | Keep/select `identity_seed`, skip an archive/event retirement, or use a cached agreement key after vault refusal. |
+| **04** — Native ordinary-publish replay (router/gateway) | Older public base and old deterministic bundle via HTTP and old PrekeyPublish frame produce `native_publication_requires_custody`; rows/floors unchanged, including fenced/unavailable native authority and device-ID/claimed-commitment mismatch through router HTTP, gateway TCP, QUIC and itest HTTP. | Re-enable `publish_custody_prekey` write or return None into the legacy writer; each route's negative test fails. |
+| **04** — Register/common writer (node) | Proof Register and signed publish enforce identical monotone/profile/byte rules. | Restore admission's direct row overwrite or skip the floor transaction. |
+| **05** — Deadline/TTL boundaries (unit/SDK) | `D-1` accepted, `D`/`D+1` refused; over-seven-day TTL refused/capped by node policy; expired unsent operation re-leases with new keys/sequence, no old emission. | Extend deadline on retry, skip receive expiry, exceed T, or reuse the old operation/ciphertext. |
+| **03** — Rotation / retained keys (SDK) | Seven-day rotation, 14-day public expiry, 21-day private limit, four total slots, matching SPK for every valid queued OPK. Clock rollback cannot resurrect or erase early; old receive-only slot expires at A+T independently of its age; restart cannot rotate early and four occupied slots refuse rather than evict. | Keep old longer windows, skip read expiry, derive SPKs, or delete matching SPK too soon. |
+| **05** — OPK lifecycle (SDK/native node) | Seven queued leases across valid target windows survive additive refill/restart. At 200, real owner status after `T+S` frees expired keys before refill; exact threshold, just-before, unleased and missing-time survive. | Replace pool, use `>=` for lease GC, skip expiry at cap or GC owner timestamps with requester results. |
+| **03** — Consumption / WAL (SDK/storage) | Authenticate before atomic advanced state/key removal; crash/rollback/concurrent use/duplicate/failed commit safe. Busy reader remains pending until actual TRUNCATE/reopen absence. | Delete before auth, split commits, skip erasure, mark queued checkpoint complete or free slots early. |
+| **03** — Reconstruction/call controls (SDK) | Native equivalent of `client/routed/call_tests.rs::committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_message_keys` inverts its current reconstructible-static-prekey assertion: retained vault/advanced state cannot decrypt the captured new-profile bootstrap after retirement. | Retain OPK or E/original root; the native negative-decryption assertion fails. Keep a positive reconstruction control so the oracle is not vacuous. |
+| **04** — Atomic leases and replay (node/real transport) | Concurrent leases distinct; failed durable write exposes no key; lost reply/restart returns same live result without charge. Fresh outer nonce required; old intent after GC cannot lease again. | Reply before commit, omit result/counter/nonce durability, reset selection on restart or accept expired intent. |
+| **04** — Owner bounds (node) | Twelve changing publications/rotations per hour, durable across reconnect/restart; over-limit Busy/hint, no write. Read-only status and exact fully matched unchanged publication retry are uncharged with no durable prekey write. | Count only client cadence, key by session, charge status/no-op retry, or admit a thirteenth changing update. |
+| **04** — Byte/account/node bounds (node) | Exact/max+1 encoded update and row sizes, 200 slots, 1008 results, roster/retired generations, account aggregate and configured node byte reservations, including a 40 MiB test cap and backend headroom; cleanup/rotation still progress. | Omit a write path/counter, duplicate full bases in results, omit retired slots or bypass byte cap with character counts. |
+| **05** — Current authority/source/handshake (native transport) | Actual gateway grant + branch signature, node audience/session/action binding, current head/cert/revocation and observed-prefix provenance. Proxy still Disconnects at handoff; ordinary lease works at session limit 1 with Deliver interleaving. | Accept client-made grant/prefix, skip signature/current head/audience, retain a stale OpenSession base, drop Deliver while awaiting result, or forward cross-home leasing instead of prekey_cross_home_unavailable. |
+| **04** — Quota isolation (node/SDK) | Account with three devices shares one pair lease/day; other accounts work; 60/1/6/120 survive restart; 5000 valid pairs under admitted resources/clock windows do not globally starve a newcomer. | Key by device, use gateway shared prefix, reset durable ledgers, or use a global 4096-pair full-table denial. |
+| **05** — Own-device sync (SDK/integration) | `own_device_sync.rs` calls the same lease helper: self-account target gets OPK or counted new-profile SPK-only, without sync failure or private-key transfer. | Bypass leasing for self-account, allocate separate requester quota, or export the private actor. |
+| **05** — Group first-contact fan-out (SDK/native integration) | 61 distinct targets through the group paths used by k2b/k5a: first 60 eligible account leases, subsequent counted SPK-only, no send failure; existing source/target limits remain. | Turn requester quota fallback into an error, skip the helper for distributions or reset account quota per target transport. |
+| **04** — Public carriers / strict profile (node/SDK) | Every GET/Lookup/Peer/manifest/ack verifies a base without OPKs/ledger; unknown/old profile is update-required. | Forward upload unchanged, bypass native freshness, add legacy projection or send old E=R0 header. |
+| **05** — Restore / activation / grace (SDK) | Fresh restore pending; attended new branch random; live merge keeps floors; old receive only before A+T, no grace reset across restart/archive/pool change; history/established sessions preserved. | Restore private rows or active bootstrap, reset A/floor, re-enable old send, accept old header after grace or rebuild a same-branch missing actor. |
+| **05** — Failure-policy matrix (SDK/bus) | Each row in section 8: unlock/history success where specified, networking refusal, maintenance warning, no infinite unavailable-key retries, terminal record then ACK, temporary lock no ACK. | Propagate optional prekey repair as unlock failure; swallow repair into success; ACK before commit or repeatedly retain permanent missing-key packets. |
 
 Use production Register/proof-status/signed-frame verification, durable node storage,
 real async mesh and owner acknowledgements for integration cases. Inject failures at each
@@ -540,18 +647,71 @@ remain separate claims.
 
 ## 13. Implementation cards and runtime documentation
 
-Adopt the component order below; no native-profile production activation before the final
-wiring card. Each component has complete local unit/failure tests and explicit dependencies,
-not a silent stub for a missing sibling. Constructor removal includes the compiling provider
-call-site adaptation; the integration card enables the complete wire path only when all
-components and strict-profile nodes are available.
+Adopt 02 → (03 ∥ 04) → 05 for implementation. Card 04 has no product-code dependency
+on 03, but its refusal of non-native identities requires the born-v3 realnet fixture
+conversion owned by 03 to be merged/pinned before 04 is accepted on main. Thus 03/04
+may be developed in parallel, while the fixture cutover constrains their merge order.
+The following tables are merge contracts, not an assertion
+that separate commits activate atomically across a deployed fleet. Each card is complete
+for its stated dormant/component boundary and must keep the existing realnet slices green.
 
 | Card | Complete responsibility / acceptance |
 | --- | --- |
-| DM-FS-V3-02 | SDK/crypto profile/header/transcript, independent E/R0, OPK-aware receive, zeroization, fixed vectors and mutations; no network activation. |
-| DM-FS-V3-03 | Canonical account actor, vault constructor removal, per-bootstrap agreement access, identity-seed/event retirement, rotation/expiry/erasure, unlock/failure policy and backup/sync/restore exclusions. Depends on 02. |
-| DM-FS-V3-04 | Native directory common transaction, ordinary-publish refusal, public views, durable leases/results/quotas/owner acks and all resource caps. Uses 02 types; parallel with 03. |
-| DM-FS-V3-05 | Initial custody proof/status/OpenSession, signed ordinary frame wiring, own-device/group flows, activation/grace/floors, complete failure policy and real SDK→gateway→router/itest contact01/k2b/k5a acceptance. Depends on 02–04. |
+| DM-FS-V3-02 | Shared wire types and canonical encoding in `ramflux-protocol`: SignedNativePrekeyBase, SignedNativeOpk, OwnerPrekeyUpdate, PrekeyPublicationSnapshot, PublicPrekeyView, PrekeyLeaseIntent/Result, OwnerPrekeyStatus, NativePrekeyRequest, frames/header/deadline and typed refusals. Cryptographic signing/X3DH/ratchet/transcript helpers and fixed positive/negative vectors in `ramflux-crypto`, plus SDK component adapters. No networking/profile activation. |
+| DM-FS-V3-03 | Depends on 02. Canonical private actor, per-bootstrap vault access, identity-seed/event migration and retirement, rotation/expiry/erasure, unlock/backup/sync/restore component behavior behind `dm_fs_v3.rotation_enabled=false`. New path cannot derive keys; physical old native builder/caller deletion waits for 05's atomic source activation. Remove/refuse production non-native SDK bootstrap and replace affected legacy realnet fixtures in the same card. |
+| DM-FS-V3-04 | Depends on 02; parallel with 03. Native directory, common publication transaction, H2 ordinary-publish refusal, non-native prekey refusal, public views, durable leases/results/publish quotas, read-only owner status and configured byte caps. `node.prekey_lease.strict=false` accepts current old-format native custody Register; strict new-profile admission and live leasing stay dormant until 05. |
+| DM-FS-V3-05 | Depends on 02–04. Status → conditional Register → OpenSession, signed ordinary frames, own-device/group wiring, activation/grace/floors and complete end-to-end failure policy. In one product commit remove old native rebuild APIs/callers and send-header path, enable both activation defaults, and update runtime docs/itest pin. Realnet contact01/k2b/k5a and all activation tests must pass on the fully wired tree. |
+
+### Behavior on main after each separately merged card
+
+| Merged card | SDK wire and private-key behavior | Node behavior | Required interim acceptance |
+| --- | --- | --- | --- |
+| 02 | Existing born-v3 old-format bootstrap, initializer and registration unchanged; new types/crypto unused by production. No rotation/retirement/migration from the new actor. | Existing admission/directory unchanged. | Existing SDK/full suites and current realnet unchanged; fixed shared-type/vector tests added. |
+| 03 (04 not required yet) | `dm_fs_v3.rotation_enabled=false`; existing native vault-derived SPK is still published with the existing native Register/old header. Do not rotate, erase or migrate that live state while the node has no update path. New actor/provider is exercised only in gated component tests. Retain old native constructors unchanged solely for this OFF path until 05. Non-native SDK manifest/prekey bootstrap is removed/refused, with its realnet fixtures converted to born-v3 in this same card. | Current native Register remains accepted; no dependency on an unmerged 04 wire endpoint. | All native realnet slices remain green; converted fixtures preserve their business assertions. Flag-OFF reconnect/restart cannot silently select the dormant actor. |
+| 04 (after the 03-owned fixture cutover) | Existing native old-format SDK still works; no activation or new lease emission required. Node component development does not require the new private actor. | `node.prekey_lease.strict=false`: common authenticated native Register transaction accepts the old native bundle and OpenSession still validates it. New-profile floor is not pinned for that branch yet. H2 closes every ordinary native publish carrier; non-native prekey/lease paths are refused. New lease/strict-profile endpoints report profile inactive, rather than partially activating. | Existing born-v3 clients register/reconnect and converted current realnet pass; the pre-03 native SDK is a compatibility test, not permission to run obsolete non-native fixtures. Node component tests exercise strict mode separately. |
+| 03 + 04, before 05 | Both defaults remain OFF; live native old-format state stays intact. The new provider and new wire cannot be selected in production. | Lenient native Register remains available; common auth, H2 and resource enforcement are present without requiring new SDK frames. | Main stays CI/realnet green without manual partial-feature settings or an unmerged dependency. |
+| 05 | One commit changes `dm_fs_v3.rotation_enabled=true` and `node.prekey_lease.strict=true`, wires the provider/transport, removes old native builders/callers and old send path, and starts migration/activation A. Only new-profile send; bounded old receive grace. | Strict new-profile Register/OpenSession/lease; no old-profile native registration or non-native fallback. | Deploy node support first, then the matching SDK. A source commit is not a distributed fleet transaction: old SDKs encountering strict nodes receive update-required during rollout, never silent downgrade. Fully updated realnet must pass before READY. |
+
+Before 05, production validation rejects setting either dormant activation flag ON;
+component tests use explicit test configuration. Card 05 removes that readiness barrier
+and flips both defaults in the same source commit. After activation, persisted profile,
+A and generation floors forbid turning the flags OFF as a rollback escape. Retaining old
+native builders until that commit is the controller's interim-state exception to the final
+no-rebuild contract; final source-absence and registration mutation acceptance belong to
+05. Non-native removal in 03/04 is the separate explicit v3-only cleanup decision, not an
+FS compatibility mode. Operator migration of obsolete identities is attended new-device
+recovery; flags do not make them native.
+
+### Legacy fixture inventory and replacement (card 03)
+
+The itest snapshot `3f874143` still explicitly enables legacy accounts at the following
+sites. Card 03 owns their production-network replacement together with the SDK removal;
+none may be left silently exercising a deleted path or postponed to 05.
+
+| Existing itest sites | Replacement and retained assertions |
+| --- | --- |
+| `src/harness/client_directory_topology.rs::client_directory_daemon_command`, `daemon_prod.rs`, `rf_cli.rs`, `tui_object_v3.rs`, `voice_calls/actors.rs` | Use `native_client_directory_daemon_command` or the equivalent born-v3 create/unlock/attach fixture; remove legacy daemon flags and legacy feature selection from networked actors. Preserve routing, attachment, surface and call/voice assertions and their affected-slice gates. The explicit legacy-helper test becomes a non-native refusal/offline negative. |
+| `src/tests/k5a_agent_host.rs` (k5a/k5a2), `mvp_s55_object_v3_public_sdk.rs`, `mvp_s56_object_v3_grantee.rs` | Native human/headless account creation and attended branch attachment/provisioning; native authority pins replace manifest/device-seed setup, with existing reply/grant/object assertions preserved. |
+| `mvp_s58_trust_snapshot_lifecycle.rs`, `mvp_s59_trust_root_cert_rotation.rs`, `mvp_s60_gateway_attestation_rotation.rs`, `mvp_s61_provider_keyring_rotation.rs`, `mvp_s62_object_v3_quic_fault.rs` | Born-v3 account/branch setup with the same trust/keyring/gateway/QUIC fault under test. Do not delete security assertions merely because legacy setup is removed. |
+| `mvp_s63_rfd_midflight_crash.rs`, `mvp_s64_relay_quic_capacity/daemon.rs`, `mvp_s65_object_ipc_frame_cap.rs`, `mvp_s66_object_ipc_reconcile.rs`, `mvp_s67_object_ipc_upload_spool.rs`, `mvp_s68_object_ipc_download_spool.rs`, `mvp_s69_object_ipc_crash_resume.rs`, `mvp_s71_t22_production_keyless_v3_positive.rs` | Native account/branch identity with existing crash seams, quota/frame sizes, spool and production-keyless expectations. Keep isolated fault features; remove only legacy bootstrap selection. |
+| itest `Cargo.toml` realnet feature | Remove transitive `itest-legacy-accounts` once these networked callers are converted; offline identity/proof-format negatives remain isolated from production bootstrap. |
+
+`contact01_contact_resolution.rs` already uses `create_native_account`; retain that fixture.
+Inventory every caller of the shared legacy helper, including k2b, when card 03 starts;
+converting the helper changes all its users and requires their full existing affected
+realnet assertions, including call/voice slices when shared fixtures change. Replacement
+is not permission to bypass authority pins, mint tokens differently, or relax budgets.
+
+### One accountable owner per test-matrix row
+
+Each row in section 12 carries exactly one card owner, including its compiling
+mutation. Other cards may add focused component tests, but do not split or defer that
+row's acceptance. In particular 03 proves initializer/new-actor behavior with the flag ON
+in component tests; 05 proves production registration and physical builder removal.
+The complete failure-policy row is 05's end-to-end responsibility, while 03 separately
+unit-tests its unlock/storage primitives and 04 its node error types. The owner-bound
+row is 04; the connect/reconnect-storm row is 05. Public carriers and all H2 negatives
+are 04; 05 consumes the shared checked types rather than inventing another writer.
 
 Implementation documentation must update [root key custody](../root_key_custody.md),
 especially “Ordinary DM security boundary”: remove the pending legacy DM-FS-01/stable-SPK
@@ -571,5 +731,6 @@ vault derivation, or silently send the old profile.
 
 None of Q1–Q6 remains open: this revision adopts the controller decisions. The additional
 encoded-byte and aggregate resource ceilings in section 7 are concrete design proposals
-for review, rather than existing protocol constants. Encoding vectors and measured
+for review, rather than existing protocol constants; section 7 now makes the node byte
+cap configurable with an explicit default and disk-headroom policy. Encoding vectors and measured
 resource/performance acceptance belong to the four named implementation cards.
