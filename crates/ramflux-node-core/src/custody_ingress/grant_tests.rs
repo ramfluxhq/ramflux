@@ -114,17 +114,19 @@ fn second_grant_on_a_granting_holder_has_its_own_refusal_label() -> Result {
     }
     let limiter = CustodyIngressLimiter::with_authenticated_limit(256, 1);
     let permit = limiter.acquire("192.0.2.1".parse()?, None, Instant::now())?;
-    permit.grant("one", || {
+    permit.try_grant("one", || {
         let callback_ran = std::cell::Cell::new(false);
         let refusal =
             crate::custody_budget_log::tests::assert_warning("grant_in_progress", 1, 0, || {
                 permit.grant("one", || callback_ran.set(true))
             })
-            .expect_err("second grant admitted");
+            .err()
+            .ok_or("second grant admitted")?;
         assert!(!callback_ran.get(), "a second grant must not execute its callback");
         assert_eq!(refusal.code, ramflux_protocol::custody::CustodyRefusal::Busy);
         assert_eq!(refusal.retry, None);
-    })?;
+        Ok::<_, &'static str>(())
+    })??;
     assert_eq!(limiter.state.lock().map_err(|_| "state")?.authenticated, 1);
     Ok(())
 }
