@@ -6,6 +6,9 @@
 pub(crate) type PopulationMap<K, V> = std::collections::BTreeMap<K, V>;
 
 #[cfg(test)]
+pub(crate) use counting::PopulationMap;
+
+#[cfg(test)]
 mod counting {
     use std::{borrow::Borrow, cell::Cell, collections::BTreeMap};
 
@@ -82,5 +85,3 @@ mod counting {
         }
     }
 }
-#[cfg(test)]
-pub(crate) use counting::PopulationMap;
