@@ -526,7 +526,7 @@ env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
 to remove the mapping. Production installs can use `docker-compose.admin.yml`
 with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. Router administration has an independent opt-in, off by default:
 set `RAMFLUX_ROUTER_ADMIN_ENABLED=1` in the demo operator env and run `up`.
-`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` defaults to 59488 only when enabled. It must
+`RAMFLUX_ROUTER_ADMIN_PORT` defaults to 59488 only when enabled. It must
 be 1024–65535 and distinct from the other configured ports. The wrapper refuses
 an occupied port before changing managed state, while allowing the existing
 owned router's mapping. Disabled ports are neither validated nor written to
@@ -534,7 +534,7 @@ owned router's mapping. Disabled ports are neither validated nor written to
 snapshots, rollback and recovery. Set the flag to 0 and run `up` to remove it.
 
 Direct Compose operators explicitly add `docker-compose.router-admin.yml` and
-set `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT`; selecting the federation overlay alone
+set `RAMFLUX_ROUTER_ADMIN_PORT`; selecting the federation overlay alone
 never publishes the router, including on upgrade. The new overlay requires an
 explicit port. It binds only loopback TCP and the router still requires a trusted
 mesh certificate and its admin token. See
@@ -761,7 +761,7 @@ set +a
 "$DEMO_TOOL" custody-budgets 127.0.0.1:59488 "$DEMO_DATA_DIR/certs" router
 ```
 
-Use `DEMO_ROUTER_ADMIN_LOOPBACK_PORT` instead of 59488 when configured.
+Use `RAMFLUX_ROUTER_ADMIN_PORT` instead of 59488 when configured.
 `DEMO_MESH_PORT` reaches federation and does not serve this router route. The tool
 uses the existing gateway mesh certificate and router admin token. Keep both
 operator-only. This path is not forwarded by the public gateway.
@@ -782,3 +782,20 @@ on every blocked retry. Out-of-range hints are logged and use only the 300 s
 floor. Valid hints wait until the reset (at least 300 s);
 other Capacity refusals remain generic. See `docs/custody_networking.md` for the
 client contract and `CHANGELOG.md` for the breaking development wire notice.
+
+### Router administration during maintenance
+
+Use `RAMFLUX_ROUTER_ADMIN_ENABLED=1` with `RAMFLUX_ROUTER_ADMIN_PORT` for the
+independent loopback router administration listener. The port defaults to 59488
+only when this listener is selected. The demo wrapper accepts the old
+`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` input alias for one release; an explicit
+`RAMFLUX_ROUTER_ADMIN_PORT` takes precedence. New runtime files save the canonical
+name, while immutable historical snapshots keep their original runtime keys and
+frozen Compose inputs.
+
+`up`, `upgrade`, `rollback`, and `recover` share enabled-port validation and the
+same occupied-port refusal. Maintenance inspects the target snapshot read-only
+and checks its port before restoring files or changing the transaction marker.
+An already running, owned router with the exact loopback mapping is permitted;
+an unrelated listener is refused with guidance to select a free port. A disabled
+router admin selection does not validate or save an unused port.

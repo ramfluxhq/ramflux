@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Charge complete task courier submissions to the actor cycle budget, service
   receipt and call couriers first, and bound federated task forwarding with
   deadline-aware HTTP workers and typed timeout/capacity results.
+### Fixed
+
+- Keep custody capacity warnings and networking events tied to transitions rather
+  than status reads and countdown updates. Expiry publishes a clear event while
+  retaining the bounded retry floor.
+- Validate the target router admin port before rollback or recovery changes
+  managed state. Use `RAMFLUX_ROUTER_ADMIN_ENABLED` / `RAMFLUX_ROUTER_ADMIN_PORT`;
+  the demo-only port spelling remains an input alias for one release.
 
 - Upgrade Web Push P-256 ECDH to p256 0.14 and crypto-bigint 0.7.10, preserving
   RFC encryption bytes and removing the RUSTSEC-2026-0387 audit exceptions.
@@ -87,9 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CLI direct-message history preserves the daemon's saved outbound plaintext display after restore instead of overwriting it with encrypted envelope JSON.
 
-
 - Native group reads include stored plaintext history after restore even when the new device has no pending receive page.
-
 
 - Keep restored native group history readable after attended recovery revokes the
   source device. Historical roster display does not grant current send routes.
@@ -145,7 +151,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BREAKING (experimental custody): proofs/challenges commit to the operation hash and receiving node id; signed node metadata binds a separate public listener certificate. Reissue experimental profiles for this pre-default wire revision. Memory-vault builds require an explicit integration-test marker. Native accounts now use ordinary v3 E2EE integration.
 
 - Add experimental born-v3 publication, registration and channel-bound sessions, with durable node pins and one-use challenges. Creation is enabled by default; integration-only memory custody is excluded from production artifacts.
-
 
 ### Added
 

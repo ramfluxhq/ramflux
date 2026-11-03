@@ -33,6 +33,7 @@ mod message_projection;
 mod metadata;
 mod mutations;
 mod native_account;
+mod networking_events;
 pub(crate) mod own_device_copy;
 pub mod protocol;
 pub(crate) mod read_model;

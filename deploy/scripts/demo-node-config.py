@@ -236,13 +236,13 @@ def validate_snapshot_overlays(state, reference):
         "RAMFLUX_DEMO_VOICE_UDP_PORT": target_voice_port,
         "DEMO_ADMIN_LOOPBACK_PORT": target_admin_port,
         "RAMFLUX_ROUTER_ADMIN_ENABLED": router_enabled,
-        "DEMO_ROUTER_ADMIN_LOOPBACK_PORT": values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488") if router_enabled else "",
+        "RAMFLUX_ROUTER_ADMIN_PORT": values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488")) if router_enabled else "",
     }
     selected = {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT", ""),
         "DEMO_ADMIN_LOOPBACK_PORT": os.environ.get("DEMO_ADMIN_LOOPBACK_PORT", ""),
         "RAMFLUX_ROUTER_ADMIN_ENABLED": os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1",
-        "DEMO_ROUTER_ADMIN_LOOPBACK_PORT": os.environ.get("DEMO_ROUTER_ADMIN_LOOPBACK_PORT", "59488") if os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1" else "",
+        "RAMFLUX_ROUTER_ADMIN_PORT": os.environ.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488") if os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1" else "",
     }
     changed = [key for key in selected if selected[key] != applied[key]]
     if changed:
@@ -407,7 +407,7 @@ def validate_selected_overlay_values(state):
     if os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1" and (
             not (state / "compose.router-admin.yml").is_file()
             or values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") != "1"
-            or values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT") != os.environ.get("DEMO_ROUTER_ADMIN_LOOPBACK_PORT", "59488")):
+            or values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488")) != os.environ.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")):
         sys.exit("router admin configuration was not applied by the last up; run up first")
 
 
@@ -596,7 +596,7 @@ def commit(state, command):
     durable_unlink(state / "transaction.pending")
 
 
-def image_version(state, command):
+def maintenance_snapshot(state, command):
     if command == "recover":
         transaction = json.loads((state / "transaction.pending").read_text())
         reference = transaction.get("previous_snapshot")
@@ -605,9 +605,25 @@ def image_version(state, command):
     else:
         owner = json.loads((state / "owner.json").read_text())
         reference = owner["snapshot_history"][-2]
-    source, _, _ = read_snapshot_manifest(state, reference)
+    read_snapshot_manifest(state, reference)
+    return reference
+
+
+def image_version(state, command):
+    source, _, _ = read_snapshot_manifest(state, maintenance_snapshot(state, command))
     owner = json.loads((source / "owner.json").read_text())
     print(owner["settings"]["DEMO_VERSION"])
+
+
+def router_admin_settings(state, command):
+    reference = maintenance_snapshot(state, command)
+    values = snapshot_runtime_values(state, reference)
+    source, _, _ = read_snapshot_manifest(state, reference)
+    token = json.loads((source / "owner.json").read_text())["token"]
+    port = values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488"))
+    admin = values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT", "")
+    voice = values.get("RAMFLUX_RELAY_VOICE_UDP_PORT", "").rsplit(":", 1)[-1]
+    print(values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0"), port or "-", admin or "-", voice or "-", token)
 
 
 def initial_recovery_owner(state):
@@ -691,6 +707,8 @@ def main():
             finish_initial_recovery(state)
         elif action == "image-version":
             image_version(state, sys.argv[4])
+        elif action == "router-admin-settings":
+            router_admin_settings(state, sys.argv[4])
         elif action == "prepare":
             prepare(repo, state, sys.argv[4])
         elif action == "commit":
@@ -710,7 +728,7 @@ def main():
         else:
             sys.exit("invalid demo configuration action")
     except SnapshotError as error:
-        if action == "recover" or (action == "image-version" and sys.argv[4] == "recover"):
+        if action == "recover" or (action in ("image-version", "router-admin-settings") and sys.argv[4] == "recover"):
             sys.exit(f"cannot recover last-good snapshot: {error}; {MANUAL_RECOVERY}")
         sys.exit(str(error))
 

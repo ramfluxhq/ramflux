@@ -12,9 +12,44 @@ pub(crate) fn unix_now() -> u64 {
 
 pub(crate) const MAX_RESET_AHEAD_SECS: u64 = 2 * 86_400;
 
+pub(crate) fn valid(hint: CapacityHint, now: u64) -> bool {
+    hint.resets_at_unix > now && hint.resets_at_unix <= now.saturating_add(MAX_RESET_AHEAD_SECS)
+}
+
+/// Log a persisted rejected hint once per account binding and value, across reloads.
+/// The authority remains unchanged; status reads only update this diagnostic cache.
+pub(crate) fn log_view_discard(
+    hint: Option<CapacityHint>,
+    path: &std::path::Path,
+    node: Option<&str>,
+    now: u64,
+) {
+    use std::{
+        collections::BTreeMap,
+        path::PathBuf,
+        sync::{Mutex, OnceLock},
+    };
+    type Rejected = (Option<String>, CapacityHint);
+    static REJECTED: OnceLock<Mutex<BTreeMap<PathBuf, Rejected>>> = OnceLock::new();
+    let mut rejected = REJECTED
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(hint) = hint.filter(|hint| !valid(*hint, now)) else {
+        rejected.remove(path);
+        return;
+    };
+    let source = (node.map(str::to_owned), hint);
+    if rejected.get(path) == Some(&source) {
+        return;
+    }
+    rejected.insert(path.to_owned(), source);
+    drop(rejected);
+    let _ = accepted(hint, now);
+}
+
 pub(crate) fn accepted(hint: CapacityHint, now: u64) -> Option<CapacityHint> {
-    if hint.resets_at_unix > now && hint.resets_at_unix <= now.saturating_add(MAX_RESET_AHEAD_SECS)
-    {
+    if valid(hint, now) {
         Some(hint)
     } else {
         tracing::warn!(

@@ -365,3 +365,24 @@ async fn custody_capacity_forward_wall_step_keeps_the_active_capture_and_allows_
     );
     Ok(())
 }
+
+// Mutation: drop only the final capacity.filter(reset > now) in clock::view.
+// The first read captures a valid hint; the second persisted load reuses that
+// anchor while the longer retry floor is still active after the reset.
+#[test]
+fn custody_persisted_reload_after_captured_reset_requires_the_output_filter() -> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut account = create(&root.0, "captured-reset", &TestVault::default(), now)?;
+    account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    account.set_networking_reason_at(&root.0, Some(reason(now + 1, 300_000)), now)?;
+    let captured = load_account(&root.0, "captured-reset", now)?;
+    assert_eq!(captured.networking_view(now).ok_or("capture missing")?.resets_at, Some(now + 1));
+    let loaded = load_account(&root.0, "captured-reset", now + 2)?;
+    let view = loaded.networking_view(now + 2).ok_or("retry floor missing")?;
+    assert!(view.resets_at.is_none());
+    assert!(matches!(view.cause, AccountNetworkingReason::NodeBusy { capacity: None, .. }));
+    let error = loaded.check_capacity_deadline(now + 2).err().ok_or("retry floor missing")?;
+    assert!(error.capacity_hint().is_none());
+    Ok(())
+}

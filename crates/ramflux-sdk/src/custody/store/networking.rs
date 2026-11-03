@@ -5,7 +5,7 @@
 use super::{
     BornAccount, CreationState, MAX_STORED_AUTHORITY_BYTES, directory, load_account, write_public,
 };
-use crate::custody::{CAPACITY_RETRY_AFTER_MS, capacity_hint};
+use crate::custody::{CAPACITY_RETRY_AFTER_MS, CAPACITY_RETRY_AFTER_SECS, capacity_hint};
 use crate::{AccountNetworkingReason, SdkError};
 use std::{fs, os::unix::fs::OpenOptionsExt, path::Path};
 mod clock;
@@ -39,7 +39,6 @@ impl BornAccount {
                 current.stored.capacity_retry_at = None;
                 return true;
             }
-
             false
         })
     }
@@ -88,7 +87,7 @@ impl BornAccount {
                         Some(
                             capacity
                                 .map_or(0, |hint| hint.resets_at_unix)
-                                .max(now.saturating_add(300)),
+                                .max(now.saturating_add(CAPACITY_RETRY_AFTER_SECS)),
                         )
                     }
                 }

@@ -5,4 +5,4 @@
 services:
   ramflux-router:
     ports:
-      - "127.0.0.1:${RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT:?operator router loopback port required}:7443/tcp"
+      - "127.0.0.1:${RAMFLUX_ROUTER_ADMIN_PORT:?operator router loopback port required}:7443/tcp"

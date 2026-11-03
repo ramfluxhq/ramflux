@@ -126,7 +126,7 @@ class RenderedComposeInputTests(unittest.TestCase):
                 if path.name == "docker-compose.admin.yml":
                     inputs["RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT"] = "59487"
                 if path.name == "docker-compose.router-admin.yml":
-                    inputs["RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT"] = "59488"
+                    inputs["RAMFLUX_ROUTER_ADMIN_PORT"] = "59488"
                 if path.name == "docker-compose.itest.custody-quota.yml":
                     inputs["RF_COMPOSE_CUSTODY_NEW_PRINCIPALS_PER_PREFIX_PER_DAY"] = "16"
                 unset = self.render(command, files, inputs)
@@ -140,7 +140,7 @@ class RenderedComposeInputTests(unittest.TestCase):
                         parts = str(port).split("/")[0].split(":")
                         return tuple(parts)
                     self.assertEqual([port_tuple(port) for port in ports], [("127.0.0.1", "59488", "7443")])
-                    changed = self.render(command, files, {**inputs, "RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT": "59588"})
+                    changed = self.render(command, files, {**inputs, "RAMFLUX_ROUTER_ADMIN_PORT": "59588"})
                     self.assertEqual([port_tuple(port) for port in changed["services"]["ramflux-router"]["ports"]],
                                      [("127.0.0.1", "59588", "7443")])
                 empty = self.render(command, files, {**dict.fromkeys(MAPPING.values(), ""), **inputs})

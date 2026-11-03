@@ -893,27 +893,84 @@ else:
         up = next(call for call in calls if "up" in call["args"])
         self.assertIn(str(self.state / "compose.admin.yml"), up["args"])
         self.assertIn("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=59487", (self.state / "runtime.env").read_text())
-        self.assertNotIn("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=", (self.state / "runtime.env").read_text())
+        self.assertNotIn("RAMFLUX_ROUTER_ADMIN_PORT=", (self.state / "runtime.env").read_text())
         with self.env_file.open("a") as output:
             output.write("DEMO_ADMIN_LOOPBACK_PORT=59482\n")
         self.assertIn("admin loopback port conflicts", self.run_script("up", success=False).stderr)
 
+    # Mutation: omit rollback/recover from the read-only router port preflight.
+    def router_admin_maintenance_refuses_occupied_snapshot_port(self, command):
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            port = occupied.getsockname()[1]
+        with self.env_file.open("a") as output:
+            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nRAMFLUX_ROUTER_ADMIN_PORT={port}\n")
+        self.run_script("up")
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=router-v2\n")
+        if command == "recover":
+            self.control.write_text(json.dumps({"public_unhealthy_versions": ["router-v2"]}))
+            self.run_script("upgrade", success=False)
+            self.control.write_text("{}")
+            # Recovery must use the target snapshot's owner even if this file was lost.
+            (self.state / "owner.token").unlink()
+        else:
+            self.run_script("upgrade")
+        before = self.managed_state()
+        marker = self.state / "transaction.pending"
+        pending = marker.read_bytes() if marker.exists() else None
+        calls = len(self.compose_commands())
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", port))
+            occupied.listen()
+            refused = self.run_script(command, success=False)
+        self.assertIn(f"router admin loopback port {port} is already in use", refused.stderr)
+        self.assertEqual(self.managed_state(), before)
+        self.assertEqual(marker.read_bytes() if marker.exists() else None, pending)
+        self.assertFalse(any("up" in args for args in self.compose_commands()[calls:]))
+
+    def test_router_admin_rollback_checks_snapshot_port_before_restoring(self):
+        self.router_admin_maintenance_refuses_occupied_snapshot_port("rollback")
+
+    def test_router_admin_recover_checks_snapshot_port_before_restoring(self):
+        self.router_admin_maintenance_refuses_occupied_snapshot_port("recover")
+
+    # Mutation: ignore RAMFLUX_ROUTER_ADMIN_PORT and always use the old alias/default.
+    def test_router_admin_canonical_port_and_legacy_input_alias(self):
+        with socket.socket() as legacy, socket.socket() as selected:
+            legacy.bind(("127.0.0.1", 0))
+            selected.bind(("127.0.0.1", 0))
+            alias = legacy.getsockname()[1]
+            canonical = selected.getsockname()[1]
+        self.assertNotEqual(alias, canonical)
+        with self.env_file.open("a") as output:
+            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT={alias}\n")
+        self.run_script("up")
+        self.assertIn(f"RAMFLUX_ROUTER_ADMIN_PORT={alias}", (self.state / "runtime.env").read_text())
+        with self.env_file.open("a") as output:
+            output.write(f"RAMFLUX_ROUTER_ADMIN_PORT={canonical}\n")
+        self.run_script("up")
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn(f"RAMFLUX_ROUTER_ADMIN_PORT={canonical}", runtime)
+        self.assertNotIn("DEMO_ROUTER_ADMIN_LOOPBACK_PORT=", runtime)
+        self.assertNotIn("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=", runtime)
+
     def test_router_admin_port_is_distinct_and_saved(self):
         with self.env_file.open("a") as output:
-            output.write("RAMFLUX_ROUTER_ADMIN_ENABLED=1\nDEMO_ADMIN_LOOPBACK_PORT=59487\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT=59487\n")
+            output.write("RAMFLUX_ROUTER_ADMIN_ENABLED=1\nDEMO_ADMIN_LOOPBACK_PORT=59487\nRAMFLUX_ROUTER_ADMIN_PORT=59487\n")
         self.assertIn("router admin loopback port conflicts", self.run_script("up", success=False).stderr)
         port = self.available_tcp_port()
         with self.env_file.open("a") as output:
-            output.write(f"DEMO_ROUTER_ADMIN_LOOPBACK_PORT={port}\n")
+            output.write(f"RAMFLUX_ROUTER_ADMIN_PORT={port}\n")
         self.run_script("up")
-        self.assertIn(f"RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT={port}", (self.state / "runtime.env").read_text())
+        self.assertIn(f"RAMFLUX_ROUTER_ADMIN_PORT={port}", (self.state / "runtime.env").read_text())
 
-    # Mutation: write RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT even when the opt-in is off.
+    # Mutation: write RAMFLUX_ROUTER_ADMIN_PORT even when the opt-in is off.
     def test_router_admin_disabled_does_not_save_port_or_inherit_federation_opt_in(self):
         with self.env_file.open("a") as output:
-            output.write("DEMO_ADMIN_LOOPBACK_PORT=59487\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT=invalid-unused\n")
+            output.write("DEMO_ADMIN_LOOPBACK_PORT=59487\nRAMFLUX_ROUTER_ADMIN_PORT=invalid-unused\n")
         self.run_script("up")
-        self.assertNotIn("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=", (self.state / "runtime.env").read_text())
+        self.assertNotIn("RAMFLUX_ROUTER_ADMIN_PORT=", (self.state / "runtime.env").read_text())
         self.assertNotIn("ramflux-router:", (self.state / "compose.admin.yml").read_text())
         self.assertFalse((self.state / "compose.router-admin.yml").exists())
         self.assertNotIn(str(self.state / "compose.router-admin.yml"), self.compose_commands()[-1])
@@ -921,7 +978,7 @@ else:
     def test_router_admin_enabled_validates_range_and_opt_in(self):
         for value in ("0", "1023", "65536", "invalid", "59443"):
             with self.env_file.open("a") as output:
-                output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT={value}\n")
+                output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nRAMFLUX_ROUTER_ADMIN_PORT={value}\n")
             self.run_script("up", success=False)
             self.assertFalse((self.state / "runtime.env").exists())
         with self.env_file.open("a") as output:
@@ -934,7 +991,7 @@ else:
             occupied.listen()
             port = occupied.getsockname()[1]
             with self.env_file.open("a") as output:
-                output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT={port}\n")
+                output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nRAMFLUX_ROUTER_ADMIN_PORT={port}\n")
             refused = self.run_script("up", success=False)
             self.assertIn(f"router admin loopback port {port} is already in use", refused.stderr)
             self.assertFalse((self.state / "runtime.env").exists())
@@ -950,11 +1007,11 @@ else:
     def router_admin_snapshot_round_trip(self, enabled):
         port = self.available_tcp_port()
         with self.env_file.open("a") as output:
-            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED={int(enabled)}\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT={port}\n")
+            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED={int(enabled)}\nRAMFLUX_ROUTER_ADMIN_PORT={port}\n")
         self.run_script("up")
         original = self.managed_state()
         runtime = (self.state / "runtime.env").read_text()
-        self.assertEqual(f"RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT={port}" in runtime, enabled)
+        self.assertEqual(f"RAMFLUX_ROUTER_ADMIN_PORT={port}" in runtime, enabled)
         self.assertEqual(str(self.state / "compose.router-admin.yml") in self.compose_commands()[-1], enabled)
         with self.env_file.open("a") as output:
             output.write("DEMO_VERSION=router-v2\n")
@@ -983,7 +1040,7 @@ else:
     def test_router_admin_port_conflicts_with_selected_voice_port(self):
         port = self.available_tcp_port()
         with self.env_file.open("a") as output:
-            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT={port}\nRAMFLUX_DEMO_VOICE_UDP_PORT={port}\n")
+            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nRAMFLUX_ROUTER_ADMIN_PORT={port}\nRAMFLUX_DEMO_VOICE_UDP_PORT={port}\n")
         self.assertIn("router admin loopback port conflicts", self.run_script("up", success=False).stderr)
         self.assertFalse((self.state / "runtime.env").exists())
 

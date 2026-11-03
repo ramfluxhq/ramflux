@@ -399,15 +399,7 @@ pub(super) fn record_networking_at(
         }
         native = crate::custody::load_account(&root, &id, now)?;
     }
-    let body = serde_json::json!({
-        "account_id": id,
-        "state": native.state(),
-        "networking_reason": native.networking_view(now),
-    });
-    let db = account.client.account_db()?;
-    if db.load_actor_state::<serde_json::Value>("account/networking")?.as_ref() != Some(&body) {
-        db.persist_actor_state("account/networking", &body)?;
-    }
+    super::networking_events::record(account, &native, now)?;
     account.client.born_v3_account = Some(Box::new(native));
     Ok(())
 }

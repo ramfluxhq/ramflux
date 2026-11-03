@@ -458,10 +458,10 @@ set +a
 
 Enable the independent router administration opt-in first: set
 `RAMFLUX_ROUTER_ADMIN_ENABLED=1` for the demo wrapper, or explicitly select
-`docker-compose.router-admin.yml` with `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT`
+`docker-compose.router-admin.yml` with `RAMFLUX_ROUTER_ADMIN_PORT`
 for direct Compose. The federation admin overlay does not publish this port. The router listener
-uses loopback TCP 59488 (`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` for the demo wrapper;
-`RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` for direct Compose). `DEMO_MESH_PORT` reaches
+uses loopback TCP 59488 (`RAMFLUX_ROUTER_ADMIN_PORT` for the demo wrapper;
+`RAMFLUX_ROUTER_ADMIN_PORT` for direct Compose). `DEMO_MESH_PORT` reaches
 federation and does not serve this router route. The tool
 uses the existing gateway mesh certificate and router admin token. Keep both
 operator-only. This path is not forwarded by the public gateway.
@@ -507,3 +507,31 @@ until the server's reset; the networking backoff also retains its monotonic floo
 This is a breaking development v3 wire change: older strict decoders reject a
 refusal carrying `capacity`. Rebuild clients and node services together; the
 version stays unchanged for the current development deployment.
+
+### Networking view and event cadence
+
+Status and account-list reads derive their current remaining delay without
+rewriting the persisted refusal. An expired hint is discarded with one warning
+per account binding and hint value across consecutive reads. The 300-second
+unhinted retry floor is still enforced when a shorter daily hint expires.
+
+`account.networking.changed` reports cause, node binding, and state transitions;
+it does not publish every countdown decrement or blocked retry. Its
+`networking_reason` is the derived view captured at that event's time. Delay
+fields describe the captured transition rather than a live countdown; obtain a
+fresh status view for the current remaining delay. Hinted blocks also retain the
+server's absolute reset time.
+`node_binding` is the existing opaque hash of node id and public key, or null
+when no binding is selected. An expiry event clears `networking_reason` even
+without another user networking attempt. The account writer checks expiry on its
+ordinary background sync and before commands, projecting that transition before
+a new connection attempt can replace the view.
+
+The router administration inputs are `RAMFLUX_ROUTER_ADMIN_ENABLED` and
+`RAMFLUX_ROUTER_ADMIN_PORT`. The former remains an independent opt-in. For one
+release the demo wrapper also accepts `DEMO_ROUTER_ADMIN_LOOPBACK_PORT` as an
+input alias; the canonical port takes precedence and is the only new runtime
+spelling saved. Historical snapshots retain their own frozen Compose/runtime
+files, and maintenance can read their old `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT`
+key. Rollback and recovery inspect the target snapshot's selection and refuse an
+invalid, conflicting, or occupied router admin port before restoring any files.
