@@ -16,6 +16,11 @@ pub(in crate::bus) struct RecordingGateway {
     pub fail_after: Option<usize>,
     pub fail_target: Option<String>,
     pub fail_own_ack: bool,
+    pub fail_own_target: Option<String>,
+    pub fail_ack: bool,
+    pub ack_target: String,
+    pub own_delay: Duration,
+    pub own_completed_at: Arc<Mutex<Option<i64>>>,
     pub prekeys: BTreeMap<String, crate::prekey::SdkPrekeyResponse>,
     pub own: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
     pub frame_lengths: Arc<Mutex<Vec<usize>>>,
@@ -44,16 +49,32 @@ impl RecordingGateway {
                 delivered: packet
                     .slots
                     .into_iter()
-                    .map(|slot| crate::GatewayOwnDeviceFanoutDelivery {
-                        device_id: slot.recipient_device_id,
-                        target_delivery_id: "sibling".into(),
-                        outcome: "online".into(),
-                        inbox_seq: Some(1),
+                    .map(|slot| {
+                        let failed =
+                            self.fail_own_target.as_ref() == Some(&slot.recipient_device_id);
+                        crate::GatewayOwnDeviceFanoutDelivery {
+                            device_id: slot.recipient_device_id,
+                            target_delivery_id: "sibling".into(),
+                            outcome: if failed { "unreachable" } else { "online" }.into(),
+                            inbox_seq: (!failed).then_some(1),
+                        }
                     })
                     .collect(),
             },
         })
     }
+    async fn delayed_own_response(
+        &mut self,
+        fanout: crate::GatewayOwnDeviceFanoutFrame,
+    ) -> Result<GatewayServerFrame, TransportError> {
+        if !self.own_delay.is_zero() {
+            tokio::time::sleep(self.own_delay).await;
+        }
+        *self.own_completed_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(now_unix_timestamp());
+        self.own_response(fanout)
+    }
+
     pub fn new(delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>) -> Self {
         Self {
             last: None,
@@ -62,6 +83,11 @@ impl RecordingGateway {
             fail_after: None,
             fail_target: None,
             fail_own_ack: false,
+            fail_own_target: None,
+            fail_ack: false,
+            ack_target: "sender".into(),
+            own_delay: Duration::ZERO,
+            own_completed_at: Arc::default(),
             prekeys: BTreeMap::new(),
             own: Arc::default(),
             frame_lengths: Arc::default(),
@@ -96,6 +122,14 @@ impl GatewaySessionFrameSink for RecordingGateway {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(bytes.len());
+            if self.fail_ack
+                && matches!(
+                    serde_json::from_slice::<GatewayClientFrame>(bytes),
+                    Ok(GatewayClientFrame::Ack { .. })
+                )
+            {
+                return Err(TransportError::Quic("injected lost inbox ACK".into()));
+            }
             self.last = Some(
                 serde_json::from_slice(bytes).map_err(|e| TransportError::Quic(e.to_string()))?,
             );
@@ -131,7 +165,7 @@ impl GatewaySessionFrameSource for RecordingGateway {
                     }
                 }
                 Some(GatewayClientFrame::OwnDeviceFanout { fanout }) => {
-                    self.own_response(fanout)?
+                    self.delayed_own_response(fanout).await?
                 }
                 Some(GatewayClientFrame::PrekeyFetch { device_id }) => GatewayServerFrame::Prekey {
                     response: self.prekeys.get(&device_id).cloned().unwrap_or_else(|| {
@@ -150,7 +184,7 @@ impl GatewaySessionFrameSource for RecordingGateway {
                 }
                 Some(GatewayClientFrame::Ack { ack }) => {
                     let cursor = GatewayCursor {
-                        target_delivery_id: "sender".into(),
+                        target_delivery_id: self.ack_target.clone(),
                         inbox_seq: 1,
                         last_envelope_id: Some(ack.envelope_id.clone()),
                         acked_envelope_ids: vec![ack.envelope_id],

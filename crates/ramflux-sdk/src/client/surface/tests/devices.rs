@@ -284,7 +284,12 @@ fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestRe
         carrier(author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
     assert!(project(author, &create, "create")?.accepted);
     assert!(author.live_surface_control_packet(&create, None)?.context.is_some());
-    author.mark_own_surface_context_announced("thread", None)?;
+    let targets = vec!["sibling".to_owned()];
+    let (_, delivery) = author.prepare_own_surface_context(
+        &author.live_surface_control_packet(&create, None)?.bytes()?,
+        &targets,
+    )?;
+    author.finish_own_surface_context(&delivery.ok_or("context delivery")?, true)?;
     let delta = carrier(
         author,
         PayloadKind::Event,
@@ -299,10 +304,22 @@ fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestRe
             }),
         )?,
     )?;
-    let live = author.live_surface_control_packet(&delta, None)?;
+    let staged = author.live_surface_control_packet(&delta, None)?;
+    assert!(staged.context.is_some(), "staging retains context until current targets are known");
+    let (bytes, _) = author.prepare_own_surface_context(&staged.bytes()?, &targets)?;
+    let live: super::super::SurfaceControl = ramflux_protocol::parse_i_json(
+        bytes.strip_prefix(super::super::CONTROL_PREFIX).ok_or("control prefix")?,
+    )?;
     assert!(live.context.is_none());
     assert_eq!(live.manifests.len(), 0);
     assert!(author.surface_control_packet(&delta, ControlKind::Own, None)?.context.is_some());
-    assert!(!author.own_surface_context_announced("thread", Some(2))?);
+    let (bytes, _) = author.prepare_own_surface_context(
+        &author.live_surface_control_packet(&delta, Some(2))?.bytes()?,
+        &targets,
+    )?;
+    let changed: super::super::SurfaceControl = ramflux_protocol::parse_i_json(
+        bytes.strip_prefix(super::super::CONTROL_PREFIX).ok_or("control prefix")?,
+    )?;
+    assert!(changed.context.is_some());
     Ok(())
 }

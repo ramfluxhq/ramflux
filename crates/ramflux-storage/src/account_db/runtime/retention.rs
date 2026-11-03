@@ -6,6 +6,24 @@ use super::super::AccountDb;
 use crate::StorageError;
 use rusqlite::params;
 impl AccountDb {
+    /// Retains pending rows before acknowledged/completed rows, oldest confirmed rows first.
+    ///
+    /// The private namespace has the same expiry contract as `retain_expiring_actor_states`.
+    /// Supports bounded delivery windows up to 32,768 rows without changing other callers' caps.
+    /// # Errors
+    /// Rejects invalid prefixes or budgets and returns storage errors atomically.
+    pub fn retain_delivery_actor_states(
+        &self,
+        prefix: &str,
+        now: i64,
+        limit: u32,
+    ) -> Result<(), StorageError> {
+        if limit > 32_768 {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        self.retain_actor_states(prefix, now, limit, true)
+    }
+
     /// Delete expired (or legacy undated) records and retain at most `limit` live rows.
     /// The caller supplies a private namespace whose JSON records have `expires_at` seconds.
     /// # Errors
@@ -15,6 +33,16 @@ impl AccountDb {
         prefix: &str,
         now: i64,
         limit: u32,
+    ) -> Result<(), StorageError> {
+        self.retain_actor_states(prefix, now, limit.min(4096), false)
+    }
+
+    fn retain_actor_states(
+        &self,
+        prefix: &str,
+        now: i64,
+        limit: u32,
+        pending_first: bool,
     ) -> Result<(), StorageError> {
         let mut bytes = prefix.as_bytes().to_vec();
         if !prefix.is_ascii() {
@@ -29,8 +57,8 @@ impl AccountDb {
                 params![prefix,end,now],
             )?;
             self.connection.execute(
-                "DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT state_kind FROM runtime_actor_state WHERE state_kind>=?1 AND state_kind<?2 ORDER BY CAST(json_extract(CAST(state_json AS TEXT),'$.expires_at') AS INTEGER) DESC,state_kind DESC LIMIT -1 OFFSET ?3)",
-                params![prefix,end,limit.min(4096)],
+                "DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT state_kind FROM runtime_actor_state WHERE state_kind>=?1 AND state_kind<?2 ORDER BY CASE WHEN ?4 THEN COALESCE(json_extract(CAST(state_json AS TEXT),'$.completed'),json_extract(CAST(state_json AS TEXT),'$.acknowledged'),0) ELSE 0 END ASC,CAST(json_extract(CAST(state_json AS TEXT),'$.expires_at') AS INTEGER) DESC,state_kind DESC LIMIT -1 OFFSET ?3)",
+                params![prefix,end,limit,pending_first],
             )?;
             Ok(())
         })
@@ -39,6 +67,49 @@ impl AccountDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delivery_retention_keeps_pending_rows_and_supports_the_larger_stream_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (root, db) = crate::tests::test_db("delivery-retention")?;
+        db.write_transaction(|| {
+            for i in 0..5000 {
+                db.persist_actor_state(
+                    &format!("receipt/{i:05}"),
+                    &serde_json::json!({"expires_at":100 + i,"acknowledged":true}),
+                )?;
+            }
+            Ok::<_, StorageError>(())
+        })?;
+        db.retain_delivery_actor_states("receipt/", 0, 5000)?;
+        assert_eq!(db.actor_state_usage("receipt/")?.0, 5000);
+        db.persist_actor_state(
+            "receipt/pending",
+            &serde_json::json!({"expires_at":20,"acknowledged":false}),
+        )?;
+        db.persist_actor_state(
+            "receipt/unconfirmed",
+            &serde_json::json!({"expires_at":30,"acknowledged":false}),
+        )?;
+        db.persist_actor_state("receipt0/neighbor", &"keep")?;
+        db.retain_delivery_actor_states("receipt/", 0, 3)?;
+        assert_eq!(
+            db.actor_state_key_page("receipt/", 10)?,
+            vec!["receipt/04999", "receipt/pending", "receipt/unconfirmed"]
+        );
+        db.retain_delivery_actor_states("receipt/", 0, 2)?;
+        assert_eq!(
+            db.actor_state_key_page("receipt/", 10)?,
+            vec!["receipt/pending", "receipt/unconfirmed"]
+        );
+        db.retain_delivery_actor_states("receipt/", 20, 2)?;
+        assert_eq!(db.actor_state_key_page("receipt/", 10)?, vec!["receipt/unconfirmed"]);
+        assert!(db.actor_state_exists("receipt0/neighbor")?);
+        assert!(db.retain_delivery_actor_states("receipt/", 0, 32_769).is_err());
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn expiry_and_row_cap_prune_only_the_selected_namespace()
     -> Result<(), Box<dyn std::error::Error>> {

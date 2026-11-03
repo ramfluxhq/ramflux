@@ -50,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without blocking account unlock. Markerless legacy archive merges baseline only
   imported verifications that still match their observed signed authority; sealed
   local verifications and existing authority stamps remain unchanged.
+- Confirm own-device surface context per active sibling set after fanout ACKs,
+  park failed targets independently, and preserve exact committed replay handling
+  when disposable streaming receipts are evicted. Pending cache rows take priority
+  over completed rows within explicit 18,000-row receipt and status budgets.
 
 - Bound custody capacity reset hints to two days, keep node-bound retry deadlines
   without repeated status writes, and expose router budget inspection through

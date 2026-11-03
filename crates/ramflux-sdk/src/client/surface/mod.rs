@@ -18,6 +18,8 @@ pub(crate) use own_history::{SurfaceExportMetadata, SurfaceHistoryExport};
 mod delivery;
 mod fallback;
 mod origin;
+mod own_delivery;
+pub(crate) use own_delivery::OwnContextDelivery;
 mod pending;
 mod persist;
 mod projection;

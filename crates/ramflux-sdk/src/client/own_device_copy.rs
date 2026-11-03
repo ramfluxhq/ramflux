@@ -15,6 +15,8 @@ pub(crate) const DOMAIN: &str = "ramflux.sdk.own_device_message.v2";
 pub(crate) const PREFIX: &[u8] = b"ramflux.own_device_message.v2\n";
 pub(crate) const MAX_PACKET_BYTES: usize = 512 * 1024;
 pub(crate) const TOO_LARGE: &str = "own-device message byte budget exceeded";
+mod receipts;
+pub(crate) use receipts::MAX_DELIVERY_ROWS;
 const RECEIPTS: &str = "own-device/message-receipt/";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,8 +27,32 @@ pub(crate) struct OwnDeviceMessage {
     pub ciphertext: String,
     pub slots: Vec<OwnKeySlot>,
     pub signature: String,
+    #[serde(skip)]
+    pub(crate) context_delivery: Option<super::surface::OwnContextDelivery>,
 }
 impl OwnDeviceMessage {
+    fn verify_source(
+        &self,
+        entry: &GatewayInboxEntry,
+        manifest: &crate::prekey::SdkDeviceManifestResponse,
+        recipient: &str,
+    ) -> Result<(), SdkError> {
+        let source = manifest
+            .devices
+            .iter()
+            .find(|d| d.device_id == entry.envelope.source_device_id)
+            .ok_or_else(|| invalid("own-device sender is not active"))?;
+        if !manifest.devices.iter().any(|d| d.device_id == recipient) {
+            return Err(invalid("own-device recipient is not active"));
+        }
+        ramflux_crypto::verify_device_branch_signature(
+            &source.branch_public_key,
+            &self.signing()?,
+            &self.signature,
+        )?;
+        Ok(())
+    }
+
     fn recipient_slot(&self, device: &str) -> Result<&OwnKeySlot, SdkError> {
         let mut slots = self.slots.iter().filter(|slot| slot.recipient_device_id == device);
         let slot = slots.next().ok_or_else(|| invalid("own-device recipient slot ambiguity"))?;
@@ -115,6 +141,8 @@ struct Receipt {
     scope: ReceiptScope,
     valid_until: i64,
     expires_at: i64,
+    #[serde(default)]
+    acknowledged: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
@@ -248,6 +276,18 @@ impl RamfluxClient {
         if targets.is_empty() {
             return Ok(None);
         }
+        let target_keys = targets
+            .iter()
+            .map(|target| {
+                serde_json::to_string(&(
+                    &target.device_id,
+                    &target.target_delivery_id,
+                    &target.branch_public_key,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (body, context_delivery) =
+            self.prepare_own_surface_context(input.body, &target_keys)?;
         let context = PrivateContext {
             message: input.id.into(),
             principal: engine.config.principal_id.clone(),
@@ -265,10 +305,11 @@ impl RamfluxClient {
             ciphertext: String::new(),
             slots: Vec::new(),
             signature: String::new(),
+            context_delivery,
         };
         let mut plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&context)?);
         plaintext.push(b'\n');
-        plaintext.extend_from_slice(input.body);
+        plaintext.extend_from_slice(&body);
         let key = zeroize::Zeroizing::new(ramflux_crypto::random_32()?);
         let nonce = ramflux_protocol::decode_base64url(&packet.nonce)
             .map_err(|_| invalid("own-device nonce"))?;
@@ -363,6 +404,7 @@ impl RamfluxClient {
                 scope,
                 valid_until: context.expires_at,
                 expires_at: context.expires_at.saturating_add(300),
+                acknowledged: false,
             },
         )?;
         Ok(())
@@ -390,19 +432,12 @@ impl RamfluxClient {
         let root = self.surface_local_root_commitment()?;
         let now = now_unix_timestamp();
         let db = self.account_db()?;
-        db.retain_expiring_actor_states(RECEIPTS, now, 4096)?;
-        let receipt_key = format!("{RECEIPTS}{}", packet.id);
-        let fingerprint = ramflux_protocol::hash_base64url(DOMAIN, &bytes);
-        if let Some(old) = db.load_actor_state::<Receipt>(&receipt_key)? {
-            old.validate(
-                db,
-                &entry.envelope.source_device_id,
-                &local.device_id,
-                &fingerprint,
-                now,
-            )?;
+        let replay = self.own_copy_replay(entry, &packet, &bytes, now)?;
+        if replay.committed {
             return Ok(true);
         }
+        let receipt_key = format!("{RECEIPTS}{}", packet.id);
+        let fingerprint = ramflux_protocol::hash_base64url(DOMAIN, &bytes);
         let manifest = self
             .cache_verified_device_manifest(gateway, &root, "own_device_message_receive")
             .await?;
@@ -411,19 +446,7 @@ impl RamfluxClient {
             &self.device_identity_for_root(&root, &entry.envelope.source_device_id)?,
             NativeOperation::Sync,
         )?;
-        let source = manifest
-            .devices
-            .iter()
-            .find(|d| d.device_id == entry.envelope.source_device_id)
-            .ok_or_else(|| invalid("own-device sender is not active"))?;
-        if !manifest.devices.iter().any(|d| d.device_id == local.device_id) {
-            return Err(invalid("own-device recipient is not active"));
-        }
-        ramflux_crypto::verify_device_branch_signature(
-            &source.branch_public_key,
-            &packet.signing()?,
-            &packet.signature,
-        )?;
+        packet.verify_source(entry, &manifest, &local.device_id)?;
         let recipient = packet.recipient_slot(&local.device_id)?;
         let slot = recipient.object_slot(&packet.id, &manifest.principal_commitment);
         if slot.ciphertext.sender_device_id_hash
@@ -458,6 +481,15 @@ impl RamfluxClient {
             // generic envelope signatures are not the own-device packet's signature scheme.
             let source_identity =
                 self.device_identity_for_root(&root, &entry.envelope.source_device_id)?;
+            // Reserve replay capacity before consuming a ratchet step or applying the control.
+            receipts::remember(
+                db,
+                &replay.key,
+                &replay.fingerprint,
+                context.expires_at,
+                false,
+                now,
+            )?;
             let scope = self.apply_own_device_control(
                 entry,
                 &source_identity,
@@ -467,7 +499,7 @@ impl RamfluxClient {
             )?;
             self.commit_inline_pair_key_slot(&slot, &key)?;
             self.persist_own_device_receipt(&receipt_key, &context, fingerprint, scope)?;
-            db.retain_expiring_actor_states(RECEIPTS, now, 4096)?;
+            db.retain_delivery_actor_states(RECEIPTS, now, MAX_DELIVERY_ROWS)?;
             Ok::<_, SdkError>(())
         })?;
         Ok(true)

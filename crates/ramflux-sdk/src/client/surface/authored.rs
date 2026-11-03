@@ -149,9 +149,6 @@ impl RamfluxClient {
                     },
                     Some(("surface", &reference)),
                 )?;
-                if control.context.is_some() {
-                    self.mark_own_surface_context_announced(&carrier.conversation_id, epoch)?;
-                }
                 Ok::<_, SdkError>(())
             })
         })();

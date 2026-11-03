@@ -714,7 +714,14 @@ impl RamfluxClient {
         let mut ack = gateway_ack(&entry.envelope.envelope_id, &receiver, received_at);
         ack.ext.ext.insert("inbox_seq".into(), serde_json::json!(entry.inbox_seq));
         let cursor = engine.ack(ack).await?;
-        self.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)?;
+        if entry.envelope.delivery_class == ramflux_protocol::DeliveryClass::SelfDeviceControl {
+            self.account_db()?.write_transaction(|| {
+                self.record_own_copy_ack(entry)?;
+                self.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)
+            })?;
+        } else {
+            self.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)?;
+        }
         Ok(cursor)
     }
 

@@ -6,6 +6,8 @@ use super::*;
 use crate::bus::runtime_tests;
 use ramflux_protocol::{A2uiConversationCommand, StreamAppendCommand};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
+#[path = "surface_own_tests/followups.rs"]
+mod followups;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 pub(super) async fn sibling_fixture(
@@ -245,6 +247,11 @@ async fn lost_own_copy_ack_keeps_peer_submitted_and_replays_one_immutable_messag
     for key in db.actor_state_key_page("own-device/send/", 256)? {
         let mut work: Value = db.load_actor_state(&key)?.ok_or("retry")?;
         work["next_at"] = json!(0);
+        if let Some(targets) = work["targets"].as_array_mut() {
+            for target in targets {
+                target["next_at"] = json!(0);
+            }
+        }
         db.persist_actor_state(&key, &work)?;
     }
     let mut healthy = super::fixture::RecordingGateway::new(Arc::default());
@@ -466,7 +473,7 @@ async fn own_copy_node_payload_hides_private_group_root_principal_and_dates() ->
 }
 
 #[tokio::test]
-async fn a_backed_off_first_copy_blocks_newer_hash_ordered_copies_until_retry() -> TestResult {
+async fn a_backed_off_copy_allows_newer_copies_and_preserves_each_immutable_retry() -> TestResult {
     use crate::client::own_device_copy::OwnMessageInput;
     let root = runtime_tests::root("own-copy-order");
     let mut source = runtime_tests::account(
@@ -502,10 +509,15 @@ async fn a_backed_off_first_copy_blocks_newer_hash_ordered_copies_until_retry() 
         )?;
         let _ = crate::bus::own_device_copy::flush(&mut source).await?;
     }
-    assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 1);
+    assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 2);
     for key in source.client.account_db()?.actor_state_key_page("own-device/send/", 256)? {
         let mut work: Value = source.client.account_db()?.load_actor_state(&key)?.ok_or("work")?;
         work["next_at"] = json!(0);
+        if let Some(targets) = work["targets"].as_array_mut() {
+            for target in targets {
+                target["next_at"] = json!(0);
+            }
+        }
         source.client.account_db()?.persist_actor_state(&key, &work)?;
     }
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
@@ -515,8 +527,9 @@ async fn a_backed_off_first_copy_blocks_newer_hash_ordered_copies_until_retry() 
         let _ = crate::bus::own_device_copy::flush(&mut source).await?;
     }
     let captures = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(captures.len(), 3);
-    assert_eq!(captures[0].encrypted_payload, captures[1].encrypted_payload);
+    assert_eq!(captures.len(), 4);
+    assert_eq!(captures[0].encrypted_payload, captures[2].encrypted_payload);
+    assert_eq!(captures[1].encrypted_payload, captures[3].encrypted_payload);
     let packet =
         |envelope: &ramflux_protocol::Envelope| -> Result<Value, Box<dyn std::error::Error>> {
             let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)?;
@@ -525,11 +538,11 @@ async fn a_backed_off_first_copy_blocks_newer_hash_ordered_copies_until_retry() 
             )?)
         };
     assert_eq!(
-        packet(&captures[1])?["id"],
+        packet(&captures[2])?["id"],
         crate::bus::own_device_copy::copy_id(&source.client, first)?
     );
     assert_eq!(
-        packet(&captures[2])?["id"],
+        packet(&captures[3])?["id"],
         crate::bus::own_device_copy::copy_id(&source.client, second)?
     );
     drop(captures);

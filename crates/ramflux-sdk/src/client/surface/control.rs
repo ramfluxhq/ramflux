@@ -56,9 +56,8 @@ impl RamfluxClient {
         carrier: &Carrier,
         group_epoch: Option<u64>,
     ) -> Result<SurfaceControl, SdkError> {
-        let include_context =
-            !self.own_surface_context_announced(&carrier.conversation_id, group_epoch)?;
-        self.surface_control_packet_inner(carrier, ControlKind::Own, group_epoch, include_context)
+        // Suppress context only during preparation, after the current targets are known.
+        self.surface_control_packet_inner(carrier, ControlKind::Own, group_epoch, true)
     }
     fn surface_control_packet_inner(
         &self,

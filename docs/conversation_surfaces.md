@@ -35,10 +35,13 @@ per-event control with pair-ratchet-wrapped keys for active siblings. They never
 full-history bundles or upload objects. The immutable inner device signature survives
 node fanout rewriting the outer route. A lost ACK retries the same inner ciphertext
 under a fresh outer envelope ID; sibling receipts and projection commit atomically.
-`own_device_copy_state` is independent of peer `delivery_state`. The account retries
-up to 10 attempts within the original 600-second lifetime (2–60 seconds backoff),
-with a 256-message / 8 MiB pending budget. Each drain has a soft 250 ms work
-budget and stops on its first network failure; one operation is bounded by the
+`own_device_copy_state` is independent of peer `delivery_state`. Each prepared
+target has up to 10 delivery attempts within the original 600-second lifetime
+(2–60 seconds backoff), with a 256-message / 8 MiB pending budget. A failed target
+is parked independently: later copies continue, while confirmed target progress
+survives retries and account restart. The immutable fanout packet is unchanged;
+a retry can still reach an already confirmed sibling, which treats it idempotently.
+Each drain retains its soft 250 ms work budget; one operation is bounded by the
 ordinary gateway timeout. Exhaustion is visible as `failed`; an explicit
 fresh resync can repair a sibling that missed updates. Manual history export/restore
 remains separate from live fanout. Live copies require updated sibling receivers;
@@ -212,12 +215,26 @@ opaque logical ID, nonce, ciphertext, signature and recipient cryptographic slot
 Conversation, group, principal/root, original timestamps and logical message context
 are inside authenticated encryption; slots contain no conversation ID. Routing
 identity and fresh outer envelope timestamps remain available to the node.
-FIFO retry sequencing prevents an older backed-off copy being overtaken. Disposable
-copy receipts retain at most 4,096 rows (logical expiry plus 300 seconds), and copy
-statuses at most 2,048 rows (900 seconds). The first live copy per conversation/epoch
-carries bootstrap context, refreshed after 600 seconds; subsequent copies carry only
-the event and necessary signer proof. Explicit history export still carries full
-context. Legacy v1 queued copies fail their own-copy status and require a fresh copy
+Eligible retries are considered in creation order, while parked targets do not
+block later copies. Disposable receipts and statuses each retain at most 18,000
+rows: a capacity budget of 10 events/second over the existing 900-second retention
+window, multiplied by two. This is a cache budget, not a throughput promise.
+Expired rows are removed first; among live rows, pending work is preferred and
+the oldest acknowledged or completed rows are evicted first. A separate bounded
+account-keyed marker of the exact authenticated packet and source/recipient scope
+keeps committed duplicates idempotent after receipt eviction, without retaining
+message content or clear identities. It has the same 18,000-row bound and does not
+evict live markers for new work; saturation defers new packets without advancing
+the pair ratchet. Packet validity remains 600 seconds. Gateway ACK confirmation
+and receive-cursor persistence update atomically; a storage failure leaves the ACK
+eligible for retry.
+
+Context is suppressed only after a context-bearing packet's fanout is confirmed,
+for that conversation, epoch and exact prepared active sibling set. A changed set
+gets context again; failed fanout clears its marker. Suppression expires after
+600 seconds and ordinary delta ACKs do not extend it. Old queue-time markers are
+ignored and removed lazily during surface preparation. Explicit history export
+still carries full context. Legacy v1 queued copies fail their own-copy status and require a fresh copy
 or history sync; peer delivery status is independent.
 
 `surface.get` and content-free `surface.changed` metadata include `streams`, a map
