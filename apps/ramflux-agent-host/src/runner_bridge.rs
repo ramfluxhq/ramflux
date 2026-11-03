@@ -97,6 +97,11 @@ impl<E: EngineProvider> AgentHost<E> {
                 return Ok(());
             };
             if let Some(output) = packet.outputs.front() {
+                if !self.engine.bridge().ok_or(Error::State)?.output_ready(bus.now_ms()) {
+                    self.engine.bridge().ok_or(Error::State)?.defer_packet();
+                    self.save_bridge_state().await?;
+                    return Ok(());
+                }
                 let result = bus
                     .request(&output.method, output.body.clone(), Some(&output.operation_id))
                     .await;
@@ -111,7 +116,7 @@ impl<E: EngineProvider> AgentHost<E> {
                     }
                     Ok(_) => {}
                 }
-                self.engine.bridge().ok_or(Error::State)?.output_done();
+                self.engine.bridge().ok_or(Error::State)?.output_done(bus.now_ms());
                 continue;
             }
             if let Some(approval) = packet.approval {

@@ -41,6 +41,8 @@ pub(super) struct Turn {
     pub text: String,
     pub final_received: bool,
     pub final_sent: bool,
+    #[serde(default)]
+    pub next_surface_write_at: u64,
     pub stream: Option<Stream>,
     pub task: Option<Value>,
     pub approval: Option<Approval>,

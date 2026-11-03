@@ -142,8 +142,35 @@ impl PrxBridgeEngine {
         let turn = self.state.turns.get(id).ok_or(Error::State)?;
         Ok((turn.conversation.clone(), turn.message.clone()))
     }
-    pub(crate) fn output_done(&mut self) {
+    pub(crate) fn output_ready(&self, now: u64) -> bool {
+        self.state.packet.as_ref().is_some_and(|packet| {
+            packet.outputs.front().is_none_or(|output| {
+                output.method != "surface.send"
+                    || packet
+                        .turn_id
+                        .as_ref()
+                        .and_then(|id| self.state.turns.get(id))
+                        .is_some_and(|turn| now >= turn.next_surface_write_at)
+            })
+        })
+    }
+    pub(crate) fn defer_packet(&mut self) {
+        if let Some(packet) = &mut self.state.packet
+            && let (Some(generation), Some(id)) =
+                (packet.rpc_generation.take(), packet.rpc_id.clone())
+        {
+            // The caller saves remaining output and its rate deadline before sending this ACK.
+            self.answers.push_back((generation, id, packet.error));
+        }
+    }
+    pub(crate) fn output_done(&mut self, now: u64) {
         if let Some(packet) = &mut self.state.packet {
+            if packet.outputs.front().is_some_and(|output| output.method == "surface.send")
+                && let Some(turn) =
+                    packet.turn_id.as_ref().and_then(|id| self.state.turns.get_mut(id))
+            {
+                turn.next_surface_write_at = now.saturating_add(self.config.stream_flush_ms);
+            }
             packet.outputs.pop_front();
         }
     }
@@ -439,6 +466,7 @@ impl PrxBridgeEngine {
                 text: String::new(),
                 final_received: false,
                 final_sent: false,
+                next_surface_write_at: 0,
                 stream: None,
                 task: source.task,
                 approval: None,
@@ -530,6 +558,7 @@ impl PrxBridgeEngine {
             .state
             .packet
             .as_ref()
+            .filter(|_| self.output_ready(now))
             .map(|p| EngineEvent::BridgeWork {
                 key: p.key.clone(),
                 conversation_id: p
@@ -611,11 +640,13 @@ impl EngineProvider for PrxBridgeEngine {
         Ok(())
     }
     fn wake(&self) -> impl std::future::Future<Output = ()> {
-        let immediate = !self.transport.events.is_empty()
-            || self.state.packet.is_some()
-            || self.connected
-                && (!self.answers.is_empty() || !self.send_queue.is_empty())
-                && self.transport.commands.capacity() > 0;
+        let immediate = if self.state.packet.is_some() {
+            self.output_ready(crate::bus::now_ms())
+        } else {
+            !self.transport.events.is_empty()
+        } || self.connected
+            && (!self.answers.is_empty() || !self.send_queue.is_empty())
+            && self.transport.commands.capacity() > 0;
         let ready = Arc::clone(&self.transport.ready);
         async move {
             if !immediate {
