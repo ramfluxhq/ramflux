@@ -1,6 +1,6 @@
 # Session push v1
 
-Design revision 3. Proposal for review; no implementation or runtime acceptance is
+Design revision 4. Proposal for review; no implementation or runtime acceptance is
 claimed. All decisions below supersede the earlier S6 implementation-card recipes.
 The implementation must be dispatched from approved dependency SHAs, not from this
 proposal's source baseline.
@@ -9,8 +9,8 @@ proposal's source baseline.
 
 ### 1.1 Reproducible baseline
 
-Product source baseline: `81e59c3032f69b627e421ced8b137c5e995e0a2c`, fetched
-`origin/main` for revision 3. The design branch retains its original parent;
+Product source baseline: `0d6da88fb189201a44eefe611d5e79c39ef77661`, fetched
+`origin/main` for revision 4. The design branch retains its original parent;
 all source citations below were rechecked at this newer immutable baseline.
 All product file:line citations throughout this document refer to that immutable
 object, except the explicitly pinned dependency references in section 1.2.
@@ -38,7 +38,7 @@ Line intervals describe a source region; they are not links to mutable main.
 | WAL replay filters replay-expired records, skips retention-expired entries, and excludes sequences settled by redb cursor state | `crates/ramflux-node-core/src/router_wal.rs:624-635`, `crates/ramflux-node-core/src/router_store.rs:1252-1310` |
 | WAL defaults on; group commit defaults off. A redb store still exists with WAL enabled | `crates/ramflux-node-core/src/router_store.rs:375-395`, `:1592-1604` |
 | WAL batch appends complete records then syncs before success; segment rotation syncs the old file | `crates/ramflux-node-core/src/router_wal.rs:904-938` |
-| Reference Compose selects async ingress, group commit default 0, WAL batch 256 and queue 4,096; it does not set WAL_ENABLED to false | `deploy/docker-compose.itest.yml:84-96` |
+| Reference Compose selects async ingress, group commit default 0, WAL batch 256 and queue 4,096; it does not set WAL_ENABLED to false | `deploy/docker-compose.itest.yml:85-97` |
 | The SDK buffers Deliver while awaiting other replies; Resume merges these unsolicited frames into its returned entries | `crates/ramflux-sdk/src/gateway/engine.rs:477-511`, `:706-716` |
 | Receive processes/project-commits, then ACKs, then cleans retry/unrouted state and advances C; held paths deliberately skip completed-entry cleanup | `crates/ramflux-sdk/src/bus/sync_driver.rs:266-352` |
 | Locally retained entries can be appended below the receive cursor | `crates/ramflux-sdk/src/bus/sync_driver.rs:566-590` |
@@ -47,7 +47,7 @@ Line intervals describe a source region; they are not links to mutable main.
 | Retry/dead-letter/hold expiry performs real deletes; a new receive ledger must join these lifecycles | `crates/ramflux-storage/src/account_db/journal/inbox_failure.rs:10-18`, `:35-118` |
 | The durable outbox is projected into the journal with unique outbox-derived source keys; journal_outbox also marks publication in its transaction | `crates/ramflux-sdk/src/bus/events.rs:38-72`, `crates/ramflux-storage/src/account_db/journal/mod.rs:120-141` |
 | Message footprint registers ciphertext/identifier copies, not just plaintext; erasure removes indexed retry/unrouted copies | `crates/ramflux-storage/src/account_db/message_footprint/schema.rs:14-32`, `:61-63`, `crates/ramflux-storage/src/account_db/message_footprint/erasure.rs:60-65` |
-| Backup copies SQLite then strips state; merge has a separate exclusion list | `crates/ramflux-storage/src/account_db/backup.rs:110-133`, `crates/ramflux-storage/src/account_db/backup_merge.rs:33-72` |
+| Backup copies SQLite then strips state; merge has a separate exclusion list | `crates/ramflux-storage/src/account_db/backup.rs:110-133`, `crates/ramflux-storage/src/account_db/backup_merge.rs:33-73` |
 | An older writer rejects a newer schema before migration writes | `crates/ramflux-storage/src/schema_object_erasure.rs:8-21` |
 
 “As configured” here means the checked-in reference configuration and constructor
@@ -297,6 +297,15 @@ evidence, not proof that
 an entire logical message has no copy on any other device. Gap events contain
 only T, E, from_seq, to_seq, count, reason and classification.
 
+**Direct old-SDK DB upgrade takes migration precedence.** If the database has
+no S6 ledger/epoch yet, connecting directly to a capable node follows this
+migration rule, NOT the U->E reset: bind its first verified E, preserve old C,
+initialize activated_cursor=C and fence uncertainty through the first issued P.
+Do not import S or emit inbox_reset to hide (C,S] history. The old ACK-before-C
+crash there remains legacy_unverified. U exists only after a NEW-ledger client
+actually used a proofless old-node session; its later U->E transition follows
+section 2.5. Backup-sanitized fresh state follows fresh-device initialization.
+
 Migration initializes activated_cursor=C. Existing local retry/unrouted work is
 indexed into receipts before enabling loss inference. On the first capable page,
 atomically set legacy_uncertain_through to its issued watermark before applying
@@ -357,7 +366,7 @@ Resync, issued probe, submit assignment and ACK request/result, including mesh
 forward. Legacy wire omission is only the explicitly restricted compat case in
 section 4.3. A first-ever connection to a truly old node uses a persistent local
 compatibility namespace U (random 128 bits, marked unverified in epoch state),
-never sent as router E. First capable binding from U with prior work/C uses the
+never sent as router E. First capable binding from U with prior S6-ledger work/C uses the
 same atomic reset below, with reason incarnation_first_verified and
 legacy_unverified classification; this does not claim proven router volume loss.
 First binding from empty U with C=0 is initialization without a reset event.
@@ -372,9 +381,18 @@ page with after=0; it carries settled_through_seq S (the router's contiguous
 durable settled cursor, NOT the issued watermark P or an out-of-order ACK maximum).
 Validate 0<=S<=issued, E, T and page bounds under one router snapshot. A changed
 E while preparing this transition restarts validation; no old-E page supplies S.
-An empty inbox supplies S=0. No new-E push is applied before this page binds E.
+A newly initialized inbox with no issued sequences supplies S=0; an all-settled
+historical inbox retains its bounded S. No new-E push applies before this page binds E.
 
-S maps to the published durable CursorAckState.settled_inbox_seq, not inbox_seq.
+Let R be the largest contiguous durably settled prefix: each sequence is ACKed,
+expired/dead-letter retired, a durable aborted tombstone, or absent in a finalized
+recovered store view (historical reason may be unknown). An in-flight guard
+or live pending entry stops it. Fix advance_settled to walk those sparse durable
+boundaries, not next_seq-1 when pending happens to be empty. Publish S=min(R,P)
+under the same lock as P; therefore 0<=S<=P=issued by construction. A newly
+allocated guard with empty pending cannot advance R or S. Durable tombstones can
+advance R only after their terminal commit; no tentative absence counts as settled.
+S maps to this corrected published CursorAckState.settled_inbox_seq, not inbox_seq.
 The existing advance_settled also crosses expiry/dead-letter retirements
 (`crates/ramflux-node-core/src/inbox.rs:32-46`,
 `crates/ramflux-node-core/src/inbox.rs:561-583`,
@@ -400,7 +418,7 @@ activated_cursor=S and legacy_uncertain_through=S. The first-page fence below S
 marks pre-existing coverage legacy_unverified/historical: it is never expanded
 into unavailable OR legacy_unverified loss events for already ACK-settled rows.
 For U->E use reason incarnation_first_verified with the identical S/fence rule.
-This overrides migration's issued-watermark uncertainty rule for a reset.
+This overrides the uncertainty rule only for a real existing-epoch reset; direct pre-ledger DB migration remains section 2.4.
 
 The reset event represents an unknown old tail, not a fabricated finite loss
 count. Published journal events and cumulative counters remain historical; no
@@ -507,7 +525,7 @@ reply content or source attribution stays registered for erasure.
 | Stage / actual source entry and commit points | Durable dedup / redrive result | Network work and exact S6b adaptation |
 | --- | --- | --- |
 | Seen/committed probe: `crates/ramflux-sdk/src/bus/sync_driver.rs:399-400`; `crates/ramflux-sdk/src/client/routed/committed.rs:37-58`; `crates/ramflux-sdk/src/client/routed/receive.rs:138-175` | Existing routed seen hash and authenticated committed key identify a prior crypto/content commit; mismatch is rejected | A hit skips crypto only. It must still drain the required projection/reply stages below; do not return Completed merely because seen exists |
-| Own-device receive: `crates/ramflux-sdk/src/bus/sync_driver.rs:402-403`; `crates/ramflux-sdk/src/client/own_device_copy.rs:370-475` | Existing RECEIPTS packet-id/fingerprint plus control+inline-key-slot+receipt transaction; duplicate returns Duplicate after required local projection | Manifest reads run outside actor; commit revalidates generation/authority. Pair recovery work uses durable courier admission, no socket await in actor |
+| Own-device receive: `crates/ramflux-sdk/src/bus/sync_driver.rs:402-403`; `crates/ramflux-sdk/src/client/own_device_copy.rs:418-518` | Existing authenticated replay fingerprint/RECEIPTS packet-id plus replay reservation+control+inline-key-slot+receipt transaction; committed replay skips crypto only, required local projection still drains | Manifest reads run outside actor; commit revalidates generation/authority. Pair recovery work uses durable courier admission, no socket await in actor |
 | Routed bootstrap/open: `crates/ramflux-sdk/src/client/routed/receive.rs:100-135`, `crates/ramflux-sdk/src/client/routed/receive.rs:178-235` | Authenticated admission key; contact bootstrap/own-history import retain their per-event receipts; retries resume from these markers | Manifest/discovery/group preparation/own-history network reads become Prepare -> external bounded call -> generation-fenced Apply. Preserve input and result across each local commit, no actor-held DB across await |
 | Routed crypto/content commit: `crates/ramflux-sdk/src/client/routed/receive.rs:236-264`, `crates/ramflux-sdk/src/client/routed/receive.rs:531-610` | Existing authenticated committed receipt, pair snapshot, projection/message watermark in transaction; Duplicate reconstructs outstanding local stages | Pair-reset reply becomes durable courier outbox admission in the same effect/marker transaction. Attachment fetch stays external and uses existing object/import identity; auto-fetch=false for resident receive. Cache refresh is replayed from committed state |
 | Surface answer: `crates/ramflux-sdk/src/bus/sync_driver.rs:407-408`; `crates/ramflux-sdk/src/client/surface/resync_request.rs:304-314`; `crates/ramflux-sdk/src/bus/sync_driver.rs:75-83` | Existing surface/resync-response key is atomically transferred to durable courier outbox keyed by authenticated receive identity; a transfer marker makes redrive Duplicate | Replace remove-before-send and in-memory reply vector. Outbox retains immutable prepared envelope/id until submit acknowledgement; lost reply retries same envelope. Remote replay dedup applies, no claim of exactly-once physical network send |
@@ -539,12 +557,14 @@ ACK batch on a cloned affected shard state; accumulate ALL acknowledged and
 retired sequences across individual ACK calls, then commit once and publish the
 new in-memory shard. Hold that shard's mutation serialization through publication.
 On storage error publish nothing, return no success and retire the request/session;
-if durable commit outcome is uncertain, reload/abort rather than serve a fork.
+if durable commit outcome is uncertain, take the fail-stop path below before serving another response.
 
 The page/issued APIs read only the durable published shard view. For each (T,E),
 track assigned sequences still in flight in an in-memory ordered set. Let A be
-highest assigned and P the published durable watermark. Each assigned sequence
-<=P has exactly one durable disposition: accepted entry or aborted tombstone.
+highest assigned and P the published durable watermark. Each assignment resolved in the live process
+through P has exactly one durable disposition: accepted entry or aborted tombstone.
+On restart, the finalized recovered store may instead contain absent historical
+slots under its durable high-water; those remain unknown, as specified below.
 Assignment creates an owned in-flight guard under allocation synchronization,
 before exposing the tentative row or releasing that synchronization. Durable
 terminal success removes it, then P advances to min(in_flight)-1 (or A when
@@ -554,54 +574,153 @@ I/O; same-target submissions stay concurrent and WAL batching is preserved.
 Existing bounded ingress permits (reference queue 4,096) also reserve guard and
 tombstone persistence capacity before allocation, including native custody.
 
-The guard owns the final persistence outcome, not a request continuation. A
-Drop caused by panic/unwind, early return, cancelled future or an allocated
-non-persisting outcome synchronously commits a sequence-only tombstone
-`(T,E,s,aborted)` through the store, without a shard mutex held. It does not abort
-the process. Drop must not panic or rely on spawning an unowned async cleanup;
-it returns only after durable disposition or an explicit storage-fault quarantine.
-Before allocation refusal/replay/forward-only outcomes need no guard. Audit each
-should_persist_submission=false outcome: if it owns an allocation, Drop resolves
-it; a no-allocation assertion alone is insufficient for an injected allocated
-branch. A successful accepted write disarms Drop only after durable completion.
+The store owns each assignment descriptor and its pre-reserved resolver mailbox
+slot until terminal durability. The request's guard holds only a handle. Before
+sequence allocation, asynchronously acquire the ingress/submission permit, WAL
+queue reservation (or bounded redb work-queue admission), descriptor and aborted-range slot.
+Redb admission reserves queue capacity, not an exclusive WriteTransaction or
+per-target write lock; it must permit s+1 to commit while s has not handed off.
+Fan-out reserves these for its entire bounded target set before allocating any
+sequence; refusal releases all reservations. Between allocation and durable
+hand-off there is no await for another request's permit or queue space. No
+blocking mutex or redb transaction is retained across an await.
 
-Cancellation racing persistence must serialize on the store's per-assignment
-terminal state: accepted and aborted are mutually exclusive, selected atomically
-with their record. Drop joins any already committing operation; accepted wins
-if committed, otherwise aborted commits and a late accepted completion cannot
-resurrect it. Redb uses one terminal transaction; WAL terminal records and replay
-resolve that same single winner. Never tombstone an accepted row or expose both.
-An aborted record stores no envelope ID, ciphertext, sender or replay tuple.
-Remove tentative content/index effects before publishing its tombstone. Retain
-tombstones until a durable contiguous settled/checkpoint prefix subsumes them;
-never prune an unsettled tombstone into unknown on ordinary restart. Coalesce
-adjacent aborted ranges; include them in the sparse index and page bounds.
+Each descriptor has one serialized persistence state:
+
+| State / evidence | Cancellation, error or Drop disposition |
+| --- | --- |
+| ReservedNoWrite: store append/commit has never been issued | The store-owned resolver may durably write `(T,E,s,aborted)` |
+| DefiniteNonWrite: validation rejected before any append/write hand-off | Same aborted transition, with an explicit store-issued never-written proof |
+| HandedOff: ownership transferred to WAL writer or redb write operation | Request Drop only signals detachment. It cannot authorize a tombstone; the store operation remains owned and resolves independently |
+| AcceptedDurable: positive durable completion | Publish accepted when predecessors permit; detaching the request cannot change it |
+| AbortedDurable: proved non-write plus positive durable tombstone completion | Publish aborted and release tentative replay/index state atomically |
+| FatalUncertain: WAL sync error, writer reply channel closed/dead writer, redb commit error, or panic inside the write | Freeze publication/admission immediately, log typed fatal and fail-stop the process; NEVER write an aborted tombstone |
+
+No generic Err or unwind is a never-written proof. A panic strictly before any
+store call may abandon ReservedNoWrite; a panic inside the redb write closure is
+FatalUncertain even if rollback seems likely. Mark HandedOff BEFORE issuing the
+write. Accepted and aborted cannot race as independent writes: an atomic state
+transition grants either the accepted hand-off or the proved-non-write resolver,
+never both. A late request continuation cannot change that state. Pre-allocation
+refusal/replay/forward-only outcomes need no guard. Audit every
+should_persist_submission=false branch, including an injected allocated branch;
+if it owns an allocation with no write issued, the resolver persists aborted.
+
+Guard Drop is nonblocking: set its preallocated descriptor's detached/resolution
+flag and notify the store-owned resolver thread. No fsync, wait, transaction,
+queue-capacity acquisition or joining another operation runs in Drop. The bounded
+mailbox slot was reserved before allocation, so cleanup cannot be lost to queue
+exhaustion or depend on the cancelled request/Tokio runtime. The resolver owns
+tombstone writes after request unwind has released any transaction. A separate
+store-owned fatal supervisor consumes FatalUncertain notifications and aborts
+without acquiring a DB/shard lock or joining the failed writer/resolver. Unwind
+inside a write signals this supervisor directly; it never opens a nested redb
+transaction. Resolver failure or tombstone storage failure signals the same
+fatal supervisor. Admission/read/reply publication checks a shared fatal fence
+set before notification. Shutdown drains owned descriptors or fail-stops; it
+cannot detach cleanup and continue serving an unresolved store.
+
+Fail-stop is the recovery trigger, not an indefinitely quarantined inbox or a
+background retry policy. The supervisor logs `fatal_durability_uncertain` with
+operation/class and sequence metadata only, then calls process abort. Tombstone
+failure logs `fatal_tombstone_persistence` and takes the same path. No new success
+escapes after the fatal fence; outstanding connections are lost. A child-process
+test uses an independent wall-clock watchdog to detect any blocked abort path.
+Restart replays/reloads the actual durable state before readiness. If it contains
+accepted s, recover it; otherwise preserve the assigned high-water evidence that
+survived and account any missing interval as unknown. Never manufacture aborted
+for an uncertain write. A failed tombstone has no publishable reason either.
+The only no-process-death guarantee is successful proved-non-write abandonment.
+
+An aborted record contains no envelope ID, ciphertext, sender or replay tuple.
+Under the same publication synchronization, its terminal transition releases
+the assignment-owned tentative replay key, envelope-to-target index entry and
+fan-out/custody equivalents before advancing P. Reference ownership is required:
+a shared fan-out replay reservation is released only when no accepted/in-flight
+child owns it; each aborted child drops its own target index. Durable accepted
+siblings keep their identity, and retry returns those original assignments while
+aborted targets can allocate anew. Cleanup must not delete a later owner's key.
+Persist no aborted replay tuple or local-delivery idempotency entry. Coalesce
+adjacent tombstones and retain them until a durable contiguous settled/checkpoint
+prefix subsumes them; include them in the sparse page index. Ordinary restart
+cannot prune an unsettled aborted reason into unknown.
+
 Reserve one of at most 4,096 uncheckpointed aborted-range slots per inbox before
-allocating, in addition to the ingress permit; full reason storage pauses new
-allocation before effects. Checkpoint only after the durable settled prefix
-subsumes the range, preserving its sequence disposition in recovery state.
+allocation, in addition to ingress admission. If none is available, immediately
+return typed `capacity_retry_after{retry_after_ms:1000}` with no allocation, replay
+reservation or content effect; never wait indefinitely for an offline recipient.
+The conservative one-slot-per-assignment reservation is released on accepted
+completion or transferred to its durable coalesced aborted range. Checkpoint
+releases range slots only after the durable settled prefix subsumes them.
 
-On tombstone I/O failure, keep the guard's reservation in store-owned recovery
-state, quarantine this inbox and return transient persistence_unavailable to its
-waiters; publish nothing beyond the hole. No success or silent frozen inbox is
-permitted. Recovery retries the terminal write/reloads durable state before
-reopening admission. A process crash can bypass Drop; that separate residual is
-unknown after restart, not an invented aborted reason. A watchdog exports
-oldest_in_flight_age_seconds and in_flight_count; WARN when oldest age >30 s
-(rate limited once/minute per affected inbox), without aborting the process or
-claiming that WARN resolves a still-live storage operation.
+**Typed sender outcomes and replay:** a live caller of proved-non-write abandonment
+receives `aborted_retry_safe`; it can retry the identical envelope at a new
+sequence. A cancelled/disconnected caller gets no second reply and retries that
+same immutable envelope/id. Capacity refusal uses `capacity_retry_after` above.
+Neither maps to rejected_security. Fail-stop gives connection loss, not a typed
+negative result for a possibly durable acceptance. S2/session reconnect retries
+unchanged content, not a new envelope ID that could duplicate accepted delivery.
+
+Extend the existing durable local-delivery idempotency index to retain the
+original `(T,E,s,retain_until)` and authenticated content digest for each
+source-qualified envelope/target, atomically with accepted content/replay state
+in redb or its WAL record. Lookup precedes replay rejection on Gateway, Federation,
+fan-out and custody paths. Identical authenticated retries return their ORIGINAL
+accepted assignment, even after the row settled, until the original index/replay
+expiry; never refresh that deadline or allocate a duplicate. A different digest
+under the same identity is typed idempotency_conflict. Existing legacy index rows
+without an assignment cannot invent one: retain their historical replay behavior;
+new S6 acceptances always write the complete index. Recovery reconstructs it
+before admission, including durable rows formerly above P. A durable s+1 waiter
+interrupted by fail-stop therefore retries to its accepted outcome gated on P,
+never rejected_security. The current Gateway replay rejection and index shape
+(`apps/ramflux-router/src/router_engine.rs:394-420`,
+`crates/ramflux-node-core/src/router_store.rs:267-291`,
+`crates/ramflux-node-core/src/router_store.rs:815-850`) must change in S6a.
+After the original replay/index horizon, existing signed freshness and retention
+rules apply; this is not indefinite sender retry or history storage.
 
 **Reply enforcement:** router submit/fan-out/forward and native custody Submitted
-responses wait until P(T,E)>=s for EVERY assigned target before returning
-success. The gateway remains reply-driven; it cannot push s+1 on its own write
-alone. No new publishable bit or later notification channel is introduced.
-Wait outside shard/store locks using a cancellation-safe notification predicate;
-if the request is cancelled after commit, its accepted guard stays resolved.
-Sender acknowledgement latency therefore includes earlier same-target writes
-or their tombstone commits, in addition to its own commit. Healthy storage
-batch deadlines apply; the 30 s watchdog is diagnostic, not a hard latency bound.
-Persistent replay responses referring to s also wait for its published P.
+responses asynchronously await P(T,E)>=s for EVERY assigned target before
+returning success. Every reply wait uses a cancellation-safe async notification
+predicate outside shard/store locks; no condvar or blocking wait on a router
+worker. The gateway remains reply-driven; its own s+1 durability cannot push it
+before P advances. Persistent idempotent accepted replies await the same gate.
+Own-device fan-out becomes async through its handler/mesh dispatch; blocking
+redb and sync compatibility operations run on bounded blocking/store threads,
+then the async reply adapter awaits P. Sync public signatures, where retained,
+are off-runtime adapters, never invoked inline by a Tokio worker; native custody's
+blocking work returns to an async response gate. Test and audit every caller.
+
+Cancellation after hand-off leaves store-owned persistence running; after commit
+it never undoes accepted content. The watchdog exports
+oldest_in_flight_age_seconds and in_flight_count, with WARN when oldest age >30 s
+(rate limited once/minute per affected inbox). WARN is diagnostic, not recovery
+or proof of a storage fault. Sender latency includes predecessor durability;
+healthy batch deadlines apply, with no unconditional 30 s acceptance guarantee.
 For fan-out, gate each assignment before exposing any reply/push for it.
+
+**Snapshot/export authority:** RouterCore::snapshot(), inbox_snapshot and
+save_router must read one published view under the same per-target publication
+synchronization: live rows, tombstones and settled/issued cursor metadata at or below
+P only; never raw A, in-flight rows, or replay keys owned by unresolved guards.
+Accepted rows above P and their replay/idempotency keys are also excluded from
+that export until published. Match every exported replay/index record to its
+published accepted disposition; include durable tombstones and recovery metadata
+so an export cannot erase them. No snapshot can turn an unresolved assignment
+into durable accepted content.
+
+During service the incremental/WAL store is authoritative. save_router's control
+and migration updates MUST stop calling replace_incremental_router_tables to
+clear/rewrite delivery, cursor, replay, tombstone, incarnation, idempotency or
+checkpoint/WAL-identity tables. They persist only control state. A filtered export
+is not a replacement for the live store: do not delete separately durable s+1>P
+or lower its recovery high-water while saving control state. Bootstrap, restore
+and checkpoint use the store's serialized durable recovery/checkpoint operations,
+not a stale filtered RouterCore snapshot; preserve durable above-P records until
+their prefix resolves, with section 2.5 rotation on restore. The snapshot test
+also commits accepted s+1 while s is held, saves control state, then resolves s;
+reopen must retain both outcomes and the full high-water evidence.
 
 Pages, covered_through_seq, FetchEntry, probes, legacy and custody reads expose
 only rows <=P and issued=P. A tombstone supplies known reason aborted, including
@@ -612,30 +731,40 @@ old-process callbacks from publishing into a recovered incarnation.
 | Assignment / read site at source baseline | S6a disposition |
 | --- | --- |
 | `apps/ramflux-router/src/router_engine.rs:61-103`, `apps/ramflux-router/src/router_engine.rs:182-225` | Sync/async submit, local completion of forwarding and fan-out: allocator guard, terminal persist, wait P>=s before response; audit `apps/ramflux-router/src/router_engine.rs:448-459` non-persisting outcomes |
-| `apps/ramflux-router/src/router_engine.rs:342-382`, `crates/ramflux-node-core/src/router.rs:754-770`, `crates/ramflux-node-core/src/router.rs:822-841` | Own-device fan-out's separate record_fanout_increment owns every returned allocation guard through the batch commit; any early error drops unresolved guards; wait for each target P before exposing the fan-out result |
+| `apps/ramflux-router/src/router_engine.rs:342-382`, `crates/ramflux-node-core/src/router.rs:754-770`, `crates/ramflux-node-core/src/router.rs:822-841` | Own-device fan-out's separate record_fanout_increment owns every returned allocation guard through the batch commit; pre-write errors resolve proved-non-write guards, uncertain writes fail-stop; async-await each target P before exposing the fan-out result |
 | `crates/ramflux-node-core/src/custody_delivery.rs:57-73` | Native custody submit uses the SAME allocator guard/store disposition and reply gate, replacing its independent acceptance/persistence boundary |
 | `crates/ramflux-node-core/src/router.rs:1159-1178` | Both online/offline append_at allocation branches create guard before releasing shard; all wrappers, including fan-out, share it |
 | `apps/ramflux-router/src/handlers.rs:1098-1129`, `crates/ramflux-node-core/src/custody_service/admission.rs:347-363` | HTTP and native custody Inbox both read the same durable published view bounded by P, even for legacy response shapes |
 | `crates/ramflux-node-core/src/router.rs:709-739`, `crates/ramflux-node-core/src/router.rs:1181-1194` | mvp1_inbox, mvp1_inbox_at and resume wrappers enforce P before their pull_after/pull_live_after access |
 | `crates/ramflux-node-core/src/router.rs:254-257`, `crates/ramflux-node-core/src/router_abuse.rs:90-96` | Pending-entry administrative snapshot/abuse count also read published state; no tentative row escapes through diagnostic APIs |
 | `crates/ramflux-node-core/src/inbox.rs:197-229`, `crates/ramflux-node-core/src/inbox.rs:303-343` | Low-level append wrapper/allocator and pull methods sit behind the same guard/publication boundary; raw in-memory fixture construction has explicit test-only durable initialization, never a production bypass |
+| `apps/ramflux-router/src/lifecycle.rs:88-112`, `crates/ramflux-node-core/src/router_store.rs:521-533`, `crates/ramflux-node-core/src/router_store.rs:1315-1388` | save_router migration/route-update callers persist control state only; no clear/rewrite of authoritative delivery/replay/recovery tables |
+| `crates/ramflux-node-core/src/router.rs:221-224`, `crates/ramflux-node-core/src/router.rs:1267-1300` | inbox_snapshot and RouterCore::snapshot export only the synchronized published prefix, including tombstones, excluding unresolved replay reservations and accepted rows above P |
+| `apps/ramflux-router/src/handlers.rs:409-413`, `apps/ramflux-router/src/handlers.rs:598-600`, `crates/ramflux-node-core/src/router_store.rs:742-772`, `crates/ramflux-node-core/src/router_wal.rs:783-802` | Async fan-out dispatch and await-only response gates; submission/WAL queue permits precede allocation, storage blocking work stays off runtime workers; closed writer reply is uncertain |
 | `apps/ramflux-gateway/src/session.rs:1272-1343`, `apps/ramflux-gateway/src/session.rs:1444-1468` | Gateway reply-driven push/fan-out needs no separate watermark cache; actual pushed frame is the enforcement oracle |
 
 The two-submission test holds s's write, completes s+1's own write, and captures
 both submit responses, the actual gateway recipient frame, custody Inbox, page,
-FetchEntry and issued probe. None exposes s+1 before P advances. Release s or
-durably abandon it, then s+1's response and push become available. Independently
-inject guard drops at every exit above and a panic inside persistence; the
-process survives, aborted is durable in both modes and P progresses. Mutations
-that reply on own-write durability or omit Drop tombstones must fail these
-respective oracles. Process death before terminal durability is tested separately.
+FetchEntry and issued probe. None exposes s+1 before P advances. Save migration
+and route-update state while s is held and again after aborted publication;
+snapshot bytes never contain s or unresolved replay keys, reopen retains aborted
+s, accepted s+1 and counters in both modes. Independently inject cancellation,
+early return, pre-write panic and pre-write validation error, plus an allocated
+non-persisting branch: resolver persists aborted and the process survives. Inject
+each uncertain class in a child process: fatal log plus prompt process death,
+no aborted record; reopen matches disk and never exposes a formerly tombstoned
+live row below a client C. A one-worker runtime with held predecessor and async
+fan-out must continue polling the predecessor and resolve both replies. Table 9.2
+names the independent mutations and distinguishes liveness from process death.
 
 | Write / cut | WAL-enabled submissions (reference default) | Redb-only submissions | Recovery / response rule |
 | --- | --- | --- | --- |
 | Inbox E creation / restore rotation | E persisted in WAL association and redb counter before service | E persisted with redb counter before service | Crash resumes complete recovery pass; never serve mixed old/new E |
 | R0 before durable submission, after in-memory preparation | no committed WAL record | no committed redb submission | No successful acceptance sent; restart has only prior durable state |
 | R1 submission commit | append+sync submission, including E and acceptance time; may have no redb inbox row | one redb transaction: E+counter+replay tuple+inbox/deadline indexes/local-delivery metadata | Reply only after durable success AND P>=s for each target; crash before reply may be sender retry; preserve replay behavior |
-| RA guard abandonment | sync aborted terminal WAL record and counter, before P publication | atomic aborted record+counter, before P publication | No process abort on Drop; recovery preserves aborted reason; accepted/aborted race has one winner |
+| RA proved-non-write guard abandonment | store-owned resolver syncs aborted record and counter before P publication | resolver commits aborted+counter outside the request transaction | Drop only signals; atomic replay/index release precedes P; typed aborted_retry_safe; uncertain writes cannot enter RA |
+| RF uncertain accepted/tombstone write | partial or complete durable bytes possible; never append aborted to resolve uncertainty | commit may be durable despite Err/panic; never attempt nested tombstone transaction | Fatal fence, typed log and store-owned supervisor abort; connection loss; restart disk is authority, idempotent accepted retries await P |
+| RS control save / published snapshot | control-only save leaves WAL/redb delivery and recovery state untouched | control-only save leaves incremental delivery/replay/tombstone/index tables untouched | Export <=P under publication synchronization; never clear/rewrite from raw/stale memory or lower durable recovery counters |
 | R1 then crash before sweep/checkpoint, restart before expiry | merge WAL with redb cursor exclusions | restore redb pending rows | Entry live in both modes |
 | R1 then crash, restart past expiry before sweep | WAL replay/retention filters may remove entry, issued watermark remains | restored expired row remains, with deadline | Page omits live entry; WAL can give unknown, redb derives expired; client suppresses gap when W0 exists |
 | WR batch ACK commit | redb cursor checkpoint plus union of all row/index retirements; WAL records remain, excluded on merge | same redb atomic operation | Before commit all old; after commit all settled. No cursor-only or last-ACK-only retirement |
@@ -701,6 +830,14 @@ retires that session, never satisfies a later call.
 | G->C ephemeral | envelope:Envelope, expires_at_ms:u64 | Event, no inbox_seq |
 | G->C ephemeral_result | envelope_id:String, outcome:accepted\|dropped, reason:Option<EphemeralDropReason> | Reply to ephemeral submit; reason present iff dropped |
 | establishment addition | session.capabilities:Vec<String>, default empty, omit empty; session.inbox_incarnation_id:Option<Incarnation> (required for every capable inbox, absent legacy) | Echo only negotiated capabilities |
+
+Durable submit rejection uses the existing nack shape with stable typed reason
+codes `aborted_retry_safe`, `capacity_retry_after` and `idempotency_conflict`;
+capacity includes retry_after_ms=1000 in the mesh result and optional nack field
+for negotiated clients. Legacy nack keeps its existing shape/reason. SDK maps the
+first two to retryable submit outcomes; conflict is terminal. Connection loss
+under fail-stop stays uncertain and retries the unchanged envelope. No negative
+submit result is sent for an accepted assignment waiting on P.
 
 EphemeralDropReason is
 `offline|queue_full|expired|rate_limited|not_local|target_refused|recipient_unsupported|invalid|unsupported|replayed`.
@@ -847,7 +984,7 @@ on-disk format; incarnation persistence is separately required in section 2.5. S
 O(log P), then merge actual pending and
 dead-letter boundaries. Never enumerate every integer from after+1 to issued.
 
-Under one shard lock snapshot issued I=P and settled_through_seq S (0<=S<=I),
+Under one shard lock snapshot issued I=P and settled_through_seq S=min(R,P) (0<=S<=I),
 then walk sparse boundaries above after. Carry S on every page, including the
 first reset page and empty pages; it never grants absent-range loss authority
 below S. Normal same-E catch-up does not overwrite C with later S.
@@ -1114,13 +1251,13 @@ writer, puller, ACK sender or hold remover is grandfathered into push OR compat 
 | `crates/ramflux-sdk/src/bus/dispatch/message.rs:702-703`, `crates/ramflux-sdk/src/bus/dispatch/message.rs:804-855` | message.receive sync plus conversation-bound legacy hold redrive, direct ACK and raw hold removal | Coalesce shared catch-up; all held redrive goes through W1+WS (ordered W2 above C), cleanup joined to terminal transition and WA owns wire ACK; read committed conversation projection |
 | `crates/ramflux-sdk/src/bus/dispatch/message.rs:21-40`, `apps/rf/src/handlers/dm.rs:49-65` | message.ack / rf dm ack ACK by envelope ID and mark local acknowledgement | Preserve public request signature; in managed mode return typed SdkError::InboundRejected with stable code receive_ledger_managed_ack, no engine acquisition/wire ACK/mark_acked. Internal WA remains the sole settler; no message-keyed intent column is added |
 | `crates/ramflux-sdk/src/bus/dispatch/group.rs:1483-1494` | Direct group ACK and three raw remove_unrouted calls | Terminal W2/WS creates intent and joins all hold deletes; WA alone sends ACK |
-| `crates/ramflux-sdk/src/client/dm.rs:702-740` | Public ack_gateway_entry/ack_gateway_delivery call engine.ack directly | Same typed managed-ledger refusal outside internal WA token; standalone ledger owns WA too. Caller-supplied envelope ID never creates a terminal intent or bypasses held accounting |
+| `crates/ramflux-sdk/src/client/dm.rs:702-747` | Public ack_gateway_entry/ack_gateway_delivery call engine.ack directly | Same typed managed-ledger refusal outside internal WA token; standalone ledger owns WA too. Preserve record_own_copy_ack semantics through the registered own-copy sequence binding below; authorized WA marks receipt retention only after router settlement, including retry after lost ACK; it is not authority for C. Caller-supplied envelope ID never creates a terminal intent or bypasses held accounting |
 | `crates/ramflux-sdk/src/bus/sync_driver.rs:339-351`, `crates/ramflux-sdk/src/bus/sync_driver.rs:508-512` | Successful ACK cleanup and terminal refusal raw hold removal | Return disposition; terminal W2/WS joins deletes, WA owns ACK |
 | `crates/ramflux-sdk/src/client/dm.rs:350-355`, `crates/ramflux-sdk/src/client/dm.rs:573-580`, `crates/ramflux-sdk/src/client/group_quarantine.rs:115-150` | Legacy decrypt/success/policy hold cleanup | Remove only within terminal W2/WS or the explicit erasure transaction; no receipt/work orphaning |
 | `crates/ramflux-sdk/src/gateway/engine.rs:477-511` | Public raw Resume transport merges pushes | Preserve signature as a transport adapter, separate unsolicited frames in managed mode. Only shared receive or bounded compat exact lookup may issue inbox requests; raw caller cannot write C. Standalone public receive uses the same ledger executor under its existing exclusive client borrow |
 | `crates/ramflux-sdk/src/client/dm_session.rs:264`; `crates/ramflux-sdk/src/bus/state.rs:354` | Delivery-state snapshot and startup maximum read C | Read-only; startup must load active E+C atomically, never write max into C or use a stale session cursor to override it |
-| `crates/ramflux-sdk/src/client/dm_session.rs:320-335`; `crates/ramflux-sdk/src/client/dm.rs:1082-1090` | Test fixtures seed/read checkpoint | Replace direct writes by test-only fixture initialization; exclude no production caller from the guard |
-| `crates/ramflux-sdk/src/bus/receipt_tests/erasure.rs:75`, `crates/ramflux-sdk/src/client/routed/root_ack_tests.rs:81-127` | Fixture-only direct ACK and forged-ACK refusal probes | Tests explicitly use unmanaged raw protocol fixtures or internal WA setup; retain refusal assertions and never exempt a production caller |
+| `crates/ramflux-sdk/src/client/dm_session.rs:320-335`; `crates/ramflux-sdk/src/client/dm.rs:1089-1097` | Test fixtures seed/read checkpoint | Replace direct writes by test-only fixture initialization; exclude no production caller from the guard |
+| `crates/ramflux-sdk/src/bus/receipt_tests/erasure.rs:75`, `crates/ramflux-sdk/src/client/routed/root_ack_tests.rs:81-127`, `crates/ramflux-sdk/src/bus/dispatch/surface_own_tests/followups.rs:239-250` | Fixture-only direct ACK and forged-ACK refusal probes | Tests explicitly use unmanaged raw protocol fixtures or internal WA setup; retain refusal assertions and never exempt a production caller |
 
 The actor executor and standalone executor share W0/W1/W2/WS/WA routines and
 exclusive account writer ownership; a standalone receive call on an actor-owned
@@ -1131,6 +1268,19 @@ namespace except with the internal transaction token; no exported setter can
 forge that token. Managed host/raw ACK adapters likewise require internal WA
 authority before any outgoing ACK frame; direct engine calls cannot bypass the
 guard. Raw transport Resume cannot apply messages or move C.
+
+The newer own-copy ACK hook parses entry content
+(`crates/ramflux-sdk/src/client/own_device_copy/receipts.rs:143-183`), while W2
+removes terminal work. S6b must not put that content or packet ID into a
+sequence-only ACK intent. W1 instead attaches an indexed (T,E,s) locator to the
+existing message-linked own-copy committed/receipt state, registered for footprint
+erasure with explicit backup strip/merge exclusion for the new binding. WA resolves this locator to
+mark those existing receipts acknowledged in the SAME transaction that retires
+the intent after a terminal router settlement. Lost reply leaves both unchanged;
+retry of already_settled/not_found can finish it. No marker is acknowledged for
+mere local intent expiry. Erasure removes the locator and message-linked state;
+late WA then only retires metadata. No retained entry_json or message identifier
+is added to ledger metadata, and own-copy retention/maintenance bounds remain.
 
 The guard test traces actual receive-checkpoint SQL writes, every outgoing
 Ack/AckBatch frame (including legacy ACKs) and every hold-table delete, as well
@@ -1233,8 +1383,8 @@ card. Controller writes new cards from this approved design with explicit SHAs.
 
 | Card | Complete scope and principal files | Dependency / enablement | Affected slices |
 | --- | --- | --- | --- |
-| S6a node durable session protocol | node-core gateway_frames, inbox_page, entry_bound, inbox sparse index; router handlers/router_engine/router_store/router_wal incarnation lifecycle, settled cursor, WAL identity, tombstones and ACK batch; node-core custody_delivery and custody_service/admission guard/read/reply paths; gateway push_queue, issued_probe, session, state, clients, serve; compact reply split, FetchEntry and capabilities, async ACK/NACK; node docs | Current main; no S2 dependency. Advertise capability only after the entire durable protocol exists. Legacy clients remain supported | id02, s39a, s51, s35, call01, s50 plus node protocol fixtures |
-| S6b SDK durable receive ledger | storage account_db/receive/{schema,stage,cover,settle,privacy}, schema migration, footprint and backup paths; SDK bus/push_receiver/{apply,reorder,ack_batch,compat,keepalive}, S2 host dispatch/read timestamp and actor arm; bus/sync_driver and contact_backpressure; bus/dispatch/{group,a2i_a2ui,message}; client/{account,dm,a2i,group_quarantine,own_device_copy,routed/{receive,committed},surface/resync_request}; storage journal/{quarantine,inbox_failure,inbox_legacy,inbox_policy}; exact stage/entrypoint adaptations in sections 3.1/7.1, events/status, docs and CHANGELOG | S6a + merged S2/S3. Adapts provisional interfaces; no changes in S2 work-in-progress branch. Complete push and compat receive at delivery | id02, contact02, s74, s39a, s51, s35, call01, s50; push01 durable cases |
+| S6a node durable session protocol | node-core gateway_frames, inbox_page, entry_bound, inbox sparse index; router handlers/router_engine/router_store/router_wal incarnation lifecycle, settled cursor, WAL identity, tombstones, published snapshot/control-save isolation, idempotent accepted retries, async reply gates, store-owned resolver/fatal supervisor and ACK batch; node-core custody_delivery and custody_service/admission guard/read/reply paths; gateway push_queue, issued_probe, session, state, clients, serve; compact reply split, FetchEntry and capabilities, async ACK/NACK; node docs | Current main; no S2 dependency. Advertise capability only after the entire durable protocol exists. Legacy clients remain supported | id02, s39a, s51, s35, call01, s50 plus node protocol fixtures |
+| S6b SDK durable receive ledger | storage account_db/receive/{schema,stage,cover,settle,privacy}, schema migration, footprint and backup paths; SDK bus/push_receiver/{apply,reorder,ack_batch,compat,keepalive}, S2 host dispatch/read timestamp and actor arm; bus/sync_driver and contact_backpressure; bus/dispatch/{group,a2i_a2ui,message}; client/{account,dm,a2i,group_quarantine,own_device_copy,own_device_copy/receipts,routed/{receive,committed},surface/resync_request}; storage journal/{quarantine,inbox_failure,inbox_legacy,inbox_policy}; exact stage/entrypoint adaptations in sections 3.1/7.1, events/status, docs and CHANGELOG | S6a + merged S2/S3. Adapts provisional interfaces; no changes in S2 work-in-progress branch. Complete push and compat receive at delivery | id02, contact02, s74, s39a, s51, s35, call01, s50; push01 durable cases |
 | S6c ephemeral transport | gateway ephemeral validation/queue/mesh result; router ephemeral_route and volatile replay; SDK transient API/dispatch/channel; durable-origin refusal; ephemeral docs | S6a/S6b; S0 dependency satisfied by approved complete Decision6 at 61d96751, including section8.2. Advertise separate `gateway.ephemeral.v1` signed/echoed capability only when the full path exists; session_push alone never implies it during staged merge | push01 transient case, id02, s50, s51 refusal fixtures |
 | S6d acceptance harness | itest src/tests/push01_session_push.rs and realnet.yml; mixed-version fixtures, ledger crash scenarios in product test modules if fixtures need shared plumbing | S6b/c delivered, exact published product pin; all three push01 cases execute green before this card READY | all selectors below |
 
@@ -1272,9 +1422,15 @@ a minimum acceptance set; functionality without its stated oracle is incomplete.
 | S6a fetch_all_terminal_races | Entry/TooLarge/Gone after expiry, sweep and router restart; supplied deadline is original; no loop | Return TooLarge for vanished row; reason/intent/deadline oracle fails |
 | S6a ack_batch_reopen_equivalence | Compare twin sequential/batch routers after reopen in both modes: pending, receipts, dead letters, indexes, cursor; one store txn | Retain only last ACK's retired list; reopened pending differs |
 | S6a ack_batch_atomic_failure | Fault commit and crash after commit before publication; no successful reply on failure, reload consistent | Publish candidate in memory before failed commit and continue serving; state-vs-reopen comparison fails |
-| S6a durable_view_publication | Allocate s/s+1 on each section 3.2 allocator, hold s write, complete s+1; s+1 submit/fan-out/forward/custody success reply AND actual gateway push stay held; HTTP/custody Inbox, FetchEntry and probe expose no s+1; release s then progress in both modes | Reply on own-write durability; actual gateway capture sees s+1 before barrier release. Independently publish at allocation or bypass custody read watermark; respective snapshot fails |
-| S6a guard_drop_tombstone | Early return, cancellation, panic inside write, and allocated should_persist=false branch each persist aborted without process death; s+1 reply/push progress, reopen retains typed aborted in both modes; accepted-vs-drop race has exactly one winner; oldest live guard>30s emits WARN/metric | Omit Drop tombstone; P/reply watchdog stalls. Separately allow late accepted record to replace aborted or omit WARN; terminal-state/metric assertion fails |
-| S6a guard_tombstone_storage_fault | Inject tombstone commit failure: affected target quarantines with transient error, P stays fixed, no success; recover store and resolve reservation before admitting traffic; unrelated target continues | Remove reservation without durable disposition; page crosses unresolved s or recovery aliases it |
+| S6a durable_view_publication | Allocate s/s+1 on every section 3.2 allocator; hold s, complete s+1; every success AND actual gateway push held, HTTP/custody Inbox/FetchEntry/probe expose neither unpublished row; release then progress in both modes | Reply on own-write durability; actual gateway capture sees s+1 before release. Independently bypass custody watermark; read capture fails |
+| S6a guard_drop_tombstone | Early return, cancellation, pre-write panic, pre-write validation Err and injected allocated should_persist=false each prove no hand-off, resolve aborted on store thread with process alive; accepted-vs-drop hand-off race has one winner; s+1 progresses, reopen aborted in both modes; oldest live guard>30s WARN/metric | Omit resolver signal; P/reply watchdog stalls. Independently permit accepted hand-off after abort claim or omit WARN; terminal-state/metric assertion fails |
+| S6a guard_tombstone_storage_fault | Fail tombstone write in child process: P frozen, fatal_tombstone_persistence and supervisor abort without DB/shard lock; no success or quarantine left serving; reopen follows durable bytes, no fabricated aborted on failed write | Keep serving after resolver storage error; child stays alive or publication crosses unresolved s; outer watchdog/state oracle fails |
+| S6a published_snapshot_control_save | Hold never-written s, durably complete s+1, invoke both lifecycle save_router callers and inbox_snapshot/RouterCore::snapshot; exported bytes have only <=P dispositions and no unresolved replay key; abort s, save again, reopen both modes: aborted s with no content/replay/index, accepted s+1/high counter intact, s cannot reappear live below C | Export raw shard/replay state; s appears in serialized snapshot. Independently restore clear/rewrite from filtered snapshot; reopened s+1/high-water or tombstone disappears |
+| S6a uncertain_write_fail_stop | Separate child cases for bytes durable then WAL sync Err, writer commits then reply closes, redb commit Err after durability, panic inside redb write closure: each logs fatal_durability_uncertain and aborts promptly without aborted write; restart returns accepted assignment where durable and correct disk outcome otherwise; client never covers aborted s then finds live s below C | Tombstone on any Err/panic, suppressing required fail-stop: death/no-tombstone oracle fails immediately; reopen plus captured C also detects a stranded live row if it published aborted |
+| S6a aborted_and_durable_sender_retry | Abort s before hand-off: live sender sees aborted_retry_safe, same envelope accepts once at new seq before AND after restart, no stale replay/index key. Fail-stop while s+1 durable but held: connection loss, retry original authenticated content returns original E/s+1 after P recovery, never rejected_security or second allocation; fan-out mixed accepted/aborted children preserve accepted siblings | Keep aborted replay/index reservation; same-process retry rejects. Independently keep Gateway persistent replay rejection or allocate anew; durable retry outcome/sequence/effect-count assertion fails |
+| S6a single_worker_reply_and_drop | One-worker Tokio runtime parks s after allocation before hand-off using an explicit test-only barrier with permits pre-reserved; async fan-out s+1 to same T does not block worker, heartbeat and s continuation poll, fan-out reaches its held P gate while s is parked, both replies finish after release in WAL and redb-only modes. Separately pre-write unwind resolves off-worker; panic inside held redb closure fail-stops without nested begin_write deadlock | Blocking condvar in fan-out; independent wall-clock watchdog observes stalled heartbeat/replies. Independently fsync/nested transaction in Drop; blocked abort/tombstone watchdog fails |
+| S6a settled_prefix_bounded_by_publication | Empty pending with in-flight s and durable s+1: page S<=P and no first-page rejection; raw A cannot advance settled. Abort s then retire s+1: durable prefix advances in both modes and after reopen | Use original next_seq-1/raw settled when pending empty; captured S>P or durable settled jumps an in-flight guard |
+| S6a aborted_slot_capacity | Offline pending head pins settled; reserve/commit 4,096 noncoalescing aborted ranges, next submit promptly returns capacity_retry_after with retry_after_ms=1000 and zero allocation/replay/index/content effects; settlement/checkpoint releases slots and retry progresses | Wait indefinitely or allocate with no reason slot; watchdog or exact counter/index/capacity assertion fails |
 | S6a out_of_order_process_crash | Complete s+1 while s uncommitted, no replies beyond P, kill process without Drop, restart with durable s+1/high counter; missing s emits unavailable/unknown once, never expired or aborted, sender retry remains safe | Fabricate expired or aborted for absent never-accepted s; exact gap-reason assertion fails |
 | S6a wal_identity_and_restore_rotation | Explicit snapshot recovery rotates E before traffic in both modes; independently delete/recreate WAL directory, change identity and remove required segment/anchor; first request observes new E, old intent cannot ACK reused seq; ordinary complete restart retains E | Skip recovery rotation or accept empty/mismatched WAL under old E; new-E assertion fails even if cursor_ahead freeze otherwise prevents delivery |
 | S6a/b delayed_old_incarnation_ack | Send real old-E ack_batch and hold at router ingress, rotate E/reuse s with new content, release raw batch directly without client filtering; router rejects whole batch and new row remains pending | Remove router E comparison; stale in-flight batch deletes unseen new-E row |
@@ -1300,7 +1456,7 @@ a minimum acceptance set; functionality without its stated oracle is incomplete.
 | S6b never_ack_above_c | At write hook every ACK seq<=durable C with terminal accounting; held never selected | Send before W2; hook finds seq>C |
 | S6b receipt_reconciles_absent_range | W1 completed, crash before W2, router expires; mixed staged/held/erased receipts subtracted by indexed range merge | Infer every missing page seq as loss; false gap count |
 | S6b compat_intent_transition | push lost ACK -> compat proof lookup -> push; proofless intents suspend, same-E settles, new-E resets; crash after legacy ACK before WA retains original equality-proof work and C fixed within E; populate terminal compat rows then U->E, kill around reset, reopen has zero orphan work/receipts/reserved slots; held work retained; reset C=S | Authorize legacy ACK by sequence alone; unseen reused content ACKed. Separately retain terminal compat work after dropping intents; reopened orphan/quota assertion fails |
-| S6b legacy_prior_crash_classification | Old ACK-before-C crash then first capable epoch emits legacy_unverified, never definite content loss | Omit epoch fence; classified unavailable count is wrong |
+| S6b legacy_prior_crash_classification | Direct pre-ledger DB upgrade onto capable node has C<S<P from old ACK-before-C crash: migration preserves C/activated=C, fences through P, (C,S] absent rows emit legacy_unverified exactly once, no reset; separately existing U->E imports S with zero prefix losses | Use U->E reset on direct migration and import S; expected legacy_unverified count disappears. Independently apply migration on existing U->E; false prefix events appear |
 | S6b push_without_polling | Initial catch-up then idle DM commits with Deliver and no Resume in measured interval | Retain old5s schedule; exact idle Resume count fails |
 | S6b reorder_and_gap | C+2 then C+1 at200ms -> ordered apply, no pull; missing sibling -> one pull at500ms | Apply arrival order; ordered projection assertion fails |
 | S6b gap_timer | No Resume before500ms, exactly one then | Wait5s; 500ms capture empty |
@@ -1311,6 +1467,7 @@ a minimum acceptance set; functionality without its stated oracle is incomplete.
 | S6b lifecycle_fence | Held page/result, lock<1s, release old generation -> no DB write or ACK; unlock recovers disk | Drop generation check; stale row/write appears |
 | S6b keepalive_all_reads | Reply/push/heartbeat update activity even without subscribers; missing reply retires at35s idle scenario | Derive activity from push-only subscription; ping sent after recent reply |
 | S6b ledger_privacy_restore | Exact metadata columns, delete/replay fence removes all work+aliases, erased receipt survives; decrypted backup/import contains no ledger or stale C; account erase DB/WAL | Omit work footprint registration; forbidden wire ID/payload found after reopen |
+| S6b own_copy_ack_binding | Own-copy W1 registers sequence locator in existing message-linked state; W2 removes work, ACK reply lost then already_settled/not_found WA atomically marks existing receipt and removes intent; expiry alone never marks, erasure before late WA leaves no binding/content; decrypted backup contains neither ledger nor locator | Keep entry-dependent public ACK hook after W2; replay marker stays unacknowledged despite terminal WA. Independently omit locator footprint/backup exclusion; erase/backup artifact assertion fails |
 | S6b old_writer_refusal | Migrated DB opened by previous writer returns AccountSchemaTooNew with unchanged contents | Weaken writer-version guard; old writer opens or changes DB |
 | S6b capacity_and_range_work | Reserve before W1; full intents or64MiB staging pauses, local retries still run; huge hole uses intervals | Reserve after W1; processing hook fires despite unavailable capacity |
 | S6c ephemeral_persistence_absence | Generic before/after every redb table, WAL length, spool, notify queue, client DB/journal; no changes for live/offline/full/expired | Send ephemeral down durable route; persistent artifact found |
@@ -1485,7 +1642,7 @@ These are design closures; all tests remain future implementation requirements.
 | Finding | Design answer and implementation oracle |
 | --- | --- |
 | design-r2-N-M1 reply enforcement / custody | Sections 3.2/5.2/9.1 enumerate allocators/readers, gate every assigned response on P; durable_view_publication captures actual gateway push and native custody Inbox |
-| design-r2-N-M2 abandoned assignment | Section 3.2 owned guard, durable aborted tombstone without process abort, single terminal winner and watchdog; guard_drop_tombstone, guard_tombstone_storage_fault |
+| design-r2-N-M2 abandoned assignment | Section 3.2 store-owned guard: proved non-write -> async resolver tombstone, uncertain write -> fail-stop; atomic hand-off winner and watchdog; r4 rules below supersede r3 cleanup/quarantine |
 | design-r2-N-M3 ACK/removal inventory | Section 7.1 adds message.receive/message.ack/group raw cleanup and public ACK helpers; W2/WS/WA authority and managed refusal; all_receive_writers_guard |
 | design-r2-N-M4 settled prefix | Sections 2.5/4.1/5.1 import first-page S into C/activation/fence for restore and U->E, no settled-prefix loss; inbox_incarnation_reset |
 | design-r2-L1 pending loss publication | Section 2.5 WJ barrier before reset; retain pending events on projection failure; inbox_incarnation_reset |
@@ -1497,6 +1654,23 @@ These are design closures; all tests remain future implementation requirements.
 | design-r2-L7 table columns | Section 9.2 ACK timing and ephemeral admission rows each have three correctly separated cells |
 | design-r2-L8 WAL counter continuity | Section 2.5 redb WAL identity/checkpoint anchor and segment chain; rotate before traffic on mismatch; wal_identity_and_restore_rotation |
 
+### 10.3 Design r3 review closure (round r4)
+
+Controller r4 decisions supersede r3's synchronous Drop, generic-error tombstone
+and quarantine recipes everywhere, including the historical closure map above.
+All tests in this table and section 9.2 are specifications, not executed results.
+
+| Finding | Design answer and implementation oracle |
+| --- | --- |
+| design-r3-M1 snapshot durability bypass | Section 3.2 snapshot/inbox export <=P under publication synchronization, no unresolved replay keys; save_router control-only, no live delivery table replacement; published_snapshot_control_save and raw/filtered rewrite mutations |
+| design-r3-M2 uncertain durability | Section 3.2 explicit never-written proof and HandedOff state; all four uncertain classes fail-stop, no tombstone; uncertain_write_fail_stop child-process/disk/C oracles |
+| design-r3-M3 replay reservation / sender | Section 3.2 atomic assignment-owned replay/index release; aborted_retry_safe, fail-stop connection loss, durable idempotent retry with original assignment gated on P; aborted_and_durable_sender_retry |
+| design-r3-M4 runtime deadlock | Section 3.2 pre-allocation permits, async fan-out/reply waits, bounded off-runtime storage, nonblocking Drop and store-owned resolver/fatal supervisor; single_worker_reply_and_drop plus redb-closure panic child |
+| design-r3-L1 S<=P | Sections 2.5/5.1 corrected durable R stops at in-flight guards, S=min(R,P); settled_prefix_bounded_by_publication |
+| design-r3-L2 exhausted abort slots | Section 3.2 capacity_retry_after with retry_after_ms=1000 before allocation/effects; aborted_slot_capacity |
+| design-r3-L3 migration precedence | Section 2.4 direct old-SDK DB upgrade uses migration, retains C and issued fence; existing ledger U->E alone resets/imports S; legacy_prior_crash_classification |
+| design-r3-L4 recovery trigger | Section 3.2 uncertain/tombstone failure immediately fatal-fences then supervisor aborts, restart recovery before readiness; no quarantine-without-recovery; guard_tombstone_storage_fault |
+
 ## 11. Residuals and owner questions
 
 Technical choices are made above; no owner technical question remains. S0 r4's
@@ -1504,13 +1678,18 @@ complete Decision 6 is approved at 61d96751 and satisfies S6c's S0 dependency.
 The merged S2/S3 interface recheck remains a dispatch prerequisite, not a product
 question or blocker to reviewing this design.
 
-A process crash bypassing Drop can leave a permanent hole s below a durable
+A process crash (including fail-stop on uncertain durability) bypassing completed
+resolution can leave a permanent hole s below a durable
 s+1 assignment recovered from disk, even though no s+1 success reply/push was
 published before the crash. The abandoned s may never have been accepted and
-its sender can retry at a new sequence; without a durable tombstone the client
+its sender can retry the unchanged envelope at a new sequence only when recovery
+finds no accepted identity; a durable accepted identity returns its original
+assignment. Without a durable tombstone the client
 reports this missing delivery evidence as unavailable/unknown, never expired or
 aborted. This is a possible spurious logical-message gap, not proof of lost
-accepted content. out_of_order_process_crash pins this residual in both modes.
+accepted content. out_of_order_process_crash pins this residual in both modes. Intentional fatal
+termination is an availability cost of refusing contradictory durability claims;
+there is no in-process retry/quarantine escape from an uncertain write.
 
 Reset imports the router's settled prefix as historical/unverified; because it
 also includes lifecycle retirement, reset cannot recover exact old loss counts
