@@ -190,8 +190,9 @@ services:
       # configured, offline-root-verified provider KEYRING (the legacy single pinned provider public
       # key is gone; that path exists only in the default-off itest-provider-single-key build). The
       # federation endpoint, the pinned offline-root PUBLIC key, and the issuer node id are REQUIRED
-      # (`:?`) so `compose config` FAILS when a key material is absent (never renders an empty value);
-      # the relay process itself also fails to start — and its `--health-check` fails — when any of
+      # (`:?` is advisory under podman-compose). Run compose-preflight.py to reject empty or
+      # unresolved security inputs; Docker Compose v2 also rejects missing inputs during config.
+      # The relay process fails to start — and its `--health-check` fails — when any of
       # these, the keyring file, or the cache path are missing, or the keyring does not load/verify
       # against the pinned offline root. The relay never authorizes objects on a silently-disabled
       # provider.
