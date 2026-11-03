@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Upgrade Web Push P-256 ECDH to p256 0.14 and crypto-bigint 0.7.10, preserving
+  RFC encryption bytes and removing the RUSTSEC-2026-0387 audit exceptions.
 - Bound custody capacity reset hints to two days, keep node-bound retry deadlines
   without repeated status writes, and expose router budget inspection through
   the operator-only loopback administration overlay.
