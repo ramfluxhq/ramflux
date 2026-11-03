@@ -114,11 +114,7 @@ pub(crate) fn serve_router_mesh_mtls(
     let allowed_service_ids = config.mesh.allowed_service_ids.clone();
     mesh_server.set_nonblocking(true)?;
     ramflux_node_core::spawn_service_worker("ramflux-router-mesh", move |_| {
-        if let Err(error) =
-            serve_mesh_mtls(&mesh_server, &mesh_router, &local_service_id, &allowed_service_ids)
-        {
-            tracing::error!(%error, "router mesh mTLS listener stopped");
-        }
+        serve_mesh_mtls(&mesh_server, &mesh_router, &local_service_id, &allowed_service_ids);
     })?;
     if router_async_ingress_enabled()
         && let Some(listen_addr) = router_async_listen_addr(config)
@@ -1008,7 +1004,7 @@ fn serve_mesh_mtls(
     router: &Arc<crate::router_runtime::RouterHandle>,
     local_service_id: &str,
     allowed_service_ids: &std::collections::BTreeSet<String>,
-) -> anyhow::Result<()> {
+) {
     let connections =
         ramflux_node_core::ConnectionSet::new(ramflux_node_core::DEFAULT_CONNECTION_LIMIT);
     let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
@@ -1085,7 +1081,6 @@ fn serve_mesh_mtls(
             Err(error) => std::thread::sleep(backoff.failure(&error)),
         }
     }
-    Ok(())
 }
 
 pub(crate) fn mesh_tls_config(
