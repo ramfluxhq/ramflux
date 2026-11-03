@@ -103,3 +103,25 @@ fn admission_error_is_busy_for_all_existing_predicates() {
         assert!(error.capacity_hint().is_none());
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn admission_retry_records_last_reason_without_shortening_the_deadline()
+-> Result<(), SdkError> {
+    use ramflux_protocol::custody::{RetryHint, RetryScope};
+    let mut retry = AdmissionRetry::default();
+    let now = Instant::now();
+    let long = RetryHint::new(RetryScope::NodeCapacity, 120_000);
+    retry.record(&SdkError::CustodyAdmission { code: CustodyRefusal::Busy, retry: long }, now);
+    let deadline = retry.not_before().ok_or(SdkError::CustodySetupInvalid)?;
+    let short = RetryHint::new(RetryScope::PreAuthSource, 5000);
+    retry.record(
+        &SdkError::CustodyAdmission { code: CustodyRefusal::Capacity, retry: short },
+        now + Duration::from_secs(10),
+    );
+    assert_eq!(retry.not_before(), Some(deadline));
+    assert_eq!(retry.reason, Some(RetryReason::Capacity { hint: Some(short), capacity: None }));
+    retry.record(&timeout(), now + Duration::from_secs(11));
+    assert_eq!(retry.not_before(), Some(deadline));
+    assert_eq!(retry.reason, Some(RetryReason::Timeout));
+    Ok(())
+}

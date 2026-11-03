@@ -147,8 +147,8 @@ impl AdmissionRetry {
         let next = now + delay;
         if self.not_before.is_none_or(|old| next >= old) {
             self.not_before = Some(next);
-            self.reason = Some(reason);
         }
+        self.reason = Some(reason);
     }
     pub(crate) fn not_before(&self) -> Option<Instant> {
         self.not_before
