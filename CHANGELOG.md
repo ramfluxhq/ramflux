@@ -46,10 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keep custody capacity warnings and networking events tied to transitions rather
   than status reads and countdown updates. Expiry publishes a clear event while
-  retaining the bounded retry floor.
+  retaining the bounded retry floor. Expiry publication failures warn once and
+  leave account commands and background synchronization running.
 - Validate the target router admin port before rollback or recovery changes
   managed state. Use `RAMFLUX_ROUTER_ADMIN_ENABLED` / `RAMFLUX_ROUTER_ADMIN_PORT`;
-  the demo-only port spelling remains an input alias for one release.
+  the demo-only port spelling remains an input alias for one release. Direct
+  Compose renames `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` to
+  `RAMFLUX_ROUTER_ADMIN_PORT` without an input alias.
 
 - Upgrade Web Push P-256 ECDH to p256 0.14 and crypto-bigint 0.7.10, preserving
   RFC encryption bytes and removing the RUSTSEC-2026-0387 audit exceptions.

@@ -36,9 +36,13 @@ include `details.retry` with `scope` (`pre_auth_source`/`node_capacity`) and
 `retry_after_ms`. Status polling does not extend admission deadlines. Desktop
 countdown rendering and persistent background retry ownership are separate changes.
 
-The resumable topic `account.networking.changed` carries `account_id`, `state`, and
-`networking_reason`. It is appended only when the networking state or reason changes,
-so clients can subscribe instead of polling with backoff.
+The resumable topic `account.networking.changed` carries `account_id`, `state`,
+`node_binding` (an opaque node-id/public-key hash, or null), and `networking_reason`.
+It is appended on state, cause or binding changes and the end of a block; countdown
+changes alone do not emit events. The reason is a capture-time derived view, so
+read fresh status for the current remaining delay. Expiry publication uses runtime
+attribution, including when checked before an unrelated command. A publication
+failure warns once and leaves commands and background sync running.
 
 The trusted `account.create.begin` request accepts optional `node_id`. It must reference an
 enabled, confirmed node. That node is persisted for the new account without changing
