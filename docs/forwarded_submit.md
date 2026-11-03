@@ -12,7 +12,12 @@ DNS has a three-second deadline. Socket connect, request writes, response header
 and response body share a single twelve-second deadline. Partial progress never
 renews it. The configured total forward timeout also applies to both ingress
 paths. A process-wide IO runtime drives these operations from blocking workers;
-its DNS blocking pool is bounded, including system lookups that cannot be cancelled.
+DNS admission allows at most 32 system resolver jobs in total, counting both
+running and queued jobs. A job
+keeps its admission permit until the system lookup actually returns, even after
+its caller times out. When all 32 jobs are occupied, new hostname lookups fail
+immediately with `ForwardTimeout { phase: "dns" }` without queueing. Literal IP
+addresses bypass the resolver pool.
 Expired futures close their socket and return `ForwardTimeout` with the phase.
 RAII keeps a live blocking worker counted even if its async waiter is cancelled.
 

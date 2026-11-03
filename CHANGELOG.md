@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound migration forwarding DNS and total socket IO, share forward admission
   across TCP and async ingress, and pin sender signature, restart, and resume
   checkpoint regressions.
+- Cap queued DNS resolver work after timeouts and test sender-field binding by
+  recomputing canonical bytes from altered envelopes.
 
 - Bound custody capacity reset hints to two days, keep node-bound retry deadlines
   without repeated status writes, and expose router budget inspection through
