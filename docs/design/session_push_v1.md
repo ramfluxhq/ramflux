@@ -1,6 +1,6 @@
 # Session push v1
 
-Design revision 2. Proposal for review; no implementation or runtime acceptance is
+Design revision 3. Proposal for review; no implementation or runtime acceptance is
 claimed. All decisions below supersede the earlier S6 implementation-card recipes.
 The implementation must be dispatched from approved dependency SHAs, not from this
 proposal's source baseline.
@@ -9,7 +9,9 @@ proposal's source baseline.
 
 ### 1.1 Reproducible baseline
 
-Product base: `081c88117d78b542b321d513a2984d1b032d4869`, fetched `origin/main`.
+Product source baseline: `81e59c3032f69b627e421ced8b137c5e995e0a2c`, fetched
+`origin/main` for revision 3. The design branch retains its original parent;
+all source citations below were rechecked at this newer immutable baseline.
 All product file:line citations throughout this document refer to that immutable
 object, except the explicitly pinned dependency references in section 1.2.
 Line intervals describe a source region; they are not links to mutable main.
@@ -74,10 +76,11 @@ interfaces before dispatch. S2 remains sole owner of the stream,
 cancellation-safe reader, call queue, generation, connection retry, lifecycle
 cancellation and courier/transfer task framework.
 
-S0 r3 input is `design/s0-msg-schema` at
-`12d702ae333a5cad86e4a278d8f95af27b79eb89`,
-`docs/design/message_schema_v1.md:283-341` (complete Decision 6). It is under
-review, not merged or approved by this document. Section 8.2 copies its clock
+S0 r4 input is `design/s0-msg-schema` at
+`61d96751b550c661d15444a7ddecff116897498d`,
+`docs/design/message_schema_v1.md:285-354` (complete Decision 6). It is
+**provisional until S0 r4 is approved**; not merged or approved by this document.
+Section 8.2 copies its clock
 and indicator wording verbatim. Its transient transport and endpoint Unsupported
 retention are distinct: S6 has no transient DB write; S10a owns S0's authenticated
 unknown-content endpoint policy. S6c dispatch requires approval of this complete
@@ -288,7 +291,10 @@ then WA expires the intent without network traffic.
 A modern epoch's `classification=unavailable` means the router's authoritative
 coverage contains no live entry and this device has no durable staged/held copy
 or terminal receipt for that sequence. Reason is expired, ack_window_overflow,
-nacked, oversize, or unknown. This is missing delivery evidence, not proof that
+nacked, aborted, oversize, or unknown. A durable aborted tombstone means an
+assigned sequence was abandoned before acceptance; it is sequence accounting,
+not proof that an accepted logical message was lost. This is missing delivery
+evidence, not proof that
 an entire logical message has no copy on any other device. Gap events contain
 only T, E, from_seq, to_seq, count, reason and classification.
 
@@ -299,7 +305,10 @@ any coverage. Missing intervals in (activated_cursor,legacy_uncertain_through]
 without recoverable work get `classification=legacy_unverified`, not a claim of
 content loss: an old client might have ACKed after processing and crashed before
 its C write. Report these separately in status. A fresh device initialized with
-this ledger has legacy_uncertain_through=0. New-client compatibility sessions use
+this ledger has legacy_uncertain_through=0. Incarnation resets instead import
+the new router settled prefix as specified in section 2.5; that prefix is
+historical coverage and produces no loss event of either class.
+New-client compatibility sessions use
 the same ledger. Verified same-E transitions add no uncertainty epoch; a
 proofless compatibility namespace must bind through section 2.5 before enabling
 capable ACKs or using its prior C as modern coverage.
@@ -330,6 +339,20 @@ E while lowering counters violates the storage/recovery prerequisite; it is not
 silently accepted. A same-E issued<C observation freezes receive/settlement with
 cursor_ahead and a diagnostic; never wait for new traffic to overtake C.
 
+In WAL mode persist a random WAL-directory identity and the last checkpointed
+segment ID/LSN in redb, and a matching identity plus chained segment headers in
+the WAL directory. Startup checks both identities, the checkpoint anchor and
+the complete required segment chain before replay/admission. Missing directory,
+mismatched identity, missing anchor or segment gap triggers a durable recovery
+pass rotating E for every affected inbox (all WAL-backed inboxes if association
+cannot be narrowed). A replacement empty WAL is never silently accepted under
+the old E. New-store initialization is distinct from opening redb with a prior
+WAL identity. Checkpoint segment retirement persists its new anchor in redb
+before unlink; recovery tolerates extra older files, never a missing required
+segment. Crash during rotation resumes it before any traffic. This detects
+separate/volatile WAL-volume loss, including a reused empty directory, while
+the explicit operator rule above covers undetectable whole-volume rollback.
+
 Carry E in SessionEstablished, each Deliver, resume_page, Entry/TooLarge/Gone,
 Resync, issued probe, submit assignment and ACK request/result, including mesh
 forward. Legacy wire omission is only the explicitly restricted compat case in
@@ -344,23 +367,59 @@ mismatch returns incarnation_mismatch with current E and changes no row. A
 queued push/hint belongs to its captured E; registration reset clears it before
 new-E data. Pages, probes and gateway E caches cannot upgrade old queued frames.
 
-When authenticated current-session evidence changes E, the actor fences the old
-network generation and performs ONE reset transaction: drop all old-E ACK
-intents and old-E loss records, retire their pending loss outbox rows, record one
-typed `inbox_reset{target_delivery_id,old_incarnation,new_incarnation,old_cursor,
-reason:router_reset,classification:legacy_unverified}`, set active E, C=0,
-activated_cursor=0 and legacy_uncertain_through=0. The reset event represents an
-unknown old tail, not a fabricated finite loss count; already projected journal
-events and cumulative historical counters remain historical. Old staged/held
-work is locally redriven or erased under its original E, without any ACK on the new E or cursor movement. Its
-terminal local event releases its reserved slot. It remains quota bounded.
+When authenticated current-session evidence changes E, fence the old network
+generation and pause receive/ACK flush. Fetch the new E's first authoritative
+page with after=0; it carries settled_through_seq S (the router's contiguous
+durable settled cursor, NOT the issued watermark P or an out-of-order ACK maximum).
+Validate 0<=S<=issued, E, T and page bounds under one router snapshot. A changed
+E while preparing this transition restarts validation; no old-E page supplies S.
+An empty inbox supplies S=0. No new-E push is applied before this page binds E.
+
+S maps to the published durable CursorAckState.settled_inbox_seq, not inbox_seq.
+The existing advance_settled also crosses expiry/dead-letter retirements
+(`crates/ramflux-node-core/src/inbox.rs:32-46`,
+`crates/ramflux-node-core/src/inbox.rs:561-583`,
+`crates/ramflux-node-core/src/inbox.rs:591-614`). Therefore S is not proof that
+every historical row was delivered. Import it only at reset as an explicitly
+legacy_unverified historical floor: it avoids inventing losses for ACKed history
+but cannot reconstruct exact pre-reset losses among already retired rows. The
+single reset event preserves that uncertainty; no extra CursorAckState field or
+new ACK-only cursor is inferred. Same-E ordinary pages continue accounting gaps
+from C, even below a later S, so normal expiry/dead-letter gaps are still visible.
+
+Before reset, WJ publishes ALL pending old-E loss events into the local durable
+journal using their unique source keys. A projection failure pauses reset and
+preserves the old ranges/outbox/intents. A crash after WJ but before reset safely
+retries; no socket subscriber acknowledgement is required. Then perform ONE
+expected-E reset transaction: verify no old-E unpublished loss event remains,
+drop old-E ACK intents and projected loss range rows, release terminal compat
+receipts/work whose intents are dropped (including footprint bindings and
+reserved quota slots), and record one typed
+`inbox_reset{target_delivery_id,old_incarnation,new_incarnation,old_cursor,
+reason:router_reset,classification:legacy_unverified}`. Set active E, C=S,
+activated_cursor=S and legacy_uncertain_through=S. The first-page fence below S
+marks pre-existing coverage legacy_unverified/historical: it is never expanded
+into unavailable OR legacy_unverified loss events for already ACK-settled rows.
+For U->E use reason incarnation_first_verified with the identical S/fence rule.
+This overrides migration's issued-watermark uncertainty rule for a reset.
+
+The reset event represents an unknown old tail, not a fabricated finite loss
+count. Published journal events and cumulative counters remain historical; no
+pending committed event is retired or pruned. Old staged/held work is locally
+redriven or erased under its original E without any new-E ACK or C movement.
+Its terminal local event releases its slot. Terminal compat rows are instead
+released in reset, never redriven as held work or left orphaned after intent
+deletion. All cleanup is erasure-safe and quota accounting is transactional.
 SettleRetained explicitly names its original E: inactive-E work permits only
 local recovery/cleanup, never network settlement or active-E checkpoint writes.
 
-After reset, catch up from 0 and accept every new-E sequence independently of
-old C. Dedup of logical messages remains the authenticated application marker;
-sequence equality across E never dedups. A crash before/after reset sees all old
-or all new state. Old callbacks, late results and old pages fail E+generation
+After reset, catch up from S. Discard first-page coverage/entries at or below S;
+if that page stops below S, re-fetch from S rather than inferring a gap. Above S
+accept new-E sequences independently of old C. Logical dedup uses the
+authenticated application marker, never (E,s): restored, previously completed
+content redelivered above S has exactly one application effect, while different
+content reusing an old sequence is processed normally. A crash before/after
+reset sees all old or all new state. Old callbacks, late results and old pages fail E+generation
 checks. Retain up to 64 retired E values per T; hitting that fence capacity
 pauses for explicit recovery rather than forgetting an E and oscillating on
 stale frames. Reconnect validates the current E before enabling ACK flush.
@@ -429,7 +488,7 @@ resolved by W0/receipt reconciliation, never assumed redelivery.
 | Inside / after held W2 | old C / C>=s plus held receipt+work+retry, no intent | Local hold survives while later entries advance C; router loss below C creates no new content gap |
 | Between successive W2 steps / final gap-only W2 | C at last complete step | Re-fetch suffix; every missing interval is counted once |
 | Below-C WS, including intervening W1 subcommits | held work, or terminal intent plus cleanup | Before WS commit retry safely; after commit ACK from intent; C unchanged in both cases |
-| Incarnation reset before/after commit | all old E state / new E+C=0+one reset event, old intents/losses removed | Restart validates E before any ACK; no old callback can settle a new row |
+| Incarnation reset before/after commit | all old E state / new E+C=S+one reset event, old intents/projected loss rows removed | WJ precedes reset; S from first page suppresses settled-prefix losses; no orphan compat work or old callback settlement |
 | Local hold terminal expiry/eviction before/after commit | full held work+receipt / failure event+intent+cleanup | Below-C WS leaves C unchanged; above-C ordered W2 never skips a predecessor |
 | Erasure transaction during staged/held work | old content+receipt, or erased receipt without content | Restart can only finish erased accounting; late outcomes cannot resurrect copies |
 | Before send / after ACK send but before router WR | intent on disk | Resend, in push or compat mode; do not delete on network uncertainty |
@@ -485,35 +544,99 @@ if durable commit outcome is uncertain, reload/abort rather than serve a fork.
 
 The page/issued APIs read only the durable published shard view. For each (T,E),
 track assigned sequences still in flight in an in-memory ordered set. Let A be
-highest assigned and P the published durable watermark. P is the highest prefix
-such that every assigned sequence <=P is on disk; it is at most A. Assignment
-inserts s in the set before releasing allocation synchronization. Durable success
-removes it, then P advances to min(in_flight)-1 (or A when empty). Completed rows
-above P remain private, even if their own write finished first. Publication under
-short shard synchronization exposes rows and P together. No blocking mutex is
-held over storage I/O and same-target submissions remain concurrent; WAL batching
-and existing throughput are preserved. The in-flight set uses the existing bounded
-ingress permits (reference queue 4,096), so it cannot grow without bound.
+highest assigned and P the published durable watermark. Each assigned sequence
+<=P has exactly one durable disposition: accepted entry or aborted tombstone.
+Assignment creates an owned in-flight guard under allocation synchronization,
+before exposing the tentative row or releasing that synchronization. Durable
+terminal success removes it, then P advances to min(in_flight)-1 (or A when
+empty). Completed rows above P remain private. Short shard synchronization
+publishes rows/tombstones and P together. No blocking mutex is held over storage
+I/O; same-target submissions stay concurrent and WAL batching is preserved.
+Existing bounded ingress permits (reference queue 4,096) also reserve guard and
+tombstone persistence capacity before allocation, including native custody.
 
-Pages, covered_through_seq, FetchEntry, probes, legacy reads and pushes use only
-rows <=P and issued=P. Never emit push s+1 before s is durable. Do not lower A or
-reuse an assigned seq after an individual write failure: use the existing process
-abort, publish nothing past the hole and recover durable assignments on restart.
-After recovery, discarded tentative allocations cannot be reused in a way that
-aliases a previously durable assignment; preserve the durable high-water counter.
-Old-process callbacks cannot publish into the recovered incarnation.
+The guard owns the final persistence outcome, not a request continuation. A
+Drop caused by panic/unwind, early return, cancelled future or an allocated
+non-persisting outcome synchronously commits a sequence-only tombstone
+`(T,E,s,aborted)` through the store, without a shard mutex held. It does not abort
+the process. Drop must not panic or rely on spawning an unowned async cleanup;
+it returns only after durable disposition or an explicit storage-fault quarantine.
+Before allocation refusal/replay/forward-only outcomes need no guard. Audit each
+should_persist_submission=false outcome: if it owns an allocation, Drop resolves
+it; a no-allocation assertion alone is insufficient for an injected allocated
+branch. A successful accepted write disarms Drop only after durable completion.
 
-The two-submission test allocates s and s+1 for one target, holds s's write and
-lets s+1 finish. A page, FetchEntry, issued probe and push capture must expose
-neither s+1 nor coverage through it. Release s and both become visible in order.
-Also fail s's write and assert process abort/no successful page beyond prior P.
-This explicitly forbids assignment-order or completion-order publication.
+Cancellation racing persistence must serialize on the store's per-assignment
+terminal state: accepted and aborted are mutually exclusive, selected atomically
+with their record. Drop joins any already committing operation; accepted wins
+if committed, otherwise aborted commits and a late accepted completion cannot
+resurrect it. Redb uses one terminal transaction; WAL terminal records and replay
+resolve that same single winner. Never tombstone an accepted row or expose both.
+An aborted record stores no envelope ID, ciphertext, sender or replay tuple.
+Remove tentative content/index effects before publishing its tombstone. Retain
+tombstones until a durable contiguous settled/checkpoint prefix subsumes them;
+never prune an unsettled tombstone into unknown on ordinary restart. Coalesce
+adjacent aborted ranges; include them in the sparse index and page bounds.
+Reserve one of at most 4,096 uncheckpointed aborted-range slots per inbox before
+allocating, in addition to the ingress permit; full reason storage pauses new
+allocation before effects. Checkpoint only after the durable settled prefix
+subsumes the range, preserving its sequence disposition in recovery state.
+
+On tombstone I/O failure, keep the guard's reservation in store-owned recovery
+state, quarantine this inbox and return transient persistence_unavailable to its
+waiters; publish nothing beyond the hole. No success or silent frozen inbox is
+permitted. Recovery retries the terminal write/reloads durable state before
+reopening admission. A process crash can bypass Drop; that separate residual is
+unknown after restart, not an invented aborted reason. A watchdog exports
+oldest_in_flight_age_seconds and in_flight_count; WARN when oldest age >30 s
+(rate limited once/minute per affected inbox), without aborting the process or
+claiming that WARN resolves a still-live storage operation.
+
+**Reply enforcement:** router submit/fan-out/forward and native custody Submitted
+responses wait until P(T,E)>=s for EVERY assigned target before returning
+success. The gateway remains reply-driven; it cannot push s+1 on its own write
+alone. No new publishable bit or later notification channel is introduced.
+Wait outside shard/store locks using a cancellation-safe notification predicate;
+if the request is cancelled after commit, its accepted guard stays resolved.
+Sender acknowledgement latency therefore includes earlier same-target writes
+or their tombstone commits, in addition to its own commit. Healthy storage
+batch deadlines apply; the 30 s watchdog is diagnostic, not a hard latency bound.
+Persistent replay responses referring to s also wait for its published P.
+For fan-out, gate each assignment before exposing any reply/push for it.
+
+Pages, covered_through_seq, FetchEntry, probes, legacy and custody reads expose
+only rows <=P and issued=P. A tombstone supplies known reason aborted, including
+EntryGone; it is never a live Deliver. Do not reuse any durably assigned sequence
+after failure/restart. Recover the durable high-water counter, and prevent
+old-process callbacks from publishing into a recovered incarnation.
+
+| Assignment / read site at source baseline | S6a disposition |
+| --- | --- |
+| `apps/ramflux-router/src/router_engine.rs:61-103`, `apps/ramflux-router/src/router_engine.rs:182-225` | Sync/async submit, local completion of forwarding and fan-out: allocator guard, terminal persist, wait P>=s before response; audit `apps/ramflux-router/src/router_engine.rs:448-459` non-persisting outcomes |
+| `apps/ramflux-router/src/router_engine.rs:342-382`, `crates/ramflux-node-core/src/router.rs:754-770`, `crates/ramflux-node-core/src/router.rs:822-841` | Own-device fan-out's separate record_fanout_increment owns every returned allocation guard through the batch commit; any early error drops unresolved guards; wait for each target P before exposing the fan-out result |
+| `crates/ramflux-node-core/src/custody_delivery.rs:57-73` | Native custody submit uses the SAME allocator guard/store disposition and reply gate, replacing its independent acceptance/persistence boundary |
+| `crates/ramflux-node-core/src/router.rs:1159-1178` | Both online/offline append_at allocation branches create guard before releasing shard; all wrappers, including fan-out, share it |
+| `apps/ramflux-router/src/handlers.rs:1098-1129`, `crates/ramflux-node-core/src/custody_service/admission.rs:347-363` | HTTP and native custody Inbox both read the same durable published view bounded by P, even for legacy response shapes |
+| `crates/ramflux-node-core/src/router.rs:709-739`, `crates/ramflux-node-core/src/router.rs:1181-1194` | mvp1_inbox, mvp1_inbox_at and resume wrappers enforce P before their pull_after/pull_live_after access |
+| `crates/ramflux-node-core/src/router.rs:254-257`, `crates/ramflux-node-core/src/router_abuse.rs:90-96` | Pending-entry administrative snapshot/abuse count also read published state; no tentative row escapes through diagnostic APIs |
+| `crates/ramflux-node-core/src/inbox.rs:197-229`, `crates/ramflux-node-core/src/inbox.rs:303-343` | Low-level append wrapper/allocator and pull methods sit behind the same guard/publication boundary; raw in-memory fixture construction has explicit test-only durable initialization, never a production bypass |
+| `apps/ramflux-gateway/src/session.rs:1272-1343`, `apps/ramflux-gateway/src/session.rs:1444-1468` | Gateway reply-driven push/fan-out needs no separate watermark cache; actual pushed frame is the enforcement oracle |
+
+The two-submission test holds s's write, completes s+1's own write, and captures
+both submit responses, the actual gateway recipient frame, custody Inbox, page,
+FetchEntry and issued probe. None exposes s+1 before P advances. Release s or
+durably abandon it, then s+1's response and push become available. Independently
+inject guard drops at every exit above and a panic inside persistence; the
+process survives, aborted is durable in both modes and P progresses. Mutations
+that reply on own-write durability or omit Drop tombstones must fail these
+respective oracles. Process death before terminal durability is tested separately.
 
 | Write / cut | WAL-enabled submissions (reference default) | Redb-only submissions | Recovery / response rule |
 | --- | --- | --- | --- |
 | Inbox E creation / restore rotation | E persisted in WAL association and redb counter before service | E persisted with redb counter before service | Crash resumes complete recovery pass; never serve mixed old/new E |
 | R0 before durable submission, after in-memory preparation | no committed WAL record | no committed redb submission | No successful acceptance sent; restart has only prior durable state |
-| R1 submission commit | append+sync submission, including E and acceptance time; may have no redb inbox row | one redb transaction: E+counter+replay tuple+inbox/deadline indexes/local-delivery metadata | Reply only after durable success; crash before reply may be sender retry; preserve existing replay behavior |
+| R1 submission commit | append+sync submission, including E and acceptance time; may have no redb inbox row | one redb transaction: E+counter+replay tuple+inbox/deadline indexes/local-delivery metadata | Reply only after durable success AND P>=s for each target; crash before reply may be sender retry; preserve replay behavior |
+| RA guard abandonment | sync aborted terminal WAL record and counter, before P publication | atomic aborted record+counter, before P publication | No process abort on Drop; recovery preserves aborted reason; accepted/aborted race has one winner |
 | R1 then crash before sweep/checkpoint, restart before expiry | merge WAL with redb cursor exclusions | restore redb pending rows | Entry live in both modes |
 | R1 then crash, restart past expiry before sweep | WAL replay/retention filters may remove entry, issued watermark remains | restored expired row remains, with deadline | Page omits live entry; WAL can give unknown, redb derives expired; client suppresses gap when W0 exists |
 | WR batch ACK commit | redb cursor checkpoint plus union of all row/index retirements; WAL records remain, excluded on merge | same redb atomic operation | Before commit all old; after commit all settled. No cursor-only or last-ACK-only retirement |
@@ -557,7 +680,7 @@ rollback retires the active capable session and renegotiates on reconnect.
 Primitive aliases: Seq=u64, Deadline=i64 Unix seconds, Target=existing target
 string; Incarnation is the 32-hex E above. Omitted Optional fields decode as None.
 Entries retain the existing InboxEntry shape. EntryRecord is `{entry: InboxEntry, retain_until: Deadline}`.
-RangeReason is `expired|ack_window_overflow|nacked`; local reasons also include
+RangeReason is `expired|ack_window_overflow|nacked|aborted`; local reasons also include
 `oversize|unknown`. Requests are implicitly scoped to the authenticated session T;
 when a legacy-shaped request includes target, it must equal T. No request_id is
 needed because S2 permits exactly one request in flight; an unexpected reply
@@ -566,11 +689,11 @@ retires that session, never satisfies a later call.
 | Direction / tag | Exact fields beyond frame_type | Reply set / meaning |
 | --- | --- | --- |
 | C->G resume | resume:{target_delivery_id:Target,after_inbox_seq:Seq,limit:usize,resume_token:String}, incarnation_id:Incarnation | Capable request adds E; omit E on legacy wire. Capable reply is resume_page or nack |
-| G->C resume_page | target_delivery_id:Target, incarnation_id:Incarnation, after_inbox_seq:Seq, covered_through_seq:Seq, issued_inbox_seq:Seq, entries:Vec<EntryRecord>, known_losses:Vec<{from_seq:Seq,to_seq:Seq,reason:RangeReason}>, oversize_next:Option<Seq>, more:bool | Authoritative range, section 5; cannot mix with unsolicited pushes |
+| G->C resume_page | target_delivery_id:Target, incarnation_id:Incarnation, after_inbox_seq:Seq, covered_through_seq:Seq, issued_inbox_seq:Seq, settled_through_seq:Seq, entries:Vec<EntryRecord>, known_losses:Vec<{from_seq:Seq,to_seq:Seq,reason:RangeReason}>, oversize_next:Option<Seq>, more:bool | Authoritative range, section 5; cannot mix with unsolicited pushes |
 | C->G fetch_entry | incarnation_id:Incarnation, inbox_seq:Seq | entry, entry_too_large, entry_gone, nack |
 | G->C entry | incarnation_id:Incarnation, record:EntryRecord | Exact s and T from request; full frame <=F |
 | G->C entry_too_large | incarnation_id:Incarnation, inbox_seq:Seq, retain_until:Deadline | Live legacy entry exceeds single-entry cap. No envelope/message ID or content |
-| G->C entry_gone | incarnation_id:Incarnation, inbox_seq:Seq, observed_issued_inbox_seq:Seq, reason:expired\|ack_window_overflow\|nacked\|unknown | Point view says no live entry at s<=issued. No TTL invented |
+| G->C entry_gone | incarnation_id:Incarnation, inbox_seq:Seq, observed_issued_inbox_seq:Seq, reason:expired\|ack_window_overflow\|nacked\|aborted\|unknown | Point view says no live entry at s<=issued. No TTL invented |
 | C->G ack_batch | incarnation_id:Incarnation, inbox_seqs:Vec<Seq> | Strictly increasing, 1..64, all positive; ack_batch or nack |
 | G->C ack_batch | incarnation_id:Incarnation, cursor:InboxCursorResponse, results:Vec<{inbox_seq:Seq,outcome:acked\|already_settled\|not_found\|invalid_seq\|rejected,reason:Option<String>}> | Exactly one result per requested seq, no others; reason bounded 256 UTF-8 bytes |
 | G->C submit_accepted | incarnation_id:Incarnation, envelope_id:String, target_delivery_id:Target, inbox_seq:Seq | Durable submit reply; compact acknowledgement, no recipient content |
@@ -725,12 +848,17 @@ on-disk format; incarnation persistence is separately required in section 2.5. S
 O(log P), then merge actual pending and
 dead-letter boundaries. Never enumerate every integer from after+1 to issued.
 
-Under one shard lock snapshot issued I and walk sparse boundaries above after:
+Under one shard lock snapshot issued I=P and settled_through_seq S (0<=S<=I),
+then walk sparse boundaries above after. Carry S on every page, including the
+first reset page and empty pages; it never grants absent-range loss authority
+below S. Normal same-E catch-up does not overwrite C with later S.
+
+The walk is:
 
 1. Skip an absent interval in constant work, extending coverage to just before
    the next boundary (or I). Missing intervals need no serialized router record.
 2. For an expired pending row, append/merge an expired reason; do not delete it.
-   Dead-letter rows add their known reason; no live row may overlap a reason.
+   Dead-letter and durable tombstone rows add their known reason; no live row may overlap a reason.
 3. For a live row, measure the ACTUAL serialized one-item resume_page with its
    mandatory header, max-width coverage/I, retain_until, vectors and delimiters.
    If it cannot fit B alone, stop with oversize_next=s and covered=s-1. If it fits
@@ -755,7 +883,7 @@ At u64::MAX use checked successor/exclusive-bound operations, never wrap to zero
 
 Before staging, SDK validates E against the active epoch, then target and
 echoed after against its request,
-after<=covered<=issued, sorted unique entry sequences inside coverage, and sorted
+after<=covered<=issued, 0<=settled_through_seq<=issued, sorted unique entry sequences inside coverage, and sorted
 disjoint known-loss ranges inside coverage with no live-entry overlap. A marker
 must equal covered+1 and be <=issued. more is true exactly when covered<issued;
 an invalid/nonprogressing page retires the session with C unchanged. A point
@@ -765,7 +893,7 @@ for it. Receipt reconciliation cannot confer authority beyond these bounds.
 ### 5.2 Admission and FetchEntry
 
 Before assigning/committing a NEW inbox row on every creating path (gateway,
-own-device fan-out, federation inbound, migration forward), measure the largest
+own-device fan-out, federation inbound, migration forward, native custody submit), measure the largest
 serialized downstream single-entry frame: capable Deliver including retain_until,
 legacy Deliver, and Entry{record}. Substitute u64::MAX and worst-width signed
 deadline; include node-added franking/authority metadata AFTER normalization.
@@ -795,7 +923,7 @@ oversize_next=after+1. A page with covered=after, no marker and more=true is a
 protocol violation. If after=I it returns terminal empty with more=false. If
 client after>I (e.g. rollback lost a storage volume), return nack cursor_ahead;
 freeze that same-E session, revalidate incarnation and require the recovery
-procedure in section 2.5; a new E resets C atomically and catches up from 0. An empty
+procedure in section 2.5; a new E resets C atomically to its first-page settled cursor S and catches up from S. An empty
 terminal tail at I after
 absent ranges still has covered=I>after. Each successful point outcome accounts
 s or supplies recoverable local work; thus successful catch-up strictly advances
@@ -966,10 +1094,11 @@ desktop callers to adopt a new connection runtime.
 
 This inventory is from repository-wide Rust searches for
 persist_gateway_receive_cursor, gateway_receive_cursor_checkpoint_name,
-resume_after, receive_gateway_deliveries and receive_gateway_plaintext_deliveries
+resume_after, receive_gateway_deliveries, receive_gateway_plaintext_deliveries,
+ack_gateway_entry, ack_gateway_delivery, engine.ack and remove_unrouted
 at the product base. Paths below are full source citations; all listed production
 paths are S6b scope. Search again on the merged S2/S3 dispatch SHA; no unlisted
-writer or puller is grandfathered into push OR compat mode.
+writer, puller, ACK sender or hold remover is grandfathered into push OR compat mode.
 
 | Source at base | Existing behavior | Required disposition in both new-client modes |
 | --- | --- | --- |
@@ -983,9 +1112,16 @@ writer or puller is grandfathered into push OR compat mode.
 | `crates/ramflux-sdk/src/client/dm.rs:284-294` | Opaque public receive pulls from gateway cursor, appends entries | Adapter invokes shared ledger receive and reads committed opaque projection; appending opaque delivery alone cannot account/ACK a body as processed |
 | `crates/ramflux-sdk/src/client/dm.rs:302-326` | Plaintext public receive pulls from C and writes C after routed processing | Adapter invokes shared receive and filters local projection; local held entries use WS |
 | `crates/ramflux-sdk/src/client/dm.rs:360-369`; `crates/ramflux-sdk/src/client/dm.rs:477-481`; `crates/ramflux-sdk/src/client/dm.rs:584-595` | Legacy catch-up/success/terminal helper C writes | Keep content/ratchet marker transactions inside W1, remove embedded C mutation; W2/WS alone finish coverage/settlement |
+| `crates/ramflux-sdk/src/bus/dispatch/message.rs:702-703`, `crates/ramflux-sdk/src/bus/dispatch/message.rs:804-855` | message.receive sync plus conversation-bound legacy hold redrive, direct ACK and raw hold removal | Coalesce shared catch-up; all held redrive goes through W1+WS (ordered W2 above C), cleanup joined to terminal transition and WA owns wire ACK; read committed conversation projection |
+| `crates/ramflux-sdk/src/bus/dispatch/message.rs:21-40`, `apps/rf/src/handlers/dm.rs:49-65` | message.ack / rf dm ack ACK by envelope ID and mark local acknowledgement | Preserve public request signature; in managed mode return typed SdkError::InboundRejected with stable code receive_ledger_managed_ack, no engine acquisition/wire ACK/mark_acked. Internal WA remains the sole settler; no message-keyed intent column is added |
+| `crates/ramflux-sdk/src/bus/dispatch/group.rs:1483-1494` | Direct group ACK and three raw remove_unrouted calls | Terminal W2/WS creates intent and joins all hold deletes; WA alone sends ACK |
+| `crates/ramflux-sdk/src/client/dm.rs:702-740` | Public ack_gateway_entry/ack_gateway_delivery call engine.ack directly | Same typed managed-ledger refusal outside internal WA token; standalone ledger owns WA too. Caller-supplied envelope ID never creates a terminal intent or bypasses held accounting |
+| `crates/ramflux-sdk/src/bus/sync_driver.rs:339-351`, `crates/ramflux-sdk/src/bus/sync_driver.rs:508-512` | Successful ACK cleanup and terminal refusal raw hold removal | Return disposition; terminal W2/WS joins deletes, WA owns ACK |
+| `crates/ramflux-sdk/src/client/dm.rs:350-355`, `crates/ramflux-sdk/src/client/dm.rs:573-580`, `crates/ramflux-sdk/src/client/group_quarantine.rs:115-150` | Legacy decrypt/success/policy hold cleanup | Remove only within terminal W2/WS or the explicit erasure transaction; no receipt/work orphaning |
 | `crates/ramflux-sdk/src/gateway/engine.rs:477-511` | Public raw Resume transport merges pushes | Preserve signature as a transport adapter, separate unsolicited frames in managed mode. Only shared receive or bounded compat exact lookup may issue inbox requests; raw caller cannot write C. Standalone public receive uses the same ledger executor under its existing exclusive client borrow |
 | `crates/ramflux-sdk/src/client/dm_session.rs:264`; `crates/ramflux-sdk/src/bus/state.rs:354` | Delivery-state snapshot and startup maximum read C | Read-only; startup must load active E+C atomically, never write max into C or use a stale session cursor to override it |
 | `crates/ramflux-sdk/src/client/dm_session.rs:320-335`; `crates/ramflux-sdk/src/client/dm.rs:1082-1090` | Test fixtures seed/read checkpoint | Replace direct writes by test-only fixture initialization; exclude no production caller from the guard |
+| `crates/ramflux-sdk/src/bus/receipt_tests/erasure.rs:75`, `crates/ramflux-sdk/src/client/routed/root_ack_tests.rs:81-127` | Fixture-only direct ACK and forged-ACK refusal probes | Tests explicitly use unmanaged raw protocol fixtures or internal WA setup; retain refusal assertions and never exempt a production caller |
 
 The actor executor and standalone executor share W0/W1/W2/WS/WA routines and
 exclusive account writer ownership; a standalone receive call on an actor-owned
@@ -993,15 +1129,22 @@ account returns the existing typed ownership error instead of starting a second
 receiver. Public API signatures remain source compatible. Neither executor uses
 a hidden polling task. Generic checkpoint APIs reject the receive-checkpoint
 namespace except with the internal transaction token; no exported setter can
-forge that token. Raw transport Resume cannot apply messages or move C.
+forge that token. Managed host/raw ACK adapters likewise require internal WA
+authority before any outgoing ACK frame; direct engine calls cannot bypass the
+guard. Raw transport Resume cannot apply messages or move C.
 
-The guard test traces actual receive-checkpoint SQL writes and inbox requests
-while invoking group receive, a2i.list, both DM public APIs, legacy success,
-legacy rejection and retry paths with an interleaved gap/hold. Every C write
-must be W2 or the explicit migration/incarnation-reset transaction, every inbox
-request must be the shared catch-up or bounded exact-settlement lookup, and no
-WS call changes C. A source inventory assertion catches new unclassified call
-sites; it supplements this behavioral guard, never substitutes for it.
+The guard test traces actual receive-checkpoint SQL writes, every outgoing
+Ack/AckBatch frame (including legacy ACKs) and every hold-table delete, as well
+as inbox requests. Invoke group receive, message.receive with a conversation,
+message.ack/rf dm ack, a2i.list, both public DM APIs, legacy success/rejection
+and retry/expiry/erasure paths with an interleaved gap/hold. Every C write is
+W2 or explicit migration/reset; every ACK is WA for a terminal intent with s<=C
+and matching E/content proof; every hold delete belongs to W2/WS, reset terminal
+compat cleanup or explicit erasure. Refused managed ACK APIs produce no frame
+or delete. No WS changes C. Hooks carry the real transaction/WA authority, never
+a caller-supplied label. Classify fixture-only direct ACK sites separately in
+the source inventory; production has no exemptions. A source assertion catches
+new unclassified calls but does not replace the behavioral wire/SQL hooks.
 
 ## 8. Ephemeral delivery and S0 input
 
@@ -1028,10 +1171,16 @@ queued work can expire without delivery; no second reply or later durable ACK.
 SDK authenticates/decrypts before its transient consumer; S10a owns typed inner
 consent, supersession and S0's endpoint Unsupported policy.
 
-### 8.2 Pinned S0 r3 clock and indicator contract
+### 8.2 Pinned S0 r4 clock and indicator contract
 
 The following text is verbatim from the pinned S0 Decision 6 in section 1.2;
-S0 review approval is still a dispatch prerequisite:
+**provisional until S0 r4 is approved**. Approval is a dispatch prerequisite:
+
+Throughout this document `ttl_seconds` names the sender-signed TTL in seconds.
+During the S6 bridge it is the existing `Envelope.ttl: u32`
+(`crates/ramflux-protocol/src/core_types.rs:56`); S10a names that same semantic
+field `ttl_seconds` in the reset outer profile. It is not a second TTL or an
+independently renewable interval.
 
 Ephemeral TTL has the explicit bound `1 <= ttl_seconds <= 5` (default 5),
 in integer seconds, and priority low. The lifetime uses
@@ -1041,7 +1190,7 @@ overflow, TTL outside 1..5, created_at > node_now + 2 seconds, or now_ms >=
 expires_at_ms. Every gateway, router, federation hop, live writer and receiver
 enforces that same exclusive deadline; no grace, first-receipt renewal or
 restart extension. Within the 2-second future tolerance acceptance can be
-immediate, so remaining life at first receipt can reach ttl + 2 seconds.
+immediate, so remaining life at first receipt can reach ttl_seconds + 2 seconds.
 
 Endpoints accept Typing only in this mode. The typing indicator lifetime is
 **at most 5 s**, bounded by the signed interval `[created_at, D)`: it is visible
@@ -1049,9 +1198,15 @@ only when created_at*1000 <= now_ms < expires_at_ms, and clears at D even
 after restart or replay. The 2-second future tolerance permits early transport
 acceptance, not early display or a longer indicator lifetime; any early input
 stays only in bounded transient memory until its signed start, or is dropped.
+The receiver independently checks its own clock: checked created_at*1000 must
+be <= checked(local_now_ms + 2000), otherwise drop immediately, never hold it.
+Accepted early input is held for at most 2 s, with the same future/deadline
+checks repeated before display; backward clock movement cannot extend that
+hold (use a monotonic 2 s hold deadline too). Clock overflow drops input.
 Late arrival shortens the indicator lifetime; duplicate/reconnect never renews
 the signed interval.
-S0 r3 also resolves all three former approval gaps: integer TTL 1..5/default 5,
+
+S0 r4 also resolves all three former approval gaps: integer TTL 1..5/default 5,
 the at-most-5-second visible interval despite early transport acceptance, and
 the signed ext.delivery_mode bridge followed by complete replacement with the
 required named sender-signed/AEAD-bound field. At the S10a profile reset, remove
@@ -1079,9 +1234,9 @@ card. Controller writes new cards from this approved design with explicit SHAs.
 
 | Card | Complete scope and principal files | Dependency / enablement | Affected slices |
 | --- | --- | --- | --- |
-| S6a node durable session protocol | node-core gateway_frames, inbox_page, entry_bound, inbox sparse index; router handlers/router_engine/router_store/router_wal incarnation lifecycle and ACK batch; gateway push_queue, issued_probe, session, state, clients, serve; compact reply split, FetchEntry and capabilities, async ACK/NACK; node docs | Current main; no S2 dependency. Advertise capability only after the entire durable protocol exists. Legacy clients remain supported | id02, s39a, s51, s35, call01, s50 plus node protocol fixtures |
-| S6b SDK durable receive ledger | storage account_db/receive/{schema,stage,cover,settle,privacy}, schema migration, footprint and backup paths; SDK bus/push_receiver/{apply,reorder,ack_batch,compat,keepalive}, S2 host dispatch/read timestamp and actor arm; bus/sync_driver and contact_backpressure; bus/dispatch/{group,a2i_a2ui}; client/{account,dm,a2i,group_quarantine,own_device_copy,routed/{receive,committed},surface/resync_request}; storage journal/{quarantine,inbox_failure,inbox_legacy,inbox_policy}; exact stage/entrypoint adaptations in sections 3.1/7.1, events/status, docs and CHANGELOG | S6a + merged S2/S3. Adapts provisional interfaces; no changes in S2 work-in-progress branch. Complete push and compat receive at delivery | id02, contact02, s74, s39a, s51, s35, call01, s50; push01 durable cases |
-| S6c ephemeral transport | gateway ephemeral validation/queue/mesh result; router ephemeral_route and volatile replay; SDK transient API/dispatch/channel; durable-origin refusal; ephemeral docs | S6a/S6b + approved complete S0 Decision6 at the pinned r3 SHA, including section8.2. Advertise separate `gateway.ephemeral.v1` signed/echoed capability only when the full path exists; session_push alone never implies it during staged merge | push01 transient case, id02, s50, s51 refusal fixtures |
+| S6a node durable session protocol | node-core gateway_frames, inbox_page, entry_bound, inbox sparse index; router handlers/router_engine/router_store/router_wal incarnation lifecycle, settled cursor, WAL identity, tombstones and ACK batch; node-core custody_delivery and custody_service/admission guard/read/reply paths; gateway push_queue, issued_probe, session, state, clients, serve; compact reply split, FetchEntry and capabilities, async ACK/NACK; node docs | Current main; no S2 dependency. Advertise capability only after the entire durable protocol exists. Legacy clients remain supported | id02, s39a, s51, s35, call01, s50 plus node protocol fixtures |
+| S6b SDK durable receive ledger | storage account_db/receive/{schema,stage,cover,settle,privacy}, schema migration, footprint and backup paths; SDK bus/push_receiver/{apply,reorder,ack_batch,compat,keepalive}, S2 host dispatch/read timestamp and actor arm; bus/sync_driver and contact_backpressure; bus/dispatch/{group,a2i_a2ui,message}; client/{account,dm,a2i,group_quarantine,own_device_copy,routed/{receive,committed},surface/resync_request}; storage journal/{quarantine,inbox_failure,inbox_legacy,inbox_policy}; exact stage/entrypoint adaptations in sections 3.1/7.1, events/status, docs and CHANGELOG | S6a + merged S2/S3. Adapts provisional interfaces; no changes in S2 work-in-progress branch. Complete push and compat receive at delivery | id02, contact02, s74, s39a, s51, s35, call01, s50; push01 durable cases |
+| S6c ephemeral transport | gateway ephemeral validation/queue/mesh result; router ephemeral_route and volatile replay; SDK transient API/dispatch/channel; durable-origin refusal; ephemeral docs | S6a/S6b + approved complete S0 Decision6 at the provisional r4 SHA (after approval), including section8.2. Advertise separate `gateway.ephemeral.v1` signed/echoed capability only when the full path exists; session_push alone never implies it during staged merge | push01 transient case, id02, s50, s51 refusal fixtures |
 | S6d acceptance harness | itest src/tests/push01_session_push.rs and realnet.yml; mixed-version fixtures, ledger crash scenarios in product test modules if fixtures need shared plumbing | S6b/c delivered, exact published product pin; all three push01 cases execute green before this card READY | all selectors below |
 
 Final capability rule: ephemeral requires BOTH session_push.v1 and ephemeral.v1
@@ -1113,11 +1268,18 @@ a minimum acceptance set; functionality without its stated oracle is incomplete.
 | --- | --- | --- |
 | S6a page_sparse_coverage_and_caps | limit0 refuses, limit10000 clamps256, 10^15 absent span plus sparse live rows <=512 visits, nonoverlap coverage and checked counts | Enumerate numeric sequences; visit watchdog/budget fails even though bytes stay small |
 | S6a page_exact_serialized_boundary | Actual whole frame<=B immediately below/at/above B, including escaped metadata and known reasons; either progress or first marker | Decide oversize from raw entry bytes; one boundary produces empty more=true or oversized frame |
-| S6a entry_admission_all_origins | Gateway, fan-out, federation and migration normalize then measure Entry and both Deliver shapes; exact cap succeeds, +1 refuses without append | Omit post-authority bound on one origin; its oversized row appears |
+| S6a entry_admission_all_origins | Gateway, fan-out, federation, migration and native custody normalize then measure Entry and both Deliver shapes; exact cap succeeds, +1 refuses without append | Omit post-authority bound on one origin; its oversized row appears |
 | S6a fetch_all_terminal_races | Entry/TooLarge/Gone after expiry, sweep and router restart; supplied deadline is original; no loop | Return TooLarge for vanished row; reason/intent/deadline oracle fails |
 | S6a ack_batch_reopen_equivalence | Compare twin sequential/batch routers after reopen in both modes: pending, receipts, dead letters, indexes, cursor; one store txn | Retain only last ACK's retired list; reopened pending differs |
 | S6a ack_batch_atomic_failure | Fault commit and crash after commit before publication; no successful reply on failure, reload consistent | Publish candidate in memory before failed commit and continue serving; state-vs-reopen comparison fails |
-| S6a durable_view_publication | Allocate s and s+1 concurrently to same T, hold s write, complete s+1; page/FetchEntry/probe/push cannot expose or cover s+1 until s durable; fail s -> process abort | Publish at assignment; capture covers a tentative sequence (also test completion-order publication independently) |
+| S6a durable_view_publication | Allocate s/s+1 on each section 3.2 allocator, hold s write, complete s+1; s+1 submit/fan-out/forward/custody success reply AND actual gateway push stay held; HTTP/custody Inbox, FetchEntry and probe expose no s+1; release s then progress in both modes | Reply on own-write durability; actual gateway capture sees s+1 before barrier release. Independently publish at allocation or bypass custody read watermark; respective snapshot fails |
+| S6a guard_drop_tombstone | Early return, cancellation, panic inside write, and allocated should_persist=false branch each persist aborted without process death; s+1 reply/push progress, reopen retains typed aborted in both modes; accepted-vs-drop race has exactly one winner; oldest live guard>30s emits WARN/metric | Omit Drop tombstone; P/reply watchdog stalls. Separately allow late accepted record to replace aborted or omit WARN; terminal-state/metric assertion fails |
+| S6a guard_tombstone_storage_fault | Inject tombstone commit failure: affected target quarantines with transient error, P stays fixed, no success; recover store and resolve reservation before admitting traffic; unrelated target continues | Remove reservation without durable disposition; page crosses unresolved s or recovery aliases it |
+| S6a out_of_order_process_crash | Complete s+1 while s uncommitted, no replies beyond P, kill process without Drop, restart with durable s+1/high counter; missing s emits unavailable/unknown once, never expired or aborted, sender retry remains safe | Fabricate expired or aborted for absent never-accepted s; exact gap-reason assertion fails |
+| S6a wal_identity_and_restore_rotation | Explicit snapshot recovery rotates E before traffic in both modes; independently delete/recreate WAL directory, change identity and remove required segment/anchor; first request observes new E, old intent cannot ACK reused seq; ordinary complete restart retains E | Skip recovery rotation or accept empty/mismatched WAL under old E; new-E assertion fails even if cursor_ahead freeze otherwise prevents delivery |
+| S6a/b delayed_old_incarnation_ack | Send real old-E ack_batch and hold at router ingress, rotate E/reuse s with new content, release raw batch directly without client filtering; router rejects whole batch and new row remains pending | Remove router E comparison; stale in-flight batch deletes unseen new-E row |
+| S6b same_incarnation_regression | Same E issued<C freezes receive/settlement with cursor_ahead and diagnostic; advance traffic past C, freeze remains until explicit recovery | Wait for issued to overtake C and resume; wire/SQL hook sees forbidden ACK or C write |
+| S6b retired_incarnation_fence | Fill 64 retired E values, attempt 65th transition: pause with recovery diagnostic, no fence forgotten, no new C/ACK or reset write | Evict oldest E or grow set; bound/state assertions fail |
 | S6a retention_mode_oracles | WAL pre-sweep unknown, redb pre-sweep expired, post-sweep/prune unknown permitted; issued retained through second reopen | Remove observe_issued_seq restoration loop; expired-only WAL target loses issued coverage. Separately skip expired redb row restore; pre-sweep expired reason fails |
 | S6a sender_isolation | Hold recipient at sink-write-entered, issue second submit on SAME sender after first reply; it completes before release | Await recipient write on sender task; second reply misses barrier watchdog |
 | S6a queue_half_drain_and_inflight | 16 admitted incl held in-flight, 4 overflows -> min after16; no Resync above8; fresh overflow during its write survives; latch guarantees eventual hint under arrivals | Exclude in-flight occupancy; admitted count differs |
@@ -1126,7 +1288,7 @@ a minimum acceptance set; functionality without its stated oracle is incomplete.
 | S6a population_probe | 1,025/5,000/40,960 tokens, all batches visited once, <=4 concurrent, missing/timeouts reset confirmations, no overlapping rounds | Probe first1,024 only; untouched token lacks hint |
 | S6a probe_hole_below_high_push | Router-origin s1 plus pushed s2 cannot hide s1; only second successful observation hints | Use max pushed seq as coverage; hint missing |
 | S6a mesh_compat_overflow | Old boolean decoder sees durable overflow true, no wake; new outcome agrees | delivered=(outcome==queued); wake recorder nonempty |
-| S6a sender_recipient_matrix | Sender x recipient old/new, local/mesh, old forwarder to capable recipient: deficient frame discarded, Resync queued, no wake; actual recipient target; capable self-target gets separate reply+push without probe/Resume | Keep self-target suppression; recipient frame missing |
+| S6a sender_recipient_matrix | Sender x recipient old/new, local/mesh; old forwarder to capable recipient discards deficient frame, schedules Resync, no wake; actual target and capable self-target separate reply+push without probe | Keep self-target suppression; recipient frame missing. Separately enqueue deficient old-forwarder frame with invented E/deadline; wire capture finds forbidden Deliver |
 | S6a async_ack_nack_and_input_caps | Held router call on current-thread runtime does not block other heartbeat; bad/65/empty batch refused before router call | Use blocking router helper; independent heartbeat misses watchdog |
 | S6b staging_survives_router_expiry | Crash at EVERY W1 commit then advance beyond router retention, restart both modes, no false loss and one effect | Omit W0 or delete it after first W1 subcommit; receipt reconciliation cannot recover |
 | S6b atomic_cover_crash_sweep | Interleaved loss1/live2, gap-only page, trailing gap, capacity pause; all-or-none loss/outbox/intent/C at every commit cut | Split cursor then intent; k between commits exposes partial W2 |
@@ -1137,14 +1299,14 @@ a minimum acceptance set; functionality without its stated oracle is incomplete.
 | S6b ack_lost_before_and_after_commit | Real router inbox empties after retry; intents survive death before flush and lost reply after WR | Delete intent on uncertain send; pending row remains |
 | S6b never_ack_above_c | At write hook every ACK seq<=durable C with terminal accounting; held never selected | Send before W2; hook finds seq>C |
 | S6b receipt_reconciles_absent_range | W1 completed, crash before W2, router expires; mixed staged/held/erased receipts subtracted by indexed range merge | Infer every missing page seq as loss; false gap count |
-| S6b compat_intent_transition | push lost batch -> compat proof-checked exact lookup -> push; proofless inherited intent suspends, matching-E reconnect settles, different-E resets; crash after legacy ACK before WA leaves original registered work for equality proof; C fixed | Authorize legacy ACK by sequence alone; restore/reuse s with different payload and capture an ACK of unseen content |
+| S6b compat_intent_transition | push lost ACK -> compat proof lookup -> push; proofless intents suspend, same-E settles, new-E resets; crash after legacy ACK before WA retains original equality-proof work and C fixed within E; populate terminal compat rows then U->E, kill around reset, reopen has zero orphan work/receipts/reserved slots; held work retained; reset C=S | Authorize legacy ACK by sequence alone; unseen reused content ACKed. Separately retain terminal compat work after dropping intents; reopened orphan/quota assertion fails |
 | S6b legacy_prior_crash_classification | Old ACK-before-C crash then first capable epoch emits legacy_unverified, never definite content loss | Omit epoch fence; classified unavailable count is wrong |
 | S6b push_without_polling | Initial catch-up then idle DM commits with Deliver and no Resume in measured interval | Retain old5s schedule; exact idle Resume count fails |
 | S6b reorder_and_gap | C+2 then C+1 at200ms -> ordered apply, no pull; missing sibling -> one pull at500ms | Apply arrival order; ordered projection assertion fails |
 | S6b gap_timer | No Resume before500ms, exactly one then | Wait5s; 500ms capture empty |
 | S6b connected_and_sweep | One initial Resume within100ms; none until900s; probe/gap/retry held beyond experiment | Remove Connected trigger; 100ms frame count0 |
 | S6b sweep_setting | Default900s; pure parser clamp60..3600; deprecated variables one warning/no effect | Default60s; premature Resume |
-| S6b ack_batch_timing \|16 eligible->one batch;3->one at1s; every seq passed W2 | ACK each entry; batch count differs |
+| S6b ack_batch_timing | 16 eligible->one batch;3->one at1s; every seq passed W2 | ACK each entry; batch count differs |
 | S6b coalesced_resync | Resync+Lagged+sweep during held run -> exactly one follow-up; buffer256/8MiB | Spawn catch-up per hint; concurrent/follow-up count differs |
 | S6b lifecycle_fence | Held page/result, lock<1s, release old generation -> no DB write or ACK; unlock recovers disk | Drop generation check; stale row/write appears |
 | S6b keepalive_all_reads | Reply/push/heartbeat update activity even without subscribers; missing reply retires at35s idle scenario | Derive activity from push-only subscription; ping sent after recent reply |
@@ -1154,11 +1316,11 @@ a minimum acceptance set; functionality without its stated oracle is incomplete.
 | S6c ephemeral_persistence_absence | Generic before/after every redb table, WAL length, spool, notify queue, client DB/journal; no changes for live/offline/full/expired | Send ephemeral down durable route; persistent artifact found |
 | S6c ephemeral_deadline | Stale signed input under fresh request refused before router I/O, D exact on every hop, now==D expires | Recompute D from receipt time; delayed/replayed envelope accepted |
 | S6c ephemeral_restart_window | Router-only restart receiver dedups; combined/repeated restarts duplicate only beforeD, never durable; no marker afterD | Keep marker pastD; live-marker inspection fails |
-| S6c ephemeral_admission_result \|40 same paused-instant submits,41st rate-limited,50ms refill1; invalid ttl0/6 refuses before routing; accepted then expired gets no second reply | Validate after route; router recorder sees invalid input |
+| S6c ephemeral_admission_result | 40 same paused-instant submits,41st rate-limited,50ms refill1; invalid ttl0/6 refuses before routing; accepted then expired gets no second reply | Validate after route; router recorder sees invalid input |
 | S6c final_registration_capability | Replace capable token with legacy between route/enqueue -> dropped recipient_unsupported | Check capability only at routing; accepted with no capable queue |
-| S6a/b inbox_incarnation_reset | Persist high C and pending intents/loss rows, restore router with lower counter under new E in both modes, reuse old seqs with new content; all new messages delivered, no old ACK affects them, one inbox_reset, old losses/intents gone atomically | Remove E comparison in ACK mutation; old intent deletes unseen new-E row. Separately omit reset C=0; new messages below old C disappear |
+| S6a/b inbox_incarnation_reset | Both modes start old C=100 then restore lower counter/new E with settled1..30/live31..50; first page S=30: zero prefix gap events, one reset and all live rows delivered below old C; same U->E case. WJ publishes pending old loss once before reset. Redeliver completed content above S and new content reusing old seq: one effect per application marker. Same-E expiry crossing settled cursor still yields a gap | Reset C/fence to0 produces false prefix gaps; keep old C loses live31..50. Separately drop pending old outbox, dedup by (E,s), or overwrite C with S on ordinary pages; corresponding journal/projection/gap oracle fails |
 | S6a/b invalid_seq_terminal | invalid_seq deletes named intent once, emits diagnostic and revalidates E; later reused seq never receives an old retry | Classify invalid_seq as transient; capture a later unsafe ACK retry |
-| S6b all_receive_writers_guard | Invoke every section 7.1 API with gap1/live2 and held below C; SQL/request hooks attribute every C write/pull to permitted transaction | Leave group.rs routed branch writing C directly; uncounted gap or out-of-transaction write fails |
+| S6b all_receive_writers_guard | All section 7.1 APIs incl conversation message.receive and message.ack/rf dm ack with gap/hold; SQL, inbox-request, outgoing ACK and hold-delete hooks enforce W2/WS/WA/reset/erasure; held never ACKed, managed public ACK typed refusal | Leave message.rs direct ACK; wire hook detects ACK outside WA or s>C. Separately leave group raw remove_unrouted; delete hook detects missing transaction authority |
 | S6b hold_source_class_quotas | Submit >64 unrouted entries from one verified source and many-source burst, exercise 256/16MiB aggregate and 4MiB source bound, then routable DM; DM arrives, oldest holds have typed held_evicted+intent, no orphan rows | Keep legacy 1,024 shared hold budget or delete oldest unrouted row without W-path; starvation/orphan/event assertion fails |
 | S6b held_local_expiry_and_eviction_crash | Force quarantine purge/64-cap eviction, expire_inbox_holds, dead_letter_inbox and contact expiry; kill before/after terminal transaction; exactly one failure event+intent or full old work/receipt, C unchanged below C | Execute quarantine.rs raw DELETE first; reopen finds held receipt without work or missing event/intent |
 | S6b receive_stage_redrive | Kill before/after EVERY concrete W1 commit in section 3.1; one crypto/application effect, required projection event and immutable reply outbox survive even when router row is gone | Keep seen-marker early Completed; crash after crypto before projection/reply admission loses required stage |
@@ -1171,10 +1333,11 @@ a minimum acceptance set; functionality without its stated oracle is incomplete.
 | S6b loss_storage_backpressure | Fill 2,048 ranges and separately 1MiB unpublished-loss budget; next W2 pauses with C/work/outbox unchanged; projection/pruning then permits one atomic retry | Remove range cap, then separately byte cap; forbidden commit occurs. Split pause from C commit; immediate durable state fails |
 | S6b compat_frame_limit_fallback | 64-entry legacy reply exceeds F, fresh-session retry limit1 succeeds; oversized single entry pauses with status and fixed C, no reconnect loop | Retain limit64 after frame failure; session repeatedly fails or good entry never arrives |
 | S6b stale_page_suffix_progress | Pushes advance C while page is in flight, after<=C<covered; useful suffix applies with loss reconciliation and no duplicate effect, repeated races do not starve | Reject entire stale-C page; page suffix never commits under continuous pushes |
-| S6c s0_r3_lifetime_bridge | ttl0/6 invalid, ttl1/5 accepted within deadline; early future input never displays before created_at, visible duration<=5s, late arrival shortens; bridge signed, unknown invalid, S10a rejects bridge/dual-field | Display on early transport receipt or renew on duplicate; separately retain bridge parser after profile reset; corresponding assertion fails |
+| S6c s0_r4_lifetime_bridge | ttl_seconds aliases Envelope.ttl; ttl0/6 invalid, ttl1/5 valid; receiver own-clock ahead>2s drops immediately, exact2s bounded hold, backward wall clock never extends monotonic2s hold, overflow drops; display inside signed interval <=5s, no renewal; signed bridge and reset rejection | Omit receiver own-clock check; skewed input retained. Separately use wall-clock-only hold deadline, renew duplicate display or retain bridge parser at reset; corresponding oracle fails |
 | S6d push01 wire capture | Actual Deliver to B and zero Resume between send and event, after initial catch-up; sweep3600s | Re-enable receive poll; capture finds Resume with competing paths held |
 
-Crash sweep hooks count real commits W0/W1*/W2/WS/WA/WJ/WR/RE/RC, rerun once per
+Crash sweep hooks count real commits W0/W1*/W2/WS/WA/WJ/WR/RA/RE/RC and WAL
+identity/rotation writes, rerun once per
 cut k, kill immediately after k, and reopen DB/router files. For each split
 mutation there MUST be a k between the two writes and an immediate durable-state
 assertion; merely placing a fault before W2 is insufficient. Include loss ranges
@@ -1310,16 +1473,48 @@ All 14 design-review findings have the following normative closures. The earlier
 | design-r1-L3 fallback clock skew | Section 2.3 fallback adds 120s and states its clock assumption/residual; no unconditional upper-bound claim |
 | design-r1-L4 repeated content mismatch | Section 2.3 first-copy authority and bounded diagnostic without reconnect livelock; staged_content_conflict |
 | design-r1-L5 weak/missing mutations | Section 9.2 retention mutation edits product restore loop, late W0/W1 erase-fence mutations, independent range/byte budget mutations |
-| design-r1-L6 S0 approval completeness | Sections 1.2/8.2 pin r3 12d702ae, verbatim clock/display wording and three explicit L6 dependencies; s0_r3_lifetime_bridge |
+| design-r1-L6 S0 approval completeness | Sections 1.2/8.2 pin provisional r4 61d96751, verbatim clock/display wording and three explicit L6 dependencies; s0_r4_lifetime_bridge |
 | design-r1-L7 compat frame failure | Section 4.3 sticky limit1 fresh-session fallback and single-entry pause/status; compat_frame_limit_fallback |
 | design-r1-L8 stale-C page | Section 7 validates E/generation then applies suffix above current C; stale_page_suffix_progress |
 | design-r1-L9 S2 provenance | Section 1.2 marks snapshots uncommitted, SHA-256 identity only, provisional recheck on merged S2; no file:line attributed to 08c056a5 |
 
+### 10.2 Design r2 review closure (round r3)
+
+These are design closures; all tests remain future implementation requirements.
+
+| Finding | Design answer and implementation oracle |
+| --- | --- |
+| design-r2-N-M1 reply enforcement / custody | Sections 3.2/5.2/9.1 enumerate allocators/readers, gate every assigned response on P; durable_view_publication captures actual gateway push and native custody Inbox |
+| design-r2-N-M2 abandoned assignment | Section 3.2 owned guard, durable aborted tombstone without process abort, single terminal winner and watchdog; guard_drop_tombstone, guard_tombstone_storage_fault |
+| design-r2-N-M3 ACK/removal inventory | Section 7.1 adds message.receive/message.ack/group raw cleanup and public ACK helpers; W2/WS/WA authority and managed refusal; all_receive_writers_guard |
+| design-r2-N-M4 settled prefix | Sections 2.5/4.1/5.1 import first-page S into C/activation/fence for restore and U->E, no settled-prefix loss; inbox_incarnation_reset |
+| design-r2-L1 pending loss publication | Section 2.5 WJ barrier before reset; retain pending events on projection failure; inbox_incarnation_reset |
+| design-r2-L2 terminal compat release | Section 2.5 reset atomically releases terminal compat work/receipts/quotas; compat_intent_transition reopen oracle |
+| design-r2-L3 effective E/dedup tests | delayed_old_incarnation_ack bypasses client masking; inbox_incarnation_reset redelivers completed content and rejects (E,s) dedup |
+| design-r2-L4 missing mutations | wal_identity_and_restore_rotation, same_incarnation_regression, retired_incarnation_fence and independent old-forwarder sender_recipient_matrix mutation |
+| design-r2-L5 crash hole | Sections 3.2/11 residual and out_of_order_process_crash pin unknown, never expired/aborted |
+| design-r2-L6 S0 r4 delta | Sections 1.2/8.2 pin 61d96751 verbatim with provisional approval marker; s0_r4_lifetime_bridge receiver-clock and monotonic-hold cases |
+| design-r2-L7 table columns | Section 9.2 ACK timing and ephemeral admission rows each have three correctly separated cells |
+| design-r2-L8 WAL counter continuity | Section 2.5 redb WAL identity/checkpoint anchor and segment chain; rotate before traffic on mismatch; wal_identity_and_restore_rotation |
+
 ## 11. Residuals and owner questions
 
-Technical choices are made above; no owner technical question remains. S0 r3 complete Decision 6
+Technical choices are made above; no owner technical question remains. S0 r4 complete Decision 6
 approval and merged S2/S3 interface recheck are dispatch prerequisites, not product
 questions or blockers to reviewing this design.
+
+A process crash bypassing Drop can leave a permanent hole s below a durable
+s+1 assignment recovered from disk, even though no s+1 success reply/push was
+published before the crash. The abandoned s may never have been accepted and
+its sender can retry at a new sequence; without a durable tombstone the client
+reports this missing delivery evidence as unavailable/unknown, never expired or
+aborted. This is a possible spurious logical-message gap, not proof of lost
+accepted content. out_of_order_process_crash pins this residual in both modes.
+
+Reset imports the router's settled prefix as historical/unverified; because it
+also includes lifecycle retirement, reset cannot recover exact old loss counts
+from that prefix. The reset diagnostic carries the uncertainty, while ordinary
+same-E coverage continues to report missing sequences from C.
 
 Residual product behavior is explicit: an unrecoverable inbox gap cannot retrieve
 history from an E2EE router; a user must obtain another device/sender copy through
