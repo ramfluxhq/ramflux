@@ -3,7 +3,7 @@
 
 //! Derive a bounded deadline and share its monotonic anchor across account reloads.
 use super::{AccountNetworkingReason, NetworkingView, capacity_hint};
-use crate::custody::{CAPACITY_RETRY_AFTER_MS, store::StoredAuthority};
+use crate::custody::{CAPACITY_RETRY_AFTER_MS, CAPACITY_RETRY_AFTER_SECS, store::StoredAuthority};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -32,7 +32,7 @@ fn normalized(
         return (reason, deadline, false);
     };
     let daily = capacity.is_some();
-    *capacity = capacity.and_then(|hint| capacity_hint::accepted(hint, now));
+    *capacity = capacity.filter(|hint| capacity_hint::valid(*hint, now));
     if daily && capacity.is_none() {
         *retry_after_ms = CAPACITY_RETRY_AFTER_MS;
     }
@@ -47,7 +47,7 @@ fn normalized(
         if daily {
             *capacity = None;
             *retry_after_ms = CAPACITY_RETRY_AFTER_MS;
-            now.saturating_add(300)
+            now.saturating_add(CAPACITY_RETRY_AFTER_SECS)
         } else {
             // Preserve a relative hint's identity so persisting a clock correction
             // can keep the already captured monotonic anchor.
@@ -107,6 +107,11 @@ pub(super) fn view(
     path: &Path,
     now: u64,
 ) -> Option<NetworkingView> {
+    let hint = reason.and_then(|reason| match reason {
+        AccountNetworkingReason::NodeBusy { capacity, .. } => *capacity,
+        _ => None,
+    });
+    capacity_hint::log_view_discard(hint, path, node, now);
     let mut anchors = anchors();
     let Some(reason) = reason else {
         anchors.remove(path);
@@ -117,7 +122,7 @@ pub(super) fn view(
         anchors.remove(path);
         let mut cause = reason.clone();
         if let AccountNetworkingReason::NodeBusy { capacity, .. } = &mut cause {
-            *capacity = capacity.and_then(|hint| capacity_hint::accepted(hint, now));
+            *capacity = capacity.filter(|hint| capacity_hint::valid(*hint, now));
         }
         return Some(NetworkingView { cause, remaining_ms: None, resets_at: None, clamped: false });
     };
@@ -128,10 +133,10 @@ pub(super) fn view(
         old.source == source && (old.monotonic || !clamped || old.clamped)
             || old.source.0 == source.0 && old.reason == cause && old.deadline == bounded
     });
+    if clamped && (!reuse || anchors.get(path).is_some_and(|anchor| !anchor.clamped)) {
+        tracing::info!(clamped = true, "clamped persisted custody capacity deadline");
+    }
     if !reuse {
-        if clamped {
-            tracing::info!(clamped = true, "clamped persisted custody capacity deadline");
-        }
         anchors.insert(
             path.to_owned(),
             Anchor {
@@ -149,10 +154,7 @@ pub(super) fn view(
     }
     let anchor = anchors.get_mut(path)?;
     if clamped {
-        if !anchor.clamped {
-            tracing::info!(clamped = true, "clamped persisted custody capacity deadline");
-            anchor.clamped = true;
-        }
+        anchor.clamped = true;
         // Keep the normalized source in sync after every rollback and persistence pass.
         // The monotonic deadline remains the one captured for this cooldown.
         anchor.deadline = bounded;
