@@ -8,13 +8,16 @@ cryptographic framing and the implementation boundaries. It adds no runtime
 feature. The design branch is a review artifact; S10a imports this exact file by
 its approved commit SHA rather than merging the design branch.
 
-The implementation checkout for this proposal starts at
-`ad725d638b6d24ed15ae9f13b94733a640b75a3d`. All product `path:line` citations below
+Round r2 continues the design artifact at
+`3ed15324ce85878052f9dc99beaec1fea019e08c`, without rebasing its branch. All product `path:line` citations below
 are pinned to `6b8e53106618aaee091989099ddb8dd5b1c9ad82`; `desktop/` denotes the
 separate desktop repository at `08a9e63873a231a9a332c2274eeba7b819341feb`.
 The intervening identity-verification/backup change does not change the schema
 literal set. Counts are 182 occurrences, 70 distinct literals across the product,
-and 179 occurrences, 70 distinct literals in SDK source. A literal inventory is
+and 179 occurrences, 70 distinct literals in SDK source. The live Surface/Call/Task wire definitions were also compared with main
+`42cb140574aeca3b0e4f5cfcf2f840ae59d40832` in r2: the mapped definitions
+are unchanged; a newer task historical-projection change adds local metadata,
+not wire fields. All tables still cite the fixed product baseline. A literal inventory is
 not a claim that each literal defines an application message: several are hash
 separation domains or private persistence formats.
 
@@ -70,15 +73,29 @@ remain subject to their native 8 KiB proof limit. Task and Surface retain the
 control, membership and parser limits are not removed by the aggregate cap.
 
 Unsupported retention adds a separate **64-row / 32 MiB exact-raw budget per
-account**, plus 4 KiB bounded metadata per row. An admission transaction reserves
-that budget before ratchet/read-model commit. Exhaustion is ordinary local
-storage backpressure: preserve existing rows, withhold ACK and surface
-`StorageCapacity` with recovery actions (upgrade, delete selected Unsupported
-messages, or provision storage). It is never UnsupportedSchema, never an
-unsupported-kind NACK and never silent FIFO destruction of retained bytes.
-This does not promise delivery from an arbitrarily abusive authenticated peer;
-normal contact blocking, native authorization, TTL and S6 gaps still apply.
-The new budget is not mislabeled an already existing inbox quota.
+account**, plus 4 KiB bounded metadata per row. Within it, each authenticated
+source account anchor has a **16-row / 8 MiB** sub-budget across all its devices,
+groups, conversations and own-copy deliveries. Charge outer and nested raw copies
+to the verified original author; same-root transport cannot reset that charge.
+An undecodable identity is charged to the authenticated transport source anchor;
+reparse can transfer a charge only atomically without exceeding either budget.
+Reserve account and source budgets in the same transaction before ratchet/read-model
+commit. No per-device identity or conversation churn bypasses the source budget.
+
+Exhaustion is local storage backpressure: preserve existing rows, withhold ACK,
+surface `StorageCapacity` identifying the bounded source, and continue servicing
+other sources. Per-source admission queues and fair polling prevent one full
+source queue from stopping other inbound processing. Recovery actions are
+upgrade, delete selected Unsupported messages, block the source, or provision
+storage. It is never UnsupportedSchema, an unsupported-kind NACK or FIFO eviction.
+Withheld ACK is **not** a durable delivery promise: the node retains ciphertext
+only until the earlier of envelope expiry and seven days after acceptance
+(`docs/server-data.md:13`), then removes it. Its present ACK-window overflow can
+also drop a delivery without recipient notification (`docs/server-data.md:192`).
+Persist the local capacity diagnostic so retry/expiry is visible; do not invent a
+node expiry receipt. S6 owns typed gaps. This does not promise unlimited delivery
+from authenticated peers; native authorization and blocking continue to apply.
+These budgets are new choices, not measured existing inbox quotas.
 
 ## 2. Numbered decisions and rejected alternatives
 
@@ -148,8 +165,8 @@ scanner recognizes unknown field numbers, unsupported field introductions,
 unknown enum/entity numbers and a layer above effective receiver support.
 Prost decoding is performed only after that scan. Unknown content produces
 `Unsupported { layer, kind }`, with a raw-row handle, not a replacement text
-message. Entity::Unknown is represented by the EntityUnknown structure; its
-presence likewise makes the whole message Unsupported. No partial action is
+message. An unrecognized Entity.kind number makes the entire message
+Unsupported; EntityUnknown exists only as a local projection, never on the wire. No partial action is
 executed. A protobuf body decode failure after authenticated framing also
 produces an opaque Unsupported placeholder rather than displaying binary text.
 
@@ -305,23 +322,43 @@ unsigned directory property. S10a owns protocol, SDK publication and node
 manifest verification/serialization changes needed to carry it.
 
 Only that current device can sign its declaration; an authorized native owner
-must endorse an update in a newer custody publication. Lowering max_layer is an
-explicit higher-sequence declaration, not an inferred downgrade from a timeout
-or old backup. Pin both native head/counter and per-device declaration sequence;
-reject stale, foreign-epoch or equal-sequence conflicting declarations. Statement
-validity is at most 24 hours and is also subject to the existing native authority
-freshness/current-head check. An expired/missing statement is LayerUnavailable,
-not max_layer=0. A stale lower declaration is repaired by updating/unlocking the
-device, issuing its fresh signed declaration and publishing an endorsed native
-head. Loss of the signing holder requires attended native recovery/new-device
-enrollment. Local history reads do not wait for this publication.
+endorses changes in a newer custody publication. An explicit lower max_layer
+requires a higher sequence and may never be below the mandatory floor F. Pin
+both native head/counter and declaration sequence; reject stale, foreign-epoch
+or equal-sequence conflicting statements without lowering those pins. Wall-clock
+expiry never rolls back authority, sequence or a declaration's historical record.
 
-Effective receive maximum is min(compiled maximum, active signed declaration).
-Backup/restore can preserve declarations as historical evidence only; they never
-restore a current head, declaration sequence floor or live capability from the
-archive. Fresh admission refreshes authority/floors before new sends. A malicious
-home can still withhold new publications within the pre-existing freshness
-model; this design does not add a transparency-log guarantee.
+A statement may have at most 24 hours of validity **for above-floor selection**.
+An expired or missing layer declaration NEVER blocks a send: use F for that
+target, even after more than 24 hours offline. F=1 during the S10a development
+stage and F=3 after S10b; every admitted client in a stage supports its floor.
+This floor is part of the deployed profile, not a guessed value of max_layer=0.
+A foreign/replayed declaration is discarded and grants no above-floor support;
+it also cannot erase the pinned sequence/head. Ordinary native device admission,
+revocation and cryptographic-key availability still apply independently of layers.
+
+For current verified declarations select the minimum over source compiled/active
+support and every target's fresh max_layer (the fresh cohort). A target without a
+fresh declaration receives a separately encoded F representation. It is excluded
+from the fresh-cohort minimum: neither a group nor an own-device fan-out is
+lowered wholesale for that member. Source capability is bounded by compiled
+support; a missing/expired local statement similarly permits sending at F.
+Every representation retains one logical event id, author sequence, authorization
+and membership snapshot. Apply the downgrade table before per-device encryption.
+For a group, distinct plaintext representations use distinct group sender-key
+counters/ciphertexts under the same logical id, and only matching target devices
+receive each pair-sealed wrapper. Never reuse a nonce/counter across variants.
+
+There is **no mandatory daily custody publication** to keep messaging working.
+Publish on capability change or to renew optional above-floor selection while
+online; an offline/lost holder simply loses the above-floor optimization. Unlock
+or attended native recovery/new-device enrollment restores publication authority,
+not permission to send a floor message. Repair a stale lower declaration by a
+higher-sequence signed update and endorsed head. Local history never waits for it.
+Effective receive maximum is min(compiled maximum, fresh declared maximum), or
+F if the declaration is absent/expired. Backup/restore preserves statements only
+as historical evidence and refreshes native pins; it cannot reactivate stale
+capability. The existing native authority freshness/withholding model is unchanged.
 
 ### Decision 8 — encrypted headers (Q7, D7)
 
@@ -407,8 +444,8 @@ select body message types; the uint32 field preserves future numbers. Content is
 a generated local/API view only. PaddedInner/Padding describe the crypto framer's
 logical values; their protobuf encoding is **not** the encryption plaintext.
 Native signed proof bytes use their independently owned, named canonical codecs.
-A SignedPayload's payload has the type fixed by its containing field, not an
-untrusted schema-name dispatch. Its signature authenticates those exact bytes.
+Every signed payload has a concrete descriptor and an explicit signer/signature
+field; there is no generic SignedPayload bytes model or schema-name dispatch.
 
 ```proto
 syntax = "proto3";
@@ -500,12 +537,8 @@ message Forward {
   optional string original_display_name = 2;
   bytes origin_assertion = 3;
 }
-message EntityUnknown {
-  uint32 kind = 1;
-  bytes original_entity = 2;
-}
 enum EntityKind {
-  ENTITY_UNKNOWN = 0;
+  ENTITY_UNSPECIFIED = 0;
   ENTITY_BOLD = 1;
   ENTITY_ITALIC = 2;
   ENTITY_CODE = 3;
@@ -517,9 +550,10 @@ enum EntityKind {
 message Entity {
   uint32 offset = 1;
   uint32 length = 2;
-  uint32 kind = 3;
+  EntityKind kind = 3;
   optional string value = 4;
-  EntityUnknown unknown = 5;
+  reserved 5;
+  reserved "unknown";
 }
 message Thumbnail {
   string mime_type = 1;
@@ -590,11 +624,6 @@ message GroupSealedContent {
   bytes franking_commitment = 21;
   bytes commitment = 22;
 }
-message SignedPayload {
-  bytes payload = 1;
-  QualifiedDevice signer = 2;
-  bytes signature = 3;
-}
 enum ServiceAction {
   SERVICE_UNSPECIFIED = 0;
   SERVICE_MEMBER_ADDED = 1;
@@ -660,62 +689,79 @@ enum ControlOperation {
   CONTROL_HOME_MIGRATION = 8;
   CONTROL_RECOVERY = 9;
   CONTROL_LIVE_PRESENCE = 10;
+  CONTROL_A2I = 11;
+  CONTROL_OBJECT_REVOKE = 12;
+  CONTROL_OWN_CONTACT_TOMBSTONE = 13;
+  CONTROL_OWN_GROUP_CONSENT = 14;
+  CONTROL_OWN_MESSAGE_COPY = 15;
+  CONTROL_FRIEND = 16;
 }
 message Control {
   ControlOperation operation = 1;
-  MessageRef target = 2;
-  bytes correlation_id = 3;
-  bytes native_signed_document = 4;
-  HistoryPage history = 5;
-  uint64 epoch = 6;
-  repeated QualifiedDevice subjects = 7;
-  ContactControl contact = 8;
-  GroupKeyDistribution group_key = 9;
-  PairRecovery pair_recovery = 10;
-  RecoveryControl recovery = 11;
-  OwnContactSync own_contact = 12;
+  reserved 2 to 15;
+  reserved "target", "correlation_id", "native_signed_document", "history", "epoch",
+           "subjects", "contact", "group_key", "pair_recovery", "recovery", "own_contact";
+  oneof payload {
+    PairReset reset = 16;
+    PairResetAck reset_ack = 17;
+    ContactControl contact_control = 18;
+    GroupStateControl group_state = 19;
+    GroupKeyControl group_key_control = 20;
+    OwnContactSync own_contact_sync = 21;
+    HistoryPage own_history = 22;
+    HomeMigrationControl home_migration = 23;
+    RecoveryControl recovery_control = 24;
+    LivePresence live_presence = 25;
+    A2iControlEvent a2i = 26;
+    ObjectRevokeAccess object_revoke = 27;
+    OwnContactTombstone own_contact_tombstone = 28;
+    OwnGroupConsent own_group_consent = 29;
+    OwnMessageCopy own_message_copy = 30;
+    FriendControl friend = 31;
+  }
 }
-message ContactControl {
-  uint32 action = 1;
-  QualifiedDevice requester = 2;
-  QualifiedDevice target = 3;
-  string display_name = 4;
-  bytes native_consent_proof = 5;
-  bytes request_id = 6;
-}
-message GroupKeyDistribution {
-  string group_id = 1;
-  QualifiedDevice sender = 2;
-  uint64 epoch = 3;
-  bytes state_hash = 4;
-  bytes sender_key_seed = 5;
-  bytes sender_signature = 6;
-  bytes membership_proof = 7;
-}
-message PairRecovery {
-  bytes old_session_id = 1;
-  bytes reset_id = 2;
-  bytes transcript_hash = 3;
-  uint64 epoch = 4;
-}
+message PairReset { uint64 rejected_bootstrap_floor = 1; }
+message PairResetAck { uint64 rejected_bootstrap_floor = 1; }
+message ContactControl { NativeContactConsent consent = 1; }
+message HomeMigrationControl { NativeHomeAuthorization proposal = 1; }
 message RecoveryControl {
-  uint32 action = 1;
-  bytes invitation_id = 2;
-  QualifiedDevice owner = 3;
-  QualifiedDevice guardian = 4;
-  bytes native_guardian_proof = 5;
-  uint64 expires_at = 6;
+  oneof payload { GuardianInvite invite = 1; GuardianAccept accept = 2; }
 }
-message OwnContactSync {
-  uint64 roster_revision = 1;
-  repeated ContactControl entries = 2;
-  repeated bytes removed_request_ids = 3;
-  bytes native_owner_proof = 4;
+message LivePresence { uint64 epoch = 1; repeated QualifiedDevice subjects = 2; }
+message ObjectRevokeAccess {
+  string object_id = 1;
+  string recipient_principal_id = 2;
+  string link_id = 3;
+  string reason = 4;
+  int64 effective_at = 5;
+}
+message FriendControl {
+  uint32 action = 1;
+  string link_id = 2;
+  string requester = 3;
+  string target = 4;
+  optional string remove_scope = 5;
+  bool blocked = 6;
+  optional int64 capability_revoked_at = 7;
+}
+message OwnMessageCopy {
+  HistoryItem item = 1;
+  QualifiedDevice source = 2;
+  QualifiedDevice target = 3;
+  int64 created_at = 4;
+  int64 expires_at = 5;
 }
 message HistoryItem {
   bytes exact_inner = 1;
-  bytes origin_evidence = 2;
+  reserved 2;
+  reserved "origin_evidence";
+  HistoryOriginEvidence source_evidence = 16;
   optional Delete tombstone = 3;
+}
+message HistoryOriginEvidence {
+  bytes canonical_sender_envelope = 1;
+  NativeCustodyManifest source_authority = 2;
+  optional NativeGroupSnapshot group_membership = 3;
 }
 message HistoryPage {
   bytes transfer_id = 1;
@@ -724,62 +770,1091 @@ message HistoryPage {
   repeated HistoryItem items = 4;
   bytes page_digest = 5;
 }
+message JsonNull {}
+message JsonArray { repeated JsonValue values = 1; }
+message JsonMember { string key = 1; JsonValue value = 2; }
+message JsonObject { repeated JsonMember members = 1; }
+message JsonValue {
+  oneof value {
+    JsonNull null = 1;
+    bool boolean = 2;
+    string number = 3;
+    string text = 4;
+    JsonArray array = 5;
+    JsonObject object = 6;
+  }
+}
+message NativeCustodyManifest { bytes canonical = 1; }
+message NativeSignedDeviceSet { bytes canonical = 1; }
+message NativePrekeyBundle { bytes canonical = 1; }
+message NativeBranchProof { bytes canonical = 1; }
+message NativeGroupActor { bytes canonical = 1; }
+message NativeGroupSnapshot { bytes canonical = 1; }
+message NativeGroupChangeRequest { bytes canonical = 1; }
+message NativeGroupChangeResult { bytes canonical = 1; }
+message NativeGroupTransferAcceptance { bytes canonical = 1; }
+message NativeContactConsent { bytes canonical = 1; }
+message NativeGroupEvent { bytes canonical = 1; }
+message NativeHomeAuthorization { bytes canonical = 1; }
+message CallEndpoint {
+  string principal_id = 1;
+  string root_public_key = 2;
+  string device_id = 3;
+}
+message CallActionInvite {
+  string base_key = 1;
+}
+message CallActionRinging {
+
+}
+message CallActionAnswer {
+  string base_key = 1;
+}
+message CallActionAck {
+  VoicePeerAllocation allocation = 1;
+}
+message CallActionReady {
+  VoiceLeaseConsent consent = 1;
+}
+message CallActionReject {
+
+}
+message CallActionBusy {
+
+}
+message CallActionHangup {
+
+}
+message CallActionTimeout {
+
+}
+message CallActionFailed {
+
+}
+message CallActionAnsweredElsewhere {
+
+}
+message CallActionRekey {
+  uint64 generation = 1;
+  string base_key = 2;
+}
+message CallActionRekeyAck {
+  uint64 generation = 1;
+  string base_key = 2;
+}
+message CallAction {
+  oneof value {
+    CallActionInvite invite = 1;
+    CallActionRinging ringing = 2;
+    CallActionAnswer answer = 3;
+    CallActionAck ack = 4;
+    CallActionReady ready = 5;
+    CallActionReject reject = 6;
+    CallActionBusy busy = 7;
+    CallActionHangup hangup = 8;
+    CallActionTimeout timeout = 9;
+    CallActionFailed failed = 10;
+    CallActionAnsweredElsewhere answered_elsewhere = 11;
+    CallActionRekey rekey = 12;
+    CallActionRekeyAck rekey_ack = 13;
+  }
+}
+message CallControl {
+  string schema = 1;
+  string call_id = 2;
+  string conversation_id = 3;
+  CallEndpoint caller = 4;
+  CallEndpoint callee = 5;
+  CallEndpoint sender = 6;
+  uint64 seq = 7;
+  int64 created_at = 8;
+  CallAction body = 9;
+  string signature = 10;
+}
+message VoiceAllocationRequest {
+  string call_id = 1;
+  CallEndpoint caller = 2;
+  CallEndpoint callee = 3;
+}
+message VoicePeerAllocation {
+  string lease_id = 1;
+  string endpoint = 2;
+  uint64 expires_at = 3;
+  uint64 hard_expires_at = 4;
+}
+message VoiceLeaseConsent {
+  VoiceAllocationRequest scope = 1;
+  string lease_id = 2;
+  uint64 expires_at = 3;
+  string signature = 4;
+}
+message SurfaceEvent {
+  string schema = 1;
+  string conversation_id = 2;
+  uint64 version = 3;
+  SurfaceCommand command = 4;
+}
 message SurfaceAction {
-  string id = 1;
-  string label = 2;
-  string method = 3;
-  bytes canonical_arguments = 4;
-  bytes authority_proof = 5;
+  string schema = 1;
+  string conversation_id = 2;
+  string surface_id = 3;
+  uint64 version = 4;
+  string surface_hash = 5;
+  string action_id = 6;
+  JsonValue values = 7;
+  string args_hash = 8;
+  optional SurfaceTaskBinding task_binding = 9;
 }
-message SurfaceState {
-  string id = 1;
-  uint64 revision = 2;
-  string text = 3;
-  repeated SurfaceAction actions = 4;
-  bytes previous_state_digest = 5;
-  bytes result_digest = 6;
-  optional string selected_action = 7;
-  optional string outcome = 8;
-}
-message Surface {
-  uint32 operation = 1;
-  SignedPayload state = 2;
-}
-message TaskState {
+message SurfaceTaskBinding {
   string task_id = 1;
-  uint64 revision = 2;
+  string step_id = 2;
+}
+message SurfaceCommandCreateSurface {
+  CreateSurfaceCommand value = 1;
+}
+message SurfaceCommandUpdateComponents {
+  UpdateComponentsCommand value = 1;
+}
+message SurfaceCommandUpdateDataModel {
+  UpdateDataModelCommand value = 1;
+}
+message SurfaceCommandDeleteSurface {
+  DeleteSurfaceCommand value = 1;
+}
+message SurfaceCommandPatchSurface {
+  PatchSurfaceCommand value = 1;
+}
+message SurfaceCommandStreamAppend {
+  StreamAppendCommand value = 1;
+}
+message SurfaceCommand {
+  oneof value {
+    SurfaceCommandCreateSurface create_surface = 1;
+    SurfaceCommandUpdateComponents update_components = 2;
+    SurfaceCommandUpdateDataModel update_data_model = 3;
+    SurfaceCommandDeleteSurface delete_surface = 4;
+    SurfaceCommandPatchSurface patch_surface = 5;
+    SurfaceCommandStreamAppend stream_append = 6;
+  }
+}
+message PatchSurfaceCommand {
+  string surface_id = 1;
+  string base_surface_hash = 2;
+  repeated SurfacePatchOp ops = 3;
+  string new_surface_hash = 4;
+}
+message SurfacePatchOpReplaceBlock {
+  JsonValue component = 1;
+}
+message SurfacePatchOpInsertBlock {
+  uint64 index = 1;
+  JsonValue component = 2;
+}
+message SurfacePatchOpRemoveBlock {
+  string component_id = 1;
+}
+message SurfacePatchOpSetActions {
+  repeated JsonValue actions = 1;
+}
+message SurfacePatchOpSetFallbackText {
+  string fallback_text = 1;
+}
+message SurfacePatchOp {
+  oneof value {
+    SurfacePatchOpReplaceBlock replace_block = 1;
+    SurfacePatchOpInsertBlock insert_block = 2;
+    SurfacePatchOpRemoveBlock remove_block = 3;
+    SurfacePatchOpSetActions set_actions = 4;
+    SurfacePatchOpSetFallbackText set_fallback_text = 5;
+  }
+}
+message StreamAppendCommand {
+  string surface_id = 1;
+  string component_id = 2;
+  string text_delta = 3;
+  bool final_ = 4;
+}
+message CreateSurfaceCommand {
+  string surface_id = 1;
+  SurfaceType surface_type = 2;
+  string catalog = 3;
+  string catalog_version = 4;
+  string fallback_text = 5;
+  optional string fallback_markdown = 6;
+  repeated JsonValue components = 7;
+  JsonObject data_model = 8;
+  repeated JsonValue allowed_actions = 9;
+}
+message UpdateComponentsCommand {
+  string surface_id = 1;
+  string base_surface_hash = 2;
+  repeated JsonValue components = 3;
+  repeated string remove_component_ids = 4;
+  string new_surface_hash = 5;
+}
+message UpdateDataModelCommand {
+  string surface_id = 1;
+  string base_surface_hash = 2;
+  JsonObject data_patch = 3;
+  string new_surface_hash = 4;
+}
+message DeleteSurfaceCommand {
+  string surface_id = 1;
+  optional DeleteSurfaceReason reason = 2;
+}
+message SurfaceTypeMessageCard {
+
+}
+message SurfaceTypeApprovalCard {
+
+}
+message SurfaceTypeFormCard {
+
+}
+message SurfaceTypeStatusPanel {
+
+}
+message SurfaceTypeTaskCard {
+
+}
+message SurfaceTypeFilePreview {
+
+}
+message SurfaceTypeCallCard {
+
+}
+message SurfaceTypeAgentResult {
+
+}
+message SurfaceTypeNotificationCard {
+
+}
+message SurfaceType {
+  oneof value {
+    SurfaceTypeMessageCard message_card = 1;
+    SurfaceTypeApprovalCard approval_card = 2;
+    SurfaceTypeFormCard form_card = 3;
+    SurfaceTypeStatusPanel status_panel = 4;
+    SurfaceTypeTaskCard task_card = 5;
+    SurfaceTypeFilePreview file_preview = 6;
+    SurfaceTypeCallCard call_card = 7;
+    SurfaceTypeAgentResult agent_result = 8;
+    SurfaceTypeNotificationCard notification_card = 9;
+  }
+}
+message DeleteSurfaceReasonCompleted {
+
+}
+message DeleteSurfaceReasonCancelled {
+
+}
+message DeleteSurfaceReasonReplaced {
+
+}
+message DeleteSurfaceReasonExpired {
+
+}
+message DeleteSurfaceReasonError {
+
+}
+message DeleteSurfaceReason {
+  oneof value {
+    DeleteSurfaceReasonCompleted completed = 1;
+    DeleteSurfaceReasonCancelled cancelled = 2;
+    DeleteSurfaceReasonReplaced replaced = 3;
+    DeleteSurfaceReasonExpired expired = 4;
+    DeleteSurfaceReasonError error = 5;
+  }
+}
+message A2iControlEvent {
+  string schema = 1;
+  uint32 version = 2;
+  string domain = 3;
+  Ext ext = 4;
+  SignedFields signed = 5;
+  A2iControlEventType event_type = 6;
+  ControlDomain control_domain = 7;
+  string action = 8;
+  JsonValue subject = 9;
+  string correlation_id = 10;
+  string source_device_id = 11;
+  string target_device_id = 12;
+  optional string grant_id = 13;
+  optional int64 expires_at = 14;
+}
+message ControlDomainMessage {
+
+}
+message ControlDomainConversation {
+
+}
+message ControlDomainA2ui {
+
+}
+message ControlDomainMcpTool {
+
+}
+message ControlDomain {
+  oneof value {
+    ControlDomainMessage message = 1;
+    ControlDomainConversation conversation = 2;
+    ControlDomainA2ui a2ui = 3;
+    ControlDomainMcpTool mcp_tool = 4;
+  }
+}
+message A2iControlEventTypeControl {
+
+}
+message A2iControlEventType {
+  oneof value {
+    A2iControlEventTypeControl control = 1;
+  }
+}
+message TaskStatusProposed {
+
+}
+message TaskStatusRunning {
+
+}
+message TaskStatusNeedsMe {
+
+}
+message TaskStatusDone {
+
+}
+message TaskStatusFailed {
+
+}
+message TaskStatusCancelled {
+
+}
+message TaskStatus {
+  oneof value {
+    TaskStatusProposed proposed = 1;
+    TaskStatusRunning running = 2;
+    TaskStatusNeedsMe needs_me = 3;
+    TaskStatusDone done = 4;
+    TaskStatusFailed failed = 5;
+    TaskStatusCancelled cancelled = 6;
+  }
+}
+message NeedsMeApproval {
+  string grant_id = 1;
+}
+message NeedsMeChoice {
+  string surface_id = 1;
+}
+message NeedsMeInput {
+  string surface_id = 1;
+}
+message NeedsMe {
+  oneof value {
+    NeedsMeApproval approval = 1;
+    NeedsMeChoice choice = 2;
+    NeedsMeInput input = 3;
+  }
+}
+message TaskStep {
+  string id = 1;
+  string title = 2;
+  TaskStatus state = 3;
+  optional NeedsMe needs_me = 4;
+}
+message TaskStart {
+  string task_id = 1;
+  string conversation_id = 2;
   string requester = 3;
   string assignee = 4;
-  string step_id = 5;
-  string text = 6;
-  bytes canonical_arguments = 7;
-  optional string grant_id = 8;
-  optional string decision = 9;
-  repeated MessageRef depends_on = 10;
-  bytes previous_event_digest = 11;
+  string text = 5;
+  optional string constraints = 6;
+}
+message TaskProposal {
+  string task_id = 1;
+  string conversation_id = 2;
+  string proposer = 3;
+  string assignee = 4;
+  string title = 5;
+  repeated TaskStep steps = 6;
+}
+message TaskAccept {
+  string task_id = 1;
+  uint64 version = 2;
+}
+message TaskDecline {
+  string task_id = 1;
+  uint64 version = 2;
+}
+message TaskUpdate {
+  string task_id = 1;
+  uint64 version = 2;
+  TaskStatus state = 3;
+  repeated TaskStep steps = 4;
+  optional string result_ref = 5;
+  optional string result_summary = 6;
+}
+message TaskCancel {
+  string task_id = 1;
+  uint64 base_revision = 2;
+}
+message TaskDecisionResume {
+
+}
+message TaskDecisionDeny {
+
+}
+message TaskDecision {
+  oneof value {
+    TaskDecisionResume resume = 1;
+    TaskDecisionDeny deny = 2;
+  }
+}
+message TaskResolve {
+  string task_id = 1;
+  uint64 base_revision = 2;
+  string step_id = 3;
+  NeedsMe target = 4;
+  string decision_id = 5;
+  TaskDecision decision = 6;
+}
+message TaskEventBodyStart {
+  TaskStart value = 1;
+}
+message TaskEventBodyProposal {
+  TaskProposal value = 1;
+}
+message TaskEventBodyAccept {
+  TaskAccept value = 1;
+}
+message TaskEventBodyDecline {
+  TaskDecline value = 1;
+}
+message TaskEventBodyUpdate {
+  TaskUpdate value = 1;
+}
+message TaskEventBodyCancel {
+  TaskCancel value = 1;
+}
+message TaskEventBodyResolve {
+  TaskResolve value = 1;
+}
+message TaskEventBody {
+  oneof value {
+    TaskEventBodyStart start = 1;
+    TaskEventBodyProposal proposal = 2;
+    TaskEventBodyAccept accept = 3;
+    TaskEventBodyDecline decline = 4;
+    TaskEventBodyUpdate update = 5;
+    TaskEventBodyCancel cancel = 6;
+    TaskEventBodyResolve resolve = 7;
+  }
+}
+message TaskEvent {
+  string schema = 1;
+  uint32 version = 2;
+  string domain = 3;
+  Ext ext = 4;
+  SignedFields signed = 5;
+  string conversation_id = 6;
+  TaskEventBody event = 7;
+}
+message SignedFields {
+  string signing_key_id = 1;
+  SignatureAlg signature_alg = 2;
+  string signature = 3;
+}
+message Ext {
+  JsonObject ext = 1;
+}
+message SurfaceCarrier {
+  string schema = 1;
+  string content_type = 2;
+  optional int64 posted_at = 3;
+  optional int64 updated_at = 4;
+  string conversation_id = 5;
+  string surface_id = 6;
+  string message_id = 7;
+  string sender_principal_id = 8;
+  string sender_device_id = 9;
+  string author_principal_id = 10;
+  string signature = 11;
+  optional SurfaceSnapshotProof snapshot = 12;
+  oneof payload {
+    SurfaceEvent event = 16;
+    SurfaceAction action = 17;
+    SurfaceCarrier action_receipt = 18;
+  }
+  reserved 14, 15;
+}
+message SurfaceSnapshotProof {
+  SurfaceEvent event = 1;
+  SurfaceCheckpoint checkpoint = 2;
+  optional string surface_hash = 3;
+  SurfaceResyncMetadata metadata = 4;
+  string author_device_id = 5;
+}
+message SurfaceDelivery {
+  SurfaceControlKind kind = 1;
+  SurfaceCarrier carrier = 2;
+  optional uint64 group_epoch = 3;
+  optional OwnContext context = 4;
+  repeated NativeDeviceManifest manifests = 5;
+}
+message SurfaceControlKindPeer {
+
+}
+message SurfaceControlKindOwn {
+
+}
+message SurfaceControlKind {
+  oneof value {
+    SurfaceControlKindPeer peer = 1;
+    SurfaceControlKindOwn own = 2;
+  }
+}
+message OwnContext {
+  string conversation_id = 1;
+  repeated string participants = 2;
+  optional SdkOwnDeviceGroupSnapshot group = 3;
+  optional FriendLinkRecord friend = 4;
+}
+message TaskCarrier {
+  string content_type = 1;
+  string conversation_id = 2;
+  string message_id = 3;
+  string principal_id = 4;
+  string device_id = 5;
+  TaskEvent event = 6;
+  string signature = 7;
+  TaskCertificate decision_proof = 8;
+}
+message TaskApprovalRequest {
+  TaskApprovalBinding binding = 1;
+  LocalMcpApprovalRecord approval = 2;
+  LocalMcpGrantSigningBody grant_body = 3;
+}
+message TaskApprovalPayloadRequest {
+  TaskApprovalRequest request = 1;
+}
+message TaskApprovalPayloadDecision {
+  TaskApprovalRequest request = 1;
+  bool approved = 2;
+  optional string grant_signature = 3;
+}
+message TaskApprovalPayload {
+  oneof value {
+    TaskApprovalPayloadRequest request = 1;
+    TaskApprovalPayloadDecision decision = 2;
+  }
+}
+message TaskApprovalPacket {
+  TaskApprovalPayload payload = 1;
+  string principal = 2;
+  string device = 3;
+  string signature = 4;
+  reserved 5;
+}
+message TaskAck {
+  TaskCarrier carrier = 1;
+  TaskCertificate certificate = 2;
+  repeated NativeDeviceManifest manifests = 3;
+  string signer_principal = 4;
+  string signer_device = 5;
+  string signature = 6;
+}
+message TaskControlIntent {
+  TaskCarrier carrier = 1;
+}
+message TaskControlAck {
+  TaskAck value = 1;
+}
+message TaskControl {
+  oneof value {
+    TaskControlIntent intent = 1;
+    TaskControlAck ack = 2;
+  }
+}
+message TaskCertificate {
+  string conversation_id = 1;
+  TaskResolve resolution = 2;
+  string assignee = 3;
+  string issuer_device = 4;
+  int64 issued_at = 5;
+  TaskCertificatePhase phase = 6;
+  optional uint64 committed_version = 7;
+  optional string carrier_hash = 8;
+  string decision_key = 9;
+  string evidence_hash = 10;
+  string signature = 11;
+}
+message TaskCertificatePhaseReserved {
+
+}
+message TaskCertificatePhaseCommitted {
+
+}
+message TaskCertificatePhase {
+  oneof value {
+    TaskCertificatePhaseReserved reserved = 1;
+    TaskCertificatePhaseCommitted committed = 2;
+  }
+}
+message TaskAcceptedEvent {
+  TaskCarrier carrier = 1;
+  string public_key = 2;
+  bool actor_kind_verified = 3;
+  int64 received_at = 4;
+  optional TaskCertificate decision_certificate = 5;
+  optional TaskMembership membership = 6;
+}
+message TaskHistory {
+  repeated TaskAcceptedEvent events = 1;
+  int64 created_at = 2;
+  int64 updated_at = 3;
+  reserved 4;
+  reserved "checkpoint";
+}
+message TaskMembership {
+  string conversation = 1;
+  optional string group = 2;
+  optional uint64 epoch = 3;
+  int64 at = 4;
+  repeated string members = 5;
+}
+message TaskOwnPacket {
+  OwnContext context = 1;
+  TaskHistory history = 2;
+  repeated NativeDeviceManifest manifests = 3;
+  repeated SdkOwnDeviceGroupMemberPin pins = 4;
+  uint64 base = 5;
+  string prefix_hash = 6;
+}
+message TaskApprovalBinding {
+  string conversation_id = 1;
+  string task_id = 2;
+  string step_id = 3;
+  uint64 opening_revision = 4;
+  string requester = 5;
+  string assignee = 6;
+  string executor_device_id = 7;
+}
+message LocalMcpGrantSigningBody {
+  optional TaskApprovalBinding task_binding = 1;
+  string approval_id = 2;
+  string grant_id = 3;
+  string server_id = 4;
+  string tool_name = 5;
+  optional string tool_scope = 6;
+  McpCapability capability = 7;
+  string registry_hash = 8;
+  string tool_manifest_set_hash = 9;
+  bool full_delegation = 10;
+  bool single_use = 11;
+  optional string arguments_hash = 12;
+  int64 expires_at = 13;
+}
+message LocalBusFederationRoute {
+  string federation_url = 1;
+  string source_node_id = 2;
+  string target_node_id = 3;
+  string required_capability = 4;
+  optional string admin_token = 5;
+  optional string recipient_prekey_url = 6;
+}
+message LocalMcpApprovalRecord {
+  string approval_id = 1;
+  string server_id = 2;
+  string tool_name = 3;
+  McpCapability capability = 4;
+  RiskLevel risk_level = 5;
+  optional string tool_scope = 6;
+  string confirmation_mode = 7;
+  int64 expires_at = 8;
+  string status = 9;
+  JsonValue details = 10;
+}
+message GroupStateControl {
+  string schema = 1;
+  GroupControlBody body = 2;
+}
+message GroupControlBodyRequest {
+  NativeGroupChangeRequest request = 1;
+  optional LocalBusFederationRoute federation = 2;
+}
+message GroupControlBodyResult {
+  NativeGroupChangeResult result = 1;
+}
+message GroupControlBodyDeviceSet {
+  string group_id = 1;
+  NativeGroupActor actor = 2;
+  uint64 device_set_epoch = 3;
+}
+message GroupControlBodyTransfer {
+  TransferControl control = 1;
+}
+message GroupControlBody {
+  oneof value {
+    GroupControlBodyRequest request = 1;
+    GroupControlBodyResult result = 2;
+    GroupControlBodyDeviceSet device_set = 3;
+    GroupControlBodyTransfer transfer = 4;
+  }
+}
+message TransferDevice {
+  string root = 1;
+  string device = 2;
+}
+message TransferProbe {
+  string id = 1;
+  NativeGroupActor actor = 2;
+  NativeGroupActor creator = 3;
+  NativeGroupSnapshot base = 4;
+  repeated TransferDevice required = 5;
+  int64 issued_at = 6;
+  int64 expires_at = 7;
+}
+message TransferHead {
+  string proposal = 1;
+  NativeGroupActor actor = 2;
+  string requested_hash = 3;
+  NativeGroupSnapshot head = 4;
+  optional NativeGroupTransferAcceptance acceptance = 5;
+  bool requires_sync = 6;
+  TransferDevice target = 7;
+  repeated TransferDevice additional_targets = 8;
+  bool cancelled = 9;
+  bool cancel_ack = 10;
+  int64 issued_at = 11;
+  int64 expires_at = 12;
+}
+message TransferBodyProbe {
+  TransferProbe probe = 1;
+}
+message TransferBodyHead {
+  TransferHead reply = 1;
+}
+message TransferBody {
+  oneof value {
+    TransferBodyProbe probe = 1;
+    TransferBodyHead head = 2;
+  }
+}
+message TransferControl {
+  TransferBody body = 1;
+  string signature = 2;
+}
+message OwnContactSync {
+  NativeDeviceManifest manifest = 1;
+  FriendLinkRecord link = 2;
+}
+message OwnContactTombstone {
+  FriendLinkRecord link = 1;
+  optional int64 decided_at = 2;
+}
+message OwnGroupConsent {
+  string schema = 1;
+  NativeGroupActor actor = 2;
+  NativeGroupSnapshot snapshot = 3;
+  bool accepted = 4;
+  int64 issued_at = 5;
+  int64 expires_at = 6;
+  string signature = 7;
+}
+message SurfaceCheckpoint {
+  string schema = 1;
+  optional CreateSurfaceCommand content = 2;
+  optional string conversation_id = 3;
+  uint64 version = 4;
+  bool closed = 5;
+  repeated SurfaceFinalEntry final_text = 6;
+}
+message SurfaceFinalEntry {
+  string id = 1;
+  bool nested = 2;
+  string text_hash = 3;
+}
+message SurfaceResyncMetadata {
+  string schema = 1;
+  string conversation_id = 2;
+  uint64 version = 3;
+  bool closed = 4;
+  string finality_base64 = 5;
+}
+message SurfaceResyncRequest {
+  string kind = 1;
+  string conversation_id = 2;
+  string surface_ref = 3;
+  string author = 4;
+  string surface_id = 5;
+  optional string group = 6;
+  optional uint64 epoch = 7;
+}
+message GuardianRecoveryShare {
+  uint32 share_id = 1;
+  uint32 threshold = 2;
+  uint32 total = 3;
+  RecoveryQuorumMemberKind member_kind = 4;
+  string value_base64 = 5;
+}
+message GuardianInvite {
+  string schema = 1;
+  uint32 version = 2;
+  string invite_id = 3;
+  string inviter_principal_id = 4;
+  string inviter_device_id = 5;
+  uint64 inviter_device_epoch = 6;
+  string inviter_device_public_key_base64url = 7;
+  string guardian_principal_id = 8;
+  string recovery_quorum_id = 9;
+  GuardianRecoveryShare share = 10;
+  int64 issued_at = 11;
+  int64 expires_at = 12;
+  SignedFields signed = 13;
+}
+message GuardianAccept {
+  string schema = 1;
+  uint32 version = 2;
+  string accept_id = 3;
+  string invite_id = 4;
+  string owner_principal_id = 5;
+  string guardian_principal_id = 6;
+  string guardian_device_id = 7;
+  uint64 guardian_device_epoch = 8;
+  string guardian_device_public_key_base64url = 9;
+  string recovery_quorum_id = 10;
+  int64 accepted_at = 11;
+  SignedFields signed = 12;
+}
+message SdkOwnDeviceGroupSnapshot {
+  optional NativeGroupSnapshot shared_state = 1;
+  string group_id = 2;
+  uint64 group_epoch = 3;
+  uint32 max_members = 4;
+  string new_member_history = 5;
+  string local_role = 6;
+  uint64 local_joined_epoch = 7;
+  repeated SdkOwnDeviceGroupMemberSnapshot members = 8;
+  repeated LocalBusGroupMemberRoute routes = 9;
+}
+message SdkOwnDeviceGroupMemberPin {
+  string group_id = 1;
+  string device_id = 2;
+  string signing_public_key = 3;
+  optional string principal_id = 4;
+  optional string principal_commitment = 5;
+}
+message SdkOwnDeviceGroupMemberSnapshot {
+  string member_id = 1;
+  string role = 2;
+  uint64 joined_epoch = 3;
+}
+message LocalBusGroupMemberRoute {
+  string member_id = 1;
+  optional string member_principal_commitment = 2;
+  optional string device_signing_public_key = 3;
+  optional string target_delivery_id = 4;
+  optional LocalBusFederationRoute federation = 5;
+}
+message GroupKeyDistribution {
+  string schema = 1;
+  uint32 version = 2;
+  string group_id = 3;
+  string sender_id = 4;
+  uint64 group_key_epoch = 5;
+  optional string group_state_hash = 6;
+  bytes sender_key_seed = 7;
+  optional string sender_key_signature = 8;
+  optional string sender_device_signing_public_key = 9;
+}
+message GroupKeyControl {
+  string schema = 1;
+  uint32 version = 2;
+  NativeGroupEvent membership_event = 3;
+  optional string actor_manifest_url = 4;
+  GroupKeyDistribution distribution = 5;
+}
+message SurfaceExportMetadata {
+  bool truncated = 1;
+  optional int64 next_before = 2;
+  map<string, uint32> skipped = 3;
+}
+message SurfaceHistoryExport {
+  repeated SurfaceDelivery controls = 1;
+  repeated OwnedSurfaceCheckpoint checkpoints = 2;
+  SurfaceExportMetadata metadata = 3;
+}
+message OwnedSurfaceCheckpoint {
+  StoredSurface record = 1;
+  SurfaceEvent snapshot_event = 2;
+  uint64 version = 3;
+  string surface_hash = 4;
+  JsonValue conversation = 5;
+  optional uint64 group_epoch = 6;
+}
+message StoredSurface {
+  string surface_id = 1;
+  string conversation_id = 2;
+  string author_principal_id = 3;
+  string author_device_id = 4;
+  SurfaceCheckpoint checkpoint = 5;
+  optional int64 created_at = 6;
+  optional int64 updated_at = 7;
+}
+message TaskExportMetadata {
+  bool truncated = 1;
+  uint32 skipped_items = 2;
+  optional string next_cursor = 3;
+}
+message NativeDeviceManifest {
+  optional NativeCustodyManifest custody = 1;
+  optional NativeSignedDeviceSet signed_device_set = 2;
+  string principal_id = 3;
+  string principal_commitment = 4;
+  string root_public_key = 5;
+  repeated ManifestDevice devices = 6;
+}
+message ManifestDevice {
+  string principal_id = 1;
+  string principal_commitment = 2;
+  string device_id = 3;
+  uint64 device_epoch = 4;
+  string branch_public_key = 5;
+  string target_delivery_id = 6;
+  optional NativeBranchProof branch_proof = 7;
+  NativePrekeyBundle prekey_bundle = 8;
+  string branch_authorized_event_id = 9;
+}
+message SignatureAlgEd25519 {
+
+}
+message SignatureAlg {
+  oneof value {
+    SignatureAlgEd25519 ed25519 = 1;
+  }
+}
+message FriendLinkRecord {
+  string link_id = 1;
+  string requester_id = 2;
+  string target_id = 3;
+  string state = 4;
+  optional string remove_scope = 5;
+  bool blocked = 6;
+  optional int64 capability_revoked_at = 7;
+}
+message McpCapabilityReadConversation {
+
+}
+message McpCapabilityDraftMessage {
+
+}
+message McpCapabilitySendMessage {
+
+}
+message McpCapabilityReadLocalFiles {
+
+}
+message McpCapabilityWriteLocalFiles {
+
+}
+message McpCapabilityRunShell {
+
+}
+message McpCapabilityManageContacts {
+
+}
+message McpCapabilityManageGroup {
+
+}
+message McpCapabilityManageMedia {
+
+}
+message McpCapabilityManageNode {
+
+}
+message McpCapabilityExternalToolInvoke {
+
+}
+message McpCapability {
+  oneof value {
+    McpCapabilityReadConversation read_conversation = 1;
+    McpCapabilityDraftMessage draft_message = 2;
+    McpCapabilitySendMessage send_message = 3;
+    McpCapabilityReadLocalFiles read_local_files = 4;
+    McpCapabilityWriteLocalFiles write_local_files = 5;
+    McpCapabilityRunShell run_shell = 6;
+    McpCapabilityManageContacts manage_contacts = 7;
+    McpCapabilityManageGroup manage_group = 8;
+    McpCapabilityManageMedia manage_media = 9;
+    McpCapabilityManageNode manage_node = 10;
+    McpCapabilityExternalToolInvoke external_tool_invoke = 11;
+  }
+}
+message RiskLevelLow {
+
+}
+message RiskLevelMedium {
+
+}
+message RiskLevelHigh {
+
+}
+message RiskLevelCritical {
+
+}
+message RiskLevel {
+  oneof value {
+    RiskLevelLow low = 1;
+    RiskLevelMedium medium = 2;
+    RiskLevelHigh high = 3;
+    RiskLevelCritical critical = 4;
+  }
+}
+message RecoveryQuorumMemberKindRootShare {
+
+}
+message RecoveryQuorumMemberKindDeviceShare {
+
+}
+message RecoveryQuorumMemberKindGuardianShare {
+
+}
+message RecoveryQuorumMemberKindHardwareTokenShare {
+
+}
+message RecoveryQuorumMemberKind {
+  oneof value {
+    RecoveryQuorumMemberKindRootShare root_share = 1;
+    RecoveryQuorumMemberKindDeviceShare device_share = 2;
+    RecoveryQuorumMemberKindGuardianShare guardian_share = 3;
+    RecoveryQuorumMemberKindHardwareTokenShare hardware_token_share = 4;
+  }
+}
+message Surface {
+  reserved 1, 2;
+  reserved "operation", "state";
+  oneof payload {
+    SurfaceDelivery delivery = 16;
+    SurfaceResyncRequest resync_request = 17;
+    SurfaceHistoryExport own_history = 18;
+  }
 }
 message Task {
-  uint32 operation = 1;
-  SignedPayload event = 2;
-  SignedPayload decision_certificate = 3;
-  repeated bytes native_membership_witnesses = 4;
+  reserved 1 to 4;
+  reserved "operation", "event", "decision_certificate", "native_membership_witnesses";
+  oneof payload {
+    TaskCarrier carrier = 16;
+    TaskApprovalPacket approval = 17;
+    TaskControl control = 18;
+    TaskHistoryExport own_history = 19;
+  }
 }
-message CallSignal {
-  bytes call_id = 1;
-  QualifiedDevice caller = 2;
-  repeated QualifiedDevice callees = 3;
-  uint64 sequence = 4;
-  uint64 expires_at = 5;
-  repeated string ice_candidates = 6;
-  repeated string codecs = 7;
-  bytes media_key_commitment = 8;
-  optional string relay = 9;
-  bytes relay_lease = 10;
-  optional string end_reason = 11;
+message TaskHistoryExport {
+  repeated TaskOwnPacket packets = 1;
+  TaskExportMetadata metadata = 2;
 }
 message Call {
-  uint32 operation = 1;
-  SignedPayload signal = 2;
+  reserved 1, 2;
+  reserved "operation", "signal";
+  CallControl control = 16;
 }
 message SelfSync {
   uint32 operation = 1;
@@ -857,32 +1932,840 @@ compact a file. 19,000–19,999 remain protobuf-reserved. New kinds start at 16;
 13–15 are permanently withdrawn constructor slots. Kind 0 is not a transmitted
 business operation. `Unsupported`, Padding and API views are not constructors.
 
-Surface operation numbers are 1=publish, 2=action, 3=result, 4=resync; Task numbers
-are 1=start, 2=progress, 3=needs_input, 4=decision, 5=ack, 6=forward,
-7=confirmation; Call numbers are 1=invite, 2=accept, 3=reject, 4=ice,
-5=end, 6=lease_update; SelfSync numbers are 1=read, 2=draft, 3=pin, 4=mute.
-Unknown numbers in these fields are Unsupported, not an inferred default action.
-Surface.state.payload has exactly the SurfaceState descriptor. Task.event.payload
-and decision_certificate.payload use TaskState plus the fixed decision-operation
-validation; Call.signal.payload uses CallSignal. Their exact payload bytes are
-signed under separate versioned surface/task/call domains. Native membership,
-recovery, custody and group-state proofs keep the native canonical document
-formats selected by the **known** ControlOperation; no JSON/schema guessing.
-ContactControl.action is 1=request, 2=accept, 3=reject, 4=remove;
-RecoveryControl.action is 1=guardian_invite, 2=guardian_accept. The known Control
-operation selects exactly its corresponding generated payload (PairRecovery for
-reset/ack, ContactControl for contact, GroupKeyDistribution for group key,
-OwnContactSync for own contact, HistoryPage for own history, RecoveryControl for
-recovery). Group state/home migration use their independently specified signed
-native document; live presence uses epoch/subjects. Forbid unrelated payloads
-and missing required payloads. A group seed is exactly 32 bytes, secret-bearing,
-never a public update field. Unknown action/operation produces Unsupported.
+Kinds 9/10/11 now mirror the live Surface/Task/Call contracts field for field,
+using the tables in section 3.1. Their removed r1 placeholder fields are reserved;
+no r1 sketch has shipped. The nested oneof tags are the operation numbers; there
+is no second integer op that can disagree with the payload. Every closed oneof
+must have exactly one arm (unit variants have an explicit empty message).
+Unknown arms are caught by the pre-decode scanner and retain the entire Inner.
+Duplicate oneof/scalar fields are invalid input, never last-wins execution.
+
+Control.operation must match exactly one typed oneof arm in section 3.2. Missing,
+multiple or unrelated arms cannot execute. Unknown operation or arm follows
+Unsupported, never a bytes payload interpreted by guessing a schema string.
+Native* fields are the only external-codec exceptions: each has a single fixed
+native type/validator, named in section 3.2; no Native wrapper accepts an
+application event or changes its codec based on content. Cryptographic blobs,
+proofs and exact Inner history bytes have their stated owners, not open payloads.
+FriendControl.action is 1=requested, 2=accepted, 3=removed, 4=blocked,
+5=unblocked. LivePresence is a planned typed ephemeral operation, not a newly
+claimed existing wire producer. RecoveryControl is exactly invite or accept.
 All GroupSealedContent crypto fields retain the existing reviewed primitive's
 validation and exact sizes; epoch/author fields bind the same native group
 state. They do not create a second application schema. The pair/report AEAD
 covers the generated wrapper; nested plaintext uses the same Message descriptor.
 The generation tool emits this operation/domain/descriptor table and layer map.
 MCP/tool canonical_arguments are application data, not a hidden transport codec.
+
+### 3.1 Live Surface, Task and Call field mapping
+
+All sources below are at the fixed product SHA, also compared against main
+`42cb140574aeca3b0e4f5cfcf2f840ae59d40832` for these wire declarations.
+S10a re-encodes these contracts; it does not invent a new call state machine,
+a component model, approval flow or task lifecycle. In each row the final column
+is the protobuf type. Tags inside an inline variant message are shown explicitly;
+all other nested types have their own rows. Optional scalar presence, signed
+integer timestamps, ordered vectors and secret/public field boundaries survive.
+
+Dynamic component trees, action values, data models, MCP subjects/details and
+Ext remain **typed JsonValue/JsonObject data**, because live Rust uses Value.
+JsonValue.number is a JSON numeric token validated as finite I-JSON (safe integer
+range for integer values); no float round trip is permitted. Objects reject
+duplicate keys, sort members by JCS key order for signing/hashing, and enforce
+existing limits before use. The oneof covers JSON null/bool/number/string/array/
+object exactly. It is never a constructor dispatch or a bytes escape hatch.
+This preserves live model syntax and existing JCS surface/args hashes.
+
+For signatures already defined by protocol types (CallControl, TaskEvent, A2iControlEvent,
+VoiceLeaseConsent, native documents), reconstruct the exact current canonical
+signing view from the typed fields, including fixed schema/domain and optional
+omission rules. Existing signature/hash domains and validators remain owned by
+those modules. No last-wins JSON map is an ingress adapter. For replaced SDK
+transport carriers (SurfaceCarrier, TaskCarrier, TaskApprovalPacket, TaskAck,
+TaskCertificate, TransferControl, OwnGroupConsent, GuardianInvite/Accept), sign
+`LP("ramflux.message.typed.<TypeName>.v1") || LP(canonical_protobuf_without_signature)`
+with the same authorized signing key. TypeName is the exact descriptor name in
+this sketch. Canonical protobuf uses ascending tags, shortest varints, omitted
+default scalars, preserved optional presence, original vector order and sorted
+JsonObject members. Nested signatures remain included. Transcripts are fixed
+here; old prefix/JSON carrier encoders are removed, never compatibility decoders.
+Carrier/certificate hashes over the changed encoding get the same type-specific
+v1 transcript domain and hash those canonical signed bytes including signature.
+No old signature domain is silently reused for a changed transcript. Private
+signing material, call base keys, grant signatures and proofs stay out of generic
+UI projections and logs. Own history preserves the original signer and witnesses.
+
+#### Mapping source: `crates/ramflux-protocol/src/call.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `CallEndpoint.principal_id` | `crates/ramflux-protocol/src/call.rs:11` | `CallEndpoint.principal_id = 1` | `string` |
+| `CallEndpoint.root_public_key` | `crates/ramflux-protocol/src/call.rs:12` | `CallEndpoint.root_public_key = 2` | `string` |
+| `CallEndpoint.device_id` | `crates/ramflux-protocol/src/call.rs:13` | `CallEndpoint.device_id = 3` | `string` |
+| `CallAction::Invite{ base_key: String }` | `crates/ramflux-protocol/src/call.rs:31` | `CallAction.invite = 1` | `CallActionInvite (string base_key = 1;)` |
+| `CallAction::Ringing` | `crates/ramflux-protocol/src/call.rs:32` | `CallAction.ringing = 2` | `CallActionRinging (empty)` |
+| `CallAction::Answer{ base_key: String }` | `crates/ramflux-protocol/src/call.rs:33` | `CallAction.answer = 3` | `CallActionAnswer (string base_key = 1;)` |
+| `CallAction::Ack{ allocation: Box<VoicePeerAllocation> }` | `crates/ramflux-protocol/src/call.rs:34` | `CallAction.ack = 4` | `CallActionAck (VoicePeerAllocation allocation = 1;)` |
+| `CallAction::Ready{ consent: Box<VoiceLeaseConsent> }` | `crates/ramflux-protocol/src/call.rs:35` | `CallAction.ready = 5` | `CallActionReady (VoiceLeaseConsent consent = 1;)` |
+| `CallAction::Reject` | `crates/ramflux-protocol/src/call.rs:36` | `CallAction.reject = 6` | `CallActionReject (empty)` |
+| `CallAction::Busy` | `crates/ramflux-protocol/src/call.rs:37` | `CallAction.busy = 7` | `CallActionBusy (empty)` |
+| `CallAction::Hangup` | `crates/ramflux-protocol/src/call.rs:38` | `CallAction.hangup = 8` | `CallActionHangup (empty)` |
+| `CallAction::Timeout` | `crates/ramflux-protocol/src/call.rs:39` | `CallAction.timeout = 9` | `CallActionTimeout (empty)` |
+| `CallAction::Failed` | `crates/ramflux-protocol/src/call.rs:40` | `CallAction.failed = 10` | `CallActionFailed (empty)` |
+| `CallAction::AnsweredElsewhere` | `crates/ramflux-protocol/src/call.rs:41` | `CallAction.answered_elsewhere = 11` | `CallActionAnsweredElsewhere (empty)` |
+| `CallAction::Rekey{ generation: u64, base_key: String }` | `crates/ramflux-protocol/src/call.rs:42` | `CallAction.rekey = 12` | `CallActionRekey (uint64 generation = 1;; string base_key = 2;)` |
+| `CallAction::RekeyAck{ generation: u64, base_key: String }` | `crates/ramflux-protocol/src/call.rs:43` | `CallAction.rekey_ack = 13` | `CallActionRekeyAck (uint64 generation = 1;; string base_key = 2;)` |
+| `CallControl.schema` | `crates/ramflux-protocol/src/call.rs:49` | `CallControl.schema = 1` | `string` |
+| `CallControl.call_id` | `crates/ramflux-protocol/src/call.rs:50` | `CallControl.call_id = 2` | `string` |
+| `CallControl.conversation_id` | `crates/ramflux-protocol/src/call.rs:51` | `CallControl.conversation_id = 3` | `string` |
+| `CallControl.caller` | `crates/ramflux-protocol/src/call.rs:52` | `CallControl.caller = 4` | `CallEndpoint` |
+| `CallControl.callee` | `crates/ramflux-protocol/src/call.rs:53` | `CallControl.callee = 5` | `CallEndpoint` |
+| `CallControl.sender` | `crates/ramflux-protocol/src/call.rs:54` | `CallControl.sender = 6` | `CallEndpoint` |
+| `CallControl.seq` | `crates/ramflux-protocol/src/call.rs:55` | `CallControl.seq = 7` | `uint64` |
+| `CallControl.created_at` | `crates/ramflux-protocol/src/call.rs:56` | `CallControl.created_at = 8` | `int64` |
+| `CallControl.body` | `crates/ramflux-protocol/src/call.rs:57` | `CallControl.body = 9` | `CallAction` |
+| `CallControl.signature` | `crates/ramflux-protocol/src/call.rs:58` | `CallControl.signature = 10` | `string` |
+| `VoiceAllocationRequest.call_id` | `crates/ramflux-protocol/src/call.rs:64` | `VoiceAllocationRequest.call_id = 1` | `string` |
+| `VoiceAllocationRequest.caller` | `crates/ramflux-protocol/src/call.rs:65` | `VoiceAllocationRequest.caller = 2` | `CallEndpoint` |
+| `VoiceAllocationRequest.callee` | `crates/ramflux-protocol/src/call.rs:66` | `VoiceAllocationRequest.callee = 3` | `CallEndpoint` |
+| `VoicePeerAllocation.lease_id` | `crates/ramflux-protocol/src/call.rs:84` | `VoicePeerAllocation.lease_id = 1` | `string` |
+| `VoicePeerAllocation.endpoint` | `crates/ramflux-protocol/src/call.rs:85` | `VoicePeerAllocation.endpoint = 2` | `string` |
+| `VoicePeerAllocation.expires_at` | `crates/ramflux-protocol/src/call.rs:86` | `VoicePeerAllocation.expires_at = 3` | `uint64` |
+| `VoicePeerAllocation.hard_expires_at` | `crates/ramflux-protocol/src/call.rs:87` | `VoicePeerAllocation.hard_expires_at = 4` | `uint64` |
+| `VoiceLeaseConsent.scope` | `crates/ramflux-protocol/src/call.rs:93` | `VoiceLeaseConsent.scope = 1` | `VoiceAllocationRequest` |
+| `VoiceLeaseConsent.lease_id` | `crates/ramflux-protocol/src/call.rs:94` | `VoiceLeaseConsent.lease_id = 2` | `string` |
+| `VoiceLeaseConsent.expires_at` | `crates/ramflux-protocol/src/call.rs:95` | `VoiceLeaseConsent.expires_at = 3` | `uint64` |
+| `VoiceLeaseConsent.signature` | `crates/ramflux-protocol/src/call.rs:96` | `VoiceLeaseConsent.signature = 4` | `string` |
+#### Mapping source: `crates/ramflux-protocol/src/a2ui_state/types.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `EventFields.schema` | `crates/ramflux-protocol/src/a2ui_state/types.rs:67` | `SurfaceEvent.schema = 1` | `string` |
+| `EventFields.conversation_id` | `crates/ramflux-protocol/src/a2ui_state/types.rs:68` | `SurfaceEvent.conversation_id = 2` | `string` |
+| `EventFields.version` | `crates/ramflux-protocol/src/a2ui_state/types.rs:69` | `SurfaceEvent.version = 3` | `uint64` |
+| `EventFields.command` | `crates/ramflux-protocol/src/a2ui_state/types.rs:70` | `SurfaceEvent.command = 4` | `SurfaceCommand` |
+| `ActionFields.schema` | `crates/ramflux-protocol/src/a2ui_state/types.rs:117` | `SurfaceAction.schema = 1` | `string` |
+| `ActionFields.conversation_id` | `crates/ramflux-protocol/src/a2ui_state/types.rs:118` | `SurfaceAction.conversation_id = 2` | `string` |
+| `ActionFields.surface_id` | `crates/ramflux-protocol/src/a2ui_state/types.rs:119` | `SurfaceAction.surface_id = 3` | `string` |
+| `ActionFields.version` | `crates/ramflux-protocol/src/a2ui_state/types.rs:120` | `SurfaceAction.version = 4` | `uint64` |
+| `ActionFields.surface_hash` | `crates/ramflux-protocol/src/a2ui_state/types.rs:121` | `SurfaceAction.surface_hash = 5` | `string` |
+| `ActionFields.action_id` | `crates/ramflux-protocol/src/a2ui_state/types.rs:122` | `SurfaceAction.action_id = 6` | `string` |
+| `ActionFields.values` | `crates/ramflux-protocol/src/a2ui_state/types.rs:123` | `SurfaceAction.values = 7` | `JsonValue` |
+| `ActionFields.args_hash` | `crates/ramflux-protocol/src/a2ui_state/types.rs:124` | `SurfaceAction.args_hash = 8` | `string` |
+| `ActionFields.task_binding` | `crates/ramflux-protocol/src/a2ui_state/types.rs:126` | `SurfaceAction.task_binding = 9` | `optional SurfaceTaskBinding` |
+| `SurfaceTaskBinding.task_id` | `crates/ramflux-protocol/src/a2ui_state/types.rs:111` | `SurfaceTaskBinding.task_id = 1` | `string` |
+| `SurfaceTaskBinding.step_id` | `crates/ramflux-protocol/src/a2ui_state/types.rs:112` | `SurfaceTaskBinding.step_id = 2` | `string` |
+| `A2uiConversationCommand::CreateSurface(CreateSurfaceCommand)` | `crates/ramflux-protocol/src/a2ui_state/types.rs:29` | `SurfaceCommand.create_surface = 1` | `SurfaceCommandCreateSurface (CreateSurfaceCommand value = 1;)` |
+| `A2uiConversationCommand::UpdateComponents(UpdateComponentsCommand)` | `crates/ramflux-protocol/src/a2ui_state/types.rs:30` | `SurfaceCommand.update_components = 2` | `SurfaceCommandUpdateComponents (UpdateComponentsCommand value = 1;)` |
+| `A2uiConversationCommand::UpdateDataModel(UpdateDataModelCommand)` | `crates/ramflux-protocol/src/a2ui_state/types.rs:31` | `SurfaceCommand.update_data_model = 3` | `SurfaceCommandUpdateDataModel (UpdateDataModelCommand value = 1;)` |
+| `A2uiConversationCommand::DeleteSurface(DeleteSurfaceCommand)` | `crates/ramflux-protocol/src/a2ui_state/types.rs:32` | `SurfaceCommand.delete_surface = 4` | `SurfaceCommandDeleteSurface (DeleteSurfaceCommand value = 1;)` |
+| `A2uiConversationCommand::PatchSurface(PatchSurfaceCommand)` | `crates/ramflux-protocol/src/a2ui_state/types.rs:33` | `SurfaceCommand.patch_surface = 5` | `SurfaceCommandPatchSurface (PatchSurfaceCommand value = 1;)` |
+| `A2uiConversationCommand::StreamAppend(StreamAppendCommand)` | `crates/ramflux-protocol/src/a2ui_state/types.rs:34` | `SurfaceCommand.stream_append = 6` | `SurfaceCommandStreamAppend (StreamAppendCommand value = 1;)` |
+| `PatchSurfaceCommand.surface_id` | `crates/ramflux-protocol/src/a2ui_state/types.rs:184` | `PatchSurfaceCommand.surface_id = 1` | `string` |
+| `PatchSurfaceCommand.base_surface_hash` | `crates/ramflux-protocol/src/a2ui_state/types.rs:185` | `PatchSurfaceCommand.base_surface_hash = 2` | `string` |
+| `PatchSurfaceCommand.ops` | `crates/ramflux-protocol/src/a2ui_state/types.rs:186` | `PatchSurfaceCommand.ops = 3` | `repeated SurfacePatchOp` |
+| `PatchSurfaceCommand.new_surface_hash` | `crates/ramflux-protocol/src/a2ui_state/types.rs:187` | `PatchSurfaceCommand.new_surface_hash = 4` | `string` |
+| `SurfacePatchOp::ReplaceBlock{ component: Value }` | `crates/ramflux-protocol/src/a2ui_state/types.rs:192` | `SurfacePatchOp.replace_block = 1` | `SurfacePatchOpReplaceBlock (JsonValue component = 1;)` |
+| `SurfacePatchOp::InsertBlock{ index: usize, component: Value }` | `crates/ramflux-protocol/src/a2ui_state/types.rs:193` | `SurfacePatchOp.insert_block = 2` | `SurfacePatchOpInsertBlock (uint64 index = 1;; JsonValue component = 2;)` |
+| `SurfacePatchOp::RemoveBlock{ component_id: String }` | `crates/ramflux-protocol/src/a2ui_state/types.rs:194` | `SurfacePatchOp.remove_block = 3` | `SurfacePatchOpRemoveBlock (string component_id = 1;)` |
+| `SurfacePatchOp::SetActions{ actions: Vec<Value> }` | `crates/ramflux-protocol/src/a2ui_state/types.rs:195` | `SurfacePatchOp.set_actions = 4` | `SurfacePatchOpSetActions (repeated JsonValue actions = 1;)` |
+| `SurfacePatchOp::SetFallbackText{ fallback_text: String }` | `crates/ramflux-protocol/src/a2ui_state/types.rs:196` | `SurfacePatchOp.set_fallback_text = 5` | `SurfacePatchOpSetFallbackText (string fallback_text = 1;)` |
+| `StreamAppendCommand.surface_id` | `crates/ramflux-protocol/src/a2ui_state/types.rs:201` | `StreamAppendCommand.surface_id = 1` | `string` |
+| `StreamAppendCommand.component_id` | `crates/ramflux-protocol/src/a2ui_state/types.rs:202` | `StreamAppendCommand.component_id = 2` | `string` |
+| `StreamAppendCommand.text_delta` | `crates/ramflux-protocol/src/a2ui_state/types.rs:203` | `StreamAppendCommand.text_delta = 3` | `string` |
+| `StreamAppendCommand.final_` | `crates/ramflux-protocol/src/a2ui_state/types.rs:205` | `StreamAppendCommand.final_ = 4` | `bool` |
+#### Mapping source: `crates/ramflux-protocol/src/surfaces.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `CreateSurfaceCommand.surface_id` | `crates/ramflux-protocol/src/surfaces.rs:138` | `CreateSurfaceCommand.surface_id = 1` | `string` |
+| `CreateSurfaceCommand.surface_type` | `crates/ramflux-protocol/src/surfaces.rs:139` | `CreateSurfaceCommand.surface_type = 2` | `SurfaceType` |
+| `CreateSurfaceCommand.catalog` | `crates/ramflux-protocol/src/surfaces.rs:140` | `CreateSurfaceCommand.catalog = 3` | `string` |
+| `CreateSurfaceCommand.catalog_version` | `crates/ramflux-protocol/src/surfaces.rs:141` | `CreateSurfaceCommand.catalog_version = 4` | `string` |
+| `CreateSurfaceCommand.fallback_text` | `crates/ramflux-protocol/src/surfaces.rs:142` | `CreateSurfaceCommand.fallback_text = 5` | `string` |
+| `CreateSurfaceCommand.fallback_markdown` | `crates/ramflux-protocol/src/surfaces.rs:144` | `CreateSurfaceCommand.fallback_markdown = 6` | `optional string` |
+| `CreateSurfaceCommand.components` | `crates/ramflux-protocol/src/surfaces.rs:146` | `CreateSurfaceCommand.components = 7` | `repeated JsonValue` |
+| `CreateSurfaceCommand.data_model` | `crates/ramflux-protocol/src/surfaces.rs:148` | `CreateSurfaceCommand.data_model = 8` | `JsonObject` |
+| `CreateSurfaceCommand.allowed_actions` | `crates/ramflux-protocol/src/surfaces.rs:150` | `CreateSurfaceCommand.allowed_actions = 9` | `repeated JsonValue` |
+| `UpdateComponentsCommand.surface_id` | `crates/ramflux-protocol/src/surfaces.rs:156` | `UpdateComponentsCommand.surface_id = 1` | `string` |
+| `UpdateComponentsCommand.base_surface_hash` | `crates/ramflux-protocol/src/surfaces.rs:157` | `UpdateComponentsCommand.base_surface_hash = 2` | `string` |
+| `UpdateComponentsCommand.components` | `crates/ramflux-protocol/src/surfaces.rs:159` | `UpdateComponentsCommand.components = 3` | `repeated JsonValue` |
+| `UpdateComponentsCommand.remove_component_ids` | `crates/ramflux-protocol/src/surfaces.rs:161` | `UpdateComponentsCommand.remove_component_ids = 4` | `repeated string` |
+| `UpdateComponentsCommand.new_surface_hash` | `crates/ramflux-protocol/src/surfaces.rs:162` | `UpdateComponentsCommand.new_surface_hash = 5` | `string` |
+| `UpdateDataModelCommand.surface_id` | `crates/ramflux-protocol/src/surfaces.rs:168` | `UpdateDataModelCommand.surface_id = 1` | `string` |
+| `UpdateDataModelCommand.base_surface_hash` | `crates/ramflux-protocol/src/surfaces.rs:169` | `UpdateDataModelCommand.base_surface_hash = 2` | `string` |
+| `UpdateDataModelCommand.data_patch` | `crates/ramflux-protocol/src/surfaces.rs:170` | `UpdateDataModelCommand.data_patch = 3` | `JsonObject` |
+| `UpdateDataModelCommand.new_surface_hash` | `crates/ramflux-protocol/src/surfaces.rs:171` | `UpdateDataModelCommand.new_surface_hash = 4` | `string` |
+| `DeleteSurfaceCommand.surface_id` | `crates/ramflux-protocol/src/surfaces.rs:177` | `DeleteSurfaceCommand.surface_id = 1` | `string` |
+| `DeleteSurfaceCommand.reason` | `crates/ramflux-protocol/src/surfaces.rs:179` | `DeleteSurfaceCommand.reason = 2` | `optional DeleteSurfaceReason` |
+| `SurfaceType::MessageCard` | `crates/ramflux-protocol/src/surfaces.rs:185` | `SurfaceType.message_card = 1` | `SurfaceTypeMessageCard (empty)` |
+| `SurfaceType::ApprovalCard` | `crates/ramflux-protocol/src/surfaces.rs:186` | `SurfaceType.approval_card = 2` | `SurfaceTypeApprovalCard (empty)` |
+| `SurfaceType::FormCard` | `crates/ramflux-protocol/src/surfaces.rs:187` | `SurfaceType.form_card = 3` | `SurfaceTypeFormCard (empty)` |
+| `SurfaceType::StatusPanel` | `crates/ramflux-protocol/src/surfaces.rs:188` | `SurfaceType.status_panel = 4` | `SurfaceTypeStatusPanel (empty)` |
+| `SurfaceType::TaskCard` | `crates/ramflux-protocol/src/surfaces.rs:189` | `SurfaceType.task_card = 5` | `SurfaceTypeTaskCard (empty)` |
+| `SurfaceType::FilePreview` | `crates/ramflux-protocol/src/surfaces.rs:190` | `SurfaceType.file_preview = 6` | `SurfaceTypeFilePreview (empty)` |
+| `SurfaceType::CallCard` | `crates/ramflux-protocol/src/surfaces.rs:191` | `SurfaceType.call_card = 7` | `SurfaceTypeCallCard (empty)` |
+| `SurfaceType::AgentResult` | `crates/ramflux-protocol/src/surfaces.rs:192` | `SurfaceType.agent_result = 8` | `SurfaceTypeAgentResult (empty)` |
+| `SurfaceType::NotificationCard` | `crates/ramflux-protocol/src/surfaces.rs:193` | `SurfaceType.notification_card = 9` | `SurfaceTypeNotificationCard (empty)` |
+| `DeleteSurfaceReason::Completed` | `crates/ramflux-protocol/src/surfaces.rs:199` | `DeleteSurfaceReason.completed = 1` | `DeleteSurfaceReasonCompleted (empty)` |
+| `DeleteSurfaceReason::Cancelled` | `crates/ramflux-protocol/src/surfaces.rs:200` | `DeleteSurfaceReason.cancelled = 2` | `DeleteSurfaceReasonCancelled (empty)` |
+| `DeleteSurfaceReason::Replaced` | `crates/ramflux-protocol/src/surfaces.rs:201` | `DeleteSurfaceReason.replaced = 3` | `DeleteSurfaceReasonReplaced (empty)` |
+| `DeleteSurfaceReason::Expired` | `crates/ramflux-protocol/src/surfaces.rs:202` | `DeleteSurfaceReason.expired = 4` | `DeleteSurfaceReasonExpired (empty)` |
+| `DeleteSurfaceReason::Error` | `crates/ramflux-protocol/src/surfaces.rs:203` | `DeleteSurfaceReason.error = 5` | `DeleteSurfaceReasonError (empty)` |
+| `A2iControlEvent.schema` | `crates/ramflux-protocol/src/surfaces.rs:56` | `A2iControlEvent.schema = 1` | `string` |
+| `A2iControlEvent.version` | `crates/ramflux-protocol/src/surfaces.rs:57` | `A2iControlEvent.version = 2` | `uint32` |
+| `A2iControlEvent.domain` | `crates/ramflux-protocol/src/surfaces.rs:58` | `A2iControlEvent.domain = 3` | `string` |
+| `A2iControlEvent.ext` | `crates/ramflux-protocol/src/surfaces.rs:60` | `A2iControlEvent.ext = 4` | `Ext` |
+| `A2iControlEvent.signed` | `crates/ramflux-protocol/src/surfaces.rs:62` | `A2iControlEvent.signed = 5` | `SignedFields` |
+| `A2iControlEvent.event_type` | `crates/ramflux-protocol/src/surfaces.rs:63` | `A2iControlEvent.event_type = 6` | `A2iControlEventType` |
+| `A2iControlEvent.control_domain` | `crates/ramflux-protocol/src/surfaces.rs:64` | `A2iControlEvent.control_domain = 7` | `ControlDomain` |
+| `A2iControlEvent.action` | `crates/ramflux-protocol/src/surfaces.rs:65` | `A2iControlEvent.action = 8` | `string` |
+| `A2iControlEvent.subject` | `crates/ramflux-protocol/src/surfaces.rs:66` | `A2iControlEvent.subject = 9` | `JsonValue` |
+| `A2iControlEvent.correlation_id` | `crates/ramflux-protocol/src/surfaces.rs:67` | `A2iControlEvent.correlation_id = 10` | `string` |
+| `A2iControlEvent.source_device_id` | `crates/ramflux-protocol/src/surfaces.rs:68` | `A2iControlEvent.source_device_id = 11` | `string` |
+| `A2iControlEvent.target_device_id` | `crates/ramflux-protocol/src/surfaces.rs:69` | `A2iControlEvent.target_device_id = 12` | `string` |
+| `A2iControlEvent.grant_id` | `crates/ramflux-protocol/src/surfaces.rs:71` | `A2iControlEvent.grant_id = 13` | `optional string` |
+| `A2iControlEvent.expires_at` | `crates/ramflux-protocol/src/surfaces.rs:73` | `A2iControlEvent.expires_at = 14` | `optional int64` |
+| `ControlDomain::Message` | `crates/ramflux-protocol/src/surfaces.rs:85` | `ControlDomain.message = 1` | `ControlDomainMessage (empty)` |
+| `ControlDomain::Conversation` | `crates/ramflux-protocol/src/surfaces.rs:86` | `ControlDomain.conversation = 2` | `ControlDomainConversation (empty)` |
+| `ControlDomain::A2ui` | `crates/ramflux-protocol/src/surfaces.rs:87` | `ControlDomain.a2ui = 3` | `ControlDomainA2ui (empty)` |
+| `ControlDomain::McpTool` | `crates/ramflux-protocol/src/surfaces.rs:88` | `ControlDomain.mcp_tool = 4` | `ControlDomainMcpTool (empty)` |
+| `A2iControlEventType::Control` | `crates/ramflux-protocol/src/surfaces.rs:79` | `A2iControlEventType.control = 1` | `A2iControlEventTypeControl (empty)` |
+#### Mapping source: `crates/ramflux-protocol/src/tasks/types.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `TaskStatus::Proposed` | `crates/ramflux-protocol/src/tasks/types.rs:11` | `TaskStatus.proposed = 1` | `TaskStatusProposed (empty)` |
+| `TaskStatus::Running` | `crates/ramflux-protocol/src/tasks/types.rs:12` | `TaskStatus.running = 2` | `TaskStatusRunning (empty)` |
+| `TaskStatus::NeedsMe` | `crates/ramflux-protocol/src/tasks/types.rs:13` | `TaskStatus.needs_me = 3` | `TaskStatusNeedsMe (empty)` |
+| `TaskStatus::Done` | `crates/ramflux-protocol/src/tasks/types.rs:14` | `TaskStatus.done = 4` | `TaskStatusDone (empty)` |
+| `TaskStatus::Failed` | `crates/ramflux-protocol/src/tasks/types.rs:15` | `TaskStatus.failed = 5` | `TaskStatusFailed (empty)` |
+| `TaskStatus::Cancelled` | `crates/ramflux-protocol/src/tasks/types.rs:16` | `TaskStatus.cancelled = 6` | `TaskStatusCancelled (empty)` |
+| `NeedsMe::Approval{ grant_id: String }` | `crates/ramflux-protocol/src/tasks/types.rs:30` | `NeedsMe.approval = 1` | `NeedsMeApproval (string grant_id = 1;)` |
+| `NeedsMe::Choice{ surface_id: String }` | `crates/ramflux-protocol/src/tasks/types.rs:31` | `NeedsMe.choice = 2` | `NeedsMeChoice (string surface_id = 1;)` |
+| `NeedsMe::Input{ surface_id: String }` | `crates/ramflux-protocol/src/tasks/types.rs:32` | `NeedsMe.input = 3` | `NeedsMeInput (string surface_id = 1;)` |
+| `TaskStep.id` | `crates/ramflux-protocol/src/tasks/types.rs:48` | `TaskStep.id = 1` | `string` |
+| `TaskStep.title` | `crates/ramflux-protocol/src/tasks/types.rs:49` | `TaskStep.title = 2` | `string` |
+| `TaskStep.state` | `crates/ramflux-protocol/src/tasks/types.rs:50` | `TaskStep.state = 3` | `TaskStatus` |
+| `TaskStep.needs_me` | `crates/ramflux-protocol/src/tasks/types.rs:52` | `TaskStep.needs_me = 4` | `optional NeedsMe` |
+| `TaskStart.task_id` | `crates/ramflux-protocol/src/tasks/types.rs:57` | `TaskStart.task_id = 1` | `string` |
+| `TaskStart.conversation_id` | `crates/ramflux-protocol/src/tasks/types.rs:58` | `TaskStart.conversation_id = 2` | `string` |
+| `TaskStart.requester` | `crates/ramflux-protocol/src/tasks/types.rs:59` | `TaskStart.requester = 3` | `string` |
+| `TaskStart.assignee` | `crates/ramflux-protocol/src/tasks/types.rs:60` | `TaskStart.assignee = 4` | `string` |
+| `TaskStart.text` | `crates/ramflux-protocol/src/tasks/types.rs:61` | `TaskStart.text = 5` | `string` |
+| `TaskStart.constraints` | `crates/ramflux-protocol/src/tasks/types.rs:63` | `TaskStart.constraints = 6` | `optional string` |
+| `TaskProposal.task_id` | `crates/ramflux-protocol/src/tasks/types.rs:68` | `TaskProposal.task_id = 1` | `string` |
+| `TaskProposal.conversation_id` | `crates/ramflux-protocol/src/tasks/types.rs:69` | `TaskProposal.conversation_id = 2` | `string` |
+| `TaskProposal.proposer` | `crates/ramflux-protocol/src/tasks/types.rs:70` | `TaskProposal.proposer = 3` | `string` |
+| `TaskProposal.assignee` | `crates/ramflux-protocol/src/tasks/types.rs:71` | `TaskProposal.assignee = 4` | `string` |
+| `TaskProposal.title` | `crates/ramflux-protocol/src/tasks/types.rs:72` | `TaskProposal.title = 5` | `string` |
+| `TaskProposal.steps` | `crates/ramflux-protocol/src/tasks/types.rs:73` | `TaskProposal.steps = 6` | `repeated TaskStep` |
+| `TaskAccept.task_id` | `crates/ramflux-protocol/src/tasks/types.rs:78` | `TaskAccept.task_id = 1` | `string` |
+| `TaskAccept.version` | `crates/ramflux-protocol/src/tasks/types.rs:79` | `TaskAccept.version = 2` | `uint64` |
+| `TaskDecline.task_id` | `crates/ramflux-protocol/src/tasks/types.rs:84` | `TaskDecline.task_id = 1` | `string` |
+| `TaskDecline.version` | `crates/ramflux-protocol/src/tasks/types.rs:85` | `TaskDecline.version = 2` | `uint64` |
+| `TaskUpdate.task_id` | `crates/ramflux-protocol/src/tasks/types.rs:90` | `TaskUpdate.task_id = 1` | `string` |
+| `TaskUpdate.version` | `crates/ramflux-protocol/src/tasks/types.rs:91` | `TaskUpdate.version = 2` | `uint64` |
+| `TaskUpdate.state` | `crates/ramflux-protocol/src/tasks/types.rs:92` | `TaskUpdate.state = 3` | `TaskStatus` |
+| `TaskUpdate.steps` | `crates/ramflux-protocol/src/tasks/types.rs:93` | `TaskUpdate.steps = 4` | `repeated TaskStep` |
+| `TaskUpdate.result_ref` | `crates/ramflux-protocol/src/tasks/types.rs:95` | `TaskUpdate.result_ref = 5` | `optional string` |
+| `TaskUpdate.result_summary` | `crates/ramflux-protocol/src/tasks/types.rs:97` | `TaskUpdate.result_summary = 6` | `optional string` |
+| `TaskCancel.task_id` | `crates/ramflux-protocol/src/tasks/types.rs:102` | `TaskCancel.task_id = 1` | `string` |
+| `TaskCancel.base_revision` | `crates/ramflux-protocol/src/tasks/types.rs:103` | `TaskCancel.base_revision = 2` | `uint64` |
+| `TaskDecision::Resume` | `crates/ramflux-protocol/src/tasks/types.rs:110` | `TaskDecision.resume = 1` | `TaskDecisionResume (empty)` |
+| `TaskDecision::Deny` | `crates/ramflux-protocol/src/tasks/types.rs:111` | `TaskDecision.deny = 2` | `TaskDecisionDeny (empty)` |
+| `TaskResolve.task_id` | `crates/ramflux-protocol/src/tasks/types.rs:120` | `TaskResolve.task_id = 1` | `string` |
+| `TaskResolve.base_revision` | `crates/ramflux-protocol/src/tasks/types.rs:121` | `TaskResolve.base_revision = 2` | `uint64` |
+| `TaskResolve.step_id` | `crates/ramflux-protocol/src/tasks/types.rs:122` | `TaskResolve.step_id = 3` | `string` |
+| `TaskResolve.target` | `crates/ramflux-protocol/src/tasks/types.rs:123` | `TaskResolve.target = 4` | `NeedsMe` |
+| `TaskResolve.decision_id` | `crates/ramflux-protocol/src/tasks/types.rs:124` | `TaskResolve.decision_id = 5` | `string` |
+| `TaskResolve.decision` | `crates/ramflux-protocol/src/tasks/types.rs:125` | `TaskResolve.decision = 6` | `TaskDecision` |
+| `TaskEventBody::Start(TaskStart)` | `crates/ramflux-protocol/src/tasks/types.rs:131` | `TaskEventBody.start = 1` | `TaskEventBodyStart (TaskStart value = 1;)` |
+| `TaskEventBody::Proposal(TaskProposal)` | `crates/ramflux-protocol/src/tasks/types.rs:132` | `TaskEventBody.proposal = 2` | `TaskEventBodyProposal (TaskProposal value = 1;)` |
+| `TaskEventBody::Accept(TaskAccept)` | `crates/ramflux-protocol/src/tasks/types.rs:133` | `TaskEventBody.accept = 3` | `TaskEventBodyAccept (TaskAccept value = 1;)` |
+| `TaskEventBody::Decline(TaskDecline)` | `crates/ramflux-protocol/src/tasks/types.rs:134` | `TaskEventBody.decline = 4` | `TaskEventBodyDecline (TaskDecline value = 1;)` |
+| `TaskEventBody::Update(TaskUpdate)` | `crates/ramflux-protocol/src/tasks/types.rs:135` | `TaskEventBody.update = 5` | `TaskEventBodyUpdate (TaskUpdate value = 1;)` |
+| `TaskEventBody::Cancel(TaskCancel)` | `crates/ramflux-protocol/src/tasks/types.rs:136` | `TaskEventBody.cancel = 6` | `TaskEventBodyCancel (TaskCancel value = 1;)` |
+| `TaskEventBody::Resolve(TaskResolve)` | `crates/ramflux-protocol/src/tasks/types.rs:137` | `TaskEventBody.resolve = 7` | `TaskEventBodyResolve (TaskResolve value = 1;)` |
+#### Mapping source: `crates/ramflux-protocol/src/tasks/event.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `EventFields.schema` | `crates/ramflux-protocol/src/tasks/event.rs:29` | `TaskEvent.schema = 1` | `string` |
+| `EventFields.version` | `crates/ramflux-protocol/src/tasks/event.rs:30` | `TaskEvent.version = 2` | `uint32` |
+| `EventFields.domain` | `crates/ramflux-protocol/src/tasks/event.rs:31` | `TaskEvent.domain = 3` | `string` |
+| `EventFields.ext` | `crates/ramflux-protocol/src/tasks/event.rs:33` | `TaskEvent.ext = 4` | `Ext` |
+| `EventFields.signed` | `crates/ramflux-protocol/src/tasks/event.rs:35` | `TaskEvent.signed = 5` | `SignedFields` |
+| `EventFields.conversation_id` | `crates/ramflux-protocol/src/tasks/event.rs:36` | `TaskEvent.conversation_id = 6` | `string` |
+| `EventFields.event` | `crates/ramflux-protocol/src/tasks/event.rs:37` | `TaskEvent.event = 7` | `TaskEventBody` |
+#### Mapping source: `crates/ramflux-protocol/src/core_types.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `SignedFields.signing_key_id` | `crates/ramflux-protocol/src/core_types.rs:26` | `SignedFields.signing_key_id = 1` | `string` |
+| `SignedFields.signature_alg` | `crates/ramflux-protocol/src/core_types.rs:27` | `SignedFields.signature_alg = 2` | `SignatureAlg` |
+| `SignedFields.signature` | `crates/ramflux-protocol/src/core_types.rs:28` | `SignedFields.signature = 3` | `string` |
+| `Ext.ext` | `crates/ramflux-protocol/src/core_types.rs:35` | `Ext.ext = 1` | `JsonObject` |
+#### Mapping source: `crates/ramflux-sdk/src/client/surface/carrier.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Carrier.schema` | `crates/ramflux-sdk/src/client/surface/carrier.rs:20` | `SurfaceCarrier.schema = 1` | `string` |
+| `Carrier.content_type` | `crates/ramflux-sdk/src/client/surface/carrier.rs:21` | `SurfaceCarrier.content_type = 2` | `string` |
+| `Carrier.posted_at` | `crates/ramflux-sdk/src/client/surface/carrier.rs:23` | `SurfaceCarrier.posted_at = 3` | `optional int64` |
+| `Carrier.updated_at` | `crates/ramflux-sdk/src/client/surface/carrier.rs:25` | `SurfaceCarrier.updated_at = 4` | `optional int64` |
+| `Carrier.conversation_id` | `crates/ramflux-sdk/src/client/surface/carrier.rs:27` | `SurfaceCarrier.conversation_id = 5` | `string` |
+| `Carrier.surface_id` | `crates/ramflux-sdk/src/client/surface/carrier.rs:28` | `SurfaceCarrier.surface_id = 6` | `string` |
+| `Carrier.message_id` | `crates/ramflux-sdk/src/client/surface/carrier.rs:29` | `SurfaceCarrier.message_id = 7` | `string` |
+| `Carrier.sender_principal_id` | `crates/ramflux-sdk/src/client/surface/carrier.rs:30` | `SurfaceCarrier.sender_principal_id = 8` | `string` |
+| `Carrier.sender_device_id` | `crates/ramflux-sdk/src/client/surface/carrier.rs:31` | `SurfaceCarrier.sender_device_id = 9` | `string` |
+| `Carrier.author_principal_id` | `crates/ramflux-sdk/src/client/surface/carrier.rs:32` | `SurfaceCarrier.author_principal_id = 10` | `string` |
+| `Carrier.signature` | `crates/ramflux-sdk/src/client/surface/carrier.rs:34` | `SurfaceCarrier.signature = 11` | `string` |
+| `Carrier.snapshot` | `crates/ramflux-sdk/src/client/surface/carrier.rs:36` | `SurfaceCarrier.snapshot = 12` | `optional SurfaceSnapshotProof` |
+| `PayloadKind::Event / wire_base64` | `crates/ramflux-sdk/src/client/surface/carrier.rs:26` | `SurfaceCarrier.event = 16` | `SurfaceEvent` |
+| `PayloadKind::Action / wire_base64` | `crates/ramflux-sdk/src/client/surface/carrier.rs:26` | `SurfaceCarrier.action = 17` | `SurfaceAction` |
+| `PayloadKind::ActionReceipt / wire_base64` | `crates/ramflux-sdk/src/client/surface/carrier.rs:26` | `SurfaceCarrier.action_receipt = 18` | `SurfaceCarrier` |
+#### Mapping source: `crates/ramflux-sdk/src/client/surface/snapshot.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `SnapshotProof.wire_base64` | `crates/ramflux-sdk/src/client/surface/snapshot.rs:13` | `SurfaceSnapshotProof.event = 1` | `SurfaceEvent` |
+| `SnapshotProof.checkpoint_base64` | `crates/ramflux-sdk/src/client/surface/snapshot.rs:15` | `SurfaceSnapshotProof.checkpoint = 2` | `SurfaceCheckpoint` |
+| `SnapshotProof.surface_hash` | `crates/ramflux-sdk/src/client/surface/snapshot.rs:17` | `SurfaceSnapshotProof.surface_hash = 3` | `optional string` |
+| `SnapshotProof.metadata` | `crates/ramflux-sdk/src/client/surface/snapshot.rs:19` | `SurfaceSnapshotProof.metadata = 4` | `SurfaceResyncMetadata` |
+| `SnapshotProof.author_device_id` | `crates/ramflux-sdk/src/client/surface/snapshot.rs:20` | `SurfaceSnapshotProof.author_device_id = 5` | `string` |
+#### Mapping source: `crates/ramflux-sdk/src/client/surface/control.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `SurfaceControl.kind` | `crates/ramflux-sdk/src/client/surface/control.rs:21` | `SurfaceDelivery.kind = 1` | `SurfaceControlKind` |
+| `SurfaceControl.carrier_base64` | `crates/ramflux-sdk/src/client/surface/control.rs:22` | `SurfaceDelivery.carrier = 2` | `SurfaceCarrier` |
+| `SurfaceControl.group_epoch` | `crates/ramflux-sdk/src/client/surface/control.rs:23` | `SurfaceDelivery.group_epoch = 3` | `optional uint64` |
+| `SurfaceControl.context` | `crates/ramflux-sdk/src/client/surface/control.rs:24` | `SurfaceDelivery.context = 4` | `optional OwnContext` |
+| `SurfaceControl.manifests` | `crates/ramflux-sdk/src/client/surface/control.rs:25` | `SurfaceDelivery.manifests = 5` | `repeated NativeDeviceManifest` |
+| `ControlKind::Peer` | `crates/ramflux-sdk/src/client/surface/control.rs:15` | `SurfaceControlKind.peer = 1` | `SurfaceControlKindPeer (empty)` |
+| `ControlKind::Own` | `crates/ramflux-sdk/src/client/surface/control.rs:16` | `SurfaceControlKind.own = 2` | `SurfaceControlKindOwn (empty)` |
+| `OwnContext.conversation_id` | `crates/ramflux-sdk/src/client/surface/control.rs:30` | `OwnContext.conversation_id = 1` | `string` |
+| `OwnContext.participants` | `crates/ramflux-sdk/src/client/surface/control.rs:31` | `OwnContext.participants = 2` | `repeated string` |
+| `OwnContext.group` | `crates/ramflux-sdk/src/client/surface/control.rs:32` | `OwnContext.group = 3` | `optional SdkOwnDeviceGroupSnapshot` |
+| `OwnContext.friend` | `crates/ramflux-sdk/src/client/surface/control.rs:33` | `OwnContext.friend = 4` | `optional FriendLinkRecord` |
+#### Mapping source: `crates/ramflux-sdk/src/client/task/carrier.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Carrier.content_type` | `crates/ramflux-sdk/src/client/task/carrier.rs:14` | `TaskCarrier.content_type = 1` | `string` |
+| `Carrier.conversation_id` | `crates/ramflux-sdk/src/client/task/carrier.rs:15` | `TaskCarrier.conversation_id = 2` | `string` |
+| `Carrier.message_id` | `crates/ramflux-sdk/src/client/task/carrier.rs:16` | `TaskCarrier.message_id = 3` | `string` |
+| `Carrier.principal_id` | `crates/ramflux-sdk/src/client/task/carrier.rs:17` | `TaskCarrier.principal_id = 4` | `string` |
+| `Carrier.device_id` | `crates/ramflux-sdk/src/client/task/carrier.rs:18` | `TaskCarrier.device_id = 5` | `string` |
+| `Carrier.wire_base64` | `crates/ramflux-sdk/src/client/task/carrier.rs:19` | `TaskCarrier.event = 6` | `TaskEvent` |
+| `Carrier.signature` | `crates/ramflux-sdk/src/client/task/carrier.rs:20` | `TaskCarrier.signature = 7` | `string` |
+| `Carrier.decision_proof_base64` | `crates/ramflux-sdk/src/client/task/carrier.rs:22` | `TaskCarrier.decision_proof = 8` | `TaskCertificate` |
+#### Mapping source: `crates/ramflux-sdk/src/client/task/approval.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Request.binding` | `crates/ramflux-sdk/src/client/task/approval.rs:17` | `TaskApprovalRequest.binding = 1` | `TaskApprovalBinding` |
+| `Request.approval` | `crates/ramflux-sdk/src/client/task/approval.rs:18` | `TaskApprovalRequest.approval = 2` | `LocalMcpApprovalRecord` |
+| `Request.grant_body` | `crates/ramflux-sdk/src/client/task/approval.rs:19` | `TaskApprovalRequest.grant_body = 3` | `LocalMcpGrantSigningBody` |
+| `Payload::Request{ request: Box<Request> }` | `crates/ramflux-sdk/src/client/task/approval.rs:24` | `TaskApprovalPayload.request = 1` | `TaskApprovalPayloadRequest (TaskApprovalRequest request = 1;)` |
+| `Payload::Decision{ request: Box<Request>, approved: bool, grant_signature: Option<String> }` | `crates/ramflux-sdk/src/client/task/approval.rs:25` | `TaskApprovalPayload.decision = 2` | `TaskApprovalPayloadDecision (TaskApprovalRequest request = 1;; bool approved = 2;; optional string grant_signature = 3;)` |
+| `Packet.payload` | `crates/ramflux-sdk/src/client/task/approval.rs:30` | `TaskApprovalPacket.payload = 1` | `TaskApprovalPayload` |
+| `Packet.principal` | `crates/ramflux-sdk/src/client/task/approval.rs:31` | `TaskApprovalPacket.principal = 2` | `string` |
+| `Packet.device` | `crates/ramflux-sdk/src/client/task/approval.rs:32` | `TaskApprovalPacket.device = 3` | `string` |
+| `Packet.signature` | `crates/ramflux-sdk/src/client/task/approval.rs:33` | `TaskApprovalPacket.signature = 4` | `string` |
+#### Mapping source: `crates/ramflux-sdk/src/client/task/control.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Ack.carrier_base64` | `crates/ramflux-sdk/src/client/task/control.rs:14` | `TaskAck.carrier = 1` | `TaskCarrier` |
+| `Ack.certificate` | `crates/ramflux-sdk/src/client/task/control.rs:15` | `TaskAck.certificate = 2` | `TaskCertificate` |
+| `Ack.manifests` | `crates/ramflux-sdk/src/client/task/control.rs:16` | `TaskAck.manifests = 3` | `repeated NativeDeviceManifest` |
+| `Ack.signer_principal` | `crates/ramflux-sdk/src/client/task/control.rs:17` | `TaskAck.signer_principal = 4` | `string` |
+| `Ack.signer_device` | `crates/ramflux-sdk/src/client/task/control.rs:18` | `TaskAck.signer_device = 5` | `string` |
+| `Ack.signature` | `crates/ramflux-sdk/src/client/task/control.rs:19` | `TaskAck.signature = 6` | `string` |
+| `Control::Intent{ carrier_base64: String }` | `crates/ramflux-sdk/src/client/task/control.rs:24` | `TaskControl.intent = 1` | `TaskControlIntent (TaskCarrier carrier = 1;)` |
+| `Control::Ack(Box<Ack>)` | `crates/ramflux-sdk/src/client/task/control.rs:25` | `TaskControl.ack = 2` | `TaskControlAck (TaskAck value = 1;)` |
+#### Mapping source: `crates/ramflux-sdk/src/client/task/certificate.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Certificate.conversation_id` | `crates/ramflux-sdk/src/client/task/certificate.rs:18` | `TaskCertificate.conversation_id = 1` | `string` |
+| `Certificate.resolution` | `crates/ramflux-sdk/src/client/task/certificate.rs:19` | `TaskCertificate.resolution = 2` | `TaskResolve` |
+| `Certificate.assignee` | `crates/ramflux-sdk/src/client/task/certificate.rs:20` | `TaskCertificate.assignee = 3` | `string` |
+| `Certificate.issuer_device` | `crates/ramflux-sdk/src/client/task/certificate.rs:21` | `TaskCertificate.issuer_device = 4` | `string` |
+| `Certificate.issued_at` | `crates/ramflux-sdk/src/client/task/certificate.rs:22` | `TaskCertificate.issued_at = 5` | `int64` |
+| `Certificate.phase` | `crates/ramflux-sdk/src/client/task/certificate.rs:23` | `TaskCertificate.phase = 6` | `TaskCertificatePhase` |
+| `Certificate.committed_version` | `crates/ramflux-sdk/src/client/task/certificate.rs:24` | `TaskCertificate.committed_version = 7` | `optional uint64` |
+| `Certificate.carrier_hash` | `crates/ramflux-sdk/src/client/task/certificate.rs:25` | `TaskCertificate.carrier_hash = 8` | `optional string` |
+| `Certificate.decision_key` | `crates/ramflux-sdk/src/client/task/certificate.rs:26` | `TaskCertificate.decision_key = 9` | `string` |
+| `Certificate.evidence_hash` | `crates/ramflux-sdk/src/client/task/certificate.rs:27` | `TaskCertificate.evidence_hash = 10` | `string` |
+| `Certificate.signature` | `crates/ramflux-sdk/src/client/task/certificate.rs:28` | `TaskCertificate.signature = 11` | `string` |
+| `Phase::Reserved` | `crates/ramflux-sdk/src/client/task/certificate.rs:12` | `TaskCertificatePhase.reserved = 1` | `TaskCertificatePhaseReserved (empty)` |
+| `Phase::Committed` | `crates/ramflux-sdk/src/client/task/certificate.rs:13` | `TaskCertificatePhase.committed = 2` | `TaskCertificatePhaseCommitted (empty)` |
+#### Mapping source: `crates/ramflux-sdk/src/client/task/mod.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `AcceptedEvent.carrier` | `crates/ramflux-sdk/src/client/task/mod.rs:33` | `TaskAcceptedEvent.carrier = 1` | `TaskCarrier` |
+| `AcceptedEvent.public_key` | `crates/ramflux-sdk/src/client/task/mod.rs:34` | `TaskAcceptedEvent.public_key = 2` | `string` |
+| `AcceptedEvent.actor_kind_verified` | `crates/ramflux-sdk/src/client/task/mod.rs:36` | `TaskAcceptedEvent.actor_kind_verified = 3` | `bool` |
+| `AcceptedEvent.received_at` | `crates/ramflux-sdk/src/client/task/mod.rs:38` | `TaskAcceptedEvent.received_at = 4` | `int64` |
+| `AcceptedEvent.decision_certificate` | `crates/ramflux-sdk/src/client/task/mod.rs:40` | `TaskAcceptedEvent.decision_certificate = 5` | `optional TaskCertificate` |
+| `AcceptedEvent.membership` | `crates/ramflux-sdk/src/client/task/mod.rs:42` | `TaskAcceptedEvent.membership = 6` | `optional TaskMembership` |
+| `TaskHistory.events` | `crates/ramflux-sdk/src/client/task/mod.rs:46` | `TaskHistory.events = 1` | `repeated TaskAcceptedEvent` |
+| `TaskHistory.created_at` | `crates/ramflux-sdk/src/client/task/mod.rs:47` | `TaskHistory.created_at = 2` | `int64` |
+| `TaskHistory.updated_at` | `crates/ramflux-sdk/src/client/task/mod.rs:48` | `TaskHistory.updated_at = 3` | `int64` |
+#### Mapping source: `crates/ramflux-sdk/src/client/task/historical.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Membership.conversation` | `crates/ramflux-sdk/src/client/task/historical.rs:13` | `TaskMembership.conversation = 1` | `string` |
+| `Membership.group` | `crates/ramflux-sdk/src/client/task/historical.rs:14` | `TaskMembership.group = 2` | `optional string` |
+| `Membership.epoch` | `crates/ramflux-sdk/src/client/task/historical.rs:15` | `TaskMembership.epoch = 3` | `optional uint64` |
+| `Membership.at` | `crates/ramflux-sdk/src/client/task/historical.rs:16` | `TaskMembership.at = 4` | `int64` |
+| `Membership.members` | `crates/ramflux-sdk/src/client/task/historical.rs:17` | `TaskMembership.members = 5` | `repeated string` |
+#### Mapping source: `crates/ramflux-sdk/src/client/task/own_history.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `TaskOwnPacket.context` | `crates/ramflux-sdk/src/client/task/own_history.rs:22` | `TaskOwnPacket.context = 1` | `OwnContext` |
+| `TaskOwnPacket.history` | `crates/ramflux-sdk/src/client/task/own_history.rs:23` | `TaskOwnPacket.history = 2` | `TaskHistory` |
+| `TaskOwnPacket.manifests` | `crates/ramflux-sdk/src/client/task/own_history.rs:24` | `TaskOwnPacket.manifests = 3` | `repeated NativeDeviceManifest` |
+| `TaskOwnPacket.pins` | `crates/ramflux-sdk/src/client/task/own_history.rs:25` | `TaskOwnPacket.pins = 4` | `repeated SdkOwnDeviceGroupMemberPin` |
+| `TaskOwnPacket.base` | `crates/ramflux-sdk/src/client/task/own_history.rs:26` | `TaskOwnPacket.base = 5` | `uint64` |
+| `TaskOwnPacket.prefix_hash` | `crates/ramflux-sdk/src/client/task/own_history.rs:27` | `TaskOwnPacket.prefix_hash = 6` | `string` |
+#### Mapping source: `crates/ramflux-sdk/src/bus/protocol.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `TaskApprovalBinding.conversation_id` | `crates/ramflux-sdk/src/bus/protocol.rs:1044` | `TaskApprovalBinding.conversation_id = 1` | `string` |
+| `TaskApprovalBinding.task_id` | `crates/ramflux-sdk/src/bus/protocol.rs:1045` | `TaskApprovalBinding.task_id = 2` | `string` |
+| `TaskApprovalBinding.step_id` | `crates/ramflux-sdk/src/bus/protocol.rs:1046` | `TaskApprovalBinding.step_id = 3` | `string` |
+| `TaskApprovalBinding.opening_revision` | `crates/ramflux-sdk/src/bus/protocol.rs:1047` | `TaskApprovalBinding.opening_revision = 4` | `uint64` |
+| `TaskApprovalBinding.requester` | `crates/ramflux-sdk/src/bus/protocol.rs:1048` | `TaskApprovalBinding.requester = 5` | `string` |
+| `TaskApprovalBinding.assignee` | `crates/ramflux-sdk/src/bus/protocol.rs:1049` | `TaskApprovalBinding.assignee = 6` | `string` |
+| `TaskApprovalBinding.executor_device_id` | `crates/ramflux-sdk/src/bus/protocol.rs:1050` | `TaskApprovalBinding.executor_device_id = 7` | `string` |
+| `LocalMcpGrantSigningBody.task_binding` | `crates/ramflux-sdk/src/bus/protocol.rs:1056` | `LocalMcpGrantSigningBody.task_binding = 1` | `optional TaskApprovalBinding` |
+| `LocalMcpGrantSigningBody.approval_id` | `crates/ramflux-sdk/src/bus/protocol.rs:1057` | `LocalMcpGrantSigningBody.approval_id = 2` | `string` |
+| `LocalMcpGrantSigningBody.grant_id` | `crates/ramflux-sdk/src/bus/protocol.rs:1058` | `LocalMcpGrantSigningBody.grant_id = 3` | `string` |
+| `LocalMcpGrantSigningBody.server_id` | `crates/ramflux-sdk/src/bus/protocol.rs:1059` | `LocalMcpGrantSigningBody.server_id = 4` | `string` |
+| `LocalMcpGrantSigningBody.tool_name` | `crates/ramflux-sdk/src/bus/protocol.rs:1060` | `LocalMcpGrantSigningBody.tool_name = 5` | `string` |
+| `LocalMcpGrantSigningBody.tool_scope` | `crates/ramflux-sdk/src/bus/protocol.rs:1062` | `LocalMcpGrantSigningBody.tool_scope = 6` | `optional string` |
+| `LocalMcpGrantSigningBody.capability` | `crates/ramflux-sdk/src/bus/protocol.rs:1063` | `LocalMcpGrantSigningBody.capability = 7` | `McpCapability` |
+| `LocalMcpGrantSigningBody.registry_hash` | `crates/ramflux-sdk/src/bus/protocol.rs:1064` | `LocalMcpGrantSigningBody.registry_hash = 8` | `string` |
+| `LocalMcpGrantSigningBody.tool_manifest_set_hash` | `crates/ramflux-sdk/src/bus/protocol.rs:1065` | `LocalMcpGrantSigningBody.tool_manifest_set_hash = 9` | `string` |
+| `LocalMcpGrantSigningBody.full_delegation` | `crates/ramflux-sdk/src/bus/protocol.rs:1066` | `LocalMcpGrantSigningBody.full_delegation = 10` | `bool` |
+| `LocalMcpGrantSigningBody.single_use` | `crates/ramflux-sdk/src/bus/protocol.rs:1068` | `LocalMcpGrantSigningBody.single_use = 11` | `bool` |
+| `LocalMcpGrantSigningBody.arguments_hash` | `crates/ramflux-sdk/src/bus/protocol.rs:1070` | `LocalMcpGrantSigningBody.arguments_hash = 12` | `optional string` |
+| `LocalMcpGrantSigningBody.expires_at` | `crates/ramflux-sdk/src/bus/protocol.rs:1071` | `LocalMcpGrantSigningBody.expires_at = 13` | `int64` |
+| `LocalBusFederationRoute.federation_url` | `crates/ramflux-sdk/src/bus/protocol.rs:395` | `LocalBusFederationRoute.federation_url = 1` | `string` |
+| `LocalBusFederationRoute.source_node_id` | `crates/ramflux-sdk/src/bus/protocol.rs:396` | `LocalBusFederationRoute.source_node_id = 2` | `string` |
+| `LocalBusFederationRoute.target_node_id` | `crates/ramflux-sdk/src/bus/protocol.rs:397` | `LocalBusFederationRoute.target_node_id = 3` | `string` |
+| `LocalBusFederationRoute.required_capability` | `crates/ramflux-sdk/src/bus/protocol.rs:398` | `LocalBusFederationRoute.required_capability = 4` | `string` |
+| `LocalBusFederationRoute.admin_token` | `crates/ramflux-sdk/src/bus/protocol.rs:400` | `LocalBusFederationRoute.admin_token = 5` | `optional string` |
+| `LocalBusFederationRoute.recipient_prekey_url` | `crates/ramflux-sdk/src/bus/protocol.rs:402` | `LocalBusFederationRoute.recipient_prekey_url = 6` | `optional string` |
+#### Mapping source: `crates/ramflux-sdk/src/records.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `LocalMcpApprovalRecord.approval_id` | `crates/ramflux-sdk/src/records.rs:80` | `LocalMcpApprovalRecord.approval_id = 1` | `string` |
+| `LocalMcpApprovalRecord.server_id` | `crates/ramflux-sdk/src/records.rs:81` | `LocalMcpApprovalRecord.server_id = 2` | `string` |
+| `LocalMcpApprovalRecord.tool_name` | `crates/ramflux-sdk/src/records.rs:82` | `LocalMcpApprovalRecord.tool_name = 3` | `string` |
+| `LocalMcpApprovalRecord.capability` | `crates/ramflux-sdk/src/records.rs:83` | `LocalMcpApprovalRecord.capability = 4` | `McpCapability` |
+| `LocalMcpApprovalRecord.risk_level` | `crates/ramflux-sdk/src/records.rs:84` | `LocalMcpApprovalRecord.risk_level = 5` | `RiskLevel` |
+| `LocalMcpApprovalRecord.tool_scope` | `crates/ramflux-sdk/src/records.rs:85` | `LocalMcpApprovalRecord.tool_scope = 6` | `optional string` |
+| `LocalMcpApprovalRecord.confirmation_mode` | `crates/ramflux-sdk/src/records.rs:86` | `LocalMcpApprovalRecord.confirmation_mode = 7` | `string` |
+| `LocalMcpApprovalRecord.expires_at` | `crates/ramflux-sdk/src/records.rs:87` | `LocalMcpApprovalRecord.expires_at = 8` | `int64` |
+| `LocalMcpApprovalRecord.status` | `crates/ramflux-sdk/src/records.rs:88` | `LocalMcpApprovalRecord.status = 9` | `string` |
+| `LocalMcpApprovalRecord.details` | `crates/ramflux-sdk/src/records.rs:89` | `LocalMcpApprovalRecord.details = 10` | `JsonValue` |
+#### Mapping source: `crates/ramflux-sdk/src/client/shared_group/controls.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `GroupControlPacket.schema` | `crates/ramflux-sdk/src/client/shared_group/controls.rs:12` | `GroupStateControl.schema = 1` | `string` |
+| `GroupControlPacket.body` | `crates/ramflux-sdk/src/client/shared_group/controls.rs:13` | `GroupStateControl.body = 2` | `GroupControlBody` |
+| `GroupControlBody::Request{ request: GroupChangeRequest, federation: Option<LocalBusFederationRoute> }` | `crates/ramflux-sdk/src/client/shared_group/controls.rs:18` | `GroupControlBody.request = 1` | `GroupControlBodyRequest (NativeGroupChangeRequest request = 1;; optional LocalBusFederationRoute federation = 2;)` |
+| `GroupControlBody::Result{ result: GroupChangeResult }` | `crates/ramflux-sdk/src/client/shared_group/controls.rs:19` | `GroupControlBody.result = 2` | `GroupControlBodyResult (NativeGroupChangeResult result = 1;)` |
+| `GroupControlBody::DeviceSet{ group_id: String, actor: GroupStateActor, device_set_epoch: u64 }` | `crates/ramflux-sdk/src/client/shared_group/controls.rs:20` | `GroupControlBody.device_set = 3` | `GroupControlBodyDeviceSet (string group_id = 1;; NativeGroupActor actor = 2;; uint64 device_set_epoch = 3;)` |
+| `GroupControlBody::Transfer{ control: Box<super::TransferControl> }` | `crates/ramflux-sdk/src/client/shared_group/controls.rs:21` | `GroupControlBody.transfer = 4` | `GroupControlBodyTransfer (TransferControl control = 1;)` |
+#### Mapping source: `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `TransferDevice.root` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:12` | `TransferDevice.root = 1` | `string` |
+| `TransferDevice.device` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:13` | `TransferDevice.device = 2` | `string` |
+| `TransferProbe.id` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:18` | `TransferProbe.id = 1` | `string` |
+| `TransferProbe.actor` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:19` | `TransferProbe.actor = 2` | `NativeGroupActor` |
+| `TransferProbe.creator` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:20` | `TransferProbe.creator = 3` | `NativeGroupActor` |
+| `TransferProbe.base` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:21` | `TransferProbe.base = 4` | `NativeGroupSnapshot` |
+| `TransferProbe.required` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:22` | `TransferProbe.required = 5` | `repeated TransferDevice` |
+| `TransferProbe.issued_at` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:23` | `TransferProbe.issued_at = 6` | `int64` |
+| `TransferProbe.expires_at` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:24` | `TransferProbe.expires_at = 7` | `int64` |
+| `TransferHead.proposal` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:29` | `TransferHead.proposal = 1` | `string` |
+| `TransferHead.actor` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:30` | `TransferHead.actor = 2` | `NativeGroupActor` |
+| `TransferHead.requested_hash` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:31` | `TransferHead.requested_hash = 3` | `string` |
+| `TransferHead.head` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:32` | `TransferHead.head = 4` | `NativeGroupSnapshot` |
+| `TransferHead.acceptance` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:33` | `TransferHead.acceptance = 5` | `optional NativeGroupTransferAcceptance` |
+| `TransferHead.requires_sync` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:34` | `TransferHead.requires_sync = 6` | `bool` |
+| `TransferHead.target` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:35` | `TransferHead.target = 7` | `TransferDevice` |
+| `TransferHead.additional_targets` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:37` | `TransferHead.additional_targets = 8` | `repeated TransferDevice` |
+| `TransferHead.cancelled` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:39` | `TransferHead.cancelled = 9` | `bool` |
+| `TransferHead.cancel_ack` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:41` | `TransferHead.cancel_ack = 10` | `bool` |
+| `TransferHead.issued_at` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:42` | `TransferHead.issued_at = 11` | `int64` |
+| `TransferHead.expires_at` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:43` | `TransferHead.expires_at = 12` | `int64` |
+| `TransferBody::Probe{ probe: Box<TransferProbe> }` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:48` | `TransferBody.probe = 1` | `TransferBodyProbe (TransferProbe probe = 1;)` |
+| `TransferBody::Head{ reply: Box<TransferHead> }` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:49` | `TransferBody.head = 2` | `TransferBodyHead (TransferHead reply = 1;)` |
+| `TransferControl.body` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:54` | `TransferControl.body = 1` | `TransferBody` |
+| `TransferControl.signature` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:55` | `TransferControl.signature = 2` | `string` |
+#### Mapping source: `crates/ramflux-sdk/src/client/own_contact.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Contact.manifest` | `crates/ramflux-sdk/src/client/own_contact.rs:20` | `OwnContactSync.manifest = 1` | `NativeDeviceManifest` |
+| `Contact.link` | `crates/ramflux-sdk/src/client/own_contact.rs:21` | `OwnContactSync.link = 2` | `FriendLinkRecord` |
+#### Mapping source: `crates/ramflux-sdk/src/client/own_contact/tombstone.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Tombstone.link` | `crates/ramflux-sdk/src/client/own_contact/tombstone.rs:13` | `OwnContactTombstone.link = 1` | `FriendLinkRecord` |
+| `Tombstone.decided_at` | `crates/ramflux-sdk/src/client/own_contact/tombstone.rs:15` | `OwnContactTombstone.decided_at = 2` | `optional int64` |
+#### Mapping source: `crates/ramflux-sdk/src/client/shared_group/own_consent.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Consent.schema` | `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:15` | `OwnGroupConsent.schema = 1` | `string` |
+| `Consent.actor` | `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:16` | `OwnGroupConsent.actor = 2` | `NativeGroupActor` |
+| `Consent.snapshot` | `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:17` | `OwnGroupConsent.snapshot = 3` | `NativeGroupSnapshot` |
+| `Consent.accepted` | `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:18` | `OwnGroupConsent.accepted = 4` | `bool` |
+| `Consent.issued_at` | `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:19` | `OwnGroupConsent.issued_at = 5` | `int64` |
+| `Consent.expires_at` | `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:20` | `OwnGroupConsent.expires_at = 6` | `int64` |
+| `Consent.signature` | `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:21` | `OwnGroupConsent.signature = 7` | `string` |
+#### Mapping source: `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `Checkpoint.schema` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:13` | `SurfaceCheckpoint.schema = 1` | `string` |
+| `Checkpoint.content` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:14` | `SurfaceCheckpoint.content = 2` | `optional CreateSurfaceCommand` |
+| `Checkpoint.conversation_id` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:15` | `SurfaceCheckpoint.conversation_id = 3` | `optional string` |
+| `Checkpoint.version` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:16` | `SurfaceCheckpoint.version = 4` | `uint64` |
+| `Checkpoint.closed` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:17` | `SurfaceCheckpoint.closed = 5` | `bool` |
+| `Checkpoint.final_text` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:18` | `SurfaceCheckpoint.final_text = 6` | `repeated SurfaceFinalEntry` |
+| `FinalEntry.id` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:23` | `SurfaceFinalEntry.id = 1` | `string` |
+| `FinalEntry.nested` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:24` | `SurfaceFinalEntry.nested = 2` | `bool` |
+| `FinalEntry.text_hash` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:25` | `SurfaceFinalEntry.text_hash = 3` | `string` |
+| `ResyncMetadata.schema` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:31` | `SurfaceResyncMetadata.schema = 1` | `string` |
+| `ResyncMetadata.conversation_id` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:32` | `SurfaceResyncMetadata.conversation_id = 2` | `string` |
+| `ResyncMetadata.version` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:33` | `SurfaceResyncMetadata.version = 3` | `uint64` |
+| `ResyncMetadata.closed` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:34` | `SurfaceResyncMetadata.closed = 4` | `bool` |
+| `ResyncMetadata.finality_base64` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:35` | `SurfaceResyncMetadata.finality_base64 = 5` | `string` |
+#### Mapping source: `crates/ramflux-sdk/src/client/surface/resync_request.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `ResyncRequest.kind` | `crates/ramflux-sdk/src/client/surface/resync_request.rs:16` | `SurfaceResyncRequest.kind = 1` | `string` |
+| `ResyncRequest.conversation_id` | `crates/ramflux-sdk/src/client/surface/resync_request.rs:17` | `SurfaceResyncRequest.conversation_id = 2` | `string` |
+| `ResyncRequest.surface_ref` | `crates/ramflux-sdk/src/client/surface/resync_request.rs:18` | `SurfaceResyncRequest.surface_ref = 3` | `string` |
+| `ResyncRequest.author` | `crates/ramflux-sdk/src/client/surface/resync_request.rs:19` | `SurfaceResyncRequest.author = 4` | `string` |
+| `ResyncRequest.surface_id` | `crates/ramflux-sdk/src/client/surface/resync_request.rs:20` | `SurfaceResyncRequest.surface_id = 5` | `string` |
+| `ResyncRequest.group` | `crates/ramflux-sdk/src/client/surface/resync_request.rs:21` | `SurfaceResyncRequest.group = 6` | `optional string` |
+| `ResyncRequest.epoch` | `crates/ramflux-sdk/src/client/surface/resync_request.rs:22` | `SurfaceResyncRequest.epoch = 7` | `optional uint64` |
+#### Mapping source: `crates/ramflux-sdk/src/client/recovery.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `SdkGuardianRecoveryShare.share_id` | `crates/ramflux-sdk/src/client/recovery.rs:34` | `GuardianRecoveryShare.share_id = 1` | `uint32` |
+| `SdkGuardianRecoveryShare.threshold` | `crates/ramflux-sdk/src/client/recovery.rs:35` | `GuardianRecoveryShare.threshold = 2` | `uint32` |
+| `SdkGuardianRecoveryShare.total` | `crates/ramflux-sdk/src/client/recovery.rs:36` | `GuardianRecoveryShare.total = 3` | `uint32` |
+| `SdkGuardianRecoveryShare.member_kind` | `crates/ramflux-sdk/src/client/recovery.rs:37` | `GuardianRecoveryShare.member_kind = 4` | `RecoveryQuorumMemberKind` |
+| `SdkGuardianRecoveryShare.value_base64` | `crates/ramflux-sdk/src/client/recovery.rs:38` | `GuardianRecoveryShare.value_base64 = 5` | `string` |
+| `SdkGuardianInviteMessage.schema` | `crates/ramflux-sdk/src/client/recovery.rs:44` | `GuardianInvite.schema = 1` | `string` |
+| `SdkGuardianInviteMessage.version` | `crates/ramflux-sdk/src/client/recovery.rs:45` | `GuardianInvite.version = 2` | `uint32` |
+| `SdkGuardianInviteMessage.invite_id` | `crates/ramflux-sdk/src/client/recovery.rs:46` | `GuardianInvite.invite_id = 3` | `string` |
+| `SdkGuardianInviteMessage.inviter_principal_id` | `crates/ramflux-sdk/src/client/recovery.rs:47` | `GuardianInvite.inviter_principal_id = 4` | `string` |
+| `SdkGuardianInviteMessage.inviter_device_id` | `crates/ramflux-sdk/src/client/recovery.rs:48` | `GuardianInvite.inviter_device_id = 5` | `string` |
+| `SdkGuardianInviteMessage.inviter_device_epoch` | `crates/ramflux-sdk/src/client/recovery.rs:49` | `GuardianInvite.inviter_device_epoch = 6` | `uint64` |
+| `SdkGuardianInviteMessage.inviter_device_public_key_base64url` | `crates/ramflux-sdk/src/client/recovery.rs:50` | `GuardianInvite.inviter_device_public_key_base64url = 7` | `string` |
+| `SdkGuardianInviteMessage.guardian_principal_id` | `crates/ramflux-sdk/src/client/recovery.rs:51` | `GuardianInvite.guardian_principal_id = 8` | `string` |
+| `SdkGuardianInviteMessage.recovery_quorum_id` | `crates/ramflux-sdk/src/client/recovery.rs:52` | `GuardianInvite.recovery_quorum_id = 9` | `string` |
+| `SdkGuardianInviteMessage.share` | `crates/ramflux-sdk/src/client/recovery.rs:53` | `GuardianInvite.share = 10` | `GuardianRecoveryShare` |
+| `SdkGuardianInviteMessage.issued_at` | `crates/ramflux-sdk/src/client/recovery.rs:54` | `GuardianInvite.issued_at = 11` | `int64` |
+| `SdkGuardianInviteMessage.expires_at` | `crates/ramflux-sdk/src/client/recovery.rs:55` | `GuardianInvite.expires_at = 12` | `int64` |
+| `SdkGuardianInviteMessage.signed` | `crates/ramflux-sdk/src/client/recovery.rs:57` | `GuardianInvite.signed = 13` | `SignedFields` |
+| `SdkGuardianAcceptMessage.schema` | `crates/ramflux-sdk/src/client/recovery.rs:63` | `GuardianAccept.schema = 1` | `string` |
+| `SdkGuardianAcceptMessage.version` | `crates/ramflux-sdk/src/client/recovery.rs:64` | `GuardianAccept.version = 2` | `uint32` |
+| `SdkGuardianAcceptMessage.accept_id` | `crates/ramflux-sdk/src/client/recovery.rs:65` | `GuardianAccept.accept_id = 3` | `string` |
+| `SdkGuardianAcceptMessage.invite_id` | `crates/ramflux-sdk/src/client/recovery.rs:66` | `GuardianAccept.invite_id = 4` | `string` |
+| `SdkGuardianAcceptMessage.owner_principal_id` | `crates/ramflux-sdk/src/client/recovery.rs:67` | `GuardianAccept.owner_principal_id = 5` | `string` |
+| `SdkGuardianAcceptMessage.guardian_principal_id` | `crates/ramflux-sdk/src/client/recovery.rs:68` | `GuardianAccept.guardian_principal_id = 6` | `string` |
+| `SdkGuardianAcceptMessage.guardian_device_id` | `crates/ramflux-sdk/src/client/recovery.rs:69` | `GuardianAccept.guardian_device_id = 7` | `string` |
+| `SdkGuardianAcceptMessage.guardian_device_epoch` | `crates/ramflux-sdk/src/client/recovery.rs:70` | `GuardianAccept.guardian_device_epoch = 8` | `uint64` |
+| `SdkGuardianAcceptMessage.guardian_device_public_key_base64url` | `crates/ramflux-sdk/src/client/recovery.rs:71` | `GuardianAccept.guardian_device_public_key_base64url = 9` | `string` |
+| `SdkGuardianAcceptMessage.recovery_quorum_id` | `crates/ramflux-sdk/src/client/recovery.rs:72` | `GuardianAccept.recovery_quorum_id = 10` | `string` |
+| `SdkGuardianAcceptMessage.accepted_at` | `crates/ramflux-sdk/src/client/recovery.rs:73` | `GuardianAccept.accepted_at = 11` | `int64` |
+| `SdkGuardianAcceptMessage.signed` | `crates/ramflux-sdk/src/client/recovery.rs:75` | `GuardianAccept.signed = 12` | `SignedFields` |
+#### Mapping source: `crates/ramflux-sdk/src/own_device_sync.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `SdkOwnDeviceGroupSnapshot.shared_state` | `crates/ramflux-sdk/src/own_device_sync.rs:91` | `SdkOwnDeviceGroupSnapshot.shared_state = 1` | `optional NativeGroupSnapshot` |
+| `SdkOwnDeviceGroupSnapshot.group_id` | `crates/ramflux-sdk/src/own_device_sync.rs:92` | `SdkOwnDeviceGroupSnapshot.group_id = 2` | `string` |
+| `SdkOwnDeviceGroupSnapshot.group_epoch` | `crates/ramflux-sdk/src/own_device_sync.rs:93` | `SdkOwnDeviceGroupSnapshot.group_epoch = 3` | `uint64` |
+| `SdkOwnDeviceGroupSnapshot.max_members` | `crates/ramflux-sdk/src/own_device_sync.rs:94` | `SdkOwnDeviceGroupSnapshot.max_members = 4` | `uint32` |
+| `SdkOwnDeviceGroupSnapshot.new_member_history` | `crates/ramflux-sdk/src/own_device_sync.rs:95` | `SdkOwnDeviceGroupSnapshot.new_member_history = 5` | `string` |
+| `SdkOwnDeviceGroupSnapshot.local_role` | `crates/ramflux-sdk/src/own_device_sync.rs:96` | `SdkOwnDeviceGroupSnapshot.local_role = 6` | `string` |
+| `SdkOwnDeviceGroupSnapshot.local_joined_epoch` | `crates/ramflux-sdk/src/own_device_sync.rs:97` | `SdkOwnDeviceGroupSnapshot.local_joined_epoch = 7` | `uint64` |
+| `SdkOwnDeviceGroupSnapshot.members` | `crates/ramflux-sdk/src/own_device_sync.rs:98` | `SdkOwnDeviceGroupSnapshot.members = 8` | `repeated SdkOwnDeviceGroupMemberSnapshot` |
+| `SdkOwnDeviceGroupSnapshot.routes` | `crates/ramflux-sdk/src/own_device_sync.rs:99` | `SdkOwnDeviceGroupSnapshot.routes = 9` | `repeated LocalBusGroupMemberRoute` |
+| `SdkOwnDeviceGroupMemberPin.group_id` | `crates/ramflux-sdk/src/own_device_sync.rs:106` | `SdkOwnDeviceGroupMemberPin.group_id = 1` | `string` |
+| `SdkOwnDeviceGroupMemberPin.device_id` | `crates/ramflux-sdk/src/own_device_sync.rs:107` | `SdkOwnDeviceGroupMemberPin.device_id = 2` | `string` |
+| `SdkOwnDeviceGroupMemberPin.signing_public_key` | `crates/ramflux-sdk/src/own_device_sync.rs:108` | `SdkOwnDeviceGroupMemberPin.signing_public_key = 3` | `string` |
+| `SdkOwnDeviceGroupMemberPin.principal_id` | `crates/ramflux-sdk/src/own_device_sync.rs:109` | `SdkOwnDeviceGroupMemberPin.principal_id = 4` | `optional string` |
+| `SdkOwnDeviceGroupMemberPin.principal_commitment` | `crates/ramflux-sdk/src/own_device_sync.rs:110` | `SdkOwnDeviceGroupMemberPin.principal_commitment = 5` | `optional string` |
+| `SdkOwnDeviceGroupMemberSnapshot.member_id` | `crates/ramflux-sdk/src/own_device_sync.rs:115` | `SdkOwnDeviceGroupMemberSnapshot.member_id = 1` | `string` |
+| `SdkOwnDeviceGroupMemberSnapshot.role` | `crates/ramflux-sdk/src/own_device_sync.rs:116` | `SdkOwnDeviceGroupMemberSnapshot.role = 2` | `string` |
+| `SdkOwnDeviceGroupMemberSnapshot.joined_epoch` | `crates/ramflux-sdk/src/own_device_sync.rs:117` | `SdkOwnDeviceGroupMemberSnapshot.joined_epoch = 3` | `uint64` |
+#### Mapping source: `crates/ramflux-sdk/src/bus/protocol.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `LocalBusGroupMemberRoute.member_id` | `crates/ramflux-sdk/src/bus/protocol.rs:647` | `LocalBusGroupMemberRoute.member_id = 1` | `string` |
+| `LocalBusGroupMemberRoute.member_principal_commitment` | `crates/ramflux-sdk/src/bus/protocol.rs:649` | `LocalBusGroupMemberRoute.member_principal_commitment = 2` | `optional string` |
+| `LocalBusGroupMemberRoute.device_signing_public_key` | `crates/ramflux-sdk/src/bus/protocol.rs:651` | `LocalBusGroupMemberRoute.device_signing_public_key = 3` | `optional string` |
+| `LocalBusGroupMemberRoute.target_delivery_id` | `crates/ramflux-sdk/src/bus/protocol.rs:653` | `LocalBusGroupMemberRoute.target_delivery_id = 4` | `optional string` |
+| `LocalBusGroupMemberRoute.federation` | `crates/ramflux-sdk/src/bus/protocol.rs:655` | `LocalBusGroupMemberRoute.federation = 5` | `optional LocalBusFederationRoute` |
+#### Mapping source: `crates/ramflux-sdk/src/group.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `SdkGroupSenderKeyDistribution.schema` | `crates/ramflux-sdk/src/group.rs:10` | `GroupKeyDistribution.schema = 1` | `string` |
+| `SdkGroupSenderKeyDistribution.version` | `crates/ramflux-sdk/src/group.rs:11` | `GroupKeyDistribution.version = 2` | `uint32` |
+| `SdkGroupSenderKeyDistribution.group_id` | `crates/ramflux-sdk/src/group.rs:12` | `GroupKeyDistribution.group_id = 3` | `string` |
+| `SdkGroupSenderKeyDistribution.sender_id` | `crates/ramflux-sdk/src/group.rs:13` | `GroupKeyDistribution.sender_id = 4` | `string` |
+| `SdkGroupSenderKeyDistribution.group_key_epoch` | `crates/ramflux-sdk/src/group.rs:14` | `GroupKeyDistribution.group_key_epoch = 5` | `uint64` |
+| `SdkGroupSenderKeyDistribution.group_state_hash` | `crates/ramflux-sdk/src/group.rs:16` | `GroupKeyDistribution.group_state_hash = 6` | `optional string` |
+| `SdkGroupSenderKeyDistribution.sender_key_seed` | `crates/ramflux-sdk/src/group.rs:17` | `GroupKeyDistribution.sender_key_seed = 7` | `bytes` |
+| `SdkGroupSenderKeyDistribution.sender_key_signature` | `crates/ramflux-sdk/src/group.rs:19` | `GroupKeyDistribution.sender_key_signature = 8` | `optional string` |
+| `SdkGroupSenderKeyDistribution.sender_device_signing_public_key` | `crates/ramflux-sdk/src/group.rs:21` | `GroupKeyDistribution.sender_device_signing_public_key = 9` | `optional string` |
+| `SdkGroupSenderKeyDistributionEnvelope.schema` | `crates/ramflux-sdk/src/group.rs:26` | `GroupKeyControl.schema = 1` | `string` |
+| `SdkGroupSenderKeyDistributionEnvelope.version` | `crates/ramflux-sdk/src/group.rs:27` | `GroupKeyControl.version = 2` | `uint32` |
+| `SdkGroupSenderKeyDistributionEnvelope.membership_event_base64` | `crates/ramflux-sdk/src/group.rs:29` | `GroupKeyControl.membership_event = 3` | `NativeGroupEvent` |
+| `SdkGroupSenderKeyDistributionEnvelope.actor_manifest_url` | `crates/ramflux-sdk/src/group.rs:31` | `GroupKeyControl.actor_manifest_url = 4` | `optional string` |
+| `SdkGroupSenderKeyDistributionEnvelope.distribution_base64` | `crates/ramflux-sdk/src/group.rs:32` | `GroupKeyControl.distribution = 5` | `GroupKeyDistribution` |
+#### Mapping source: `crates/ramflux-sdk/src/client/surface/own_history.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `SurfaceExportMetadata.truncated` | `crates/ramflux-sdk/src/client/surface/own_history.rs:12` | `SurfaceExportMetadata.truncated = 1` | `bool` |
+| `SurfaceExportMetadata.next_before` | `crates/ramflux-sdk/src/client/surface/own_history.rs:13` | `SurfaceExportMetadata.next_before = 2` | `optional int64` |
+| `SurfaceExportMetadata.skipped` | `crates/ramflux-sdk/src/client/surface/own_history.rs:14` | `SurfaceExportMetadata.skipped = 3` | `map<string, uint32>` |
+| `SurfaceHistoryExport.controls` | `crates/ramflux-sdk/src/client/surface/own_history.rs:18` | `SurfaceHistoryExport.controls = 1` | `repeated SurfaceDelivery` |
+| `SurfaceHistoryExport.checkpoints` | `crates/ramflux-sdk/src/client/surface/own_history.rs:19` | `SurfaceHistoryExport.checkpoints = 2` | `repeated OwnedSurfaceCheckpoint` |
+| `SurfaceHistoryExport.metadata` | `crates/ramflux-sdk/src/client/surface/own_history.rs:20` | `SurfaceHistoryExport.metadata = 3` | `SurfaceExportMetadata` |
+#### Mapping source: `crates/ramflux-sdk/src/client/surface/own_checkpoint.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `OwnedSurfaceCheckpoint.record` | `crates/ramflux-sdk/src/client/surface/own_checkpoint.rs:13` | `OwnedSurfaceCheckpoint.record = 1` | `StoredSurface` |
+| `OwnedSurfaceCheckpoint.snapshot_wire_base64` | `crates/ramflux-sdk/src/client/surface/own_checkpoint.rs:14` | `OwnedSurfaceCheckpoint.snapshot_event = 2` | `SurfaceEvent` |
+| `OwnedSurfaceCheckpoint.version` | `crates/ramflux-sdk/src/client/surface/own_checkpoint.rs:15` | `OwnedSurfaceCheckpoint.version = 3` | `uint64` |
+| `OwnedSurfaceCheckpoint.surface_hash` | `crates/ramflux-sdk/src/client/surface/own_checkpoint.rs:16` | `OwnedSurfaceCheckpoint.surface_hash = 4` | `string` |
+| `OwnedSurfaceCheckpoint.conversation` | `crates/ramflux-sdk/src/client/surface/own_checkpoint.rs:17` | `OwnedSurfaceCheckpoint.conversation = 5` | `JsonValue` |
+| `OwnedSurfaceCheckpoint.group_epoch` | `crates/ramflux-sdk/src/client/surface/own_checkpoint.rs:18` | `OwnedSurfaceCheckpoint.group_epoch = 6` | `optional uint64` |
+#### Mapping source: `crates/ramflux-sdk/src/client/surface/mod.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `StoredSurface.surface_id` | `crates/ramflux-sdk/src/client/surface/mod.rs:39` | `StoredSurface.surface_id = 1` | `string` |
+| `StoredSurface.conversation_id` | `crates/ramflux-sdk/src/client/surface/mod.rs:40` | `StoredSurface.conversation_id = 2` | `string` |
+| `StoredSurface.author_principal_id` | `crates/ramflux-sdk/src/client/surface/mod.rs:41` | `StoredSurface.author_principal_id = 3` | `string` |
+| `StoredSurface.author_device_id` | `crates/ramflux-sdk/src/client/surface/mod.rs:42` | `StoredSurface.author_device_id = 4` | `string` |
+| `StoredSurface.checkpoint_base64` | `crates/ramflux-sdk/src/client/surface/mod.rs:43` | `StoredSurface.checkpoint = 5` | `SurfaceCheckpoint` |
+| `StoredSurface.created_at` | `crates/ramflux-sdk/src/client/surface/mod.rs:45` | `StoredSurface.created_at = 6` | `optional int64` |
+| `StoredSurface.updated_at` | `crates/ramflux-sdk/src/client/surface/mod.rs:47` | `StoredSurface.updated_at = 7` | `optional int64` |
+#### Mapping source: `crates/ramflux-sdk/src/client/task/own_history.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `TaskExportMetadata.truncated` | `crates/ramflux-sdk/src/client/task/own_history.rs:14` | `TaskExportMetadata.truncated = 1` | `bool` |
+| `TaskExportMetadata.skipped_items` | `crates/ramflux-sdk/src/client/task/own_history.rs:15` | `TaskExportMetadata.skipped_items = 2` | `uint32` |
+| `TaskExportMetadata.next_cursor` | `crates/ramflux-sdk/src/client/task/own_history.rs:16` | `TaskExportMetadata.next_cursor = 3` | `optional string` |
+#### Mapping source: `crates/ramflux-sdk/src/prekey/manifest.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `SdkDeviceManifestResponse.custody` | `crates/ramflux-sdk/src/prekey/manifest.rs:40` | `NativeDeviceManifest.custody = 1` | `optional NativeCustodyManifest` |
+| `SdkDeviceManifestResponse.signed_device_set` | `crates/ramflux-sdk/src/prekey/manifest.rs:42` | `NativeDeviceManifest.signed_device_set = 2` | `optional NativeSignedDeviceSet` |
+| `SdkDeviceManifestResponse.principal_id` | `crates/ramflux-sdk/src/prekey/manifest.rs:43` | `NativeDeviceManifest.principal_id = 3` | `string` |
+| `SdkDeviceManifestResponse.principal_commitment` | `crates/ramflux-sdk/src/prekey/manifest.rs:44` | `NativeDeviceManifest.principal_commitment = 4` | `string` |
+| `SdkDeviceManifestResponse.root_public_key` | `crates/ramflux-sdk/src/prekey/manifest.rs:45` | `NativeDeviceManifest.root_public_key = 5` | `string` |
+| `SdkDeviceManifestResponse.devices` | `crates/ramflux-sdk/src/prekey/manifest.rs:46` | `NativeDeviceManifest.devices = 6` | `repeated ManifestDevice` |
+| `SdkDeviceManifestEntry.principal_id` | `crates/ramflux-sdk/src/prekey/manifest.rs:13` | `ManifestDevice.principal_id = 1` | `string` |
+| `SdkDeviceManifestEntry.principal_commitment` | `crates/ramflux-sdk/src/prekey/manifest.rs:14` | `ManifestDevice.principal_commitment = 2` | `string` |
+| `SdkDeviceManifestEntry.device_id` | `crates/ramflux-sdk/src/prekey/manifest.rs:15` | `ManifestDevice.device_id = 3` | `string` |
+| `SdkDeviceManifestEntry.device_epoch` | `crates/ramflux-sdk/src/prekey/manifest.rs:16` | `ManifestDevice.device_epoch = 4` | `uint64` |
+| `SdkDeviceManifestEntry.branch_public_key` | `crates/ramflux-sdk/src/prekey/manifest.rs:17` | `ManifestDevice.branch_public_key = 5` | `string` |
+| `SdkDeviceManifestEntry.target_delivery_id` | `crates/ramflux-sdk/src/prekey/manifest.rs:18` | `ManifestDevice.target_delivery_id = 6` | `string` |
+| `SdkDeviceManifestEntry.branch_proof` | `crates/ramflux-sdk/src/prekey/manifest.rs:20` | `ManifestDevice.branch_proof = 7` | `optional NativeBranchProof` |
+| `SdkDeviceManifestEntry.prekey_bundle` | `crates/ramflux-sdk/src/prekey/manifest.rs:21` | `ManifestDevice.prekey_bundle = 8` | `NativePrekeyBundle` |
+| `SdkDeviceManifestEntry.branch_authorized_event_id` | `crates/ramflux-sdk/src/prekey/manifest.rs:22` | `ManifestDevice.branch_authorized_event_id = 9` | `string` |
+#### Mapping source: `crates/ramflux-protocol/src/core_types.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `SignatureAlg::Ed25519` | `crates/ramflux-protocol/src/core_types.rs:20` | `SignatureAlg.ed25519 = 1` | `SignatureAlgEd25519 (empty)` |
+#### Mapping source: `crates/ramflux-storage/src/records/friend.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `FriendLinkRecord.link_id` | `crates/ramflux-storage/src/records/friend.rs:8` | `FriendLinkRecord.link_id = 1` | `string` |
+| `FriendLinkRecord.requester_id` | `crates/ramflux-storage/src/records/friend.rs:9` | `FriendLinkRecord.requester_id = 2` | `string` |
+| `FriendLinkRecord.target_id` | `crates/ramflux-storage/src/records/friend.rs:10` | `FriendLinkRecord.target_id = 3` | `string` |
+| `FriendLinkRecord.state` | `crates/ramflux-storage/src/records/friend.rs:11` | `FriendLinkRecord.state = 4` | `string` |
+| `FriendLinkRecord.remove_scope` | `crates/ramflux-storage/src/records/friend.rs:13` | `FriendLinkRecord.remove_scope = 5` | `optional string` |
+| `FriendLinkRecord.blocked` | `crates/ramflux-storage/src/records/friend.rs:15` | `FriendLinkRecord.blocked = 6` | `bool` |
+| `FriendLinkRecord.capability_revoked_at` | `crates/ramflux-storage/src/records/friend.rs:17` | `FriendLinkRecord.capability_revoked_at = 7` | `optional int64` |
+#### Mapping source: `crates/ramflux-protocol/src/surfaces.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `McpCapability::ReadConversation` | `crates/ramflux-protocol/src/surfaces.rs:297` | `McpCapability.read_conversation = 1` | `McpCapabilityReadConversation (empty)` |
+| `McpCapability::DraftMessage` | `crates/ramflux-protocol/src/surfaces.rs:298` | `McpCapability.draft_message = 2` | `McpCapabilityDraftMessage (empty)` |
+| `McpCapability::SendMessage` | `crates/ramflux-protocol/src/surfaces.rs:299` | `McpCapability.send_message = 3` | `McpCapabilitySendMessage (empty)` |
+| `McpCapability::ReadLocalFiles` | `crates/ramflux-protocol/src/surfaces.rs:300` | `McpCapability.read_local_files = 4` | `McpCapabilityReadLocalFiles (empty)` |
+| `McpCapability::WriteLocalFiles` | `crates/ramflux-protocol/src/surfaces.rs:301` | `McpCapability.write_local_files = 5` | `McpCapabilityWriteLocalFiles (empty)` |
+| `McpCapability::RunShell` | `crates/ramflux-protocol/src/surfaces.rs:302` | `McpCapability.run_shell = 6` | `McpCapabilityRunShell (empty)` |
+| `McpCapability::ManageContacts` | `crates/ramflux-protocol/src/surfaces.rs:303` | `McpCapability.manage_contacts = 7` | `McpCapabilityManageContacts (empty)` |
+| `McpCapability::ManageGroup` | `crates/ramflux-protocol/src/surfaces.rs:304` | `McpCapability.manage_group = 8` | `McpCapabilityManageGroup (empty)` |
+| `McpCapability::ManageMedia` | `crates/ramflux-protocol/src/surfaces.rs:305` | `McpCapability.manage_media = 9` | `McpCapabilityManageMedia (empty)` |
+| `McpCapability::ManageNode` | `crates/ramflux-protocol/src/surfaces.rs:306` | `McpCapability.manage_node = 10` | `McpCapabilityManageNode (empty)` |
+| `McpCapability::ExternalToolInvoke` | `crates/ramflux-protocol/src/surfaces.rs:307` | `McpCapability.external_tool_invoke = 11` | `McpCapabilityExternalToolInvoke (empty)` |
+| `RiskLevel::Low` | `crates/ramflux-protocol/src/surfaces.rs:288` | `RiskLevel.low = 1` | `RiskLevelLow (empty)` |
+| `RiskLevel::Medium` | `crates/ramflux-protocol/src/surfaces.rs:289` | `RiskLevel.medium = 2` | `RiskLevelMedium (empty)` |
+| `RiskLevel::High` | `crates/ramflux-protocol/src/surfaces.rs:290` | `RiskLevel.high = 3` | `RiskLevelHigh (empty)` |
+| `RiskLevel::Critical` | `crates/ramflux-protocol/src/surfaces.rs:291` | `RiskLevel.critical = 4` | `RiskLevelCritical (empty)` |
+#### Mapping source: `crates/ramflux-protocol/src/events.rs`
+
+| Live field / variant | Baseline source | Proto field / tag | Proto type / nested fields |
+|---|---|---|---|
+| `RecoveryQuorumMemberKind::RootShare` | `crates/ramflux-protocol/src/events.rs:12` | `RecoveryQuorumMemberKind.root_share = 1` | `RecoveryQuorumMemberKindRootShare (empty)` |
+| `RecoveryQuorumMemberKind::DeviceShare` | `crates/ramflux-protocol/src/events.rs:13` | `RecoveryQuorumMemberKind.device_share = 2` | `RecoveryQuorumMemberKindDeviceShare (empty)` |
+| `RecoveryQuorumMemberKind::GuardianShare` | `crates/ramflux-protocol/src/events.rs:14` | `RecoveryQuorumMemberKind.guardian_share = 3` | `RecoveryQuorumMemberKindGuardianShare (empty)` |
+| `RecoveryQuorumMemberKind::HardwareTokenShare` | `crates/ramflux-protocol/src/events.rs:15` | `RecoveryQuorumMemberKind.hardware_token_share = 4` | `RecoveryQuorumMemberKindHardwareTokenShare (empty)` |
+
+| Live carrier field | Baseline source | Proto selection | Typed replacement |
+|---|---|---|---|
+| `Carrier.payload_kind` | `crates/ramflux-sdk/src/client/surface/carrier.rs:26` | `SurfaceCarrier.payload: event=16 / action=17 / action_receipt=18` | Exactly one typed arm |
+| `Carrier.wire_base64` | `crates/ramflux-sdk/src/client/surface/carrier.rs:33` | `SurfaceCarrier.event / action / action_receipt` | SurfaceEvent / SurfaceAction / original SurfaceCarrier; decoded from former base64 transport |
+
+No live business field is declared obsolete. The following exclusions are
+explicit local-only state, not silent wire deletions:
+
+| Local field | Baseline source | Disposition |
+|---|---|---|
+| `Packet.local_expires_at` | `crates/ramflux-sdk/src/client/task/approval.rs:35` | Receiver-local retention deadline; bytes() always clears it. Reserve tag 5; never trust a peer deadline. |
+| `TaskHistory.checkpoint` | `crates/ramflux-sdk/src/client/task/mod.rs:51` | Local-only #[serde(skip)] checkpoint; never exported in TaskOwnPacket. |
+
+SurfaceCarrier's former payload_kind and wire_base64 are represented together
+by event=16, action=17 or action_receipt=18. An action_receipt recursively holds
+the original **action** carrier only; bound recursion to one receipt level and
+verify the creator receipt plus original requester signature. Snapshot proof
+checkpoint/finality and all six commands/five patch operations remain typed.
+Surface.own_history=18
+preserves SurfaceHistoryExport, OwnedSurfaceCheckpoint and export omission/cursor
+metadata. Task.own_history=19 preserves TaskHistoryExport packets plus typed
+TaskExportMetadata (truncated/skipped_items/next_cursor).
+SurfaceResyncRequest.kind retains the fixed legacy discriminator as data to
+validate, never a dispatch key. New wire dispatch is Surface.resync_request=17;
+its reply is the author-signed Surface.delivery snapshot, not a seventh command.
+TaskCarrier.decision_proof presence remains optional by message presence.
+TaskHistory.checkpoint is local-only and TaskApprovalPacket.local_expires_at is
+always cleared by the live egress builder; their reasons are listed above.
+CallControl has all thirteen CallAction arms and exact native lease fields.
+VoiceAllocation token/rebind_key/side never crossed peer CallControl: they stay
+in the authenticated gateway VoiceLeaseResponse, outside this Inner schema.
+There is no ICE or codec negotiation in the live relay call signaling contract.
+
+### 3.2 Control constructor and native-codec registry
+
+Every ControlOperation is layer 1 and has exactly the generated payload below.
+The two additional live families A2I and object revocation are explicit, as are
+all four group control variants. Native validation precedes side effects and
+Unsupported storage; a wrapper never makes unverified native bytes authoritative.
+
+| ControlOperation number/name | Control oneof field/tag/type | Live mapping / fixed validation |
+|---|---|---|
+| 1 CONTROL_PAIR_RESET | `reset = 16: PairReset` | pair.session.reset.v1; rejected_bootstrap_floor; routed/reset_work.rs |
+| 2 CONTROL_PAIR_RESET_ACK | `reset_ack = 17: PairResetAck` | pair.session.reset.ack.v1; floor=0 in current sender |
+| 3 CONTROL_CONTACT | `contact_control = 18: ContactControl` | NativeContactConsent = custody::Envelope<ContactConsentV2>; native first-contact path; legacy root JSON consent is retired on v3 reset |
+| 4 CONTROL_GROUP_STATE | `group_state = 19: GroupStateControl` | GroupControlBody request=1/result=2/device_set=3/transfer=4; tables above include federation route, beacon epoch and Transfer Probe/Head |
+| 5 CONTROL_GROUP_KEY | `group_key_control = 20: GroupKeyControl` | GroupKeyControl and GroupKeyDistribution mirror SDK v4 distribution, typed membership event, manifest URL and seed/signature bindings |
+| 6 CONTROL_OWN_CONTACT | `own_contact_sync = 21: OwnContactSync` | Contact manifest + full FriendLinkRecord; same-root import |
+| 7 CONTROL_OWN_HISTORY | `own_history = 22: HistoryPage` | Registered exact Inner pages plus origin evidence; old bundle fields mapped in section 8 |
+| 8 CONTROL_HOME_MIGRATION | `home_migration = 23: HomeMigrationControl` | NativeHomeAuthorization = protocol::home_migration::Signed<Authorization>; reserved typed application handoff, no current Inner producer |
+| 9 CONTROL_RECOVERY | `recovery_control = 24: RecoveryControl` | GuardianInvite/GuardianAccept, including secret share and all signer fields in section 3.1 |
+| 10 CONTROL_LIVE_PRESENCE | `live_presence = 25: LivePresence` | Planned epoch/subjects; ephemeral only; not a live producer claim |
+| 11 CONTROL_A2I | `a2i = 26: A2iControlEvent` | All fields plus Message/Conversation/A2ui/McpTool domain oneof; signed provenance retained |
+| 12 CONTROL_OBJECT_REVOKE | `object_revoke = 27: ObjectRevokeAccess` | object.revoke_access object/recipient/link/reason/effective_at; verify sender owns received reference |
+| 13 CONTROL_OWN_CONTACT_TOMBSTONE | `own_contact_tombstone = 28: OwnContactTombstone` | Sticky FriendLinkRecord restriction with decided_at |
+| 14 CONTROL_OWN_GROUP_CONSENT | `own_group_consent = 29: OwnGroupConsent` | Same-root signed actor/snapshot/acceptance/issued_at/expires_at |
+| 15 CONTROL_OWN_MESSAGE_COPY | `own_message_copy = 30: OwnMessageCopy` | Original exact Inner + source/target/times; authenticated same-root copy replaces private wrapper/key slots |
+| 16 CONTROL_FRIEND | `friend = 31: FriendControl` | friend.requested/accepted/removed/blocked/unblocked; all link fields and scope preserved |
+
+Native codecs are named, single-type adapters, not open application payloads:
+NativeDeviceManifest mirrors every SDK manifest response field; its
+CustodyManifest, SignedDeviceSetRecord, PrekeyBundle and BranchProofDocument
+proof leaves use fixed Native* canonical codecs and native custody validation. NativeGroupActor, NativeGroupSnapshot,
+NativeGroupChangeRequest, NativeGroupChangeResult and
+NativeGroupTransferAcceptance keep their protocol group_state canonical JSON
+and signature grammar. The typed GroupControlBody and TransferControl select
+which adapter is used before inspecting those bytes. NativeContactConsent uses
+its protocol canonical JSON codec. NativeGroupEvent is the existing signed
+protocol GroupEvent; GroupKeyDistribution
+is fully typed above, never a generic native blob. NativeHomeAuthorization is
+Signed<home_migration::Authorization>, with the existing canonical signed codec;
+its application handoff is planned, not a claimed live peer message producer.
+All enforce their current native limits plus the aggregate envelope cap. No
+schema string is used to choose a codec. A future independently owned native
+revision requires a new named field/layer, never an in-place reinterpretation.
+Section 8 lists sources and retirement of obsolete app wrappers around them.
+
+The fixed proof codec authorities (all at the baseline SHA) are:
+
+| Generated proof leaf | Fixed native type / source | Allowed codec |
+|---|---|---|
+| NativeCustodyManifest | CustodyManifest, `crates/ramflux-protocol/src/custody/network.rs:144` | Native custody canonical JSON + verified publication/authority |
+| NativeSignedDeviceSet | SignedDeviceSetRecord, `crates/ramflux-protocol/src/identity_keys.rs:44` | Existing signed device-set canonical JSON; native admission rejects legacy authority |
+| NativePrekeyBundle | PrekeyBundle, `crates/ramflux-crypto/src/prekey.rs:52` | Existing crypto prekey codec; DM-FS revision/retirement remains that owner's work |
+| NativeBranchProof | BranchProofDocument, `crates/ramflux-crypto/src/identity.rs:80` | Existing signed branch-proof codec; no legacy-authority fallback |
+| NativeGroupActor | GroupStateActor, `crates/ramflux-protocol/src/group_state.rs:90` | Native group canonical JSON/proof grammar |
+| NativeGroupSnapshot | GroupStateSnapshot, `crates/ramflux-protocol/src/group_state.rs:149` | Native signed group snapshot codec |
+| NativeGroupChangeRequest | GroupChangeRequest, `crates/ramflux-protocol/src/group_state.rs:166` | Native signed group request codec |
+| NativeGroupChangeResult | GroupChangeResult, `crates/ramflux-protocol/src/group_state.rs:191` | Native signed group result codec |
+| NativeGroupTransferAcceptance | GroupTransferAcceptance, `crates/ramflux-protocol/src/group_state.rs:122` | Native signed group transfer acceptance codec |
+| NativeContactConsent | custody::Envelope<ContactConsentV2>, `crates/ramflux-protocol/src/custody/contact.rs:21` | Native custody envelope codec; exact type already selected |
+| NativeGroupEvent | protocol::GroupEvent uses GroupEventBody, `crates/ramflux-protocol/src/events.rs:208` | Existing signed native membership event, not arbitrary application bytes |
+| NativeHomeAuthorization | home_migration::Signed<Authorization>, `crates/ramflux-protocol/src/home_migration/messages.rs:184` | Existing home migration signed canonical codec; planned handoff |
+
+These proof codecs are outside S0's application-field numbering. They never
+contain an SDK application carrier; the owning native validator rejects a wrong
+type/schema, unknown native field or bad signature before any application action.
+HistoryItem.exact_inner is the explicit raw-retention exception. Its typed
+source_evidence is HistoryOriginEvidence: canonical_sender_envelope is exactly
+the independently sender-signed outer-envelope JCS codec in section 6; the other
+fields select native custody/group proof codecs above. The importer verifies the
+original source, membership and copy binding before retaining/reparsing Inner.
+There is no arbitrary proof-bundle decoder or replacement application body.
+All new application controls and their variant numbering are concrete above.
+
+For every sub-operation listed in section 3.1/3.2: first layer=1, outer class is
+message/durable except CallAction.Invite→call_wake, and LivePresence→ephemeral.
+Below layer 1 refuse locally with PeerUpgradeRequired, never executable text.
+All S10b clients support every one of these operations at mandatory floor 3.
+Unknown future operations require a new layer and Unsupported/raw retention;
+known operations keep current role, authorization, signature and size checks.
+S12 uses these same generated fields; S10c renders only the public projection.
+Section 4.1 and 10.1 incorporate this per-operation registry by reference.
 
 ## 4. Layers, selection and downgrade
 
@@ -908,8 +2791,16 @@ wire/semantic contract, not merely proof that a generated struct can be parsed.
 | 8 | Control | 1 | Local PeerUpgradeRequired; no text substitute for authenticated commands | S6 mode validation; S11 generic wake; S12 control update |
 | 9 | Surface | 1 | Local PeerUpgradeRequired for the authenticated operation | S11 generic wake; S12 generated surface state |
 | 10 | Task | 1 | Local PeerUpgradeRequired for the authenticated operation | S11 generic wake; S12 generated task state |
-| 11 | Call | 1 | Refuse invite with PeerUpgradeRequired | S6 live ICE; S11 call_wake for invite; S12 Call |
+| 11 | Call | 1 | Refuse invite with PeerUpgradeRequired | S11 call_wake for Invite; S12 CallControl and all 13 actions |
 | 12 | SelfSync | 1 | Local PeerUpgradeRequired; never apply a text surrogate to own state | S11 generic wake; S12 read/draft/pin/mute |
+
+| Declaration / scope | Selected layer | Profile floor | Downgrade behavior | Isolation |
+|---|---|---|---|---|
+| Missing/expired declaration (all kinds) | Per-target F | F=1 in S10a, F=3 after S10b | Encode that target at F using the rows above; never LayerUnavailable, never lower a whole fan-out | Preserve every fresh-cohort target at its negotiated minimum; original logical identity is shared |
+
+The per-operation registry in sections 3.1/3.2 is part of this downgrade/consumer
+table: every Surface command/receipt/resync, Task event/approval/control/history,
+Call action and Control payload has layer 1 and the stated refusal below it.
 
 Layer 1 also contains Message.sealed_group (field 16). This replaces the SDK
 sender-key JSON wrapper, not the reviewed group encryption primitive. Encode a
@@ -920,7 +2811,7 @@ entities, reply, forward or media; its decrypted Message cannot recursively
 contain sealed_group. Group metadata and the existing group crypto header thus
 remain inside the pair AEAD. The current producer is
 `crates/ramflux-sdk/src/client/group_session.rs:617`; its old struct is
-`crates/ramflux-sdk/src/group.rs:55`. Canonical_crypto_header is the crypto-owned
+`crates/ramflux-sdk/src/group.rs:50`. Canonical_crypto_header is the crypto-owned
 canonical header, not an SDK JSON blob. Author/epoch/state hash and original
 native evidence must verify against the current group access contract; pair
 contact consent is not newly required for authorized non-contact group members.
@@ -931,11 +2822,14 @@ A group report additionally needs the existing per-message group opening and
 native author evidence to verify the rendered plaintext; never disclose a group
 master key. A receipt over group ciphertext alone proves no claimed excerpt.
 
+Reaction.token is exactly one extended grapheme cluster (Unicode UAX #29),
+1..64 UTF-8 bytes, with no controls or whitespace-only value. Both add and remove
+validate the same token without normalization; no unbounded multi-emoji string.
+
 Entity offsets and lengths are **Unicode scalar values**. Validate UTF-8 once,
 construct a scalar-to-byte index once, then validate at most 4,096 ranges in
 linear work. Only Web/iOS adapters translate to UTF-16 code units. For example
-`A😀é` has scalar offsets 0,1,2 and UTF-16 offsets 0,1,3. Entity.unknown or an
-unrecognized kind makes the whole message Unsupported, preserving exact bytes.
+`A😀é` has scalar offsets 0,1,2 and UTF-16 offsets 0,1,3. An unrecognized Entity.kind number makes the whole message Unsupported, preserving exact bytes.
 No renderer interprets an unknown entity as a URL or command.
 
 Layer 1 Message media uses MediaRef fields 1–6. Layer 2 adds inline_thumbnail
@@ -951,22 +2845,24 @@ require a new layer even when protobuf itself would permit ignoring them.
 
 | State / trigger | Required action | Persistent trust / recovery |
 |---|---|---|
-| Fresh native device | Build/sign LayerDeclaration and obtain endorsement in native Device record before message networking | Pin current native head, device epoch and declaration sequence |
-| DM send | Read verified fresh declarations for source and every target device; select their minimum, bounded by compiled support | Missing/expired/foreign statement: LayerUnavailable; refresh outside local-read path |
-| Own-device send/history | Take the minimum over source and all included own devices, including a newly admitted sibling | Same-root authorization remains mandatory; unknown raw history is preserved with provenance |
-| Group send | Snapshot current signed membership/epochs plus all target device declarations; select one group minimum | Recheck the snapshot before seal/commit; never split semantics by selecting each device independently |
-| Membership/declaration changes before submit | Discard unsubmitted prepared representation and rebuild at the new minimum | No previously accepted envelope is silently rewritten |
-| Membership changes after accepted submission | Existing authorized packet remains a historical submission under its authenticated epoch; additions get later history/own-copy delivery | Existing history floors, removal and revocation fences still govern access |
-| Incoming layer above effective receive maximum | Transactionally retain Unsupported and exact Inner, then ACK | UI shows “This message needs a newer version”; upgrade/re-publish then bounded local reparse |
-| Legitimate application rollback | Current device signs a higher-sequence lower declaration and owner endorses a newer native head | Never accept lower sequence/head; code cannot claim a layer above its compiled support |
-| Lost holder / expired declaration | Suspend new sends with LayerUnavailable; keep readable history local | Unlock signing holder or attended native recovery/enrollment, publish endorsed statement, refresh pins |
-| Restore / own-history import | Treat saved declarations as historical evidence only | Fetch live native head and declaration floors anew; do not activate stale archive capability |
+| Fresh native device | Admit native identity and pin authority; publish signed max_layer when available | No declaration still permits F messaging; publication enables above-floor selection |
+| DM send | Fresh cohort uses min(source support, all fresh target maxima); a missing/expired target independently uses F | Declaration absence/expiry NEVER yields LayerUnavailable; reject forged statements without resetting pins |
+| Own-device send/history | Same fresh-cohort rule; each missing/expired sibling receives F only for itself | Same-root authorization, provenance and erasure fences remain mandatory |
+| Group send | Snapshot signed membership/epochs; negotiate fresh-cohort minimum and separate F representations only for missing/expired members | Recheck membership; same logical event, separate sender-key counters/ciphertexts per representation; never downgrade the whole group for a stale member |
+| Membership/declaration changes before submit | Discard affected unsubmitted representation and rebuild its target/cohort assignment | No accepted envelope is silently rewritten; never reuse variant ciphertext counters |
+| Membership changes after accepted submission | Historical packet stays under its authenticated epoch; additions receive authorized later history/copies | Existing history floors, removal and revocation fences still govern access |
+| Incoming layer above effective receive maximum | Retain Unsupported and exact Inner transactionally, then ACK | UI placeholder; upgrade/re-publish then bounded local reparse |
+| Legitimate application rollback | Higher-sequence signed lower maximum >=F, endorsed by newer native head | Reject older/equal-conflicting sequences/heads; compiled support bounds advertising |
+| Lost holder / expired declaration | Continue floor sends; refresh only to restore above-floor selection | Unlock or attended recovery/enrollment restores signing/publication; layer freshness never blocks delivery |
+| Restore / own-history import | Saved declarations are historical only; refresh native authority/floors | Never import stale archive capability as live; F remains available |
 
-Structural controls never become vaguely equivalent text. The minimum can cause
-suppression (Typing), a visible new text event (Reaction/Edit), or a local typed
-refusal (Delete/authorization-bearing work). Nodes never inspect/downgrade Inner.
-After S10b, a target below mandatory crypto layer 3 yields PeerUpgradeRequired;
-message-layer downgrading is not permission to send clear ratchet headers.
+Structural controls never become vaguely equivalent text. Downgrade can suppress
+Typing, emit a visible Reaction/Edit text event or refuse a kind introduced above
+the selected layer; missing declarations themselves never refuse a send. After
+S10b, F=3 supports every kind defined here; no floor send needs such a refusal.
+A genuinely incompatible client below deployed F requires upgrade at admission;
+this is distinct from a client whose declaration expired. No message-layer
+fallback permits clear ratchet headers or revived revoked authority.
 
 ## 5. Cryptographic framing, header encryption and padding
 
@@ -1272,7 +3168,7 @@ Every class flows through the common envelope serialization/router inbox/WAL
 payload (`crates/ramflux-node-core/src/notify.rs:121`) and provider label mapping
 (`apps/ramflux-notify/src/main.rs:3232`). Notification policy also consumes the class for TTL at
 `crates/ramflux-node-core/src/notify.rs:1841`, priority at
-`crates/ramflux-node-core/src/notify.rs:1850`, collapse at
+`crates/ramflux-node-core/src/notify.rs:1851`, collapse at
 `crates/ramflux-node-core/src/notify.rs:1898` and provider hints at
 `crates/ramflux-node-core/src/notify.rs:1927`; VoIP selection is at
 `apps/ramflux-notify/src/main.rs:3215`. Replace these old category-specific
@@ -1297,8 +3193,12 @@ it does not make FederationControl a valid client submission.
 Typing never gets a call_wake or provider notification. A sender's class is not
 proof of the encrypted business kind: the endpoint validates the invitation
 before CallKit presentation, and S11 retains source/route/provider abuse budgets.
-NotificationDeliveryClass's old task/surface/self/conference distinctions collapse
-to generic message notification; call wake remains distinct. Native prekey,
+NotificationDeliveryClass's old task/surface/self distinctions collapse
+to generic message notification. A group-call/conference invitation that needs
+VoIP wake MUST use call_wake too; mapping ConferenceWakeNotification to message
+is forbidden. This class rule does not introduce a conference media protocol: the
+live CallControl contract is one-to-one; later conference signaling must define
+its own reviewed schema/layer before it can produce invites. Native prekey,
 custody, relay and federation service RPCs are outside this client-envelope enum.
 
 ## 7. Metadata leaks before and after
@@ -1345,8 +3245,8 @@ for a wire constructor.
 | task byte prefix | `crates/ramflux-sdk/src/client/task/carrier.rs:9` | Kind 10 Task; S10a |
 | Own/surface/task try-parse chain and schema-switch controls | `crates/ramflux-sdk/src/client/routed/control.rs:36`, `crates/ramflux-sdk/src/client/routed/control.rs:52`, `crates/ramflux-sdk/src/client/routed/control.rs:136` | One numeric constructor dispatch plus its descriptor, never guess by JSON structure; S10a |
 | Unknown control/project rejection and unknown-as-text path | `crates/ramflux-sdk/src/client/routed/project.rs:173`, `docs/client_read_model.md:295` | Transactional Unsupported/raw retention; S10a |
-| MessageEventBody | `crates/ramflux-protocol/src/events.rs:347` | Remove unused parallel event family; Message/Edit/Delete/Reaction/Message.media/Forward map to generated kinds; S10a |
-| ConversationEventBody | `crates/ramflux-protocol/src/events.rs:403` | Generated Service/Control and native authority proof; retain unrelated used identity/group types; S10a |
+| MessageEventBody | `crates/ramflux-protocol/src/events.rs:445` | Remove unused parallel event family; Message/Edit/Delete/Reaction/Message.media/Forward map to generated kinds; S10a |
+| ConversationEventBody | `crates/ramflux-protocol/src/events.rs:347` | Generated Service/Control and native authority proof; retain unrelated used identity/group types; S10a |
 | BotEventBody | `crates/ramflux-protocol/src/surfaces.rs:403` | Generated Surface/Task, not another untagged wire family; S10a |
 | ClientEvent<T> and its only sort helper | `crates/ramflux-protocol/src/core_types.rs:330`, `crates/ramflux-protocol/src/state.rs:51` | Generated MessageUpdate/EventIdentity ordering; remove unused generic wire facade; S10a |
 | NackReason::UnsupportedSchema and its test | `crates/ramflux-protocol/src/core_types.rs:291`, `crates/ramflux-node-core/src/tests/server_retention_r2.rs:51` | Delete variant/fixture; unknown-kind ACK/raw-retention regression; S10a |
@@ -1479,6 +3379,480 @@ all baseline occurrences, so duplicate fixtures do not inflate the distinct set.
 |---|---|---|
 | `ramflux.sdk.home_migration.proposal.v1` | `crates/ramflux-sdk/src/custody/home_authorization.rs:22` | Retain native migration authorization digest; not an application kind. |
 
+### 8.3 Complete version-string audit, including non-SDK owners
+
+The following table extends section 8.2 to the **entire product tree** at the
+fixed base: all 397 distinct quoted `ramflux.*.vN` strings / 1,077 occurrences,
+not just selected schema/type uses. Every baseline location is listed. The
+70 SDK strings already in section 8.2 are not duplicated here. This strict
+superset also accounts for hash domains, storage labels, service RPCs and test
+fixtures: retention of a non-message domain is deliberate, not a new Inner
+codec. Fixed schema strings inside native signature transcripts remain data to
+validate, never a decoder-selection mechanism. Prefix literals with escaped
+terminators are audited separately in section 8.4.
+
+| Literal | All baseline locations | Replacement / retained-domain disposition |
+|---|---|---|
+| `ramflux.a2i.sender.v3` | `crates/ramflux-sdk/src/client/routed/control.rs:259` | Retain verified native A2I sender binding hash; Control.a2i, never a body decoder. |
+| `ramflux.a2i_control.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/a2i_control/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/a2i_control/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/a2i_control/fixture.json:5`, `crates/ramflux-protocol/fixtures/protocol/v1/a2i_control/fixture.json:7`, `crates/ramflux-protocol/fixtures/protocol/v1/a2i_control/negative.invalid_signature.json:5`, `crates/ramflux-protocol/fixtures/protocol/v1/a2i_control/negative.invalid_signature.json:7`, `crates/ramflux-protocol/fixtures/protocol/v1/a2i_control/negative.replay.json:5`, `crates/ramflux-protocol/fixtures/protocol/v1/a2i_control/negative.replay.json:7`, `crates/ramflux-protocol/src/domain.rs:45` | Control.a2i: full A2iControlEvent; retain fixed signing schema/domain, remove JSON try-parse. |
+| `ramflux.a2ui.action.v2` | `apps/ramflux-agent-host/tests/host/surface_bus.rs:48`, `crates/ramflux-protocol/src/a2ui_state/types.rs:13`, `crates/ramflux-protocol/src/a2ui_state/types.rs:21`, `crates/ramflux-sdk/src/client/surface/tests.rs:186`, `crates/ramflux-sdk/src/client/surface/tests/retention.rs:75`, `crates/ramflux-sdk/src/client/task/surface_tests.rs:89`, `crates/ramflux-sdk/src/surface.rs:70` | SurfaceAction (values, args_hash, task_binding); remove wire JSON decoder, keep native hash semantics. |
+| `ramflux.a2ui.action_args.v1` | `crates/ramflux-protocol/src/domain.rs:50`, `crates/ramflux-protocol/src/domain.rs:254` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.a2ui.action_signing_body.v1` | `crates/ramflux-sync/src/a2ui.rs:9` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.a2ui.checkpoint.v2` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:43`, `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:124`, `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:147` | SurfaceCheckpoint: full typed content/finality proof; remove JSON wire checkpoint decoder. |
+| `ramflux.a2ui.conversation.v2` | `crates/ramflux-protocol/src/a2ui_state/state.rs:360`, `crates/ramflux-protocol/src/a2ui_state/types.rs:12`, `crates/ramflux-protocol/src/a2ui_state/types.rs:16`, `crates/ramflux-sdk/src/client/surface/tests.rs:76`, `crates/ramflux-sdk/src/client/surface/tests.rs:428`, `crates/ramflux-sdk/src/client/surface/tests/security.rs:68`, `crates/ramflux-sdk/src/client/task/surface_tests.rs:206` | SurfaceEvent and all six SurfaceCommand arms; retain fixed native hash/signing value, remove old wire decoder. |
+| `ramflux.a2ui.conversation.v3` | `crates/ramflux-protocol/tests/a2ui_state/wire.rs:74` | Remove negative unknown-schema fixture with old JSON decoder; new unknown-arm/raw-retention fixture replaces it. |
+| `ramflux.a2ui.final_component.v1` | `crates/ramflux-protocol/src/domain.rs:48` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.a2ui.final_text.v1` | `crates/ramflux-protocol/src/domain.rs:49`, `crates/ramflux-protocol/tests/a2ui_state/checkpoint.rs:49` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.a2ui.resync_metadata.v1` | `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:77`, `crates/ramflux-protocol/src/a2ui_state/checkpoint.rs:101` | SurfaceResyncMetadata: typed finality proof; remove JSON wire metadata decoder. |
+| `ramflux.a2ui.surface_hash.v1` | `crates/ramflux-protocol/src/domain.rs:47` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.a2ui.v1` | `crates/ramflux-crypto/tests/generate_protocol_fixtures.rs:368`, `crates/ramflux-crypto/tests/generate_protocol_fixtures.rs:404`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/fixture.json:2`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/negative.invalid_signature.json:2`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/negative.replay.json:2`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/fixture.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/negative.invalid_signature.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/negative.replay.json:3`, `crates/ramflux-sdk/src/bus/dispatch/call_bot.rs:362`, `crates/ramflux-sync/src/bot.rs:318` | Retire old application surface body/fixtures; SurfaceEvent v2 semantics only; no legacy compatibility shim. |
+| `ramflux.a2ui_surface.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/fixture.json:7`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/fixture.json:10`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/negative.invalid_signature.json:7`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/negative.invalid_signature.json:10`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/negative.replay.json:7`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/negative.replay.json:10`, `crates/ramflux-protocol/src/domain.rs:46` | Retire parallel A2uiSurfaceEvent wire family; generated Kind 9 Surface. |
+| `ramflux.account.backup.stream.v2` | `crates/ramflux-crypto/src/backup_stream/mod.rs:72`, `crates/ramflux-crypto/src/backup_stream/mod.rs:87` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.account_db_kek.v2` | `crates/ramflux-sdk/src/client/account.rs:314` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.account_db_key.v1` | `crates/ramflux-storage/src/encryption.rs:53` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.account_db_key.wrap.v1` | `crates/ramflux-storage/src/encryption.rs:232`, `crates/ramflux-storage/src/encryption.rs:249` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.ack.v1` | `apps/ramflux-gateway/src/submit_ack_tests.rs:238`, `apps/ramflux-gateway/src/submit_ack_tests.rs:238`, `apps/ramflux-gateway/src/submit_ack_tests.rs:359`, `apps/ramflux-gateway/src/submit_ack_tests.rs:359`, `apps/ramflux-router/src/router_runtime.rs:1034`, `apps/ramflux-router/src/router_runtime.rs:1036`, `crates/ramflux-node-core/src/tests/helpers.rs:442`, `crates/ramflux-node-core/src/tests/helpers.rs:444`, `crates/ramflux-protocol/fixtures/protocol/v1/ack/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/ack/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/ack/fixture.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/ack/fixture.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/ack/negative.invalid_signature.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/ack/negative.invalid_signature.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/ack/negative.replay.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/ack/negative.replay.json:8`, `crates/ramflux-protocol/src/domain.rs:25`, `crates/ramflux-sdk/src/dm.rs:426`, `crates/ramflux-sdk/src/dm.rs:428` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.agent.deferred_surface.v1` | `apps/ramflux-agent-host/src/runner_deferred.rs:33`, `apps/ramflux-agent-host/tests/host/deferred_fairness.rs:127` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.agent.handled_action.v1` | `apps/ramflux-agent-host/src/runner_output.rs:198` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.agent.prx.operation.v1` | `apps/ramflux-agent-host/src/runner_approval.rs:49` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.agent.prx.task.operation.v1` | `apps/ramflux-agent-host/src/runner_approval.rs:549` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.agent.prx.task.v1` | `apps/ramflux-agent-host/src/runner_approval.rs:42` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.agent.reply.device.v1` | `apps/ramflux-agent-host/src/participant.rs:304` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.agent.reply.v1` | `apps/ramflux-agent-host/src/participant.rs:252` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.agent.rule.v1` | `apps/ramflux-agent-host/src/engine.rs:245`, `apps/ramflux-agent-host/src/engine.rs:283` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.attachment.ack.progress.v1` | `crates/ramflux-sdk/src/client/deferred_attachment.rs:541` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.attachment.reference.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/tests.rs:195`, `crates/ramflux-sdk/src/client/deferred_attachment.rs:114`, `crates/ramflux-sdk/src/client/deferred_attachment.rs:192`, `crates/ramflux-sdk/src/client/deferred_attachment.rs:635`, `crates/ramflux-storage/src/account_db/backup_missing_tests.rs:84`, `crates/ramflux-storage/src/account_db/object_retention/actors.rs:28`, `crates/ramflux-storage/src/account_db/object_retention/legacy.rs:164`, `crates/ramflux-storage/src/account_db/object_retention/legacy.rs:174` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.backup.fetch.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/attachments.rs:42`, `crates/ramflux-sdk/src/bus/backup_jobs/tests.rs:749` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.backup.native_data.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/native.rs:62`, `crates/ramflux-sdk/src/bus/backup_jobs/native.rs:84`, `crates/ramflux-sdk/src/bus/backup_jobs/native.rs:284`, `crates/ramflux-sdk/src/bus/backup_jobs/native_tests.rs:332`, `crates/ramflux-sdk/src/bus/backup_jobs/native_writer_tests.rs:25` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.backup.staging.database.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/workers.rs:559` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.backup.staging.metadata.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/format.rs:181`, `crates/ramflux-sdk/src/bus/backup_jobs/format.rs:200` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.basic.v1` | `apps/rf/src/cli/a2i_a2ui.rs:73`, `crates/ramflux-crypto/tests/generate_protocol_fixtures.rs:371`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/fixture.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/negative.invalid_signature.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/a2ui_surface/negative.replay.json:4`, `crates/ramflux-protocol/tests/a2ui_state/goldens.json:12`, `crates/ramflux-protocol/tests/a2ui_state/goldens.json:36`, `crates/ramflux-protocol/tests/a2ui_state/support.rs:9`, `crates/ramflux-protocol/tests/m1_2_protocol.rs:205`, `crates/ramflux-sdk/src/bus/dispatch/a2i_a2ui.rs:276`, `crates/ramflux-sync/src/a2ui.rs:230` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.bot_event.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/bot_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_event/fixture.json:11`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_event/fixture.json:15`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_event/negative.invalid_signature.json:11`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_event/negative.invalid_signature.json:15`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_event/negative.replay.json:11`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_event/negative.replay.json:15`, `crates/ramflux-protocol/src/domain.rs:43` | Remove unused BotEvent family; generated Surface/Task. |
+| `ramflux.bot_install_grant.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/bot_install_grant/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_install_grant/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_install_grant/fixture.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_install_grant/fixture.json:10`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_install_grant/negative.invalid_signature.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_install_grant/negative.invalid_signature.json:10`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_install_grant/negative.replay.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_install_grant/negative.replay.json:10`, `crates/ramflux-protocol/src/domain.rs:44` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.bot_manifest.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/fixture.json:14`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/fixture.json:34`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/negative.invalid_signature.json:14`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/negative.invalid_signature.json:34`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/negative.replay.json:14`, `crates/ramflux-protocol/fixtures/protocol/v1/bot_manifest/negative.replay.json:34`, `crates/ramflux-protocol/src/domain.rs:42` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.branch_proof.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/branch_proof/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/branch_proof/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/branch_proof/fixture.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/branch_proof/fixture.json:14`, `crates/ramflux-protocol/fixtures/protocol/v1/branch_proof/negative.invalid_signature.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/branch_proof/negative.invalid_signature.json:14`, `crates/ramflux-protocol/fixtures/protocol/v1/branch_proof/negative.replay.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/branch_proof/negative.replay.json:14`, `crates/ramflux-protocol/src/domain.rs:35` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.branch_proof.v2` | `crates/ramflux-protocol/src/domain.rs:29`, `docs/root_bound_device_keys.md:21` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.call.control.signature.v1` | `crates/ramflux-sdk/src/client/call/mod.rs:19` | Retain protocol CallControl signature transcript/domain over mirrored fields; never a kind discriminator. |
+| `ramflux.call.control.v1` | `crates/ramflux-sdk/src/client/call/mod.rs:49`, `crates/ramflux-sdk/src/client/call/state.rs:177` | Call.control: full CallControl/all 13 actions; retain fixed native signing schema; remove prefix/JSON body dispatch. |
+| `ramflux.call.sequence.v1` | `crates/ramflux-sdk/src/client/call/mod.rs:244` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.call.transition.v1` | `crates/ramflux-sdk/src/client/call/mod.rs:311` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.chunk.cipher.v1` | `crates/ramflux-protocol/src/domain.rs:8` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.chunk.plain.v1` | `crates/ramflux-protocol/src/domain.rs:7` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.client_discovery.v1` | `crates/ramflux-protocol/src/client_discovery.rs:10` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.client_event.v1` | `crates/ramflux-protocol/src/group_device_roots.rs:23`, `crates/ramflux-protocol/src/group_device_roots.rs:143`, `crates/ramflux-sdk/src/client/group.rs:712`, `crates/ramflux-sdk/src/client/identity_authority/group_review_r3_tests.rs:11` | Remove unused parallel ClientEvent body codec; generated Inner/MessageUpdate. |
+| `ramflux.client_event.v2` | `crates/ramflux-protocol/src/group_device_roots.rs:26`, `crates/ramflux-protocol/src/group_device_roots.rs:89`, `crates/ramflux-sdk/src/client/group_control_roots.rs:79` | Remove old body/fixture facade; generated Inner/MessageUpdate. |
+| `ramflux.committing_aead.ad.v1` | `crates/ramflux-protocol/src/domain.rs:66` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.committing_aead.header.v1` | `crates/ramflux-protocol/src/domain.rs:65` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.committing_aead.v1` | `crates/ramflux-protocol/src/domain.rs:64` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.contact.card.v1` | `crates/ramflux-sdk/src/client/routed/contact_locator_tests.rs:100`, `crates/ramflux-sdk/src/contact_card.rs:8`, `docs/contact_cards.md:86` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.contact.card.v3` | `crates/ramflux-protocol/src/custody/contact_card.rs:8`, `docs/contact_cards.md:54` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.contact.decision_event.v1` | `crates/ramflux-sdk/src/client/contact.rs:702` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.contact.link.v2` | `crates/ramflux-sdk/src/client/contact_roots.rs:178` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.contact_request.authority_floor.v1` | `crates/ramflux-sdk/src/client/contact_requests/retention.rs:13` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.contact_request.conversation.v1` | `crates/ramflux-sdk/src/client/contact_requests/wire.rs:53` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.contact_request.delivery.v1` | `crates/ramflux-sdk/src/client/contact_requests/delivery.rs:32`, `crates/ramflux-sdk/src/client/routed/contact_request_r2_tests.rs:153`, `crates/ramflux-sdk/src/client/routed/contact_request_r2_tests.rs:188`, `crates/ramflux-sdk/src/client/routed/contact_request_r2_tests.rs:362`, `crates/ramflux-sdk/src/client/routed/contact_request_r2_tests.rs:381` | Retain contact-delivery idempotency hash; native consent mapped to Control.contact_control; not a body schema. |
+| `ramflux.contact_request.id.v1` | `crates/ramflux-crypto/src/custody/contact.rs:89`, `crates/ramflux-crypto/tests/fixtures/contact_consent_v2_reference.py:22`, `crates/ramflux-protocol/src/custody/contact.rs:78`, `crates/ramflux-sdk/src/client/contact_requests/wire.rs:60` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.contact_request.recipient_material.v1` | `crates/ramflux-sdk/src/client/contact_requests/delivery.rs:84` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.contact_request.v1` | `crates/ramflux-sdk/src/client/contact_requests/wire.rs:7`, `crates/ramflux-sdk/src/client/routed/contact_request_r2_tests.rs:66`, `crates/ramflux-sdk/src/client/routed/contact_request_r3_tests.rs:204` | Retire legacy root JSON contact codec on v3 reset; Control.contact_control carries native custody Envelope<ContactConsentV2>. |
+| `ramflux.conversation_event.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/conversation_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/conversation_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/conversation_event/fixture.json:12`, `crates/ramflux-protocol/fixtures/protocol/v1/conversation_event/fixture.json:16`, `crates/ramflux-protocol/fixtures/protocol/v1/conversation_event/negative.invalid_signature.json:12`, `crates/ramflux-protocol/fixtures/protocol/v1/conversation_event/negative.invalid_signature.json:16`, `crates/ramflux-protocol/fixtures/protocol/v1/conversation_event/negative.replay.json:12`, `crates/ramflux-protocol/fixtures/protocol/v1/conversation_event/negative.replay.json:16`, `crates/ramflux-protocol/src/domain.rs:38` | Remove unused ConversationEvent body family; generated Service/Control. |
+| `ramflux.cursor.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/cursor/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/cursor/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/cursor/fixture.json:7`, `crates/ramflux-protocol/fixtures/protocol/v1/cursor/fixture.json:13`, `crates/ramflux-protocol/fixtures/protocol/v1/cursor/negative.invalid_signature.json:7`, `crates/ramflux-protocol/fixtures/protocol/v1/cursor/negative.invalid_signature.json:13`, `crates/ramflux-protocol/fixtures/protocol/v1/cursor/negative.replay.json:7`, `crates/ramflux-protocol/fixtures/protocol/v1/cursor/negative.replay.json:13`, `crates/ramflux-protocol/src/domain.rs:27` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.device_proof.v1` | `apps/ramflux-gateway/src/session.rs:1874`, `apps/ramflux-gateway/src/session.rs:1874`, `apps/ramflux-gateway/src/session_resilience_tests.rs:209`, `apps/ramflux-gateway/src/session_resilience_tests.rs:209`, `crates/ramflux-node-core/src/tests/helpers.rs:766`, `crates/ramflux-node-core/src/tests/helpers.rs:768`, `crates/ramflux-protocol/fixtures/protocol/v1/device_proof/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/device_proof/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/device_proof/fixture.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/device_proof/fixture.json:12`, `crates/ramflux-protocol/fixtures/protocol/v1/device_proof/negative.invalid_signature.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/device_proof/negative.invalid_signature.json:12`, `crates/ramflux-protocol/fixtures/protocol/v1/device_proof/negative.replay.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/device_proof/negative.replay.json:12`, `crates/ramflux-protocol/src/domain.rs:13`, `crates/ramflux-sdk/src/gateway/helpers.rs:72`, `crates/ramflux-sdk/src/gateway/helpers.rs:74` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.device_set.v1` | `crates/ramflux-protocol/src/domain.rs:70` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.dm_ratchet.chain.v1` | `crates/ramflux-protocol/src/domain.rs:57` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.dm_ratchet.header.v1` | `crates/ramflux-protocol/src/domain.rs:59` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.dm_ratchet.message.v1` | `crates/ramflux-protocol/src/domain.rs:58` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.dm_ratchet.root.v1` | `crates/ramflux-protocol/src/domain.rs:56` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.dm_ratchet.skipped_key.v1` | `crates/ramflux-protocol/src/domain.rs:60` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.dm_session.snapshot.v1` | `crates/ramflux-crypto/src/double_ratchet.rs:647`, `crates/ramflux-crypto/src/double_ratchet.rs:694` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.envelope.v1` | `apps/ramflux-federation/src/flow.rs:676`, `apps/ramflux-federation/src/flow.rs:676`, `apps/ramflux-federation/src/flow.rs:783`, `apps/ramflux-federation/src/flow.rs:785`, `apps/ramflux-federation/src/http_listener_tests.rs:314`, `apps/ramflux-federation/src/http_listener_tests.rs:314`, `apps/ramflux-gateway/src/session.rs:2184`, `apps/ramflux-gateway/src/session.rs:2186`, `apps/ramflux-gateway/src/submit_ack_tests.rs:289`, `apps/ramflux-gateway/src/submit_ack_tests.rs:289`, `apps/ramflux-gateway/src/submit_source.rs:97`, `apps/ramflux-router/src/router_runtime.rs:1013`, `apps/ramflux-router/src/router_runtime.rs:1015`, `crates/ramflux-node-core/src/custody_delivery.rs:32`, `crates/ramflux-node-core/src/tests/helpers.rs:421`, `crates/ramflux-node-core/src/tests/helpers.rs:423`, `crates/ramflux-protocol/fixtures/protocol/v1/envelope/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/envelope/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/envelope/fixture.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/envelope/fixture.json:10`, `crates/ramflux-protocol/fixtures/protocol/v1/envelope/negative.invalid_signature.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/envelope/negative.invalid_signature.json:10`, `crates/ramflux-protocol/fixtures/protocol/v1/envelope/negative.replay.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/envelope/negative.replay.json:10`, `crates/ramflux-protocol/src/domain.rs:5`, `crates/ramflux-protocol/tests/envelope_forward_canon.rs:12`, `crates/ramflux-protocol/tests/envelope_forward_canon.rs:12`, `crates/ramflux-sdk/src/bus/dispatch/message.rs:962`, `crates/ramflux-sdk/src/bus/dispatch/message.rs:962`, `crates/ramflux-sdk/src/bus/task_delivery.rs:143`, `crates/ramflux-sdk/src/bus/task_delivery.rs:143`, `crates/ramflux-sdk/src/client/federation.rs:353`, `crates/ramflux-sdk/src/client/surface/own_history.rs:242`, `crates/ramflux-sdk/src/client/task/control_tests.rs:12`, `crates/ramflux-sdk/src/dm.rs:454`, `crates/ramflux-sdk/src/dm.rs:456`, `crates/ramflux-sdk/src/gateway/submit_tests.rs:116`, `crates/ramflux-sdk/src/gateway/submit_tests.rs:116` | Replace client-envelope revision/class policy per section 6; native notify/service messages retain their separately validated transport contract. |
+| `ramflux.event.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/event_id/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/event_id/fixture.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/event_id/negative.invalid_signature.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/event_id/negative.replay.json:4`, `crates/ramflux-protocol/src/domain.rs:4` | Retain native signed authority/event proof where used; Inner Service/Control selects its fixed proof type; no generic application dispatch. |
+| `ramflux.federated_issuer_trust_snapshot.v3` | `crates/ramflux-node-core/src/relay/trust.rs:15` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.federated_issuer_trust_snapshot_envelope.v3` | `crates/ramflux-node-core/src/relay/trust.rs:19` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.federated_issuer_trust_snapshot_envelope.v4` | `crates/ramflux-node-core/src/relay/provider.rs:21` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.federated_trust_snapshot_envelope.v3` | `crates/ramflux-node-core/src/relay/trust.rs:67` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.federation.test_seed.v1` | `apps/ramflux-federation/src/discovery.rs:136` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.federation_handshake.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/federation_handshake/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/federation_handshake/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/federation_handshake/fixture.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/federation_handshake/fixture.json:9`, `crates/ramflux-protocol/fixtures/protocol/v1/federation_handshake/negative.invalid_signature.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/federation_handshake/negative.invalid_signature.json:9`, `crates/ramflux-protocol/fixtures/protocol/v1/federation_handshake/negative.replay.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/federation_handshake/negative.replay.json:9`, `crates/ramflux-protocol/src/domain.rs:53` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.federation_provider_keyring.fingerprint.v1` | `crates/ramflux-node-core/src/relay/provider.rs:16` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.federation_provider_keyring.v1` | `crates/ramflux-node-core/src/relay/provider.rs:13`, `deploy/secrets/federation/README.md:24` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.franking.node_tag.v1` | `crates/ramflux-protocol/src/domain.rs:68` | Retire after node receipt v2 in Decision 5; independent verifier updated in S10a. |
+| `ramflux.franking_opening.v1` | `crates/ramflux-protocol/src/domain.rs:67` | Retire after uniform report-opening transcript in Decision 5; do not reuse for different inputs. |
+| `ramflux.friend_event.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/friend_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/friend_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/friend_event/fixture.json:13`, `crates/ramflux-protocol/fixtures/protocol/v1/friend_event/fixture.json:17`, `crates/ramflux-protocol/fixtures/protocol/v1/friend_event/negative.invalid_signature.json:13`, `crates/ramflux-protocol/fixtures/protocol/v1/friend_event/negative.invalid_signature.json:17`, `crates/ramflux-protocol/fixtures/protocol/v1/friend_event/negative.replay.json:13`, `crates/ramflux-protocol/fixtures/protocol/v1/friend_event/negative.replay.json:17`, `crates/ramflux-protocol/src/domain.rs:36` | Generated Control.friend with fixed action registry; remove parallel unused event wrapper. |
+| `ramflux.gateway.device_proof.v1` | `crates/ramflux-node-core/src/gateway_frames.rs:79`, `crates/ramflux-sdk/src/constants.rs:8` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.gateway.open.v1` | `crates/ramflux-node-core/src/gateway_frames.rs:78`, `crates/ramflux-sdk/src/constants.rs:7` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.gateway.resume_token.v1` | `crates/ramflux-node-core/src/gateway_state.rs:381`, `crates/ramflux-node-core/src/gateway_state.rs:396`, `crates/ramflux-sdk/src/gateway/helpers.rs:48` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.gateway_certificate_request.v3` | `crates/ramflux-node-core/src/relay/certificates.rs:46` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.gateway_issuer_certificate.binding.v3` | `crates/ramflux-node-core/src/relay/certificates.rs:55` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.gateway_issuer_certificate.v3` | `crates/ramflux-node-core/src/relay/certificates.rs:45`, `crates/ramflux-protocol/src/object_relay_v3.rs:29` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.gateway_session.v1` | `crates/ramflux-node-core/src/gateway_frames.rs:77`, `crates/ramflux-sdk/src/constants.rs:6` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.change.record.v1` | `crates/ramflux-sdk/src/client/shared_group/requests.rs:38` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.courier.attempt.v1` | `crates/ramflux-sdk/src/bus/shared_group_sync/requests.rs:13` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.courier.cursor.v1` | `crates/ramflux-sdk/src/bus/shared_group_sync/requests.rs:164` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.delivery.subject.v1` | `crates/ramflux-sdk/src/bus/shared_group_sync/outbox/delivery.rs:223` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.device_roots.v2` | `crates/ramflux-protocol/src/group_device_roots.rs:31`, `crates/ramflux-protocol/src/group_device_roots.rs:124`, `crates/ramflux-sdk/src/client/group_control_roots.rs:84` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.distribution.content.v3` | `crates/ramflux-sdk/src/bus/dispatch/group.rs:1176` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.distribution_envelope.v2` | `crates/ramflux-sdk/src/group.rs:307` | GroupKeyControl typed distribution/membership proof/manifest URL; remove SDK JSON wrapper. |
+| `ramflux.group.sender.chain.v3` | `crates/ramflux-sdk/src/client/group_session.rs:751` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.sender_key.distribution.v4` | `crates/ramflux-sdk/src/client/group_distribution_auth.rs:12` | GroupKeyDistribution exact SDK fields and existing signature/seed binding; no SDK JSON body decoder. |
+| `ramflux.group.transfer.delivery.v1` | `crates/ramflux-sdk/src/client/shared_group/transfer.rs:223` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.transfer.device.v1` | `crates/ramflux-sdk/src/client/shared_group/transfer.rs:44` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group.transfer_sync.v1` | `crates/ramflux-sdk/src/client/shared_group/transfer_wire.rs:8` | Typed TransferControl/Probe/Head under Control.group_state; replace changed signature transcript per section 3.1. |
+| `ramflux.group_event.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/group_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/group_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/group_event/fixture.json:15`, `crates/ramflux-protocol/fixtures/protocol/v1/group_event/fixture.json:19`, `crates/ramflux-protocol/fixtures/protocol/v1/group_event/negative.invalid_signature.json:15`, `crates/ramflux-protocol/fixtures/protocol/v1/group_event/negative.invalid_signature.json:19`, `crates/ramflux-protocol/fixtures/protocol/v1/group_event/negative.replay.json:15`, `crates/ramflux-protocol/fixtures/protocol/v1/group_event/negative.replay.json:19`, `crates/ramflux-protocol/src/domain.rs:37` | Retain native signed authority/event proof where used; Inner Service/Control selects its fixed proof type; no generic application dispatch. |
+| `ramflux.group_sender_key.chain.v1` | `crates/ramflux-protocol/src/domain.rs:62` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group_sender_key.distribution.v1` | `crates/ramflux-protocol/src/domain.rs:61` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group_sender_key.message.v1` | `crates/ramflux-protocol/src/domain.rs:63` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group_state.actor.v1` | `crates/ramflux-protocol/src/group_state.rs:9` | Retain fixed native GroupStateActor proof codec; never guessed by Inner decoder. |
+| `ramflux.group_state.content.v2` | `crates/ramflux-crypto/src/group_state/snapshot.rs:146`, `crates/ramflux-crypto/src/group_state/snapshot.rs:319` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group_state.creator_signature.v2` | `crates/ramflux-crypto/src/group_state/snapshot.rs:61` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group_state.creator_transfer.v2` | `crates/ramflux-crypto/src/group_state/snapshot.rs:16` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group_state.delivery.v1` | `crates/ramflux-sdk/src/bus/shared_group_sync/outbox/delivery.rs:157` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group_state.federation_route.v1` | `crates/ramflux-sdk/src/client/shared_group/federation.rs:10` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group_state.genesis.v2` | `crates/ramflux-crypto/src/group_state/snapshot.rs:15` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.group_state.request.v1` | `crates/ramflux-protocol/src/group_state.rs:7` | Retain fixed native GroupChangeRequest proof codec in NativeGroupChangeRequest; typed GroupControlBody.request selects it. |
+| `ramflux.group_state.result.v1` | `crates/ramflux-protocol/src/group_state.rs:8` | Retain fixed native GroupChangeResult proof codec in NativeGroupChangeResult; typed GroupControlBody.result selects it. |
+| `ramflux.group_state.snapshot.v2` | `crates/ramflux-protocol/src/group_state.rs:6` | Retain fixed native GroupStateSnapshot proof codec; typed snapshot fields select it. |
+| `ramflux.group_state.transfer_acceptance.v1` | `crates/ramflux-crypto/src/group_state/transfer.rs:10` | Retain fixed native GroupTransferAcceptance proof codec in typed TransferHead.acceptance. |
+| `ramflux.home_node_migration_proof.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/home_node_migration_proof/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/home_node_migration_proof/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/home_node_migration_proof/fixture.json:5`, `crates/ramflux-protocol/fixtures/protocol/v1/home_node_migration_proof/fixture.json:18`, `crates/ramflux-protocol/fixtures/protocol/v1/home_node_migration_proof/negative.invalid_signature.json:5`, `crates/ramflux-protocol/fixtures/protocol/v1/home_node_migration_proof/negative.invalid_signature.json:18`, `crates/ramflux-protocol/fixtures/protocol/v1/home_node_migration_proof/negative.replay.json:5`, `crates/ramflux-protocol/fixtures/protocol/v1/home_node_migration_proof/negative.replay.json:18`, `crates/ramflux-protocol/src/domain.rs:14`, `crates/ramflux-protocol/src/home_node_migration.rs:111` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.home_node_route_record.v1` | `crates/ramflux-node-core/src/home_node_migration.rs:7` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.home_node_route_update_proof.v1` | `crates/ramflux-node-core/src/home_node_migration.rs:8` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.branch_certificate.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3.json:40`, `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:63`, `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:64`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:23`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:58`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:312`, `crates/ramflux-protocol/src/domain.rs:79` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.branch_proof.v3` | `crates/ramflux-protocol/src/domain.rs:80` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.contact_request.v2` | `crates/ramflux-crypto/tests/fixtures/contact_consent_v2.json:15`, `crates/ramflux-crypto/tests/fixtures/contact_consent_v2_reference.py:21`, `crates/ramflux-crypto/tests/fixtures/contact_consent_v2_reference.py:30`, `crates/ramflux-protocol/src/domain.rs:85` | Retain custody Envelope<ContactConsentV2> canonical proof/signature codec; selected only by typed NativeContactConsent. |
+| `ramflux.identity.custody.object_hash.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:37`, `crates/ramflux-protocol/src/domain.rs:92`, `docs/root_key_custody_wire.md:44` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.custody.section_hash.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:84`, `crates/ramflux-protocol/src/domain.rs:93`, `docs/root_key_custody_wire.md:279` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.custody_action.v1` | `crates/ramflux-protocol/src/custody/network.rs:243` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.custody_session_action.v1` | `crates/ramflux-protocol/src/custody/network.rs:251` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.custody_signed_prekey.v1` | `crates/ramflux-sdk/src/custody/vault.rs:279` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.delegation.v1` | `crates/ramflux-protocol/src/domain.rs:81` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.device_agreement_key.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:75`, `crates/ramflux-protocol/src/domain.rs:34`, `docs/root_key_custody_wire.md:112` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.device_signing_key.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:74`, `crates/ramflux-protocol/src/domain.rs:33`, `docs/root_key_custody_wire.md:111` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.erasure_ack.v1` | `crates/ramflux-protocol/src/domain.rs:83` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.group_delegation.v1` | `crates/ramflux-protocol/src/domain.rs:82` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_admission_attestation.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:787`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:802`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:803`, `crates/ramflux-protocol/src/domain.rs:120` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_attest_request.v1` | `crates/ramflux-protocol/src/domain.rs:126` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_authorization.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:208`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:209`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:531`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:559`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:560`, `crates/ramflux-protocol/src/domain.rs:114` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_backlog_manifest.v1` | `crates/ramflux-protocol/src/domain.rs:125` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_commit.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:259`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:260`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:711`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:732`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:733`, `crates/ramflux-protocol/src/domain.rs:118` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_commit_delivery.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:751`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:768`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:769`, `crates/ramflux-protocol/src/domain.rs:119` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_control.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:625`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:644`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:645`, `crates/ramflux-protocol/src/domain.rs:116` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_delivery_map.v1` | `crates/ramflux-protocol/src/domain.rs:123` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_genesis.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:415`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:416`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:594`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:606`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:607`, `crates/ramflux-protocol/src/domain.rs:115` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_noncommit_fence.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:821`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:831`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:832`, `crates/ramflux-protocol/src/domain.rs:121` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_peer_status.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:850`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:864`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:865`, `crates/ramflux-protocol/src/domain.rs:127` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_prepare.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:437`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:462`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:463`, `crates/ramflux-protocol/src/domain.rs:112` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_receipt.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:668`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:692`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:693`, `crates/ramflux-protocol/src/domain.rs:117` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_record_hash.v1` | `crates/ramflux-protocol/src/domain.rs:122` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.home_route_offer.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:486`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:512`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:513`, `crates/ramflux-protocol/src/domain.rs:113` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.legacy_binding.v1` | `crates/ramflux-protocol/src/domain.rs:84` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.master.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:47`, `crates/ramflux-protocol/src/domain.rs:91`, `docs/root_key_custody.md:164` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.master_certificate.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3.json:72`, `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:54`, `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:55`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:90`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:147`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:344`, `crates/ramflux-protocol/src/domain.rs:77` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.node_pin_path.v1` | `crates/ramflux-sdk/src/custody/node_pins.rs:51` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.node_record.v1` | `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:176`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:399`, `crates/ramflux-protocol/src/domain.rs:89` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.pairing.channel.initiator.v1` | `crates/ramflux-protocol/src/domain.rs:100`, `docs/root_key_custody_wire.md:842` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.pairing.channel.responder.v1` | `crates/ramflux-protocol/src/domain.rs:101`, `docs/root_key_custody_wire.md:843` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.pairing.commitment.v1` | `crates/ramflux-protocol/src/domain.rs:96`, `docs/root_key_custody_wire.md:827` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.pairing.confirm.initiator.v1` | `crates/ramflux-protocol/src/domain.rs:98`, `docs/root_key_custody_wire.md:838` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.pairing.confirm.responder.v1` | `crates/ramflux-protocol/src/domain.rs:99`, `docs/root_key_custody_wire.md:839` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.pairing.sas.v1` | `crates/ramflux-protocol/src/domain.rs:97`, `docs/root_key_custody_wire.md:835` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.pairing.sas_emoji.v1` | `crates/ramflux-protocol/src/domain.rs:102`, `docs/root_key_custody_wire.md:821` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.pairing_transcript.v1` | `crates/ramflux-protocol/src/domain.rs:95`, `crates/ramflux-protocol/src/domain.rs:276`, `docs/root_key_custody_wire.md:812`, `docs/root_key_custody_wire.md:824` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.profile.v1` | `crates/ramflux-protocol/src/domain.rs:30` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.relay_acceptance.v1` | `crates/ramflux-protocol/src/domain.rs:86` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.revoked_devices.checkpoint.v1` | `crates/ramflux-protocol/src/domain.rs:88` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.revoked_devices.list.v1` | `crates/ramflux-protocol/src/domain.rs:109`, `docs/root_key_custody_wire.md:346` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.root_public_key.commitment.v1` | `apps/ramflux-router/src/router_runtime.rs:1156`, `crates/ramflux-crypto/src/signed_device_set.rs:23`, `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:52`, `crates/ramflux-node-core/src/mvp1_registry.rs:324`, `crates/ramflux-node-core/src/tests/helpers.rs:236`, `crates/ramflux-node-core/src/tests/helpers.rs:840`, `crates/ramflux-sdk/src/prekey.rs:61`, `crates/ramflux-sdk/src/prekey.rs:73`, `docs/root_key_custody_wire.md:136` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.safety_number.v2` | `crates/ramflux-protocol/src/domain.rs:94`, `docs/root_key_custody_wire.md:151` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.signed_device_set.v1` | `crates/ramflux-protocol/src/domain.rs:32` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.signed_device_set.v2` | `crates/ramflux-protocol/src/domain.rs:31` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.signed_device_set.v3` | `crates/ramflux-crypto/tests/fixtures/custody_v3.json:97`, `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:79`, `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:87`, `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:94`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:115`, `crates/ramflux-crypto/tests/fixtures/home_migration_v1.json:369`, `crates/ramflux-protocol/src/domain.rs:78` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.time_attestation.v1` | `crates/ramflux-protocol/src/domain.rs:90` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.time_probe.v1` | `crates/ramflux-protocol/src/domain.rs:110`, `docs/root_key_custody_wire.md:666` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.transfer.aad.v1` | `crates/ramflux-protocol/src/domain.rs:104`, `docs/root_key_custody_wire.md:861` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.transfer.hpke.v1` | `crates/ramflux-protocol/src/domain.rs:105`, `docs/root_key_custody_wire.md:868` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.transfer.hpke_info.v1` | `crates/ramflux-protocol/src/domain.rs:103`, `docs/root_key_custody_wire.md:859` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.transfer.hpke_suite.v1` | `crates/ramflux-protocol/src/domain.rs:107`, `docs/root_key_custody_wire.md:822` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.transfer.payload.v1` | `crates/ramflux-protocol/src/domain.rs:106`, `docs/root_key_custody_wire.md:887` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity.transfer_binding.v1` | `crates/ramflux-protocol/src/domain.rs:87` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_admission.base_snapshot.v1` | `apps/ramflux-router/src/operator.rs:89`, `crates/ramflux-node-core/src/router_store/identity_registry.rs:24` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_admission.missing_snapshot.v1` | `crates/ramflux-node-core/src/router_store/identity_registry.rs:25` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_deletion_proof.deleted_metadata_empty.v1` | `crates/ramflux-protocol/src/domain.rs:21` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_deletion_proof.deleted_metadata_leaf.v1` | `crates/ramflux-protocol/src/domain.rs:17` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_deletion_proof.deleted_metadata_parent.v1` | `crates/ramflux-protocol/src/domain.rs:19` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_deletion_proof.retained_summary.v1` | `crates/ramflux-protocol/src/domain.rs:23` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_deletion_proof.tombstone.v1` | `crates/ramflux-protocol/src/domain.rs:24` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_deletion_proof.v1` | `crates/ramflux-node-core/src/lifecycle.rs:267`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/fixture.json:9`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/fixture.json:22`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/identity_deletion_proof.bad_tombstone.reject.json:9`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/identity_deletion_proof.bad_tombstone.reject.json:22`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/negative.invalid_signature.json:9`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/negative.invalid_signature.json:22`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/negative.replay.json:9`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/negative.replay.json:22`, `crates/ramflux-protocol/src/domain.rs:15` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_event.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/identity_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_event/fixture.json:13`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_event/fixture.json:17`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_event/negative.invalid_signature.json:13`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_event/negative.invalid_signature.json:17`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_event/negative.replay.json:13`, `crates/ramflux-protocol/fixtures/protocol/v1/identity_event/negative.replay.json:17`, `crates/ramflux-protocol/src/domain.rs:28` | Retain native signed authority/event proof where used; Inner Service/Control selects its fixed proof type; no generic application dispatch. |
+| `ramflux.identity_lifecycle_tombstone.v1` | `crates/ramflux-node-core/src/lifecycle.rs:154` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.identity_lineage.event_head.v1` | `crates/ramflux-node-core/src/router_lifecycle.rs:535` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.itest.http.v1` | `crates/ramflux-node-core/src/gateway_frames.rs:30` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.itest.quic_fault.body.v1` | `apps/ramflux-relay/src/itest_quic_fault.rs:10` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.kt.empty.v1` | `crates/ramflux-crypto/src/key_verification.rs:248` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.kt.leaf.v1` | `crates/ramflux-crypto/src/key_verification.rs:183` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.kt.node.v1` | `crates/ramflux-crypto/src/key_verification.rs:242` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.kt_leaf.v1` | `crates/ramflux-crypto/src/key_verification.rs:196`, `crates/ramflux-crypto/src/key_verification.rs:429` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.legacy.inbox.v1` | `crates/ramflux-sdk/src/client/group_quarantine.rs:24` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.local.custody_account.v1` | `crates/ramflux-sdk/src/custody/store.rs:309`, `crates/ramflux-sdk/src/custody/store.rs:343`, `crates/ramflux-sdk/src/custody/store.rs:449`, `crates/ramflux-sdk/src/custody/store/recovery.rs:453` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.local.custody_vault_reference.v1` | `crates/ramflux-sdk/src/custody/store.rs:412` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.local.native_data_generation.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/native.rs:234` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.local.recovery_intent.v1` | `crates/ramflux-sdk/src/custody/store/recovery.rs:49`, `crates/ramflux-sdk/src/custody/store/recovery.rs:354` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.local.recovery_snapshot.v1` | `crates/ramflux-sdk/src/custody/store/recovery.rs:35` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.local.restore_install.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/workers.rs:461` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.local_bus.account.v1` | `crates/ramflux-sdk/src/client/routed/contact_card_tests.rs:104` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.local_bus.account_backup.v1` | `crates/ramflux-sdk/src/bus/dispatch/account.rs:11` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.local_bus.account_manifest.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/tests.rs:155`, `crates/ramflux-sdk/src/bus/dispatch/account.rs:460`, `crates/ramflux-sdk/src/bus/dispatch/tests/fixtures/legacy_created_account_manifest.json:6`, `crates/ramflux-sdk/src/bus/dispatch/tests/key_backup_restore.rs:21`, `crates/ramflux-sdk/src/bus/protocol.rs:323`, `crates/ramflux-sdk/src/bus/runtime_tests.rs:204`, `crates/ramflux-sdk/src/node/tests.rs:118`, `crates/ramflux-sdk/src/storage_failure_fixture.rs:46` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.local_bus.custody.v1` | `crates/ramflux-sdk/src/bus/custody_setup.rs:97`, `crates/ramflux-sdk/src/custody/bus.rs:145` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.local_bus.v1` | `crates/ramflux-sdk/src/bus/creation_client.rs:273`, `crates/ramflux-sdk/src/bus/creation_client.rs:297`, `crates/ramflux-sdk/src/bus/custody_response.rs:29`, `crates/ramflux-sdk/src/bus/custody_setup.rs:370`, `crates/ramflux-sdk/src/bus/dispatch/account.rs:556`, `crates/ramflux-sdk/src/bus/io.rs:28`, `crates/ramflux-sdk/src/bus/io.rs:48`, `crates/ramflux-sdk/src/bus/io.rs:262`, `crates/ramflux-sdk/src/bus/io.rs:381`, `crates/ramflux-sdk/src/bus/protocol.rs:1130`, `crates/ramflux-sdk/src/client/routed/contact_resolution_tests.rs:312`, `crates/ramflux-sdk/src/custody/bus.rs:119` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.mcp_grant.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/mcp_grant/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/mcp_grant/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/mcp_grant/fixture.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/mcp_grant/fixture.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/mcp_grant/negative.invalid_signature.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/mcp_grant/negative.invalid_signature.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/mcp_grant/negative.replay.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/mcp_grant/negative.replay.json:8`, `crates/ramflux-protocol/src/domain.rs:41` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.message_event.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/message_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/message_event/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/message_event/fixture.json:23`, `crates/ramflux-protocol/fixtures/protocol/v1/message_event/fixture.json:27`, `crates/ramflux-protocol/fixtures/protocol/v1/message_event/negative.invalid_signature.json:23`, `crates/ramflux-protocol/fixtures/protocol/v1/message_event/negative.invalid_signature.json:27`, `crates/ramflux-protocol/fixtures/protocol/v1/message_event/negative.replay.json:23`, `crates/ramflux-protocol/fixtures/protocol/v1/message_event/negative.replay.json:27`, `crates/ramflux-protocol/src/domain.rs:39` | Remove unused MessageEvent family; generated Message/Edit/Delete/Reaction/Receipt. |
+| `ramflux.nack.v1` | `apps/ramflux-router/src/router_runtime.rs:1049`, `apps/ramflux-router/src/router_runtime.rs:1051`, `crates/ramflux-node-core/src/router.rs:1780`, `crates/ramflux-node-core/src/router.rs:1782`, `crates/ramflux-node-core/src/tests/helpers.rs:457`, `crates/ramflux-node-core/src/tests/helpers.rs:459`, `crates/ramflux-protocol/fixtures/protocol/v1/nack/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/nack/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/nack/fixture.json:2`, `crates/ramflux-protocol/fixtures/protocol/v1/nack/fixture.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/nack/negative.invalid_signature.json:2`, `crates/ramflux-protocol/fixtures/protocol/v1/nack/negative.invalid_signature.json:8`, `crates/ramflux-protocol/fixtures/protocol/v1/nack/negative.replay.json:2`, `crates/ramflux-protocol/fixtures/protocol/v1/nack/negative.replay.json:8`, `crates/ramflux-protocol/src/domain.rs:26` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.node.foreign_device_set.v1` | `crates/ramflux-node-core/src/foreign_device_heads.rs:22` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.node.registration_proof.v2` | `crates/ramflux-node-core/src/mvp1_registry.rs:421`, `crates/ramflux-node-core/tests/root_bound_identity.rs:455` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.notification.collapse_key_hash.v1` | `crates/ramflux-node-core/src/tests/server_retention_r2.rs:196` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.notification.collapse_key_hash.v2` | `crates/ramflux-node-core/src/notify.rs:1483` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.notification.encrypted_bucket.v1` | `crates/ramflux-node-core/src/notify.rs:1970` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.notification.push_alias_hash.v1` | `crates/ramflux-node-core/src/notify.rs:1121`, `crates/ramflux-node-core/src/notify.rs:1224`, `crates/ramflux-node-core/src/notify.rs:1262`, `crates/ramflux-node-core/src/notify.rs:1439` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.notification_wake.v1` | `crates/ramflux-node-core/src/notify_wal.rs:1447`, `crates/ramflux-node-core/src/notify_wal.rs:1449`, `crates/ramflux-node-core/src/tests/helpers.rs:531`, `crates/ramflux-node-core/src/tests/helpers.rs:533`, `crates/ramflux-protocol/fixtures/protocol/v1/notification_wake/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/notification_wake/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/notification_wake/fixture.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/notification_wake/fixture.json:6`, `crates/ramflux-protocol/fixtures/protocol/v1/notification_wake/negative.invalid_signature.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/notification_wake/negative.invalid_signature.json:6`, `crates/ramflux-protocol/fixtures/protocol/v1/notification_wake/negative.replay.json:3`, `crates/ramflux-protocol/fixtures/protocol/v1/notification_wake/negative.replay.json:6`, `crates/ramflux-protocol/src/domain.rs:40` | Replace client-envelope revision/class policy per section 6; native notify/service messages retain their separately validated transport contract. |
+| `ramflux.notify.provider_attempt_key.v1` | `crates/ramflux-node-core/src/notify.rs:2039` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.notify.provider_h2_pool_ca.v1` | `apps/ramflux-notify/src/main.rs:2653` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object.erasure.fence.v1` | `crates/ramflux-crypto/src/object_erasure.rs:11` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object.erasure.lookup.v1` | `crates/ramflux-crypto/src/object_erasure.rs:17` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object.transport.owner.v1` | `crates/ramflux-sdk/src/client/object.rs:1049` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object.v1` | `crates/ramflux-crypto/src/kdf.rs:226`, `crates/ramflux-crypto/src/kdf.rs:227`, `crates/ramflux-crypto/src/kdf.rs:234`, `crates/ramflux-crypto/src/kdf.rs:235`, `crates/ramflux-protocol/src/domain.rs:6` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_access_grant.binding.v3` | `crates/ramflux-node-core/src/relay/authorization.rs:47`, `crates/ramflux-sdk/src/object.rs:769`, `crates/ramflux-sdk/src/object.rs:989` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_access_grant.v3` | `crates/ramflux-node-core/src/relay/authorization.rs:42`, `crates/ramflux-protocol/src/object_relay_v3.rs:26` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_chunk_frame.v1` | `crates/ramflux-node-core/src/relay/legacy.rs:211`, `crates/ramflux-node-core/src/tests/stores.rs:2536`, `crates/ramflux-node-core/src/tests/stores.rs:2602`, `crates/ramflux-sdk/src/client/object.rs:1964` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_chunk_id.v1` | `crates/ramflux-protocol/src/domain.rs:9` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_chunk_request.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/object_chunk_request/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/object_chunk_request/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/object_chunk_request/fixture.json:2`, `crates/ramflux-protocol/fixtures/protocol/v1/object_chunk_request/fixture.json:9`, `crates/ramflux-protocol/fixtures/protocol/v1/object_chunk_request/negative.invalid_signature.json:2`, `crates/ramflux-protocol/fixtures/protocol/v1/object_chunk_request/negative.invalid_signature.json:9`, `crates/ramflux-protocol/fixtures/protocol/v1/object_chunk_request/negative.replay.json:2`, `crates/ramflux-protocol/fixtures/protocol/v1/object_chunk_request/negative.replay.json:9`, `crates/ramflux-protocol/src/domain.rs:11` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_get.operation_id.v1` | `apps/rf/src/handlers/object.rs:349`, `apps/rf/src/handlers/object.rs:356` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_get_spool.v1` | `crates/ramflux-sdk/src/bus/dispatch/object.rs:1141` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_lan_announce.v1` | `crates/ramflux-sync/src/object_store.rs:1092`, `crates/ramflux-sync/src/object_store.rs:1479` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_manifest.v1` | `crates/ramflux-protocol/fixtures/protocol/v1/object_manifest/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/object_manifest/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/object_manifest/fixture.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/object_manifest/fixture.json:11`, `crates/ramflux-protocol/fixtures/protocol/v1/object_manifest/negative.invalid_signature.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/object_manifest/negative.invalid_signature.json:11`, `crates/ramflux-protocol/fixtures/protocol/v1/object_manifest/negative.replay.json:4`, `crates/ramflux-protocol/fixtures/protocol/v1/object_manifest/negative.replay.json:11`, `crates/ramflux-protocol/src/domain.rs:10` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_put.operation_id.v1` | `apps/rf/src/handlers/object.rs:702`, `apps/rf/src/handlers/object.rs:711` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_put.request.v1` | `crates/ramflux-sdk/src/object.rs:215` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_put_journal.prefix.v1` | `crates/ramflux-sdk/src/bus/dispatch/object.rs:763` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_put_spool.account.v1` | `crates/ramflux-sdk/src/bus/dispatch/object.rs:791` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_put_spool.v1` | `crates/ramflux-sdk/src/bus/dispatch/object.rs:801` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_relay.recipient_device.v1` | `apps/ramflux-gateway/src/session.rs:1219`, `apps/ramflux-relay/src/test_support.rs:55`, `apps/ramflux-relay/src/test_support.rs:378`, `crates/ramflux-node-core/src/relay/test_support.rs:98`, `crates/ramflux-node-core/src/relay/test_support.rs:217`, `crates/ramflux-sdk/src/client/object.rs:2799`, `crates/ramflux-sdk/src/object.rs:574`, `crates/ramflux-sdk/src/object.rs:607` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_relay.recipient_device.v2` | `crates/ramflux-crypto/src/device_reference.rs:114` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_relay.retention_metadata.v1` | `crates/ramflux-node-core/src/relay/chunk.rs:308` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_relay.tombstone.v3` | `crates/ramflux-sdk/src/client/object.rs:1304` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.object_relay_tombstone.test.v1` | `crates/ramflux-node-core/src/tests/stores.rs:1030`, `crates/ramflux-node-core/src/tests/stores.rs:1182`, `crates/ramflux-node-core/src/tests/stores.rs:1415`, `crates/ramflux-node-core/src/tests/stores.rs:1464` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.object_transfer_error.v1` | `crates/ramflux-sync/src/object_store.rs:655` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.operation.v1` | `crates/ramflux-sdk/src/bus/mutations.rs:54` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.own_contact.parked.v1` | `crates/ramflux-sdk/src/client/own_contact/backfill_retry.rs:10` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.own_device.history.v1` | `crates/ramflux-sdk/src/client/identity_authority/custody_lifecycle_tests.rs:192` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.own_device.import_receipt.v1` | `crates/ramflux-sdk/src/client/own_device_sync.rs:338` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.own_device.restore_skip.v1` | `crates/ramflux-storage/src/account_db/group_snapshot.rs:58` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.own_group.lazy_group.v1` | `crates/ramflux-sdk/src/client/own_group_lazy_authority.rs:17` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.owner_authorization_proof.binding.v3` | `crates/ramflux-node-core/src/relay/authorization.rs:49`, `crates/ramflux-sdk/src/client/object.rs:1325`, `crates/ramflux-sdk/src/client/object.rs:2684` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.owner_authorization_proof.v3` | `crates/ramflux-node-core/src/relay/authorization.rs:43`, `crates/ramflux-protocol/src/object_relay_v3.rs:27` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.perf.d1.microbench.v1` | `crates/ramflux-transport/examples/relay_quic_bench.rs:751` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.perf.d1.payload.v1` | `crates/ramflux-transport/examples/relay_quic_bench.rs:37` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.pre_auth_cookie.v1` | `crates/ramflux-node-core/src/gateway_state.rs:471` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.push_alias.v1` | `crates/ramflux-protocol/src/domain.rs:52` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.receipt.actor.v3` | `crates/ramflux-storage/src/account_db/conversation_projection.rs:85` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.receipt.visible_id.v1` | `crates/ramflux-sdk/src/bus/dispatch/message.rs:614` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.received.object.sender.v2` | `crates/ramflux-sdk/src/client/deferred_attachment.rs:597` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.received.slot.selector.v2` | `crates/ramflux-sdk/src/client/deferred_attachment.rs:646` | Retain cited ownership/idempotency/storage hash in its current module; peer data uses typed Control/Receipt/HistoryItem instead of string dispatch. |
+| `ramflux.recovery_quorum_proof.v1` | `crates/ramflux-node-core/src/lifecycle.rs:249`, `crates/ramflux-sdk/src/client/recovery.rs:601` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.registration_pow.v1` | `crates/ramflux-protocol/src/domain.rs:71` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.registration_trust_tier.v1` | `crates/ramflux-protocol/src/domain.rs:72` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.requester_proof_of_possession.v3` | `crates/ramflux-node-core/src/relay/authorization.rs:44`, `crates/ramflux-protocol/src/object_relay_v3.rs:28` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.retention.dev_node_signing_seed.v1` | `crates/ramflux-node-core/src/retention.rs:623` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.safety_number.group.v1` | `crates/ramflux-crypto/src/key_verification.rs:137`, `docs/root_key_custody_wire.md:153` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.safety_number.v1` | `crates/ramflux-protocol/src/domain.rs:69` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.sdk.v1` | `crates/ramflux-sdk/src/bus/dispatch/group/native_contract_tests.rs:28`, `crates/ramflux-sdk/src/bus/dispatch/group/native_selector_tests.rs:93`, `crates/ramflux-sdk/src/bus/dispatch/shared_group_sibling_tests.rs:117`, `crates/ramflux-sdk/src/bus/dispatch/surface_transport.rs:41`, `crates/ramflux-sdk/src/bus/group_conversation/tests.rs:125`, `crates/ramflux-sdk/src/bus/group_conversation/tests.rs:240`, `crates/ramflux-sdk/src/bus/shared_group_sync/native_tests.rs:31`, `crates/ramflux-sdk/src/bus/shared_group_sync/native_tests.rs:53` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.selected_evidence.v1` | `crates/ramflux-node-core/src/franking.rs:89` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.shared_group.sender_key.v1` | `crates/ramflux-sdk/src/group.rs:134` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.signed_request.replay.v2` | `crates/ramflux-protocol/src/core_types.rs:122` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.signed_request.v1` | `apps/ramflux-gateway/src/push_registration_tests.rs:12`, `apps/ramflux-gateway/src/push_registration_tests.rs:12`, `apps/ramflux-gateway/src/session.rs:1868`, `apps/ramflux-gateway/src/session.rs:1868`, `apps/ramflux-gateway/src/session.rs:2209`, `apps/ramflux-gateway/src/session.rs:2211`, `apps/ramflux-gateway/src/session.rs:2295`, `apps/ramflux-gateway/src/session.rs:2297`, `apps/ramflux-gateway/src/session_resilience_tests.rs:208`, `apps/ramflux-gateway/src/session_resilience_tests.rs:208`, `apps/ramflux-gateway/src/submit_ack_tests.rs:461`, `apps/ramflux-gateway/src/submit_ack_tests.rs:461`, `crates/ramflux-node-core/src/custody_service/admission.rs:260`, `crates/ramflux-node-core/src/tests/helpers.rs:485`, `crates/ramflux-node-core/src/tests/helpers.rs:487`, `crates/ramflux-node-core/src/tests/helpers.rs:789`, `crates/ramflux-node-core/src/tests/helpers.rs:791`, `crates/ramflux-protocol/fixtures/protocol/v1/signed_request/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/signed_request/fixture.canonical:1`, `crates/ramflux-protocol/fixtures/protocol/v1/signed_request/fixture.json:5`, `crates/ramflux-protocol/fixtures/protocol/v1/signed_request/fixture.json:11`, `crates/ramflux-protocol/fixtures/protocol/v1/signed_request/negative.invalid_signature.json:5`, `crates/ramflux-protocol/fixtures/protocol/v1/signed_request/negative.invalid_signature.json:11`, `crates/ramflux-protocol/fixtures/protocol/v1/signed_request/negative.replay.json:5`, `crates/ramflux-protocol/fixtures/protocol/v1/signed_request/negative.replay.json:11`, `crates/ramflux-protocol/src/domain.rs:12`, `crates/ramflux-sdk/src/custody/network.rs:428`, `crates/ramflux-sdk/src/gateway/engine.rs:116`, `crates/ramflux-sdk/src/gateway/engine.rs:118`, `crates/ramflux-sdk/src/gateway/helpers.rs:101`, `crates/ramflux-sdk/src/gateway/helpers.rs:103` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.source_ip_hash.v1` | `crates/ramflux-node-core/src/source_privacy.rs:62` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.source_ip_hash.v2` | `crates/ramflux-node-core/src/source_privacy.rs:38` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.storage.test.pin.v1` | `crates/ramflux-storage/src/account_db/journal/tests.rs:407` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.stream.a2ui.v1` | `crates/ramflux-sdk/src/bus/journal/mod.rs:73` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.supervisor.operation.v1` | `crates/ramflux-sdk/src/bus/lifecycle.rs:64` | Retain cited local API/persistence/idempotency owner; local messaging fields switch to generated MessageRequest/Update, no peer Inner sniffing. |
+| `ramflux.surface.action_delivery.v1` | `crates/ramflux-sdk/src/client/surface/decision.rs:92`, `crates/ramflux-sdk/src/client/surface/decision.rs:125`, `crates/ramflux-sdk/src/client/surface/task_action_read.rs:38`, `crates/ramflux-sdk/src/client/surface/task_decision.rs:101` | Retain surface action delivery-id hash/idempotency responsibility; generated SurfaceCarrier.action, no wire discriminator. |
+| `ramflux.surface.authored.v1` | `crates/ramflux-sdk/src/client/surface/authored.rs:10` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.surface.carrier.v2` | `crates/ramflux-protocol/src/domain.rs:51`, `crates/ramflux-sdk/src/client/surface/carrier.rs:99` | SurfaceCarrier event/action/original-action receipt; remove prefix/JSON codec; new typed signature domain in section 3.1. |
+| `ramflux.surface.decision.v1` | `crates/ramflux-sdk/src/client/surface/decision.rs:17` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.surface.delivery.v1` | `crates/ramflux-sdk/src/client/surface/delivery.rs:63`, `crates/ramflux-sdk/src/client/surface/delivery.rs:162`, `crates/ramflux-sdk/src/client/surface/projection.rs:198` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.surface.error.v1` | `crates/ramflux-sdk/src/client/surface/projection.rs:218` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.surface.history_page.v1` | `crates/ramflux-sdk/src/client/surface/own_history.rs:213` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.surface.identity.v1` | `crates/ramflux-sdk/src/client/surface/scope.rs:15` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.surface.pending_author.v1` | `crates/ramflux-sdk/src/client/surface/pending.rs:29`, `crates/ramflux-sdk/src/client/surface/pending.rs:50` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.surface.pending_delivery.v1` | `crates/ramflux-sdk/src/client/surface/pending.rs:33` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.surface.storage_key.v1` | `crates/ramflux-sdk/src/client/surface/mod.rs:104` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.surface.timeline.v1` | `crates/ramflux-sdk/src/client/surface/control.rs:334` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.sync.attachment.v1` | `crates/ramflux-sdk/src/bus/attachment_scheduler.rs:48` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.sync_batch.v1` | `crates/ramflux-sync/src/object_store.rs:1061`, `crates/ramflux-sync/src/object_store.rs:1635` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.task.approval.decision.v1` | `crates/ramflux-sdk/src/client/task/approval.rs:184`, `crates/ramflux-sdk/src/client/task/approval.rs:282`, `crates/ramflux-sdk/src/client/task/approval_retention.rs:131` | Retain approval decision-id derivation; TaskApprovalPayload.decision, not an alternate wire message. |
+| `ramflux.task.approval.request.v1` | `crates/ramflux-sdk/src/client/task/approval.rs:67` | Retain approval request-id derivation; TaskApprovalPayload.request, not an alternate wire message. |
+| `ramflux.task.approval.v1` | `crates/ramflux-sdk/src/client/task/approval.rs:51` | TaskApprovalPacket with Request/Decision typed payload; remove prefix/JSON packet/signature transcript. |
+| `ramflux.task.archived_certificate.v1` | `crates/ramflux-sdk/src/client/task/checkpoint.rs:26` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.task.carrier.v1` | `crates/ramflux-sdk/src/client/task/carrier.rs:27` | TaskCarrier typed fields and new signature domain; remove prefix/JSON carrier. |
+| `ramflux.task.committed_intent.v1` | `crates/ramflux-sdk/src/client/task/certificate.rs:54` | Replaced carrier digest transcript specified in section 3.1; no prefix bytes hashed on new wire. |
+| `ramflux.task.courier.dead.v1` | `crates/ramflux-sdk/src/bus/task_courier_queue.rs:79` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.task.courier.failure.v1` | `crates/ramflux-sdk/src/bus/task_courier_apply.rs:144` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.task.courier.row.v1` | `crates/ramflux-sdk/src/bus/task_courier_queue.rs:55` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.task.decision_ack.v1` | `crates/ramflux-sdk/src/client/task/control.rs:47` | TaskAck with original typed TaskCarrier, TaskCertificate and manifests; replace changed signature transcript per section 3.1. |
+| `ramflux.task.decision_certificate.v1` | `crates/ramflux-sdk/src/client/task/certificate.rs:37` | TaskCertificate all eleven fields; replace changed signature transcript per section 3.1. |
+| `ramflux.task.delivery.v1` | `crates/ramflux-sdk/src/client/task/projection.rs:145`, `crates/ramflux-sdk/src/client/task/projection.rs:219` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.task.external_decision.v1` | `crates/ramflux-sdk/src/client/task/decision.rs:32` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.task.history_prefix.v1` | `crates/ramflux-sdk/src/client/task/own_history.rs:380` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.task.private_evidence.v1` | `crates/ramflux-sdk/src/client/task/decision.rs:122` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.task.storage.v1` | `crates/ramflux-sdk/src/client/task/mod.rs:56` | Retain cited surface/task owner hash, storage or courier idempotency domain (not a wire constructor); typed Kind 9/10 owns its application data. |
+| `ramflux.task_event.v1` | `crates/ramflux-protocol/src/domain.rs:74`, `crates/ramflux-protocol/src/tasks/event.rs:11`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:7`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:7`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:13`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:13`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:19`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:19`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:25`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:25`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:31`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:31`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:37`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:37`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:43`, `crates/ramflux-protocol/tests/snapshots/task_goldens__task_events_v1.snap:43` | TaskCarrier.event / TaskEventBody (all seven arms); retain native signature rules/limits, remove wire JSON ingress. |
+| `ramflux.test.account.root.v1` | `crates/ramflux-sdk/src/bus/own_contact_backfill/tests.rs:30`, `crates/ramflux-sdk/src/bus/runtime_tests.rs:170`, `crates/ramflux-sdk/src/bus/runtime_tests/group_actor.rs:15` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.test.foreign.root.v1` | `crates/ramflux-node-core/src/tests/federation.rs:943` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.test.grantee_root.v1` | `crates/ramflux-sdk/src/object.rs:1067` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.test.group.identity.v1` | `crates/ramflux-sdk/src/client/group_tests.rs:58` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.test.group.member.v1` | `crates/ramflux-sdk/src/bus/dispatch/group.rs:1636` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.test.group.prekey.v1` | `crates/ramflux-sdk/src/client/group_tests.rs:62` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.test.group.root.v1` | `crates/ramflux-sdk/src/client/group_tests.rs:31` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.test.read_model.root.v1` | `crates/ramflux-sdk/src/bus/read_model/tests.rs:10` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.test.registration_root.v1` | `apps/ramflux-router/src/router_runtime.rs:960`, `apps/ramflux-router/src/router_runtime.rs:1100`, `crates/ramflux-node-core/src/tests/helpers.rs:26`, `crates/ramflux-node-core/src/tests/helpers.rs:189`, `crates/ramflux-node-core/src/tests/server_retention_r3.rs:39`, `crates/ramflux-node-core/src/tests/session_authority_refresh.rs:39` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.test.remote.identity.v1` | `crates/ramflux-sdk/src/client/identity_authority/test_support.rs:135` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.test.remote.prekey.v1` | `crates/ramflux-sdk/src/client/identity_authority/test_support.rs:139` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.test.remote.root.v1` | `crates/ramflux-sdk/src/client/identity_authority/test_support.rs:131`, `crates/ramflux-sdk/src/client/own_device_sync/tests/stale_group_snapshot_tests.rs:68`, `crates/ramflux-sdk/src/client/own_device_sync/tests/stale_group_snapshot_tests.rs:652` | Retain cited test/benchmark domain only; any fixture of a retired codec is rewritten to its generated constructor; no production Inner dispatch. |
+| `ramflux.test.runtime.agreement.v1` | `apps/ramflux-router/src/router_runtime.rs:1110` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.test.runtime.device.v1` | `apps/ramflux-router/src/router_runtime.rs:970`, `apps/ramflux-router/src/router_runtime.rs:1104`, `apps/ramflux-router/src/router_runtime.rs:1202` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.voice.rebind.v1` | `crates/ramflux-crypto/src/voice_rebind.rs:22`, `docs/voice-calls.md:133` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.well_known_client.v1` | `crates/ramflux-protocol/src/client_discovery.rs:9` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.well_known_server.v1` | `apps/ramflux-federation/src/discovery.rs:104`, `crates/ramflux-node-core/src/federation_crypto.rs:166`, `crates/ramflux-node-core/src/tests/helpers.rs:640` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.x3dh.initial_secret.v1` | `crates/ramflux-protocol/src/domain.rs:55` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+| `ramflux.x3dh.prekey_bundle.v1` | `crates/ramflux-protocol/src/domain.rs:54` | Retain cited native service, crypto, storage or identity domain in its current owner; outside application Inner numbering, never a new body discriminator. |
+
+### 8.4 Every byte-prefix match and its decode path
+
+Reproduce the reviewer audit with
+`git grep -n -E 'b"ramflux\.[a-z_.]+v[0-9]+' <base>`.
+Classify the complete output, including non-carrier crypto/storage/service/test
+domains, instead of silently filtering them out. The table has one row per exact
+byte literal, with every occurrence and the corresponding application decoder
+when one exists. All twelve application prefixes (including the v1 legacy
+refusal) lose their wire encoders/decoders at reset.
+
+| Exact byte literal (escaped terminator) | All baseline locations | Replacement / disposition | Decoder replaced / retained owner |
+|---|---|---|---|
+| `ramflux.account_db_kek.v2` | `crates/ramflux-sdk/src/client/account.rs:314` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.account_db_key.v1` | `crates/ramflux-storage/src/encryption.rs:53` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.account_db_key.wrap.v1` | `crates/ramflux-storage/src/encryption.rs:232`, `crates/ramflux-storage/src/encryption.rs:249` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.backup.staging.database.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/workers.rs:559` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.backup.staging.metadata.v1` | `crates/ramflux-sdk/src/bus/backup_jobs/format.rs:181`, `crates/ramflux-sdk/src/bus/backup_jobs/format.rs:200` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.call.control.v1\n` | `crates/ramflux-sdk/src/client/call/mod.rs:14` | Kind 11 Call.control (13 CallAction variants) | `crates/ramflux-sdk/src/client/call/mod.rs:40` |
+| `ramflux.contact_request.id.v1` | `crates/ramflux-crypto/tests/fixtures/contact_consent_v2_reference.py:22` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.crypto.batch_test.v1:` | `crates/ramflux-crypto/tests/ed25519_batch.rs:51` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.gateway.resume_token.v1` | `crates/ramflux-node-core/src/gateway_state.rs:396` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.identity.custody_signed_prekey.v1` | `crates/ramflux-sdk/src/custody/vault.rs:279` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.identity.device_agreement_key.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:75` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.identity.device_signing_key.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:74` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.identity.master.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:47` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.identity.root_public_key.commitment.v1` | `crates/ramflux-crypto/tests/fixtures/custody_v3_reference.py:52` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.identity.safety_number.v2\0` | `crates/ramflux-crypto/src/custody/safety.rs:45` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.mesh.postcard.v1\0` | `crates/ramflux-transport/src/compio_mesh.rs:17`, `crates/ramflux-transport/src/mesh_quic.rs:50` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.notify.route_control.v1\0` | `crates/ramflux-node-core/src/service_signing.rs:64`, `crates/ramflux-node-core/src/service_signing.rs:96` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.notify.route_delete.v1\0` | `crates/ramflux-node-core/src/service_signing.rs:71`, `crates/ramflux-node-core/src/service_signing.rs:83` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.notify.routes.v1\0` | `crates/ramflux-node-core/src/notify/routes.rs:15` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.notify.verify_bench.v1:` | `crates/ramflux-crypto/tests/ed25519_verify_bench.rs:72` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+| `ramflux.own_contact.v1\n` | `crates/ramflux-sdk/src/client/identity_authority/custody_lifecycle_tests.rs:186`, `crates/ramflux-sdk/src/client/own_contact.rs:16`, `crates/ramflux-sdk/src/client/routed/contact_request_tests.rs:421`, `crates/ramflux-sdk/src/client/routed/recipient_context_tests.rs:45` | Control.own_contact_sync (6); all ingress/backfill/restore paths | `crates/ramflux-sdk/src/client/own_contact.rs:72`, `crates/ramflux-sdk/src/client/own_contact.rs:416` |
+| `ramflux.own_contact_tombstone.v1\n` | `crates/ramflux-sdk/src/client/contact_event_id_tests.rs:94`, `crates/ramflux-sdk/src/client/identity_authority/tests.rs:553`, `crates/ramflux-sdk/src/client/own_contact/tombstone.rs:9` | Control.own_contact_tombstone (13), sticky same-root restrictions | `crates/ramflux-sdk/src/client/own_contact/tombstone.rs:18`, `crates/ramflux-sdk/src/client/own_contact/tombstone.rs:51` |
+| `ramflux.own_device_message.v1\n` | `crates/ramflux-sdk/src/client/own_device_copy.rs:315` | Remove legacy refusal/decoder branch on v3 reset; no v1 compatibility | `crates/ramflux-sdk/src/client/own_device_copy.rs:315` |
+| `ramflux.own_device_message.v2\n` | `crates/ramflux-sdk/src/client/own_device_copy.rs:15` | Control.own_message_copy (15), verified original exact Inner; no extra SDK body/key-slot codec | `crates/ramflux-sdk/src/client/own_device_copy.rs:318` |
+| `ramflux.own_group_consent.v1\n` | `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:10` | Control.own_group_consent (14) with typed signed snapshot/decision | `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:142` |
+| `ramflux.surface.control.v1\n` | `crates/ramflux-sdk/src/client/surface/control.rs:11` | Kind 9 Surface.delivery; typed peer/own, epoch, context, manifests | `crates/ramflux-sdk/src/client/surface/control.rs:164`, `crates/ramflux-sdk/src/client/surface/control.rs:178` |
+| `ramflux.surface.v2\n` | `crates/ramflux-sdk/src/client/surface/carrier.rs:9` | Kind 9 Surface.delivery.carrier (event/action/action_receipt) | `crates/ramflux-sdk/src/client/surface/carrier.rs:140` |
+| `ramflux.task.approval.v1\n` | `crates/ramflux-sdk/src/client/task/approval.rs:13` | Kind 10 Task.approval; typed Request/Decision, grant signature | `crates/ramflux-sdk/src/client/task/approval.rs:160` |
+| `ramflux.task.control.v1\n` | `crates/ramflux-sdk/src/client/task/control.rs:10` | Kind 10 Task.control; typed Intent/Ack, certificates/manifests | `crates/ramflux-sdk/src/client/task/control.rs:130` |
+| `ramflux.task.own.v1\n` | `crates/ramflux-sdk/src/client/task/own_history.rs:11` | Kind 10 Task.own_history; complete witnessed history/context/pins/base/prefix | `crates/ramflux-sdk/src/client/task/own_history.rs:152`, `crates/ramflux-sdk/src/client/task/own_history.rs:307` |
+| `ramflux.task.v1\n` | `crates/ramflux-sdk/src/client/task/carrier.rs:9` | Kind 10 Task.carrier (7 TaskEventBody variants) | `crates/ramflux-sdk/src/client/task/carrier.rs:75` |
+| `ramflux.voice.rebind.v1` | `crates/ramflux-crypto/src/voice_rebind.rs:22` | Retain independently owned crypto/storage/service/test domain; not an application byte-prefix carrier. | Cited owner; no Inner decode path. |
+
+The broad string-form grep also finds these version-labelled domain suffixes;
+none is an application carrier. Escaped JSON fixture text refers back to the
+corresponding base literal in section 8.3, not a new wire constructor.
+
+| Remaining string form | Baseline source | Retained disposition |
+|---|---|---|
+| `ramflux.notify.route_owner.v1\0{target}` | `crates/ramflux-node-core/src/notify/route_authority.rs:32` | Notify route-owner hash input; native node owner |
+| `ramflux.object_relay.v3.get.body` | `crates/ramflux-sdk/src/client/object.rs:2221`, `crates/ramflux-sdk/src/client/object.rs:2510` | Relay request-body hash domain; native object service |
+| `ramflux.object_relay.v3.ack.body` | `crates/ramflux-sdk/src/client/object.rs:2298`, `crates/ramflux-sdk/src/client/object.rs:2608` | Relay ACK-body hash domain; native object service |
+| `ramflux.group.sender_key.v1\|{group_id}\|{sender_id}\|{epoch}` | `crates/ramflux-sdk/src/group.rs:295` | Legacy group associated-data derivation; primitive adapter owns retirement, never Inner dispatch |
+| `ramflux.object_key_slot.v1\|{object_id}\|{conversation_id}\|{recipient_device_id}` | `crates/ramflux-sdk/src/object.rs:234` | Legacy slot associated-data derivation; MediaKeySlot/native crypto adapter owns retirement |
+
+### 8.5 Remaining decoder, projection and history entry points
+
+These are additional guards/readers beyond the defining decode function. The
+first table is the complete client PREFIX-recognition grep, so a retained guard
+cannot silently route a new protobuf packet back to a removed decoder. Test
+recognizers are removed/replaced with their constructor fixtures too.
+
+| Baseline recognition site | Replacement |
+|---|---|
+| `crates/ramflux-sdk/src/client/call/mod.rs:40` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/identity_authority/tests.rs:592` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/own_contact.rs:72` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/own_contact.rs:416` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/own_contact/tombstone.rs:18` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/own_contact/tombstone.rs:51` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/own_device_copy.rs:315` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/own_device_copy.rs:318` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/routed/control.rs:231` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/routed/control.rs:232` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/routed/control.rs:233` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/routed/control.rs:238` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/routed/mod.rs:316` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/routed/receive.rs:26` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/routed/receive.rs:608` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/shared_group/own_consent.rs:142` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/surface/backfill.rs:18` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/surface/carrier.rs:140` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/surface/control.rs:164` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/surface/control.rs:178` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/surface/delivery.rs:17` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/task/approval.rs:160` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/task/carrier.rs:75` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/task/control.rs:130` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/task/own_history.rs:152` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/task/own_history.rs:307` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+| `crates/ramflux-sdk/src/client/task/projection.rs:189` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
+
+| Other baseline decoder / reader | Replacement / responsible implementation |
+|---|---|
+| `crates/ramflux-sdk/src/client/routed/control.rs:64` A2iControlEvent try-parse | Control.a2i=26; exact generated fields and native source binding; S10a |
+| `crates/ramflux-sdk/src/client/routed/control.rs:93`, `crates/ramflux-sdk/src/client/routed/reset_work.rs:73` pair reset type strings | Control.reset/reset_ack, including rejected_bootstrap_floor; S10a |
+| `crates/ramflux-sdk/src/client/routed/control.rs:119`, `crates/ramflux-sdk/src/client/routed/control.rs:143`, `crates/ramflux-sdk/src/client/contact.rs:666`, `crates/ramflux-sdk/src/client/contact.rs:754` friend.* / object.revoke_access | Control.friend (all five actions/full link fields) and Control.object_revoke (all five fields); preserve ownership checks; S10a |
+| `crates/ramflux-sdk/src/client/contact_requests/native.rs:16`, `crates/ramflux-sdk/src/client/contact_requests/wire.rs:88` contact schema sniff | Control.contact_control selects custody Envelope<ContactConsentV2> directly; retire legacy consent v1 on v3 reset; S10a |
+| `crates/ramflux-sdk/src/client/shared_group/controls.rs:17` group four-arm body JSON decode | Control.group_state → GroupControlBody Request/Result/DeviceSet/Transfer; typed federation route and transfer Probe/Head; S10a |
+| `crates/ramflux-sdk/src/client/group_delivery.rs:62`, `crates/ramflux-sdk/src/client/group_delivery.rs:92`, `crates/ramflux-sdk/src/client/group_delivery.rs:408` group message/control/distribution try-parse | Message.sealed_group; Control.group_state/group_key_control with full distribution fields; S10a |
+| `crates/ramflux-sdk/src/client/surface/resync_request.rs:10`, `crates/ramflux-sdk/src/client/surface/resync_request.rs:129` surface.resync.request.v1 | Surface.resync_request; every existing field mapped in section 3.1; author replies with typed snapshot; S10a |
+| `crates/ramflux-sdk/src/client/own_device_sync.rs:9`, `crates/ramflux-sdk/src/client/own_device_sync.rs:42`, `crates/ramflux-sdk/src/client/own_device_history_pages.rs:12` sync/bundle/version switch | Control.own_history / HistoryPage and typed Task.own_history/Surface.delivery; details below; S10a |
+| `desktop/crates/ramflux-desktop-sdk/src/translate/calls.rs:65` string-key call decoder | Generated CallControl/CallAction and public CallRow adapter; all 13 signals, S10c |
+| `desktop/crates/ramflux-desktop-sdk/src/translate/tasks.rs:79` string-key task decoder | Generated TaskEvent/TaskEventBody/TaskCertificate public projection; S10c |
+| `desktop/crates/ramflux-desktop-sdk/src/translate/task_events.rs:73` parse(text) recovery | Remove rendered-text recovery; generated Task typed update; S10c |
+| `desktop/crates/ramflux-desktop-sdk/src/translate/surface_answers.rs:59` surface answer keys | Generated SurfaceAction/ActionReceipt projection with original requester binding; S10c |
+
+History replacement is a reset, not a legacy bundle decoder. The old envelope's
+principal/source/target/snapshot/times/nonce/signature become authenticated page
+transfer id, qualified endpoints, expiry, previous digest and sender envelope
+signature; history_ref/key-slot data becomes typed Message.media when an object
+is needed. Old bundle messages/contents become exact Inner HistoryItems with
+source evidence and explicit footprint bindings. task_packets and task export
+cursor/truncation remain typed TaskOwnPacket pages; surface_pages/controls/
+checkpoints and export cursor/truncation become typed Surface deliveries and
+snapshot proofs. surface_message_epochs bind EventIdentity.group_epoch.
+Groups/manifests/member pins/accepted contacts become their typed Control
+operations and OwnContext proofs, with the same-root and current revocation
+fences. next_page becomes page sequencing/cursor; authority_only becomes a
+control-only page with no items. Saved dm_sessions and raw sender-key distribution
+strings are retired from history: fresh pair sessions and typed authorized group
+key controls establish crypto state. No archive may restore old live keys or
+capability floors. This preserves messages, approvals and original authority
+while removing the old wire codecs rather than carrying them as untyped bytes.
+
+The mechanical checks compare all string and byte sets with `comm -3`, verify
+every occurrence location and require every PREFIX recognition site above.
+Section 12's removal audit repeats this inventory against the implementation:
+zero active obsolete app decoders; retained domains still have their cited owner.
+
 ## 9. Migration, persistence, readers and erasure
 
 ### 9.1 Activation is a development reset
@@ -1518,7 +3892,7 @@ leases, active layer declarations or publishable prekey private material.
 These are consumers, not merely writers. Inventory both the named keys and
 physical table columns; search for `runtime_message_content`, `state_json`,
 `body_json`, `response_json`, `runtime_unrouted`, `message_copy_binding`,
-`own_device_history`, the three carrier prefixes and every section 8 literal.
+`own_device_history`, all section 8.4 carrier prefixes and every section 8 literal.
 The implementation's source audit must classify every hit before removing a
 reader. The baseline ownership map is:
 
@@ -1640,10 +4014,10 @@ UnsupportedView replaces Content without exposing secret/raw bytes by default.
 | Reaction | message, durable | MessageRequest.reaction / Content.reaction; principal-scoped add/remove |
 | Receipt | message, durable; notification policy suppresses noisy UI locally | Content.receipt; delivered/read never inferred from transport ACK |
 | Typing | message, ephemeral, low, TTL 5 seconds, no push | MessageRequest.typing / transient Content.typing with expiry; never history |
-| Control | message; durable except known live-presence operation | Content.control; exact generated payload plus fixed native proof codec |
-| Surface | message, durable | Content.surface, SurfaceState/SurfaceAction; task/tool arguments remain application data |
-| Task | message, durable | Content.task, TaskState and signed decision; existing approval/courier isolation |
-| Call | invite=call_wake durable; ICE=message ephemeral; other signals=message | Content.call, CallSignal; native invite verification before showing a call |
+| Control | message; durable except known live-presence operation | Content.control; all 16 operation/typed-payload mappings in section 3.2, including A2I and object revoke |
+| Surface | message, durable | Content.surface; SurfaceDelivery/ResyncRequest and every section 3.1 command/action/receipt; generated JsonValue data |
+| Task | message, durable | Content.task; every TaskEventBody, approval Request/Decision, Intent/Ack and own-history field in section 3.1 |
+| Call | Invite=call_wake durable; remaining 12 CallAction signals=message durable | Content.call.control; exact CallControl, allocation and consent; no ICE; verify invite before presentation |
 | SelfSync | message, durable, same-root only | Content.selfSync; read/draft/pin/mute operation and revision |
 
 ### 10.2 S9 attachment fields
@@ -1652,7 +4026,7 @@ Message.media is ordered; each MediaRef has object_id, manifest_digest, mime_typ
 size, key_slots, optional file_name, optional inline_thumbnail and large_manifest.
 MediaKeySlot binds qualified recipient, crypto format and encrypted_key; no raw
 object key is exposed in a generic UI update. Thumbnail carries mime_type, width,
-height, encoded bytes and digest; maximum encoded bytes is 16 KiB, dimensions
+height and encoded bytes; maximum encoded bytes is 16 KiB, dimensions
 1..512 each, decoded pixels at most 262,144, recognized image codecs only.
 Validate before image decode; no URLs or executable image features. At layer 1
 omit a thumbnail; layer 2 can carry it. Local previews never bypass content policy.
@@ -1704,7 +4078,7 @@ MessageUpdate, Content and all typed nested descriptors directly. Preserve
 request_id/account_id/operation_id and journal cursor across Rust, ProtoJSON,
 UniFFI, C ABI and WASM adapters. Generated wrappers can add transport correlation,
 not a second message schema or a stringly typed “payload” model. Business errors
-remain typed codes (LayerUnavailable, PeerUpgradeRequired, StorageCapacity,
+remain typed codes (PeerUpgradeRequired, StorageCapacity,
 SchemaResetRequired, authorization and crypto errors), with exact adapter tests;
 Unsupported is a successful typed row/update. Raw retrieval for local reparse is
 privileged, bounded and off the ordinary update/bus path. Native proofs and
@@ -1824,7 +4198,7 @@ Completion definition (every row required):
 | Item | Required acceptance |
 |---|---|
 | Generation | Locked regen is deterministic and diff-free; Rust/ProtoJSON/binding round trips preserve presence, integers, Unicode and bytes; no private message schema or carrier remains |
-| Negotiation | Signed native device max_layer with expiry/rollback/recovery; all-target group/DM/own minimum; membership recheck and safe kind/field downgrade |
+| Negotiation | Signed native device max_layer with expiry/rollback/recovery; fresh-cohort minimum plus per-target F fallback on missing/expired declarations; membership recheck and safe kind/field downgrade |
 | Semantics | All 12 kinds send/receive through generated dispatch; Edit/Delete/Reaction enforce authorization/revision/tombstone rules; same Message/Service identity/order; attachments, groups, receipts, calls, tasks and own history still work |
 | Unknown input | Unknown kind, field, entity, nested signed payload or high layer commits Unsupported plus exact raw and provenance before ACK; bounded quota; no dead letter, NACK or action execution |
 | Privacy | Every raw copy registers transactionally; crash/absence/race tests cover active, prepared, journal, nested group, archived and restored paths; history-container invalidation and object last-owner rules both pass |
@@ -1913,8 +4287,16 @@ fresh target directories per mutation and restore the original source afterward.
 |---|---|---|
 | D1/Q1, S10a | schema_regeneration_is_fresh; protojson_integer_presence_unicode_conformance; no_private_inner_wire_types | Change generated field without regeneration; encode u64 as float; introduce an SDK schema discriminator/carrier |
 | D4/Q2, S10a | kind_registry_is_exhaustive_and_reserved; all_kind_binding_round_trip | Reuse a reserved KindId or remove one constructor/consumer arm |
-| D2/Q6, S10a | group_layer_is_minimum_of_every_target; own_and_dm_layer_minimum; layer_update_rejects_rollback_and_expiry | Ignore one low-layer member; accept expired or older declaration; restore an archive declaration as live |
+| D2/Q6, S10a | group_fresh_cohort_minimum; own_and_dm_fresh_minimum; layer_update_rejects_rollback | Ignore one fresh low-layer target; accept an older/equal-conflicting declaration; restore archive capability as live |
 | D2/Q6, S10a | membership_change_rebuilds_unsubmitted_representation; downgrade_does_not_execute_structural_control | Skip membership recheck; turn Delete into executable text; send Reaction state to a layer-1 member |
+| H1/D2, S10a | offline_over_24h_still_receives_floor_in_dm_group_and_own_copy | Treat expired or missing declaration as LayerUnavailable; lower every fresh group/own target to F instead of only the stale member; assert stale member receives F, fresh members retain negotiated layer and logical id is shared |
+| H2, S10a | every_surface_command_patch_action_receipt_and_resync_round_trips | Drop any component/data-model/finality field or one of 6 commands/5 patches; remove original action signer binding; k2b must fail |
+| H2, S10a | all_thirteen_call_actions_and_native_lease_fields_round_trip | Drop base_key, generation, allocation, consent signature or one action; call01 key agreement/rekey and state assertions fail |
+| H2, S10a | every_task_event_approval_control_and_history_round_trips | Drop Proposal/Resolve, grant_signature, Intent/Ack certificate, history prefix or membership witness; k3b/k5a assertions fail |
+| M2, S10a | every_control_operation_has_exactly_one_typed_payload | Substitute a different operation arm; drop A2I subject/domain, group Request federation route, DeviceSet epoch, Transfer arm or object revoke; exhaustive per-arm assertions fail |
+| L2/D3, S10a | unsupported_source_budget_is_fair_and_node_expiry_is_visible | Charge by rotating device/conversation instead of root, let one source exceed 16 rows/8 MiB, stop other peers after source exhaustion or promise persistence after node TTL; fair-admission/expiry assertions fail |
+| L3/Q3, S10a/S11 | conference_invite_maps_to_call_wake | Map ConferenceWakeNotification or a group-call wake invite to message; VoIP mapping assertion fails |
+| L4, S10a | entity_unknown_is_projection_only_and_reaction_token_is_bounded | Accept removed Entity tag 5 for execution, render unknown numeric kind, accept 65-byte or two-grapheme reaction token; raw-retention and validation assertions fail |
 | D3/Q9, S10a | unknown_kind_is_acked_and_kept_with_raw_bytes | Dead-letter an unknown kind instead of committing exact raw and ACKing |
 | D3, S10a | unknown_field_entity_layer_and_signed_payload_keep_exact_bytes | Decode/re-encode through prost before retention; ignore unknown nested field/entity or execute a partially decoded control |
 | D3/Q12, S10a | unsupported_quota_is_atomic_and_preserves_existing_rows | Exempt copied/nested raw from quota; evict an older row to ACK new input; advance ratchet on failed quota reservation |
@@ -1952,7 +4334,7 @@ required. This specification alone supplies none of that runtime evidence.
 ## 13. Residual risks and owner review points
 
 The proposed defaults are concrete so implementation does not need another
-schema-design round: floor 256, raw quota 64 rows/32 MiB, maximum Inner 524,252,
+schema-design round: floor 256, raw quota 64 rows/32 MiB with 16 rows/8 MiB per source anchor, maximum Inner 524,252,
 mandatory crypto layer 3, live queue 64/256 KiB, TTL 5 seconds and bounded receive
 ring/trials. Owner approval accepts those protocol/resource choices; changing
 them before implementation requires updating this design and vectors together.
@@ -1969,7 +4351,8 @@ claims of global content erasure. Classical X25519/X3DH is not post-quantum.
 Unknown authenticated content consumes local space and can cause explicit
 backpressure, not unlimited storage or guaranteed ACK of unlimited input. Old
 receive-key eviction bounds recovery; unlock/attended recovery remains necessary
-when private providers or signed declarations are unavailable. Group raw copies
+when private providers are unavailable. A missing/expired layer declaration
+only selects the per-target floor; it never blocks messaging. Group raw copies
 and history-page containers amplify the registration audit; their mutation
 coverage is a prerequisite, not a reason to omit them. A new schema does not
 repair current silent ACK-window overflow by itself; S6 owns typed gaps.
