@@ -61,6 +61,7 @@ pub struct PrxBridgeEngine {
     prepared: Option<Source>,
     stats: Value,
     stats_at: u64,
+    last_poll_at: u64,
     stats_dirty: bool,
     warnings: HashMap<&'static str, u64>,
 }
@@ -97,6 +98,7 @@ impl PrxBridgeEngine {
                 "erases":{"sent":0,"acked":0,"retried":0},"erase_outbox_len":0,
                 "frames_rejected":{"oversize":0,"parse":0},"late_acks":0,"retry_delay_s":0,"controls":{"agent_revoked":0,"agent_offline":0,"turn_cancel":0}}),
             stats_at: 0,
+            last_poll_at: 0,
             stats_dirty: false,
             warnings: HashMap::new(),
         })
@@ -494,6 +496,7 @@ impl PrxBridgeEngine {
         Ok(Vec::new())
     }
     fn poll_inner(&mut self, now: u64) -> Result<Vec<EngineEvent>> {
+        self.last_poll_at = now;
         let mut processed = 0usize;
         while self.state.packet.is_none() && processed < 64 && self.answers.len() < 256 {
             let Ok(event) = self.transport.events.try_recv() else {
@@ -641,7 +644,9 @@ impl EngineProvider for PrxBridgeEngine {
     }
     fn wake(&self) -> impl std::future::Future<Output = ()> {
         let immediate = if self.state.packet.is_some() {
-            self.output_ready(crate::bus::now_ms())
+            // Surface eligibility uses the same bus clock as poll/output_done. The
+            // existing 100ms maintenance tick refreshes it while output is deferred.
+            self.output_ready(self.last_poll_at)
         } else {
             !self.transport.events.is_empty()
         } || self.connected
@@ -783,6 +788,8 @@ impl EngineProvider for PrxBridgeEngine {
             }
             let now = crate::bus::now_ms();
             for turn in state.turns.values_mut() {
+                turn.next_surface_write_at =
+                    turn.next_surface_write_at.min(now.saturating_add(self.config.stream_flush_ms));
                 if let Some(at) = &mut turn.submitted_at {
                     *at = (*at).min(now);
                 }

@@ -1244,3 +1244,6 @@ async fn bridge_removal_discards_a_held_reply_packet_before_restore() -> TestRes
     host.stop().await?;
     Ok(())
 }
+
+#[path = "tests_pacing.rs"]
+mod pacing;

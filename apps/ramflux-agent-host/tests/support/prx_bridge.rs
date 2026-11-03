@@ -29,6 +29,7 @@ pub(super) struct Data {
     pub receipts: HashMap<String, Value>,
     pub replies: Vec<Value>,
     pub surfaces: Vec<ramflux_protocol::A2uiConversationEvent>,
+    pub surface_write_times: Vec<u64>,
     pub surface_states: HashMap<String, ramflux_protocol::SurfaceState>,
     pub task: Value,
     pub verified: bool,
@@ -84,6 +85,10 @@ impl Bus {
             }
             "message.submit" | "group.send" | "surface.send" => {
                 let id = operation.ok_or(Error::State)?;
+                if method == "surface.send" {
+                    let now = if data.clock == 0 { crate::bus::now_ms() } else { data.clock };
+                    data.surface_write_times.push(now);
+                }
                 if let Some(prior) = data.receipts.get(id) {
                     if prior != &body {
                         return Err(Error::State);
