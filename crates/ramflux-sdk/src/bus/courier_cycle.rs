@@ -74,11 +74,7 @@ async fn priority_step(
     courier: &'static str,
     operation: impl PriorityOperation,
 ) -> usize {
-    // Capture before cancellation can drop a borrowed engine; no fresh connection is opened here.
-    let resume_config = account
-        .engine
-        .as_ref()
-        .map_or_else(|| account.gateway_config.clone(), |engine| engine.config.clone());
+    let resume = super::gateway_resume::Snapshot::capture(account);
     let result = tokio::time::timeout(Duration::from_secs(4), operation.run(account)).await;
     match result {
         Ok(Ok(n)) => n,
@@ -87,12 +83,7 @@ async fn priority_step(
             0
         }
         Err(_) => {
-            let saved = if let Some(engine) = account.engine.take() {
-                account.retire_engine(engine)
-            } else {
-                account.gateway_config = resume_config;
-                account.checkpoint_gateway_resume()
-            };
+            let saved = resume.retire(account);
             if let Err(error) = saved {
                 tracing::warn!(%error, courier, "priority timeout resume checkpoint failed");
             }
@@ -179,10 +170,17 @@ mod tests {
     }
     struct StalledPriority {
         takes_engine: bool,
+        rotate_scope: bool,
     }
     impl PriorityOperation for StalledPriority {
         async fn run(&self, account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
             let engine = if self.takes_engine { account.engine.take() } else { None };
+            if self.rotate_scope {
+                account.gateway_config.device_epoch += 1;
+                account.gateway_config.previous_session_id = Some("current-session".into());
+                account.gateway_config.resume_token = Some("current-token".into());
+                account.gateway_config.last_seen_inbox_seq = 73;
+            }
             let result = std::future::pending().await;
             drop(engine);
             result
@@ -193,7 +191,9 @@ mod tests {
     async fn priority_timeout_retires_both_pooled_and_borrowed_engines_with_resume_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::sync::{Arc, atomic::AtomicBool};
-        for takes_engine in [false, true] {
+        for (takes_engine, rotate_scope) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let root = crate::bus::runtime_tests::root("priority-resume-timeout");
             let mut account = crate::bus::runtime_tests::account(
                 &root,
@@ -201,13 +201,19 @@ mod tests {
                 None,
                 Arc::new(AtomicBool::new(false)),
             )?;
+            let before_epoch = account.gateway_config.device_epoch;
             let engine = account.engine.as_mut().ok_or("engine")?;
             engine.config.previous_session_id = Some("retained-session".into());
             engine.config.resume_token = Some("retained-token".into());
             engine.config.last_seen_inbox_seq = 41;
             let started = tokio::time::Instant::now();
             assert_eq!(
-                priority_step(&mut account, "fixture", StalledPriority { takes_engine }).await,
+                priority_step(
+                    &mut account,
+                    "fixture",
+                    StalledPriority { takes_engine, rotate_scope }
+                )
+                .await,
                 0
             );
             assert_eq!(started.elapsed(), Duration::from_secs(4));
@@ -217,9 +223,20 @@ mod tests {
                 .projection_checkpoint(LocalBusAccountState::GATEWAY_RESUME_CHECKPOINT)?
                 .ok_or("checkpoint")?;
             let saved: serde_json::Value = serde_json::from_str(&saved)?;
-            assert_eq!(saved["previous_session_id"], "retained-session");
-            assert_eq!(saved["resume_token"], "retained-token");
-            assert_eq!(saved["last_seen_inbox_seq"], 41);
+            if rotate_scope {
+                assert_eq!(account.gateway_config.device_epoch, before_epoch + 1);
+                assert_eq!(saved["previous_session_id"], "current-session");
+                assert_eq!(saved["resume_token"], "current-token");
+                assert_eq!(saved["last_seen_inbox_seq"], 73);
+                assert_eq!(
+                    account.gateway_config.previous_session_id.as_deref(),
+                    Some("current-session")
+                );
+            } else {
+                assert_eq!(saved["previous_session_id"], "retained-session");
+                assert_eq!(saved["resume_token"], "retained-token");
+                assert_eq!(saved["last_seen_inbox_seq"], 41);
+            }
         }
         Ok(())
     }

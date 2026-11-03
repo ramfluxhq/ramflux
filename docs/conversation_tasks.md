@@ -120,6 +120,9 @@ second remaining before starting. Newly received receipts can still be sent in
 the same cycle when eight seconds remain for another priority pass. A timed-out
 priority operation retains pending work and checkpoints the gateway resume state
 before reconnecting; it never clears a pending call merely because time ran out.
+Cancellation keeps current identity/custody/routing configuration. Saved resume
+metadata is reused only while the authenticated account/device and route still
+match; an authority refresh during the wait is never rolled back.
 
 Task federation forwarding uses the same one-second submit deadline as local
 confirmation forwarding. It returns `TaskDeliveryTimeout` when that deadline

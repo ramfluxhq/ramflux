@@ -23,6 +23,7 @@ pub mod daemon;
 mod delivery_receipts;
 pub mod dispatch;
 mod events;
+mod gateway_resume;
 pub(crate) mod group_conversation;
 mod group_delivery;
 pub mod io;

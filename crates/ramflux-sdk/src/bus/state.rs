@@ -450,10 +450,17 @@ impl LocalBusAccountState {
     }
 
     pub(super) fn checkpoint_gateway_resume(&self) -> Result<(), SdkError> {
+        self.checkpoint_gateway_resume_from(&self.gateway_config)
+    }
+
+    pub(super) fn checkpoint_gateway_resume_from(
+        &self,
+        config: &GatewaySessionConfig,
+    ) -> Result<(), SdkError> {
         let persisted = PersistedGatewayResume {
-            previous_session_id: self.gateway_config.previous_session_id.clone(),
-            resume_token: self.gateway_config.resume_token.clone(),
-            last_seen_inbox_seq: self.gateway_config.last_seen_inbox_seq,
+            previous_session_id: config.previous_session_id.clone(),
+            resume_token: config.resume_token.clone(),
+            last_seen_inbox_seq: config.last_seen_inbox_seq,
         };
         self.client.set_projection_checkpoint(
             Self::GATEWAY_RESUME_CHECKPOINT,
