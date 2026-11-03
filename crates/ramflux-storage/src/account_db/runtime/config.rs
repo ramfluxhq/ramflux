@@ -101,6 +101,35 @@ impl AccountDb {
         })
     }
 
+    /// Shares this account-owned writer with a short synchronous worker phase.
+    /// Network futures must never retain a transaction guard across an await.
+    /// The original managed writer still serializes all SQLite jobs and owns its lease.
+    ///
+    /// # Errors
+    /// Refuses query-only handles; a reader cannot acquire writer authority.
+    pub fn share_writer(&self) -> Result<Self, StorageError> {
+        if self.is_query_only()? {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        Ok(Self {
+            local_account_id: self.local_account_id.clone(),
+            principal_commitment: self.principal_commitment.clone(),
+            path: self.path.clone(),
+            mode: self.mode,
+            current_key: self.current_key.clone(),
+            device_signer: self.device_signer.clone(),
+            clock: self.clock.clone(),
+            object_retirement: super::super::object_retention::RetirementObserver {
+                generations: std::sync::Arc::clone(&self.object_retirement.generations),
+                ..Default::default()
+            },
+            connection: self.connection.clone(),
+            erasure_authority: self.erasure_authority.clone(),
+            volatile_typing: RefCell::new(BTreeMap::new()),
+            volatile_presence: RefCell::new(BTreeMap::new()),
+        })
+    }
+
     fn open_query_only_connection(&self) -> Result<Connection, StorageError> {
         let connection = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         apply_key(&connection, &self.current_key)?;
