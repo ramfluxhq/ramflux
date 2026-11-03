@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Upgrade Ed25519 to dalek 3 and share curve25519-dalek 5 with X25519 while
   preserving RFC 8032 signatures and node identity record encodings.
-- Preserve the full call-signaling submit window in priority courier passes, and
-  document shared receive budgets and deferred background contact discovery.
+- Preserve same-cycle delivery receipts with an eight-second priority admission
+  floor and a separate call-signaling allowance, capped by the remaining cycle.
+  Document shared receive budgets and deferred background contact discovery.
+
 - Charge complete task courier submissions to the actor cycle budget, service
   receipt and call couriers first, and bound federated task forwarding with
   deadline-aware HTTP workers and typed timeout/capacity results.

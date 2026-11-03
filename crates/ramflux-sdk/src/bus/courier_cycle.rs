@@ -10,8 +10,10 @@ pub(super) const LIMIT: Duration = Duration::from_secs(20);
 // for local bookkeeping. Courier-worker manifest preparation is outside this budget.
 const TASK_MINIMUM: Duration = Duration::from_secs(7);
 
-pub(super) const PRIORITY_ALLOWANCE: Duration =
-    Duration::from_secs(4).saturating_add(super::task_delivery::SUBMIT_ALLOWANCE);
+// Admission floor for the post-receive pass, independent of the call submit budget.
+pub(super) const PRIORITY_ALLOWANCE: Duration = Duration::from_secs(8);
+const RECEIPT_ALLOWANCE: Duration = Duration::from_secs(4);
+const CALL_ALLOWANCE: Duration = super::task_delivery::SUBMIT_ALLOWANCE;
 
 pub(super) trait Couriers {
     async fn priority(&mut self);
@@ -49,11 +51,18 @@ impl Cycle {
 }
 
 pub(super) async fn priority(account: &mut LocalBusAccountState) -> usize {
+    priority_until(account, tokio::time::Instant::now() + LIMIT).await
+}
+
+pub(super) async fn priority_until(
+    account: &mut LocalBusAccountState,
+    deadline: tokio::time::Instant,
+) -> usize {
     if !super::task_courier_queue::networking_ready(account) {
         return 0;
     }
-    let receipts = priority_step(account, "receipt", Priority::Receipt).await;
-    receipts + priority_step(account, "call", Priority::Call).await
+    let receipts = priority_step(account, "receipt", Priority::Receipt, deadline).await;
+    receipts + priority_step(account, "call", Priority::Call, deadline).await
 }
 
 trait PriorityOperation {
@@ -70,8 +79,8 @@ enum Priority {
 impl PriorityOperation for Priority {
     fn allowance(&self) -> Duration {
         match self {
-            Self::Receipt => Duration::from_secs(4),
-            Self::Call => super::task_delivery::SUBMIT_ALLOWANCE,
+            Self::Receipt => RECEIPT_ALLOWANCE,
+            Self::Call => CALL_ALLOWANCE,
         }
     }
     async fn run(&self, account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
@@ -86,9 +95,15 @@ async fn priority_step(
     account: &mut LocalBusAccountState,
     courier: &'static str,
     operation: impl PriorityOperation,
+    deadline: tokio::time::Instant,
 ) -> usize {
+    let now = tokio::time::Instant::now();
+    if deadline <= now {
+        return 0;
+    }
     let resume = super::gateway_resume::Snapshot::capture(account);
-    let result = tokio::time::timeout(operation.allowance(), operation.run(account)).await;
+    let deadline = deadline.min(now + operation.allowance());
+    let result = tokio::time::timeout_at(deadline, operation.run(account)).await;
     match result {
         Ok(Ok(n)) => n,
         Ok(Err(error)) => {
@@ -224,7 +239,8 @@ mod tests {
                 priority_step(
                     &mut account,
                     "fixture",
-                    StalledPriority { takes_engine, rotate_scope }
+                    StalledPriority { takes_engine, rotate_scope },
+                    started + LIMIT,
                 )
                 .await,
                 0
@@ -251,6 +267,33 @@ mod tests {
                 assert_eq!(saved["last_seen_inbox_seq"], 41);
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn priority_step_cannot_extend_the_remaining_sync_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::{Arc, atomic::AtomicBool};
+        let root = crate::bus::runtime_tests::root("priority-remaining-time");
+        let mut account = crate::bus::runtime_tests::account(
+            &root,
+            "sender",
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )?;
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            priority_step(
+                &mut account,
+                "fixture",
+                StalledPriority { takes_engine: false, rotate_scope: false },
+                started + Duration::from_secs(2),
+            )
+            .await,
+            0
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert!(account.engine.is_none());
         Ok(())
     }
 }

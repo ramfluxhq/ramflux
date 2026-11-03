@@ -144,28 +144,115 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
         .await
 }
 
-// Mutation: cap Priority::Call at four seconds again.
+fn outgoing_call(account: &mut LocalBusAccountState, peer: &RamfluxClient) -> Case<String> {
+    let id = ramflux_protocol::encode_base64url([28; 16]);
+    let call = crate::client::call::state::LiveCall::outgoing(
+        id.clone(),
+        "healthy".into(),
+        account.client.call_local_endpoint()?,
+        vec![peer.call_local_endpoint()?],
+        now_unix_timestamp(),
+    )?;
+    account.client.persist_call_row(&call.row)?;
+    account.client.voice_calls.insert(id.clone(), call);
+    Ok(id)
+}
+
+// Mutation: raise the shared post-receive admission floor to nineteen seconds.
+#[tokio::test]
+async fn newly_received_messages_send_receipts_in_the_same_pass_with_eight_seconds_left() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(async {
+            for call_seconds in [0, 10] {
+                let mut f = Box::pin(Fixture::new("courier-receive-receipt-r3")).await?;
+                f.inbound().await?;
+                let call_gate = if call_seconds > 0 {
+                    outgoing_call(&mut f.source, &f.peer.client)?;
+                    let (gate, observed) = hold();
+                    let released = Arc::clone(&gate.release);
+                    f.gateway.lock().map_err(|_| "gateway")?.submit_hold = Some(gate);
+                    Some((observed, released))
+                } else {
+                    None
+                };
+                let (gate, mut observed) = hold();
+                let released = Arc::clone(&gate.release);
+                let gateway = Arc::clone(&f.gateway);
+                {
+                    let mut server = gateway.lock().map_err(|_| "gateway")?;
+                    // Only the ordinary DM: the other fixture entry is a call invitation.
+                    server.inbox.truncate(1);
+                    server.resume_hold = Some(gate);
+                    assert_eq!(server.sent, Vec::<ramflux_protocol::Envelope>::new());
+                }
+                assert_eq!(
+                    f.source
+                        .client
+                        .account_db()?
+                        .actor_state_usage(crate::client::delivery_receipts::PREFIX)?
+                        .0,
+                    0
+                );
+                tokio::time::pause();
+                let started = tokio::time::Instant::now();
+                let task = tokio::task::spawn_local(async move {
+                    let mut account = f.source;
+                    let result = crate::bus::sync_driver::run(&mut account).await;
+                    (account, result)
+                });
+                if let Some((mut observed, release)) = call_gate {
+                    entered(&mut observed).await?;
+                    tokio::time::advance(Duration::from_secs(call_seconds)).await;
+                    gateway.lock().map_err(|_| "gateway")?.submit_hold = None;
+                    release.notify_one();
+                }
+                entered(&mut observed).await?;
+                tokio::time::advance(Duration::from_secs(2)).await;
+                released.notify_one();
+                let (account, result) = complete(task).await?;
+                result?;
+                assert_eq!(account.client.direct_messages("healthy")?.len(), 1);
+                assert_eq!(
+                    gateway
+                        .lock()
+                        .map_err(|_| "gateway")?
+                        .sent
+                        .iter()
+                        .filter(|envelope| envelope.envelope_id.starts_with("receipt_evt_"))
+                        .count(),
+                    1,
+                    "a newly received message must send its receipt in this same sync pass"
+                );
+                assert_eq!(
+                    account
+                        .client
+                        .account_db()?
+                        .actor_state_usage(crate::client::delivery_receipts::PREFIX)?
+                        .0,
+                    0
+                );
+                assert_eq!(started.elapsed(), Duration::from_secs(call_seconds + 2));
+                tokio::time::resume();
+            }
+            Ok(())
+        }))
+        .await
+}
+
+// Mutation: cap the independent call allowance at four seconds again.
 #[tokio::test]
 async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Case {
     LocalSet::new()
         .run_until(Box::pin(async {
             let mut f = Box::pin(Fixture::new("courier-call-budget-r2")).await?;
-            let id = ramflux_protocol::encode_base64url([28; 16]);
-            let call = crate::client::call::state::LiveCall::outgoing(
-                id.clone(),
-                "healthy".into(),
-                f.source.client.call_local_endpoint()?,
-                vec![f.peer.client.call_local_endpoint()?],
-                now_unix_timestamp(),
-            )?;
-            f.source.client.persist_call_row(&call.row)?;
-            f.source.client.voice_calls.insert(id.clone(), call);
+            let id = outgoing_call(&mut f.source, &f.peer.client)?;
             let (gate, mut observed) = hold();
             let released = Arc::clone(&gate.release);
             f.gateway.lock().map_err(|_| "gateway")?.submit_hold = Some(gate);
             let gateway = Arc::clone(&f.gateway);
             let before = gateway.lock().map_err(|_| "gateway")?.sessions.clone();
             tokio::time::pause();
+            let started = tokio::time::Instant::now();
             let task = tokio::task::spawn_local(async move {
                 let mut account = f.source;
                 let sent = crate::bus::courier_cycle::priority(&mut account).await;
@@ -183,6 +270,7 @@ async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Ca
             assert!(account.has_pooled_engine(), "a valid slow submit must not force a reconnect");
             assert_eq!(gateway.lock().map_err(|_| "gateway")?.sessions, before);
             assert_eq!(gateway.lock().map_err(|_| "gateway")?.sent.len(), 1);
+            assert_eq!(started.elapsed(), Duration::from_secs(10));
             Ok(())
         }))
         .await

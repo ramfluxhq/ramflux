@@ -119,11 +119,14 @@ Background preparation does not own the account or a gateway session.
 The periodic 20-second sync cycle also services receipts and calls before receive
 and lower-priority transfers. Lower-priority network couriers need at least one
 second remaining before starting. Newly received receipts can still be sent in
-the same cycle when nineteen seconds remain for another complete priority pass.
+the same cycle when at least eight seconds remain for a second priority pass.
+This admission floor is independent of the fifteen-second call allowance. Each
+courier timeout is capped by the time left in the existing cycle, so a second
+pass cannot allocate a fresh call window beyond that deadline.
 Explicit `message.receive` and `group.receive` use this path too: priority work
 can add up to nineteen seconds before inbox receive begins. Each priority pass
 scans at most 256 pending receipt keys and loads those rows; a second pass can
-repeat that local scan when the full allowance remains. Both priority passes
+repeat that local scan when the eight-second admission floor remains. Both priority passes
 share the same twenty-second accounting window, rather than adding independent
 allowances. The background account loop has an outer twenty-second timeout;
 explicit receive retains the existing timeouts of its network steps. A timed-out
