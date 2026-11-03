@@ -69,16 +69,7 @@ impl Supervisor {
                     .to_owned();
                 let account = self.backup_jobs.install_account(&id)?;
                 let key = self.native_install_key(&account).await?;
-                let setup = match request.body.get_mut("passphrase") {
-                    Some(value) => match value.take() {
-                        serde_json::Value::String(secret) => Some(super::NativeRestoreSetup {
-                            vault: super::super::custody_setup::primary_provider(&self.config),
-                            passphrase: zeroize::Zeroizing::new(secret),
-                        }),
-                        _ => return Err(SdkError::CustodySetupInvalid),
-                    },
-                    None => None,
-                };
+                let setup = self.native_restore_setup(&mut request)?;
                 let (row, stage) = self.backup_jobs.begin_install(&id)?;
                 self.installing.borrow_mut().insert(account.clone());
                 let supervisor = self.owned_backup_handle()?;
@@ -114,6 +105,21 @@ impl Supervisor {
             _ => return Err(refused("unsupported_version")),
         };
         Ok(ActorResponse { body: serde_json::json!({"job":row}), events: Vec::new(), nodes: None })
+    }
+    fn native_restore_setup(
+        &self,
+        request: &mut LocalBusFrame,
+    ) -> Result<Option<super::NativeRestoreSetup>, SdkError> {
+        let Some(value) = request.body.get_mut("passphrase") else {
+            return Ok(None);
+        };
+        let serde_json::Value::String(secret) = value.take() else {
+            return Err(SdkError::CustodySetupInvalid);
+        };
+        Ok(Some(super::NativeRestoreSetup {
+            vault: super::super::custody_setup::primary_provider(&self.config),
+            passphrase: zeroize::Zeroizing::new(secret),
+        }))
     }
     async fn native_install_key(
         &self,

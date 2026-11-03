@@ -193,27 +193,7 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND sender_id='' AND length(encrypted_body)=0 AND metadata_json=x'7b7d'",[],|r|r.get::<_,u64>(0))?,2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND is_own=1",[],|r|r.get::<_,u64>(0))?,2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM runtime_message_content WHERE message_id IN ('source-deleted','local-deleted')",[],|r|r.get::<_,u64>(0))?,0);
-    for id in ["source-deleted", "local-deleted"] {
-        let key = super::runtime::message_origin::message_origin_key("thread", id)?;
-        assert_eq!(
-            merged.db.query_row(
-                "SELECT count(*) FROM runtime_actor_state WHERE state_kind=?1",
-                [&key],
-                |row| row.get::<_, u64>(0)
-            )?,
-            0,
-            "deleted message {id} retained attribution"
-        );
-    }
-    let retained = super::runtime::message_origin::message_origin_key("thread", "last")?;
-    assert_eq!(
-        merged.db.query_row(
-            "SELECT count(*) FROM runtime_actor_state WHERE state_kind=?1",
-            [&retained],
-            |row| row.get::<_, u64>(0)
-        )?,
-        1
-    );
+    assert_merged_message_origins(&merged.db)?;
     assert_eq!(
         merged.db.query_row(
             "SELECT read_at FROM conversation_read_state WHERE reader_id='reader'",
@@ -235,6 +215,31 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     drop(source_index);
     drop(local_index);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn assert_merged_message_origins(db: &rusqlite::Connection) -> TestResult {
+    for id in ["source-deleted", "local-deleted"] {
+        let key = super::runtime::message_origin::message_origin_key("thread", id)?;
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM runtime_actor_state WHERE state_kind=?1",
+                [&key],
+                |row| row.get::<_, u64>(0)
+            )?,
+            0,
+            "deleted message {id} retained attribution"
+        );
+    }
+    let retained = super::runtime::message_origin::message_origin_key("thread", "last")?;
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM runtime_actor_state WHERE state_kind=?1",
+            [&retained],
+            |row| row.get::<_, u64>(0)
+        )?,
+        1
+    );
     Ok(())
 }
 

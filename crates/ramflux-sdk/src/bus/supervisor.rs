@@ -312,13 +312,7 @@ impl Supervisor {
         if let Some(status) = self.locked_native_status(&request, &id).await? {
             return Ok(status);
         }
-        let creating = matches!(
-            request.method.as_str(),
-            "account.create"
-                | "account.itest_legacy.create"
-                | "account.unlock"
-                | "account.backup.import"
-        );
+        let creating = opens_account(&request.method);
         self.require_restore_ready(&id, creating)?;
         let actor = if let Some(actor) = actor {
             actor
@@ -776,6 +770,16 @@ fn not_open(id: &str) -> SdkError {
 }
 fn reply(body: serde_json::Value) -> ActorResponse {
     ActorResponse { body, events: Vec::new(), nodes: None }
+}
+
+fn opens_account(method: &str) -> bool {
+    matches!(
+        method,
+        "account.create"
+            | "account.itest_legacy.create"
+            | "account.unlock"
+            | "account.backup.import"
+    )
 }
 
 fn account_actor_id(request: &LocalBusFrame) -> Result<String, SdkError> {
