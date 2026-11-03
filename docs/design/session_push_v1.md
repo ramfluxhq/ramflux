@@ -57,7 +57,7 @@ recovery model. A custom WAL directory, especially a volatile mount, changes the
 failure domain: process-crash recovery assumes its files survive; host/volume loss
 has no extra durability guarantee from this design.
 
-### 1.2 Provisional dependencies
+### 1.2 Dependency status and provenance
 
 S2's r1 inspection was of uncommitted files, NOT files in committed
 `08c056a5adbfc4a55363da74dd90868c8eba1117`. The only identities of those
@@ -76,15 +76,14 @@ interfaces before dispatch. S2 remains sole owner of the stream,
 cancellation-safe reader, call queue, generation, connection retry, lifecycle
 cancellation and courier/transfer task framework.
 
-S0 r4 input is `design/s0-msg-schema` at
+Approved S0 r4 input is the published `design/s0-msg-schema` at
 `61d96751b550c661d15444a7ddecff116897498d`,
-`docs/design/message_schema_v1.md:285-354` (complete Decision 6). It is
-**provisional until S0 r4 is approved**; not merged or approved by this document.
-Section 8.2 copies its clock
-and indicator wording verbatim. Its transient transport and endpoint Unsupported
+`docs/design/message_schema_v1.md:285-354` (complete Decision 6). Controller
+approval of this design SHA satisfies S6c's S0 dependency. Section 8.2 copies its
+clock and indicator wording verbatim. Its transient transport and endpoint Unsupported
 retention are distinct: S6 has no transient DB write; S10a owns S0's authenticated
-unknown-content endpoint policy. S6c dispatch requires approval of this complete
-Decision 6 at that SHA or a controller-pinned approved successor.
+unknown-content endpoint policy. S6c consumes this approved complete Decision 6;
+any successor requires a new controller pin.
 
 ### 1.3 International practice and the local choice
 
@@ -1148,7 +1147,7 @@ new unclassified calls but does not replace the behavioral wire/SQL hooks.
 
 ## 8. Ephemeral delivery and S0 input
 
-### 8.1 Contract consumed from provisional S0
+### 8.1 Contract consumed from approved S0
 
 Generic mode=durable|ephemeral, no plaintext typing field, no new delivery class.
 Until S10a introduces the signed/AEAD-bound named outer field, the signed
@@ -1173,8 +1172,8 @@ consent, supersession and S0's endpoint Unsupported policy.
 
 ### 8.2 Pinned S0 r4 clock and indicator contract
 
-The following text is verbatim from the pinned S0 Decision 6 in section 1.2;
-**provisional until S0 r4 is approved**. Approval is a dispatch prerequisite:
+The following text is verbatim from the approved S0 r4 Decision 6 pinned in
+section 1.2 at `61d96751b550c661d15444a7ddecff116897498d`:
 
 Throughout this document `ttl_seconds` names the sender-signed TTL in seconds.
 During the S6 bridge it is the existing `Envelope.ttl: u32`
@@ -1236,7 +1235,7 @@ card. Controller writes new cards from this approved design with explicit SHAs.
 | --- | --- | --- | --- |
 | S6a node durable session protocol | node-core gateway_frames, inbox_page, entry_bound, inbox sparse index; router handlers/router_engine/router_store/router_wal incarnation lifecycle, settled cursor, WAL identity, tombstones and ACK batch; node-core custody_delivery and custody_service/admission guard/read/reply paths; gateway push_queue, issued_probe, session, state, clients, serve; compact reply split, FetchEntry and capabilities, async ACK/NACK; node docs | Current main; no S2 dependency. Advertise capability only after the entire durable protocol exists. Legacy clients remain supported | id02, s39a, s51, s35, call01, s50 plus node protocol fixtures |
 | S6b SDK durable receive ledger | storage account_db/receive/{schema,stage,cover,settle,privacy}, schema migration, footprint and backup paths; SDK bus/push_receiver/{apply,reorder,ack_batch,compat,keepalive}, S2 host dispatch/read timestamp and actor arm; bus/sync_driver and contact_backpressure; bus/dispatch/{group,a2i_a2ui,message}; client/{account,dm,a2i,group_quarantine,own_device_copy,routed/{receive,committed},surface/resync_request}; storage journal/{quarantine,inbox_failure,inbox_legacy,inbox_policy}; exact stage/entrypoint adaptations in sections 3.1/7.1, events/status, docs and CHANGELOG | S6a + merged S2/S3. Adapts provisional interfaces; no changes in S2 work-in-progress branch. Complete push and compat receive at delivery | id02, contact02, s74, s39a, s51, s35, call01, s50; push01 durable cases |
-| S6c ephemeral transport | gateway ephemeral validation/queue/mesh result; router ephemeral_route and volatile replay; SDK transient API/dispatch/channel; durable-origin refusal; ephemeral docs | S6a/S6b + approved complete S0 Decision6 at the provisional r4 SHA (after approval), including section8.2. Advertise separate `gateway.ephemeral.v1` signed/echoed capability only when the full path exists; session_push alone never implies it during staged merge | push01 transient case, id02, s50, s51 refusal fixtures |
+| S6c ephemeral transport | gateway ephemeral validation/queue/mesh result; router ephemeral_route and volatile replay; SDK transient API/dispatch/channel; durable-origin refusal; ephemeral docs | S6a/S6b; S0 dependency satisfied by approved complete Decision6 at 61d96751, including section8.2. Advertise separate `gateway.ephemeral.v1` signed/echoed capability only when the full path exists; session_push alone never implies it during staged merge | push01 transient case, id02, s50, s51 refusal fixtures |
 | S6d acceptance harness | itest src/tests/push01_session_push.rs and realnet.yml; mixed-version fixtures, ledger crash scenarios in product test modules if fixtures need shared plumbing | S6b/c delivered, exact published product pin; all three push01 cases execute green before this card READY | all selectors below |
 
 Final capability rule: ephemeral requires BOTH session_push.v1 and ephemeral.v1
@@ -1249,7 +1248,8 @@ Merge order S6a -> S6b (after S2 and S3) -> S6c -> S6d pin. S1 precedes deployed
 acceptance. S7 may start design after S6a but merges after S6b, preserving this
 host/keepalive contract. S8 design/security review may overlap; implementation
 merges after S6b and retains one initial catch-up per real Connected. S10a
-implementation dispatch waits for complete S6a/b/c on main, S0 approval and S2;
+implementation dispatch waits for complete S6a/b/c on main and S2; its S0 design
+dependency is satisfied by approved r4 at 61d96751.
 S6d acceptance must be green before S6 is declared delivered. S10a owns inner
 schema/typing semantics and replacement of the ext bridge. S4/S9 reuse S2 without
 reopening the receive contract. Gateway/router images must share the node-protocol
@@ -1444,7 +1444,7 @@ owner in section9; review must validate the implementation separately.
 | r1-M1 first-item byte proof invalid | sections5.1-5.2; measured complete one-item page, measured largest Entry/Deliver at admission |
 | r1-M2 ACK privacy and lifecycle | section2.2; sequence-only intents, exact allowlists, backup/merge erase; added staged content explicitly registered |
 | r1-M3 client downgrade changed | sections2.2,9.4; AccountSchemaTooNew forward-only guard, unchanged-file oracle |
-| r1-M4 S0 replay horizon mismatch | sections1.2,8.2; markers end at signed D, exact S0 approval prerequisite, no grace |
+| r1-M4 S0 replay horizon mismatch | sections1.2,8.2; markers end at signed D, S0 approval satisfied at 61d96751, no grace |
 | r1-M5 mesh overflow wakes device | section6.3; durable overflow true for old/new decoders, no offline wake |
 | r1-M6 crash fault not between split writes | sections3,9.2; enumerate every real commit and immediate durable-state oracle between split writes |
 | r2-H1 held cleanup / no below-C settlement | I4; section2.3 outcome-specific W2 and WS, local hold lifecycle and crash tests |
@@ -1473,7 +1473,7 @@ All 14 design-review findings have the following normative closures. The earlier
 | design-r1-L3 fallback clock skew | Section 2.3 fallback adds 120s and states its clock assumption/residual; no unconditional upper-bound claim |
 | design-r1-L4 repeated content mismatch | Section 2.3 first-copy authority and bounded diagnostic without reconnect livelock; staged_content_conflict |
 | design-r1-L5 weak/missing mutations | Section 9.2 retention mutation edits product restore loop, late W0/W1 erase-fence mutations, independent range/byte budget mutations |
-| design-r1-L6 S0 approval completeness | Sections 1.2/8.2 pin provisional r4 61d96751, verbatim clock/display wording and three explicit L6 dependencies; s0_r4_lifetime_bridge |
+| design-r1-L6 S0 approval completeness | Sections 1.2/8.2 pin approved r4 61d96751, verbatim clock/display wording and three explicit L6 dependencies; s0_r4_lifetime_bridge |
 | design-r1-L7 compat frame failure | Section 4.3 sticky limit1 fresh-session fallback and single-entry pause/status; compat_frame_limit_fallback |
 | design-r1-L8 stale-C page | Section 7 validates E/generation then applies suffix above current C; stale_page_suffix_progress |
 | design-r1-L9 S2 provenance | Section 1.2 marks snapshots uncommitted, SHA-256 identity only, provisional recheck on merged S2; no file:line attributed to 08c056a5 |
@@ -1493,15 +1493,16 @@ These are design closures; all tests remain future implementation requirements.
 | design-r2-L3 effective E/dedup tests | delayed_old_incarnation_ack bypasses client masking; inbox_incarnation_reset redelivers completed content and rejects (E,s) dedup |
 | design-r2-L4 missing mutations | wal_identity_and_restore_rotation, same_incarnation_regression, retired_incarnation_fence and independent old-forwarder sender_recipient_matrix mutation |
 | design-r2-L5 crash hole | Sections 3.2/11 residual and out_of_order_process_crash pin unknown, never expired/aborted |
-| design-r2-L6 S0 r4 delta | Sections 1.2/8.2 pin 61d96751 verbatim with provisional approval marker; s0_r4_lifetime_bridge receiver-clock and monotonic-hold cases |
+| design-r2-L6 S0 r4 delta | Sections 1.2/8.2 pin approved 61d96751 verbatim; S6c S0 dependency satisfied; s0_r4_lifetime_bridge receiver-clock and monotonic-hold cases |
 | design-r2-L7 table columns | Section 9.2 ACK timing and ephemeral admission rows each have three correctly separated cells |
 | design-r2-L8 WAL counter continuity | Section 2.5 redb WAL identity/checkpoint anchor and segment chain; rotate before traffic on mismatch; wal_identity_and_restore_rotation |
 
 ## 11. Residuals and owner questions
 
-Technical choices are made above; no owner technical question remains. S0 r4 complete Decision 6
-approval and merged S2/S3 interface recheck are dispatch prerequisites, not product
-questions or blockers to reviewing this design.
+Technical choices are made above; no owner technical question remains. S0 r4's
+complete Decision 6 is approved at 61d96751 and satisfies S6c's S0 dependency.
+The merged S2/S3 interface recheck remains a dispatch prerequisite, not a product
+question or blocker to reviewing this design.
 
 A process crash bypassing Drop can leave a permanent hole s below a durable
 s+1 assignment recovered from disk, even though no s+1 success reply/push was
