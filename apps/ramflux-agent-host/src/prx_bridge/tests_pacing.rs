@@ -138,7 +138,7 @@ async fn bridge_deferred_packet_wake_waits_for_the_next_bus_clock_poll() -> Test
         task::{Context, Waker},
     };
     let (_root, server, mut host) = fixture().await?;
-    let base = crate::bus::now_ms().saturating_sub(60_000);
+    let base = crate::bus::now_ms() + 60_000;
     host.data.lock().map_err(|_| "data")?.clock = base;
     let input = host.input(&server, "paced-wake").await?;
     let mut p = params(&input, "wake-delta");
@@ -146,8 +146,14 @@ async fn bridge_deferred_packet_wake_waits_for_the_next_bus_clock_poll() -> Test
     p["version"] = json!(1);
     p["text_delta"] = json!("z".repeat(20_000));
     server.call("reply.surface", p).await?;
-    let stopped = host.stop().await?;
-    assert!(!stopped.host.engine.output_ready(base));
+    let mut stopped = host.stop().await?;
+    // Stop the real loop before shifting the clock so a broken wake cannot starve
+    // the assertion driver. The pending packet still came through the real socket.
+    stopped.host.engine.last_poll_at = base.saturating_sub(120_000);
+    for turn in stopped.host.engine.state.turns.values_mut() {
+        turn.next_surface_write_at = turn.next_surface_write_at.saturating_sub(120_000);
+    }
+    assert!(!stopped.host.engine.output_ready(stopped.host.engine.last_poll_at));
     assert!(stopped.host.engine.packet().is_some());
     // Drain any previously stored Notify permit without yielding or advancing a clock.
     // A future that always compares with wall time remains ready on every poll.
