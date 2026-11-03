@@ -17,6 +17,8 @@ use zeroize::{Zeroize, Zeroizing};
 mod genesis;
 mod networking;
 mod publication;
+#[cfg(test)]
+mod race_hooks;
 mod recovery;
 pub(crate) use publication::accept_publication;
 pub use recovery::RecoveryCeremony;
@@ -450,6 +452,16 @@ pub(super) fn persist(
     pins.observe(&verified)?;
     pins.discard_retained_records();
     let dir = genesis::reserve_account(root, &input.local_account_id, &record.body.account_anchor)?;
+    #[cfg(test)]
+    race_hooks::run(race_hooks::Stage::AfterReservation, root, &input.local_account_id)?;
+    genesis::require_owned_reservation(
+        root,
+        &input.local_account_id,
+        &record.body.account_anchor,
+        &dir,
+    )?;
+    #[cfg(test)]
+    race_hooks::run(race_hooks::Stage::AfterReservationCheck, root, &input.local_account_id)?;
     let reference = ramflux_protocol::hash_base64url(
         "ramflux.local.custody_vault_reference.v1",
         &[
@@ -507,6 +519,14 @@ pub(super) fn persist(
             custodian_account_id: input.custodian_account_id.clone(),
             agent_provisioning_vault_ref: agent_provisioning_reference.clone(),
         };
+        #[cfg(test)]
+        race_hooks::run(race_hooks::Stage::BeforeAuthorityPublish, root, &input.local_account_id)?;
+        genesis::require_owned_reservation(
+            root,
+            &input.local_account_id,
+            &stored.record.body.account_anchor,
+            &dir,
+        )?;
         if let Some(gate) = commit_gate {
             gate.commit()?;
         }

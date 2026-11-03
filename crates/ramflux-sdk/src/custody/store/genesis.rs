@@ -36,6 +36,28 @@ pub(super) fn reserve_account(root: &Path, id: &str, anchor: &str) -> Result<Pat
     Ok(dir)
 }
 
+pub(super) fn require_owned_reservation(
+    root: &Path,
+    id: &str,
+    anchor: &str,
+    dir: &Path,
+) -> Result<(), SdkError> {
+    let index = ramflux_storage::AccountIndex::open(root)?;
+    let owned = match index.account(id) {
+        Ok(row) => row.principal_commitment == anchor,
+        Err(ramflux_storage::StorageError::AccountNotFound(_)) => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !owned {
+        let _ = index.release_unwrapped_reservation(id, anchor);
+        // Only our empty unpublished marker may be removed; never delete another authority.
+        let _ = fs::remove_dir(dir);
+        let _ = File::open(root.join("custody_accounts")).and_then(|parent| parent.sync_all());
+        return Err(SdkError::CustodyAccountConflict);
+    }
+    Ok(())
+}
+
 pub(super) fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     let parent = path.parent().ok_or_else(super::super::invalid)?;
     let temporary = parent.join(format!(
