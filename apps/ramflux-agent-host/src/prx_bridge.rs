@@ -582,6 +582,12 @@ impl PrxBridgeEngine {
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         for id in ids {
+            if self.state.packet.as_ref().is_some_and(|p| p.turn_id.as_ref() == Some(&id))
+                && let Some(packet) = self.state.packet.take()
+                && let (Some(generation), Some(rpc)) = (packet.rpc_generation, packet.rpc_id)
+            {
+                self.answers.push_back((generation, rpc, None));
+            }
             if let Some(token) = self.inflight.get(&format!("in:{id}")) {
                 let _ = token.compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst);
             }

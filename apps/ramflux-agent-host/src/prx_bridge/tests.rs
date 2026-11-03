@@ -1204,3 +1204,43 @@ async fn bridge_removal_only_cancels_unfinished_turns() -> TestResult {
     host.stop().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn bridge_removal_discards_a_held_reply_packet_before_restore() -> TestResult {
+    use crate::EngineProvider;
+    let (_root, server, mut host) = fixture().await?;
+    let input = host.input(&server, "message-1").await?;
+    host.data.lock().map_err(|_| "data")?.fail_reply = Some(());
+    let mut p = params(&input, "held-removal");
+    p["final"] = json!(true);
+    p["text"] = json!("obsolete reply");
+    let mut wire = serde_json::to_vec(
+        &json!({"jsonrpc":"2.0","id":"prx-held-removal","method":"reply.text","params":p}),
+    )?;
+    wire.push(b'\n');
+    server.raw(wire).await?;
+    let data = Arc::clone(&host.data);
+    let mut stopped = host.transport_failure().await?;
+    assert!(stopped.host.engine.packet().is_some());
+    stopped.host.engine.revoke("thread").await?;
+    stopped.host.save_state()?;
+    assert!(
+        stopped.host.engine.packet().is_none(),
+        "revocation must discard the held output before its turn is removed"
+    );
+    {
+        let mut data = data.lock().map_err(|_| "data")?;
+        data.removed = true;
+        data.bus_down = false;
+        data.fail_reply = None;
+    }
+    let after = server.calls.lock().map_err(|_| "calls")?.len();
+    let host = Host::resume(stopped, Arc::clone(&data)).await?;
+    server.wait_method("bridge.hello", after).await?;
+    let mut barrier = params(&input, "removed-packet-barrier");
+    barrier["on"] = json!(false);
+    server.call("reply.typing", barrier).await?;
+    assert_eq!(texts(&*data.lock().map_err(|_| "data")?)?, [] as [&str; 0]);
+    host.stop().await?;
+    Ok(())
+}

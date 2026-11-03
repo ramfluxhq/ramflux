@@ -151,6 +151,10 @@ impl PrxBridgeEngine {
             stream.total_appends = stream.total_appends.saturating_add(1);
             final_empty = false;
             self.count(&["stream_appends_sent"]);
+            // Ordinary maintenance emits one append; closing batches must drain before close.
+            if !final_ {
+                break;
+            }
         }
         if final_ && !stream.buffered.is_empty() {
             self.count(&["stream_capped"]);
