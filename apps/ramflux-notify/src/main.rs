@@ -2808,8 +2808,28 @@ fn encrypt_webpush_aes128gcm(
     auth_secret_base64url: &str,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, ramflux_node_core::NodeCoreError> {
-    use aes_gcm::aead::{Aead, KeyInit};
     use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+
+    let server_secret = p256::SecretKey::random(&mut OsRng);
+    let mut salt = [0_u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    encrypt_webpush_aes128gcm_with(
+        &server_secret,
+        salt,
+        client_p256dh_base64url,
+        auth_secret_base64url,
+        plaintext,
+    )
+}
+
+fn encrypt_webpush_aes128gcm_with(
+    server_secret: &p256::SecretKey,
+    salt: [u8; 16],
+    client_p256dh_base64url: &str,
+    auth_secret_base64url: &str,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, ramflux_node_core::NodeCoreError> {
+    use aes_gcm::aead::{Aead, KeyInit};
     use p256::elliptic_curve::sec1::ToEncodedPoint;
 
     const WEBPUSH_RECORD_SIZE: u32 = 4096;
@@ -2846,11 +2866,11 @@ fn encrypt_webpush_aes128gcm(
                 "invalid WebPush P-256 public key: {source}"
             ))
         })?;
-    let server_secret = p256::ecdh::EphemeralSecret::random(&mut OsRng);
-    let server_public = p256::PublicKey::from(&server_secret);
+    let server_public = server_secret.public_key();
     let server_public_bytes = server_public.to_encoded_point(false);
     let server_public_bytes = server_public_bytes.as_bytes();
-    let shared_secret = server_secret.diffie_hellman(&client_public);
+    let shared_secret =
+        p256::ecdh::diffie_hellman(server_secret.to_nonzero_scalar(), client_public.as_affine());
 
     let mut key_info = Vec::with_capacity("WebPush: info\0".len() + 65 + 65);
     key_info.extend_from_slice(b"WebPush: info\0");
@@ -2865,8 +2885,6 @@ fn encrypt_webpush_aes128gcm(
         ))
     })?;
 
-    let mut salt = [0_u8; 16];
-    OsRng.fill_bytes(&mut salt);
     let content_hkdf = hkdf::Hkdf::<sha2::Sha256>::new(Some(&salt), &ikm);
     let mut cek = [0_u8; 16];
     content_hkdf.expand(b"Content-Encoding: aes128gcm\0", &mut cek).map_err(|source| {
@@ -3281,3 +3299,6 @@ struct FcmServiceAccount {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod webpush_tests;
