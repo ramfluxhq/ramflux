@@ -8,8 +8,8 @@ cryptographic framing and the implementation boundaries. It adds no runtime
 feature. The design branch is a review artifact; S10a imports this exact file by
 its approved commit SHA rather than merging the design branch.
 
-Round r2 continues the design artifact at
-`3ed15324ce85878052f9dc99beaec1fea019e08c`, without rebasing its branch. All product `path:line` citations below
+Round r3 continues the design artifact at
+`e505565eb2e5c573ec10210125056b307b2143aa`, without rebasing its branch. All product `path:line` citations below
 are pinned to `6b8e53106618aaee091989099ddb8dd5b1c9ad82`; `desktop/` denotes the
 separate desktop repository at `08a9e63873a231a9a332c2274eeba7b819341feb`.
 The intervening identity-verification/backup change does not change the schema
@@ -290,7 +290,15 @@ control by decrypting it. Hiding this mode while requiring the node not to store
 it is impossible without another private-delivery protocol; that alternative
 is rejected here.
 
-Ephemeral TTL is 5 seconds and priority low. S6 validates source/signature,
+Ephemeral TTL is 1..5 seconds (default 5) and priority low. The lifetime uses
+sender-signed Unix-second `created_at` and `ttl_seconds`: compute the checked
+sum D = created_at + ttl_seconds and checked expires_at_ms = D * 1000. Reject
+overflow, TTL outside 1..5, created_at > node_now + 2 seconds, or now_ms >=
+expires_at_ms. Every gateway, router, federation hop, live writer and receiver
+enforces that same exclusive deadline; no grace, first-receipt renewal or
+restart extension. Within the 2-second future tolerance acceptance can be
+immediate, so remaining life at first receipt can reach ttl + 2 seconds.
+S6 validates source/signature,
 recipient, current authorization, TTL and frame size, then sends only to an
 already live recipient session. It uses a bounded 64-envelope / 256 KiB live
 queue per session, drops on saturation/offline/expiry, never allocates inbox_seq,
@@ -298,10 +306,17 @@ never writes router inbox, router WAL, federation durable spool or notify queue,
 and never emits offline push. A sender gets a bounded transient accepted/dropped
 result, not a durable inbox ACK. Live federation uses the same transient mode
 and cannot convert it into a durable retry. Replay markers, if necessary, contain
-only authenticated digests and expire within the 5-second lifetime.
+only authenticated digests and expire at D. Router dedup keys bind authenticated
+source root/device, envelope id and payload hash; receiver dedup binds source/id
+and rejects conflicting payload hashes. A surviving receiver drops router
+restart duplicates. Router and receiver restarts, including repeated restarts,
+can expose duplicates within the remaining signed lifetime: there is no bound
+of at most one duplicate. All copies are rejected at or after D. A sender clock
+lagging the node by its TTL can lose transient delivery; never retry durably.
 
 Endpoints accept Typing only in this mode, keep the indicator in memory for at
-most five seconds, and never create history, own-history, backup or journal body
+most the remaining signed lifetime, clearing at D even after restart or replay,
+and never create history, own-history, backup or journal body
 rows for known Typing. Drop superseded indicators. Receiver typing consent and
 rate limits are per authenticated peer/conversation. A malicious durable Typing
 is not displayed as history; its typed policy refusal is not an unknown-schema
@@ -330,8 +345,11 @@ expiry never rolls back authority, sequence or a declaration's historical record
 
 A statement may have at most 24 hours of validity **for above-floor selection**.
 An expired or missing layer declaration NEVER blocks a send: use F for that
-target, even after more than 24 hours offline. F=1 during the S10a development
-stage and F=3 after S10b; every admitted client in a stage supports its floor.
+target, even after more than 24 hours offline. F=2 during the S10a development
+stage and F=3 after S10b; S10a admits layers 1–2 together, never a layer-1-only
+client. Every admitted client in a stage supports its floor. Delete and Edit
+execute their typed semantics at every admitted floor; expiry never refuses
+Delete or turns Edit into a new text message.
 This floor is part of the deployed profile, not a guessed value of max_layer=0.
 A foreign/replayed declaration is discarded and grants no above-floor support;
 it also cannot erase the pinned sequence/head. Ordinary native device admission,
@@ -342,12 +360,18 @@ support and every target's fresh max_layer (the fresh cohort). A target without 
 fresh declaration receives a separately encoded F representation. It is excluded
 from the fresh-cohort minimum: neither a group nor an own-device fan-out is
 lowered wholesale for that member. Source capability is bounded by compiled
-support; a missing/expired local statement similarly permits sending at F.
+support. A sender whose own statement is missing/expired keeps sending at
+max(F, the target's last valid declared max_layer), bounded by its compiled support
+and the fresh-cohort minimum; a missing/expired target statement contributes F,
+not historical above-floor authority. Own expiry does not lower fresh targets
+or prevent sending. Republish the local statement on the next connection.
 Every representation retains one logical event id, author sequence, authorization
 and membership snapshot. Apply the downgrade table before per-device encryption.
 For a group, distinct plaintext representations use distinct group sender-key
 counters/ciphertexts under the same logical id, and only matching target devices
 receive each pair-sealed wrapper. Never reuse a nonce/counter across variants.
+S10b pads every per-device copy of this logical event to the same largest
+ciphertext bucket by section 5.5, including fresh/floor and own/group variants.
 
 There is **no mandatory daily custody publication** to keep messaging working.
 Publish on capability change or to renew optional above-floor selection while
@@ -355,8 +379,12 @@ online; an offline/lost holder simply loses the above-floor optimization. Unlock
 or attended native recovery/new-device enrollment restores publication authority,
 not permission to send a floor message. Repair a stale lower declaration by a
 higher-sequence signed update and endorsed head. Local history never waits for it.
-Effective receive maximum is min(compiled maximum, fresh declared maximum), or
-F if the declaration is absent/expired. Backup/restore preserves statements only
+Effective receive maximum is always the highest layer the receiver build
+supports, regardless of its own declaration's presence, value or expiry. A
+compiled maximum below F fails admission. Declaration expiry governs only
+senders' above-floor selection; queued supported Delete/Edit execute immediately
+without republication or an Unsupported round trip. Backup/restore preserves
+statements only
 as historical evidence and refreshes native pins; it cannot reactivate stale
 capability. The existing native authority freshness/withholding model is unchanged.
 
@@ -2783,8 +2811,8 @@ wire/semantic contract, not merely proof that a generated struct can be parsed.
 |---:|---|---:|---|---|
 | 1 | Message | 1 | No usable schema: local PeerUpgradeRequired | S9 media fields; S11 wake; S12 typed MessageUpdate |
 | 2 | Service | 1 | No usable schema: local PeerUpgradeRequired | S11 generic wake; S12 typed service update |
-| 3 | Edit | 2 | New Message stating an edit, with target reference and new text; never mutate an old row silently | S11 generic wake; S12 Edit request/update |
-| 4 | Delete | 2 | Refuse a remote deletion with PeerUpgradeRequired; local deletion remains possible | S9 last-owner erase; S11 generic wake; S12 Delete |
+| 3 | Edit | 2 | Below admitted F: require client upgrade at admission; never replace a typed Edit with text at an admitted floor | S11 generic wake; S12 Edit request/update |
+| 4 | Delete | 2 | Below admitted F: require client upgrade at admission; never refuse a typed Delete because a declaration expired | S9 last-owner erase; S11 generic wake; S12 Delete |
 | 5 | Reaction | 2 | New Message text describing the reaction and target; no fabricated reaction state | S11 generic wake; S12 Reaction |
 | 6 | Receipt | 1 | Local PeerUpgradeRequired; never infer a receipt from transport ACK | S11 wake policy; S12 typed receipt |
 | 7 | Typing | 2 | Suppress transmission; it must not become durable text | S6 ephemeral path; S11 no push; S12 transient update |
@@ -2796,7 +2824,7 @@ wire/semantic contract, not merely proof that a generated struct can be parsed.
 
 | Declaration / scope | Selected layer | Profile floor | Downgrade behavior | Isolation |
 |---|---|---|---|---|
-| Missing/expired declaration (all kinds) | Per-target F | F=1 in S10a, F=3 after S10b | Encode that target at F using the rows above; never LayerUnavailable, never lower a whole fan-out | Preserve every fresh-cohort target at its negotiated minimum; original logical identity is shared |
+| Missing/expired declaration (all kinds) | Per-target F | F=2 in S10a, F=3 after S10b | Encode that target at F using the rows above; never LayerUnavailable, never lower a whole fan-out | Preserve every fresh-cohort target at its negotiated minimum; original logical identity is shared |
 
 The per-operation registry in sections 3.1/3.2 is part of this downgrade/consumer
 table: every Surface command/receipt/resync, Task event/approval/control/history,
@@ -2851,15 +2879,18 @@ require a new layer even when protobuf itself would permit ignoring them.
 | Group send | Snapshot signed membership/epochs; negotiate fresh-cohort minimum and separate F representations only for missing/expired members | Recheck membership; same logical event, separate sender-key counters/ciphertexts per representation; never downgrade the whole group for a stale member |
 | Membership/declaration changes before submit | Discard affected unsubmitted representation and rebuild its target/cohort assignment | No accepted envelope is silently rewritten; never reuse variant ciphertext counters |
 | Membership changes after accepted submission | Historical packet stays under its authenticated epoch; additions receive authorized later history/copies | Existing history floors, removal and revocation fences still govern access |
-| Incoming layer above effective receive maximum | Retain Unsupported and exact Inner transactionally, then ACK | UI placeholder; upgrade/re-publish then bounded local reparse |
+| Incoming layer above compiled receive maximum | Retain Unsupported and exact Inner transactionally, then ACK | UI placeholder; upgrade then bounded local reparse; own declaration expiry never lowers decoding |
+| Own declaration absent/expired on send | Use target selection max(F, target last valid declaration), compiled/cohort bounded | Republish on next connection; own freshness never lowers all targets |
+| Own declaration absent/expired on receive | Decode and execute through compiled maximum | Apply queued supported Delete/Edit immediately; no publication prerequisite |
 | Legitimate application rollback | Higher-sequence signed lower maximum >=F, endorsed by newer native head | Reject older/equal-conflicting sequences/heads; compiled support bounds advertising |
 | Lost holder / expired declaration | Continue floor sends; refresh only to restore above-floor selection | Unlock or attended recovery/enrollment restores signing/publication; layer freshness never blocks delivery |
 | Restore / own-history import | Saved declarations are historical only; refresh native authority/floors | Never import stale archive capability as live; F remains available |
 
-Structural controls never become vaguely equivalent text. Downgrade can suppress
-Typing, emit a visible Reaction/Edit text event or refuse a kind introduced above
-the selected layer; missing declarations themselves never refuse a send. After
-S10b, F=3 supports every kind defined here; no floor send needs such a refusal.
+Structural controls never become vaguely equivalent text. All kinds defined
+here execute at F=2 in S10a and F=3 after S10b, including Delete/Edit/Reaction
+and ephemeral Typing. Missing declarations themselves never refuse a send.
+Future above-floor kinds/fields need an explicit safe downgrade or refusal;
+no admitted floor representation refuses Delete or replaces Edit with text.
 A genuinely incompatible client below deployed F requires upgrade at admission;
 this is distinct from a client whose declaration expired. No message-layer
 fallback permits clear ratchet headers or revived revoked authority.
@@ -2872,7 +2903,9 @@ Encode one Inner once and preserve those bytes. The body plaintext is:
 
 `u32_be(inner_length) || exact_inner || kf[32] || zero_padding`.
 
-Let L = 4 + inner_length + 32. Pad to Padme(max(L,256)). This separates protobuf
+Let L = 4 + inner_length + 32. The individual minimum is Padme(max(L,256));
+fan-out uses the common ciphertext target defined in section 5.5. This separates
+protobuf
 varint lengths from padding calculations. PaddedInner is the generated logical
 model used at the crypto boundary; it is never protobuf-encoded as the plaintext.
 The receiver checks all lengths, zero padding and limits before exposing Inner.
@@ -2995,7 +3028,8 @@ that prefix plus encrypted header. Capsule/body/header swaps must fail.
 The capsule is decryptable after compromise of the retained native agreement
 key and recorded E; this exposes old bootstrap **metadata**, not an X3DH root
 without the retired SPK/OPK. Do not claim metadata forward secrecy for the first
-packet. Public E, the format byte and larger bootstrap size remain observable.
+packet. Public E and the format byte remain observable; standalone bootstrap size
+is larger, while copies of one event share the section 5.5 ciphertext length.
 
 ### 5.4 Header vector production recipe for S10b
 
@@ -3040,6 +3074,26 @@ z=max(0,E-S), round up to the next multiple of 2^z. Use integer arithmetic.
 The separate no-floor reference results are 17→18, 100→104, 300→304,
 1000→1024, 100000→100352. The 256-byte floor supersedes the first two.
 No extra power-of-two bucket is applied above the floor.
+
+For copies of one logical event, serialize every target representation before
+sealing, including fresh-cohort, floor, group wrapper and own-device copies.
+For copy i let L_i be its framed plaintext length, H_i its exact CryptoBox
+overhead (including any bootstrap capsule), and P_i = Padme(max(L_i,256)).
+Choose the largest total bucket B = max_i(H_i + P_i). Every copy appends
+authenticated zero tail until its plaintext length is B - H_i, so every binary
+encrypted_payload (and its base64 encoding) has the same length B. This applies
+also across established/bootstrap formats; the public format/E remain visible.
+A single copy retains the original Padme sizing and vectors. A receiver accepts
+zero tails with length at least its individual P_i through the 512 KiB cap; it
+cannot reconstruct the private fan-out and must not require its own minimal
+bucket exactly. Recompute the common target when unsubmitted membership or
+representations change. Do not expose real ciphertext until every copy passes
+its plaintext, final-frame and transport cap; overflow rejects the whole event
+with PayloadTooLarge, never sends a smaller stale-target copy or partially
+commits ratchet state. Retries retain the accepted event's common size target.
+The <=12% calculation below describes each individual Padme minimum, not cover
+padding added to smaller representations; equalization can cost more than 12%
+for those copies. S11 still measures the final padded provider payload.
 
 For typical framed plaintext sizes L=100,300,1000,100000, padded sizes are
 256,304,1024,100352: overhead over actual L is 156%, 1.333333%, 2.4%, 0.352%.
@@ -3205,7 +3259,8 @@ custody, relay and federation service RPCs are outside this client-envelope enum
 
 | Observable | Before (measured baseline) | After the final profile |
 |---|---|---|
-| Size | Exact serialized body size; no padding | Padme bucket plus 256-byte minimum; total size still reveals buckets, attachments and bootstrap capsule size |
+| Size | Exact serialized body size; no padding | Padme bucket plus 256-byte minimum; total size still reveals buckets and attachments; bootstrap format/E remain visible |
+| Per-device declaration freshness | S10a fresh/floor representations can differ in size, exposing stale or long-offline targets | From S10b every copy of one event uses the largest common ciphertext bucket, masking freshness by copy length; pre-S10b size signal is a residual |
 | Session id | Readable DmCiphertext JSON | Header AEAD; no outer session selector |
 | Counter / previous-chain length | Readable JSON integers | Header AEAD; header nonce is random, not an exposed counter |
 | Ratchet public key | Readable ratchet_public_key | Header AEAD; bootstrap E is explicitly public, independent R0 is encrypted |
@@ -3781,12 +3836,31 @@ corresponding base literal in section 8.3, not a new wire constructor.
 ### 8.5 Remaining decoder, projection and history entry points
 
 These are additional guards/readers beyond the defining decode function. The
-first table is the complete client PREFIX-recognition grep, so a retained guard
+first table accounts for the PREFIX-recognition grep over all crates/ and apps/,
+including retained non-message prefixes, so a retained guard
 cannot silently route a new protobuf packet back to a removed decoder. Test
 recognizers are removed/replaced with their constructor fixtures too.
 
 | Baseline recognition site | Replacement |
 |---|---|
+| `apps/ramflux-gateway/src/itest_http.rs:257` | Retain native custody history HTTP path routing; not an application Inner decoder. |
+| `apps/ramflux-gateway/src/quic_dispatch.rs:71` | Retain native custody history path routing; not an application Inner decoder. |
+| `apps/ramflux-router/src/handlers.rs:129` | Retain native custody history path dispatch/parsing; not an application Inner decoder. |
+| `apps/ramflux-router/src/handlers.rs:544` | Retain native custody history path dispatch/parsing; not an application Inner decoder. |
+| `apps/ramflux-router/src/handlers.rs:1062` | Retain native custody history path dispatch/parsing; not an application Inner decoder. |
+| `crates/ramflux-node-core/src/router_wal.rs:1339` | Retain WAL shard-directory name parser; not an application Inner decoder. |
+| `crates/ramflux-sdk/src/bus/delivery_receipts.rs:111` | Retain local receipt-work key parsing; generated Receipt replaces wire content, not this storage key. |
+| `crates/ramflux-sdk/src/bus/delivery_receipts.rs:204` | Retain local receipt-work key parsing; generated Receipt replaces wire content, not this storage key. |
+| `crates/ramflux-sdk/src/bus/dispatch/surface_own_tests.rs:236` | Replace old own-copy prefix fixture recognition with generated Control.own_message_copy validation; S10a. |
+| `crates/ramflux-sdk/src/bus/dispatch/surface_own_tests.rs:442` | Replace old own-copy prefix fixture recognition with generated Control.own_message_copy validation; S10a. |
+| `crates/ramflux-sdk/src/bus/dispatch/surface_own_tests.rs:524` | Replace old own-copy prefix fixture recognition with generated Control.own_message_copy validation; S10a. |
+| `crates/ramflux-sdk/src/bus/dispatch/surface_text_fixture.rs:32` | Replace own-copy fixture with generated Control.own_message_copy; S10a. |
+| `crates/ramflux-sdk/src/bus/readers.rs:224` | Generated Content/UnsupportedView projection; never lossy UTF-8 of stored bytes; S10a. |
+| `crates/ramflux-sdk/src/bus/tests/task_courier_fixture.rs:298` | Replace own-copy fixture with generated Control.own_message_copy; S10a. |
+| `crates/ramflux-sdk/src/contact_card.rs:204` | Retain portable signed contact-card/link input codec; not an application Inner decoder. |
+| `crates/ramflux-sdk/src/contact_card.rs:205` | Retain portable signed contact-card/link input codec; not an application Inner decoder. |
+| `crates/ramflux-sdk/src/contact_card.rs:347` | Retain portable signed contact-card/link input codec; not an application Inner decoder. |
+| `crates/ramflux-sdk/src/prekey.rs:199` | Retain native custody history request-path validation; not an application Inner decoder. |
 | `crates/ramflux-sdk/src/client/call/mod.rs:40` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
 | `crates/ramflux-sdk/src/client/identity_authority/tests.rs:592` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
 | `crates/ramflux-sdk/src/client/own_contact.rs:72` | Generated kind/typed-payload validation and original provenance; remove prefix gate (S10a). |
@@ -4060,14 +4134,18 @@ Whole provider payload <=3,072 bytes or use generic wake/cursor fetch. Default
 preview remains off. Local device decryption produces opt-in preview.
 
 S6 receives `delivery_mode = durable | ephemeral` on every client envelope. For
-ephemeral, enforce low priority and TTL <=5 seconds, use a live-session queue of
+ephemeral, enforce low priority and signed TTL 1..5 seconds (default 5).
+Decision 6 defines D = checked(created_at + ttl_seconds), exclusive deadline
+D*1000, 2-second future tolerance and no grace; every hop/receiver verifies the
+unchanged deadline before enqueue and again before delivery. Restarts never
+renew it. Use a live-session queue of
 at most 64 envelopes/256 KiB per target, and drop offline/expired/saturated input.
 No inbox sequence, WAL, spool, persistence retry, dead letter or push record may
 be created. Return a typed transient accepted/dropped outcome with no durability
 claim; no scoped inbox ACK is allocated. Fields are sender signed/AEAD bound.
 No plaintext typing bit, and no third class. Rate/admission limits still apply.
 TTL validation occurs before any storage/enqueue decision. Receiver recognizes
-Typing only after authentication/decryption; after expiry it emits a clear-state
+Typing only after authentication/decryption; at now_ms >= D*1000 it emits a clear-state
 transient update. Generic ephemeral mode leaks liveness urgency, not a claimed
 application constructor. This node contract must be merged before S10a dispatch.
 
@@ -4235,7 +4313,9 @@ storage crypto-generation reset and safe state commit. No new application kinds.
 Completion: layer-3 mandatory crypto profile; no readable DmCiphertext header;
 both bootstrap modes/capsule paths; max eighteen pair-local header trials;
 skipped/current/next/old-state recovery; Padme floor/cap/overhead; full frame and
-push sizing; independent fixed vectors; no state mutation on rejected packets;
+push sizing; equal ciphertext lengths across every per-device copy of one
+logical event, including differing layer representations and bootstrap overhead;
+independent fixed vectors; no state mutation on rejected packets;
 secret-buffer erasure and locked-provider behavior. S10b cannot ship a clear
 header fallback, R0=E or an unbounded old-key ring.
 
@@ -4288,8 +4368,10 @@ fresh target directories per mutation and restore the original source afterward.
 | D1/Q1, S10a | schema_regeneration_is_fresh; protojson_integer_presence_unicode_conformance; no_private_inner_wire_types | Change generated field without regeneration; encode u64 as float; introduce an SDK schema discriminator/carrier |
 | D4/Q2, S10a | kind_registry_is_exhaustive_and_reserved; all_kind_binding_round_trip | Reuse a reserved KindId or remove one constructor/consumer arm |
 | D2/Q6, S10a | group_fresh_cohort_minimum; own_and_dm_fresh_minimum; layer_update_rejects_rollback | Ignore one fresh low-layer target; accept an older/equal-conflicting declaration; restore archive capability as live |
-| D2/Q6, S10a | membership_change_rebuilds_unsubmitted_representation; downgrade_does_not_execute_structural_control | Skip membership recheck; turn Delete into executable text; send Reaction state to a layer-1 member |
+| D2/Q6, S10a | membership_change_rebuilds_unsubmitted_representation; downgrade_does_not_execute_structural_control | Skip membership recheck; turn Delete into executable text; admit a layer-1-only client below F=2 |
 | H1/D2, S10a | offline_over_24h_still_receives_floor_in_dm_group_and_own_copy | Treat expired or missing declaration as LayerUnavailable; lower every fresh group/own target to F instead of only the stale member; assert stale member receives F, fresh members retain negotiated layer and logical id is shared |
+| r3-M1/D2, S10a | stale_declaration_target_receives_and_executes_delete_and_edit | Set F=1 in S10a so Delete refuses or Edit becomes text; tie receive maximum to own declaration expiry so queued layer-2 Delete/Edit become Unsupported; each mutation separately fails across DM/group/own-copy, including stale sender with fresh target |
+| r3-L1/D1, S10a | message_page_projects_generated_content_and_unsupported | Keep readers.rs prefix sniff/lossy UTF-8 of stored protobuf; known text and UnsupportedView projection assertions fail |
 | H2, S10a | every_surface_command_patch_action_receipt_and_resync_round_trips | Drop any component/data-model/finality field or one of 6 commands/5 patches; remove original action signer binding; k2b must fail |
 | H2, S10a | all_thirteen_call_actions_and_native_lease_fields_round_trip | Drop base_key, generation, allocation, consent signature or one action; call01 key agreement/rekey and state assertions fail |
 | H2, S10a | every_task_event_approval_control_and_history_round_trips | Drop Proposal/Resolve, grant_signature, Intent/Ack certificate, history prefix or membership witness; k3b/k5a assertions fail |
@@ -4308,6 +4390,7 @@ fresh target directories per mutation and restore the original source afterward.
 | D4/Q10, S10a | message_service_share_sequence_and_order; edit_reaction_delete_authorization | Add a separate Service sequence; allow recipient's EVERYONE delete of peer DM; accept stale edit revision; recreate reaction after tombstone |
 | D5/Q8, S10b | padme_floor_vectors_and_twelve_percent_bound | Replace Padme with power-of-two buckets; 257 rounds to 512 and violates the measured bound |
 | D5/Q8, S10b | padding_caps_zeros_and_full_frame_budget | Omit the 256-byte floor; accept nonzero tail or length overflow; check plaintext cap instead of final encoded frame |
+| r3-L2/D5, S10b | per_device_copies_of_one_message_have_equal_ciphertext_lengths | Pad fresh/floor DM/group/own copies independently or omit bootstrap overhead compensation; unequal binary/base64 lengths fail; test exact caps and whole-event refusal on overflow |
 | D6/Q3, S10a | all_classes_producers_consumers_and_push_mapping | Retain SelfDeviceControl or object class at one production constructor; send ordinary Control as VoIP wake |
 | D6/Q3, S10a | every_envelope_has_uniform_tag_and_commitment | Omit collapse_tag/report_commitment only for Receipt, SelfSync or group Control; fixed-shape assertion detects it |
 | Q4, S10a | report_receipt_accepts_only_bound_opening_and_trusted_node | Skip C recomputation, change A0/target/payload hash, trust reporter's key or accept arbitrary redacted excerpt; tampered evidence must be refused |
@@ -4318,7 +4401,8 @@ fresh target directories per mutation and restore the original source afterward.
 | D7/Q7, S10b | he_bootstrap_both_modes_and_capsule_ad_binding | Reuse E as R0, swap capsule/header/outer fields, omit a transcript binding or expose bootstrap header in plaintext |
 | D7/Q7, S10b | he_vectors_cross_implementation_and_no_failed_commit | Reuse header nonce; change one KDF label; advance receiver after body tag failure; expected vectors/state snapshots differ |
 | D9/Q5, S10a with S6 | typing_live_offline_expiry_has_no_persistent_artifacts | Route ephemeral through inbox/WAL or create push/retry row; query all relevant node tables after live/offline/saturated/expired cases |
-| D9/Q5, S10a | typing_is_generated_transient_content_not_plaintext_kind | Add plaintext typing field or third class; persist known Typing in history or retain it after five-second expiry |
+| r3-S6/D9/Q5, S10a with S6 | ephemeral_signed_deadline_is_exclusive_across_hops_and_restarts | Renew TTL at a hop/restart, add grace at D, allow created_at > now+2, wrap deadline arithmetic, or promise at most one duplicate across repeated router/receiver restarts; boundary, skew and restart traces fail |
+| D9/Q5, S10a | typing_is_generated_transient_content_not_plaintext_kind | Add plaintext typing field or third class; persist known Typing in history or retain it at/after the signed deadline |
 | Q8/S11, S10b consumer | push_embedding_measures_complete_padded_provider_payload | Exclude base64/authority/receipt/wrapper bytes from 3,072-byte measurement; oversized provider payload must fall back to wake |
 | Q12/S10a | unknown_cannot_bypass_native_group_or_own_origin_authority | Retain a forged group/own-history message as authorized Unsupported; origin verifier must reject before fallback |
 | S10c | typed_renderer_unknown_unicode_delete_and_transient | Parse hand-written keys, index emoji by bytes, render unknown entity as URL or retain a deleted cached preview |
@@ -4343,10 +4427,17 @@ No unresolved choice is hidden behind a schema string or a guessed decoder.
 Residuals: source/recipient/signature key and timing stay outer; call_wake and
 ephemeral mode reveal urgency/category; stable collapse tags link conversation
 traffic within a pair session; per-device fan-out reveals group size; padding
-reveals buckets and has a small-message floor cost. Bootstrap format/E/size are
+reveals buckets and has a small-message floor cost. Per-event fan-out cover
+padding can exceed the individual Padme overhead bound. Bootstrap format/E are
 observable; later agreement-key compromise reveals recorded capsule metadata.
 Compromised endpoints, externally exported archives and remote recipients defeat
 claims of global content erasure. Classical X25519/X3DH is not post-quantum.
+
+| Residual | Boundary / consequence |
+|---|---|
+| Pre-S10b per-device size signal | S10a has no mandatory padding: different fresh/floor representations can reveal stale declarations or long-offline devices. S10b common-bucket padding closes this length signal; target count, timing and public bootstrap format remain observable. |
+| Sender clock behind node | If lag is at least ttl, the exclusive signed deadline may already have passed and transient delivery (for example Typing) is lost. No grace or durable fallback repairs it. |
+| Transient duplicates on restart | Router and receiver restarts can expose repeated duplicates within the remaining sender-signed lifetime; there is no at-most-one-duplicate guarantee. At/after D every hop rejects all copies; no transient history is created. |
 
 Unknown authenticated content consumes local space and can cause explicit
 backpressure, not unlimited storage or guaranteed ACK of unlimited input. Old
