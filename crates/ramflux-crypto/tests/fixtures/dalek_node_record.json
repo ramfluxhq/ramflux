@@ -1,0 +1,62 @@
+{
+  "license": "SPDX-License-Identifier: BSD-3-Clause",
+  "copyright": "Copyright (c) 2026 Span Brain",
+  "seed_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+  "record": {
+    "body": {
+      "schema": "ramflux.identity.node_record.v1",
+      "version": 1,
+      "node_id": "fixture.example",
+      "node_signing_public_key": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+      "client_tls_certificate_sha256": null,
+      "epoch": 1,
+      "previous_record_hash": null,
+      "issued_at": 1700000000,
+      "receipt_keys": [],
+      "revoked_receipt_key_ids": [],
+      "proxy_keys": [
+        {
+          "key_id": "kpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpI",
+          "public_key": "jKYxRZB6Lmxfs9wHkcAYm4JS2j5BQ3BLOyyk5SbyXdE",
+          "not_before": 1699999995,
+          "sign_until": 1700003600,
+          "overlap_until": 1700605500,
+          "status": "active",
+          "proxy_id": "ramflux-gateway",
+          "audiences": [
+            "fixture.example"
+          ]
+        },
+        {
+          "key_id": "lJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJQ",
+          "public_key": "Ef1FcU-Iog3vKTCLb8K7P5l3F8dMBZ26879drcbPlgo",
+          "not_before": 1699999995,
+          "sign_until": 1700003600,
+          "overlap_until": 1700605500,
+          "status": "active",
+          "proxy_id": "gw-a",
+          "audiences": [
+            "fixture.example"
+          ]
+        },
+        {
+          "key_id": "lpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpY",
+          "public_key": "THGz3CdRP5lL0zkf38xjALLn2vGAl5Ros05DLPFOXjU",
+          "not_before": 1699999995,
+          "sign_until": 1700003600,
+          "overlap_until": 1700605500,
+          "status": "active",
+          "proxy_id": "gw-b",
+          "audiences": [
+            "fixture.example"
+          ]
+        }
+      ],
+      "revoked_proxy_key_ids": [],
+      "channel_binding_modes": [
+        "home_relay_receipt"
+      ]
+    },
+    "signature": "Xh_gTPmDRmiH1YecQhVWic2SHQszP9uBxo8Yt_iznPoSrJwU-9dh7HT_do5Fm7InTG41JB4u-fO3m0A8ssyQAQ"
+  }
+}
