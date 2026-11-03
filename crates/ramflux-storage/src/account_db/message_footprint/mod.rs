@@ -182,7 +182,14 @@ fn actor_registration(key: &str, value: &Value) -> ActorRegistration {
     if key.starts_with("own-device/send/")
         && let Some(message) = value.pointer("/intent/id").and_then(Value::as_str)
     {
-        registration.message_ids.insert(message.to_owned());
+        // Plain sent copies use the transport envelope as intent.id, not as another owner.
+        let owner =
+            if value.pointer("/intent/owner_record/0").and_then(Value::as_str) == Some("message") {
+                value.pointer("/intent/owner_record/1").and_then(Value::as_str).unwrap_or(message)
+            } else {
+                message
+            };
+        registration.message_ids.insert(owner.to_owned());
     }
 
     if key.starts_with("delivery-receipt/pending/")

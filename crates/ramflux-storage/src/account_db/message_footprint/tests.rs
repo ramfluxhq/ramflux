@@ -391,6 +391,32 @@ fn removing_retry_work_removes_its_provisional_footprints() -> Result<(), Storag
 }
 
 #[test]
+fn sent_copy_envelopes_do_not_claim_an_unrelated_message_owner() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("footprint-sent-copy-owner")?;
+    for message in ["logical", "envelope"] {
+        db.send_direct_message("thread", message, "sender", b"body")?;
+    }
+    db.persist_message_actor_state(
+        "logical",
+        "own-device/send/plain",
+        &json!({"intent":{"id":"envelope","owner_record":["message","logical"]}}),
+    )?;
+    db.persist_actor_state(
+        "own-device/send/surface",
+        &json!({"intent":{"id":"envelope","owner_record":["surface","surface-id"]}}),
+    )?;
+    db.delete_direct_message("thread", "logical", "local", "delete-logical")?;
+    assert!(!db.actor_state_exists("own-device/send/plain")?);
+    assert!(db.actor_state_exists("own-device/send/surface")?);
+    assert!(!db.message_is_deleted("envelope")?);
+    db.delete_direct_message("thread", "envelope", "local", "delete-envelope")?;
+    assert!(!db.actor_state_exists("own-device/send/surface")?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn deleting_a_pointer_target_preserves_unread_and_other_message_receipts()
 -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("footprint-conversation-pointers")?;

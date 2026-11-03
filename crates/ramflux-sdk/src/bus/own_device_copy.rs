@@ -319,7 +319,7 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
     let id = &work.intent.copy_id;
     let db = client.account_db()?;
     let key = format!("own-device/status/{id}");
-    let status = json!({"state":value,"conversation_id":work.intent.conversation,"message_id":work.intent.id,"expires_at":work.intent.created_at.saturating_add(900)});
+    let status = json!({"state":value,"conversation_id":work.intent.conversation,"message_id":message_owner(work).unwrap_or(&work.intent.id),"expires_at":work.intent.created_at.saturating_add(900)});
     if let Some(message) = message_owner(work) {
         db.persist_message_actor_state(message, &key, &status)?;
     } else {
