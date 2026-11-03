@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Upgrade Ed25519 to dalek 3 and share curve25519-dalek 5 with X25519 while
+  preserving RFC 8032 signatures and node identity record encodings.
 - Upgrade Web Push P-256 ECDH to p256 0.14 and crypto-bigint 0.7.10, preserving
   RFC encryption bytes and removing the RUSTSEC-2026-0387 audit exceptions.
 - Erase proven pre-upgrade attachments after their last message owner is removed;

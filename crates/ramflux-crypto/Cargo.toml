@@ -21,7 +21,7 @@ blake3 = "1.8.5"
 chacha20poly1305 = "0.10.1"
 chacha20 = "0.9"
 poly1305 = { version = "0.8", features = ["zeroize"] }
-ed25519-dalek = { version = "2.2.0", features = ["batch", "zeroize"] }
+ed25519-dalek = { workspace = true, features = ["batch", "zeroize"] }
 getrandom = "0.3"
 hex = "0.4"
 hmac = "0.13"
