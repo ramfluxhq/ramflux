@@ -26,10 +26,6 @@ reqwest.workspace = true
 time = { version = "0.3", features = ["parsing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
 
-[dev-dependencies]
-ramflux-sdk = { workspace = true, features = ["itest-restore-state"] }
-tracing-subscriber.workspace = true
-
 [lints]
 workspace = true
 

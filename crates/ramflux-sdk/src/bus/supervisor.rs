@@ -515,7 +515,7 @@ impl Supervisor {
         }
         let known = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
         Ok(reply(
-            serde_json::json!({"accounts":accounts, "account_details":known.into_iter().map(|(row, _)| row).collect::<Vec<_>>(), "active_account_id":active}),
+            serde_json::json!({"accounts":accounts, "account_details":known, "active_account_id":active}),
         ))
     }
 

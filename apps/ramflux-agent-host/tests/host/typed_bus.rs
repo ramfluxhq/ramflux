@@ -381,8 +381,9 @@ fn persisted_account(
     let mut client = RamfluxClient::new();
     client.create_identity_root(id, root_seed);
     client.create_device_branch(id, &device, 1, device_seed);
+    let commitment = client.owned_device_identity()?.root_commitment().to_owned();
     client.open_account_index(root)?;
-    client.create_account(id, &format!("commitment-{id}"))?;
+    client.create_account(id, &commitment)?;
     client.unlock_account(id, database_secret.as_bytes())?;
     drop(client);
     let accounts = root.join("local_bus_accounts");
@@ -403,7 +404,7 @@ fn persisted_account(
             "schema":"ramflux.local_bus.account_manifest.v1",
             "local_account_id":id,
             "principal_id":id,
-            "principal_commitment":format!("commitment-{id}"),
+            "principal_commitment":commitment,
             "device_id":device,
             "target_delivery_id":target,
             "account_secret":stored_secret,
