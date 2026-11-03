@@ -130,14 +130,7 @@ impl IdentityRegistry {
             custody.records.insert(anchor.clone(), publication.clone());
         }
         if let PinOutcome::Fenced(alert) = &outcome {
-            tracing::error!(
-                account_anchor = %alert.account_anchor,
-                range_index = alert.range_index,
-                conflict_kind = ?alert.kind,
-                accepted_record_hash = %alert.accepted_record_hash,
-                conflicting_record_hash = %alert.conflicting_record_hash,
-                "custody authority conflict requires operator review and a new master certificate"
-            );
+            log_conflict(alert);
         }
         Ok(outcome)
     }
@@ -253,6 +246,7 @@ impl RouterCore {
         registry.apply_custody_account(anchor.clone(), state)?;
         // Native custody does not change the legacy delivery-key migration read snapshot.
         if let PinOutcome::Fenced(alert) = outcome {
+            log_conflict(&alert);
             return Err(NodeCoreError::CustodyConflict { alert: Box::new(alert) });
         }
         Ok(publication.record.clone())
@@ -350,4 +344,15 @@ fn log_pruned_evidence(anchor: &str, before: u64, after: u64) {
         tracing::warn!(account_anchor = %anchor, dropped = after - before,
             "dropped older custody conflict evidence to enforce retention bounds");
     }
+}
+
+fn log_conflict(alert: &ramflux_crypto::custody::CustodyConflictAlert) {
+    tracing::error!(
+        account_anchor = %alert.account_anchor,
+        range_index = alert.range_index,
+        conflict_kind = ?alert.kind,
+        accepted_record_hash = %alert.accepted_record_hash,
+        conflicting_record_hash = %alert.conflicting_record_hash,
+        "custody authority conflict requires operator review and a new master certificate"
+    );
 }
