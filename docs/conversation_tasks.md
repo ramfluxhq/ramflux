@@ -120,6 +120,10 @@ second remaining before starting. Newly received receipts can still be sent in
 the same cycle when eight seconds remain for another priority pass. A timed-out
 priority operation retains pending work and checkpoints the gateway resume state
 before reconnecting; it never clears a pending call merely because time ran out.
+Sibling/contact discovery remains in the background account loop; explicit receive
+and read operations do not initiate that discovery. Background backfill starts
+only with eleven seconds left, allowing both five-second directory windows and
+local staging; otherwise it remains for a later background cycle.
 Cancellation keeps current identity/custody/routing configuration. Saved resume
 metadata is reused only while the authenticated account/device and route still
 match; an authority refresh during the wait is never rolled back.

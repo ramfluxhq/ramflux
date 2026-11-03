@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex as RoutingMutex};
 
 type ReaderSlot = Arc<RoutingMutex<Option<AccountReaders>>>;
 
+// Two five-second directory attempts plus local backfill staging.
+const BACKFILL_MINIMUM: Duration = Duration::from_secs(11);
+
 pub(super) struct Bootstrap {
     pub account_id: String,
     pub config: LocalBusConfig,
@@ -293,8 +296,24 @@ impl AccountRuntime {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };
-        let result = tokio::time::timeout(Duration::from_secs(20), async {
-            super::sync_driver::run(account).await
+        let deadline = tokio::time::Instant::now() + super::courier_cycle::LIMIT;
+        let result = tokio::time::timeout_at(deadline, async {
+            let count = super::sync_driver::run(account).await?;
+            // Background-only discovery must not be introduced into explicit receive/read calls.
+            let backfilled = if deadline.saturating_duration_since(tokio::time::Instant::now())
+                >= BACKFILL_MINIMUM
+            {
+                match Box::pin(super::own_contact_backfill::drive(account)).await {
+                    Ok(count) => count,
+                    Err(error) => {
+                        tracing::debug!(%error, "own-device contact backfill deferred");
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+            Ok::<_, SdkError>(count + backfilled)
         })
         .await;
         let reason = match &result {

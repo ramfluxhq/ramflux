@@ -80,11 +80,6 @@ async fn run_with_receive_clock(
             tracing::warn!(%error,"surface resync reply failed; requester may retry next window");
         }
     }
-    if deadline.saturating_duration_since(tokio::time::Instant::now()) >= Duration::from_secs(1)
-        && let Err(error) = super::own_contact_backfill::drive(account).await
-    {
-        tracing::debug!(%error, "own-device contact backfill deferred");
-    }
     courier_count(deadline, "own-device copy", Box::pin(super::own_device_copy::flush(account)))
         .await;
     let contacts = courier_count(
