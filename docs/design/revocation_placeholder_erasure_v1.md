@@ -1,10 +1,15 @@
 # Revocation placeholder erasure v1
 
 Status: proposed design; no implementation or runtime acceptance is claimed.
+Revision: r2, closing the first independent design review.
 Evidence base: `0d6da88fb189201a44eefe611d5e79c39ef77661` (2026-11-04).
 This base contains attachment erasure commit
 `38e41095de34ada4e711390e96a577dbaea717f5` and revocation commit
 `81e59c3032f69b627e421ced8b137c5e995e0a2c`.
+Citation verification: fetched `origin/main` at
+`aebc4901e53a6f0aacc1c87a67fc1c5e578db2c5` (2026-11-04). Every cited
+product source range is unchanged from the evidence base; the intervening
+changes affect deployment files only. Proposed behavior remains unimplemented.
 
 ## 1. Facts at the evidence base
 
@@ -45,7 +50,7 @@ revocation control's envelope ID is provenance, not either identity.
 | `message_copy_binding`, `message_footprint` | PK `(copy_id,message_id)` and `(message_id,kind,locator)`; message indexes and `message_footprint_locator(kind,locator,message_id)`. Both `object:<selector>` and `object:<wire>` bind to owners. Footprints enroll actor, event, archive, inbox, outbox, journal and projection copies. | `A/message_footprint/schema.rs:15-29,43-95`; `R/mod.rs:248-251` |
 | `message_footprint_actor_stage`, `message_footprint_outbox_stage`, `message_footprint_journal_stage` | Transaction staging can contain actor/copy/binding JSON and journal locators. Consumers drain rows within the writer operation; require empty staging at commit and in exported snapshots. They add no independent lifetime authority. | `A/message_footprint/schema.rs:100-143,250-275` |
 | `backup_archived_actor_state`, `backup_archived_local_event`, `local_event_log` | Private historical copies can retain selector/reference/provenance JSON even when no current directory row remains. Archive PK `(source,state_kind)` / unique `(source,event_id)`; live event key is event ID with gateway-envelope index. | `A/backup_merge.rs:320-335`; `S/schema.rs:76-99` |
-| `backup_erased_copy` | Base TEMP exclusion set, PK `(database_name,table_name,row_id)`, used by object merge, generic merge and archive preservation. Excluding an object does not automatically exclude a retention reference. | `A/backup_object_erasure.rs:28,186-190,347-351`; `A/backup_merge.rs:324-335,358,454-459` |
+| `backup_erased_copy` | Base TEMP exclusion set, PK `(database_name,table_name,row_id)`, used by object merge, generic merge and archive preservation. `merge_graph` does not consult it; excluding an object does not exclude a retention reference. | `A/backup_object_erasure.rs:28,186-190`; `A/backup_merge.rs:324-335,358,454-459`; contrast `A/backup_object_erasure.rs:347-354` |
 | `backup_missing_attachment` | PK selector with manifest/plaintext hash; preparation also installs `backup_object_reference_hashes(manifest_hash,plaintext_hash)` on `object_index`. Records are scanned in both databases and excluded separately. | `A/backup_missing.rs:60-91`; `A/backup_object_erasure.rs:99-109` |
 | `object_manifest`, `object_key_slot`, `object_chunk` | Wire-owned encrypted metadata and keys/chunk locators; PK object/slot/chunk; unique manifest hash and `(object_id,chunk_index)`; `idx_object_chunk_state`, added `object_key_slot_wire`. No placeholder is stored here. | `S/schema.rs:467-507`; `R/schema.rs:10` |
 | `object_transfer_state`, `object_operation`, `object_share_grant_projection`, `object_tombstone` | Wire/manifest progress, responses, grants and tombstone provenance; PK transfer/operation row, composite grant owner, tombstone ID; `object_transfer_wire`, `idx_object_operation_operation`, `idx_object_share_grant_recipient`, `object_tombstone_target`. Cleanup must retain a different live wire manifest. | `S/schema.rs:508-528,688-699,772-785`; `R/schema.rs:10,76-105` |
@@ -76,7 +81,8 @@ untracked copies of private selectors.
 | Restore, incoming fence → local live reference/placeholder | `A/backup_object_erasure.rs:146-158` deletes local references of fenced commitments before calling the shared payload body, losing alias identities. `merge_graph` at lines 347-354 filters references only by payload fence; a selector lookup alone does not block reference import. |
 | Restore merge/export copies | `A/backup_merge.rs:164-165,218-236,320-335,340-438` preserves private copies and applies object/generic arbitration before the final deleted-message update and commit; rollback at lines 239-242. `erased` returns early on an unfenced referenced payload (`A/backup_object_erasure.rs:212-218`), bypassing selector lookup. `check_object_access` has the same early-return shape (`R/mod.rs:137-159`). |
 | Restore installation, full/native/fresh | Existing full restore copies local then merges (`J/install.rs:145-158`); native data restore calls the same merge mode (`J/native.rs:218-247`; `A/backup_native.rs:49-55`). Fresh full restore directly copies incoming and archives outbound (`J/install.rs:238-249`), bypassing merge. Generation publication is a separate durable index-pointer operation after staging/integrity checks. |
-| Own-copy import | Signed history page authentication precedes decoding; `K/client/own_device_sync.rs:269-325` imports a page, binds transport owners and receipt in a writer transaction. Bundle import is transactional at lines 677-683; own deletion and message import at lines 694-760 use ordinary deletion authority. It is not a raw backup-table importer. Attachment references materialized from messages must use the same registration guard as peer receive. |
+| Own-copy import | Signed history page authentication precedes decoding; `K/client/own_device_sync.rs:269-325` imports a page, binds transport owners and receipt in a writer transaction. Bundle import is transactional at lines 677-683; own deletion and message import at lines 694-760 use ordinary deletion authority. It stores no history-message attachment references. Its only registration is `K/client/object.rs:1014-1066`, specifically line 1053: a transport-owner edge with selector equal to the history object ID and reference JSON `{}`. |
+| Legacy discovery | Bounded pages (256 rows, 1 MiB) inspect current and archived actors, including archived attachment actors in phase 4 (`R/legacy.rs:8-11,55-123`). `discover_reference` at lines 126-181 directly inserts a retention reference after a payload-fence check; its owner insertion is conditional on a live DM projection. It bypasses registration and can leave an ownerless reference. |
 
 The four destructive retention-reference statements are `R/schema.rs:123,129,137`
 and `A/backup_object_erasure.rs:157`. The five callers of the payload-only body
@@ -101,7 +107,16 @@ The following definitions make the invariant implementable:
   may precede the message projection in the enclosing receive transaction;
   the authenticated owner edge is sufficient unless a sticky deletion marker
   or either restore side's deletion authority vetoes that owner. A bare JSON
-  actor or a reference with no admissible owner cannot resurrect ownership.
+  actor or a reference with no admissible owner cannot resurrect managed
+  ownership. The legacy revoke exception below preserves an existing live
+  actor's veto without manufacturing a managed owner edge.
+- A live legacy received reference may not yet have a retention owner edge:
+  discovery can still be paging, or the reference is classified
+  `unowned_legacy`. For revocation only, an existing authenticated reference
+  actor plus its agreeing client-record owner is a live legacy witness, unless
+  known owner-deletion authority, a closed selector lookup or a payload fence
+  vetoes it. This exception cannot authorize graph insertion by discovery or
+  restore, and cannot reopen an erased selector from JSON alone.
 - A payload fence covers exactly `C`, unconditionally. It dominates all
   selectors, reference hashes and timestamps. A selector lookup covers an
   erased selector in the absence of a surviving independently admitted
@@ -109,9 +124,12 @@ The following definitions make the invariant implementable:
   selector that shares `C`.
 - Existing partial-reference lookups are historical witnesses: if a distinct
   reference for the same selector still has a valid owner, retain that
-  reference and its revocation veto. This live witness is established before
-  candidate incoming rows are admitted. An incoming row cannot declare itself
-  live to bypass a target's closed selector lookup.
+  reference and its revocation veto. For historical imports this live witness
+  is established before candidate rows are admitted; an archive cannot declare
+  its candidate live to bypass a target's closed lookup. A new authenticated
+  message with a non-deleted owner can reopen an unfenced selector, including
+  a deterministic received selector used by an earlier deleted message. Its
+  admitted owner then takes precedence over the historical lookup for G6.
 - Explicit identity replacement is the existing checked wire operation and
   exact new-commitment receipt. It can establish the new identity despite an
   old wire lookup; it never clears an old payload fence. It grants no blanket
@@ -124,23 +142,52 @@ orphan. New restores normalize legacy placeholders before publication (§5).
 
 ### 2.1 Proposed common decisions
 
-**G1 — reference admission.** At receive/own-copy registration, after acquiring
-the writer transaction, check payload fence, message deletion authority and
-selector status before writing any retention row, owner edge, binding or actor.
-For a lookup-bearing selector, allow an already surviving same-identity
-reference to gain another authenticated non-deleted owner; otherwise refuse
-stale reference admission with `ObjectErased`. Ordinary import cannot create an
-explicit replacement receipt. Reject conflicting selector identities rather
-than choosing an arbitrary reference hash.
+**G1 — owner-keyed reference admission.** Within the writer transaction, check
+the candidate's payload fence and exact message deletion authority before any
+retention row, owner edge, binding or actor write. Carry explicit admission
+context from the authenticated caller: `fresh_message` versus historical
+`restore`, `archive_discovery` or `own_copy`. A signed history page remains
+historical; a signature alone does not make an old owner fresh. The storage
+registration default must not silently grant the fresh-message exception.
+
+A new authenticated message with a non-deleted owner is admitted even if its
+deterministic selector has an old lookup (`K/client/deferred_attachment.rs:659-668`).
+Keep the opaque lookup; the newly admitted owner reopens access under G6. A
+replay of the old deleted message still fails its owner-deletion check. Payload
+fences always refuse, even for a new owner. Preserve conflicting-identity
+checks; ordinary registration cannot mint a replacement receipt.
+
+Only historical candidates face the additional closed-selector veto. Allow an
+independently admitted same-identity survivor, but never let a candidate prove
+its own survival against a target lookup. Discovery (`R/legacy.rs:126-181`)
+must use this decision before inserting anything: skip fenced/closed candidates
+and skip reference insertion when no admissible owner can be reconstructed.
+Classify the latter as `unowned_legacy`; do not persist an ownerless retention
+reference or binding. Archived actor copies obey the same rule.
+
+Storage may expose typed `ObjectErased` internally, but every SDK call site
+must consume that narrow refusal as an erased-item skip or deterministic
+inbound rejection with quarantine/ACK, never an error keeping a whole message
+in retry. Fresh-message success, deleted-owner replay and unrelated-message
+progress are checked together in E16. Storage/I/O errors still propagate.
 
 **G2 — manifest and placeholder admission.** One shared resolver decides whether
 a missing row has an admissible reference identity; callers do not add redundant
-fallback guards that would mask a mutation of that decision. New missing-row placeholders require
-an admitted live reference and a nonzero manifest. Resolve actor reference first,
+fallback guards that would mask a mutation of that decision. New missing-row
+placeholders require a live managed or live legacy received reference as defined
+above, and a nonzero manifest. Resolve actor reference first,
 then the retention reference/payload join, then client record. Retention identity
 must agree across live references; verify that any selected actor/display
-manifest agrees with the authenticated mapping. Display-only owner metadata is
-not ownership proof. No source or disagreement means `AuthorizationRejected`
+manifest agrees with the authenticated mapping. In the legacy branch retain
+the control handler's client-record owner authorization: the actor must be
+that owner's received reference, and its manifest must agree with any known
+client-record manifest or retention identity. Accept a valid peer revoke
+while discovery is incomplete or has left a live `unowned_legacy` reference:
+create its nonzero placeholder from the actor manifest, without creating a
+retention owner. Closed lookup/fence or known deleted owner still vetoes it;
+the base erased-object consumed no-op comes from `A/object.rs:167-169`.
+Display-only owner metadata is not ownership proof. No source or disagreement
+means `AuthorizationRejected`
 and no inserted row. Existing payload-bearing rows retain their ordinary
 tombstoning behavior. Map this narrow refusal to the existing deterministic
 owner-refusal inbound class, without converting storage/I/O failures into
@@ -192,7 +239,8 @@ checks. Removing a placeholder alone is insufficient. Detailed order is §4.2.
 **G6 — read and export consistency.** A lookup-bearing selector with no admitted
 owner cannot return early through an orphan reference or placeholder. Resolve
 aliases through authenticated references before checking payload identity.
-An independently surviving same-selector reference or valid new wire replacement
+An independently surviving or freshly authenticated same-selector reference, a
+live legacy revoke witness without a closed lookup, or valid new wire replacement
 keeps access to its unfenced identity; unrelated selectors sharing `C` remain
 accessible. Snapshots export the committed graph, including opaque fences, and
 the existing generation-publication check rejects snapshots overtaken by any
@@ -206,10 +254,10 @@ has a concrete implementation owner.
 
 | Decision | Proposed code and integration points |
 | --- | --- |
-| G1/G2 identity and admission | `A/object_retention/selector_admission.rs`: one selector identity resolver and reference-admission decision; call from `R/mod.rs` registration, `R/actors.rs` actor guard (including selector in the actor key and indirect alias values), and `A/object.rs` missing-row revocation. `K/client/routed/control.rs` owns the narrow error mapping. |
-| G3/G4 capture and cleanup | `A/object_retention/selector_erasure.rs`: SQL builders for capture, surviving-owner projection and retirement cleanup; compose them into the existing `R/schema.rs` message and payload bodies after dependency expansion. `A/backup_object_erasure.rs` performs its additional pre-delete capture. The existing payload/work rows keep the manifest available until cleanup. |
+| G1/G2 identity and admission | `A/object_retention/selector_admission.rs`: one identity resolver with explicit fresh/historical registration and legacy-revoke decisions; call from `R/mod.rs` registration, `R/legacy.rs::discover_reference` before its direct INSERTs, `R/actors.rs` actor guard (including selector in the actor key and indirect alias values), and `A/object.rs` missing-row revocation. SDK peer receive passes fresh authenticated owner context; own-copy transport registration passes historical context. `K/client/routed/control.rs` and reference callers consume narrow refusals without retry loops. |
+| G3/G4 capture and cleanup | `A/object_retention/selector_erasure.rs`: SQL builders for capture, surviving-owner projection and retirement cleanup; compose them into the existing `R/schema.rs` message and payload bodies after dependency expansion (P1). Restore's additional pre-delete capture in `A/backup_object_erasure.rs` is P2, witnessed by E6/U5/U6. The existing payload/work rows keep the manifest available until cleanup. |
 | G5 graph classification | `A/backup_selector_admission.rs`: encrypted operation decision tables, two-input classification and single-input normalization. `A/backup_object_erasure.rs`, `A/backup_merge.rs`, `A/backup_missing.rs`, `A/backup_native.rs` and fresh `J/install.rs` consume that decision; archive preservation cannot invent a separate veto interpretation. |
-| G6 access/publication | Shared resolver used by `R/mod.rs::check_object_access` and restore copy filtering; erasure generation advanced by the G4 builders. `J/workers.rs` keeps the current publication authorization boundary. Own-copy materialization uses the G1 storage entrypoint within its existing page transaction. |
+| G6 access/publication | Shared resolver used by `R/mod.rs::check_object_access` and restore copy filtering; preserve existing generation advances in `R/schema.rs:69,119`. `J/workers.rs` keeps the current publication authorization boundary. The actual own-copy transport-owner registration uses historical G1 context within its page transaction; history attachment materialization is not implemented at this base. |
 
 Restore scratch names are `backup_reference_admission` with columns
 `side,reference_hash,message_id,selector,commitment` and PK
@@ -218,9 +266,17 @@ Restore scratch names are `backup_reference_admission` with columns
 Decisions are `keep`, `erase` or `unowned_legacy`; only accepted owner edges enter
 the reference table. Add indexes `(side,selector,commitment)` and
 `(side,commitment,reference_hash)` on accepted edges, and retain local witnesses
-as a separately identified pre-merge side until classification finishes. Stage
-unresolved legacy rows in existing row exclusions rather than inventing C.
-Both operation tables are in encrypted main and are dropped before COMMIT.
+as a separately identified pre-merge side until classification finishes. A third
+table, `backup_lookup_origin(side,lookup,commitment)`, has PK `(side,lookup)`
+and index `(lookup,side)`. Populate both `target` and `incoming` sides before
+the first lookup union (base `A/backup_object_erasure.rs:64`); never infer origin
+from the unioned main table. A fourth table,
+`backup_target_delete(reference_hash,message_id,selector,commitment)`, has PK
+`(reference_hash,message_id)` and indexes `(selector,commitment)` and
+`(message_id,reference_hash)`. It tracks the physical target edges that must
+survive until the final deletion pass; these are never accepted owner edges.
+Stage unresolved legacy rows in existing row exclusions rather than inventing C.
+All four operation tables are in encrypted main and are dropped before COMMIT.
 
 ## 3. Path × state matrix
 
@@ -234,25 +290,27 @@ payload commitment is fenced. Legacy column applies to both sides.
 
 | Path | L-live | L-erased | L-fenced | I-live | I-erased | I-fenced | Legacy zero manifest |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Authenticated revoke | P+ via G2; K with partial lookup | No row, consumed no-op via G1/G2 | No row, stronger veto via G2 | Admit live reference first; then G2 | No resurrection via G1 | No resurrection via G1 | New zero forbidden; refusal G2; old row §5 |
-| Reference creation / peer receive | K; preserve tombstone via G1/G2 | X before retention/actors via G1 | X via identity check + G1 | Admit non-deleted owner via G1 | X via G1 | X via G1 | Cannot use unknown manifest to admit reference; §5 only on archive boundary |
-| Late payload import / own-copy reference materialization | K; tombstone still vetoes upsert via G1 and existing upsert guard | X/skip erased item via G1 | X/skip erased item via G1 | G1 before actor or copy binding | Exclude stale copy via G1 | Exclude stale copy via G1 | Not a source of new zero placeholders |
+| Authenticated revoke | P+ via G2; K with partial lookup | No row, consumed no-op from base `A/object.rs:167-169` | No row, stronger veto via access check | Managed or live legacy actor/owner witness permits G2; no discovery prerequisite | No resurrection via G2 | No resurrection via G2 | New zero forbidden; refusal G2; old row §5 |
+| New authenticated message / peer reference creation | K; preserve live tombstone | Admit fresh non-deleted owner, reopen unfenced selector via G1/G6; replay of deleted owner skipped/rejected without retry | Refuse fenced item via G1, consume narrow inbound refusal | Admit non-deleted owner via G1 | Lookup alone cannot veto a fresh owner; owner deletion still vetoes | Payload fence always vetoes | Cannot use unknown manifest to admit reference; §5 only on archive boundary |
+| Late payload import / own-copy transport-owner registration | K; tombstone still vetoes ordinary upsert | Historical closed-selector veto/skip via G1 | Payload fence veto/skip via G1 | Historical G1 before transport-owner/binding writes | Exclude stale transport owner via G1 | Exclude stale transport owner via G1 | No history attachment reference materialization at base; not a new zero source |
 | Message delete (DM, group, sibling) | P− on last selector owner, otherwise K; G3/G4 | Idempotent P−; G4 | P−; G3/G4 | Incoming delete runs same trigger after authenticated import; G3/G4 | No restored owners; G1/G5 | No restored owners; G1/G5 | Touched row normalized from captured reference then erased, or retained with surviving reference; §5 |
 | Payload-only transport retirement | Capture full ancestor closure, P−; G3/G4 | Idempotent P−; G4 | P−; G3/G4 | No raw incoming payload cleanup; G5 classifies first | G5 P− | G5 P− | G4 uses captured identity, not zero hash; §5 |
 | Pre-send hold release/drop | Direct referenced hold ineligible; eligible child retires referenced ancestors, P− via G3/G4 | No selector to recreate; G4 | Idempotent G3/G4 | No incoming hold release API | G5 excludes instead | G5 excludes instead | Ancestor case handled by §5/G4 |
-| Legacy retention maintenance | Direct reference/revocation guard K; eligible ancestor closure G3/G4 | No recreation; G4 | G3/G4 P− | Discovery must not accept erased owners; G1 | G1 rejects | Payload fence checked by discovery/G1 | Preserve ambiguous untouched store rows; normalize touched closure §5 |
+| Legacy retention maintenance / discovery | Direct reference/revocation guard K; eligible ancestor closure G3/G4 | Discovery skips closed historical selector; G1 before direct INSERT | Discovery skips fence; cleanup G3/G4 | Only reconstructible admissible owner permits reference insertion; otherwise `unowned_legacy`, no new reference | Archived actor cannot reopen closed selector; G1 | Fence checked before discovery writes; G1 | Preserve ambiguous untouched rows; live legacy revoke still accepted by G2; normalize touched closure §5 |
 | Explicit wire identity replacement | Active old owner forbids replacement; otherwise retire old G3/G4 and insert verified new identity | Only checked expected-absence/new receipt may succeed; §4.3 | Old C stays fenced, new C may succeed; §4.3 | Exact receipt for new wire C accepted; G5 | Old aliases excluded; G5 | Old C always excluded; G5 | Never infer a replacement receipt from zero manifest |
 | Account erase | No supported API at base; §4.4 specifies required future behavior | Same boundary | Same boundary | No account erase import API | No account erase import API | No account erase import API | No claim that lock, unload or index removal erases old rows |
 | Backup export | P+ and K exported in committed graph; G6 | P−, opaque lookup exported; G4/G6 | P−, opaque fence exported; G4/G6 | No incoming graph in export | No incoming graph in export | No incoming graph in export | Existing untouched store limitation §8; normalized restore output has no unresolved zero row |
 | Restore A: target veto, archive candidate | K independent target survivors; G5 | P− incoming selector graph, successful restore; G5 | P− all incoming references to C; G5 | Admit only if no target veto; P+ after arbitration | Source closed selectors excluded; G5 | Source fences unioned first; G5 | Resolve and classify before arbitration; §5 |
 | Restore B: archive veto, target live | Payload fence retires target graph; selector-only witness preserves independent target survivor; G5/G4 | Remain P−; G5 | Remain P−; G5 | Independent unfenced selectors survive; G5 | Closed source selector cannot import its stale graph; G5 | Retire local/incoming graph for C; G3/G5 | Same classification as A, never an unconditional exemption; §5 |
+| Restore C: archive deletes m2, target revoked alias owned by m2, C live through m1 | m2 is not a survivor; keep its target link pending final deleted-message pass, then G3/G4 P−; m1 selector stays usable | Idempotent P− | Fenced cleanup remains G3/G4 | Incoming undeleted m2 cannot override deletion authority | Source deletion dominates exact m2 owner | Fence dominates too | Preserve captured manifest through load-bearing final trigger, then normalize/erase §5 |
 | Restore generic merge / preserved archives / missing preparation | Keep only copies backed by surviving owners; G5/G6 | Exclude selector copies in every destination; G5 | Exclude payload copies; G5 | Filter by accepted references before archiving or inserting; G5 | No graph or archived alias provenance; G5 | No graph or archived payload provenance; G5 | Normalize in private generation, never rewrite source archive; §5 |
 | Fresh full restore / native data restore | Normalize copied target before index publication; G5/G6 | Existing local veto applied by native/shared merge; G5 | Same | Fresh graph accepted only after normalization; G5 | Honor archive's own lookup/deletion authority; G5 | Honor archive's own fences; G5 | Same normalizer on fresh-copy path; §5 |
 
-The two restore rows are different witnesses. A target with only a payload
+The three restore rows are different witnesses. A target with only a payload
 fence and no alias reference cannot test local pre-delete capture. A target with
 a live alias and an incoming fence must test that capture. Neither substitutes
-for the lookup-only case where another selector still owns the payload.
+for the lookup-only case where another selector still owns the payload, or for
+incoming deletion authority that must retire a still-linked target alias.
 
 ## 4. Commit-boundary arguments
 
@@ -302,8 +360,10 @@ Run all steps within the existing `BEGIN IMMEDIATE`/COMMIT of
 `A/backup_merge.rs:94,159-160,236`. Keep incoming read-only. Put new private
 classification work in the encrypted staging database, not plaintext TEMP:
 operation tables keyed by `(side,reference_hash,message_id)` for accepted owner
-edges and `(side,selector,commitment)` for selector decisions, plus the existing
-row exclusions. Index selector/commitment and reference hash; drop work before
+edges, `(side,selector,commitment)` for selector decisions, and `(side,lookup)`
+for pre-union lookup origin (§2.2), plus the existing row exclusions. Index
+selector/commitment, reference hash and lookup/side; pending target deletion
+uses `backup_target_delete` rather than the accepted-edge table. Drop work before
 commit, rollback and discard staging on errors. These are scratch tables,
 excluded from generic merge and snapshots; they add no wire/archive field.
 
@@ -314,7 +374,12 @@ excluded from generic merge and snapshots; they add no wire/archive field.
    the `ReceivedAttachment` wrapper containing prepared local state. Verify imported lookup
    witnesses against their reference when present. Preserve opaque orphaned
    lookup witnesses when no plaintext mapping remains. Validate dependency
-   classes. Failure rolls back the entire attempted restore.
+   classes. Snapshot **both** inputs' selector lookup witnesses into
+   `backup_lookup_origin` now, before any union; preserve dual provenance when
+   the same lookup exists on both sides. Capture wire witnesses as well when
+   the existing table does not distinguish wire and selector lookups. No later
+   classification may reconstruct side from main after it has been unioned.
+   Failure rolls back the entire attempted restore.
 2. Union payload fences and wire/selector lookup witnesses. Expand dependency
    fences over both input graphs to a fixed point. Build deletion authority
    from **both** sides' deleted projections, sticky markers and message/group
@@ -326,11 +391,18 @@ excluded from generic merge and snapshots; they add no wire/archive field.
    lookup plus a genuinely surviving target witness stays live. For a new wire
    identity, require the exact existing replacement receipt and full existing
    wire-identity checks. An old alias is never authorized by that receipt.
+   Separately mark existing target reference hashes whose owners are deleted
+   only by incoming authority in `backup_target_delete` (called
+   `pending_target_delete` below). This is cleanup work,
+   not an admitted live witness. Retain those physical reference/owner links
+   until step 9 unless step 6 captures and erases them via G3/G4 for a payload
+   fence. A reference shared with another non-deleted owner retains that owner.
 4. Classify **all** incoming references, even selectors without a placeholder.
    Exclude if payload fenced, every owner deleted, identity malformed, or target
-   selector closed. A target lookup with no local witness blocks incoming stale
+   selector closed. Query `backup_lookup_origin(side='target')`, not unioned
+   main, for the target veto. A target lookup with no local witness blocks incoming stale
    same-identity rows even if the source claims a live owner. A lookup learned
-   only from incoming can retain incoming references only when that same input
+   only from `backup_lookup_origin(side='incoming')` can retain incoming references only when that same input
    has independently valid surviving owners (legacy partial lookup); closed
    incoming lookup never creates new target references. Independent valid target
    witnesses are preserved under selector-only incoming history. Payload fences
@@ -348,8 +420,11 @@ excluded from generic merge and snapshots; they add no wire/archive field.
    `object_erasure_work` from fenced **retention payload identities**, including
    unmaterialized aliases; do not rely solely on `scan_objects` finding a wire
    row. Run G3/G4 after shared dependency expansion, preserving the pre-delete
-   capture. Remove local selector copies classified closed. References removed
-   in this step cannot be recreated by step 7.
+   capture. Remove local selector copies classified closed, except the
+   `pending_target_delete` reference/owner links, their placeholders and cleanup
+   bindings needed by step 9. Do not detach them with generic DELETE/filter SQL:
+   their last-owner retirement must run G3/G4. References removed in this step
+   cannot be recreated by step 7.
 7. Import payload rows subject to payload fences; reference rows only from the
    admitted reference set; message edges only from admitted owner edges;
    reference-actor rows only from admitted reference hashes. Copy bindings and
@@ -370,8 +445,19 @@ excluded from generic merge and snapshots; they add no wire/archive field.
    selector-bearing candidates fail closed with ownership-unverified rather
    than silently bypassing exclusions. Object arbitration is unchanged for
    admitted identities: current tombstones win; ordinary timestamp rules and
-   payload identity conflict checks still apply.
-9. The final deleted-message pass remains defense in depth. Verify no rejected
+   payload identity conflict checks still apply. For `pending_target_delete`,
+   filter all incoming/archive copies now but retain the existing target
+   reference/owner links and cleanup state until step 9. Their physical
+   presence does not admit their provenance to a preservation writer.
+9. The final deleted-message pass (`A/backup_merge.rs:236`) is **load-bearing**
+   for target aliases whose owner is deleted by incoming authority while C
+   remains live through another selector (matrix Restore C). Apply the merged
+   tombstones/deleted projections and re-fire `UPDATE ... SET deleted=1 WHERE
+   deleted=1` with those target links intact; the installed object/message
+   triggers then capture and retire that alias through G3/G4. E20 must prove
+   the alias was still linked immediately before this pass and its captured
+   placeholder/reference/actors are gone afterwards, with m1 still usable.
+   Never call this pass optional defense in depth. Verify no rejected
    reference/owner/binding/projection or placeholder exists, surviving selectors
    still resolve, and work is empty; then COMMIT. This is a bounded check over
    the operation decision set, not a scan of unrelated account history.
@@ -390,6 +476,12 @@ the same writer transaction. It does not delete the old fence. Replacements
 have a different commitment; an archive cannot relabel an old alias as the new
 wire to evade selector erasure. Test both valid new wire access and stale old
 private-selector refusal in the same fixture.
+
+The replacement alias-capture subcase uses explicitly injected or legacy
+ownerless reference/placeholder rows: compliant G2/G4 state cannot produce that
+combination once the last owner is gone. The public replacement eligibility
+check (`A/object.rs:49`) must still pass. This is defense against historical
+state, not a claim that an actively message-owned alias can be replaced.
 
 Access must consult the admitted ownership/identity interpretation before either
 base early return (`R/mod.rs:146-151`, `backup_object_erasure.rs:217-218`). A
@@ -419,14 +511,18 @@ justify retaining an internally orphaned placeholder. Native restore uses the
 same two-input classification. Fault before index commit leaves the selected
 old generation intact; fault after it follows existing generation recovery.
 
-Own-copy history import authenticates the page outside the SQL transaction and
-then runs G1 before ownership/reference materialization inside the page writer
-transaction, together with deletion projection, transport binding and receipt.
-Never apply a historical control simply because its event was archived. A stale
-attachment is skipped with the existing typed erased-item outcome; no reference
-or selector provenance is added by that skipped item. Unrelated page messages
-and valid surviving selectors remain importable. This does not add propagation
-of object revocations to the history wire format.
+Own-copy history import authenticates the page outside the SQL transaction.
+Its actual transport-owner registration (`K/client/object.rs:1053`) passes
+historical G1 context inside the page transaction, alongside deletion
+projection, transport binding and receipt. A narrow refusal must be consumed
+without indefinite retry; it cannot grant the transport a fresh-message
+exception merely because the page was signed. Base history import does not
+materialize message attachment references, so no attachment-alias absence
+fixture or mutation is claimed for it (E15/U24 withdrawn). Future history
+attachment materialization would need G1 before all row/binding/actor writes
+and separate acceptance; it is not part of these proposed cards. Never apply a
+historical revocation just because its event was archived. No history wire
+format change is proposed.
 
 ### 4.4 Account erase coverage boundary
 
@@ -453,6 +549,17 @@ test creates a placeholder from display metadata alone
 reference/owner before revocation; keep all tombstone shape and late-import
 assertions. Add a separate display-only refusal case. This changes the admitted
 fixture to match G2, rather than weakening the late-import veto assertion.
+
+Nonzero legacy actor manifests have a separate compatibility obligation from
+the zero-row table below. A valid peer revoke with an undiscovered received
+actor and an agreeing client-record owner must still create a veto, as it does
+at the base (`K/client/routed/control.rs:143-164`, `A/object.rs:172-186`). The
+same holds for a live ownerless legacy reference after discovery; no known
+deletion/fence may veto it. G2's legacy branch is evaluated without requiring
+a retention owner edge or finishing all discovery pages. E19 checks this
+storage behavior, and E11 exercises its signed inbound outcome. This branch
+does not let discovery insert an ownerless row or an archive reopen a closed
+selector; those are historical G1/G5 decisions.
 
 At restore or when an erasure closure touches a legacy payload-free row:
 
@@ -489,7 +596,8 @@ older binary must refuse a v13 account/archive through the established sentinel
 and version checks. This floor protects the changed reference-admission and
 trigger behavior even though no persistent domain columns are added. Upgrade
 does no whole-account orphan scrub. Add v12-read/v13-write, old-writer refusal
-and migration-rollback tests to P1/P2.
+and migration-rollback tests: P1 owns live-store upgrade/old-writer/rollback
+subcases in E10; P2 owns private archive upgrade/rollback subcases in E14.
 
 ## 6. Review closure
 
@@ -510,6 +618,17 @@ closure, not a claim that the corresponding implementation/test already passes.
 | r2 N4: lookup-only successful restore resurrects reference despite missing owner edge | G5 steps 3-9 cover the whole selector graph before generic/archive merge; G1/G6 guard later imports and reads. E7 asserts all-table absence, access refusal and other-selector access; U9 restores commitment-only reference merge while placeholder exclusion remains. |
 | r2 partial same-selector and explicit replacement caution | §2 definitions, G1/G5, E2/E8/E9 preserve independent live references and exact new wire replacement without reviving old aliases. |
 | r2 mutation feasibility note for legacy exclusion | §5, E12/U14 require a live admitted zero row with an observable winning revocation; no nonmatching predicate-only mutation is counted. |
+| Design review H1: permanent selector veto breaks fresh authenticated receipt | Owner-keyed G1 and G6 admit fresh m3 after m2 deletion, even for the same deterministic selector; E16 also rejects m2 replay without retry. E17/U17 isolate the historical lookup veto with no deleted candidate owner. |
+| Design review M1: own-copy attachment materialization absent at base | §1.2 and §4.3 state the real transport-owner registration; E15/U24 withdrawn. Future attachment materialization is a residual, not an acceptance claim. |
+| Design review M2: discovery bypasses registration | G1/§2.2 wire `discover_reference` before its INSERTs; E18/U27 check archived aliases and ownerless candidates. |
+| Design review M3: undiscovered/unowned legacy revoke lost | G2/§5 explicitly preserve the nonzero actor/authorized-owner legacy branch; E19 storage and E11 signed inbound subcases. |
+| Design review M4: lookup origin lost on union | §2.2/§4.2 step 1 snapshot both sides before step 2; step 4 queries origin scratch; E8 reverse case and U28. |
+| Design review M5: incoming deletion leaves target alias orphaned | Restore C, `backup_target_delete`, steps 3/6/8/9 preserve links until load-bearing final trigger; E20/U29. |
+| Design review M6: acceptance assignment gaps/duplicates | §7 tables give exactly one owner to every active E/U; P2 owns restore capture and its E6/U5/U6, plus E8/E9/U26; P1 owns U15/U16. |
+| Design review M7: generation mutation masked | U19 withdrawn: existing `R/schema.rs:119` (message owner deletion) and `:69` (payload work) already bump every named path. E13 retains generation/publication assertions, without an independent U19 kill claim. |
+| Design review L1: U9 access assertion masked by G6 | U9 fails graph/all-table/snapshot absence; hardened access still returns `ObjectErased`. |
+| Design review L2: replacement alias capture needs historical state | §4.3 and E4 label injected/legacy ownerless alias state explicitly; compliant code cannot produce that fixture. |
+| Design review L3: fact/mechanism corrections | §1.1 contrasts `merge_graph` with row exclusions; matrix attributes revoke no-op to `A/object.rs:167-169`; own-copy facts corrected. |
 
 The old “payload-only projection residue is out of scope” decision is obsolete
 for copies belonging to selectors this operation retires: leaving those copies
@@ -526,9 +645,14 @@ behavior changes, and the normal provenance/transaction checks.
 
 | Proposed card | Complete implementation responsibility | Acceptance |
 | --- | --- | --- |
-| P1: storage selector lifecycle | G1-G4/G6 shared identity resolution, reference admission/read checks, nonzero creation, erasure capture and cleanup, generation advance; all five payload-only callers and message trigger. New responsibility modules rather than growing large object/SQL files. | E1-E4, E8-E10, E13; U1-U6, U10-U13, U17-U19; VM budgets for capture/cleanup and delete/retire. |
-| P2: restore graph admission | Depends on P1. G5 two-input and single-input normalization; inverse restore directions; object/reference/owner/actor/archive filters; legacy normalization; native and fresh installation hooks. No deferred generic-copy fix. | E5-E9, E12/E14; U5-U9, U14/U20-U23; existing merge/replacement/attachment verification regressions. |
-| P3: SDK receive and own-copy integration | Depends on P1/P2. Narrow deterministic refusal mapping, real receive path, history/copy materialization guard, snapshot-publication race evidence, public lifecycle docs and release note. | E11/E13-E15; U12/U19/U24/U25; full SDK and attachment CLI tests; controller slices below. |
+| P1: storage selector lifecycle | G1-G4/G6 identity resolution, explicit fresh/historical admission API and legacy discovery/revoke branches, nonzero creation, shared erasure capture/cleanup; message trigger and non-restore payload callers, preserving generation advances. New responsibility modules rather than growing large object/SQL files. | E1, E2, E3, E4, E10, E18, E19; U1, U2, U3, U4, U10, U11, U13, U15, U16, U18, U25, U27, U30; capture/cleanup and delete/retire VM budgets (§7.3). |
+| P2: restore graph admission | Depends on P1. G5 lookup-origin capture, two-input/single-input classification; restore pre-delete capture with work survival; inverse directions, final target-owner deletion; all copy filters, legacy normalization, native/fresh hooks. No deferred generic-copy fix. | E5, E6, E7, E8, E9, E12, E14, E17, E20; U5, U6, U7, U8, U9, U14, U17, U20, U21, U22, U23, U26, U28, U29, U31; restore classification VM budget (§7.3). |
+| P3: SDK receive and transport-owner integration | Depends on P1/P2. Pass correct authenticated fresh/historical context at peer receive and actual own-copy transport registration; consume narrow refusals without retry loops; signed control compatibility, snapshot-publication race, public lifecycle docs and release note. No new history attachment materialization. | E11, E13, E16; U12; full SDK and attachment CLI tests, controller slices below. |
+
+The fixture/mutation owner columns below are exhaustive: no cross-card double
+credit. P1 exports primitives that P2 later wires to restore; P1 does not claim
+restore witnesses before P2 exists. E15, U19 and U24 are withdrawn, not deferred
+implementation obligations. Keep their IDs unused to preserve review history.
 
 ### 7.1 Required fixtures and observations
 
@@ -541,22 +665,27 @@ live reference, use unique retired-reference/slot canaries and explicit graph
 checks; do not forbid a shared payload's still-authorized provenance. After
 both owners die, no plaintext canary remains anywhere. Opaque hashes may remain.
 
-| Test | Required witness and assertion |
-| --- | --- |
-| E1 selector lifetime | `m1→wire`, `m2→alias` share C, revoke alias, delete m2 then m1 and reverse order. Alias dies with its own last reference even while C remains; other selector stays usable; no exported alias row. |
-| E2 selector survivor | Two distinct reference hashes with different message owners share alias and manifest. First delete puts alias in work but retains its tombstone; second deletes it. Also shared-hash/two-owner case. Exercise historical partial lookup explicitly. |
-| E3/E4 all erase callers | Eligible hold child→transport parent and two-hop ancestor chain, message-seeded chain, direct transport retirement, replacement with checked eligibility, legacy maintenance with direct guard and a reachable retiring ancestor. Distinct private selectors and wire IDs prevent incidental wire-row cleanup from masking missing capture. Assert G4 projection/reference-actor cleanup as well as placeholder absence. |
-| E5 target payload fence | Target has C fence, no alias row/reference/lookup. Archive contains live alias reference, owner, actors and known placeholder. Restore succeeds; alias lookup now exists, graph/provenance absent; alias access erased. |
-| E6 incoming payload fence | Target has live alias reference/placeholder and no alias lookup. Archive has C fence learned through another selector. Prove reference exists before pre-delete, capture survives body entry, row/graph removed and lookup recorded. No local wire object is required. |
-| E7 lookup-only N4 | Target deletes m2 alias while m1 wire keeps C live; no C fence. Older archive contains m2 alias graph/placeholder, actor aliases and archived copies. Successful restore must not import alias reference even though C is unfenced; no owner, actor/binding/provenance or subsequent snapshot canary; `ObjectErased(alias)`, `Ok(wire)` and unchanged m1 payload. Retain D7-style object exclusion while testing graph mutation U9. Also test an incoming reference with no placeholder. |
-| E8 partial historical lookup | Target has partial alias lookup and a distinct live alias reference/owner; archived deleted reference is rejected but existing alias reference/placeholder survive. Reverse input side for source partial lookup with a valid source owner and no target veto. Shared selector with conflicting identities refuses atomically. |
-| E9 explicit replacement | Real checked new wire manifest/receipt restores and remains accessible despite old wire lookup; old payload fence retained, old aliases cannot return. Removing/forging receipt refuses replacement. |
-| E10 manifest sources | No actor and no display manifest, retained live reference only: correct manifest required. No sources: typed refusal, no row. Conflicting retention manifests and no alternatives: refusal. Stale display metadata cannot override authenticated mapping. Display-only owner metadata with no live ownership cannot create a placeholder. |
-| E11 authenticated receive refusal | Owning peer sends a valid signed revocation; metadata owner-only, actor/retention sources absent. Real receive loop must yield `InboundRejected`→`routing_rejected`, remove retry/unrouted, dead-letter and attempt ACK, then no retry on second receive. Base chain: `K/client/routed/mod.rs:336-337`, `K/client/inbox_failure.rs:43-44`, `K/bus/sync_driver.rs:472-510` and its following quarantine/ACK flow. Storage failure outside the narrow refusal still propagates. |
-| E12 legacy compatibility | Zero incoming over live known wire, current tombstone over newer payload, and current-newer live row cases retain base arbitration. Add alias zero with live reference, fenced zero, unowned zero and incoming zero against closed lookup. First remains revocation-capable; erased/unowned cases cannot export provenance. |
-| E13 publication generation | Pause export after snapshot but before authorization, delete only alias with other selector alive, resume: staged job refused as erased and discarded. Repeat a payload-only erasure and authorization-first ordering. No dependence on new payload fence count. |
-| E14 atomic staging | Inject failure after capture, fence union, graph admission, archive preservation, before SQL COMMIT and before index selection. Verify selected generation unchanged on failure, scratch absent after success and source archive hash unchanged. Run full and native paths; fresh full copy normalizes its own internally fenced/deleted graph before publication. |
-| E15 own-copy | Valid authenticated page/copy with stale alias after local lookup-only erasure: no reference, actor or binding reappears; valid other selector and unrelated messages import. Both deletion-before-copy and copy-before-deletion; replay and reopen. Revoked live reference still vetoes late payload import. |
+| Test | Owner | Required witness and assertion |
+| --- | --- | --- |
+| E1 selector lifetime | P1 | `m1→wire`, `m2→alias` share C, revoke alias, delete m2 then m1 and reverse order. Alias dies with its own last reference even while C remains; other selector stays usable; no exported alias row. Direct G6 subcase injects an ownerless alias reference behind a closed lookup and requires `ObjectErased`; no restore dependency. |
+| E2 selector survivor | P1 | Two distinct reference hashes with different message owners share alias and manifest. First delete puts alias in work but retains its tombstone; second deletes it. Also shared-hash/two-owner case. Exercise historical partial lookup explicitly. |
+| E3 recursive erasure | P1 | Eligible hold child→transport parent and two-hop ancestor chain, message-seeded chain and direct transport retirement. Distinct private selectors/wires prevent incidental wire-row cleanup from masking capture. Assert hold eligibility and G4 projection/reference-actor cleanup as well as placeholder absence. |
+| E4 other payload callers | P1 | Replacement with checked eligibility, legacy maintenance with direct guard and reachable retiring ancestor. Replacement alias capture explicitly injects legacy ownerless reference/placeholder rows (§4.3); never call that state producible by compliant G2/G4. The reachable hold/transport E3 cases independently kill U4. Assert projections/bindings as well as placeholder absence. |
+| E5 target payload fence | P2 | Target has C fence, no alias row/reference/lookup. Archive contains live alias reference, owner, actors and known placeholder. Restore succeeds; alias lookup now exists, graph/provenance absent; alias access erased. |
+| E6 incoming payload fence | P2 | Target has live alias reference/placeholder and no alias lookup. Archive has C fence learned through another selector. Prove reference exists before pre-delete, capture survives body entry, row/graph removed and lookup recorded. No local wire object is required. |
+| E7 lookup-only N4 | P2 | Target deletes m2 alias while m1 wire keeps C live; no C fence. Older archive contains m2 alias graph/placeholder, actor aliases and archived copies. Successful restore must not import alias reference even though C is unfenced; no owner, actor/binding/provenance or subsequent snapshot canary; `ObjectErased(alias)`, `Ok(wire)` and unchanged m1 payload. Retain D7-style object exclusion for U9: graph/all-table/snapshot assertions kill it; G6 still refuses access. Also incoming reference with no placeholder. |
+| E8 partial historical lookup | P2 | Target partial alias lookup plus distinct live alias owner: archived deleted reference rejected, existing reference/placeholder survive. Reverse case has **no target alias lookup or witness**, incoming partial lookup plus valid source owner: restore admits that source survivor and its winning veto. Assert pre-union origin rows and run U28. Shared selector with conflicting identities refuses atomically. |
+| E9 explicit replacement | P2 | Real checked new wire manifest/receipt restores and remains accessible despite old wire lookup; old payload fence retained, old aliases cannot return. Removing/forging receipt refuses replacement. |
+| E10 manifest sources and live-store upgrade | P1 | No actor/display manifest, retained live reference only: correct manifest required. No sources: typed refusal, no row. Conflicting retention manifests and no alternatives: refusal. Stale display metadata cannot override authenticated mapping. Display-only owner metadata cannot create a placeholder. Live-store v12→v13 writer floor, old-writer refusal and migration rollback subcases (§5). Existing late-import/upsert regression uses a live owned reference and proves its veto survives. |
+| E11 signed control receive | P3 | Owning peer sends a valid signed revocation; metadata owner-only, actor/retention sources absent: `InboundRejected`→`routing_rejected`, remove retry/unrouted, dead-letter and attempt ACK, no retry on second receive. Also valid legacy actor + agreeing owner with no retention edge: success, nonzero placeholder and late-fetch veto, no dead-letter. Base chain: `K/client/routed/mod.rs:336-337`, `K/client/inbox_failure.rs:43-44`, `K/bus/sync_driver.rs:472-510` and following quarantine/ACK. Storage/I/O failures still propagate. |
+| E12 legacy archive compatibility | P2 | Zero incoming over live known wire, current tombstone over newer payload and current-newer live row retain arbitration. Alias zero with live reference, fenced zero, unowned zero and zero against closed lookup: first remains revocation-capable, erased/unowned cases cannot export provenance. |
+| E13 publication generation | P3 | Pause export before authorization, delete alias with other selector alive, resume: job refused and discarded. Repeat payload-only erasure and authorization-first ordering. Assert generation increases independently of payload fence count. Existing bumps already cover these paths; no U19 kill is claimed. |
+| E14 atomic staging and archive upgrade | P2 | Fault after capture, fence union, graph admission, archive preservation, before SQL COMMIT and index selection. Selected generation unchanged on failure, all four scratch tables absent on success, source archive hash unchanged. Full/native/fresh normalization and staged v12→v13 upgrade/rollback subcases (§5). |
+| E16 fresh owner reopens selector | P3 | Bob's m1 owns wire, Carol's m2 owns deterministic alias, same C. Delete m2 while C stays live; assert closed alias lookup and absent alias reference. Carol sends fresh authenticated m3 with the same wire/selector: admit reference/owner/actors, alias usable after reopen. Replay m2: owner deletion still refuses, ACK/skip or deterministic rejection without retry. A payload fence still refuses m3. Exercise actual routed receive, pending-contact release and direct reference callers; unrelated valid messages progress. |
+| E17 historical lookup alone | P2 | On one device, delete m2 alias while m1 wire keeps C live. A sibling archive contains distinct historical m3 using the same selector, never seen/deleted on target. Assert `message_is_deleted(m3)==false` and no m3 deletion authority on either input, C unfenced, no target alias survivor, target lookup present. Restore succeeds but omits m3's attachment reference/owner/bindings while unrelated m3 content follows normal merge. U17 omits only historical lookup admission: forbidden graph rows appear; graph absence is the kill, with no claim about access under the mutation. This is a historical owner, unlike fresh E16. |
+| E18 legacy discovery | P1 | Archived alias actor/context behind closed lookup, with a distinct live non-deleted m3 projection and unfenced C retained through another selector; the lookup came from deleted m2, not m3. Run the bounded discovery page: no reference/owner/binding is inserted. A separate no-lookup candidate without an admissible projection is classified `unowned_legacy`, also inserts no reference. Control with valid owner/no veto registers normally. U27 removes the historical lookup check only in discovery; graph absence fails, independent of deletion/fence guards. |
+| E19 live legacy revoke | P1 | Existing received actor with nonzero manifest and agreeing client-record owner, no placeholder and no retention owner edge: valid caller-authenticated revoke creates correct placeholder before discovery completes. Repeat with live `unowned_legacy` state after discovery. Neither fixture has closed lookup, payload fence or known deleted owner. Deferred import still vetoed; no fabricated retention edge. Known owner deletion/fence and conflicting manifest cases refuse/no-op as specified. |
+| E20 incoming deletion against target alias | P2 | Target m2 owns revoked alias, m1 owns wire sharing C; no fence/lookup. Archive supplies m2 tombstone only. Prove alias reference/owner link intact immediately before final deleted-message pass, and no m2 live witness admitted. After pass: alias placeholder/reference/actors/bindings gone, alias lookup exists, C unfenced and m1 usable; reopen/snapshot has no retired alias provenance. U29 omits the final deletion pass; remaining graph rows must fail absence. |
 
 ### 7.2 Independent mutation witnesses
 
@@ -565,39 +694,43 @@ source hashes, and rerun its healthy test. A compile failure, unrelated timeout
 or zero test matches is not a mutation kill. These clauses are consequences of
 the single invariant, not separate lifetime rules.
 
-| Mutation | Consequence isolated by a required test |
-| --- | --- |
-| U1 restore old payload-work-dependent placeholder predicate | E1 leaves alias row after m2 deletion while m1 owns C. |
-| U2 remove same-selector survivor guard | E2 first deletion wrongly removes still-needed tombstone. |
-| U3 move shared capture before recursive expansion | E3/E4 lose parent/grandparent selector capture. |
-| U4 omit shared capture | E3/E4 payload-only direct/ancestor aliases survive retirement. |
-| U5 omit restore pre-delete capture | E6 loses the already-deleted local alias. |
-| U6 clear captured references at payload-body entry | E6 loses nonempty restore work. |
-| U7 omit incoming alias identity classification | E5 imports orphan alias placeholder. |
-| U8 exclude placeholder but omit discovered selector lookup | E5 access is not `ObjectErased`; target began with no lookup. |
-| U9 restore commitment-only incoming reference merge, retaining placeholder exclusion | E7 imports alias reference without owner edge; graph/access/all-table assertions fail. |
-| U10 replace the shared missing-reference/manifest refusal with the old zero-manifest insertion | E10 succeeds or inserts a row when refusal is required; mutate the single G2 decision, not an unreachable fallback behind another ownership guard. |
-| U11 remove retention manifest source with both alternatives absent | E10 valid fallback case refuses instead of creating the correct veto. |
-| U12 propagate narrow authorization refusal as raw storage error | E11 loses deterministic classification/ACK and retry outcome. |
-| U13 accept first disagreeing retention identity | E10 conflict fixture creates a forbidden row. |
-| U14 unconditionally exclude live legacy zero placeholder | E12 loses the incoming winning tombstone over an older live wire row. |
-| U15 defeat object selector candidate index (`object_id||''`) | Standalone G4 VM-step budget fails at large unrelated N. |
-| U16 defeat commitment capture index (`commitment||''`) | Standalone G3 VM-step budget fails independently of U15. |
-| U17 omit selector check in registration | E15/E10 stale lookup-only alias gets a reference/owner/binding. |
-| U18 return payload-access success before closed lookup with an orphan reference | Direct E7 access hardening subcase, with an intentionally injected ownerless alias reference, returns Ok. |
-| U19 omit generation advance on last-selector removal | E13 publishes the overtaken snapshot. |
-| U20 run placeholder exclusion after wire reuse conflict | E7 restore aborts rather than succeeding without alias. |
-| U21 omit exclusion/redaction in archive preservation while graph stays filtered | E7's post-restore all-table/snapshot canary finds alias provenance. |
-| U22 omit fresh-copy normalization | E14 publishes a copied archive with an internally erased/orphaned placeholder. |
-| U23 treat every historical lookup as unconditional selector erasure | E8 loses live same-selector reference/veto, or E9 rejects verified new wire. Run the two exception mutations separately if implemented in separate branches. |
-| U24 bypass admission in own-copy materialization | E15 restores stale alias on authenticated copy/page import. |
-| U25 let ordinary upsert replace tombstone | Existing late-import regression/E15 loses live revocation veto. |
-| U26 defeat the restore admission candidate indexes while keeping row decisions unchanged | The isolated restore classification VM-step budget in §7.3 grows with unrelated local N and fails; whole-archive traversal is outside this measurement. |
+| Mutation | Owner | Consequence isolated by a required test |
+| --- | --- | --- |
+| U1 restore old payload-work-dependent placeholder predicate | P1 | E1 leaves alias row after m2 deletion while m1 owns C. |
+| U2 remove same-selector survivor guard | P1 | E2 first deletion wrongly removes still-needed tombstone. |
+| U3 move shared capture before recursive expansion | P1 | E3/E4 lose parent/grandparent selector capture. |
+| U4 omit shared capture | P1 | Reachable E3 hold/transport aliases survive retirement; E4 historical replacement is additional coverage, not the only witness. |
+| U5 omit restore pre-delete capture | P2 | E6 loses the already-deleted local alias. |
+| U6 clear captured references at payload-body entry | P2 | E6 loses nonempty restore work; P2 owns restore-specific placement even though the shared body originates in P1. |
+| U7 omit incoming alias identity classification | P2 | E5 imports orphan alias placeholder. |
+| U8 exclude placeholder but omit discovered selector lookup | P2 | E5 access is not `ObjectErased`; target began with no lookup. |
+| U9 restore commitment-only incoming reference merge, retaining placeholder exclusion | P2 | E7 imports alias reference without owner edge; graph/all-table/snapshot absence fails. G6 still returns `ObjectErased`, so access is not its kill. |
+| U10 replace shared missing-reference/manifest refusal with old zero-manifest insertion | P1 | E10 succeeds or inserts a row when refusal required; mutate the single G2 decision, not an unreachable fallback behind another guard. |
+| U11 remove retention manifest source with both alternatives absent | P1 | E10 valid fallback refuses instead of creating correct veto. |
+| U12 propagate narrow authorization refusal as raw storage error | P3 | E11 loses deterministic classification/ACK and retry outcome. |
+| U13 accept first disagreeing retention identity | P1 | E10 conflict fixture creates forbidden row. |
+| U14 unconditionally exclude live legacy zero placeholder | P2 | E12 loses incoming winning tombstone over older live wire row. |
+| U15 defeat object selector candidate index (`object_id||''`) | P1 | Standalone G4 VM-step budget fails at large unrelated N. |
+| U16 defeat commitment capture index (`commitment||''`) | P1 | Standalone G3 VM-step budget fails independently of U15. |
+| U17 omit historical closed-selector check in G5 admission, keeping owner-deletion/payload checks | P2 | E17 imports forbidden reference/owner/binding; both inputs lack deletion authority for candidate m3, so the lookup is the sole refusing guard. This does not mutate fresh-message admission. |
+| U18 return payload-access success before closed lookup with orphan reference | P1 | Direct E1 injected-ownerless-reference subcase returns Ok. |
+| U20 run placeholder exclusion after wire reuse conflict | P2 | E7 restore aborts rather than succeeding without alias. |
+| U21 omit exclusion/redaction in archive preservation while graph stays filtered | P2 | E7 post-restore all-table/snapshot canary finds alias provenance. |
+| U22 omit fresh-copy normalization | P2 | E14 publishes copied archive with internally erased/orphaned placeholder. |
+| U23 treat every historical lookup as unconditional selector erasure | P2 | E8 loses live same-selector reference/veto, or E9 rejects verified new wire. Run exception branches separately if implemented separately. |
+| U25 let ordinary upsert replace tombstone | P1 | E10 existing late-import/upsert regression loses live revocation veto. |
+| U26 defeat restore admission candidate indexes while preserving row decisions | P2 | Isolated classification VM-step budget (§7.3) grows with unrelated local N and fails, outside whole-archive traversal. |
+| U27 bypass historical lookup admission only in `discover_reference` | P1 | E18 archived alias gains reference/owner despite closed lookup; candidate m3 is not deleted and C not fenced, so no masking guard. |
+| U28 classify lookup origin from unioned main instead of `backup_lookup_origin` | P2 | Reverse E8 wrongly treats source-only partial lookup as closed target veto and loses valid incoming reference/winning placeholder. |
+| U29 omit final deleted-message pass as a whole | P2 | E20 keeps target m2-linked alias reference/placeholder; retained links prove steps 6/8 did not already do that retirement. Do not mutate only redundant re-fire SQL after another deletion update has already fired the trigger. |
+| U30 write zero instead of resolved authenticated creation manifest | P1 | E1 last-message cleanup leaves a placeholder whose manifest no longer matches captured identity. Distinct from missing-source refusal U10. |
+| U31 remove identity-neutral legacy conflict exemption | P2 | E12 live-wire restore conflicts instead of accepting winning legacy zero tombstone. Distinct from live-row exclusion U14. |
 
-Retain existing zero-manifest-at-creation and legacy-conflict regression intent:
-replace authenticated known manifest with zeros to fail last-message cleanup;
-remove identity-neutral legacy conflict exemption to fail the live-wire restore
-case. These are distinct from U10 and U14 and require actual runtime failures.
+Withdrawn U19 had no independent witness: existing generation bumps at
+`R/schema.rs:69,119` mask omission of an extra G4 advance on every named path.
+Keep E13's ordinary generation/publication regression and preserve those bumps;
+do not invent another bump solely to create a mutation. E15/U24 targeted absent
+own-copy attachment materialization and are withdrawn for that reason.
 
 ### 7.3 Work budgets
 
@@ -662,6 +795,10 @@ round runs none of those slices.
   residue. No startup scrub is introduced. New operation closures and normalized
   restore outputs must satisfy the invariant; a fresh/reset compliant store is
   the premise for its global inductive form.
+- History-message attachment materialization is absent at the evidence base.
+  This design wires historical admission at the existing transport-owner call;
+  it does not introduce the missing materialization feature or count an
+  attachment-alias fixture against that nonexistent path.
 - Account-wide erase is unsupported in the reviewed surface (§4.4). Lock/unload
   and local generation replacement are not account erasure acceptance.
 - A fresh restore from only a pre-delete external archive has no knowledge of
