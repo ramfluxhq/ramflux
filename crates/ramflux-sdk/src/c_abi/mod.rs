@@ -951,6 +951,7 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         | E::KeyWrappingFailed(_)
         | E::RekeyRollbackFailed(_)
         | E::AccountNotFound(_)
+        | E::AccountAlreadyExists(_)
         | E::Serde(_)
         | E::HistoryBundleHashMismatch
         | E::AuthorizationRejected

@@ -60,6 +60,7 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         | E::KeyWrappingFailed(_)
         | E::RekeyRollbackFailed(_)
         | E::AccountNotFound(_)
+        | E::AccountAlreadyExists(_)
         | E::Serde(_)
         | E::AuthorizationRejected
         | E::GroupMemberLimitExceeded

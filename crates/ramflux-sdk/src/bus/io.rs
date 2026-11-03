@@ -241,6 +241,7 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::KeyWrappingFailed(_)
         | E::RekeyRollbackFailed(_)
         | E::AccountNotFound(_)
+        | E::AccountAlreadyExists(_)
         | E::Serde(_)
         | E::HistoryBundleHashMismatch
         | E::AuthorizationRejected
