@@ -156,6 +156,18 @@ fn handle_public_connection_with_source_limits(
     handle_public_connection_tracked(stream, context, limits, accepted_at, source_permit, None);
 }
 
+struct RequestAdmission<'a> {
+    connection: Option<&'a ramflux_node_core::ConnectionGuard>,
+    request: Option<ramflux_node_core::ConnectionRequestGuard>,
+}
+
+impl RequestAdmission<'_> {
+    fn begin(&mut self) -> bool {
+        self.request = ramflux_node_core::begin_connection_request(self.connection);
+        self.request.is_some()
+    }
+}
+
 fn handle_public_connection_tracked(
     stream: &mut TcpStream,
     context: &FederationPublicHttpContext,
@@ -164,15 +176,14 @@ fn handle_public_connection_tracked(
     source_permit: Option<&SourceConnectionPermit>,
     connection: Option<&ramflux_node_core::ConnectionGuard>,
 ) {
-    let mut request_guard = None;
+    let mut admission = RequestAdmission { connection, request: None };
     let response = match public_response(
         stream,
         context,
         limits,
         accepted_at,
         source_permit,
-        connection,
-        &mut request_guard,
+        &mut admission,
     ) {
         Ok(response) => response,
         Err(error) => {
@@ -201,9 +212,9 @@ pub(crate) fn handle_public_request(
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let limits = crate::http_limits::defaults(true);
     let accepted_at = std::time::Instant::now();
-    let mut guard = None;
+    let mut admission = RequestAdmission { connection: None, request: None };
     if let Some(response) =
-        public_response(stream, context, limits, accepted_at, None, None, &mut guard)?
+        public_response(stream, context, limits, accepted_at, None, &mut admission)?
     {
         response.write(stream, limits, accepted_at)?;
     }
@@ -216,18 +227,16 @@ fn public_response(
     limits: ramflux_node_core::HttpRequestLimits,
     accepted_at: std::time::Instant,
     source_permit: Option<&SourceConnectionPermit>,
-    connection: Option<&ramflux_node_core::ConnectionGuard>,
-    request_guard: &mut Option<ramflux_node_core::ConnectionRequestGuard>,
+    admission: &mut RequestAdmission<'_>,
 ) -> Result<Option<HttpResponse>, ramflux_node_core::NodeCoreError> {
     let Some(request) =
         ramflux_node_core::read_http_request_with_limits(stream, limits, accepted_at)?
     else {
         return Ok(None);
     };
-    let Some(guard) = ramflux_node_core::begin_connection_request(connection) else {
+    if !admission.begin() {
         return Ok(Some(HttpResponse::text("503 Service Unavailable", "shutting down")));
-    };
-    *request_guard = Some(guard);
+    }
     #[cfg(feature = "itest-http")]
     ramflux_node_core::shutdown_request_test_delay();
 
