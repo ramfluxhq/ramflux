@@ -373,9 +373,6 @@ impl BackupDatabase {
                     |r| r.get(0),
                 )
                 .optional()?;
-            if current_manifest.as_deref().is_some_and(|manifest| manifest != source_manifest) {
-                return Err(StorageError::ObjectIdentityConflict);
-            }
             let current: Option<(i64, bool)> = self
                 .db
                 .query_row(
@@ -384,6 +381,12 @@ impl BackupDatabase {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
+            // A durable revocation can deliberately have an unknown (zero) manifest.
+            if !current.is_some_and(|(_, tombstoned)| tombstoned)
+                && current_manifest.as_deref().is_some_and(|manifest| manifest != source_manifest)
+            {
+                return Err(StorageError::ObjectIdentityConflict);
+            }
             if current.is_some_and(|(current, tombstoned)| {
                 tombstoned || current > at || (current == at && !source_deleted)
             }) {

@@ -165,7 +165,7 @@ impl AccountDb {
         // Erasure is a stronger veto and must not be replaced by a tombstone row.
         self.write_transaction(|| {
             match self.check_object_access(object_id) {
-                Ok(()) => {},
+                Ok(()) => {}
                 Err(StorageError::ObjectErased) => return Ok(()),
                 Err(error) => return Err(error),
             }

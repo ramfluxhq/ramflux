@@ -182,7 +182,28 @@ fn discover_reference(
 
 fn reclaim_one(db: &Connection, now: i64, discovery_complete: bool) -> Result<(), StorageError> {
     db.execute("DELETE FROM object_erasure_work", [])?;
-    db.execute("INSERT INTO object_erasure_work SELECT p.commitment,p.wire_id,p.manifest_hash FROM object_retention_payload p LEFT JOIN object_index o ON o.object_id=p.wire_id AND CAST(o.manifest_hash AS TEXT)=p.manifest_hash WHERE ((p.retention_class='imported' AND ?3 AND p.owner_count=0) OR (p.retention_class='pre_send' AND p.hold_expires_at<=?1 AND p.owner_count=0) OR (p.retention_class='transport' AND p.hold_expires_at<=?1)) AND COALESCE(length(o.ciphertext),0)<=?2 AND COALESCE(length(o.object_body),0)<=?2 ORDER BY p.commitment LIMIT 1",params![now,MAX_PAYLOAD,discovery_complete])?;
+    // Keep revocation fences until the private reference is explicitly retired. These
+    // probes use the wire/selector and actor-key indexes; no reference JSON is decoded.
+    db.execute(r"
+        INSERT INTO object_erasure_work
+        SELECT p.commitment,p.wire_id,p.manifest_hash FROM object_retention_payload p
+        LEFT JOIN object_index o ON o.object_id=p.wire_id AND CAST(o.manifest_hash AS TEXT)=p.manifest_hash
+        WHERE ((p.retention_class='imported' AND ?3 AND p.owner_count=0)
+            OR (p.retention_class='pre_send' AND p.hold_expires_at<=?1 AND p.owner_count=0)
+            OR (p.retention_class='transport' AND p.hold_expires_at<=?1))
+        AND NOT (
+            EXISTS(SELECT 1 FROM object_index revoked WHERE revoked.object_id=p.wire_id AND revoked.tombstoned=1)
+            AND (EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind='attachment/reference/'||p.wire_id)
+                OR EXISTS(SELECT 1 FROM object_retention_reference r
+                    JOIN runtime_actor_state a ON a.state_kind='attachment/reference/'||r.selector
+                    WHERE r.commitment=p.commitment))
+        )
+        AND NOT EXISTS(SELECT 1 FROM object_retention_reference r
+            JOIN object_index revoked ON revoked.object_id=r.selector AND revoked.tombstoned=1
+            JOIN runtime_actor_state a ON a.state_kind='attachment/reference/'||r.selector
+            WHERE r.commitment=p.commitment)
+        AND COALESCE(length(o.ciphertext),0)<=?2 AND COALESCE(length(o.object_body),0)<=?2
+        ORDER BY p.commitment LIMIT 1", params![now,MAX_PAYLOAD,discovery_complete])?;
     let inconsistent:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM object_erasure_work w JOIN object_retention_payload p USING(commitment) WHERE p.retention_class<>'transport' AND EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.commitment=w.commitment))",[],|r|r.get(0))?;
     if inconsistent {
         return Err(StorageError::ObjectOwnershipUnverified { schema_version: 12 });

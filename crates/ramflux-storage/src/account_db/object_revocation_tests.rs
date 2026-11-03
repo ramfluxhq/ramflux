@@ -13,8 +13,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "rf-object-revoke-{}-{}",
+            "rf-object-revoke-{}-{sequence}-{}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
         ));
@@ -119,16 +121,36 @@ fn object_placeholder_without_manifest_uses_zero_bytes() -> TestResult {
 
 #[test]
 fn backup_merge_keeps_tombstone_placeholder() -> TestResult {
+    backup_placeholder_roundtrip(true)
+}
+
+// Mutation: check the manifest identity before allowing the current tombstone to win.
+#[test]
+fn backup_merge_keeps_zero_manifest_tombstone_placeholder() -> TestResult {
+    backup_placeholder_roundtrip(false)
+}
+
+fn backup_placeholder_roundtrip(known_manifest: bool) -> TestResult {
     let local = Fixture::new()?;
     let old = Fixture::new()?;
+    assert_ne!(local.root, old.root, "independent backup fixtures must have distinct roots");
     old.write_live()?;
-    local.db.persist_client_record(
-        "object",
-        "object",
-        &json!({
-            "owner":"owner","manifest_hash":"manifest","message_id":"message"
-        }),
-    )?;
+    if known_manifest {
+        local.db.persist_client_record(
+            "object",
+            "object",
+            &json!({
+                "owner":"owner","manifest_hash":"manifest","message_id":"message"
+            }),
+        )?;
+    }
+
+    local.db.register_object_reference(&crate::ObjectReferenceOwner {
+        reference_hash: "backup-reference", wire_id: "object", manifest_hash: "manifest",
+        selector: "object", message_id: "message",
+        reference: &json!({"reference":{"object_id":"object","manifest_hash":"manifest","plaintext_hash":"plaintext"}}),
+        metadata: &json!({"object_id":"object","manifest_hash":"manifest","message_id":"message"}),
+    })?;
     local.db.persist_actor_state("attachment/reference/object", &json!({
         "reference":{"object_id":"object","manifest_hash":"manifest","plaintext_hash":"plaintext"}
     }))?;
@@ -164,5 +186,119 @@ fn backup_merge_keeps_tombstone_placeholder() -> TestResult {
         |row| row.get::<_, bool>(0)
     )?);
     assert_eq!(roundtrip.verify_attachments(|_, _| Ok(()))?.missing, 0);
+    Ok(())
+}
+
+// Mutation: remove the private-reference veto from retention reclamation.
+#[test]
+fn tombstone_placeholder_survives_retention_sweep_while_reference_exists() -> TestResult {
+    for retention in [
+        crate::ObjectRetention::Imported,
+        crate::ObjectRetention::PreSend { expires_at: 0 },
+        crate::ObjectRetention::OwnDeviceTransport,
+    ] {
+        for (selector, known_manifest) in [("object", true), ("object", false), ("alias", false)] {
+            let f = Fixture::new()?;
+            f.db.retain_object("object", "manifest", crate::ObjectRetention::Imported)?;
+            f.db.register_object_reference(&crate::ObjectReferenceOwner {
+                reference_hash: "reference",
+                wire_id: "object",
+                manifest_hash: "manifest",
+                selector,
+                message_id: "message",
+                reference: &json!({"reference":{"object_id":"object","manifest_hash":"manifest"}}),
+                metadata: &json!({"object_id":selector,"message_id":"message"}),
+            })?;
+            f.db.retain_object("object", "manifest", retention)?;
+            f.db.connection.execute("UPDATE object_retention_payload SET hold_expires_at=0", [])?;
+            // Exercise orphan/expired maintenance, independently of explicit last-message erasure.
+            f.db.connection.execute("DELETE FROM object_message_reference", [])?;
+            let key = format!("attachment/reference/{selector}");
+            f.db.persist_actor_state(
+                &key,
+                &json!({
+                    "reference":{"object_id":"object","manifest_hash":"manifest"}
+                }),
+            )?;
+            if known_manifest {
+                f.db.persist_client_record(
+                    "object",
+                    selector,
+                    &json!({"manifest_hash":"manifest"}),
+                )?;
+            }
+            f.db.set_object_tombstoned(selector)?;
+            for _ in 0..8 {
+                f.db.maintain_object_retention()?;
+                f.db.maintain_expired_object_holds()?;
+            }
+            assert_eq!(
+                f.db.connection.query_row(
+                    "SELECT phase FROM object_retention_upgrade WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                5,
+                "discovery must finish before the assertion"
+            );
+            assert!(f.db.object_is_tombstoned(selector)?, "the revocation fence must survive");
+            assert!(f.db.load_actor_state::<Value>(&key)?.is_some());
+            assert_eq!(
+                f.db.object_erasure_generation()?,
+                0,
+                "maintenance must not replace revocation with erasure"
+            );
+            // Removing the last private reference makes the eligible payload reclaimable again.
+            f.db.remove_actor_state(&key)?;
+            f.db.maintain_object_retention()?;
+            assert!(matches!(
+                f.db.check_object_identity("object", "manifest"),
+                Err(crate::StorageError::ObjectErased)
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Mutation: remove check_object_access before inserting a placeholder.
+#[test]
+fn revocation_after_erasure_does_not_insert_placeholder() -> TestResult {
+    let f = Fixture::new()?;
+    f.db.retain_object("object", "manifest", crate::ObjectRetention::Imported)?;
+    for _ in 0..8 {
+        f.db.maintain_object_retention()?;
+    }
+    assert!(matches!(f.db.check_object_access("object"), Err(crate::StorageError::ObjectErased)));
+    f.db.set_object_tombstoned("object")?;
+    assert!(!f.db.object_is_tombstoned("object")?);
+    assert_eq!(
+        f.db.connection
+            .query_row("SELECT COUNT(*) FROM object_index", [], |row| row.get::<_, i64>(0))?,
+        0
+    );
+    Ok(())
+}
+
+// Mutation: filter only the directory arm instead of the UNION output.
+#[test]
+fn message_attachment_union_filters_revoked_retention_and_directory_selectors() -> TestResult {
+    let f = Fixture::new()?;
+    f.db.register_object_reference(&crate::ObjectReferenceOwner {
+        reference_hash: "reference",
+        wire_id: "object",
+        manifest_hash: "manifest",
+        selector: "object",
+        message_id: "message",
+        reference: &json!({"reference":{"object_id":"object","manifest_hash":"manifest"}}),
+        metadata: &json!({"object_id":"object","message_id":"message"}),
+    })?;
+    f.db.persist_actor_state(
+        "directory/object/directory",
+        &json!({"object_id":"directory","message_id":"message"}),
+    )?;
+    assert_eq!(f.db.client_message_object_ids("message")?, vec!["directory", "object"]);
+    f.db.set_object_tombstoned("object")?;
+    f.db.set_object_tombstoned("directory")?;
+    assert_eq!(f.db.client_message_object_ids("message")?, Vec::<String>::new());
     Ok(())
 }

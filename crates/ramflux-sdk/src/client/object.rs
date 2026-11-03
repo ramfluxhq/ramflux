@@ -630,7 +630,7 @@ impl RamfluxClient {
             })
         })
         .await;
-        let outcome = outcome.map_err(super::deferred_attachment::attachment_error);
+        let outcome = outcome.map_err(|error| self.attachment_error(attachment, error));
         if check == "verified_local_cache" {
             super::attachment_diagnostics::checked_context(outcome, &attachment.object_id, check)
         } else {
@@ -1221,9 +1221,13 @@ impl RamfluxClient {
         let alias = self.received_object_alias(object_id)?;
         if let Some(db) = self.active_account_db.as_ref() {
             db.check_object_access(object_id)?;
-            let wire = alias.as_ref().map_or(object_id, |(wire, _)|wire.as_str());
-            if wire != object_id { db.check_object_access(wire)?; }
-            if db.object_is_tombstoned(object_id)? || (wire != object_id && db.object_is_tombstoned(wire)?) {
+            let wire = alias.as_ref().map_or(object_id, |(wire, _)| wire.as_str());
+            if wire != object_id {
+                db.check_object_access(wire)?;
+            }
+            if db.object_is_tombstoned(object_id)?
+                || (wire != object_id && db.object_is_tombstoned(wire)?)
+            {
                 return Err(SyncError::ObjectTombstoned.into());
             }
         }

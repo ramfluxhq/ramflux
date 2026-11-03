@@ -674,3 +674,93 @@ async fn attachment_deleted_and_unverified_causes_keep_one_warning_each()
     }
     Ok(())
 }
+
+// Mutation: stop normalizing placeholder identity conflicts at the attachment boundary.
+#[tokio::test]
+async fn attachment_fetch_maps_zero_manifest_placeholder_conflict_to_deleted()
+-> Result<(), SdkError> {
+    let mut f = Fixture::new()?;
+    let object = f.package.object.clone();
+    let receipt = f
+        .client
+        .fetch_received_with(
+            "remote-object",
+            "zero-manifest-race",
+            FETCH_TIMEOUT,
+            async |client, _| {
+                let db = client.account_db()?;
+                db.persist_client_record("object", "remote-object", &json!({"owner":"owner"}))?;
+                db.set_object_tombstoned("remote-object")?;
+                // The actual checked storage write observes the unknown-manifest placeholder.
+                db.upsert_object(&ramflux_storage::ObjectWrite {
+                    object_id: &object.object_id,
+                    manifest_hash: &object.manifest_hash,
+                    nonce: &object.nonce,
+                    ciphertext: &object.ciphertext,
+                    plaintext_hash: &object.plaintext_hash,
+                    tombstoned: false,
+                    backup_excluded: false,
+                    content_key: None,
+                    object: &object,
+                    updated_at: 1,
+                })?;
+                Err(SdkError::LocalBus("late import unexpectedly succeeded".into()))
+            },
+        )
+        .await?;
+    assert_eq!(receipt["transfer_state"], "failed");
+    assert_eq!(receipt["last_error"], crate::error::ATTACHMENT_DELETED);
+    assert_eq!(receipt["retryable"], false);
+    assert!(matches!(
+        f.client.decrypt_object("remote-object"),
+        Err(SdkError::Sync(SyncError::ObjectTombstoned))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn attachment_error_preserves_live_identity_conflict_and_object_erased()
+-> Result<(), SdkError> {
+    let mut f = Fixture::new()?;
+    assert!(matches!(
+        f.client.attachment_error(
+            &f.reference,
+            ramflux_storage::StorageError::ObjectIdentityConflict.into()
+        ),
+        SdkError::Storage(ramflux_storage::StorageError::ObjectIdentityConflict)
+    ));
+    f.client.send_direct_message("conversation", "message", "owner", b"body")?;
+    let result = f
+        .client
+        .fetch_received_with(
+            "remote-object",
+            "erase-during-fetch",
+            FETCH_TIMEOUT,
+            async |client, reference| {
+                client.account_db()?.delete_direct_message(
+                    "conversation",
+                    "message",
+                    "local",
+                    "erase",
+                )?;
+                client
+                    .account_db()?
+                    .check_object_identity(&reference.object_id, &reference.manifest_hash)?;
+                Ok(())
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(SdkError::ObjectErased)));
+    assert!(matches!(
+        f.client.attachment_error(&f.reference, SdkError::ObjectErased),
+        SdkError::ObjectErased
+    ));
+    assert!(matches!(
+        f.client.attachment_error(
+            &f.reference,
+            ramflux_storage::StorageError::ObjectIdentityConflict.into()
+        ),
+        SdkError::ObjectErased
+    ));
+    Ok(())
+}

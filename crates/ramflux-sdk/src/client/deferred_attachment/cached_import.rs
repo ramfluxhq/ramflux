@@ -85,7 +85,7 @@ impl RamfluxClient {
             }))
         })();
         super::super::attachment_diagnostics::checked(
-            outcome.map_err(super::attachment_error),
+            outcome.map_err(|error| self.attachment_error(reference, error)),
             &reference.object_id,
             check,
         )

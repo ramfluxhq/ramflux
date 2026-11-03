@@ -11,13 +11,6 @@ use std::time::Duration;
 
 mod cached_import;
 
-pub(super) fn attachment_error(error: SdkError) -> SdkError {
-    match error {
-        SdkError::Sync(SyncError::ObjectTombstoned) => SdkError::AttachmentDeleted,
-        other => other,
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct ReferenceContext<'a> {
     pub owner: &'a str,
@@ -79,6 +72,30 @@ const fn default_retryable() -> bool {
 }
 
 impl RamfluxClient {
+    pub(super) fn attachment_error(
+        &self,
+        reference: &SdkDmAttachmentRef,
+        error: SdkError,
+    ) -> SdkError {
+        match error {
+            SdkError::Sync(SyncError::ObjectTombstoned) => SdkError::AttachmentDeleted,
+            SdkError::Storage(ramflux_storage::StorageError::ObjectIdentityConflict) => {
+                // A zero-manifest placeholder can win between the initial check and import.
+                // Preserve live identity conflicts and the stronger erasure fence.
+                let deleted = (|| {
+                    self.account_db()?.check_object_access(&reference.object_id)?;
+                    self.discard_deleted_attachment_chunks(reference)
+                })();
+                match deleted {
+                    Ok(true) => SdkError::AttachmentDeleted,
+                    Err(SdkError::ObjectErased) => SdkError::ObjectErased,
+                    _ => error,
+                }
+            }
+            other => other,
+        }
+    }
+
     /// Persist each confirmed ACK so a bounded fetch never restarts an entire ACK pass.
     pub(super) async fn acknowledge_received_attachment_with<F>(
         &self,
@@ -402,7 +419,7 @@ impl RamfluxClient {
             Ok::<(), SdkError>(())
         }
         .await;
-        match outcome.map_err(attachment_error) {
+        match outcome.map_err(|error| self.attachment_error(&stored.reference, error)) {
             Ok(()) => {
                 "available".clone_into(&mut state.transfer_state);
                 state.retryable = false;
