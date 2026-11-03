@@ -33,6 +33,15 @@ impl PrxBridgeEngine {
         self.state.controls.get(tag).or_else(|| self.state.decisions.get(tag)).cloned()
     }
     pub(super) fn schedule(&mut self, now: u64) {
+        self.retry_at.retain(|tag, _| {
+            if let Some(id) = tag.strip_prefix("in:") {
+                return self.state.inbound.contains_key(id);
+            }
+            if let Some(key) = tag.strip_prefix("erase:") {
+                return self.state.erases.contains_key(key);
+            }
+            self.state.controls.contains_key(tag) || self.state.decisions.contains_key(tag)
+        });
         let stale = self
             .state
             .inbound

@@ -1176,3 +1176,31 @@ async fn bridge_stream_json_escaping_stays_within_canonical_snapshot_limit() -> 
 async fn bridge_http_pending_visible_failure_is_sent_after_bus_reconnect() -> TestResult {
     http_visible_failure().await
 }
+
+#[tokio::test]
+async fn bridge_removal_only_cancels_unfinished_turns() -> TestResult {
+    let (_root, server, mut host) = fixture().await?;
+    let completed = host.input(&server, "completed").await?;
+    finish(&server, &completed, "old reply").await?;
+    host.data.lock().map_err(|_| "data")?.clock = crate::bus::now_ms() + 200;
+    let current = host.input(&server, "current").await?;
+    host.data.lock().map_err(|_| "data")?.removed = true;
+    host.event("conversation.changed", json!({"conversation_id":"thread","removed":true})).await?;
+    host.applied().await?;
+    let mut barrier = params(&current, "removal-history-barrier");
+    barrier["on"] = json!(false);
+    server.call("reply.typing", barrier).await?;
+    assert_eq!(
+        server
+            .calls
+            .lock()
+            .map_err(|_| "calls")?
+            .iter()
+            .filter(|r| r["method"] == "turn.cancel")
+            .count(),
+        1,
+        "completed history must not become cancellation backlog"
+    );
+    host.stop().await?;
+    Ok(())
+}

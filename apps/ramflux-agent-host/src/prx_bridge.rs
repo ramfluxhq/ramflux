@@ -586,8 +586,9 @@ impl PrxBridgeEngine {
                 let _ = token.compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst);
             }
             self.state.inbound.remove(&id);
-            self.state.turns.remove(&id);
-            self.state.controls.insert(format!("cancel:{id}"),Call{method:"turn.cancel".into(),params:json!({"conversation_id":c,"turn_id":id,"reason":"conversation_removed"})});
+            if self.state.turns.remove(&id).is_some_and(|turn| turn.terminal_at.is_none()) {
+                self.state.controls.insert(format!("cancel:{id}"),Call{method:"turn.cancel".into(),params:json!({"conversation_id":c,"turn_id":id,"reason":"conversation_removed"})});
+            }
         }
         self.active.remove(c);
         self.state.decisions.retain(|_, d| d.params["conversation_id"] != c);
