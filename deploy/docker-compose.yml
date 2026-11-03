@@ -25,6 +25,7 @@ services:
       RAMFLUX_GATEWAY_V3_ISSUER_SEED: "${RF_COMPOSE_GATEWAY_V3_ISSUER_SEED:?see deploy/compose-inputs.json migration}"
       RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE: "${RF_COMPOSE_GATEWAY_V3_ISSUER_CERT_FILE:?see deploy/compose-inputs.json migration}"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - gateway-redb:/var/lib/ramflux/gateway
       - ./config/gateway.toml:/etc/ramflux/config/gateway.toml:ro
       - ./certs/gateway:/etc/ramflux/mesh:ro
@@ -63,6 +64,7 @@ services:
       RAMFLUX_CUSTODY_AUTHENTICATED_POOL: "${RF_COMPOSE_CUSTODY_AUTHENTICATED_POOL:-}"
       RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS: "${RF_COMPOSE_CUSTODY_AUTH_TIMEOUT_MS:-}"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - router-redb:/var/lib/ramflux/router
       - ./config/router.toml:/etc/ramflux/config/router.toml:ro
       - ./certs/router:/etc/ramflux/mesh:ro
@@ -90,6 +92,7 @@ services:
       RAMFLUX_NOTIFY_ROUTE_KEY_FILE: "/etc/ramflux/mesh/route.key"
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL:?see deploy/compose-inputs.json migration}"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - notify-redb:/var/lib/ramflux/notify
       - ./config/notify.toml:/etc/ramflux/config/notify.toml:ro
       - ./certs/notify:/etc/ramflux/mesh:ro
@@ -151,6 +154,7 @@ services:
       RAMFLUX_FEDERATION_FORCE_TCP_MESH: "${RF_COMPOSE_FEDERATION_FORCE_TCP_MESH:-0}"
       RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK: "${RF_COMPOSE_FEDERATION_DISABLE_TCP_FALLBACK:-0}"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - federation-redb:/var/lib/ramflux/federation
       - ./config/federation.toml:/etc/ramflux/config/federation.toml:ro
       - ./certs/federation:/etc/ramflux/mesh:ro
@@ -200,6 +204,7 @@ services:
       RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE: "${RF_COMPOSE_RELAY_TRUST_SNAPSHOT_CACHE_FILE:?see deploy/compose-inputs.json migration}"
       RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS: "${RF_COMPOSE_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS:-30}"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - relay-redb:/var/lib/ramflux/relay
       - ./config/relay.toml:/etc/ramflux/config/relay.toml:ro
       - ./certs/relay:/etc/ramflux/mesh:ro
@@ -228,6 +233,7 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - signaling-redb:/var/lib/ramflux/signaling
       - ./config/signaling.toml:/etc/ramflux/config/signaling.toml:ro
       - ./certs/signaling:/etc/ramflux/mesh:ro
@@ -256,6 +262,7 @@ services:
     environment:
       RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE: "/etc/ramflux/node-identity/node-signing.key"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       # Only the signing seed: never federation's mesh TLS key.
       - ./certs/node-identity:/etc/ramflux/node-identity:ro
       - retention-redb:/var/lib/ramflux/retention
@@ -268,6 +275,7 @@ services:
       retries: 12
 
 volumes:
+  node-privacy: {}
   gateway-redb: {}
   router-redb: {}
   notify-redb: {}

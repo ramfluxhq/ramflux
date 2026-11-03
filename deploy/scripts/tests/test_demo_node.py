@@ -356,7 +356,7 @@ else:
                 self.assertFalse((self.root / "deployed").exists())
                 removed = [args[-1] for args in self.commands()
                            if args[:2] in (["rm", "-f"], ["network", "rm"], ["volume", "rm"])]
-                self.assertEqual(set(removed), {"id-demo-network", *(f"id-ramflux-{service}" for service
+                self.assertEqual(set(removed), {"id-demo-network", "demo-test_node-privacy", *(f"id-ramflux-{service}" for service
                     in ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")),
                     *(f"demo-test_{service}-redb" for service
                     in ("gateway", "router", "notify", "federation", "relay", "signaling", "retention"))})
@@ -1114,6 +1114,20 @@ else:
                 self.assertFalse(self.compose_commands())
                 self.assertFalse((self.state / "transaction.pending").exists())
                 self.control.write_text("{}")
+
+    def test_refuses_foreign_node_privacy_volume_before_any_compose_mutation(self):
+        self.run_script("up")
+        self.control.write_text(json.dumps({
+            "unlabeled": "volume", "unlabeled_volume": "node-privacy",
+        }))
+        self.journal.write_text("")
+        refused = self.run_script("up", success=False)
+        self.assertIn("refusing foreign volume in project demo-test", refused.stderr)
+        self.assertTrue(any(args[:2] == ["volume", "inspect"]
+                            and args[-1] == "demo-test_node-privacy"
+                            for args in self.commands()))
+        self.assertFalse(self.compose_commands())
+        self.assertFalse((self.state / "transaction.pending").exists())
 
     def test_status_fails_for_stopped_or_unhealthy_services(self):
         self.run_script("up")

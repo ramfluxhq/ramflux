@@ -43,6 +43,7 @@ services:
       RAMFLUX_MESH_QUIC_STREAM_RECEIVE_WINDOW: "${RF_COMPOSE_MESH_QUIC_STREAM_RECEIVE_WINDOW:-1048576}"
       RAMFLUX_MESH_QUIC_SEND_WINDOW: "${RF_COMPOSE_MESH_QUIC_SEND_WINDOW:-16777216}"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - ./config/gateway.toml:/etc/ramflux/config/gateway.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/gateway:/etc/ramflux/mesh:ro
       - gateway-redb:/var/lib/ramflux/gateway
@@ -102,6 +103,7 @@ services:
       RAMFLUX_ROUTER_FEDERATION_FORWARD_URL: "http://ramflux-federation:18084/internal/home-node-migration/forward"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:?generated fixture token required}"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - ./config/router.toml:/etc/ramflux/config/router.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/router:/etc/ramflux/mesh:ro
       - router-redb:/var/lib/ramflux/router
@@ -150,6 +152,7 @@ services:
       RAMFLUX_ITEST_NOTIFY_HTTP_ADDR: "0.0.0.0:18083"
       RAMFLUX_NOTIFY_MESH_LISTEN_ADDR: "0.0.0.0:18085"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - ./config/notify.toml:/etc/ramflux/config/notify.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/notify:/etc/ramflux/mesh:ro
       - notify-redb:/var/lib/ramflux/notify
@@ -207,6 +210,7 @@ services:
       RAMFLUX_MESH_QUIC_STREAM_RECEIVE_WINDOW: "${RF_COMPOSE_MESH_QUIC_STREAM_RECEIVE_WINDOW:-1048576}"
       RAMFLUX_MESH_QUIC_SEND_WINDOW: "${RF_COMPOSE_MESH_QUIC_SEND_WINDOW:-16777216}"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - ./config/federation.toml:/etc/ramflux/config/federation.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/federation:/etc/ramflux/mesh:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/node-identity:/etc/ramflux/node-identity:ro
@@ -245,6 +249,7 @@ services:
       RAMFLUX_RELAY_ALLOW_PRIVATE_TARGETS: "1"
       RAMFLUX_RELAY_ITEST_CAPTURE_JSON: "${RF_COMPOSE_RELAY_ITEST_CAPTURE_JSON:-/tmp/ramflux-relay-itest-capture.jsonl}"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - ./config/relay.toml:/etc/ramflux/config/relay.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/relay:/etc/ramflux/mesh:ro
       - relay-redb:/var/lib/ramflux/relay
@@ -271,6 +276,7 @@ services:
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_SIGNALING_TURN_UDP_ADDR: "0.0.0.0:3478"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - ./config/signaling.toml:/etc/ramflux/config/signaling.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/signaling:/etc/ramflux/mesh:ro
       - signaling-redb:/var/lib/ramflux/signaling
@@ -298,6 +304,7 @@ services:
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_RETENTION_HTTP_ADDR: "0.0.0.0:18087"
     volumes:
+      - node-privacy:/etc/ramflux/config/node-identity
       - ${RAMFLUX_CERTS_DIR:-./certs}/node-identity:/etc/ramflux/node-identity:ro
       - ./config/retention.toml:/etc/ramflux/config/retention.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/retention:/etc/ramflux/mesh:ro
@@ -313,6 +320,7 @@ services:
       retries: 12
 
 volumes:
+  node-privacy: {}
   gateway-redb: {}
   router-redb: {}
   notify-redb: {}

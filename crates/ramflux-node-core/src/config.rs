@@ -98,12 +98,32 @@ pub fn load_config_from_args(
     args: impl IntoIterator<Item = String>,
     expected_service_id: &str,
 ) -> Result<Option<NodeServiceConfig>, NodeCoreError> {
+    config_from_args(args, expected_service_id, true)
+}
+
+/// Reads client configuration without initializing service secrets or creating files.
+/// # Errors
+/// Returns invalid argument, configuration or environment errors.
+pub fn read_config_from_args(
+    args: impl IntoIterator<Item = String>,
+    expected_service_id: &str,
+) -> Result<Option<NodeServiceConfig>, NodeCoreError> {
+    config_from_args(args, expected_service_id, false)
+}
+
+fn config_from_args(
+    args: impl IntoIterator<Item = String>,
+    expected_service_id: &str,
+    initialize_privacy: bool,
+) -> Result<Option<NodeServiceConfig>, NodeCoreError> {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--config" {
             let path = args.next().ok_or(NodeCoreError::MissingConfigPath)?;
-            let config = load_config(path, expected_service_id)?;
-            crate::source_privacy::configure_node_privacy()?;
+            let config = load_config(&path, expected_service_id)?;
+            if initialize_privacy {
+                crate::source_privacy::configure_node_privacy(Path::new(&path), &config.node_id)?;
+            }
             return Ok(Some(config));
         }
     }

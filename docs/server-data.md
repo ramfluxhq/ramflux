@@ -31,11 +31,31 @@ erase guarantee against a malicious operator.
 
 Source-IP admission identifiers use HMAC-SHA-256 with a node secret and preserve
 IPv6 /64 bucketing (IPv4-mapped addresses normalize to IPv4). They are not
-unsalted address hashes. By default each process generates an ephemeral key;
-restart changes identifiers. Mount a shared, private base64url-encoded 32-byte
-key as `RAMFLUX_NODE_PRIVACY_KEY_FILE` where stable node-local bucketing across
-services/restarts is required. Use a distinct key on each node. A server with
-that key can still evaluate candidate addresses.
+unsalted address hashes. Configured services create a random 32-byte key on first
+start and reuse it across restarts. The private file is
+`node-identity/source-ip-<identity-commitment>.key` beside the service configuration;
+the filename commits to its `node_id`, so services for the same node share a key
+and different nodes use separate keys even in a shared configuration directory.
+Files are published complete without replacing a concurrent creator's key, with
+Unix mode 0600. New identity directories use mode 0700; existing directories must
+not be writable by group or other users. Missing write access, malformed keys,
+permissive modes and symlink substitution refuse startup instead of changing the key.
+
+The default Compose files mount the persistent `node-privacy` volume at
+`/etc/ramflux/config/node-identity` in every service, including read-only containers.
+Preserve that volume with the node identity. For a manual install, make the
+configuration's `node-identity` directory writable only by the service user, or mount
+a pre-provisioned private base64url-encoded 32-byte key and set
+`RAMFLUX_NODE_PRIVACY_KEY_FILE`. An explicit key path remains read-only input:
+a missing or invalid mounted key is refused and is never regenerated. Use a
+distinct key per node; replicas must share the same file. A server with that key
+can still evaluate candidate addresses. In-process fixtures that do not load a
+service configuration retain an ephemeral process key.
+
+Old unkeyed address hashes and earlier ephemeral-key hashes are not comparable
+with the new node-local identifiers. No migration or bucket matching is attempted:
+old registration windows age out and daily prefix-quota rows expire at their
+daily reset. Keep the generated key to retain the new buckets across restarts.
 
 ## Mounted secrets and migration
 
@@ -183,9 +203,10 @@ they are not the production registration boundary.
   compact redb only on the startup that performs the migration. An interrupted
   startup leaves retired pages until a later compaction, and a single `compact()`
   call may not reclaim everything.
-- Source-IP admission buckets use an ephemeral per-process key unless
-  `RAMFLUX_NODE_PRIVACY_KEY_FILE` is mounted. Without it, per-IP registration
-  budgets reset on every gateway restart and are split across gateway replicas.
+- Replicas must share the node privacy key directory or the same explicitly
+  mounted key. Separate copies with different keys split per-IP budgets; losing
+  the key changes identifiers. The automatic directory must support atomic hard
+  links and directory synchronization; otherwise provision an explicit mounted key.
 - The check that a secret lies outside the database volume is a path heuristic: it
   rejects secrets under the database's parent directory. It does not compare mount
   points, so operators must still mount secrets from a separate location.

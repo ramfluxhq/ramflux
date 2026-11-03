@@ -3,17 +3,23 @@
 
 //! Node-keyed source pseudonyms retain IPv6 prefix admission without exposing an address hash.
 use crate::{NodeCoreError, NodeSecret};
+use std::path::Path;
 use std::sync::OnceLock;
+mod key_file;
 static MOUNTED_KEY: OnceLock<NodeSecret> = OnceLock::new();
 
-pub(crate) fn configure_node_privacy() -> Result<(), NodeCoreError> {
-    if let Some(path) = crate::environment::var_os("RAMFLUX_NODE_PRIVACY_KEY_FILE") {
-        let key = NodeSecret::from_file(path)?;
-        MOUNTED_KEY.set(key).map_err(|_| {
-            NodeCoreError::Unauthorized("node privacy key already initialized".into())
-        })?;
-    }
-    Ok(())
+pub(crate) fn configure_node_privacy(
+    config_path: &Path,
+    node_id: &str,
+) -> Result<(), NodeCoreError> {
+    let key = if let Some(path) = crate::environment::var_os("RAMFLUX_NODE_PRIVACY_KEY_FILE") {
+        NodeSecret::from_file(path)?
+    } else {
+        key_file::load_or_create(config_path, node_id)?
+    };
+    MOUNTED_KEY
+        .set(key)
+        .map_err(|_| NodeCoreError::Unauthorized("node privacy key already initialized".into()))
 }
 #[must_use]
 pub fn source_ip_hash(source_ip: &str) -> String {

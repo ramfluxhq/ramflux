@@ -418,7 +418,8 @@ def render_files(repo, state, owner):
         "services": {f"ramflux-{name}": {
             "build": {"context": str(repo)}, "restart": "unless-stopped", "labels": label,
         } for name in SERVICES},
-        "volumes": {f"{name}-redb": {"labels": label} for name in SERVICES},
+        "volumes": {**{f"{name}-redb": {"labels": label} for name in SERVICES},
+                    "node-privacy": {"labels": label}},
         "networks": {"default": {"labels": label}},
     }
     custody, record = custody_inputs(state)

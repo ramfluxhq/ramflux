@@ -237,6 +237,12 @@ volumes together when backing up; never commit or distribute `identity.json`,
 are mounted into their respective services; provider/offline signing seeds stay
 outside containers.
 
+The persistent `node-privacy` volume holds mode-0600 source-IP admission keys,
+shared by configured services of the same node. Preserve it with the node identity
+and other named volumes when backing up or rolling back. Reusing the key keeps
+source buckets stable across restarts; a replacement key cannot match old buckets.
+See [source-IP key storage and upgrade policy](../docs/server-data.md).
+
 The desktop adds the printed `http://DEMO_HOST:DEMO_HTTP_PORT` URL, then confirms
 the node using the expected public key over a trusted channel. Discovery and
 prekey HTTP use the same explicit LAN HTTP origin as the s72 fixture; gateway and

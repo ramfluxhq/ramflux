@@ -108,6 +108,12 @@ if normalized and normalized[0] == "compose":
             resources[f"demo-test_{service}-redb"] = {
                 "kind": "volume", "project": "demo-test", "owner": token,
             }
+        override = json.loads((state / "demo-override.json").read_text())
+        privacy_owner = override["volumes"].get("node-privacy", {}).get("labels", {}).get(
+            "org.ramflux.demo.owner")
+        resources["demo-test_node-privacy"] = {
+            "kind": "volume", "project": "demo-test", "owner": privacy_owner,
+        }
         resources["id-demo-network"] = {"kind": "network", "project": "demo-test", "owner": token}
         save_resources()
         if control.get("corrupt_env_after_up"):
@@ -157,7 +163,7 @@ if args[:3] == ["volume", "ls", "-q"]:
 if args[:3] == ["network", "ls", "-q"]:
     kind = "network"
 if args == ["volume", "ls", "-q"] and control.get("unlabeled") == "volume":
-    print("demo-test_gateway-redb")
+    print("demo-test_" + control.get("unlabeled_volume", "gateway-redb"))
 elif args == ["network", "ls", "--format", "{{.Name}}"] and control.get("unlabeled") == "network":
     print("demo-test_default")
 elif kind and control.get("foreign") == kind:
@@ -176,13 +182,17 @@ elif kind in ("network", "volume"):
     selected_project = next((value.split("=", 2)[-1] for value in args
                              if value.startswith("label=com.docker.compose.project=")), None)
     for key, value in resources.items():
+        if (kind == "volume" and control.get("unlabeled") == "volume"
+                and key == "demo-test_" + control.get("unlabeled_volume", "gateway-redb")):
+            continue
         if value["kind"] == kind and (selected_project is None or value["project"] == selected_project):
             print(key)
 elif args and (args[0] == "inspect" or (len(args) > 1 and args[1] == "inspect")):
     if "--format" in args:
         target = args[-1]
         unlabeled_collision = (
-            control.get("unlabeled") == "volume" and target == "demo-test_gateway-redb"
+            control.get("unlabeled") == "volume"
+            and target == "demo-test_" + control.get("unlabeled_volume", "gateway-redb")
         ) or (control.get("unlabeled") == "network" and target == "demo-test_default")
         print(resources[target]["owner"] if target in resources and not unlabeled_collision
               else "foreign-owner")

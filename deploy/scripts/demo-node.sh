@@ -250,7 +250,7 @@ check_resources() {
         all_names=$(runtime volume ls -q)
         for name in $all_names; do
           case "$name" in
-            "${DEMO_PROJECT}_gateway-redb"|"${DEMO_PROJECT}_router-redb"|"${DEMO_PROJECT}_notify-redb"|"${DEMO_PROJECT}_federation-redb"|"${DEMO_PROJECT}_relay-redb"|"${DEMO_PROJECT}_signaling-redb"|"${DEMO_PROJECT}_retention-redb") ids="$ids $name" ;;
+            "${DEMO_PROJECT}_gateway-redb"|"${DEMO_PROJECT}_router-redb"|"${DEMO_PROJECT}_notify-redb"|"${DEMO_PROJECT}_federation-redb"|"${DEMO_PROJECT}_relay-redb"|"${DEMO_PROJECT}_signaling-redb"|"${DEMO_PROJECT}_retention-redb"|"${DEMO_PROJECT}_node-privacy") ids="$ids $name" ;;
           esac
         done
         ;;

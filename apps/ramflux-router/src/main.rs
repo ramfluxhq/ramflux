@@ -131,7 +131,7 @@ fn wait_for_shutdown_signal() -> anyhow::Result<()> {
 
 fn run_mesh_health_smoke(service: &'static str) -> anyhow::Result<()> {
     let args = std::env::args().skip(1).filter(|arg| arg != "--mesh-health-smoke");
-    let Some(config) = ramflux_node_core::load_config_from_args(args, service)? else {
+    let Some(config) = ramflux_node_core::read_config_from_args(args, service)? else {
         anyhow::bail!("--mesh-health-smoke requires --config");
     };
     run_mesh_health_smoke_with_config(&config)
