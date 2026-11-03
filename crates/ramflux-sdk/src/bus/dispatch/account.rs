@@ -69,8 +69,7 @@ pub(crate) async fn dispatch_account_bus_request(
                 return Ok(local_bus_ok(serde_json::to_value(result)?));
             }
 
-            let mut body: LocalBusAccountUnlockRequest =
-                account_request(&request.body)?;
+            let mut body: LocalBusAccountUnlockRequest = account_request(&request.body)?;
             let response = local_bus_account_unlock(state, &account_id, &mut body).await?;
             Ok(local_bus_ok(serde_json::to_value(response)?))
         }
