@@ -2,7 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Reserve authenticated capacity, run durable work unlocked, then commit or roll back.
-use super::*;
+use super::{CustodyIngressLimiter, CustodyIngressPermit, State};
+use crate::custody_budget_log::{CustodyAdmissionRefusal, node_retry, refuse};
+use ramflux_protocol::custody::CustodyRefusal;
+use std::time::{Duration, Instant};
 
 struct Reservation<'a> {
     permit: &'a CustodyIngressPermit,
