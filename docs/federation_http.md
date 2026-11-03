@@ -94,7 +94,7 @@ The override is never included by demo-node.sh or normal production Compose.
 `RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS` and
 `RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS` each default to 64 concurrent connections;
 valid values are 1..4096 and invalid configuration fails startup. Excess connections
-receive a generic 503 without spawning another worker on either listener. Slots are released after
+close immediately without spawning another worker on either listener. Slots are released after
 success, request failure or normal worker return. Production uses `panic = "abort"`,
 so a worker panic terminates the process rather than unwinding and releasing only
 that slot. The existing request read timeout still applies. Public 500 responses
@@ -104,8 +104,9 @@ With `RAMFLUX_FEDERATION_PER_SOURCE_LIMITS=on` (the default), the public listene
 also limits each source independently. Concurrent connections default to 8 per
 source and 16 per IPv4 `/24` or IPv6 `/48`. A connection-open token bucket and a
 request token bucket both default to 20 per second with a burst of 40. Connection
-rate and slot refusals receive a generic 503; request-rate refusals receive a
-generic 429.
+rate and source-slot refusals receive a generic 503 from a tracked worker when a
+global slot is available; global-cap refusals close immediately. Request-rate
+refusals receive a generic 429.
 
 Source accounting is derived only from the accepted socket address.
 `X-Forwarded-For`, `Forwarded`, and similar HTTP headers are not trusted. A reverse
@@ -198,8 +199,8 @@ positive integers. Compose uses the corresponding `RF_COMPOSE_` input aliases;
 demo writes concrete inputs from its operator env file. The shared reader's default
 body cap is 1 MiB. Parsing rejection is fail-closed and never shares admin routes.
 
-Over-cap 503 is best-effort: unread queued bytes can make the kernel close with a
-reset instead. Either result refuses the excess connection without a worker.
+Global-cap refusal closes the excess socket immediately; the peer may observe EOF
+or a reset. No response write or drain runs on the accept thread.
 
 ## Response delivery and bounded shutdown
 
@@ -220,7 +221,11 @@ request budget. Small oversized headers which finish arriving within that drain
 window receive a complete 413 rather than a truncated status line. A larger or slow
 finite header, or a peer which streams indefinitely beyond the drain budget, may
 still see a reset after the response; it cannot prolong a worker slot.
-The over-cap 503 remains best-effort, with no drain on the accept thread.
+Source-limit 503 remains best-effort: unread queued bytes may cause a reset.
+Its tracked worker has a one-second write deadline and participates in shutdown.
+On SIGTERM or SIGINT, accept loops stop, idle sockets are interrupted, admitted
+requests retain their response-write guards through the configured grace, and the
+coordinator force-closes remaining sockets before dropping the final store owners.
 
 The demo validates all six header/body/deadline inputs and both connection caps
 before creating state, invoking tools or recreating containers. Explicit empty,

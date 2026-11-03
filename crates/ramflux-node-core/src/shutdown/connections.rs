@@ -4,7 +4,6 @@
 //! Socket ownership and request admission for blocking listeners.
 
 use super::{InFlightGuard, RUNTIME, ShutdownRuntime, begin_service_request};
-use crate::NodeCoreError;
 use std::collections::BTreeMap;
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Condvar, Mutex};
@@ -93,6 +92,8 @@ impl ConnectionSet {
         }
         let id = state.next_id;
         state.next_id = state.next_id.wrapping_add(1);
+        #[cfg(feature = "itest-http")]
+        inject_connection_failure("clone")?;
         state.entries.insert(id, Entry { socket: socket.try_clone()?, active: false });
         Ok(Some(ConnectionGuard { set: Arc::clone(self), id }))
     }
@@ -105,29 +106,27 @@ impl ConnectionSet {
     /// Returns a socket registration or thread-spawn error.
     pub fn spawn<T, F>(
         self: &Arc<Self>,
-        socket: &TcpStream,
+        socket: TcpStream,
         context: T,
         worker: F,
-    ) -> Result<bool, NodeCoreError>
+    ) -> std::io::Result<bool>
     where
         T: Send + 'static,
-        F: FnOnce(&mut T, &ConnectionGuard) + Send + 'static,
+        F: FnOnce(TcpStream, &mut T, &ConnectionGuard) + Send + 'static,
     {
-        let Some(guard) = self
-            .register(socket)
-            .map_err(|error| NodeCoreError::ServiceShutdown(error.to_string()))?
-        else {
+        let Some(guard) = self.register(&socket)? else {
             return Ok(false);
         };
-        let owner = ConnectionOwner { context, guard };
-        std::thread::Builder::new()
-            .name("mesh-connection".into())
-            .spawn(move || {
-                let mut owner = owner;
-                worker(&mut owner.context, &owner.guard);
-                drop(owner);
-            })
-            .map_err(|error| NodeCoreError::ServiceShutdown(error.to_string()))?;
+        // The owned socket moves into TLS; only the coordinator keeps a duplicate descriptor.
+        let owner = ConnectionOwner { context: (socket, context), guard };
+        #[cfg(feature = "itest-http")]
+        inject_connection_failure("spawn")?;
+        std::thread::Builder::new().name("mesh-connection".into()).spawn(move || {
+            let ConnectionOwner { context: (socket, context), guard } = owner;
+            let mut owner = ConnectionOwner { context, guard };
+            worker(socket, &mut owner.context, &owner.guard);
+            drop(owner);
+        })?;
         Ok(true)
     }
 
@@ -244,4 +243,15 @@ pub fn begin_connection_request(
             Some(ConnectionRequestGuard { connection: None, _request: begin_service_request()? })
         }
     }
+}
+
+// Failure markers are consumed once in integration builds, never in production binaries.
+#[cfg(feature = "itest-http")]
+fn inject_connection_failure(stage: &str) -> std::io::Result<()> {
+    if let Ok(directory) = crate::environment::var("RAMFLUX_ITEST_CONNECTION_FAILURE_DIR")
+        && std::fs::remove_file(std::path::Path::new(&directory).join(stage)).is_ok()
+    {
+        return Err(std::io::Error::other(format!("injected connection {stage} failure")));
+    }
+    Ok(())
 }

@@ -40,6 +40,7 @@ pub(crate) fn serve_itest_http(
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     let connections =
         ramflux_node_core::ConnectionSet::new(ramflux_node_core::DEFAULT_CONNECTION_LIMIT);
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     tracing::info!(addr, "federation itest HTTP surface listening");
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let stream = match listener.accept().map(|(stream, _)| stream) {
@@ -49,29 +50,26 @@ pub(crate) fn serve_itest_http(
                 continue;
             }
             Err(error) => {
-                tracing::warn!(%error, "federation itest accept failed");
+                std::thread::sleep(backoff.failure(&error));
                 continue;
             }
         };
-        let registration = stream
-            .try_clone()
-            .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
-        connections.spawn(
-            &registration,
-            (
-                stream,
-                ItestHttpContext {
-                    state: Arc::clone(state),
-                    store: Arc::clone(store),
-                    router: Arc::clone(router),
-                    discovery: discovery.clone(),
-                    mesh_observability: Arc::clone(mesh_observability),
-                },
-            ),
-            |context, connection| {
-                handle_itest_connection(&mut context.0, &context.1, connection);
+        match connections.spawn(
+            stream,
+            ItestHttpContext {
+                state: Arc::clone(state),
+                store: Arc::clone(store),
+                router: Arc::clone(router),
+                discovery: discovery.clone(),
+                mesh_observability: Arc::clone(mesh_observability),
             },
-        )?;
+            |mut stream, context, connection| {
+                handle_itest_connection(&mut stream, context, connection);
+            },
+        ) {
+            Ok(_) => backoff.success(),
+            Err(error) => std::thread::sleep(backoff.failure(&error)),
+        }
     }
     Ok(())
 }

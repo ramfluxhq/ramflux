@@ -344,37 +344,34 @@ fn public_failures_hide_internal_details_and_unsupported_post_is_not_proxied() -
 
 #[test]
 fn public_connection_limit_rejects_excess_and_releases_after_success_and_error() -> TestResult {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     let root = temp_cert_root("http-cap")?;
     let admin = context(&root)?;
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
     };
-    let active = Arc::new(AtomicUsize::new(0));
+    let active = ramflux_node_core::ConnectionSet::new(1);
     let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(2, 16, 32));
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut first = TcpStream::connect(listener.local_addr()?)?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    let worker = crate::http_connections::spawn_public_test_connection(
         stream,
         public.clone(),
         active.clone(),
-        1,
         crate::http_limits::defaults(true),
         &source_limits,
     )
     .ok_or("first connection rejected")?;
-    assert_eq!(active.load(Ordering::Acquire), 1);
+    assert_eq!(active.len(), 1);
     let mut excess = TcpStream::connect(listener.local_addr()?)?;
     excess.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
     assert!(
-        crate::public_http::spawn_public_connection(
+        crate::http_connections::spawn_public_test_connection(
             stream,
             public.clone(),
             active.clone(),
-            1,
             crate::http_limits::defaults(true),
             &source_limits
         )
@@ -382,8 +379,8 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
     );
     let mut response = String::new();
     excess.read_to_string(&mut response)?;
-    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-    assert_eq!(active.load(Ordering::Acquire), 1);
+    assert!(response.is_empty(), "capacity must close the newcomer");
+    assert_eq!(active.len(), 1);
     // The global-cap refusal must drop the source permit it acquired before admission.
     let probe = source_limits
         .acquire_connection(listener.local_addr()?.ip(), std::time::Instant::now())
@@ -395,24 +392,23 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
     );
     drop(probe);
     first.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
-    worker.join().map_err(|_| "worker panicked")?;
+    worker.join()?;
     first.read_to_string(&mut String::new())?;
-    assert_eq!(active.load(Ordering::Acquire), 0);
+    assert_eq!(active.len(), 0);
     let mut failed = TcpStream::connect(listener.local_addr()?)?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    let worker = crate::http_connections::spawn_public_test_connection(
         stream,
         public,
         active.clone(),
-        1,
         crate::http_limits::defaults(true),
         &source_limits,
     )
     .ok_or("slot not released")?;
     failed.write_all(b"GET /mvp1/prekey/root HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
-    worker.join().map_err(|_| "worker panicked")?;
+    worker.join()?;
     failed.read_to_string(&mut String::new())?;
-    assert_eq!(active.load(Ordering::Acquire), 0);
+    assert_eq!(active.len(), 0);
     drop(admin);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -420,15 +416,13 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
 
 #[test]
 fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers() -> TestResult {
-    use std::sync::atomic::AtomicUsize;
-
     let root = temp_cert_root("http-source-rate")?;
     let admin = context(&root)?;
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
     };
-    let active = Arc::new(AtomicUsize::new(0));
+    let active = ramflux_node_core::ConnectionSet::new(8);
     let source_limits = PublicSourceLimits::new(
         PublicSourceLimitConfig::for_test(1, 16, 32).with_request_rate(1, 1),
     );
@@ -437,11 +431,10 @@ fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers(
     let mut first = TcpStream::connect(listener.local_addr()?)?;
     first.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    let worker = crate::http_connections::spawn_public_test_connection(
         stream,
         public.clone(),
         active.clone(),
-        8,
         crate::http_limits::defaults(true),
         &source_limits,
     )
@@ -451,11 +444,10 @@ fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers(
     excess.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
     assert!(
-        crate::public_http::spawn_public_connection(
+        crate::http_connections::spawn_public_test_connection(
             stream,
             public.clone(),
             active.clone(),
-            8,
             crate::http_limits::defaults(true),
             &source_limits,
         )
@@ -472,17 +464,16 @@ fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers(
     first.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
     let mut response = String::new();
     first.read_to_string(&mut response)?;
-    worker.join().map_err(|_| "worker panicked")?;
+    worker.join()?;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
     let mut second = TcpStream::connect(listener.local_addr()?)?;
     second.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    let worker = crate::http_connections::spawn_public_test_connection(
         stream,
         public,
         active,
-        8,
         crate::http_limits::defaults(true),
         &source_limits,
     )
@@ -492,7 +483,7 @@ fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers(
     )?;
     response.clear();
     second.read_to_string(&mut response)?;
-    worker.join().map_err(|_| "worker panicked")?;
+    worker.join()?;
     assert!(response.starts_with("HTTP/1.1 429"), "{response}");
     assert_eq!(
         response.split_once("\r\n\r\n").ok_or("missing response body")?.1,
@@ -507,7 +498,6 @@ fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers(
 #[test]
 fn source_slot_releases_after_error_and_timeout_and_full_idle_table_admits() -> TestResult {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
 
     let root = temp_cert_root("http-source-release")?;
@@ -516,7 +506,7 @@ fn source_slot_releases_after_error_and_timeout_and_full_idle_table_admits() -> 
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
     };
-    let active = Arc::new(AtomicUsize::new(0));
+    let active = ramflux_node_core::ConnectionSet::new(8);
     let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(1, 16, 4));
     let limits = ramflux_node_core::HttpRequestLimits {
         request_timeout: Duration::from_millis(100),
@@ -527,17 +517,16 @@ fn source_slot_releases_after_error_and_timeout_and_full_idle_table_admits() -> 
     let mut malformed = TcpStream::connect(listener.local_addr()?)?;
     malformed.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    let worker = crate::http_connections::spawn_public_test_connection(
         stream,
         public.clone(),
         active.clone(),
-        8,
         limits,
         &source_limits,
     )
     .ok_or("malformed request connection refused")?;
     malformed.write_all(b"GET /healthz HTTP/1.1\r\nContent-Length: -1\r\n\r\n")?;
-    worker.join().map_err(|_| "worker panicked")?;
+    worker.join()?;
     let mut response = String::new();
     malformed.read_to_string(&mut response)?;
     assert!(response.starts_with("HTTP/1.1 400"), "{response}");
@@ -545,17 +534,16 @@ fn source_slot_releases_after_error_and_timeout_and_full_idle_table_admits() -> 
     let mut trickler = TcpStream::connect(listener.local_addr()?)?;
     trickler.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    let worker = crate::http_connections::spawn_public_test_connection(
         stream,
         public.clone(),
         active.clone(),
-        8,
         limits,
         &source_limits,
     )
     .ok_or("source slot not released after request error")?;
     trickler.write_all(b"G")?;
-    worker.join().map_err(|_| "worker panicked")?;
+    worker.join()?;
     response.clear();
     trickler.read_to_string(&mut response)?;
     assert!(response.starts_with("HTTP/1.1 408"), "{response}");
@@ -570,17 +558,16 @@ fn source_slot_releases_after_error_and_timeout_and_full_idle_table_admits() -> 
     let mut healthy = TcpStream::connect(listener.local_addr()?)?;
     healthy.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    let worker = crate::http_connections::spawn_public_test_connection(
         stream,
         public,
         active,
-        8,
         limits,
         &source_limits,
     )
     .ok_or("full idle table refused a new real source")?;
     healthy.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
-    worker.join().map_err(|_| "worker panicked")?;
+    worker.join()?;
     response.clear();
     healthy.read_to_string(&mut response)?;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
@@ -592,15 +579,13 @@ fn source_slot_releases_after_error_and_timeout_and_full_idle_table_admits() -> 
 
 #[test]
 fn disabled_source_limits_allow_same_source_until_global_cap() -> TestResult {
-    use std::sync::atomic::AtomicUsize;
-
     let root = temp_cert_root("http-source-disabled")?;
     let admin = context(&root)?;
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
     };
-    let active = Arc::new(AtomicUsize::new(0));
+    let active = ramflux_node_core::ConnectionSet::new(2);
     let source_limits = PublicSourceLimits::new(
         PublicSourceLimitConfig::for_test(1, 1, 2).with_request_rate(1, 1).disabled(),
     );
@@ -615,11 +600,10 @@ fn disabled_source_limits_allow_same_source_until_global_cap() -> TestResult {
         let mut client = TcpStream::connect(listener.local_addr()?)?;
         client.set_read_timeout(Some(Duration::from_secs(5)))?;
         let (stream, _) = listener.accept()?;
-        let worker = crate::public_http::spawn_public_connection(
+        let worker = crate::http_connections::spawn_public_test_connection(
             stream,
             public.clone(),
             active.clone(),
-            2,
             limits,
             &source_limits,
         )
@@ -633,11 +617,10 @@ fn disabled_source_limits_allow_same_source_until_global_cap() -> TestResult {
     refused.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
     assert!(
-        crate::public_http::spawn_public_connection(
+        crate::http_connections::spawn_public_test_connection(
             stream,
             public.clone(),
             active.clone(),
-            2,
             limits,
             &source_limits,
         )
@@ -645,19 +628,18 @@ fn disabled_source_limits_allow_same_source_until_global_cap() -> TestResult {
     );
     let mut response = String::new();
     refused.read_to_string(&mut response)?;
-    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+    assert!(response.is_empty(), "capacity must close the newcomer");
 
     for worker in workers {
-        worker.join().map_err(|_| "worker panicked")?;
+        worker.join()?;
     }
     let mut healthy = TcpStream::connect(listener.local_addr()?)?;
     healthy.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(
+    let worker = crate::http_connections::spawn_public_test_connection(
         stream,
         public,
         active,
-        2,
         limits,
         &source_limits,
     )
@@ -665,7 +647,7 @@ fn disabled_source_limits_allow_same_source_until_global_cap() -> TestResult {
     healthy.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
     response.clear();
     healthy.read_to_string(&mut response)?;
-    worker.join().map_err(|_| "worker panicked")?;
+    worker.join()?;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
     drop(clients);

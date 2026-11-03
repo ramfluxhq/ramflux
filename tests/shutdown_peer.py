@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Span Brain
 """Real authenticated pooled peers used by configured shutdown regressions."""
+import collections
+import os
 import http.client
 import json
 import socket
@@ -42,10 +44,55 @@ def response(peer):
     return reply.status, body.decode()
 
 
-if mode == "raw":
+if mode.startswith("http-"):
+    peer = socket.create_connection((host, int(port)), timeout=3)
+    peer.settimeout(4)
+    if mode.endswith("-request"):
+        request(peer)
+        status, body = response(peer)
+        assert status == 200, (status, body)
+        print("response-complete", flush=True)
+        sys.exit(0)
+    peer.sendall(b"G")
+    # A later response proves the earlier partial reader was accepted and registered.
+    with socket.create_connection((host, int(port)), timeout=3) as barrier:
+        barrier.settimeout(4)
+        request(barrier)
+        status, body = response(barrier)
+        assert status == 200, (status, body)
+elif mode.startswith("failure-"):
+    try:
+        with connect() as rejected:
+            probe(rejected)
+            status, _ = response(rejected)
+            assert status in (200, 403, 404), status
+    except (OSError, ssl.SSLError):
+        pass
+    peer = connect()
+    probe(peer)
+    status, _ = response(peer)
+    assert status in (200, 403, 404), status
+elif mode == "raw":
     peer = socket.create_connection((host, int(port)), timeout=3)
 elif mode == "handshake":
     peer = connect()
+elif mode == "descriptors":
+    peers = [connect() for _ in range(16)]
+    for peer in peers:
+        request(peer)
+        status, _ = response(peer)
+        assert status == 200, status
+    if sys.platform == "linux":
+        sockets = collections.Counter()
+        for descriptor in Path(f"/proc/{pid}/fd").iterdir():
+            try:
+                target = os.readlink(descriptor)
+            except FileNotFoundError:
+                continue
+            if target.startswith("socket:"):
+                sockets[target] += 1
+        assert sum(count == 2 for count in sockets.values()) >= 16, sockets
+        assert max(sockets.values()) <= 2, sockets
 elif mode == "churn":
     def stats():
         with connect() as probe:

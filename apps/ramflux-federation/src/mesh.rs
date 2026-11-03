@@ -245,6 +245,7 @@ pub(crate) fn serve_mesh_mtls(
 ) {
     let connections =
         ramflux_node_core::ConnectionSet::new(ramflux_node_core::DEFAULT_CONNECTION_LIMIT);
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     tracing::info!("federation mesh mTLS surface listening");
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let socket = match server.accept_tcp_stream() {
@@ -256,22 +257,19 @@ pub(crate) fn serve_mesh_mtls(
                 continue;
             }
             Err(error) => {
-                tracing::warn!(%error, "federation mesh TCP accept failed");
+                let error = match error {
+                    ramflux_transport::TransportError::Io(error) => error,
+                    other => std::io::Error::other(other.to_string()),
+                };
+                std::thread::sleep(backoff.failure(&error));
                 continue;
             }
         };
-        let registration = match socket.try_clone() {
-            Ok(socket) => socket,
-            Err(error) => {
-                tracing::warn!(%error, "federation socket clone failed");
-                continue;
-            }
-        };
-        if let Err(error) = connections.spawn(
-            &registration,
-            (socket, context.clone(), tls.clone()),
-            |context, connection| {
-                let (socket, context, tls) = context;
+        match connections.spawn(
+            socket,
+            (context.clone(), tls.clone()),
+            |socket, context, connection| {
+                let (context, tls) = context;
                 let accepted = (|| {
                     let roots = context
                         .state
@@ -280,11 +278,7 @@ pub(crate) fn serve_mesh_mtls(
                             ramflux_transport::TransportError::Http(error.to_string())
                         })?
                         .pinned_peer_ca_cert_pems();
-                    ramflux_transport::authenticate_tcp_stream_with_pem_roots(
-                        socket.try_clone()?,
-                        tls,
-                        &roots,
-                    )
+                    ramflux_transport::authenticate_tcp_stream_with_pem_roots(socket, tls, &roots)
                 })();
                 let accepted = match accepted {
                     Ok(accepted) => accepted,
@@ -324,7 +318,8 @@ pub(crate) fn serve_mesh_mtls(
                 let _ = ramflux_transport::close_mesh_server_stream(&mut stream);
             },
         ) {
-            tracing::warn!(%error, "federation connection worker unavailable");
+            Ok(_) => backoff.success(),
+            Err(error) => std::thread::sleep(backoff.failure(&error)),
         }
     }
 }

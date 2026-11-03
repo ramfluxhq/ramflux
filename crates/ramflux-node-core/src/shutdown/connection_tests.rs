@@ -34,8 +34,7 @@ fn drain_count_reaches_zero_after_context_clones_drop() -> Result<(), Box<dyn st
     let store = Arc::new(());
     for _ in 0..2000 {
         let (socket, _peer) = sockets()?;
-        let registration = socket.try_clone()?;
-        set.spawn(&registration, (socket, Arc::clone(&store)), |_, _| {})?;
+        set.spawn(socket, Arc::clone(&store), |_, _, _| {})?;
     }
     assert_eq!(set.wait_empty(Instant::now() + Duration::from_secs(5)), 0);
     assert_eq!(Arc::strong_count(&store), 1);
@@ -47,8 +46,7 @@ fn idle_read_is_interrupted_without_waiting_for_socket_timeout()
 -> Result<(), Box<dyn std::error::Error>> {
     let set = ConnectionSet::new(1);
     let (socket, _peer) = sockets()?;
-    let registration = socket.try_clone()?;
-    set.spawn(&registration, socket, |socket, _| {
+    set.spawn(socket, (), |mut socket, (), _| {
         let _ = socket.read(&mut [0; 1]);
     })?;
     set.stop_idle();
@@ -60,9 +58,8 @@ fn idle_read_is_interrupted_without_waiting_for_socket_timeout()
 fn force_close_interrupts_blocked_response_write() -> Result<(), Box<dyn std::error::Error>> {
     let set = ConnectionSet::new(1);
     let (socket, _peer) = sockets()?;
-    let registration = socket.try_clone()?;
     let (sender, receiver) = std::sync::mpsc::channel();
-    set.spawn(&registration, socket, move |socket, connection| {
+    set.spawn(socket, (), move |mut socket, (), connection| {
         let Some(_request) = connection.begin_request() else {
             return;
         };
@@ -75,5 +72,27 @@ fn force_close_interrupts_blocked_response_write() -> Result<(), Box<dyn std::er
     assert!(!set.is_empty());
     set.force_close();
     assert_eq!(set.wait_empty(Instant::now() + Duration::from_secs(1)), 0);
+    Ok(())
+}
+
+#[test]
+fn connection_context_drops_before_membership_even_when_slow()
+-> Result<(), Box<dyn std::error::Error>> {
+    struct SlowContext(Arc<ConnectionSet>, Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for SlowContext {
+        fn drop(&mut self) {
+            std::thread::sleep(Duration::from_millis(25));
+            self.1.store(self.0.len() == 1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let set = ConnectionSet::new(1);
+    let (socket, _peer) = sockets()?;
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    set.spawn(socket, SlowContext(Arc::clone(&set), Arc::clone(&observed)), |_, _, _| {})?;
+    assert_eq!(set.wait_empty(Instant::now() + Duration::from_secs(2)), 0);
+    assert!(
+        observed.load(std::sync::atomic::Ordering::SeqCst),
+        "membership released before context"
+    );
     Ok(())
 }

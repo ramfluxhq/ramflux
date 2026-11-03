@@ -1011,6 +1011,7 @@ fn serve_mesh_mtls(
 ) -> anyhow::Result<()> {
     let connections =
         ramflux_node_core::ConnectionSet::new(ramflux_node_core::DEFAULT_CONNECTION_LIMIT);
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     tracing::info!("router mesh mTLS surface listening");
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let socket = match server.accept_tcp_stream() {
@@ -1022,34 +1023,32 @@ fn serve_mesh_mtls(
                 continue;
             }
             Err(error) => {
-                tracing::warn!(%error, "router mesh TCP accept failed");
+                let error = match error {
+                    ramflux_transport::TransportError::Io(error) => error,
+                    other => std::io::Error::other(other.to_string()),
+                };
+                std::thread::sleep(backoff.failure(&error));
                 continue;
             }
         };
-        let registration = socket.try_clone()?;
-        connections.spawn(
-            &registration,
+        match connections.spawn(
+            socket,
             (
-                socket,
                 server.handshake_config(),
                 Arc::clone(router),
                 local_service_id.to_owned(),
                 allowed_service_ids.clone(),
             ),
-            |context, connection| {
-                let (socket, config, router, local_id, allowed_ids) = context;
-                let accepted = match socket
-                    .try_clone()
-                    .map_err(ramflux_transport::TransportError::Io)
-                    .and_then(|socket| {
-                        ramflux_transport::authenticate_tcp_stream(socket, Arc::clone(config))
-                    }) {
-                    Ok(accepted) => accepted,
-                    Err(error) => {
-                        tracing::debug!(%error, "router mesh TLS handshake ended");
-                        return;
-                    }
-                };
+            |socket, context, connection| {
+                let (config, router, local_id, allowed_ids) = context;
+                let accepted =
+                    match ramflux_transport::authenticate_tcp_stream(socket, Arc::clone(config)) {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            tracing::debug!(%error, "router mesh TLS handshake ended");
+                            return;
+                        }
+                    };
                 let peer = match ramflux_node_core::authorize_mesh_peer(
                     local_id,
                     allowed_ids,
@@ -1081,7 +1080,10 @@ fn serve_mesh_mtls(
                 }
                 let _ = ramflux_transport::close_mesh_server_stream(&mut stream);
             },
-        )?;
+        ) {
+            Ok(_) => backoff.success(),
+            Err(error) => std::thread::sleep(backoff.failure(&error)),
+        }
     }
     Ok(())
 }

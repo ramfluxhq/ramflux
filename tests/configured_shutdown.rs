@@ -32,15 +32,31 @@ pub fn configured_shutdown_is_clean(
     }
     #[cfg(feature = "itest-http")]
     if matches!(service, "ramflux-router" | "ramflux-retention" | "ramflux-federation") {
+        for stage in ["clone", "spawn"] {
+            run_case(binary, service, &fixture, &format!("failure-{stage}"))?;
+            assert_clean_reopen(&fixture.database)?;
+        }
         run_case(binary, service, &fixture, "request")?;
         assert_clean_reopen(&fixture.database)?;
         assert_committed_request(service, &fixture)?;
     }
     #[cfg(feature = "itest-http")]
     if service == "ramflux-router" {
+        run_case(binary, service, &fixture, "descriptors")?;
+        assert_clean_reopen(&fixture.database)?;
         run_case(binary, service, &fixture, "churn")?;
     }
     assert_clean_reopen(&fixture.database)?;
+    #[cfg(feature = "itest-http")]
+    if service == "ramflux-federation" {
+        for surface in ["admin", "public"] {
+            for state in ["idle", "request"] {
+                let _ = std::fs::remove_file(fixture.root.join("admitted"));
+                run_case(binary, service, &fixture, &format!("http-{surface}-{state}"))?;
+                assert_clean_reopen(&fixture.database)?;
+            }
+        }
+    }
     #[cfg(feature = "itest-http")]
     if service == "ramflux-router" {
         std::fs::remove_file(fixture.root.join("admitted"))?;
@@ -60,6 +76,8 @@ struct Fixture {
     voice_udp: String,
     voice_control: String,
     async_addr: String,
+    public_addr: String,
+    admin_addr: String,
 }
 
 impl Fixture {
@@ -144,6 +162,8 @@ turn_tcp_addr = "127.0.0.1:0"
             voice_udp,
             voice_control,
             async_addr: free_udp_addr()?,
+            public_addr: free_tcp_addr()?,
+            admin_addr: free_tcp_addr()?,
         })
     }
 }
@@ -175,7 +195,13 @@ fn run_case(
     if service == "ramflux-federation" && mode == "request" {
         seed_federation_sweep(fixture)?;
     }
-    let mut child = ChildGuard(configured_command(binary, service, fixture, mode)?.spawn()?);
+    let mut command = configured_command(binary, service, fixture, mode)?;
+    if mode.starts_with("failure-") {
+        let directory = fixture.root.join("connection-failures");
+        std::fs::create_dir_all(&directory)?;
+        command.env("RAMFLUX_ITEST_CONNECTION_FAILURE_DIR", directory);
+    }
+    let mut child = ChildGuard(command.spawn()?);
     let stdout = child.0.stdout.take().ok_or("missing stdout")?;
     let (log_sender, log_receiver) = mpsc::channel();
     let reader = std::thread::spawn(move || {
@@ -201,41 +227,34 @@ fn run_case(
         }
         return Err(format!("{service} startup failed ({error}): {logs}").into());
     }
+    if let Some(stage) = mode.strip_prefix("failure-") {
+        std::fs::write(fixture.root.join("connection-failures").join(stage), b"fail once")?;
+    }
     let probe = if mode == "probe" {
         Some(start_request_probe(&fixture.probe_addr, fixture.probe_udp)?)
     } else {
         None
     };
-    let mut peer =
-        if matches!(mode, "pooled" | "handshake" | "raw" | "request" | "churn" | "second") {
-            Some(start_mesh_peer(
-                fixture,
-                service,
-                if mode == "second" { "request" } else { mode },
-                child.0.id(),
-            )?)
-        } else {
-            None
-        };
-    if matches!(mode, "request" | "second") {
+    let mut peer = if matches!(
+        mode,
+        "pooled" | "handshake" | "raw" | "request" | "churn" | "descriptors" | "second"
+    ) || mode.starts_with("failure-")
+        || mode.starts_with("http-")
+    {
+        Some(start_mesh_peer(
+            fixture,
+            service,
+            if mode == "second" { "request" } else { mode },
+            child.0.id(),
+        )?)
+    } else {
+        None
+    };
+    if matches!(mode, "request" | "second") || mode.ends_with("-request") {
         wait_for_file(&fixture.root.join("admitted"))?;
     }
     let (status, elapsed) = signal_and_wait(&mut child.0, service, mode)?;
-    if let Some(peer) = peer.as_mut()
-        && mode == "request"
-    {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(status) = peer.0.try_wait()? {
-                assert!(status.success(), "request peer failed: {status}");
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err("request peer exceeded timeout".into());
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
+    wait_for_request_peer(peer.as_mut(), mode)?;
     if let Some(probe) = probe {
         probe.join().map_err(|_| "request probe panicked")??;
     }
@@ -253,8 +272,41 @@ fn run_case(
     if !status.success() {
         return Err(format!("{service} exited with {status}: {logs}").into());
     }
+    if let Some(stage) = mode.strip_prefix("failure-") {
+        assert!(
+            !fixture.root.join("connection-failures").join(stage).exists(),
+            "failure was not injected"
+        );
+        assert_eq!(
+            logs.matches(&format!("injected connection {stage} failure")).count(),
+            1,
+            "{logs}"
+        );
+    }
     if logs.matches("graceful shutdown complete").count() != 1 {
         return Err(format!("missing unique shutdown completion for {service}: {logs}").into());
+    }
+    Ok(())
+}
+
+fn wait_for_request_peer(
+    peer: Option<&mut ChildGuard>,
+    mode: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(peer) = peer
+        && (mode == "request" || mode.ends_with("-request"))
+    {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = peer.0.try_wait()? {
+                assert!(status.success(), "request peer failed: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("request peer exceeded timeout".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     Ok(())
 }
@@ -417,7 +469,13 @@ fn start_mesh_peer(
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/shutdown_peer.py"))
             .args([
                 fixture.root.to_str().ok_or("fixture path")?,
-                &fixture.probe_addr,
+                if mode.starts_with("http-admin-") {
+                    &fixture.admin_addr
+                } else if mode.starts_with("http-public-") {
+                    &fixture.public_addr
+                } else {
+                    &fixture.probe_addr
+                },
                 mode,
                 service,
                 &pid.to_string(),
@@ -427,7 +485,7 @@ fn start_mesh_peer(
             .stderr(Stdio::inherit())
             .spawn()?,
     );
-    if mode != "request" {
+    if mode != "request" && !mode.ends_with("-request") {
         let stdout = child.0.stdout.take().ok_or("peer stdout")?;
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -586,8 +644,8 @@ fn configured_command(
         .env("RAMFLUX_NOTIFY_MESH_LISTEN_ADDR", &fixture.probe_addr)
         .env("RAMFLUX_RETENTION_ASYNC_LISTEN_ADDR", &fixture.async_addr)
         .env("RAMFLUX_FEDERATION_SPOOL_RETRY_INTERVAL_SECS", "3600")
-        .env("RAMFLUX_FEDERATION_PUBLIC_ADDR", "127.0.0.1:0")
-        .env("RAMFLUX_FEDERATION_ADMIN_ADDR", "127.0.0.1:0")
+        .env("RAMFLUX_FEDERATION_PUBLIC_ADDR", &fixture.public_addr)
+        .env("RAMFLUX_FEDERATION_ADMIN_ADDR", &fixture.admin_addr)
         .env("RAMFLUX_RELAY_VOICE_UDP_ADDR", &fixture.voice_udp)
         .env("RAMFLUX_RELAY_VOICE_CONTROL_ADDR", &fixture.voice_control)
         .env("RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT", &fixture.voice_udp)
@@ -600,7 +658,7 @@ fn configured_command(
             "literal:shutdown-test-relay-service-key-material",
         );
     }
-    if matches!(mode, "request" | "second") {
+    if matches!(mode, "request" | "second") || mode.ends_with("-request") {
         child.env("RAMFLUX_ITEST_SHUTDOWN_REQUEST_MARKER", fixture.root.join("admitted"));
     }
     Ok(child)

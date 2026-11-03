@@ -45,59 +45,82 @@ pub(crate) fn serve_admin_http(
             .ok()
             .as_deref(),
     )?;
-    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let connections = ramflux_node_core::ConnectionSet::new(limit);
     let listener = TcpListener::bind(addr).map_err(|source| {
         ramflux_node_core::NodeCoreError::ItestHttp(format!(
             "federation admin HTTP bind failed at {addr}: {source}"
         ))
     })?;
     tracing::info!(addr, limit, "federation production admin HTTP surface listening");
-    std::thread::Builder::new()
-        .spawn(move || {
-            for stream in listener.incoming() {
-                let stream = match stream {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        tracing::warn!(%error, "federation admin accept failed");
-                        continue;
-                    }
-                };
-                let _worker =
-                    spawn_admin_connection(stream, context.clone(), active.clone(), limit, limits);
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
+    ramflux_node_core::spawn_service_worker("ramflux-federation-admin-http", move |shutdown| {
+        let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
+        while !shutdown.is_cancelled() {
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    continue;
+                }
+                Err(error) => {
+                    std::thread::sleep(backoff.failure(&error));
+                    continue;
+                }
+            };
+            match spawn_admin_connection(stream, context.clone(), &connections, limits) {
+                Ok(_) => backoff.success(),
+                Err(error) => std::thread::sleep(backoff.failure(&error)),
             }
-        })
-        .map_err(|error| {
-            ramflux_node_core::NodeCoreError::ItestHttp(format!(
-                "federation admin listener thread unavailable: {error}"
-            ))
-        })?;
+        }
+    })?;
     Ok(())
 }
 
 pub(crate) fn spawn_admin_connection(
     stream: TcpStream,
     context: FederationAdminHttpContext,
-    active: Arc<std::sync::atomic::AtomicUsize>,
-    limit: usize,
+    connections: &Arc<ramflux_node_core::ConnectionSet>,
     limits: ramflux_node_core::HttpRequestLimits,
-) -> Option<std::thread::JoinHandle<()>> {
+) -> std::io::Result<bool> {
     crate::http_connections::spawn_connection(
         stream,
-        active,
-        limit,
+        connections,
+        context,
         std::time::Instant::now(),
-        move |stream, accepted_at| {
-            handle_admin_connection_with_limits(stream, &context, limits, accepted_at);
+        move |stream, context, accepted_at, connection| {
+            handle_admin_connection_tracked(stream, context, limits, accepted_at, Some(connection));
         },
     )
 }
+
+#[cfg(test)]
 pub(crate) fn handle_admin_connection_with_limits(
     stream: &mut TcpStream,
     context: &FederationAdminHttpContext,
     limits: ramflux_node_core::HttpRequestLimits,
     accepted_at: std::time::Instant,
 ) {
-    let response = match admin_response(stream, context, limits, accepted_at) {
+    handle_admin_connection_tracked(stream, context, limits, accepted_at, None);
+}
+
+fn handle_admin_connection_tracked(
+    stream: &mut TcpStream,
+    context: &FederationAdminHttpContext,
+    limits: ramflux_node_core::HttpRequestLimits,
+    accepted_at: std::time::Instant,
+    connection: Option<&ramflux_node_core::ConnectionGuard>,
+) {
+    let mut request_guard = None;
+    let response = match admin_response(
+        stream,
+        context,
+        limits,
+        accepted_at,
+        connection,
+        &mut request_guard,
+    ) {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(%error, "federation admin request failed");
@@ -121,7 +144,9 @@ pub(crate) fn handle_admin_request(
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let limits = crate::http_limits::defaults(false);
     let accepted_at = std::time::Instant::now();
-    if let Some(response) = admin_response(stream, context, limits, accepted_at)? {
+    let mut guard = None;
+    if let Some(response) = admin_response(stream, context, limits, accepted_at, None, &mut guard)?
+    {
         response.write(stream, limits, accepted_at)?;
     }
     Ok(())
@@ -132,12 +157,21 @@ fn admin_response(
     context: &FederationAdminHttpContext,
     limits: ramflux_node_core::HttpRequestLimits,
     accepted_at: std::time::Instant,
+    connection: Option<&ramflux_node_core::ConnectionGuard>,
+    request_guard: &mut Option<ramflux_node_core::ConnectionRequestGuard>,
 ) -> Result<Option<HttpResponse>, ramflux_node_core::NodeCoreError> {
     let Some(request) =
         ramflux_node_core::read_http_request_with_limits(stream, limits, accepted_at)?
     else {
         return Ok(None);
     };
+    let Some(guard) = ramflux_node_core::begin_connection_request(connection) else {
+        return Ok(Some(HttpResponse::text("503 Service Unavailable", "shutting down")));
+    };
+    *request_guard = Some(guard);
+    #[cfg(feature = "itest-http")]
+    ramflux_node_core::shutdown_request_test_delay();
+
     let state = &context.state;
     let store = context.store.as_ref();
     let discovery = &context.discovery;

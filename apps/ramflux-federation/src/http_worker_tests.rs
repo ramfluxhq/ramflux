@@ -3,7 +3,7 @@
 
 //! Native regressions for bounded federation response and admin worker lifetimes.
 use crate::{
-    admin_http::{handle_admin_connection_with_limits, spawn_admin_connection},
+    admin_http::handle_admin_connection_with_limits,
     public_http::{FederationPublicHttpContext, handle_public_connection_with_limits},
 };
 use std::{
@@ -11,7 +11,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -94,7 +94,7 @@ fn admin_worker_cap_refuses_excess_and_releases_slots_after_success_rejection_an
     let root = crate::test_certificates::temp_cert_root("admin-worker-cap")?;
     let context = crate::http_listener_tests::context(&root)?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
-    let active = Arc::new(AtomicUsize::new(0));
+    let active = ramflux_node_core::ConnectionSet::new(1);
     let limits = ramflux_node_core::HttpRequestLimits {
         request_timeout: Duration::from_secs(2),
         ..crate::http_limits::defaults(false)
@@ -103,23 +103,34 @@ fn admin_worker_cap_refuses_excess_and_releases_slots_after_success_rejection_an
         let mut client = TcpStream::connect(listener.local_addr()?)?;
         client.set_read_timeout(Some(Duration::from_secs(10)))?;
         let (server, _) = listener.accept()?;
-        let worker = spawn_admin_connection(server, context.clone(), active.clone(), 1, limits)
-            .ok_or("first connection refused")?;
-        assert_eq!(active.load(Ordering::Acquire), 1);
+        let worker = crate::http_connections::spawn_admin_test_connection(
+            server,
+            context.clone(),
+            active.clone(),
+            limits,
+        )
+        .ok_or("first connection refused")?;
+        assert_eq!(active.len(), 1);
         let mut excess = TcpStream::connect(listener.local_addr()?)?;
         excess.set_read_timeout(Some(Duration::from_secs(3)))?;
         let (server, _) = listener.accept()?;
         assert!(
-            spawn_admin_connection(server, context.clone(), active.clone(), 1, limits).is_none()
+            crate::http_connections::spawn_admin_test_connection(
+                server,
+                context.clone(),
+                active.clone(),
+                limits
+            )
+            .is_none()
         );
-        assert_eq!(active.load(Ordering::Acquire), 1);
+        assert_eq!(active.len(), 1);
         let mut refused = String::new();
         excess.read_to_string(&mut refused)?;
-        assert!(refused.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(refused.is_empty(), "capacity must close the newcomer");
         client.write_all(raw)?;
         let mut response = String::new();
         client.read_to_string(&mut response)?;
-        worker.join().map_err(|_| "admin worker panicked")?;
+        worker.join()?;
         let status = if raw == b"G" {
             "408"
         } else if raw == b"bad\r\n\r\n" {
@@ -128,7 +139,7 @@ fn admin_worker_cap_refuses_excess_and_releases_slots_after_success_rejection_an
             "200"
         };
         assert!(response.starts_with(&format!("HTTP/1.1 {status}")), "{response}");
-        assert_eq!(active.load(Ordering::Acquire), 0);
+        assert_eq!(active.len(), 0);
     }
     drop(context);
     std::fs::remove_dir_all(root)?;
@@ -140,15 +151,14 @@ fn a_nonreading_response_peer_releases_its_worker_permit() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let _client = TcpStream::connect(listener.local_addr()?)?;
     let (server, _) = listener.accept()?;
-    let active = Arc::new(AtomicUsize::new(0));
+    let active = ramflux_node_core::ConnectionSet::new(1);
     let (tx, rx) = std::sync::mpsc::channel();
     let response = crate::http_response::HttpResponse::json(&serde_json::json!({
         "large": "x".repeat(32 * 1024 * 1024)
     }))?;
-    let worker = crate::http_connections::spawn_connection(
+    let worker = crate::http_connections::spawn_test_connection(
         server,
         active.clone(),
-        1,
         Instant::now(),
         move |stream, _| {
             let limits = ramflux_node_core::HttpRequestLimits {
@@ -161,8 +171,8 @@ fn a_nonreading_response_peer_releases_its_worker_permit() -> TestResult {
     )
     .ok_or("connection refused")?;
     assert!(rx.recv_timeout(Duration::from_secs(5))?);
-    worker.join().map_err(|_| "response worker panicked")?;
-    assert_eq!(active.load(Ordering::Acquire), 0);
+    worker.join()?;
+    assert_eq!(active.len(), 0);
     Ok(())
 }
 
@@ -173,7 +183,7 @@ fn a_slow_reading_response_peer_releases_its_worker_permit_at_the_write_cap() ->
     client.set_read_timeout(Some(Duration::from_millis(250)))?;
     let shutdown = client.try_clone()?;
     let (server, _) = listener.accept()?;
-    let active = Arc::new(AtomicUsize::new(0));
+    let active = ramflux_node_core::ConnectionSet::new(1);
     let stop = Arc::new(AtomicBool::new(false));
     let reader_stop = Arc::clone(&stop);
     let reader = std::thread::spawn(move || {
@@ -196,10 +206,9 @@ fn a_slow_reading_response_peer_releases_its_worker_permit_at_the_write_cap() ->
         "large": "x".repeat(32 * 1024 * 1024)
     }))?;
     let started = Instant::now();
-    let worker = crate::http_connections::spawn_connection(
+    let worker = crate::http_connections::spawn_test_connection(
         server,
         active.clone(),
-        1,
         Instant::now(),
         move |stream, _| {
             let limits = ramflux_node_core::HttpRequestLimits {
@@ -212,13 +221,13 @@ fn a_slow_reading_response_peer_releases_its_worker_permit_at_the_write_cap() ->
     )
     .ok_or("connection refused")?;
     let (failed, elapsed) = rx.recv_timeout(Duration::from_secs(8))?;
-    worker.join().map_err(|_| "response worker panicked")?;
+    worker.join()?;
     stop.store(true, Ordering::Release);
     let _ = shutdown.shutdown(std::net::Shutdown::Both);
     reader.join().map_err(|_| "slow reader panicked")?;
     assert!(failed);
     assert!(elapsed < Duration::from_secs(7), "slow reader held worker for {elapsed:?}");
-    assert_eq!(active.load(Ordering::Acquire), 0);
+    assert_eq!(active.len(), 0);
     Ok(())
 }
 
