@@ -198,7 +198,7 @@ fn single_key_batch_routes_a_mixed_order_key_to_strict() -> TestResult {
     for counter in 0..4096_u32 {
         let message = format!("ramflux-mixed-key-{counter}");
         let k = challenge(&point, &key, message.as_bytes());
-        if k.to_bytes()[0] & 7 == 0 {
+        if k.to_bytes()[0].is_multiple_of(8) {
             continue;
         }
         let forged = signature(point, r + k * signing.to_scalar());
