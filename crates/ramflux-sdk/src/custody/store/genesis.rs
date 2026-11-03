@@ -71,7 +71,6 @@ impl Drop for TemporaryPublication {
 
 #[cfg(test)]
 mod checkpoints {
-    use super::{directory, private_directory};
     use crate::SdkError;
     use std::cell::RefCell;
 
