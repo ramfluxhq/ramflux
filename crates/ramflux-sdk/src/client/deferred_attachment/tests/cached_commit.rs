@@ -690,6 +690,8 @@ async fn attachment_fetch_maps_zero_manifest_placeholder_conflict_to_deleted()
             async |client, _| {
                 let db = client.account_db()?;
                 db.persist_client_record("object", "remote-object", &json!({"owner":"owner"}))?;
+                // Emulate a legacy fence created before its authenticated reference was stored.
+                db.remove_actor_state(&reference_key("remote-object"))?;
                 db.set_object_tombstoned("remote-object")?;
                 // The actual checked storage write observes the unknown-manifest placeholder.
                 db.upsert_object(&ramflux_storage::ObjectWrite {
