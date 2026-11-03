@@ -7,12 +7,18 @@ use serde_json::{Value, json};
 
 /// Resolve upgrade coordinates once on the account writer, including a durable cache miss.
 pub(super) fn initialize_coordinates(db: &AccountDb) -> Result<(), SdkError> {
+    initialize_coordinates_with(db, |topic| Ok(db.latest_journal_event(topic)?))
+}
+
+fn initialize_coordinates_with(
+    db: &AccountDb,
+    mut latest: impl FnMut(&str) -> Result<Option<ramflux_storage::JournalEvent>, SdkError>,
+) -> Result<(), SdkError> {
     db.write_transaction(|| {
         for (storage, topic) in [("sync/status", "sync.status"), ("sync/health", "node.health")] {
             let key = format!("{storage}/event");
             if db.actor_state_exists(storage)? && !db.actor_state_exists(&key)? {
-                let coordinates = db
-                    .latest_journal_event(topic)?
+                let coordinates = latest(topic)?
                     .map_or(Value::Null, |event| json!({"seq":event.seq,"at":event.at}));
                 db.persist_actor_state(&key, &coordinates)?;
             }
@@ -189,3 +195,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "sync_status_migration_tests.rs"]
+mod migration_tests;

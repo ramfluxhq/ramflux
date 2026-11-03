@@ -31,6 +31,15 @@ A slow client receives `stream.lagged` with `last_delivered_seq` and reconnects
 from that cursor. Replay is bounded and the account writer never waits for a
 slow subscriber. Account lock or daemon stop closes the stream.
 
+## Bounded journal pages
+
+`stream.read` is an account-scoped reader-pool method. It accepts optional
+`since_seq` and returns `bounds`, `cursor`, `resync_required` and at most 128
+`events`. It does not include a `status` field or read current sync samples.
+Only the subscription's first read attaches a coherent status snapshot to its
+acknowledgement; the live 50 ms tail reads journal pages only. Use
+`sync.status.get` for an explicit status refresh.
+
 ## Status transitions and retention
 
 `sync.status` and `node.health` are durable state transitions. The first sample
@@ -67,7 +76,20 @@ can refresh `sync.status.get`; event timestamps are not heartbeats. Both samples
 and `last_run` are null before the first completed sync. Older persisted samples
 recover coordinates from retained journal rows; if that historical row was
 already pruned before upgrade, only its coordinates are null until a transition.
-Subscription samples and replay bounds share one database snapshot.
+Subscription samples and replay bounds share one database snapshot. Writer-side
+reader initialization resolves each older sample's transition coordinates once,
+including a durable JSON `null` when no retained transition exists. A saved miss
+survives account reopen and prevents subsequent status reads from rescanning the
+journal. A later semantic transition replaces those null coordinates atomically.
+
+The account writer installs `runtime_journal_topic_seq(topic, seq)` during its
+idempotent runtime-schema transaction, replacing the redundant single-topic
+indexes. Both latest-transition lookups and contact-journal redaction use its
+leading topic key. Failed schema upgrades roll back the index replacement. No
+writer-version floor is required: this changes indexes, not row formats, and
+older SQLite writers maintain the compound index normally. No operator data
+repair is needed; reverting to an older binary can recreate a redundant index,
+which a subsequent upgrade consolidates again.
 
 Ordinary journal events default to a 10,000-event count budget and seven-day
 age limit (`RAMFLUX_EVENT_MAX_COUNT`, `RAMFLUX_EVENT_MAX_AGE_SECONDS`). Status and

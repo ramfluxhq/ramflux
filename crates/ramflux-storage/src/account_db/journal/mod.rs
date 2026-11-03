@@ -34,11 +34,17 @@ pub struct JournalBounds {
     pub pruned_through: u64,
 }
 
+const LATEST_TOPIC_EVENT_SQL: &str =
+    "SELECT seq,at,topic,body_json FROM runtime_journal WHERE topic=?1 ORDER BY seq DESC LIMIT 1";
+
 impl AccountDb {
     pub(super) fn install_journal_schema(&self) -> Result<(), StorageError> {
+        let transaction = self.connection.immediate_transaction()?;
         self.connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_journal(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,topic TEXT NOT NULL,body_json BLOB NOT NULL,source_key TEXT NOT NULL UNIQUE,sticky INTEGER NOT NULL DEFAULT 0,acknowledged INTEGER NOT NULL DEFAULT 0,subject TEXT);
         CREATE TABLE IF NOT EXISTS runtime_journal_bounds(singleton INTEGER PRIMARY KEY CHECK(singleton=1),head_seq INTEGER NOT NULL,pruned_through INTEGER NOT NULL);
-        CREATE INDEX IF NOT EXISTS runtime_journal_topic ON runtime_journal(topic);
+        CREATE INDEX IF NOT EXISTS runtime_journal_topic_seq ON runtime_journal(topic,seq);
+        DROP INDEX IF EXISTS runtime_journal_topic;
+        DROP INDEX IF EXISTS runtime_journal_contact_topic;
         CREATE INDEX IF NOT EXISTS runtime_journal_unrouted_envelope ON runtime_journal(
             CASE WHEN json_valid(CAST(body_json AS TEXT)) THEN json_extract(CAST(body_json AS TEXT),'$.envelope_id') END
         ) WHERE topic='message.unrouted';
@@ -52,6 +58,7 @@ impl AccountDb {
         CREATE INDEX IF NOT EXISTS runtime_message_content_conversation ON runtime_message_content(conversation_id,message_id);")?;
         self.connection.execute_batch("CREATE TRIGGER IF NOT EXISTS runtime_content_deleted AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 BEGIN DELETE FROM runtime_message_content WHERE message_id=NEW.message_id; END;
             CREATE TRIGGER IF NOT EXISTS runtime_content_removed AFTER DELETE ON direct_message_projection BEGIN DELETE FROM runtime_message_content WHERE message_id=OLD.message_id; END;")?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -60,10 +67,7 @@ impl AccountDb {
     /// # Errors
     /// Returns SQL or stored event decoding errors.
     pub fn latest_journal_event(&self, topic: &str) -> Result<Option<JournalEvent>, StorageError> {
-        Ok(self.connection.query_row(
-            "SELECT seq,at,topic,body_json FROM runtime_journal WHERE topic=?1 ORDER BY seq DESC LIMIT 1",
-            params![topic], row,
-        ).optional()?)
+        Ok(self.connection.query_row(LATEST_TOPIC_EVENT_SQL, params![topic], row).optional()?)
     }
 
     /// Appends compact, explicitly constructed metadata once per durable source key.
@@ -220,3 +224,6 @@ fn row(row: &crate::database::Row) -> rusqlite::Result<JournalEvent> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod topic_index_tests;

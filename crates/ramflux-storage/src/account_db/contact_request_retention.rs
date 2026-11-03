@@ -220,9 +220,7 @@ impl AccountDb {
         if self.actor_state_exists(MARKER)? {
             return Ok(());
         }
-        self.connection.execute_batch(
-            "CREATE INDEX IF NOT EXISTS runtime_journal_contact_topic ON runtime_journal(topic)",
-        )?;
+        // The writer runtime migration installs the shared topic/sequence journal index.
         self.connection.execute("UPDATE runtime_journal SET body_json=CAST(json_remove(CAST(body_json AS TEXT),'$.preview','$.note','$.safety_number') AS BLOB) WHERE topic IN ('contact.requested','contact.accepted','contact.declined','contact.blocked','contact.request.expired') AND (json_type(CAST(body_json AS TEXT),'$.preview') IS NOT NULL OR json_type(CAST(body_json AS TEXT),'$.note') IS NOT NULL OR json_type(CAST(body_json AS TEXT),'$.safety_number') IS NOT NULL)",[])?;
         self.persist_actor_state(MARKER, &true)?;
         Ok(())
