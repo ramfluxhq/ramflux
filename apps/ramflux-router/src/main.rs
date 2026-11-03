@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 mod custody_listener;
+mod forward_http;
 mod handlers;
 mod identity_authority;
 mod lifecycle;

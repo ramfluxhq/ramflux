@@ -717,3 +717,6 @@ mod t24a2_pool_ownership_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod forward_resume_tests;

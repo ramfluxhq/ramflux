@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("forward {phase} deadline expired")]
+    ForwardTimeout { phase: &'static str },
     #[error("home migration refused: {0:?}")]
     HomeMigration(ramflux_protocol::home_migration::Refusal),
     #[error("source authority refused: {reason_code:?}")]

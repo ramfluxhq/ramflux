@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 const ROUTER_FORWARD_CONCURRENCY_ENV: &str = "RAMFLUX_ROUTER_FORWARD_CONCURRENCY";
 const ROUTER_FORWARD_CONCURRENCY_DEFAULT: usize = 32;
 const ROUTER_FORWARD_TIMEOUT_SECONDS_ENV: &str = "RAMFLUX_ROUTER_FORWARD_TIMEOUT_SECONDS";
+// The old-home reservation lasts 20 s (whole-second lease timestamps).
+// DNS <= 3 s plus socket IO <= 12 s leaves room before that lease expires.
+// New-home federation Pending lasts 142 s: two worst-case 71 s router posts;
+// it deliberately outlives an old-home retry and prevents duplicate delivery.
 const ROUTER_FORWARD_TIMEOUT_SECONDS_DEFAULT: u64 = 20;
 
 pub(crate) struct TokioRouterRuntime {
@@ -76,6 +80,7 @@ impl LocalFederationForwardClient {
     pub(crate) fn forward(
         &self,
         plan: &ramflux_node_core::HomeNodeMigrationForwardPlan,
+        timeout: Duration,
     ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError>
     {
         let mut request = plan.federated_forward_request(&self.source_node_id);
@@ -86,7 +91,7 @@ impl LocalFederationForwardClient {
             "admin_token": self.admin_token.as_deref().unwrap_or_default(),
             "forward": request,
         });
-        ramflux_node_core::itest_http_post_json(&self.url, &body)
+        crate::forward_http::post(&self.url, &body, timeout)
     }
 }
 
@@ -121,7 +126,11 @@ impl RouterHandle {
             Self::Tokio(runtime) => crate::router_engine::submit_envelope(
                 runtime.state.as_ref(),
                 runtime.store.as_ref(),
-                runtime.home_node_forward.as_ref(),
+                crate::router_engine::AsyncForwardContext {
+                    client: runtime.home_node_forward.as_ref(),
+                    semaphore: &runtime.forward_semaphore,
+                    timeout: runtime.forward_timeout,
+                },
                 envelope,
                 total_started,
                 origin,
@@ -338,6 +347,18 @@ pub(crate) mod tests {
 
     use super::*;
 
+    mod forward_hardening;
+
+    fn no_forward() -> crate::router_engine::AsyncForwardContext<'static> {
+        static SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        crate::router_engine::AsyncForwardContext {
+            client: None,
+            semaphore: SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(32))),
+            timeout: Duration::from_secs(20),
+        }
+    }
+
     #[test]
     fn tokio_handle_matches_submit_and_replay_oracle() -> anyhow::Result<()> {
         let envelope = current_envelope("env_runtime_submit", "target_runtime_submit")?;
@@ -345,7 +366,7 @@ pub(crate) mod tests {
         let oracle = crate::router_engine::submit_envelope(
             oracle_state.as_ref(),
             oracle_store.as_ref(),
-            None,
+            no_forward(),
             envelope.clone(),
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Gateway,
@@ -460,7 +481,7 @@ pub(crate) mod tests {
         let _submitted = crate::router_engine::submit_envelope(
             oracle_state.as_ref(),
             oracle_store.as_ref(),
-            None,
+            no_forward(),
             envelope.clone(),
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Gateway,
@@ -862,7 +883,7 @@ pub(crate) mod tests {
             admin_token: Some("local-token".to_owned()),
             source_node_id: "node-a".to_owned(),
         };
-        let response = client.forward(&forward_plan())?;
+        let response = client.forward(&forward_plan(), Duration::from_secs(20))?;
         assert!(response.accepted);
         assert_eq!(response.source_node_id, "node-a");
         assert_eq!(response.target_node_id, "node-b");

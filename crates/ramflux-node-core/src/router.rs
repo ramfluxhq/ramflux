@@ -35,6 +35,8 @@ mod retention;
 const ROUTER_TARGET_SHARD_COUNT: usize = 64;
 const ROUTER_REPLAY_GUARD_SHARD_COUNT: usize = 64;
 const ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT: usize = 64;
+// Old-home attempts expire after 20 s; bounded forwarding uses <= 3 s DNS + 12 s IO.
+// New-home Pending is 142 s (twice the 71 s router-post bound), so retries deduplicate.
 const DEFAULT_FORWARD_RESERVATION_LEASE_SECONDS: u64 = 20;
 
 #[must_use]

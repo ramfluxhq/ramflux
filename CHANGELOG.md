@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidate journal topic lookups into a transactional topic/sequence index.
   Cache missing legacy status coordinates once and keep status snapshots in the
   subscription acknowledgement, with bounded replay pages carrying only events.
+- Bound migration forwarding DNS and total socket IO, share forward admission
+  across TCP and async ingress, and pin sender signature, restart, and resume
+  checkpoint regressions.
 
 - Bound custody capacity reset hints to two days, keep node-bound retry deadlines
   without repeated status writes, and expose router budget inspection through
