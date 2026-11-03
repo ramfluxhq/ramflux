@@ -539,6 +539,9 @@ async fn bridge_awaiting_approval_status_is_typed_failure() -> TestResult {
 async fn bridge_turn_without_terminal_status_is_cancelled_at_turn_timeout() -> TestResult {
     let (_root, server, mut host) = fixture().await?;
     let input = host.input(&server, "message-1").await?;
+    let mut accepted = params(&input, "admission-ack-barrier");
+    accepted["on"] = json!(true);
+    server.call("reply.typing", accepted).await?;
     let state: Value = serde_json::from_slice(&std::fs::read(&host.config.state_file)?)?;
     let started = state["engine"]["turns"]
         .as_object()
@@ -625,6 +628,10 @@ async fn bridge_pending_erase_survives_host_restart() -> TestResult {
     server.wait_method("inbound.message_deleted", 0).await?;
     let data = Arc::clone(&host.data);
     let stopped = host.stop().await?;
+    assert!(
+        stopped.host.state.engine.as_ref().ok_or("state")?["erases"].is_object(),
+        "erase outbox must be serialized"
+    );
     assert_eq!(
         stopped.host.state.engine.as_ref().ok_or("state")?["erases"]
             .as_object()
@@ -650,7 +657,9 @@ async fn bridge_unreachable_at_start_warns_and_retries_without_stopping_host() -
     let server = Server::new(root.path())?;
     server.stop_listener();
     tokio::task::yield_now().await;
-    let mut host = Host::start(&server, crate::PrxAuthorization::Supervised).await?;
+    let started = Host::start(&server, crate::PrxAuthorization::Supervised).await;
+    assert!(started.is_ok(), "an unreachable PRX socket must not stop host startup");
+    let mut host = started?;
     host.enqueue("message-1").await?;
     host.event("message.updated", json!({"message":{"deleted":false}})).await?;
     host.applied().await?;
@@ -795,9 +804,11 @@ async fn checkpoint_from_main_without_bridge_fields_loads() -> TestResult {
     std::fs::set_permissions(root.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let mut config = host.config.clone();
     config.state_file = root.path().join("old.json");
-    let old: crate::Checkpoint = serde_json::from_value(
+    let old: std::result::Result<crate::Checkpoint, _> = serde_json::from_value(
         json!({"account_id":"agent","principal_id":"agent-principal","device_id":"agent-device","cursor":37,"last_reply_ms":{},"pending":null}),
-    )?;
+    );
+    assert!(old.is_ok(), "a main checkpoint without new fields must load");
+    let old = old?;
     let store = crate::CheckpointStore::new(config.state_file.clone())?;
     store.save(&old)?;
     drop(store);
@@ -1084,7 +1095,7 @@ async fn bridge_deleting_an_old_turn_preserves_the_current_turn_index() -> TestR
 async fn bridge_restored_packet_never_answers_a_previous_connection_rpc() -> TestResult {
     let (_root, server, mut host) = fixture().await?;
     let input = host.input(&server, "message-1").await?;
-    host.data.lock().map_err(|_| "data")?.bus_down = true;
+    host.data.lock().map_err(|_| "data")?.fail_reply = Some(());
     let mut p = params(&input, "held-reply");
     p["final"] = json!(true);
     p["text"] = json!("recovered");
@@ -1099,6 +1110,7 @@ async fn bridge_restored_packet_never_answers_a_previous_connection_rpc() -> Tes
     assert_eq!(checkpoint["packet"]["rpc_id"], "prx-held-old");
     assert!(checkpoint["packet"].get("rpc_generation").is_none());
     data.lock().map_err(|_| "data")?.bus_down = false;
+    data.lock().map_err(|_| "data")?.fail_reply = None;
     let after = server.calls.lock().map_err(|_| "calls")?.len();
     let host = Host::resume(stopped, data).await?;
     server.wait_method("bridge.hello", after).await?;
@@ -1152,4 +1164,9 @@ async fn bridge_stream_json_escaping_stays_within_canonical_snapshot_limit() -> 
     }
     host.stop().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn bridge_http_pending_visible_failure_is_sent_after_bus_reconnect() -> TestResult {
+    http_visible_failure().await
 }

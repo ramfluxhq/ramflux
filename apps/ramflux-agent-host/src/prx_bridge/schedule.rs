@@ -37,7 +37,10 @@ impl PrxBridgeEngine {
             .state
             .inbound
             .iter()
-            .filter(|(_, i)| now >= i.queued_at.saturating_add(600_000))
+            .filter(|(id, i)| {
+                now >= i.queued_at.saturating_add(600_000)
+                    && self.state.turns.get(*id).is_none_or(|t| t.submitted_at.is_none())
+            })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         for id in stale {

@@ -35,6 +35,7 @@ pub(super) struct Data {
     pub removed: bool,
     pub bus_down: bool,
     pub fail_after_task_read: Option<()>,
+    pub fail_reply: Option<()>,
     pub clock: u64,
     pub polled_clock: u64,
 }
@@ -53,7 +54,8 @@ impl Bus {
         let mut data = self.data.lock().map_err(|_| Error::State)?;
         data.requests.push((method.into(), body.clone(), operation.map(str::to_owned)));
         self.changed.notify_waiters();
-        if data.bus_down {
+        if data.bus_down || method == "message.submit" && data.fail_reply.is_some() {
+            data.bus_down = true;
             return Err(Error::Bus);
         }
         Ok(match method {
@@ -412,12 +414,15 @@ impl Host {
         server.wait_method("inbound.message", after).await
     }
     pub async fn stop(mut self) -> TestResult<Stopped> {
-        self.event("account.locked", json!({})).await?;
+        if !self.task.is_finished() {
+            self.event("account.locked", json!({})).await?;
+        }
         let (host, result) =
             tokio::time::timeout(std::time::Duration::from_secs(5), self.task).await??;
-        if !matches!(result, Err(Error::IdentityLost)) {
-            return Err("host did not stop on identity loss".into());
-        }
+        assert!(
+            matches!(result, Err(Error::IdentityLost)),
+            "host did not stop on identity loss: {result:?}"
+        );
         Ok(Stopped { host, root: self.root })
     }
     pub async fn transport_failure(self) -> TestResult<Stopped> {
