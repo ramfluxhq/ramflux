@@ -399,7 +399,7 @@ async fn custody_capacity_server_retry_hint_is_shared_by_two_store_handles() -> 
         );
         let path = directory(&root.0, "shared-short-hint")?.join("authority.json");
         let bytes = fs::read(&path)?;
-        second.set_networking_reason_at(
+        second.set_networking_error_at(
             &root.0,
             Some(AccountNetworkingReason::NodeBusy {
                 retry_after_ms: u64::from(
@@ -407,6 +407,7 @@ async fn custody_capacity_server_retry_hint_is_shared_by_two_store_handles() -> 
                 ),
                 capacity: None,
             }),
+            &blocked,
             now,
         )?;
         assert_eq!(fs::read(&path)?, bytes, "a blocked second process renewed the deadline");
