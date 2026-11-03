@@ -27,13 +27,14 @@ impl AccountIndex {
         )
     }
 
-    fn prepare_account_directories(&self, local_account_id: &str) -> Result<(), StorageError> {
+    fn prepare_account_directories(&self, local_account_id: &str) -> Result<std::sync::Arc<crate::account_writer::AccountWriter>, StorageError> {
         let account_dir = self.root.join(format!("accounts/{local_account_id}"));
         fs::create_dir_all(account_dir.join("objects"))?;
+        let writer = crate::account_writer::AccountWriter::acquire(&self.root, local_account_id)?;
         fs::File::open(&account_dir)?.sync_all()?;
         fs::File::open(self.root.join("accounts"))?.sync_all()?;
         fs::File::open(&self.root)?.sync_all()?;
-        Ok(())
+        Ok(writer)
     }
 
     /// # Errors
@@ -61,8 +62,7 @@ impl AccountIndex {
     ) -> Result<LocalAccountRecord, StorageError> {
         let (db_relative_path, object_dir_relative_path, key_ref) =
             Self::account_record(local_account_id);
-        self.prepare_account_directories(local_account_id)?;
-        let _writer = crate::account_writer::AccountWriter::acquire(&self.root, local_account_id)?;
+        let _writer = self.prepare_account_directories(local_account_id)?;
         self.connection.execute(
             "INSERT OR REPLACE INTO local_account (
                 local_account_id, principal_commitment, display_label, db_relative_path,
@@ -97,8 +97,7 @@ impl AccountIndex {
     ) -> Result<LocalAccountRecord, StorageError> {
         let (db_relative_path, object_dir_relative_path, key_ref) =
             Self::account_record(local_account_id);
-        self.prepare_account_directories(local_account_id)?;
-        let _writer = crate::account_writer::AccountWriter::acquire(&self.root, local_account_id)?;
+        let _writer = self.prepare_account_directories(local_account_id)?;
         let changed = self.connection.execute(
             "INSERT INTO local_account (
                 local_account_id, principal_commitment, display_label, db_relative_path,

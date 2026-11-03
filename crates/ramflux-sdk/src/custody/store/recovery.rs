@@ -330,7 +330,7 @@ fn persist_intent(
         current.stored.compacted_ids.as_deref(),
         None,
     )?;
-    current.stored.pins.observe(&verified)?;
+    current.stored.pins.observe_with_previous(&verified, Some(&current.stored.record))?;
     let old_primary = current.stored.primary_vault_ref.clone();
     let old_branch = current.stored.branch_vault_ref.clone();
     let branch_new = new_branch != old_branch;

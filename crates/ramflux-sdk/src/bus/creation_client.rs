@@ -305,6 +305,7 @@ impl LocalBusCreationClient {
                 Some("CustodyConfirmationFailed") => SdkError::CustodyConfirmationFailed,
                 Some("CustodyVaultUnavailable") => SdkError::CustodyVaultUnavailable,
                 Some("CustodyExpired") => SdkError::CustodyExpired,
+                Some("CustodyAccountConflict") => SdkError::CustodyAccountConflict,
                 Some("NoNodeSelected") => SdkError::NoNodeSelected,
                 _ => SdkError::CustodySetupInvalid,
             });

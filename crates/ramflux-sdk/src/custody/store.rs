@@ -725,3 +725,6 @@ impl BornAccount {
         self.mark_live(root)
     }
 }
+
+#[cfg(test)]
+mod reservation_tests;

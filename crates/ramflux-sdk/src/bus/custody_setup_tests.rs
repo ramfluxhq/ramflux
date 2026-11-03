@@ -104,7 +104,7 @@ async fn custody_bus_show_once_confirm_restart_and_legacy_fallback_refusal() -> 
         let mut bus = connect(&socket).await?;
         bus.begin(&input("after-restart")).await?;
         bus.cancel().await?;
-        let mut ordinary = LocalBusClient::connect(&socket).await?;
+        let ordinary = LocalBusClient::connect(&socket).await?;
         // The compatibility ceremony stores public authority, without an ordinary data key.
         // Only account.create.confirm with a passphrase installs an unlocked data actor.
         let status = ordinary
@@ -302,6 +302,9 @@ impl PrimaryVault for BlockingVault {
     fn load_primary(&self, reference: &str) -> std::result::Result<SelfSigningKey, SdkError> {
         self.inner.load_primary(reference)
     }
+    fn delete(&self, reference: &str) -> std::result::Result<(), SdkError> {
+        self.inner.delete(reference)
+    }
     fn store_branch(
         &self,
         reference: &str,
@@ -328,7 +331,7 @@ async fn custody_confirm_vault_and_fsync_work_does_not_stall_the_daemon_thread()
         let answers = words(&phrase, positions)?;
         let confirm = tokio::spawn(async move { bus.confirm(&answers).await });
         tokio::time::timeout(std::time::Duration::from_secs(2), vault.entered.notified()).await?;
-        let mut ordinary = LocalBusClient::connect(&socket).await?;
+        let ordinary = LocalBusClient::connect(&socket).await?;
         let status = tokio::time::timeout(
             std::time::Duration::from_millis(500),
             ordinary.request(None, "daemon", "daemon.status", serde_json::json!({})),
@@ -439,5 +442,77 @@ async fn custody_shutdown_cannot_release_the_data_root_while_confirmation_is_blo
     server?;
     flow?;
     assert!(root.0.join("custody_accounts/late-confirm/authority.json").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn custody_native_shutdown_retains_root_lease_and_cancels_uncommitted_authority() -> Result {
+    struct Release(Arc<BlockingVault>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let root = Root::new()?;
+    let socket = root.0.join("bus.sock");
+    let vault = Arc::new(BlockingVault::new());
+    let mut config = LocalBusConfig::new(&socket, &root.0);
+    config.custody_vault = Some(vault.clone());
+    let second = LocalBusConfig::new(root.0.join("second.sock"), &root.0);
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _shutdown = Shutdown(stop.clone());
+        let _release = Release(vault.clone());
+        drop(connect(&socket).await?);
+        let mut bus = crate::LocalBusCreationClient::connect(&socket).await?;
+        bus.begin("Native lease", ramflux_protocol::PrincipalKind::Human).await?;
+        let phrase = bus.show_once().await?;
+        let answers = words(&phrase, bus.hidden_challenge().await?)?;
+        let confirm = tokio::spawn(async move {
+            bus.confirm(&answers, &Zeroizing::new("independent data passphrase".into())).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), vault.entered.notified()).await?;
+        stop.send(true)?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while socket.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let attempt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::serve_local_bus_until(second, stop.subscribe()),
+        )
+        .await?;
+        assert!(
+            matches!(attempt, Err(SdkError::Io(e)) if e.kind()==std::io::ErrorKind::WouldBlock)
+        );
+        let ids = ramflux_storage::AccountIndex::open(&root.0)?.known_account_ids()?;
+        assert_eq!(ids.len(), 1);
+        assert!(root.0.join("custody_accounts").join(&ids[0]).exists());
+        assert!(!root.0.join("second.sock").exists());
+        vault.release();
+        let _ = confirm.await;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    vault.release();
+    server?;
+    flow?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match super::data_root_lock::DataRootLock::acquire(&root.0) {
+                Ok(lease) => break Ok::<_, SdkError>(lease),
+                Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => break Err(error),
+            }
+        }
+    }).await??;
+    let ids = ramflux_storage::AccountIndex::open(&root.0)?.known_account_ids()?;
+    assert_eq!(ids.len(), 1);
+    assert!(!root.0.join("custody_accounts").join(&ids[0]).join("authority.json").exists());
+    assert_eq!(vault.inner.entry_count()?, 0);
     Ok(())
 }

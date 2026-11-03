@@ -148,6 +148,7 @@ impl CustodyBusClient {
         if let Response::Error { code } = &reply.result {
             return Err(match code.as_str() {
                 "CustodyExpired" => SdkError::CustodyExpired,
+                "CustodyAccountConflict" => SdkError::CustodyAccountConflict,
                 "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
                 "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,
                 "NetworkingPending" => SdkError::NetworkingPending,

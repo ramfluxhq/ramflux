@@ -214,7 +214,8 @@ async fn custody_response(
     if frame.method == "account.create.confirm" {
         return super::creation_confirm::respond(frame, supervisor, ceremony, disconnected).await;
     }
-    super::custody_setup::respond(frame, &supervisor.config, ceremony, supervisor.root_lease.borrow().clone()).await
+    let lease = supervisor.root_lease.borrow().clone();
+    super::custody_setup::respond(frame, &supervisor.config, ceremony, lease).await
 }
 
 async fn configure_subscription(
