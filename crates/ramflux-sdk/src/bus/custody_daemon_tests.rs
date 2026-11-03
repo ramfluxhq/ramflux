@@ -34,7 +34,7 @@ async fn custody_second_daemon_cannot_unlink_the_live_socket_or_reconcile_its_ro
         assert!(matches!(attempt,Err(SdkError::Io(e)) if e.kind()==std::io::ErrorKind::WouldBlock));
         assert!(marker.exists());
         assert_eq!(std::fs::metadata(&socket)?.ino(), inode);
-        let ordinary = LocalBusClient::connect(&socket).await?;
+        let mut ordinary = LocalBusClient::connect(&socket).await?;
         let status =
             ordinary.request(None, "daemon", "daemon.status", serde_json::json!({})).await?;
         assert_eq!(status["accounts"], 0);
@@ -66,7 +66,7 @@ async fn custody_inconsistent_and_invalidly_named_markers_leave_other_accounts_a
     let flow = async {
         let _stop = Shutdown(stop.clone());
         let mut ceremony = connect(&socket).await?;
-        let bus = LocalBusClient::connect(&socket).await?;
+        let mut bus = LocalBusClient::connect(&socket).await?;
         assert_eq!(
             bus.request(None, "daemon", "daemon.status", serde_json::json!({})).await?["accounts"],
             0

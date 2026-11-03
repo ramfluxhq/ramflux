@@ -104,7 +104,7 @@ async fn custody_bus_show_once_confirm_restart_and_legacy_fallback_refusal() -> 
         let mut bus = connect(&socket).await?;
         bus.begin(&input("after-restart")).await?;
         bus.cancel().await?;
-        let ordinary = LocalBusClient::connect(&socket).await?;
+        let mut ordinary = LocalBusClient::connect(&socket).await?;
         // The compatibility ceremony stores public authority, without an ordinary data key.
         // Only account.create.confirm with a passphrase installs an unlocked data actor.
         let status = ordinary
@@ -331,7 +331,7 @@ async fn custody_confirm_vault_and_fsync_work_does_not_stall_the_daemon_thread()
         let answers = words(&phrase, positions)?;
         let confirm = tokio::spawn(async move { bus.confirm(&answers).await });
         tokio::time::timeout(std::time::Duration::from_secs(2), vault.entered.notified()).await?;
-        let ordinary = LocalBusClient::connect(&socket).await?;
+        let mut ordinary = LocalBusClient::connect(&socket).await?;
         let status = tokio::time::timeout(
             std::time::Duration::from_millis(500),
             ordinary.request(None, "daemon", "daemon.status", serde_json::json!({})),
