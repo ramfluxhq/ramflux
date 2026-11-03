@@ -197,7 +197,10 @@ elif args and (args[0] == "inspect" or (len(args) > 1 and args[1] == "inspect"))
         print(resources[target]["owner"] if target in resources and not unlabeled_collision
               else "foreign-owner")
     else:
-        token = (state / "owner.token").read_text().strip()
+        # Container labels survive a crash that loses the current owner-token file.
+        token = resources.get(args[-1], {}).get("owner")
+        if token is None:
+            token = (state / "owner.token").read_text().strip()
         health = control.get("health", "healthy")
         if int((root / "clock").read_text()) < control.get("healthy_after", 0):
             health = "starting"

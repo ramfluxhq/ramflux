@@ -38,4 +38,4 @@ class FederationListenerTests(unittest.TestCase):
         self.assertNotIn('ramflux-router', federation['services'])
         router = yaml.safe_load((DEPLOY / 'docker-compose.router-admin.yml').read_text())
         self.assertEqual(router['services']['ramflux-router']['ports'],
-            ['127.0.0.1:${RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT:?operator router loopback port required}:7443/tcp'])
+            ['127.0.0.1:${RAMFLUX_ROUTER_ADMIN_PORT:?operator router loopback port required}:7443/tcp'])

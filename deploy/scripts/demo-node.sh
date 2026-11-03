@@ -57,10 +57,11 @@ done
 export DEMO_NODE_ID DEMO_GATEWAY_PORT DEMO_RELAY_PORT DEMO_HTTP_PORT DEMO_TURN_PORT
 export DEMO_MESH_PORT DEMO_BIND_ADDR DEMO_VERSION
 DEMO_ADMIN_LOOPBACK_PORT=${DEMO_ADMIN_LOOPBACK_PORT:-}
-DEMO_ROUTER_ADMIN_LOOPBACK_PORT=${DEMO_ROUTER_ADMIN_LOOPBACK_PORT:-59488}
+# Keep the former demo-only spelling as an input alias for one release.
+RAMFLUX_ROUTER_ADMIN_PORT=${RAMFLUX_ROUTER_ADMIN_PORT:-${DEMO_ROUTER_ADMIN_LOOPBACK_PORT:-59488}}
 RAMFLUX_ROUTER_ADMIN_ENABLED=${RAMFLUX_ROUTER_ADMIN_ENABLED:-0}
 case "$RAMFLUX_ROUTER_ADMIN_ENABLED" in 0|1) ;; *) fail 'RAMFLUX_ROUTER_ADMIN_ENABLED must be 0 or 1' ;; esac
-export DEMO_ADMIN_LOOPBACK_PORT DEMO_ROUTER_ADMIN_LOOPBACK_PORT RAMFLUX_ROUTER_ADMIN_ENABLED
+export DEMO_ADMIN_LOOPBACK_PORT RAMFLUX_ROUTER_ADMIN_PORT RAMFLUX_ROUTER_ADMIN_ENABLED
 case "$DEMO_HOST" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'DEMO_HOST must be a DNS name or IPv4 address' ;; esac
 case "$DEMO_NODE_ID" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'invalid DEMO_NODE_ID' ;; esac
 case "$DEMO_PROJECT" in [a-z0-9]*) ;; *) fail 'invalid DEMO_PROJECT' ;; esac
@@ -79,14 +80,29 @@ if [ -n "$DEMO_ADMIN_LOOPBACK_PORT" ]; then
     [ "$DEMO_ADMIN_LOOPBACK_PORT" -ne "$tcp_port" ] || fail 'admin loopback port conflicts with another demo port'
   done
 fi
-if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ]; then
-  case "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" in 0*|*[!0-9]*) fail 'router admin loopback port must be an integer' ;; esac
-  [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -ge 1024 ] && [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -le 65535 ] || fail 'router admin loopback port must be 1024..65535'
-  for tcp_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TURN_PORT" "$DEMO_MESH_PORT" ${DEMO_ADMIN_LOOPBACK_PORT:+"$DEMO_ADMIN_LOOPBACK_PORT"}; do
-    [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -ne "$tcp_port" ] || fail 'router admin loopback port conflicts with another demo port'
+# Validate both current selections and read-only target snapshot selections.
+validate_router_admin_port() {
+  router_enabled=$1
+  router_port=$2
+  router_admin=$3
+  router_voice=$4
+  case "$router_enabled" in 0|1) ;; *) fail 'RAMFLUX_ROUTER_ADMIN_ENABLED must be 0 or 1' ;; esac
+  [ "$router_enabled" = 1 ] || return 0
+  case "$router_port" in ''|0*|*[!0-9]*) fail 'router admin loopback port must be an integer' ;; esac
+  [ "${#router_port}" -le 5 ] && [ "$router_port" -ge 1024 ] && [ "$router_port" -le 65535 ] || fail 'router admin loopback port must be 1024..65535'
+  for reserved_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TURN_PORT" "$DEMO_MESH_PORT" "$router_admin" "$router_voice"; do
+    case "$reserved_port" in ''|-) continue ;; esac
+    [ "$router_port" -ne "$reserved_port" ] || fail 'router admin loopback port conflicts with another demo port'
   done
-fi
-
+}
+probe_router_admin_port() {
+  validate_router_admin_port "$@"
+  [ "$router_enabled" = 1 ] || return 0
+  router_ids=$(runtime ps -aq --filter "label=com.docker.compose.project=$DEMO_PROJECT" --filter 'label=com.docker.compose.service=ramflux-router')
+  router_inspection='[]'
+  if [ -n "$router_ids" ]; then router_inspection=$(runtime inspect $router_ids); fi
+  printf '%s' "$router_inspection" | python3 "$script_dir/router-admin-port.py" "$router_port" "$DEMO_PROJECT" "$owner"
+}
 RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS=${RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS-64}
 case "$RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS" in ''|0*|*[!0-9]*) fail 'public max connections must be an integer in 1..4096' ;; esac
 [ "${#RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS}" -le 4 ] && [ "$RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS" -le 4096 ] || fail 'public max connections must be 1..4096'
@@ -147,7 +163,7 @@ if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
   done
 fi
 if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ] && [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
-  [ "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" -ne "$RAMFLUX_DEMO_VOICE_UDP_PORT" ] || fail 'router admin loopback port conflicts with another demo port'
+  [ "$RAMFLUX_ROUTER_ADMIN_PORT" -ne "$RAMFLUX_DEMO_VOICE_UDP_PORT" ] || fail 'router admin loopback port conflicts with another demo port'
 fi
 export RAMFLUX_DEMO_VOICE_UDP_PORT
 case "$DEMO_DATA_DIR" in /*) ;; *) fail 'DEMO_DATA_DIR must be absolute' ;; esac
@@ -165,6 +181,7 @@ case "$command" in
     python3 "$script_dir/demo-node-config.py" "$repo" "$DEMO_DATA_DIR" custody-status >/dev/null
     ;;
 esac
+validate_router_admin_port "$RAMFLUX_ROUTER_ADMIN_ENABLED" "$RAMFLUX_ROUTER_ADMIN_PORT" "$DEMO_ADMIN_LOOPBACK_PORT" "$RAMFLUX_DEMO_VOICE_UDP_PORT"
 case "$command" in up) mkdir -p "$DEMO_DATA_DIR" ;; esac
 [ -d "$DEMO_DATA_DIR" ] || fail 'demo data directory does not exist'
 state=$(CDPATH='' cd -- "$DEMO_DATA_DIR" && pwd -P)
@@ -499,11 +516,14 @@ verify_public_endpoints() {
 load_applied_overlays() {
   RAMFLUX_DEMO_VOICE_UDP_PORT=$(sed -n 's/^RAMFLUX_RELAY_VOICE_UDP_PORT=.*://p' "$state/runtime.env" | tail -n 1)
   DEMO_ADMIN_LOOPBACK_PORT=$(sed -n 's/^RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=//p' "$state/runtime.env" | tail -n 1)
-  DEMO_ROUTER_ADMIN_LOOPBACK_PORT=$(sed -n 's/^RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=//p' "$state/runtime.env" | tail -n 1)
-  DEMO_ROUTER_ADMIN_LOOPBACK_PORT=${DEMO_ROUTER_ADMIN_LOOPBACK_PORT:-59488}
+  RAMFLUX_ROUTER_ADMIN_PORT=$(sed -n 's/^RAMFLUX_ROUTER_ADMIN_PORT=//p' "$state/runtime.env" | tail -n 1)
+  if [ -z "$RAMFLUX_ROUTER_ADMIN_PORT" ]; then
+    RAMFLUX_ROUTER_ADMIN_PORT=$(sed -n 's/^RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=//p' "$state/runtime.env" | tail -n 1)
+  fi
+  RAMFLUX_ROUTER_ADMIN_PORT=${RAMFLUX_ROUTER_ADMIN_PORT:-59488}
   RAMFLUX_ROUTER_ADMIN_ENABLED=$(sed -n 's/^RAMFLUX_ROUTER_ADMIN_ENABLED=//p' "$state/runtime.env" | tail -n 1)
   RAMFLUX_ROUTER_ADMIN_ENABLED=${RAMFLUX_ROUTER_ADMIN_ENABLED:-0}
-  export RAMFLUX_DEMO_VOICE_UDP_PORT DEMO_ADMIN_LOOPBACK_PORT DEMO_ROUTER_ADMIN_LOOPBACK_PORT RAMFLUX_ROUTER_ADMIN_ENABLED
+  export RAMFLUX_DEMO_VOICE_UDP_PORT DEMO_ADMIN_LOOPBACK_PORT RAMFLUX_ROUTER_ADMIN_PORT RAMFLUX_ROUTER_ADMIN_ENABLED
 }
 # Inspect the intended images before prepare/recover can write any managed state.
 case "$command" in
@@ -518,13 +538,19 @@ esac
 if [ "$command" != recover ]; then
   # Refused resource adoption must leave every managed file and marker untouched.
   check_resources
-  if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ] && { [ "$command" = up ] || [ "$command" = upgrade ]; }; then
-    router_ids=$(runtime ps -aq --filter "label=com.docker.compose.project=$DEMO_PROJECT" --filter 'label=com.docker.compose.service=ramflux-router')
-    router_inspection='[]'
-    if [ -n "$router_ids" ]; then router_inspection=$(runtime inspect $router_ids); fi
-    printf '%s' "$router_inspection" | python3 "$script_dir/router-admin-port.py" "$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" "$DEMO_PROJECT" "$owner"
-  fi
 fi
+case "$command" in
+  up|upgrade)
+    probe_router_admin_port "$RAMFLUX_ROUTER_ADMIN_ENABLED" "$RAMFLUX_ROUTER_ADMIN_PORT" "$DEMO_ADMIN_LOOPBACK_PORT" "$RAMFLUX_DEMO_VOICE_UDP_PORT"
+    ;;
+  rollback|recover)
+    router_settings=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" router-admin-settings "$command")
+    IFS=' ' read -r snapshot_router_enabled snapshot_router_port snapshot_admin_port snapshot_voice_port owner <<EOF
+$router_settings
+EOF
+    probe_router_admin_port "$snapshot_router_enabled" "$snapshot_router_port" "$snapshot_admin_port" "$snapshot_voice_port"
+    ;;
+esac
 if [ "$command" = recover ]; then
   [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
   DEMO_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover)
@@ -630,7 +656,7 @@ RAMFLUX_CLIENT_PREKEY_HTTP_URL=$origin
 RAMFLUX_CLIENT_SIGNALING_TURN_ADDR=$DEMO_HOST:$DEMO_TURN_PORT
 ENV
       if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ]; then
-        printf '%s\n' "RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=$DEMO_ROUTER_ADMIN_LOOPBACK_PORT" >> "$runtime_pending"
+        printf '%s\n' "RAMFLUX_ROUTER_ADMIN_PORT=$RAMFLUX_ROUTER_ADMIN_PORT" >> "$runtime_pending"
       fi
       if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
         cat >> "$runtime_pending" <<ENV

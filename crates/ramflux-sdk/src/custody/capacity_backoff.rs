@@ -12,7 +12,8 @@ use std::{
 };
 use tokio::time::Instant;
 
-pub(crate) const RETRY_AFTER_MS: u64 = 300_000;
+pub(crate) const RETRY_AFTER_SECS: u64 = 300;
+pub(crate) const RETRY_AFTER_MS: u64 = RETRY_AFTER_SECS * 1000;
 const COOLDOWN: Duration = Duration::from_millis(RETRY_AFTER_MS);
 struct Deadline {
     until: Option<Instant>,

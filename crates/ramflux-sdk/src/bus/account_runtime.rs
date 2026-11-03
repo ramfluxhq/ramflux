@@ -297,6 +297,14 @@ impl AccountRuntime {
     }
 
     async fn sync(&mut self) -> Result<bool, SdkError> {
+        let request = LocalBusFrame::request(
+            "networking-expiry",
+            Some(self.id.clone()),
+            "sync",
+            "sync.run",
+            serde_json::json!({}),
+        );
+        self.publish_networking_expiry(&request).await?;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };
@@ -360,6 +368,16 @@ impl AccountRuntime {
         self.state.accounts.remove(&self.id);
     }
 
+    async fn publish_networking_expiry(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
+        if let Some(account) = self.state.accounts.get(&self.id)
+            && super::networking_events::refresh_expired(account)?
+        {
+            // Project expiry before another attempt can replace the actor-state snapshot.
+            self.publish(request).await?;
+        }
+        Ok(())
+    }
+
     fn authorize_backup(&self, generation: i64) -> Result<(), SdkError> {
         let account = local_bus_account(&self.state, &self.id)?;
         if account.client.account_db()?.privacy_erasure_generation()? != generation {
@@ -386,6 +404,7 @@ impl AccountRuntime {
     }
 
     async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
+        self.publish_networking_expiry(&command.request).await?;
         if let Some(backup) = command.private.take() {
             match backup {
                 super::actor::PrivateCommand::NativeUnlock { passphrase, home_node_id, reply } => {
