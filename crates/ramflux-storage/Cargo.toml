@@ -29,6 +29,7 @@ tracing = "0.1"
 [features]
 default = ["sqlcipher"]
 sqlcipher = ["rusqlite/bundled-sqlcipher"]
+test-instrumentation = ["rusqlite/hooks"]
 insecure-test-sqlite = ["rusqlite/bundled"]
 
 [lints.rust]
@@ -50,4 +51,4 @@ todo = "deny"
 dbg_macro = "deny"
 
 [dev-dependencies]
-rusqlite = { version = "0.37", default-features = false, features = ["trace"] }
+rusqlite = { version = "0.37", default-features = false, features = ["trace", "hooks"] }

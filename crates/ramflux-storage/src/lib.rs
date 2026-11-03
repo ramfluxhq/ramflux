@@ -33,6 +33,8 @@ mod schema_group_sender_identity;
 mod schema_identity_keys;
 mod schema_object_erasure;
 mod schema_receipt_identity;
+#[cfg(any(test, feature = "test-instrumentation"))]
+mod sqlite_work;
 
 pub use account_db::AccountDb;
 pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};

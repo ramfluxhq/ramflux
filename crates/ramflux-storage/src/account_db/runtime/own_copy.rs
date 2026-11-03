@@ -48,7 +48,8 @@ impl AccountDb {
     }
 
     /// Performs one bounded cleanup statement across all delivery namespaces.
-    /// Reserves a disposable receipt/status slot at the cap; live replay proofs are never evicted.
+    /// Reserves a receipt slot at the cap; status writes already happened, so evict only above it.
+    /// Live replay proofs are never evicted; a full expired batch defers live eviction.
     /// Reads at most 16 expired rows and 17 cap candidates per namespace; deletes one live cap victim.
     /// # Errors
     /// Returns SQL errors atomically with the caller's new copy or status transition.
@@ -73,9 +74,15 @@ impl AccountDb {
                 let mut query = self.connection.prepare(EXPIRED)?;
                 let expired = query.query_map(params![prefix, now, 16], |row| row.get(0))?
                     .collect::<rusqlite::Result<Vec<String>>>()?;
+                let expired_batch_full = expired.len() == 16;
                 let remaining = expired.iter().fold(rows, |count, _| count.saturating_sub(1));
                 victims.extend(expired);
-                if prefix != PREFIXES[2] && remaining >= u64::from(budget) {
+                let over_budget = if prefix == PREFIXES[1] {
+                    remaining > u64::from(budget)
+                } else {
+                    remaining >= u64::from(budget)
+                };
+                if prefix != PREFIXES[2] && !expired_batch_full && over_budget {
                     let candidates = self.connection.prepare(VICTIMS)?.query_map(params![prefix, 17], |row| row.get(0))?
                         .collect::<rusqlite::Result<Vec<String>>>()?;
                     if let Some(victim) = candidates.into_iter().find(|key| !victims.contains(key)) {

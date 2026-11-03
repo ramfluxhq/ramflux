@@ -427,8 +427,15 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     drop(source);
     mail.lock().map_err(|_| "mailbox")?.stall_receipts = true;
     let mut receiver = b.account(None, mail)?;
+    // Start the deadline after setup and measure timer behavior on the paused runtime clock.
+    // Database/crypto work under host load must not consume the receipt courier deadline.
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
     tokio::time::timeout(Duration::from_secs(6), crate::bus::sync_driver::run(&mut receiver))
         .await??;
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_secs(6));
+    assert!(receiver.engine.is_none(), "the stalled receipt session must be retired");
     for id in ["first", "second"] {
         assert_eq!(
             receiver.client.account_db()?.message_content(id)?,

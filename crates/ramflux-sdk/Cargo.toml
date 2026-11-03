@@ -78,6 +78,7 @@ tracing = "0.1"
 zeroize = { version = "1.8", features = ["serde"] }
 
 [dev-dependencies]
+ramflux-storage = { workspace = true, features = ["test-instrumentation"] }
 ed25519-dalek.workspace = true
 rusqlite = { workspace = true }
 ramflux-node-core = { workspace = true }

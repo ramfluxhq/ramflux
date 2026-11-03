@@ -177,3 +177,50 @@ impl RamfluxClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remember_has_bounded_vm_work_at_the_full_18000_marker_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let index = ramflux_storage::AccountIndex::open(root.path())?;
+        index.create_account("acct", "principal")?;
+        let key = ramflux_storage::AccountDbKey::derive("acct", b"receipt-work-test");
+        let db = AccountDb::open(&index, "acct", &key)?;
+        db.write_transaction(|| {
+            for i in 0..MAX_DELIVERY_ROWS {
+                db.persist_actor_state(
+                    &format!("{REPLAYS}{i:05}"),
+                    &Committed {
+                        fingerprint: "fixture".into(),
+                        valid_until: 600,
+                        expires_at: 900,
+                        acknowledged: false,
+                    },
+                )?;
+            }
+            Ok::<_, SdkError>(())
+        })?;
+        // A fresh copy at capacity exercises the new-marker usage check without evicting proofs.
+        let (result, steps) = db.measure_sqlite_vm_steps(|| {
+            remember(&db, &format!("{REPLAYS}new"), "new", 600, false, 0)
+        })?;
+        println!("remember at 18,000 markers (full): vm_steps={steps}, budget=2000");
+        assert!(steps < 2000, "remember exceeded VM work budget: {steps} >= 2000");
+        assert!(matches!(result, Err(SdkError::InboundPending(_))));
+        assert!(!db.actor_state_exists(&format!("{REPLAYS}new"))?);
+        // Leave a slot so the same measurement also covers the actual insert/trigger path.
+        db.remove_actor_state(&format!("{REPLAYS}00000"))?;
+        let (result, steps) = db.measure_sqlite_vm_steps(|| {
+            remember(&db, &format!("{REPLAYS}new"), "new", 600, false, 0)
+        })?;
+        result?;
+        println!("remember at 17,999 markers (insert): vm_steps={steps}, budget=2000");
+        assert!(steps < 2000, "remember insert exceeded VM work budget: {steps} >= 2000");
+        assert_eq!(db.own_copy_actor_usage(REPLAYS)?.0, u64::from(MAX_DELIVERY_ROWS));
+        Ok(())
+    }
+}

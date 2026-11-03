@@ -52,6 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local verifications and existing authority stamps remain unchanged.
 - Index own-copy expiry and due retries, keep transactional row/byte counters, and
   bound streaming cleanup without scanning parked copies or receipt namespaces.
+  Defer live eviction while expired batches remain and avoid reserving an extra
+  status slot after a status write.
 - Confirm own-device surface context per active sibling set after fanout ACKs,
   park failed targets independently, and preserve exact committed replay handling
   when disposable streaming receipts are evicted. Pending cache rows take priority

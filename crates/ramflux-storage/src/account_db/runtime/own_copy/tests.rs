@@ -64,8 +64,11 @@ fn delivery_plans_search_indexes_and_one_copy_has_one_cleanup_step()
         CLEANUPS.with(|count| count.set(0));
         Ok(())
     })?;
-    let started = std::time::Instant::now();
-    db.maintain_own_copy_delivery(0, 18_000)?;
+    let (result, vm_steps) =
+        db.measure_sqlite_vm_steps(|| db.maintain_own_copy_delivery(0, 18_000))?;
+    result?;
+    println!("maintenance at 18,000 rows x 3 prefixes: vm_steps={vm_steps}, budget=2000");
+    assert!(vm_steps < 2000, "maintenance exceeded VM work budget: {vm_steps} >= 2000");
     db.persist_message_actor_state(
         "new-owner",
         "own-device/message-receipt/new",
@@ -75,10 +78,20 @@ fn delivery_plans_search_indexes_and_one_copy_has_one_cleanup_step()
         connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
         Ok(CLEANUPS.with(Cell::get))
     })?;
-    println!("one copy at 18,000 rows: cleanup_steps={steps}, elapsed={:?}", started.elapsed());
+    println!("one copy at 18,000 rows: cleanup_steps={steps}");
     assert!(steps <= 1, "per-copy cleanup repeated {steps} times");
     assert_eq!(db.own_copy_actor_usage(PREFIXES[0])?.0, 18_000);
     assert_eq!(db.own_copy_actor_usage(PREFIXES[2])?.0, 18_000, "live proofs must survive the cap");
+    assert!(
+        db.actor_state_exists(&format!("{}00000", PREFIXES[1]))?,
+        "status at the cap needs no reserved slot"
+    );
+    db.persist_message_actor_state(
+        "new-owner",
+        "own-device/status/new",
+        &serde_json::json!({"expires_at":99_999,"completed":true}),
+    )?;
+    db.maintain_own_copy_delivery(0, 18_000)?;
     for key in [format!("{}00000", PREFIXES[0]), format!("{}00000", PREFIXES[1])] {
         assert!(!db.actor_state_exists(&key)?);
         let bindings: i64 = db.connection.query_row(
@@ -189,6 +202,86 @@ fn legacy_actor_rows_are_backfilled_once_and_expiry_cleanup_is_timer_gated()
         db.actor_state_exists("own-device/status/live")?,
         "expired rows free capacity before any live victim is chosen"
     );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn status_write_then_cleanup_preserves_live_rows_when_one_expiry_frees_the_slot()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (root, db) = crate::tests::test_db("own-copy-status-cap")?;
+    for i in 0..4 {
+        db.persist_message_actor_state(
+            "live-owner",
+            &format!("{}live-{i}", PREFIXES[1]),
+            &serde_json::json!({"expires_at":1000+i,"completed":true}),
+        )?;
+    }
+    db.persist_actor_state(
+        &format!("{}expired", PREFIXES[1]),
+        &serde_json::json!({"expires_at":0,"completed":false}),
+    )?;
+    assert_eq!(db.own_copy_actor_usage(PREFIXES[1])?.0, 5);
+    db.maintain_own_copy_delivery(1, 4)?;
+    assert_eq!(db.own_copy_actor_usage(PREFIXES[1])?.0, 4);
+    for i in 0..4 {
+        assert!(db.actor_state_exists(&format!("{}live-{i}", PREFIXES[1]))?);
+    }
+    assert!(!db.actor_state_exists(&format!("{}expired", PREFIXES[1]))?);
+    // Without any expiry, a status write above the cap still needs one live eviction.
+    db.persist_actor_state(
+        &format!("{}new", PREFIXES[1]),
+        &serde_json::json!({"expires_at":2000,"completed":true}),
+    )?;
+    db.maintain_own_copy_delivery(1, 4)?;
+    assert_eq!(db.own_copy_actor_usage(PREFIXES[1])?.0, 4);
+    assert!(!db.actor_state_exists(&format!("{}live-0", PREFIXES[1]))?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn full_expired_batch_defers_live_eviction_until_all_expired_rows_are_removed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (root, db) = crate::tests::test_db("own-copy-expired-batch")?;
+    db.write_transaction(|| {
+        for prefix in &PREFIXES[..2] {
+            for i in 0..3 {
+                db.persist_actor_state(
+                    &format!("{prefix}live-{i}"),
+                    &serde_json::json!({"expires_at":1000+i,"completed":true,"acknowledged":true}),
+                )?;
+            }
+            for i in 0..20 {
+                db.persist_actor_state(
+                    &format!("{prefix}expired-{i:02}"),
+                    &serde_json::json!({"expires_at":0,"completed":false,"acknowledged":false}),
+                )?;
+            }
+        }
+        Ok::<_, StorageError>(())
+    })?;
+    db.maintain_own_copy_delivery(1, 4)?;
+    for prefix in &PREFIXES[..2] {
+        assert_eq!(db.own_copy_actor_usage(prefix)?.0, 7);
+        for i in 0..3 {
+            assert!(
+                db.actor_state_exists(&format!("{prefix}live-{i}"))?,
+                "live victim while expired rows remain"
+            );
+        }
+        assert!(db.actor_state_exists(&format!("{prefix}expired-19"))?);
+    }
+    db.maintain_own_copy_delivery(1, 4)?;
+    for prefix in &PREFIXES[..2] {
+        assert_eq!(db.own_copy_actor_usage(prefix)?.0, 3);
+        assert!(!db.actor_state_exists(&format!("{prefix}expired-19"))?);
+        for i in 0..3 {
+            assert!(db.actor_state_exists(&format!("{prefix}live-{i}"))?);
+        }
+    }
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
