@@ -420,13 +420,23 @@ impl RouterCore {
             return Err(NodeCoreError::Capacity { resource: "custody account count" });
         }
         let state = CustodyAccountState { publication: publication.clone(), pins };
+        if outcome != PinOutcome::Unchanged {
+            store.prune_custody_history(now)?;
+        }
         let tx = store.migration_db().begin_write().map_err(|e| reject(&e.to_string()))?;
         let offer = crate::home_migration_store::destination::prepare_in_transaction(
             &tx, node, input, &verified, now,
         )?;
         if outcome != PinOutcome::Unchanged {
             store.record_custody_account_in_tx(
-                &tx, anchor, &state, is_new, source, now,
+                &tx,
+                crate::router_store::CustodyAccountWrite {
+                    anchor,
+                    state: &state,
+                    is_new,
+                    source,
+                    now,
+                },
             )?;
         }
         crate::home_migration_store::commit_transition(store, tx)?;

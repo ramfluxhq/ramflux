@@ -31,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod custody;
 mod custody_accounts;
+pub(crate) use custody_accounts::CustodyAccountWrite;
 mod custody_budget_policy;
 pub use custody_accounts::CustodyPublicationBudgetRow;
 mod custody_history;

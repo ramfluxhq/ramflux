@@ -13,6 +13,13 @@ const ACCOUNTS: TableDefinition<&str, &[u8]> = TableDefinition::new("custody_acc
 const BUDGETS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("custody_publication_budgets_v1");
 const MAX_ACCOUNTS: u64 = 65_536;
+pub(crate) struct CustodyAccountWrite<'a> {
+    pub anchor: &'a str,
+    pub state: &'a CustodyAccountState,
+    pub is_new: bool,
+    pub source: IpAddr,
+    pub now: u64,
+}
 fn error(error: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(error.to_string())
 }
@@ -225,7 +232,10 @@ impl RouterRedbStore {
     ) -> Result<(), NodeCoreError> {
         self.prune_custody_history(now)?;
         let tx = self.db.begin_write().map_err(error)?;
-        self.record_custody_account_in_tx(&tx, anchor, state, is_new, source, now)?;
+        self.record_custody_account_in_tx(
+            &tx,
+            CustodyAccountWrite { anchor, state, is_new, source, now },
+        )?;
         tx.commit().map_err(error)?;
         self.observe_custody_publication_commit();
         Ok(())
@@ -236,12 +246,9 @@ impl RouterRedbStore {
     pub(crate) fn record_custody_account_in_tx(
         &self,
         tx: &redb::WriteTransaction,
-        anchor: &str,
-        state: &CustodyAccountState,
-        is_new: bool,
-        source: IpAddr,
-        now: u64,
+        input: CustodyAccountWrite<'_>,
     ) -> Result<(), NodeCoreError> {
+        let CustodyAccountWrite { anchor, state, is_new, source, now } = input;
         let bytes = serde_json::to_vec(state).map_err(error)?;
         if bytes.len() > 16 * 1024 * 1024 {
             crate::custody_budget_log::refuse(
@@ -291,12 +298,7 @@ impl RouterRedbStore {
             if let Some(previous) = accounts.get(anchor).map_err(error)? {
                 let previous: CustodyAccountState =
                     serde_json::from_slice(previous.value()).map_err(error)?;
-                super::custody_history::retain(
-                    tx,
-                    &previous.publication,
-                    &state.publication,
-                    now,
-                )?;
+                super::custody_history::retain(tx, &previous.publication, &state.publication, now)?;
             }
             accounts.insert(anchor, bytes.as_slice()).map_err(error)?;
         }

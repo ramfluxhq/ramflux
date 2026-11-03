@@ -120,7 +120,7 @@ pub(super) fn retain(
 }
 
 impl RouterRedbStore {
-    pub(super) fn prune_custody_history(&self, now: u64) -> Result<(), NodeCoreError> {
+    pub(crate) fn prune_custody_history(&self, now: u64) -> Result<(), NodeCoreError> {
         let cutoff = format!("{now:020}/~");
         // Inspect the ordered expiry index first; routine publication adds no maintenance write.
         let expired = {
