@@ -116,7 +116,8 @@ non-native dispatch returns typed `native_account_required` before networking or
 persistence. Card 04 refuses non-native manifest/mvp1 prekey publication/fetch/lease with
 the same typed scope outcome. Native accounts using the pre-activation old wire format
 are distinct from non-native identities and remain usable as section 13 specifies.
-No dual production `identity_seed` path remains after activation. All stateful/networked legacy fixtures, including product in-crate behavior tests,
+No dual production `identity_seed` path remains after activation. All stateful/networked
+legacy fixtures, including product in-crate behavior tests,
 convert to born-v3 under the single disposition rule and exhaustive inventories in
 section 13. The SDK `itest-legacy-accounts` feature, its account creators, config
 switch and daemon/CLI entry points are removed in card 03. Only inline legacy bytes
@@ -334,8 +335,11 @@ transaction. In lenient mode this also covers a byte-identical stored old-format
 native Register after current native proof/authority verification: compare the
 qualified branch/epoch and canonical bundle bytes, not the fresh outer proof bytes.
 It returns success with no owner publication charge, prekey/floor write or new
-prekey nonce write. Equal IDs/counters with different bytes, stale or fenced
-authority, and non-native identities never qualify for this no-op. A genuinely changing publication/rotation checks the owner rate/storage
+prekey nonce write. For lenient old-format Register, a verified first registration
+without a stored row is accepted and charged, whereas different canonical bundle
+bytes for a qualified branch with a stored row (including after an epoch change),
+stale/fenced authority and non-native identities are refused. A genuinely changing
+publication/rotation checks the owner rate/storage
 reservation, then atomically admits its fresh request nonce with the state changes.
 Lease/fallback requests retain the durable nonce treatment from section 5.
 Publications accept increasing counters/generations and serials; equal counter plus equal
@@ -749,9 +753,12 @@ helper consumers and 20 flag-string sites rechecked at itest main
 `6ae488e4571d9e5c0c4b660d91bf660a846ef2de`. Product config/creator and test callers
 were rechecked at main `38e41095de34ada4e711390e96a577dbaea717f5`. These read-only
 inventories do not change the branch's runtime baseline or claim a fixture cutover.
+Their boundary is the SDK legacy account/prekey removal and node prekey
+publication/fetch/lease refusal surface, including its build/test/doc selectors;
+they are not an inventory of every historical mvp1 identity-only scenario.
 
 **One disposition rule:** convert every stateful/networked or production-behavior
-legacy fixture listed below to born-v3, preserving its business/security assertions,
+legacy account/prekey fixture listed below to born-v3, preserving its business/security assertions,
 timeouts, budgets and affected realnet gates. Only individual pure offline
 format/proof-negative assertions may retain inline old-format bytes under
 `cfg(test)`; they cannot create an account/prekey actor, call a deleted publish
@@ -811,9 +818,46 @@ where a file uses both mechanisms.
 | `src/tests/mvp_s63_rfd_midflight_crash.rs`, `src/tests/mvp_s64_relay_quic_capacity/daemon.rs`, `src/tests/mvp_s66_object_ipc_reconcile.rs`, `src/tests/mvp_s67_object_ipc_upload_spool.rs`, `src/tests/mvp_s68_object_ipc_download_spool.rs`, `src/tests/mvp_s69_object_ipc_crash_resume.rs` | Converted by 03. These six use target_dir rather than config. Use native_rf_binary or a neutral artifact resolver and remove legacy build/daemon selection; retain the crash, relay-capacity and IPC/spool behavior listed above. |
 
 `src/tests/contact01_contact_resolution.rs` already uses `create_native_account`;
-keep that native fixture. k2b callers of these shared harnesses inherit the native
-replacement and their existing surface assertions. Changes to shared voice/group
-fixtures require their full affected-slice acceptance in 03, not deferral to 05.
+keep that native fixture. k2b's actors call the legacy creator directly; replacing
+its launcher alone does not convert those actors. Card 03 converts both explicitly
+in the table below. Changes to shared voice/group fixtures require their full
+affected-slice acceptance in 03, not deferral to 05.
+
+#### Direct realnet creators and remaining itest bootstrap callers (03)
+
+The five CI slices below require their own native creator conversion in addition
+to the shared launcher change. Card 03 updates both launch and actor/RPC setup,
+using existing native custody Register while 04 is not yet merged; no new lease
+endpoint is a prerequisite. Keep the slice names and their business assertions.
+
+| Itest files / CI slice | Owner and disposition under the single rule |
+| --- | --- |
+| `src/tests/k2b_surface_round_trip.rs`, `src/tests/k2b_surface_round_trip/actors.rs` — k2b | **03: converted.** Replace client_directory_daemon_command and direct account.itest_legacy.create with native daemon/create/attach helpers; preserve human/agent DM, group surfaces and restart assertions. The actors do not inherit conversion from the launcher. |
+| `src/tests/k3b_task_needs_me_approval.rs`, `src/tests/k3b_task_needs_me_approval/actors.rs` — k3b | **03: converted.** Replace launcher, direct creator and its traced account-method classification; preserve task needs-me/approval, actor isolation and reply controls. |
+| `src/tests/mvp_s73_client_read_model.rs`, `src/tests/mvp_s74_event_stream.rs` — s73/s74 | **03: converted.** Replace both launchers and s73's shared create helper, which s74 imports; retain actionable IDs, autonomous sync, stream replay and daemon-restart assertions. |
+| `src/tests/proof01_durable_identity.rs` — proof01 | **03: converted.** Replace the launcher and inline legacy RPC creation; preserve durable native identity/current proof after session-proof expiry. |
+| `src/tests/fixtures_smoke.rs`, `src/tests/identity_sdk_a.rs`, `src/harness/group_sender_keys_d.rs` | **03: converted.** Replace direct initialize_and_publish_prekey_bundle calls with native account/branch/custody setup, preserving smoke, identity SDK and group sender-key assertions. fixtures_smoke must compile and run in the default build as well as the realnet feature build. The fourth itest helper-caller file, src/harness/sdk_daemon_bus_flow.rs, is already assigned above. |
+
+#### Non-native mvp1 HTTP prekey cohort and identity-only boundary
+
+| Itest files / surface | Owner and disposition under the single rule |
+| --- | --- |
+| `src/tests/mvp01_realnet.rs`; `src/harness/mvp1_identity_dm_a.rs`; `src/harness/mvp1_identity_dm_b.rs`; `src/harness/mvp2_friend_group.rs`; `src/harness/mvp4_federation_a.rs`; `src/harness/a2i_a2ui.rs`; `src/tests/mvp8_federation.rs`; `src/tests/mvp9_messages.rs`; `src/tests/mvp10_coverage.rs`; `src/tests/mvp23_realnet.rs`; `src/tests/mvp45_realnet.rs` | **03: convert this eleven-file compose prekey cohort to native fixtures; do not retire it or its compose stack.** Replace non-native identity-plus-mvp1-prekey bootstrap with current native account/branch authority and custody Register. Preserve the DM, federation, friend/group, A2I/A2UI, message, coverage and compose assertions and their existing budgets. **04: owns typed refusal and unchanged-state assertions for the superseded non-native mvp1 prekey publish/fetch/lease operations**, after 03's native fixture cutover/pin; no obsolete positive publish expectation survives as a bypass. |
+
+Non-native `/mvp1/identity/register` **without prekey operations** is outside this
+account/prekey cleanup and remains unchanged in 03/04; it is not a supported
+non-native SDK account-creation or DM-bootstrap escape. This boundary includes
+`src/tests/mvp_s39_gateway_resume.rs`, `src/tests/mvp_s50_cross_gateway.rs`,
+`src/tests/mvp_s51_home_node_migration_forward.rs`,
+`src/tests/mvp_s54_object_v3_runtime.rs`,
+`src/tests/mvp_s64_relay_quic_capacity.rs`,
+`src/harness/mvp6_trust_abuse_a.rs`, `src/harness/mvp6_trust_abuse_b.rs`,
+`src/tests/mvp6_trust_abuse.rs`, `src/harness/mvp7_compliance.rs`,
+`src/tests/mvp7_compliance.rs`, `src/harness/push_registration.rs` and
+`src/harness/rooted_registration.rs`. Only their identity-registration-only use is
+unchanged; any prekey/bootstrap use follows the conversion/refusal rule above.
+The six target_dir callers and the s64 daemon fixture remain explicitly assigned
+as already listed. Card 04 changes prekey refusal, not the identity-register API.
 
 #### Product creator/config surface removal (03)
 
@@ -827,6 +871,7 @@ production builds; it is not a reason to leave them network-selectable in itest.
 | `crates/ramflux-sdk/src/bus/lifecycle.rs`; `crates/ramflux-sdk/src/bus/supervisor.rs`; `crates/ramflux-sdk/src/bus/read_model/capture.rs`; `crates/ramflux-sdk/src/bus/read_model/mod.rs`; `crates/ramflux-sdk/src/bus/account_error_tests.rs` | Remove legacy switch plumbing and adapt account/error/read-model behavior tests to native fixtures. Pure negative request decoding remains only under the rule above. |
 | `apps/rf/Cargo.toml`; `apps/rf/src/cli/account.rs`; `apps/rf/src/cli/daemon.rs`; `apps/rf/src/handlers/account.rs`; `apps/rf/src/handlers/daemon.rs`; `apps/rf/src/handlers/itest_legacy_account.rs`; `apps/rf/src/handlers/mod.rs`; `apps/rf/src/cli/opaque_id_tests.rs` | Remove the forwarded feature, legacy daemon option, itest-legacy-create handler and RPC creator; adapt CLI parser/error controls and preserve native account ceremony/opaque-ID acceptance. |
 | `crates/ramflux-sdk/src/bus/state.rs` !native branch; `crates/ramflux-sdk/src/bus/dispatch/device.rs`; `crates/ramflux-sdk/src/bus/dispatch/identity_authority.rs`; `crates/ramflux-sdk/src/client/identity.rs` | Remove production non-native manifest/publish callers plus create_and_store_prekey_bundle and all initialize_and_publish_prekey_bundle* wrappers after the native fixture conversion. These are distinct from the temporary old-format **native** credential constructors retained OFF until 05. |
+| `crates/ramflux-sdk/src/prekey.rs::sdk_publish_prekey_bundle`; `crates/ramflux-sdk/src/gateway/engine.rs::publish_prekey_bundle`; `crates/ramflux-sdk/src/prelude.rs` sdk_publish_prekey_bundle export | **03: delete with the initialize_and_publish_prekey_bundle* wrappers and adapt their callers.** Remove this low-level HTTP/old GatewayClientFrame::PrekeyPublish send plumbing and export in 03, so no dead helper waits until 05 or fails clippy. The native OFF-path custody Register is distinct and stays usable until 05; node-side old-frame refusal remains 04. |
 
 #### Product test cohorts inherited by 03 and 04
 
@@ -834,7 +879,25 @@ production builds; it is not a reason to leave them network-selectable in itest.
 | --- | --- |
 | `crates/ramflux-sdk/src/client/routed/tests.rs`; `crates/ramflux-sdk/src/client/routed/backup_tests.rs`; `crates/ramflux-sdk/src/client/private_prekeys.rs`; `crates/ramflux-sdk/src/client/identity_authority/tests.rs`; `crates/ramflux-sdk/src/client/identity_authority/test_support.rs`; `crates/ramflux-sdk/src/bus/runtime_tests.rs`; `crates/ramflux-sdk/src/bus/runtime_tests/group_legacy.rs`; `crates/ramflux-sdk/src/bus/receipt_tests/fixture.rs` | **03: converted.** These eight files call initialize_and_publish_prekey_bundle*. Replace their stateful setup with native account/branch fixtures and current custody publication. Shared routed and identity-authority fixture consumers inherit the native setup; keep DM, backup, prekey, authority, group, runtime and receipt assertions. No cfg(test) resurrection of the removed bootstrap helper. |
 | `crates/ramflux-sdk/src/client/identity_authority/proof_lifetime_tests.rs` | **03: convert SDK fixture setup**, including positive publication to the existing native custody Register path, preserving proof lifetime/replay/freshness assertions before 04 is present. **04: owns the publish/refusal assertions** below against that native setup. Pure old-proof format negatives use inline test bytes only. |
-| `crates/ramflux-node-core/src/tests/contact_directory.rs`; `crates/ramflux-node-core/tests/root_authority_regressions.rs`; `crates/ramflux-node-core/tests/root_bound_identity.rs`; `crates/ramflux-sdk/src/client/identity_authority/proof_lifetime_tests.rs` | **04: converted publication cohort.** Replace positive mvp1/legacy-registry publish bootstrap with native custody fixtures/Register or the verified new common transaction as appropriate. Preserve contact-directory, root/current-authority, proof renewal, mismatch and replay oracles. Add non-native/native old-publish refusals with unchanged state through the live handlers; direct legacy publish setup cannot be a workaround. This is the four-file cohort whose old publish path 04 closes. |
+| `crates/ramflux-node-core/src/tests/contact_directory.rs`; `crates/ramflux-node-core/tests/root_authority_regressions.rs`; `crates/ramflux-node-core/tests/root_bound_identity.rs`; `crates/ramflux-sdk/src/client/identity_authority/proof_lifetime_tests.rs` | **04: converted publication cohort.** Replace positive mvp1/legacy-registry publish bootstrap with native custody fixtures/Register or the verified new common transaction as appropriate. Preserve contact-directory, root/current-authority, proof renewal, mismatch and replay oracles. Add non-native/native old-publish refusals with unchanged state through the live handlers; direct legacy publish setup cannot be a workaround. Together with the next two node files, this is the six-file publication/writer cohort owned by 04. |
+| `crates/ramflux-node-core/src/tests/custody_registration.rs` (ordinary-directory native publish case) | **04: converted.** Set up positive native publication via verified custody Register/common transaction; preserve directory, manifest, authority and retained-value assertions. Flip the former ordinary native publish success into H2 refusal with unchanged state, and keep the forged-publish negative. No direct publish_custody_prekey success is used to evade H2. |
+| `crates/ramflux-node-core/src/home_migration_store/tests.rs` (registered source-home fixture) | **04: converted.** Replace the raw record_custody_prekey junk-row marker with a valid verified native Register/common-transaction fixture. Preserve registered/unregistered source-home migration assertions; no unverified writer or test-only raw bootstrap helper remains an alternate entry point. |
+
+#### Build, CI, script, constructor-test and documentation selectors (03)
+
+| Product / itest selector | Owner and disposition |
+| --- | --- |
+| Product `.github/workflows/ci.yml`, SDK itest_legacy test step with --features itest-legacy-accounts; `scripts/check-production-features.py` legacy feature-name check | **03: update in the same feature-removal commit.** Replace the obsolete feature-dependent SDK CI command with native creator/refusal regression coverage; remove the deleted feature from the resolved-feature probe and add a source-absence control for its creator/feature/flag. Preserve the memory-vault, release and production provenance guards and their negative controls; an unknown-feature cargo error is not evidence of a production guard. |
+| `crates/ramflux-sdk/src/bus/metadata/tests.rs`; `crates/ramflux-sdk/src/client/routed/device_revocation_tests.rs` | **03: converted.** Replace LocalBusPersistedAccount::from_create_request setup with native persisted-account/branch fixtures; preserve metadata and current-device revocation assertions. No cfg(test) resurrection of the removed constructor. |
+| `docs/custody_networking.md`, Temporary legacy integration fixtures subsection (reviewed lines 330–340 and its remaining feature/flag/RPC/CLI text) | **03: remove/update with the SDK feature and creator deletion.** Document native fixture setup and the removed legacy opt-in; it cannot wait for 05's broader FS runtime-doc update. No claim that strict FS is active in 03. |
+| Itest `.github/workflows/realnet.yml`, call01-legacy slice's --exact tests::call01_voice::call01_realnet_legacy_voice_round_trip selector | **03: rename alongside the converted voice scenario.** Use a distinct native-fixture scenario/test name and matching exact workflow selector, preserving this scenario's full assertions as well as the existing call01_realnet_voice_round_trip case. Retain the workflow's empty-filter failure guard; neither silently dropping the old scenario nor pointing both entries at the same existing case is conversion. Keep k2b/k3b/s73/s74/proof01 selectors matched to their converted tests in that same itest pin. |
+
+For L1, card 04 copies the explicit section 6 lenient Register cases into row 15's
+test: no stored row accepts a verified first registration and charges it; an
+identical stored row is an uncharged no-op; changed bytes for an existing qualified
+branch row (including an epoch change) refuse without a write. Thus row 15's
+changed-bytes refusal is not applied to a first registration, and section 6's
+later changing-publication path does not silently admit an old-format conflict.
 
 These are card inputs, not a request to rediscover or defer the scope at card start.
 Both product and itest fixture changes need matching pins and their own gates.
