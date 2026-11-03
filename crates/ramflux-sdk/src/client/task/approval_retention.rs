@@ -29,6 +29,11 @@ pub(crate) enum DeliveryReason {
     InvalidDecision,
 }
 #[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct DecisionSigner {
+    pub principal_id: String,
+    pub device_id: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Receipt {
     pub request_id: String,
     pub peer: String,
@@ -36,6 +41,10 @@ pub(crate) struct Receipt {
     pub approval_id: String,
     pub grant_id: String,
     pub approved: bool,
+    // Only the authenticated decision packet supplies this identity. Old receipts
+    // remain unproven, including when their delivery state changes on retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<DecisionSigner>,
     pub fingerprint: String,
     pub expires_at: i64,
     pub updated_at: i64,
@@ -45,7 +54,11 @@ pub(crate) struct Receipt {
 }
 impl Receipt {
     pub(crate) fn row(&self, id: &str) -> Value {
-        json!({"approval_id":format!("task_approval_{id}"),"decision_id":self.approval_id,"grant_id":self.grant_id,"task_binding":self.binding,"status":if self.approved {"approved"}else{"denied"},"delivery_state":self.delivery_state,"reason_code":self.reason_code,"expires_at":self.expires_at})
+        let mut row = json!({"approval_id":format!("task_approval_{id}"),"decision_id":self.approval_id,"grant_id":self.grant_id,"task_binding":self.binding,"status":if self.approved {"approved"}else{"denied"},"delivery_state":self.delivery_state,"reason_code":self.reason_code,"expires_at":self.expires_at});
+        if let Some(signer) = &self.decided_by {
+            row["decided_by"] = json!(signer);
+        }
+        row
     }
 }
 impl RamfluxClient {
@@ -147,6 +160,15 @@ impl RamfluxClient {
             approval_id: packet.request().approval.approval_id.clone(),
             grant_id: packet.request().grant_body.grant_id.clone(),
             approved,
+            decided_by: old.as_ref().map_or_else(
+                || {
+                    Some(DecisionSigner {
+                        principal_id: packet.principal.clone(),
+                        device_id: packet.device.clone(),
+                    })
+                },
+                |receipt| receipt.decided_by.clone(),
+            ),
             fingerprint,
             expires_at: old
                 .as_ref()

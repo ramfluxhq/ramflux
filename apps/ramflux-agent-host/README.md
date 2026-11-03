@@ -249,7 +249,10 @@ then approves or denies its fresh grant. Decide on the **same device that sent t
 message**. A verified different device or a different group member cannot decide this
 PRX turn. The bridge requires rfd's authenticated decision signer principal and device;
 missing provenance, stale verification or a device mismatch returns `approval_unavailable`
-and forwards no human decision. Re-verify changed safety numbers and send a new command
+and forwards no human decision. New approval and denial receipts retain the verified
+packet signer as `decided_by` in `task.get.approval_decisions`. Older receipts without
+that field remain unproven after delivery retries; start a fresh command and grant
+rather than trying to repair their identity metadata. Re-verify changed safety numbers and send a new command
 from the device that will decide. Never alter the checkpoint or substitute a device id.
 The lower of PRX's expiry and `approval_timeout_s` wins; no action defaults to deny
 and produces `approval_timeout`. A late approval never starts a tool.

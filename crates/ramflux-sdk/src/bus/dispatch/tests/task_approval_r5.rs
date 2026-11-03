@@ -602,3 +602,6 @@ mod r7;
 
 #[path = "task_approval_r8.rs"]
 mod r8;
+
+#[path = "task_approval_signer.rs"]
+mod signer;

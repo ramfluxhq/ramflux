@@ -62,6 +62,8 @@ fn a_requesters_second_device_reads_the_remote_approval_and_returns_a_task_bound
     );
     let decision = sibling.decide_task_approval(id, true)?;
     assert_eq!(decision["decision_id"], "approval");
+    assert_eq!(decision["decided_by"]["principal_id"], "human");
+    assert_eq!(decision["decided_by"]["device_id"], "human2-device");
     assert_eq!(sibling.task_remote_approvals()?, Vec::<Value>::new());
     let jobs = sibling.account_db()?.task_record_page::<approval::Job>(
         "task/approval_decision_out/",
@@ -83,6 +85,11 @@ fn a_requesters_second_device_reads_the_remote_approval_and_returns_a_task_bound
         local.accept_task_approval(reply)?;
     }
     assert_eq!(f.human.task_remote_approvals()?, Vec::<Value>::new());
+    assert_eq!(
+        f.human.task_get(Some("thread"), "task")?["approval_decisions"][0]["decided_by"]["device_id"],
+        "human2-device",
+        "receipt identity must name the deciding device rather than the original task actor"
+    );
     let Payload::Decision { grant_signature: Some(signature), request, .. } = &reply.payload else {
         return Err("decision missing".into());
     };
