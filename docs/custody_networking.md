@@ -485,8 +485,7 @@ Enable the independent router administration opt-in first: set
 `RAMFLUX_ROUTER_ADMIN_ENABLED=1` for the demo wrapper, or explicitly select
 `docker-compose.router-admin.yml` with `RAMFLUX_ROUTER_ADMIN_PORT`
 for direct Compose. The federation admin overlay does not publish this port. The router listener
-uses loopback TCP 59488 (`RAMFLUX_ROUTER_ADMIN_PORT` for the demo wrapper;
-`RAMFLUX_ROUTER_ADMIN_PORT` for direct Compose). `DEMO_MESH_PORT` reaches
+uses loopback TCP 59488 (`RAMFLUX_ROUTER_ADMIN_PORT`). `DEMO_MESH_PORT` reaches
 federation and does not serve this router route. The tool
 uses the existing gateway mesh certificate and router admin token. Keep both
 operator-only. This path is not forwarded by the public gateway.
@@ -559,7 +558,10 @@ server's absolute reset time.
 when no binding is selected. An expiry event clears `networking_reason` even
 without another user networking attempt. The account writer checks expiry on its
 ordinary background sync and before commands, projecting that transition before
-a new connection attempt can replace the view.
+a new connection attempt can replace the view. These expiry publications use
+runtime attribution, including retries after publication failure, rather than an
+unrelated command's request id. Failures log one WARN until publication succeeds;
+account commands and background synchronization continue.
 
 The router administration inputs are `RAMFLUX_ROUTER_ADMIN_ENABLED` and
 `RAMFLUX_ROUTER_ADMIN_PORT`. The former remains an independent opt-in. For one

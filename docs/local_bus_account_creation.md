@@ -60,9 +60,14 @@ registration refusal includes the typed custody refusal `code`. The field is nul
 when no typed cause is available and is cleared when networking becomes live.
 
 Subscribe to `account.networking.changed` to observe semantic transitions without
-polling. Its body contains `account_id`, networking `state`, and
-`networking_reason`. Repeated retries with the same state and reason do not emit a
-second event, and no credential or endpoint secret is included.
+polling. Its body contains `account_id`, networking `state`, `node_binding` (an
+opaque node-id/public-key hash, or null), and `networking_reason`. State, cause or
+binding changes and the end of a block emit an event; countdown changes alone and
+repeated blocked retries do not. The derived reason describes the capture time;
+read fresh status for the current remaining delay. Expiry is attributed to the
+runtime, including before an unrelated command. Publication failure warns once
+and leaves commands and background sync running. No credential or endpoint secret
+is included.
 
 `account.create.cancel {}` is idempotent, including after a consumed or failed
 confirmation. Disconnect and daemon shutdown erase pending phrase/word buffers.
