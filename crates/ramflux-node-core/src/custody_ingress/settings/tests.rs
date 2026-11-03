@@ -81,7 +81,15 @@ fn issuance_tuple_ordering_and_fast_bootstrap() -> TestResult {
         .ok_or("accepted unordered tuple")?
         .to_string();
     assert!(invalid.contains("RAMFLUX_CUSTODY_CHALLENGES_PER_PREFIX_PER_MINUTE"));
-    let settings = CustodyIssuanceSettings::new(128, 128, 1024)?;
+    let settings = CustodyIssuanceSettings::from_values(|key| {
+        Ok(match key {
+            "RAMFLUX_CUSTODY_CHALLENGES_PER_IP_PER_MINUTE"
+            | "RAMFLUX_CUSTODY_CHALLENGES_PER_PREFIX_PER_MINUTE" => "128",
+            "RAMFLUX_CUSTODY_CHALLENGES_PER_NODE_PER_MINUTE" => "1024",
+            _ => "",
+        }
+        .to_owned())
+    })?;
     for ip in ["192.0.2.1", "2001:db8:1:2::1"] {
         let tick = std::time::Instant::now();
         let mut source = crate::custody_ingress::CustodySourceBudget::with_settings(settings);
