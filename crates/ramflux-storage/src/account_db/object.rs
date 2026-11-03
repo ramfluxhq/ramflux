@@ -170,7 +170,20 @@ impl AccountDb {
                 Err(error) => return Err(error),
             }
             let record = self.client_record("object", object_id)?;
-            let manifest = record.as_ref().and_then(|value| value["manifest_hash"].as_str());
+            let reference_manifest: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT json_extract(CAST(state_json AS TEXT),'$.reference.manifest_hash')
+                     FROM runtime_actor_state WHERE state_kind=?1",
+                    params![format!("attachment/reference/{object_id}")],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            // Message capture authenticates this reference; display metadata need not carry a hash.
+            let manifest = reference_manifest
+                .as_deref()
+                .or_else(|| record.as_ref().and_then(|value| value["manifest_hash"].as_str()));
             let placeholder = serde_json::json!({
                 "object_id": object_id,
                 "owner": record.as_ref().and_then(|value| value["owner"].as_str()),

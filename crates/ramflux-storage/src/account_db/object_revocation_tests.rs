@@ -40,6 +40,45 @@ impl Fixture {
         })?;
         Ok(())
     }
+
+    fn received_reference(&self, selector: &str, metadata_manifest: Option<&str>) -> TestResult {
+        self.db.send_direct_message("thread", "message", "peer", b"message")?;
+        let reference = json!({
+            "reference":{"object_id":"object","manifest_hash":"manifest","plaintext_hash":"plaintext"}
+        });
+        let mut metadata = json!({"object_id":selector,"owner":"peer","message_id":"message"});
+        if let Some(manifest) = metadata_manifest {
+            metadata["manifest_hash"] = json!(manifest);
+        }
+        self.db.register_object_reference(&crate::ObjectReferenceOwner {
+            reference_hash: "authenticated-reference",
+            wire_id: "object",
+            manifest_hash: "manifest",
+            selector,
+            message_id: "message",
+            reference: &reference,
+            metadata: &metadata,
+        })?;
+        self.db.persist_actor_state(&format!("attachment/reference/{selector}"), &reference)?;
+        self.db.persist_client_record("object", selector, &metadata)?;
+        Ok(())
+    }
+
+    fn legacy_placeholder(&self) -> TestResult {
+        let body: Vec<u8> = self.db.connection.query_row(
+            "SELECT object_body FROM object_index WHERE object_id='object'",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut body: Value = serde_json::from_slice(&body)?;
+        body["revocation"]["manifest_hash"] = Value::Null;
+        self.db.connection.execute(
+            "UPDATE object_index SET manifest_hash=?1,chunk_manifest_hash=?1,object_body=?2
+             WHERE object_id='object'",
+            rusqlite::params![&[0_u8; 32][..], serde_json::to_vec(&body)?],
+        )?;
+        Ok(())
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -155,6 +194,10 @@ fn backup_placeholder_roundtrip(known_manifest: bool) -> TestResult {
         "reference":{"object_id":"object","manifest_hash":"manifest","plaintext_hash":"plaintext"}
     }))?;
     local.db.set_object_tombstoned_with_revocation("object", Some("owner"), Some("wire"), 10)?;
+    if !known_manifest {
+        // Preserve coverage of archives written before authenticated manifest binding.
+        local.legacy_placeholder()?;
+    }
     assert_eq!(local.db.backup_missing_selectors()?, Vec::<String>::new());
     let old_path = old.root.join("old.db");
     let archive = old.db.write_backup_snapshot(&old_path)?;
@@ -186,6 +229,74 @@ fn backup_placeholder_roundtrip(known_manifest: bool) -> TestResult {
         |row| row.get::<_, bool>(0)
     )?);
     assert_eq!(roundtrip.verify_attachments(|_, _| Ok(()))?.missing, 0);
+    Ok(())
+}
+
+// Mutation: replace the authenticated reference manifest with the old zero-byte fallback.
+#[test]
+fn revocation_placeholder_is_erased_with_its_last_message() -> TestResult {
+    for selector in ["object", "alias"] {
+        for metadata_manifest in [None, Some("stale-display-manifest")] {
+            let f = Fixture::new()?;
+            f.received_reference(selector, metadata_manifest)?;
+            f.db.set_object_tombstoned_with_revocation(selector, Some("peer"), Some("revoke"), 10)?;
+            assert!(f.db.object_is_tombstoned(selector)?);
+            f.db.delete_direct_message("thread", "message", "local", "delete")?;
+            assert_eq!(
+                f.db.connection.query_row(
+                    "SELECT COUNT(*) FROM object_index WHERE object_id=?1",
+                    rusqlite::params![selector],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                0,
+                "last-message erasure must remove revocation provenance: {selector}, metadata={metadata_manifest:?}"
+            );
+            assert!(matches!(
+                f.db.check_object_access(selector),
+                Err(crate::StorageError::ObjectErased)
+            ));
+            let archive = f.db.write_backup_snapshot(&f.root.join("after-erasure.db"))?;
+            assert_eq!(archive.counts.attachments, 0, "the erased fence must not enter backups");
+        }
+    }
+    Ok(())
+}
+
+// Mutation: remove the source-placeholder exemption from backup manifest conflict checking.
+#[test]
+fn backup_revocation_placeholder_restores_onto_live_object() -> TestResult {
+    for (legacy, current_newer) in [(false, false), (true, false), (true, true)] {
+        let incoming = Fixture::new()?;
+        incoming.received_reference("object", None)?;
+        incoming.db.set_object_tombstoned_with_revocation(
+            "object",
+            Some("peer"),
+            Some("revoke"),
+            10,
+        )?;
+        if legacy {
+            incoming.legacy_placeholder()?;
+        }
+        let incoming_path = incoming.root.join("incoming.db");
+        let archive = incoming.db.write_backup_snapshot(&incoming_path)?;
+        let current = Fixture::new()?;
+        current.write_live()?;
+        if !current_newer {
+            current.db.connection.execute("UPDATE object_index SET updated_at=1", [])?;
+        }
+        let current_path = current.root.join("current.db");
+        let snapshot = current.db.write_backup_snapshot(&current_path)?;
+        let mut restored = BackupDatabase::open(&current_path, &snapshot.key)?;
+        restored.merge_backup(&incoming_path, &archive.key, || Ok(()))?;
+        let row: (bool, String, String) = restored.db.query_row(
+            "SELECT tombstoned,CAST(manifest_hash AS TEXT),CAST(chunk_manifest_hash AS TEXT)
+             FROM object_index WHERE object_id='object'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(row, (!current_newer, "manifest".into(), "manifest".into()));
+        assert_eq!(restored.verify_attachments(|_, _| Ok(()))?.missing, 0);
+    }
     Ok(())
 }
 

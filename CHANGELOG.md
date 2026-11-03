@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist sender revocations before the first attachment import; keep deletion fences through
   late writes and backup restore, hide revoked attachments, and report nonretryable
   `attachment deleted` fetch failures. Add `rf object fetch` for explicit resumable fetches.
+  Bind placeholder manifests to authenticated attachment references so last-message erasure
+  removes revocation provenance, and restore payload-free legacy fences over live objects.
 
 - Upgrade SHA-2, HMAC, HKDF, and X25519 dependencies without changing stored or wire formats.
 - Prepare task courier routes outside the account synchronization loop, isolate

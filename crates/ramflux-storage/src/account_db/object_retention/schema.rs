@@ -100,6 +100,8 @@ pub(super) fn payload_cleanup(db: &Connection) -> rusqlite::Result<String> {
         "DELETE FROM object_tombstone WHERE target_kind='object' AND target_id IN ({wires});"
     )
     .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    // Private selectors can own payload-free revocation rows separately from the wire id.
+    body.push_str("DELETE FROM object_index WHERE object_id IN (SELECT selector FROM object_reference_erasure_work) AND tombstoned=1 AND chunk_count=0 AND length(ciphertext)=0 AND EXISTS(SELECT 1 FROM object_reference_erasure_work r JOIN object_erasure_work w USING(commitment) WHERE r.selector=object_index.object_id AND w.manifest_hash=CAST(object_index.manifest_hash AS TEXT));");
     body.push_str("DELETE FROM object_index WHERE object_id IN (SELECT wire_id FROM object_erasure_work) AND EXISTS(SELECT 1 FROM object_erasure_work w WHERE w.wire_id=object_index.object_id AND w.manifest_hash=CAST(object_index.manifest_hash AS TEXT)); DELETE FROM object_retention_payload WHERE commitment IN (SELECT commitment FROM object_erasure_work); DELETE FROM object_erasure_work;");
     Ok(body)
 }

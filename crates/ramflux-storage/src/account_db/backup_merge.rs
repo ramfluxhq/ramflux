@@ -354,7 +354,7 @@ impl BackupDatabase {
             })
             .collect::<Vec<_>>()
             .join(",");
-        let mut query=self.db.prepare("SELECT rowid,object_id,updated_at,length(ciphertext),backup_excluded,tombstoned,CAST(manifest_hash AS TEXT) FROM incoming.object_index o WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='object_index' AND e.row_id=o.rowid) ORDER BY rowid")?;
+        let mut query=self.db.prepare("SELECT rowid,object_id,updated_at,length(ciphertext),backup_excluded,tombstoned,CAST(manifest_hash AS TEXT),chunk_count FROM incoming.object_index o WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='object_index' AND e.row_id=o.rowid) ORDER BY rowid")?;
         let mut rows = query.query([])?;
         while let Some(row) = rows.next()? {
             progress()?;
@@ -365,6 +365,10 @@ impl BackupDatabase {
             let excluded: bool = row.get(4)?;
             let source_deleted: bool = row.get(5)?;
             let source_manifest: String = row.get(6)?;
+            let source_placeholder = source_deleted
+                && bytes == 0
+                && row.get::<_, i64>(7)? == 0
+                && source_manifest.as_bytes() == [0_u8; 32];
             let current_manifest: Option<String> = self
                 .db
                 .query_row(
@@ -383,6 +387,7 @@ impl BackupDatabase {
                 .optional()?;
             // A durable revocation can deliberately have an unknown (zero) manifest.
             if !current.is_some_and(|(_, tombstoned)| tombstoned)
+                && !source_placeholder
                 && current_manifest.as_deref().is_some_and(|manifest| manifest != source_manifest)
             {
                 return Err(StorageError::ObjectIdentityConflict);
@@ -416,6 +421,13 @@ impl BackupDatabase {
                     }
                     target.write_all(&buffer[..count])?;
                 }
+            }
+            // A legacy payload-free fence can inherit the live identity it revokes.
+            if source_placeholder && let Some(manifest) = current_manifest {
+                self.db.execute(
+                    "UPDATE object_index SET manifest_hash=?1,chunk_manifest_hash=?1 WHERE rowid=?2",
+                    params![manifest.as_bytes(), target_row],
+                )?;
             }
             if !excluded {
                 report.restored.attachments += 1;

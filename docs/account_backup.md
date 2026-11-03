@@ -330,7 +330,13 @@ Pre-import attachment revocations are exported as tombstone placeholder rows, in
 owner and revocation provenance. They have zero chunks and no payload or content key, so payload
 verification and missing-download preparation skip them. Export keeps the fence, and merge never
 replaces a current tombstone with an archived live object, even if its timestamp is newer.
-This also applies when the manifest was unknown at revocation and the placeholder contains
-32 zero bytes. Retention maintenance preserves the placeholder while its private attachment
-reference remains; explicit message erasure still removes owned payloads and installs the
-stronger portable erasure fence. `ObjectErased` remains distinct from `attachment deleted`.
+The placeholder manifest comes from the authenticated attachment reference, ahead of cached
+display metadata. Explicit last-message erasure therefore removes the placeholder and its
+owner/revocation provenance, including rows stored under private selectors; later exports contain no attachment row for that erased payload.
+Older payload-free placeholders with a 32-zero-byte manifest do not conflict with a live
+object during restore. Normal timestamp arbitration still applies; a restored legacy fence
+inherits the current object's known manifest. Live payload manifest conflicts remain errors.
+Retention maintenance preserves a placeholder while its private attachment reference remains;
+explicit message erasure installs the stronger portable erasure fence. `ObjectErased` remains
+distinct from `attachment deleted`. Sender revocations without a known, matching-owner client
+reference remain refused.
