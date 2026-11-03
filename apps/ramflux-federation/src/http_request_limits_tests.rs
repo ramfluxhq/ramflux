@@ -2,15 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! Anonymous request framing and slow-client bounds on the real public worker path.
-use crate::public_http::{
-    FederationPublicHttpContext, handle_public_connection_with_limits, spawn_public_connection,
-};
+use crate::public_http::{FederationPublicHttpContext, handle_public_connection_with_limits};
 use crate::public_source_limits::{PublicSourceLimitConfig, PublicSourceLimits};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -82,7 +80,7 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
         discovery: admin.discovery.clone(),
     };
     let listener = TcpListener::bind("127.0.0.1:0")?;
-    let active = Arc::new(AtomicUsize::new(0));
+    let active = ramflux_node_core::ConnectionSet::new(64);
     let limits = ramflux_node_core::HttpRequestLimits {
         request_timeout: Duration::from_secs(2),
         ..crate::http_limits::defaults(true)
@@ -100,11 +98,10 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
         }
         let (stream, _) = listener.accept()?;
         workers.push(
-            spawn_public_connection(
+            crate::http_connections::spawn_public_test_connection(
                 stream,
                 context.clone(),
                 active.clone(),
-                64,
                 limits,
                 &source_limits,
             )
@@ -137,17 +134,22 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
     writer.join().map_err(|_| "trickle writer panicked")?;
     joiner.join().map_err(|_| "trickle joiner panicked")?;
     assert_eq!(done.ok(), Some(true), "tricklers must time out while they are still sending");
-    assert_eq!(active.load(Ordering::Acquire), 0);
+    assert_eq!(active.len(), 0);
     let mut normal = TcpStream::connect(listener.local_addr()?)?;
     normal.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
-    let worker =
-        spawn_public_connection(stream, context, active.clone(), 64, limits, &source_limits)
-            .ok_or("normal request refused after deadline")?;
+    let worker = crate::http_connections::spawn_public_test_connection(
+        stream,
+        context,
+        active.clone(),
+        limits,
+        &source_limits,
+    )
+    .ok_or("normal request refused after deadline")?;
     normal.write_all(b"GET /healthz HTTP/1.1\r\n\r\n")?;
     let mut response = String::new();
     normal.read_to_string(&mut response)?;
-    worker.join().map_err(|_| "normal worker panicked")?;
+    worker.join()?;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     drop(admin);
     std::fs::remove_dir_all(root)?;

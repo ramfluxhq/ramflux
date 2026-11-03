@@ -106,7 +106,7 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
     tcp_server_config: rustls::ServerConfig,
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
-    std::thread::Builder::new().name("ramflux-gateway-quic".to_owned()).spawn(move || {
+    ramflux_node_core::spawn_service_worker("ramflux-gateway-quic", move |shutdown| {
         let worker_threads = gateway_quic_worker_threads();
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         let _threads = ramflux_node_core::track_service_runtime(&mut builder);
@@ -122,6 +122,7 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
             let quic_task = tokio::spawn(run_gateway_quic(addr, server_config, context.clone()));
             let tcp_task = tokio::spawn(run_gateway_tcp_tls(tcp_addr, tcp_server_config, context));
             tokio::select! {
+                () = shutdown.cancelled() => {},
                 result = quic_task => match result {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => tracing::error!(%error, "gateway QUIC listener stopped"),
@@ -172,8 +173,11 @@ fn spawn_gateway_tcp_tls_thread(
             }
         };
         runtime.block_on(async move {
-            if let Err(error) = run_gateway_tcp_tls(tcp_addr, tcp_server_config, context).await {
-                tracing::error!(%error, "gateway TCP-TLS listener stopped");
+            tokio::select! {
+                () = shutdown.cancelled() => {},
+                result = run_gateway_tcp_tls(tcp_addr, tcp_server_config, context) => {
+                    if let Err(error) = result { tracing::error!(%error, "gateway TCP-TLS listener stopped"); }
+                }
             }
         });
         ramflux_node_core::drain_service_runtime(runtime);
@@ -226,8 +230,10 @@ async fn serve_gateway_quic_endpoint(
     let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     let (events, mut failures) = tokio::sync::mpsc::channel::<Option<std::io::Error>>(64);
     let auth_timeout = crate::session::GATEWAY_FIRST_FRAME_TIMEOUT;
+    let shutdown = ramflux_node_core::service_shutdown_token();
     loop {
         let connecting = tokio::select! {
+            () = shutdown.cancelled() => return Ok(()),
             incoming=endpoint.accept()=>match incoming {Some(incoming)=>incoming,None=>return Ok(())},
             event=failures.recv()=>{
                 if let Some(Some(error))=event {tokio::time::sleep(backoff.failure(&error)).await;}else{backoff.success();}
@@ -278,7 +284,12 @@ pub(crate) async fn serve_gateway_tcp_listener(
     tracing::info!(addr = %listener.local_addr()?, "gateway TCP-TLS session surface listening");
     let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     loop {
-        let (stream, remote_addr) = match listener.accept().await {
+        let shutdown = ramflux_node_core::service_shutdown_token();
+        let accepted = tokio::select! {
+            () = shutdown.cancelled() => return Ok(()),
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, remote_addr) = match accepted {
             Ok(accepted) => {
                 backoff.success();
                 accepted
@@ -333,7 +344,6 @@ pub(crate) async fn serve_gateway_tcp_listener(
             }
         });
     }
-    Ok(())
 }
 
 // T22-A1 / RQ-04: v2 shared-HMAC relay service-key loading, compiled only under `itest-local-mint`.
@@ -394,13 +404,11 @@ fn spawn_gateway_forward_mesh_thread(
     tls: ramflux_transport::MeshTlsConfig,
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
-    std::thread::Builder::new().name("ramflux-gateway-forward-mesh".to_owned()).spawn(
-        move || {
-            if let Err(error) = run_gateway_forward_mesh_listener(&listen_addr, &tls, context) {
-                tracing::error!(%error, "gateway forward mesh listener stopped");
-            }
-        },
-    )?;
+    ramflux_node_core::spawn_service_worker("ramflux-gateway-forward-mesh", move |_| {
+        if let Err(error) = run_gateway_forward_mesh_listener(&listen_addr, &tls, context) {
+            tracing::error!(%error, "gateway forward mesh listener stopped");
+        }
+    })?;
     Ok(())
 }
 
@@ -422,7 +430,12 @@ fn run_gateway_forward_mesh_listener(
         let local_addr = server.local_addr()?;
         tracing::info!(addr = %local_addr, "gateway forward mesh surface listening");
         loop {
-            let connection = match server.accept_connection().await {
+            let shutdown = ramflux_node_core::service_shutdown_token();
+            let accepted = tokio::select! {
+                () = shutdown.cancelled() => break,
+                accepted = server.accept_connection() => accepted,
+            };
+            let connection = match accepted {
                 Ok(connection) => connection,
                 Err(error) => {
                     tracing::warn!(%error, "gateway forward mesh connection rejected");
