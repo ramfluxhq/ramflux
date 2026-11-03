@@ -452,16 +452,6 @@ pub(super) fn persist(
     pins.observe(&verified)?;
     pins.discard_retained_records();
     let dir = genesis::reserve_account(root, &input.local_account_id, &record.body.account_anchor)?;
-    #[cfg(test)]
-    race_hooks::run(race_hooks::Stage::AfterReservation, root, &input.local_account_id)?;
-    genesis::require_owned_reservation(
-        root,
-        &input.local_account_id,
-        &record.body.account_anchor,
-        &dir,
-    )?;
-    #[cfg(test)]
-    race_hooks::run(race_hooks::Stage::AfterReservationCheck, root, &input.local_account_id)?;
     let reference = ramflux_protocol::hash_base64url(
         "ramflux.local.custody_vault_reference.v1",
         &[

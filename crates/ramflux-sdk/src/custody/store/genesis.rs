@@ -33,6 +33,11 @@ pub(super) fn reserve_account(root: &Path, id: &str, anchor: &str) -> Result<Pat
             error => Err(error.into()),
         };
     }
+    #[cfg(test)]
+    super::race_hooks::run(super::race_hooks::Stage::AfterReservation, root, id)?;
+    require_owned_reservation(root, id, anchor, &dir)?;
+    #[cfg(test)]
+    super::race_hooks::run(super::race_hooks::Stage::AfterReservationCheck, root, id)?;
     Ok(dir)
 }
 
