@@ -55,8 +55,6 @@ async fn run_with_receive_clock(
     receive_now: impl FnOnce() -> i64,
 ) -> Result<usize, SdkError> {
     let deadline = tokio::time::Instant::now() + super::courier_cycle::LIMIT;
-    // Service critical couriers before receive or any lower-priority network work can use the cycle.
-    let mut priority_sent = super::courier_cycle::priority(account).await;
     account.client.account_db()?.expire_backup_pairs(now_unix_timestamp())?;
     if let Err(error) = account.client.account_db().and_then(|db| {
         db.retain_delivery_receipts(now_unix_timestamp(), 128).map_err(SdkError::from)
@@ -65,6 +63,8 @@ async fn run_with_receive_clock(
     }
     account.client.finish_pair_retirement()?;
     super::dispatch::call::expire_due(account)?;
+    // Preserve retirement and expiry preconditions before servicing any network courier.
+    let mut priority_sent = super::courier_cycle::priority(account).await;
     let mut engine = account.take_live_engine().await?;
     let result = receive(account, &mut engine, receive_now()).await;
     account.put_engine(engine);
