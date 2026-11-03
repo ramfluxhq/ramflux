@@ -85,49 +85,67 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stalled_forward_returns_typed_timeout_without_blocking_runtime_or_leaking_slot()
     -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicBool, Ordering};
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let target = route(format!("http://{}", listener.local_addr()?));
+        let (arrived, mut observed) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let guard_expired = Arc::new(AtomicBool::new(false));
+        let server_guard = Arc::clone(&guard_expired);
         let server = std::thread::spawn(move || -> std::io::Result<()> {
             let (mut socket, _) = listener.accept()?;
-            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
             let mut buffer = [0; 4096];
             let _ = socket.read(&mut buffer)?;
-            // Longer than both the caller deadline and the permit-release assertion.
-            std::thread::sleep(Duration::from_millis(800));
+            let _ = arrived.send(());
+            // A release barrier keeps the peer stalled. This wall guard only bounds
+            // cleanup if the HTTP deadline is broken; it must not win in a passing test.
+            if matches!(
+                released.recv_timeout(Duration::from_secs(5)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                server_guard.store(true, Ordering::SeqCst);
+            }
             let _ = socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n");
             Ok(())
         });
         let capacity = Arc::new(Semaphore::new(1));
         let started = tokio::time::Instant::now();
-        let mut heartbeat = false;
-        let (result, ()) = tokio::join!(
-            forward_until(
-                target,
-                envelope()?,
-                started + Duration::from_millis(100),
-                capacity.clone()
-            ),
-            async {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                heartbeat = true;
-            },
-        );
+        let deadline = started + Duration::from_secs(1);
+        let task = tokio::spawn(forward_until(target, envelope()?, deadline, capacity.clone()));
+        let guard = std::time::Instant::now();
+        while observed.try_recv().is_err() {
+            assert!(!task.is_finished(), "the forward ended before entering its held HTTP request");
+            assert!(guard.elapsed() < Duration::from_secs(10), "HTTP barrier not reached");
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        let heartbeat = tokio::spawn(async {
+            tokio::task::yield_now().await;
+            true
+        });
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let result = task.await?;
         assert!(matches!(result, Err(SdkError::TaskDeliveryTimeout)), "{result:?}");
-        assert!(heartbeat && started.elapsed() < Duration::from_millis(500));
-        tokio::time::timeout(Duration::from_millis(250), async {
-            while capacity.available_permits() != 1 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .map_err(|_| "deadline did not release the worker slot")?;
+        assert!(heartbeat.await?);
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        // No paused-clock timeout here: the real socket's deadline must release the
+        // permit while the peer is still held. A broken deadline trips the server guard.
+        let permit = capacity.clone().acquire_owned().await?;
+        let released_by_deadline = !guard_expired.load(Ordering::SeqCst);
+        drop(permit);
+        let _ = release.send(());
         tokio::task::spawn_blocking(move || {
             server.join().map_err(|_| std::io::Error::other("stub panicked"))?
         })
         .await??;
+        assert!(
+            released_by_deadline,
+            "the HTTP deadline must release its slot before the peer guard"
+        );
         Ok(())
     }
 

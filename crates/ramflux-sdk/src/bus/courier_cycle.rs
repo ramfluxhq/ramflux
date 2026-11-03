@@ -6,8 +6,12 @@
 use crate::prelude::*;
 
 pub(super) const LIMIT: Duration = Duration::from_secs(20);
-// Five seconds for actor preparation, one for submit, and one for local bookkeeping.
+// Reserve five seconds for actor-side authority/sealing, one for submit, and one
+// for local bookkeeping. Courier-worker manifest preparation is outside this budget.
 const TASK_MINIMUM: Duration = Duration::from_secs(7);
+
+pub(super) const PRIORITY_ALLOWANCE: Duration =
+    Duration::from_secs(4).saturating_add(super::task_delivery::SUBMIT_ALLOWANCE);
 
 pub(super) trait Couriers {
     async fn priority(&mut self);
@@ -53,6 +57,9 @@ pub(super) async fn priority(account: &mut LocalBusAccountState) -> usize {
 }
 
 trait PriorityOperation {
+    fn allowance(&self) -> Duration {
+        Duration::from_secs(4)
+    }
     async fn run(&self, account: &mut LocalBusAccountState) -> Result<usize, SdkError>;
 }
 
@@ -61,6 +68,12 @@ enum Priority {
     Call,
 }
 impl PriorityOperation for Priority {
+    fn allowance(&self) -> Duration {
+        match self {
+            Self::Receipt => Duration::from_secs(4),
+            Self::Call => super::task_delivery::SUBMIT_ALLOWANCE,
+        }
+    }
     async fn run(&self, account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
         match self {
             Self::Receipt => super::delivery_receipts::flush(account).await,
@@ -75,7 +88,7 @@ async fn priority_step(
     operation: impl PriorityOperation,
 ) -> usize {
     let resume = super::gateway_resume::Snapshot::capture(account);
-    let result = tokio::time::timeout(Duration::from_secs(4), operation.run(account)).await;
+    let result = tokio::time::timeout(operation.allowance(), operation.run(account)).await;
     match result {
         Ok(Ok(n)) => n,
         Ok(Err(error)) => {

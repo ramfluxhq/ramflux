@@ -108,16 +108,25 @@ cleanup and new-request admission.
 
 Task preparation workers remain separate from the account actor. Each result pass
 has a 20-second active actor budget: receipt and call couriers run first, with up
-to four seconds each. Every task application charges its complete elapsed time,
+to four seconds for receipts and fifteen seconds for call signaling (matching
+its submit allowance). Every task application charges its complete elapsed time,
 including submits and failures. Another task starts only with seven seconds left
-(five for preparation, one for submit and one for local bookkeeping). Budget
+(five for actor-side authority/sealing, one for submit and one for local bookkeeping).
+Manifest preparation in courier workers is outside that active actor budget. Budget
 exhaustion leaves the queued row, attempts and backoff unchanged for the next pass.
 Background preparation does not own the account or a gateway session.
 
 The periodic 20-second sync cycle also services receipts and calls before receive
 and lower-priority transfers. Lower-priority network couriers need at least one
 second remaining before starting. Newly received receipts can still be sent in
-the same cycle when eight seconds remain for another priority pass. A timed-out
+the same cycle when nineteen seconds remain for another complete priority pass.
+Explicit `message.receive` and `group.receive` use this path too: priority work
+can add up to nineteen seconds before inbox receive begins. Each priority pass
+scans at most 256 pending receipt keys and loads those rows; a second pass can
+repeat that local scan when the full allowance remains. Both priority passes
+share the same twenty-second accounting window, rather than adding independent
+allowances. The background account loop has an outer twenty-second timeout;
+explicit receive retains the existing timeouts of its network steps. A timed-out
 priority operation retains pending work and checkpoints the gateway resume state
 before reconnecting; it never clears a pending call merely because time ran out.
 Sibling/contact discovery remains in the background account loop; explicit receive

@@ -3,6 +3,7 @@
 
 //! Ordinary gateway submission and bounded executor-confirmation retries.
 use crate::prelude::*;
+pub(super) const SUBMIT_ALLOWANCE: Duration = Duration::from_secs(15);
 pub(super) struct Destination {
     pub route: LocalBusFederationRoute,
     pub conversation_id: String,
@@ -18,7 +19,7 @@ pub(super) async fn submit_all(
     account: &mut LocalBusAccountState,
     deliveries: Vec<Delivery>,
 ) -> Result<usize, SdkError> {
-    submit_until(account, deliveries, tokio::time::Instant::now() + Duration::from_secs(15)).await
+    submit_until(account, deliveries, tokio::time::Instant::now() + SUBMIT_ALLOWANCE).await
 }
 pub(super) async fn submit_until(
     account: &mut LocalBusAccountState,
@@ -51,13 +52,21 @@ async fn submit(
     drop(resume);
     let result = if let Some(destination) = &delivery.federation {
         match federated_envelope(&engine, delivery, destination) {
-            Ok(envelope) => RamfluxClient::forward_task_envelope_until(
-                destination.route.clone(),
-                envelope,
-                deadline,
-            )
-            .await
-            .map(|_| ()),
+            Ok(envelope) => {
+                tracing::info!(
+                    route_decision = "remote_federation_forward",
+                    source_node_id = %destination.route.source_node_id,
+                    target_node_id = %destination.route.target_node_id,
+                    "forwarding task control to federation"
+                );
+                RamfluxClient::forward_task_envelope_until(
+                    destination.route.clone(),
+                    envelope,
+                    deadline,
+                )
+                .await
+                .map(|_| ())
+            }
             Err(error) => Err(error),
         }
     } else if let Ok(result) =
@@ -147,18 +156,22 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn federated_submit_respects_the_shared_deadline_and_returns_the_actor_engine()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let url = format!("http://{}", listener.local_addr()?);
+        let (arrived, mut observed) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || -> std::io::Result<()> {
             let (mut socket, _) = listener.accept()?;
             socket.set_read_timeout(Some(Duration::from_secs(2)))?;
             let mut buffer = [0; 4096];
             let _ = socket.read(&mut buffer)?;
-            std::thread::sleep(Duration::from_millis(600));
+            let _ = arrived.send(());
+            // Release-controlled peer; this generous wall guard only bounds cleanup.
+            let _ = released.recv_timeout(Duration::from_secs(5));
             let _ = socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n");
             Ok(())
         });
@@ -203,14 +216,32 @@ mod tests {
             recipient_root: "remote-root".into(),
         };
         let started = tokio::time::Instant::now();
-        let result = submit_until(
-            &mut account,
-            vec![Delivery { envelope, federation: Some(destination) }],
-            started + Duration::from_millis(100),
-        )
-        .await;
+        let envelope = Delivery { envelope, federation: Some(destination) };
+        let (result, account) = LocalSet::new()
+            .run_until(async move {
+                let task = tokio::task::spawn_local(async move {
+                    let result = submit_until(
+                        &mut account,
+                        vec![envelope],
+                        started + Duration::from_secs(1),
+                    )
+                    .await;
+                    (result, account)
+                });
+                let guard = std::time::Instant::now();
+                while observed.try_recv().is_err() {
+                    assert!(!task.is_finished(), "submit ended before the HTTP barrier");
+                    assert!(guard.elapsed() < Duration::from_secs(10), "HTTP barrier not reached");
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(started.elapsed(), Duration::ZERO);
+                tokio::time::advance(Duration::from_secs(1)).await;
+                task.await
+            })
+            .await?;
+        let _ = release.send(());
         assert!(matches!(result, Err(SdkError::TaskDeliveryTimeout)), "{result:?}");
-        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
         assert!(
             account.has_pooled_engine(),
             "HTTP timeout must not discard the unrelated gateway session"

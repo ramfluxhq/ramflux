@@ -11,6 +11,19 @@ use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub(super) type Case<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[derive(Clone)]
+pub(super) struct Hold {
+    pub entered: tokio::sync::mpsc::UnboundedSender<()>,
+    pub release: Arc<tokio::sync::Notify>,
+}
+impl Hold {
+    async fn wait(&self) {
+        let released = self.release.notified();
+        let _ = self.entered.send(());
+        released.await;
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Gateway {
     pub sessions: BTreeMap<String, usize>,
@@ -19,6 +32,19 @@ pub(super) struct Gateway {
     pub acked: BTreeSet<String>,
     pub manifests: BTreeMap<String, Value>,
     pub protocol_errors: Vec<String>,
+    pub submit_hold: Option<Hold>,
+    pub receipt_bypass: bool,
+    pub resume_hold: Option<Hold>,
+    pub manifest_requests: Vec<String>,
+}
+
+impl Gateway {
+    fn manifest_response(&mut self, path: &str) -> Value {
+        let commitment = path.strip_prefix("/mvp1/device-manifest/").unwrap_or("");
+        self.manifest_requests.push(commitment.into());
+        let body = self.manifests.get(commitment).cloned().unwrap_or(Value::Null);
+        json!({"status":if body.is_null(){404}else{200},"body":body})
+    }
 }
 
 pub(super) struct Fixture {
@@ -210,15 +236,7 @@ async fn serve(
         stream.read_exact(&mut bytes).await?;
         let value: Value = serde_json::from_slice(&bytes)?;
         let response = if let Some(path) = value["path"].as_str() {
-            let commitment = path.strip_prefix("/mvp1/device-manifest/").unwrap_or("");
-            let body = shared
-                .lock()
-                .map_err(|_| "gateway")?
-                .manifests
-                .get(commitment)
-                .cloned()
-                .unwrap_or(Value::Null);
-            json!({"status":if body.is_null(){404}else{200},"body":body})
+            shared.lock().map_err(|_| "gateway")?.manifest_response(path)
         } else {
             let frame: GatewayClientFrame = serde_json::from_value(value)?;
             let response = match frame {
@@ -242,6 +260,10 @@ async fn serve(
                 },
                 GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
                 GatewayClientFrame::Resume { .. } => {
+                    let hold = shared.lock().map_err(|_| "gateway")?.resume_hold.take();
+                    if let Some(hold) = hold {
+                        hold.wait().await;
+                    }
                     let gateway = shared.lock().map_err(|_| "gateway")?;
                     GatewayServerFrame::Resume {
                         entries: gateway
@@ -253,6 +275,19 @@ async fn serve(
                     }
                 }
                 GatewayClientFrame::Submit { submit } => {
+                    let hold = {
+                        let gateway = shared.lock().map_err(|_| "gateway")?;
+                        if gateway.receipt_bypass
+                            && submit.envelope.envelope_id.starts_with("receipt_evt_")
+                        {
+                            None
+                        } else {
+                            gateway.submit_hold.clone()
+                        }
+                    };
+                    if let Some(hold) = hold {
+                        hold.wait().await;
+                    }
                     shared.lock().map_err(|_| "gateway")?.sent.push(submit.envelope.clone());
                     GatewayServerFrame::Deliver {
                         entry: GatewayInboxEntry {
