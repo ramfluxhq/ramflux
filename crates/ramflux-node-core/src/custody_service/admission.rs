@@ -175,16 +175,37 @@ impl CustodyService {
         // A hinted refusal is a response frame, but is never successful authentication.
         let result = if let Some(permit) = scope.permit {
             let principal = attempt.proof.body.device_ref.account_anchor.clone();
-            match permit
-                .try_grant(&principal, || self.finish_admitted_proof(scope, attempt, possession))
-            {
-                Ok(result) => result,
-                Err(refusal) => return Ok(refusal.into_frame()),
-            }
+            self.finish_listener_grant(permit, &principal, || {
+                self.finish_admitted_proof(scope, attempt, possession)
+            })
         } else {
             self.finish_admitted_proof(scope, attempt, possession)
         };
         result.or_else(super::ProofFailure::response)
+    }
+    fn finish_listener_grant(
+        &self,
+        permit: &crate::CustodyIngressPermit,
+        principal: &str,
+        grant: impl FnOnce() -> Result<CustodyServerFrame, super::ProofFailure>,
+    ) -> Result<CustodyServerFrame, super::ProofFailure> {
+        let mut opened = None;
+        match permit.try_grant(principal, || {
+            let result = grant();
+            if let Ok(CustodyServerFrame::SessionEstablished { session }) = &result {
+                opened = Some(session.session_id.clone());
+            }
+            result
+        }) {
+            Ok(result) => result,
+            Err(refusal) => {
+                // Still under service admission: close before any refusal/ACK is returned.
+                if let Some(id) = opened {
+                    self.leases().close(&id);
+                }
+                Ok(refusal.into_frame())
+            }
+        }
     }
     fn finish_admitted_proof(
         &self,

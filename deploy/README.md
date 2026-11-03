@@ -449,6 +449,11 @@ reports `node_capacity` with a retry interval. Unlimited capacity is bounded by
 process descriptors and memory; startup reserves H * listeners + 512 descriptors
 and logs the effective soft limit.
 
+An upgrade retains a finite `RAMFLUX_CUSTODY_AUTHENTICATED_POOL` already in
+`runtime.env` when the operator omits the input, and logs a WARN for that retained
+ceiling. To return to unlimited, run the upgrade with
+`RAMFLUX_CUSTODY_AUTHENTICATED_POOL=` explicitly set to an empty value.
+
 Pre-auth handshakes default to four per source (range 1–4096), independent of
 already authenticated sessions. Router-only challenge knobs default to IP=16,
 PREFIX=32, NODE=1024 per minute, each in 1–65536. Startup requires IP <= PREFIX <=

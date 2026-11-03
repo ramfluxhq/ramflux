@@ -49,6 +49,13 @@ fn handshake_flood_from_one_ip_is_still_refused_with_hint() -> Result {
         let limiter = CustodyIngressLimiter::new(256);
         let tick = Instant::now();
         let address: IpAddr = address.parse()?;
+        let authenticated = (0..20)
+            .map(|n| {
+                let permit = limiter.acquire(address, None, tick)?;
+                permit.mark_authenticated(&format!("account-{n}"))?;
+                Ok(permit)
+            })
+            .collect::<Result<Vec<_>>>()?;
         let held: Vec<_> = (0..4)
             .map(|_| limiter.acquire(address, None, tick))
             .collect::<std::result::Result<_, _>>()?;
@@ -58,6 +65,7 @@ fn handshake_flood_from_one_ip_is_still_refused_with_hint() -> Result {
             .ok_or("fifth accepted")?;
         assert_eq!(refusal.retry, Some(RetryHint::new(RetryScope::PreAuthSource, 8000)));
         assert!(held.iter().all(|p| !p.is_revoked()));
+        assert!(authenticated.iter().all(|p| !p.is_revoked()));
     }
     Ok(())
 }

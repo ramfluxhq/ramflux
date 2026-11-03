@@ -34,6 +34,7 @@ pub use source_privacy::{source_ip_hash, source_ip_hash_with_key};
 mod custody_authority;
 mod custody_ingress;
 mod custody_listener_resources;
+mod custody_population_map;
 pub use custody_ingress::{
     CustodyIngressLimiter, CustodyIngressPermit, CustodyIssuanceSettings, CustodyPoolSettings,
     custody_auth_timeout, custody_source_prefixes,

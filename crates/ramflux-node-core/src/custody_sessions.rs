@@ -60,12 +60,10 @@ pub(crate) struct SessionLease {
 pub(crate) struct CustodyLeases {
     challenges: BTreeMap<String, ChallengeLease>,
     proofs: BTreeMap<String, Instant>,
-    sessions: BTreeMap<String, SessionLease>,
+    sessions: crate::custody_population_map::PopulationMap<String, SessionLease>,
     sources: crate::custody_ingress::CustodySourceBudget,
     session_deadlines: BTreeSet<(Instant, String)>,
     session_by_holder: BTreeMap<String, String>,
-    #[cfg(test)]
-    session_visits: usize,
     pending_count: usize,
     by_holder: BTreeMap<String, BTreeSet<String>>,
     by_prefix: BTreeMap<String, BTreeSet<(Instant, String)>>,
@@ -309,10 +307,6 @@ impl CustodyLeases {
         tick: Instant,
     ) -> Result<CustodySession, CustodyRefusal> {
         self.prune(tick);
-        #[cfg(test)]
-        {
-            self.session_visits += 1;
-        }
         let lease = self.sessions.get(id).ok_or(CustodyRefusal::SessionRequired)?;
         if lease.holder != holder {
             return Err(CustodyRefusal::BindingRefused);
@@ -366,10 +360,6 @@ impl CustodyLeases {
         }
     }
     fn remove_session(&mut self, id: &str) {
-        #[cfg(test)]
-        {
-            self.session_visits += 1;
-        }
         if let Some(lease) = self.sessions.remove(id) {
             self.session_deadlines.remove(&(lease.deadline, id.to_owned()));
             if self.session_by_holder.get(&lease.holder).is_some_and(|current| current == id) {

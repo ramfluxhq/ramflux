@@ -44,6 +44,7 @@ struct ActiveHolder {
     keys: Vec<String>,
     connection: Option<usize>,
     principal: Option<String>,
+    granting: bool,
     deadline: Instant,
     revoked: Arc<AtomicBool>,
     revocation: Arc<Notify>,
@@ -69,14 +70,12 @@ struct State {
     sources: BTreeMap<String, PreAuthBudget>,
     preauth_deadlines: BTreeSet<(Instant, u64)>,
     deadlines: BTreeSet<(Instant, u64)>,
-    holders: BTreeMap<u64, ActiveHolder>,
+    holders: crate::custody_population_map::PopulationMap<u64, ActiveHolder>,
     sequence: u64,
     handshakes: usize,
     authenticated: usize,
     #[cfg(test)]
-    holder_visits: usize,
-    #[cfg(test)]
-    callback_holds: Vec<Duration>,
+    grant_lock_holds: Vec<Duration>,
 }
 /// Owned permits bound pre-authentication work; authenticated capacity is optional.
 pub struct CustodyIngressLimiter {
@@ -119,16 +118,15 @@ impl CustodyIngressLimiter {
     }
     #[cfg(test)]
     pub(crate) fn operation_count(&self, reset: bool) -> usize {
-        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let count = state.holder_visits;
-        if reset {
-            state.holder_visits = 0;
-        }
-        count
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).holders.visits(reset)
     }
     #[cfg(test)]
-    pub(crate) fn callback_hold_times(&self) -> Vec<Duration> {
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).callback_holds.clone()
+    pub(crate) fn grant_lock_hold_times(&self) -> Vec<Duration> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .grant_lock_holds
+            .clone()
     }
     fn prune(state: &mut State, tick: Instant) {
         while let Some((deadline, holder)) = state.deadlines.first().copied() {
@@ -228,6 +226,7 @@ impl CustodyIngressLimiter {
                 keys,
                 connection,
                 principal: None,
+                granting: false,
                 deadline,
                 revoked: Arc::clone(&revoked),
                 revocation: Arc::clone(&revocation),
@@ -263,10 +262,6 @@ impl CustodyIngressLimiter {
         }
     }
     fn remove_holder(state: &mut State, id: u64) {
-        #[cfg(test)]
-        {
-            state.holder_visits += 1;
-        }
         let Some(h) = state.holders.remove(&id) else { return };
         state.deadlines.remove(&(h.deadline, id));
         h.revoked.store(true, Ordering::Release);
@@ -298,100 +293,6 @@ impl CustodyIngressPermit {
     pub fn mark_authenticated(&self, principal: &str) -> Result<(), CustodyAdmissionRefusal> {
         self.grant(principal, || ())
     }
-    /// Execute a grant atomically with the H-to-A transition and revocation.
-    /// The existing durable grant callback remains inside this transaction and must not re-enter.
-    /// # Errors
-    /// Returns the admission refusal without executing the callback when capacity is unavailable.
-    pub fn grant<T>(
-        &self,
-        principal: &str,
-        grant: impl FnOnce() -> T,
-    ) -> Result<T, CustodyAdmissionRefusal> {
-        self.try_grant(principal, || Ok::<T, std::convert::Infallible>(grant())).map(|r| match r {
-            Ok(value) => value,
-            Err(never) => match never {},
-        })
-    }
-    /// Failed callbacks retain the original pre-authentication holder and deadline.
-    /// # Errors
-    /// Returns admission refusals with their hints; the nested result preserves callback errors.
-    pub fn try_grant<T, E>(
-        &self,
-        principal: &str,
-        grant: impl FnOnce() -> Result<T, E>,
-    ) -> Result<Result<T, E>, CustodyAdmissionRefusal> {
-        self.try_grant_at(principal, Instant::now(), grant)
-    }
-    fn try_grant_at<T, E>(
-        &self,
-        principal: &str,
-        tick: Instant,
-        grant: impl FnOnce() -> Result<T, E>,
-    ) -> Result<Result<T, E>, CustodyAdmissionRefusal> {
-        let mut state =
-            self.limiter.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        CustodyIngressLimiter::prune(&mut state, tick);
-        #[cfg(test)]
-        {
-            state.holder_visits += 1;
-        }
-        let Some(h) = state.holders.get(&self.holder) else {
-            return Err(refuse("unavailable_holder", 1, 0, CustodyRefusal::Busy, None));
-        };
-        if self.is_revoked() {
-            return Err(refuse("revoked_holder", 1, 0, CustodyRefusal::Busy, None));
-        }
-        if principal.is_empty() || principal.len() > 512 {
-            return Err(refuse(
-                "principal_bytes",
-                principal.len(),
-                if principal.is_empty() { 1 } else { 512 },
-                CustodyRefusal::Busy,
-                None,
-            ));
-        }
-        if let Some(current) = &h.principal {
-            if current != principal {
-                return Err(refuse("principal_binding_mismatch", 1, 0, CustodyRefusal::Busy, None));
-            }
-            #[cfg(test)]
-            let callback_started = Instant::now();
-            let result = grant();
-            #[cfg(test)]
-            state.callback_holds.push(callback_started.elapsed());
-            return Ok(result);
-        }
-        if let Some(limit) = self.limiter.authenticated_limit
-            && state.authenticated >= limit
-        {
-            return Err(refuse(
-                "authenticated",
-                state.authenticated,
-                limit,
-                CustodyRefusal::Busy,
-                Some(node_retry()),
-            ));
-        }
-        #[cfg(test)]
-        let callback_started = Instant::now();
-        let result = grant();
-        #[cfg(test)]
-        state.callback_holds.push(callback_started.elapsed());
-        if result.is_err() {
-            return Ok(result);
-        }
-        let Some(mut h) = state.holders.remove(&self.holder) else {
-            return Err(CustodyRefusal::Busy.into());
-        };
-        state.deadlines.remove(&(h.deadline, self.holder));
-        CustodyIngressLimiter::untrack_preauth(&mut state, self.holder, &h);
-        h.principal = Some(principal.to_owned());
-        h.deadline = tick + Duration::from_mins(15);
-        state.deadlines.insert((h.deadline, self.holder));
-        state.holders.insert(self.holder, h);
-        state.authenticated += 1;
-        Ok(result)
-    }
     pub async fn revoked(&self) {
         loop {
             if self.is_revoked() {
@@ -413,3 +314,7 @@ mod tests;
 mod admission_tests;
 #[cfg(test)]
 pub(crate) mod hint_tests;
+
+mod grant;
+#[cfg(test)]
+mod grant_tests;

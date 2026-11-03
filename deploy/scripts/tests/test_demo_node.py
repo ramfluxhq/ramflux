@@ -182,7 +182,8 @@ else:
         record.unlink()
         with (self.state / "runtime.env").open("a") as output:
             output.write("RAMFLUX_CUSTODY_AUTHENTICATED_SESSIONS_PER_PRINCIPAL=4\n")
-        self.run_script("upgrade")
+        upgraded = self.run_script("upgrade")
+        self.assertIn("WARN: retained finite RAMFLUX_CUSTODY_AUTHENTICATED_POOL=512;", upgraded.stderr)
         self.assertEqual((self.state / "runtime.env").read_text(),
                          runtime.replace("RAMFLUX_VERSION=demo-test", "RAMFLUX_VERSION=demo-v2"))
         (self.state / "secrets/custody/node-record.json").write_bytes(b"interrupted rewrite")
@@ -190,6 +191,20 @@ else:
         self.assertEqual(self.managed_state(), original)
         self.assertEqual((self.state / "secrets/custody/node-record.json").read_bytes(),
                          b'{"signed-record":"version-one"}\n')
+
+    def test_upgrade_explicit_empty_authenticated_pool_clears_retained_finite_value(self):
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_CUSTODY_AUTHENTICATED_POOL=512\n")
+        self.run_script("up")
+        self.env_file.write_text(self.env_file.read_text().replace(
+            "RAMFLUX_CUSTODY_AUTHENTICATED_POOL=512", "RAMFLUX_CUSTODY_AUTHENTICATED_POOL=") +
+            "DEMO_VERSION=demo-v2\n")
+        upgraded = self.run_script("upgrade")
+        self.assertNotIn("WARN: retained finite", upgraded.stderr)
+        runtime = dict(line.split("=", 1) for line in
+                       (self.state / "runtime.env").read_text().splitlines() if "=" in line)
+        self.assertEqual(runtime.get("RAMFLUX_CUSTODY_AUTHENTICATED_POOL", ""), "")
+        self.assertEqual(runtime.get("RF_COMPOSE_CUSTODY_AUTHENTICATED_POOL", ""), "")
 
     def test_incomplete_custody_inputs_refuse_initial_and_legacy_upgrade_before_writes(self):
         record = self.root / "node-record.json"

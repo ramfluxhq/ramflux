@@ -137,11 +137,14 @@ A refuses Prove with `Busy` and a 30000 ms `node_capacity` hint, then releases H
 when the connection closes. Clear or raise `RAMFLUX_CUSTODY_AUTHENTICATED_POOL`
 and restart to recover from a finite authenticated ceiling.
 
-The first successful Prove moves H to A under the limiter mutex, ordered against
-revocation. The existing synchronous publication/prekey callback is the sole
-local durable-write exception inside that transaction; it never awaits network
-I/O and must not re-enter. Limiter/index bookkeeping performs only in-memory
-operations. Deadline indexes prune expired holders/sessions without scanning
+Prove checks the holder and reserves A under the limiter mutex, then releases
+that mutex before the synchronous durable publication/prekey/session callback.
+The existing service admission lock still orders the callback against disconnect
+cleanup. A second limiter critical section commits H to A or rolls back the
+reservation. If the holder was revoked or expired during the callback, the
+service closes any new session before replying with a refusal; it never sends
+SessionEstablished for that failed grant. Both limiter critical sections perform
+only in-memory operations; durable commits do not hold the limiter mutex. Deadline indexes prune expired holders/sessions without scanning
 all authenticated holders; pre-auth counters are removed exactly once on
 promotion or unauthenticated removal. Direct session creation is fenced by its
 holder, so a closed/revoked holder cannot recreate a grant.
@@ -529,3 +532,9 @@ until the server's reset; the networking backoff also retains its monotonic floo
 This is a breaking development v3 wire change: older strict decoders reject a
 refusal carrying `capacity`. Rebuild clients and node services together; the
 version stays unchanged for the current development deployment.
+
+Pending-account networking hints persist their node-bound retry deadline,
+including short Capacity hints. Another process opening the same account observes
+the remaining delay; status reads and blocked retries do not renew it. Relative
+hints use the protocol's one-second to one-hour bounds and round up to the stored
+wall-clock second, while an active process also keeps a monotonic anchor.

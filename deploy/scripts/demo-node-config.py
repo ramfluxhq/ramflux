@@ -329,6 +329,11 @@ def custody_inputs(state):
     for key in (keys[0], keys[2]):
         if values[key] and not re.fullmatch(r"[A-Za-z0-9_-]+", values[key]):
             sys.exit("DEMO_CUSTODY_INPUT_INVALID: " + key)
+    pool_key = "RAMFLUX_CUSTODY_AUTHENTICATED_POOL"
+    if pool_key not in os.environ and previous.get(pool_key):
+        print("WARN: retained finite RAMFLUX_CUSTODY_AUTHENTICATED_POOL=" + values[pool_key] +
+              "; set RAMFLUX_CUSTODY_AUTHENTICATED_POOL= explicitly empty to return to unlimited",
+              file=sys.stderr)
     record = None
     if values[keys[1]]:
         source = Path(values[keys[1]])

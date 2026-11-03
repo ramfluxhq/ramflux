@@ -90,7 +90,7 @@ fn admission_work_is_independent_of_live_authenticated_holders() -> Result {
     let expired = limiter.acquire("192.0.2.1".parse()?, Some(1), tick)?;
     let live = limiter.acquire("192.0.2.1".parse()?, Some(1), tick + Duration::from_secs(2))?;
     limiter.operation_count(true);
-    pool.session_visits = 0;
+    pool.sessions.visits(true);
     let incoming =
         limiter.acquire("192.0.2.1".parse()?, Some(1), tick + Duration::from_secs(11))?;
     incoming.mark_authenticated("incoming")?;
@@ -100,16 +100,16 @@ fn admission_work_is_independent_of_live_authenticated_holders() -> Result {
     assert!(!live.is_revoked());
     assert!(held.iter().all(|p| !p.is_revoked()));
     assert!(limiter.operation_count(false) <= 9, "holder work={}", limiter.operation_count(false));
-    assert!(pool.session_visits <= 8, "session work={}", pool.session_visits);
+    assert!(pool.sessions.visits(false) <= 8, "session work={}", pool.sessions.visits(false));
     assert_eq!(pool.sessions.len(), 10_001);
     // A due session at the front is removed without visiting the future population.
     let mut short = session();
     short.expires_at = 112;
     let short = pool.open(short, "short".into(), 111, tick + Duration::from_secs(11))?;
-    pool.session_visits = 0;
+    pool.sessions.visits(true);
     pool.prune(tick + Duration::from_secs(13));
     assert!(!pool.sessions.contains_key(&short.session_id));
     assert_eq!(pool.sessions.len(), 10_001);
-    assert_eq!(pool.session_visits, 1);
+    assert_eq!(pool.sessions.visits(false), 1);
     Ok(())
 }

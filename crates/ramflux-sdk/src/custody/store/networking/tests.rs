@@ -365,3 +365,77 @@ async fn custody_capacity_forward_wall_step_keeps_the_active_capture_and_allows_
     );
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn custody_capacity_server_retry_hint_is_shared_by_two_store_handles() -> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut first = create(&root.0, "shared-short-hint", &TestVault::default(), now)?;
+    first.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    for retry_ms in [30_000, 600_000, 1201] {
+        first.set_networking_reason_at(&root.0, None, now)?;
+        let error = SdkError::CustodyAdmission {
+            code: CustodyRefusal::Capacity,
+            retry: ramflux_protocol::custody::RetryHint::new(
+                ramflux_protocol::custody::RetryScope::PreAuthSource,
+                retry_ms,
+            ),
+        };
+        let cause = Some(AccountNetworkingReason::NodeBusy {
+            retry_after_ms: u64::from(error.retry_hint().ok_or("retry hint")?.retry_after_ms),
+            capacity: None,
+        });
+        first.set_networking_reason_at(&root.0, cause, now)?;
+        // A second process has no in-memory monotonic anchor from the writer.
+        clock::begin_refusal(&first.networking_path);
+        let mut second = load_account(&root.0, "shared-short-hint", now)?;
+        let seconds = u64::from(retry_ms).div_ceil(1000);
+        assert_eq!(second.stored.capacity_retry_at, Some(now + seconds));
+        let blocked = second.check_capacity_deadline(now).err().ok_or("second handle admitted")?;
+        assert_eq!(blocked.custody_refusal(), Some(CustodyRefusal::Capacity));
+        assert_eq!(
+            second.networking_view(now).ok_or("hint missing")?.remaining_ms,
+            Some(seconds * 1000)
+        );
+        let path = directory(&root.0, "shared-short-hint")?.join("authority.json");
+        let bytes = fs::read(&path)?;
+        second.set_networking_reason_at(
+            &root.0,
+            Some(AccountNetworkingReason::NodeBusy {
+                retry_after_ms: u64::from(
+                    blocked.retry_hint().ok_or("blocked retry hint")?.retry_after_ms,
+                ),
+                capacity: None,
+            }),
+            now,
+        )?;
+        assert_eq!(fs::read(&path)?, bytes, "a blocked second process renewed the deadline");
+        tokio::time::advance(std::time::Duration::from_secs(seconds)).await;
+        let second = load_account(&root.0, "shared-short-hint", now + seconds)?;
+        second.check_capacity_deadline(now + seconds)?;
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn custody_capacity_short_hint_keeps_anchor_across_clock_rollback() -> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut first = create(&root.0, "short-clock", &TestVault::default(), now - 7 * 86_400)?;
+    first.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    first.set_networking_reason_at(
+        &root.0,
+        Some(AccountNetworkingReason::NodeBusy { retry_after_ms: 30_000, capacity: None }),
+        now,
+    )?;
+    assert_eq!(first.networking_view(now).ok_or("missing hint")?.remaining_ms, Some(30_000));
+    tokio::time::advance(std::time::Duration::from_secs(29)).await;
+    let backwards = now - 3600;
+    let mut second = load_account(&root.0, "short-clock", backwards)?;
+    second.bind_capacity_node(&root.0, "node-a", "key-a", backwards)?;
+    let restored = load_account(&root.0, "short-clock", backwards)?;
+    assert_eq!(restored.networking_view(backwards).ok_or("hint lost")?.remaining_ms, Some(1000));
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    restored.check_capacity_deadline(backwards)?;
+    Ok(())
+}

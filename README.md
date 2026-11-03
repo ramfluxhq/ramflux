@@ -73,6 +73,12 @@ Stop the node and remove local volumes:
 docker compose -f deploy/docker-compose.yml down -v
 ```
 
+
+An upgrade retains a finite `RAMFLUX_CUSTODY_AUTHENTICATED_POOL` already in
+`runtime.env` when the operator omits the input, and logs a WARN for that retained
+ceiling. To return to unlimited, run the upgrade with
+`RAMFLUX_CUSTODY_AUTHENTICATED_POOL=` explicitly set to an empty value.
+
 ## Security
 
 Do not file public issues for vulnerabilities. See `SECURITY.md` and

@@ -31,16 +31,34 @@ fn normalized(
     let AccountNetworkingReason::NodeBusy { retry_after_ms, capacity } = &mut reason else {
         return (reason, deadline, false);
     };
+    let daily = capacity.is_some();
     *capacity = capacity.and_then(|hint| capacity_hint::accepted(hint, now));
-    let bound = if capacity.is_some() { capacity_hint::MAX_RESET_AHEAD_SECS } else { 300 };
+    if daily && capacity.is_none() {
+        *retry_after_ms = CAPACITY_RETRY_AFTER_MS;
+    }
+    *retry_after_ms = (*retry_after_ms).clamp(1000, 3_600_000);
+    let bound = if capacity.is_some() {
+        capacity_hint::MAX_RESET_AHEAD_SECS
+    } else {
+        (*retry_after_ms).div_ceil(1000)
+    };
     let clamped = deadline > now.saturating_add(bound);
     let deadline = if clamped {
-        *capacity = None;
-        now.saturating_add(300)
+        if daily {
+            *capacity = None;
+            *retry_after_ms = CAPACITY_RETRY_AFTER_MS;
+            now.saturating_add(300)
+        } else {
+            // Preserve a relative hint's identity so persisting a clock correction
+            // can keep the already captured monotonic anchor.
+            now.saturating_add(bound)
+        }
     } else {
         deadline
     };
-    *retry_after_ms = CAPACITY_RETRY_AFTER_MS;
+    if capacity.is_some() {
+        *retry_after_ms = CAPACITY_RETRY_AFTER_MS;
+    }
     (reason, deadline, clamped)
 }
 

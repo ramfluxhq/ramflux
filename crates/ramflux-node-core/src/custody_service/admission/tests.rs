@@ -87,3 +87,58 @@ fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[test]
+fn revoked_during_grant_closes_new_session_before_reply() -> Result<(), Box<dyn std::error::Error>>
+{
+    let now = 1_760_000_000;
+    let path = std::env::temp_dir().join(format!(
+        "custody-revoked-grant-{}.redb",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    {
+        let store = crate::RouterRedbStore::open_without_wal(&path)?;
+        let driver = Driver::new("revoked-session", 170)?;
+        let service = CustodyService::new(driver.node.clone(), false, &store, now)?;
+        let pool = crate::CustodyIngressLimiter::with_authenticated_limit(256, 1);
+        let tick = std::time::Instant::now();
+        let permit = pool.acquire("192.0.2.1".parse()?, None, tick)?;
+        let _admission = service.admission.lock().map_err(|_| "admission")?;
+        let mut opened = None;
+        let reply =
+            crate::custody_budget_log::tests::assert_warning("revoked_holder", 1, 0, || {
+                service.finish_listener_grant(&permit, "one", || {
+                    let session = service.leases().open(
+                        CustodySession {
+                            session_id: String::new(),
+                            target_delivery_id: "target".into(),
+                            device_ref: driver.reference.clone(),
+                            record_hash: "record".into(),
+                            proof_hash: "proof".into(),
+                            binding_mode: BindingMode::HomeRelayReceipt,
+                            expires_at: now + 300,
+                        },
+                        "holder".into(),
+                        now,
+                        tick,
+                    )?;
+                    opened = Some(session.session_id.clone());
+                    permit.revoke();
+                    Ok(CustodyServerFrame::SessionEstablished { session })
+                })
+            })
+            .map_err(|_| "grant")?;
+        assert!(matches!(
+            reply,
+            CustodyServerFrame::Refused { code: CustodyRefusal::Busy, retry: None, .. }
+        ));
+        assert_eq!(
+            service.leases().session(&opened.ok_or("session")?, "holder", now, tick).err(),
+            Some(CustodyRefusal::SessionRequired)
+        );
+        let next = pool.acquire("192.0.2.1".parse()?, None, tick)?;
+        next.mark_authenticated("two")?;
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}

@@ -72,10 +72,16 @@ impl BornAccount {
             }
         }
         self.update_networking(root, now, |current| {
+            if current.stored.capacity_retry_at.is_some()
+                && current.networking_view(now).is_some_and(|view| {
+                    view.remaining_ms.is_some_and(|remaining| remaining > 0)
+                        && Some(&view.cause) == reason.as_ref()
+                })
+            {
+                return false;
+            }
             let deadline = match reason.as_ref() {
-                Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity })
-                    if capacity.is_some() || *retry_after_ms == CAPACITY_RETRY_AFTER_MS =>
-                {
+                Some(AccountNetworkingReason::NodeBusy { retry_after_ms, capacity }) => {
                     let active = current
                         .networking_view(now)
                         .and_then(|view| view.remaining_ms)
@@ -85,11 +91,13 @@ impl BornAccount {
                     } else {
                         // A new refusal may share a wall timestamp after a clock correction.
                         clock::begin_refusal(&current.networking_path);
-                        Some(
-                            capacity
-                                .map_or(0, |hint| hint.resets_at_unix)
-                                .max(now.saturating_add(300)),
-                        )
+                        Some(capacity.map_or(0, |hint| hint.resets_at_unix).max(
+                            now.saturating_add(if capacity.is_some() {
+                                300
+                            } else {
+                                (*retry_after_ms).clamp(1000, 3_600_000).div_ceil(1000)
+                            }),
+                        ))
                     }
                 }
                 _ => None,
@@ -112,6 +120,19 @@ impl BornAccount {
         {
             if let AccountNetworkingReason::NodeBusy { capacity: Some(capacity), .. } = view.cause {
                 return Err(SdkError::CustodyCapacity { capacity });
+            }
+            if let AccountNetworkingReason::NodeBusy { retry_after_ms, capacity: None } = view.cause
+                && matches!(self.networking_reason(), Some(AccountNetworkingReason::NodeBusy {
+                    retry_after_ms, capacity: None
+                }) if *retry_after_ms != CAPACITY_RETRY_AFTER_MS)
+            {
+                return Err(SdkError::CustodyAdmission {
+                    code: ramflux_protocol::custody::CustodyRefusal::Capacity,
+                    retry: ramflux_protocol::custody::RetryHint::new(
+                        ramflux_protocol::custody::RetryScope::NodeCapacity,
+                        u32::try_from(retry_after_ms).unwrap_or(u32::MAX),
+                    ),
+                });
             }
             return Err(ramflux_protocol::custody::CustodyRefusal::Capacity.into());
         }
