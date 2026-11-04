@@ -13,6 +13,7 @@ mod selector_erasure;
 mod selector_legacy;
 #[cfg(test)]
 mod selector_legacy_tests;
+mod selector_revocation;
 use super::AccountDb;
 use crate::StorageError;
 pub use generation::PrivacyResourceRegistration;

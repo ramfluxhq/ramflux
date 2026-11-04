@@ -330,3 +330,167 @@ fn e18_discovery_page_cut_before_commit() -> Result<(), StorageError> {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn revocation_fixture(db: &AccountDb) -> Result<(), StorageError> {
+    register(db, ObjectReferenceAdmission::FreshMessage)
+}
+
+fn assert_revocation_refused(db: &AccountDb) -> Result<(), StorageError> {
+    assert!(matches!(
+        db.set_object_tombstoned_with_revocation("alias", Some("peer"), Some("revoke"), 1),
+        Err(StorageError::AuthorizationRejected)
+    ));
+    let count: i64 =
+        db.connection.query_row("SELECT COUNT(*) FROM object_index", [], |row| row.get(0))?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+#[test]
+fn e10_retained_live_reference_is_the_only_manifest_source() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("revoke-retention-only")?;
+    revocation_fixture(&db)?;
+    assert!(!db.actor_state_exists("attachment/reference/alias")?);
+    assert!(db.client_record("object", "alias")?.is_none());
+    db.set_object_tombstoned("alias")?;
+    drop(db);
+    let db = reopen(&root)?;
+    let manifest: String = db.connection.query_row(
+        "SELECT CAST(manifest_hash AS TEXT) FROM object_index WHERE object_id='alias'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(manifest, "manifest");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn e10_revocation_creation_stores_resolved_nonzero_manifest() -> Result<(), StorageError> {
+    for managed in [false, true] {
+        let (root, db) = crate::tests::test_db("revoke-nonzero")?;
+        if managed {
+            revocation_fixture(&db)?;
+        }
+        db.persist_actor_state(
+            "attachment/reference/alias",
+            &json!({"reference":{"object_id":"wire","manifest_hash":"manifest"}}),
+        )?;
+        db.persist_client_record(
+            "object",
+            "alias",
+            &json!({"owner":"peer","message_id":"message","manifest_hash":"manifest"}),
+        )?;
+        db.set_object_tombstoned_with_revocation(
+            "alias",
+            Some("peer"),
+            Some("revoke-envelope"),
+            1,
+        )?;
+        drop(db);
+        let db = reopen(&root)?;
+        let (manifest, chunk): (Vec<u8>, Vec<u8>) = db.connection.query_row(
+            "SELECT manifest_hash,chunk_manifest_hash FROM object_index WHERE object_id='alias'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(manifest, b"manifest");
+        assert_eq!(chunk, manifest);
+        let count: i64 = db.connection.query_row(
+            "SELECT COUNT(*) FROM object_message_reference",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            count,
+            i64::from(managed),
+            "legacy creation must not fabricate retention ownership"
+        );
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn e10_no_source_is_refused_without_row() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("revoke-no-source")?;
+    assert_revocation_refused(&db)?;
+    drop(db);
+    let db = reopen(&root)?;
+    assert!(!db.object_is_tombstoned("alias")?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn e10_conflicting_retention_manifests_refused() -> Result<(), StorageError> {
+    for actor_conflict in [false, true] {
+        let (root, db) = crate::tests::test_db("revoke-conflict")?;
+        revocation_fixture(&db)?;
+        if actor_conflict {
+            db.persist_actor_state(
+                "attachment/reference/alias",
+                &json!({"reference":{"object_id":"wire","manifest_hash":"other-manifest"}}),
+            )?;
+        } else {
+            db.register_object_reference(
+                ObjectReferenceAdmission::FreshMessage,
+                &ObjectReferenceOwner {
+                    reference_hash: "other-reference",
+                    wire_id: "wire",
+                    manifest_hash: "other-manifest",
+                    selector: "alias",
+                    message_id: "other-message",
+                    reference: &json!({}),
+                    metadata: &json!({}),
+                },
+            )?;
+        }
+        assert_revocation_refused(&db)?;
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn e10_stale_display_metadata_cannot_override_mapping() -> Result<(), StorageError> {
+    for actor in [false, true] {
+        let (root, db) = crate::tests::test_db("revoke-display-conflict")?;
+        revocation_fixture(&db)?;
+        if actor {
+            db.persist_actor_state(
+                "attachment/reference/alias",
+                &json!({"reference":{"object_id":"wire","manifest_hash":"manifest"}}),
+            )?;
+        }
+        db.persist_client_record(
+            "object",
+            "alias",
+            &json!({"owner":"peer","manifest_hash":"stale"}),
+        )?;
+        assert_revocation_refused(&db)?;
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn e10_display_only_owner_metadata_refused() -> Result<(), StorageError> {
+    for manifest in [None, Some("display-manifest")] {
+        let (root, db) = crate::tests::test_db("revoke-display-only")?;
+        db.persist_client_record(
+            "object",
+            "alias",
+            &json!({"owner":"peer","message_id":"message","manifest_hash":manifest}),
+        )?;
+        assert_revocation_refused(&db)?;
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}

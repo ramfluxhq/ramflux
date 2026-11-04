@@ -93,6 +93,7 @@ impl Drop for Fixture {
 fn late_import_cannot_replace_tombstone_placeholder() -> TestResult {
     let fixture = Fixture::new()?;
     let db = &fixture.db;
+    fixture.received_reference("object", None)?;
     db.persist_client_record(
         "object",
         "object",
@@ -147,17 +148,14 @@ fn late_import_cannot_replace_tombstone_placeholder() -> TestResult {
 }
 
 #[test]
-fn object_placeholder_without_manifest_uses_zero_bytes() -> TestResult {
+fn object_placeholder_without_manifest_source_is_refused() -> TestResult {
     let f = Fixture::new()?;
-    f.db.set_object_tombstoned("object")?;
-    let (manifest, nonce): (Vec<u8>, Vec<u8>) = f.db.connection.query_row(
-        "SELECT chunk_manifest_hash,nonce FROM object_index WHERE object_id='object'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    assert_eq!(manifest, [0_u8; 32]);
-    assert_eq!(nonce, [0_u8; 12]);
-    assert!(f.db.load_object::<Value>("object")?.is_some());
+    assert!(matches!(
+        f.db.set_object_tombstoned("object"),
+        Err(crate::StorageError::AuthorizationRejected)
+    ));
+    assert!(!f.db.object_is_tombstoned("object")?);
+    assert!(f.db.load_object::<Value>("object")?.is_none());
     Ok(())
 }
 
@@ -242,6 +240,18 @@ fn revocation_placeholder_is_erased_with_its_last_message() -> TestResult {
         for metadata_manifest in [None, Some("stale-display-manifest")] {
             let f = Fixture::new()?;
             f.received_reference(selector, metadata_manifest)?;
+            if metadata_manifest.is_some() {
+                assert!(matches!(
+                    f.db.set_object_tombstoned_with_revocation(
+                        selector,
+                        Some("peer"),
+                        Some("revoke"),
+                        10
+                    ),
+                    Err(crate::StorageError::AuthorizationRejected)
+                ));
+                f.db.persist_client_record("object", selector, &json!({"object_id":selector,"owner":"peer","message_id":"message","manifest_hash":"manifest"}))?;
+            }
             f.db.set_object_tombstoned_with_revocation(selector, Some("peer"), Some("revoke"), 10)?;
             assert!(f.db.object_is_tombstoned(selector)?);
             f.db.delete_direct_message("thread", "message", "local", "delete")?;
@@ -341,7 +351,8 @@ fn tombstone_placeholder_survives_retention_sweep_while_reference_exists() -> Te
                     &json!({"manifest_hash":"manifest"}),
                 )?;
             }
-            f.db.set_object_tombstoned(selector)?;
+            f.db.persist_client_record("object", selector, &json!({"owner":"peer","message_id":"message","manifest_hash": if known_manifest { Some("manifest") } else { None }}))?;
+            f.db.set_object_tombstoned_with_revocation(selector, Some("peer"), None, 10)?;
             for _ in 0..8 {
                 f.db.maintain_object_retention()?;
                 f.db.maintain_expired_object_holds()?;
@@ -415,7 +426,16 @@ fn message_attachment_union_filters_revoked_retention_and_directory_selectors() 
     )?;
     assert_eq!(f.db.client_message_object_ids("message")?, vec!["directory", "object"]);
     f.db.set_object_tombstoned("object")?;
-    f.db.set_object_tombstoned("directory")?;
+    f.db.persist_actor_state(
+        "attachment/reference/directory",
+        &json!({"reference":{"object_id":"directory","manifest_hash":"directory-manifest"}}),
+    )?;
+    f.db.persist_client_record(
+        "object",
+        "directory",
+        &json!({"object_id":"directory","owner":"peer","message_id":"message"}),
+    )?;
+    f.db.set_object_tombstoned_with_revocation("directory", Some("peer"), None, 10)?;
     assert_eq!(f.db.client_message_object_ids("message")?, Vec::<String>::new());
     Ok(())
 }

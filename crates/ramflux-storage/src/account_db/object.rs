@@ -178,20 +178,16 @@ impl AccountDb {
                 Err(error) => return Err(error),
             }
             let record = self.client_record("object", object_id)?;
-            let reference_manifest: Option<String> = self
-                .connection
-                .query_row(
-                    "SELECT json_extract(CAST(state_json AS TEXT),'$.reference.manifest_hash')
-                     FROM runtime_actor_state WHERE state_kind=?1",
-                    params![format!("attachment/reference/{object_id}")],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .flatten();
-            // Message capture authenticates this reference; display metadata need not carry a hash.
-            let manifest = reference_manifest
-                .as_deref()
-                .or_else(|| record.as_ref().and_then(|value| value["manifest_hash"].as_str()));
+            let exists: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM object_index WHERE object_id=?1)",
+                params![object_id],
+                |row| row.get(0),
+            )?;
+            let manifest = if exists {
+                None
+            } else {
+                Some(self.resolve_revocation_manifest(object_id, sender, record.as_ref())?)
+            };
             let placeholder = serde_json::json!({
                 "object_id": object_id,
                 "owner": record.as_ref().and_then(|value| value["owner"].as_str()),
@@ -208,7 +204,7 @@ impl AccountDb {
                            1, 0, NULL, ?5) ON CONFLICT(object_id) DO NOTHING",
                 params![
                     object_id,
-                    manifest.map_or(&[0_u8; 32][..], str::as_bytes),
+                    manifest.as_deref().map_or(&[][..], str::as_bytes),
                     revoked_at,
                     &[0_u8; 12][..],
                     serde_json::to_vec(&placeholder)?
