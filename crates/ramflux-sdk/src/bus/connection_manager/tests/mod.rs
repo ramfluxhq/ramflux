@@ -71,7 +71,7 @@ impl SessionConnector for Connector {
         Box::pin(std::future::ready(result))
     }
 }
-fn config() -> Result<GatewaySessionConfig, Box<dyn std::error::Error>> {
+pub(crate) fn config() -> Result<GatewaySessionConfig, Box<dyn std::error::Error>> {
     let root = ramflux_crypto::create_identity_root("host-principal", [21; 32]);
     let branch = ramflux_crypto::create_device_branch("host-principal", "host-device", 1, [22; 32]);
     Ok(GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
@@ -112,7 +112,7 @@ fn limits() -> RuntimeTimeouts {
     assert_eq!(limits.retry_budget, held, "the fixture must not introduce a competing retry timer");
     limits
 }
-async fn fixture() -> Result<(ConnectionHandle, SessionIo), Box<dyn std::error::Error>> {
+pub(crate) async fn fixture() -> Result<(ConnectionHandle, SessionIo), Box<dyn std::error::Error>> {
     let (handle, mut receive) = reconnecting_fixture(limits())?;
     let io = receive.recv().await.ok_or("connector did not enter")?;
     handle.require_live(Duration::from_secs(600)).await?;
@@ -132,11 +132,14 @@ fn reconnecting_fixture(
     );
     Ok((handle, receive))
 }
-fn send(io: &SessionIo, frame: &GatewayServerFrame) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn send(
+    io: &SessionIo,
+    frame: &GatewayServerFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
     io.input.send(serde_json::to_vec(frame)?)?;
     Ok(())
 }
-fn entry(id: &str, sequence: u64) -> Result<crate::GatewayInboxEntry, SdkError> {
+pub(crate) fn entry(id: &str, sequence: u64) -> Result<crate::GatewayInboxEntry, SdkError> {
     Ok(serde_json::from_value(
         serde_json::json!({"inbox_seq":sequence,"target_delivery_id":"host-target","envelope":{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"source-device","signature_alg":"ed25519","signature":"fixture","envelope_id":id,"source_principal_id":"source","source_device_id":"source-device","target_delivery_id":"host-target","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"opaque"}}),
     )?)

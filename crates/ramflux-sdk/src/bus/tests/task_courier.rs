@@ -187,7 +187,6 @@ fn runtime(
         events,
         shutdown,
         courier: Some(TaskCourier::start()),
-        courier_cycle: crate::bus::courier_cycle::Cycle::default(),
         courier_events: Some(observations),
         networking_expiry_pending: false,
         networking_expiry_warned: false,
@@ -414,81 +413,6 @@ async fn stall(
         }
     });
     Ok((task, received))
-}
-
-#[tokio::test]
-async fn r1_exhausted_cycle_defers_a_ready_actor_item_without_charging_then_next_pass_sends_it()
--> Case {
-    LocalSet::new()
-        .run_until(Box::pin(async {
-            let mut fixture = Box::pin(Fixture::new("courier-cycle-deferral-r1")).await?;
-            let packet = carrier(&fixture.source, "healthy", "cycle-task")?;
-            let key = "task/ack/cycle-deferral";
-            ack(&fixture.source, key, &packet)?;
-            let before =
-                fixture.source.client.account_db()?.load_actor_state::<Value>(key)?.ok_or("job")?;
-            let item = task_courier_queue::manifest_requests(&mut fixture.source)?
-                .into_iter()
-                .next()
-                .ok_or("item")?;
-            let manifests = fixture
-                .gateway
-                .lock()
-                .map_err(|_| "gateway")?
-                .manifests
-                .values()
-                .cloned()
-                .map(serde_json::from_value)
-                .collect::<Result<Vec<SdkDeviceManifestResponse>, _>>()?;
-            let root = fixture.root.clone();
-            let gateway = fixture.gateway.clone();
-            let (mut actor, _, _, _) = runtime(fixture.source, &root.join("source"));
-            actor.stop_courier().await;
-            actor.courier_cycle = crate::bus::courier_cycle::Cycle::exhausted();
-            actor
-                .apply_courier_outcome(Outcome::Item {
-                    item: item.clone(),
-                    preparation: Preparation::Ready {
-                        manifests: manifests.clone(),
-                        fetched_after: std::time::Instant::now(),
-                    },
-                })
-                .await?;
-            let account = actor.state.accounts.get("sender").ok_or("account")?;
-            assert_eq!(account.client.account_db()?.load_actor_state::<Value>(key)?, Some(before));
-            assert_eq!(
-                account
-                    .client
-                    .account_db()?
-                    .actor_state_key_page("task/courier_failure/", 1)?
-                    .len(),
-                0
-            );
-            assert_eq!(gateway.lock().map_err(|_| "gateway")?.sent.len(), 0);
-            actor.courier_cycle = crate::bus::courier_cycle::Cycle::default();
-            actor
-                .apply_courier_outcome(Outcome::Item {
-                    item,
-                    preparation: Preparation::Ready {
-                        manifests,
-                        fetched_after: std::time::Instant::now(),
-                    },
-                })
-                .await?;
-            assert!(
-                !actor
-                    .state
-                    .accounts
-                    .get("sender")
-                    .ok_or("account")?
-                    .client
-                    .account_db()?
-                    .actor_state_exists(key)?
-            );
-            assert_ne!(gateway.lock().map_err(|_| "gateway")?.sent.len(), 0);
-            Ok(())
-        }))
-        .await
 }
 
 #[tokio::test]

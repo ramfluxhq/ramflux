@@ -91,15 +91,13 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
             tokio::time::pause();
             let started = tokio::time::Instant::now();
             let task = tokio::task::spawn_local(async move {
-                let result = actor
-                    .apply_courier_outcome(Outcome::Item {
-                        item,
-                        preparation: Preparation::Ready {
-                            manifests,
-                            fetched_after: std::time::Instant::now(),
-                        },
-                    })
-                    .await;
+                let result = actor.apply_courier_outcome(Outcome::Item {
+                    item,
+                    preparation: Preparation::Ready {
+                        manifests,
+                        fetched_after: std::time::Instant::now(),
+                    },
+                });
                 (actor, result)
             });
             entered(&mut observed).await?;
@@ -255,7 +253,7 @@ async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Ca
             let started = tokio::time::Instant::now();
             let task = tokio::task::spawn_local(async move {
                 let mut account = f.source;
-                let sent = crate::bus::courier_cycle::priority(&mut account).await;
+                let sent = crate::bus::dispatch::call::drive(&mut account).await;
                 (account, sent)
             });
             entered(&mut observed).await?;
@@ -265,7 +263,7 @@ async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Ca
             released.notify_one();
             let (account, sent) = complete(task).await?;
             assert!(still_waiting, "the submit allowance must survive a ten-second gateway reply");
-            assert_eq!(sent, 1);
+            assert_eq!(sent?, 1);
             assert_eq!(account.client.voice_calls[&id].pending.len(), 0);
             assert!(account.has_pooled_engine(), "a valid slow submit must not force a reconnect");
             assert_eq!(gateway.lock().map_err(|_| "gateway")?.sessions, before);

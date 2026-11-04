@@ -415,8 +415,14 @@ async fn deliver_target(
 ) -> Result<Option<Plan>, SdkError> {
     let request =
         std::mem::replace(&mut target.request, SendMaterialRequest { root: None, prekey: None });
-    let material =
-        federation::material(context, &target.plan.config, request, target.route.as_ref()).await;
+    let material = federation::material(
+        context,
+        &target.plan.config,
+        request,
+        crate::bus::connection_manager::CallClass::Bulk,
+        target.route.as_ref(),
+    )
+    .await;
     let captured = target.plan.clone();
     let owned_root = target.root.clone();
     let owned_device = target.device.clone();

@@ -9,10 +9,6 @@ pub(crate) mod source;
 
 type PendingEntryId = (String, u64, String);
 
-#[cfg(test)]
-#[path = "tests/sync_courier_budget.rs"]
-mod budget_tests;
-
 pub(super) struct Schedule {
     pub min: Duration,
     pub max: Duration,

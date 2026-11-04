@@ -60,7 +60,8 @@ async fn parked_copy_is_indexed_when_due_and_fails_at_the_600_second_lifetime() 
     let mut gateway = super::super::super::fixture::RecordingGateway::new(Arc::default());
     gateway.fail_own_ack = true;
     let own = Arc::clone(&gateway.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let create = super::super::super::dm_tests::create_carrier(&source.client)?;
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "pending");
     let db = source.client.account_db()?;

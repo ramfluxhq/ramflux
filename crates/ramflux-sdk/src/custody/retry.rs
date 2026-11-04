@@ -7,6 +7,12 @@ use ramflux_protocol::custody::{CapacityHint, CustodyRefusal, RetryHint};
 use std::{fs::File, future::Future, path::Path, time::Duration};
 use tokio::time::Instant;
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_RETRY_BUDGET: Duration;
+    pub(crate) static TEST_BUSY_PROGRESS: std::sync::Arc<std::sync::atomic::AtomicUsize>;
+}
+
 const RETRY_BUDGET: Duration = Duration::from_secs(90);
 const MAX_BACKOFF: Duration = Duration::from_secs(16);
 
@@ -22,6 +28,10 @@ pub(crate) fn set_thread_budget(budget: Duration) {
     BUDGET_OVERRIDE.with(|cell| cell.set(Some(budget)));
 }
 fn retry_budget() -> Duration {
+    #[cfg(test)]
+    if let Ok(budget) = TEST_RETRY_BUDGET.try_with(|budget| *budget) {
+        return budget;
+    }
     #[cfg(test)]
     if let Some(budget) = BUDGET_OVERRIDE.with(std::cell::Cell::get) {
         return budget;
@@ -65,6 +75,11 @@ impl Budget {
             Err(_) => return Err(timeout()),
         };
         self.busy_observed = result.as_ref().is_err_and(is_busy);
+        #[cfg(test)]
+        if self.busy_observed {
+            let _ = TEST_BUSY_PROGRESS
+                .try_with(|progress| progress.fetch_add(1, std::sync::atomic::Ordering::AcqRel));
+        }
         self.last_busy_hint =
             result.as_ref().err().filter(|error| is_busy(error)).and_then(SdkError::retry_hint);
         result

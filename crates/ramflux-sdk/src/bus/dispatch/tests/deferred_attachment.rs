@@ -234,7 +234,7 @@ async fn deleted_attachment_receipt_survives_scheduler_deadline() -> Result<(), 
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
-    let engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    let engine = account.session_client().await?;
     let receipt = json!({"transfer_state":"failed",
         "last_error":crate::error::ATTACHMENT_DELETED,"retryable":false});
     let result = finish_fetch(

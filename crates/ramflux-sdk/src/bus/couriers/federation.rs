@@ -40,9 +40,12 @@ pub(crate) async fn material(
     context: &SessionContext,
     config: &GatewaySessionConfig,
     request: SendMaterialRequest,
+    class: crate::bus::connection_manager::CallClass,
     route: Option<&LocalBusFederationRoute>,
 ) -> Result<SendMaterial, SdkError> {
-    let Some(route) = route else { return pair_material::fetch(context, config, request).await };
+    let Some(route) = route else {
+        return pair_material::fetch(context, config, request, class).await;
+    };
     let base = route
         .recipient_prekey_url
         .as_deref()
@@ -74,7 +77,12 @@ pub(crate) async fn submit(
     envelope: ramflux_protocol::Envelope,
     route: Option<LocalBusFederationRoute>,
 ) -> Result<(), SdkError> {
-    submit_until(context, envelope, route, context.call_deadline(), false).await
+    let deadline = if route.is_some() {
+        tokio::time::Instant::now() + context.network_wait()
+    } else {
+        context.call_deadline()
+    };
+    submit_inner(context, envelope, route, deadline, false, false).await
 }
 
 pub(crate) async fn submit_until(
@@ -84,13 +92,31 @@ pub(crate) async fn submit_until(
     deadline: tokio::time::Instant,
     priority: bool,
 ) -> Result<(), SdkError> {
+    submit_inner(context, envelope, route, deadline, priority, !priority).await
+}
+
+async fn submit_inner(
+    context: &SessionContext,
+    envelope: ramflux_protocol::Envelope,
+    route: Option<LocalBusFederationRoute>,
+    deadline: tokio::time::Instant,
+    priority: bool,
+    task_forward: bool,
+) -> Result<(), SdkError> {
+    let deadline_error = || if task_forward { SdkError::TaskDeliveryTimeout } else { stopped() };
     if let Some(route) = route {
         if deadline <= tokio::time::Instant::now() {
-            return Err(SdkError::TaskDeliveryTimeout);
+            return Err(deadline_error());
         }
-        let _permit = crate::client::federation::forward_slots()
-            .try_acquire()
-            .map_err(|_| SdkError::TaskForwardWorkerCapacity)?;
+        let _permit = if task_forward {
+            Some(
+                crate::client::federation::forward_slots()
+                    .try_acquire()
+                    .map_err(|_| SdkError::TaskForwardWorkerCapacity)?,
+            )
+        } else {
+            None
+        };
         let request = crate::client::federation::federated_forward_request(&route, envelope);
         let response = tokio::time::timeout_at(
             deadline,
@@ -102,9 +128,9 @@ pub(crate) async fn submit_until(
             ),
         )
         .await
-        .map_err(|_| SdkError::TaskDeliveryTimeout)?
+        .map_err(|_| deadline_error())?
         .map_err(|error| match error {
-            SdkError::Io(ref io) if io.kind() == std::io::ErrorKind::TimedOut => {
+            SdkError::Io(ref io) if task_forward && io.kind() == std::io::ErrorKind::TimedOut => {
                 SdkError::TaskDeliveryTimeout
             }
             other => other,

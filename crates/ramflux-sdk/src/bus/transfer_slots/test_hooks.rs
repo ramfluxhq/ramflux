@@ -3,6 +3,11 @@
 
 //! Test-owned checkpoints are held before persistence without occupying the account writer.
 
+#![expect(
+    dead_code,
+    reason = "Transfer checkpoint fixtures are exercised in the pending S2 integration round"
+)]
+
 use crate::SdkError;
 use crate::bus::account_runtime::{fetches::FetchCheckpoint, uploads::Checkpoint};
 use std::sync::{Arc, Mutex};

@@ -34,15 +34,27 @@ pub(super) fn node(original: &VerifiedNodeRecord, now: u64) -> Result<VerifiedNo
 pub(super) async fn public_lookup(
     bytes: &[u8],
     stream: &mut ramflux_transport::GatewayTcpTlsStream,
+    script: &Arc<Mutex<Script>>,
 ) -> Result<bool> {
     let Ok(request) = serde_json::from_slice::<ramflux_transport::GatewayQuicRequest>(bytes) else {
         return Ok(false);
     };
     assert_eq!(request.method, "GET");
     assert!(request.path.starts_with("/mvp1/device-manifest/"));
+    let body = script
+        .lock()
+        .map_err(|_| "script lock")?
+        .ordinary
+        .as_ref()
+        .and_then(|session| {
+            session.manifests.get(request.path.trim_start_matches("/mvp1/device-manifest/"))
+        })
+        .map(serde_json::to_value)
+        .transpose()?
+        .unwrap_or(serde_json::Value::Null);
     ramflux_transport::write_gateway_session_json(
         stream,
-        &ramflux_transport::GatewayQuicResponse { status: 200, body: serde_json::Value::Null },
+        &ramflux_transport::GatewayQuicResponse { status: 200, body },
     )
     .await?;
     Ok(true)
@@ -111,12 +123,23 @@ pub(super) fn dispatch(
 pub(super) async fn ordinary(
     stream: &mut ramflux_transport::GatewayTcpTlsStream,
     session: &str,
+    script: &Arc<Mutex<Script>>,
 ) -> Result {
     let open: GatewayClientFrame = ramflux_transport::read_gateway_session_json(stream).await?;
     let GatewayClientFrame::Open { open } = open else { return Err("ordinary open".into()) };
     assert_eq!(open.device_id, "primary");
     let auth: GatewayClientFrame = ramflux_transport::read_gateway_session_json(stream).await?;
     assert!(matches!(auth, GatewayClientFrame::Auth { .. }));
+    let held = script.lock().map_err(|_| "script lock")?.hold_established.clone();
+    if let Some(entered) = held {
+        entered.notify_one();
+        let release = script.lock().map_err(|_| "script lock")?.release_established.clone();
+        if let Some(release) = release {
+            release.notified().await;
+        } else {
+            return std::future::pending().await;
+        }
+    }
     ramflux_transport::write_gateway_session_json(
         stream,
         &GatewayServerFrame::SessionEstablished {
@@ -130,7 +153,99 @@ pub(super) async fn ordinary(
         },
     )
     .await?;
+    let persistent = script.lock().map_err(|_| "script lock")?.ordinary.is_some();
+    if persistent {
+        serve_session(stream, script, &open.target_delivery_id).await?;
+    }
     Ok(())
+}
+
+#[derive(Default)]
+pub(super) struct SessionScript {
+    pub inbox: Vec<crate::GatewayInboxEntry>,
+    pub manifests: std::collections::BTreeMap<String, crate::prekey::SdkDeviceManifestResponse>,
+    pub received: Vec<GatewayClientFrame>,
+    pub held_ack: Option<Arc<HeldAck>>,
+}
+pub(super) struct HeldAck {
+    pub id: String,
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+async fn serve_session(
+    stream: &mut ramflux_transport::GatewayTcpTlsStream,
+    script: &Arc<Mutex<Script>>,
+    target: &str,
+) -> Result {
+    loop {
+        let frame: GatewayClientFrame =
+            match ramflux_transport::read_gateway_session_json(stream).await {
+                Ok(frame) => frame,
+                Err(ramflux_transport::TransportError::Io(error))
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
+        let hold = {
+            let script = script.lock().map_err(|_| "script lock")?;
+            script.ordinary.as_ref().and_then(|session|session.held_ack.as_ref())
+                .filter(|held|matches!(&frame,GatewayClientFrame::Ack { ack } if ack.envelope_id==held.id)).cloned()
+        };
+        if let Some(held) = hold {
+            held.entered.notify_one();
+            held.release.notified().await;
+        }
+        let responses = {
+            let mut script = script.lock().map_err(|_| "script lock")?;
+            let session = script.ordinary.as_mut().ok_or("session script")?;
+            session.received.push(frame.clone());
+            match frame {
+                GatewayClientFrame::Resume { resume } => vec![GatewayServerFrame::Resume {
+                    entries: session
+                        .inbox
+                        .iter()
+                        .filter(|entry| entry.inbox_seq > resume.after_inbox_seq)
+                        .take(64)
+                        .cloned()
+                        .collect(),
+                }],
+                GatewayClientFrame::Ack { ack } => {
+                    let cursor = crate::GatewayCursor {
+                        target_delivery_id: target.into(),
+                        inbox_seq: session
+                            .inbox
+                            .iter()
+                            .find(|entry| entry.envelope.envelope_id == ack.envelope_id)
+                            .map(|entry| entry.inbox_seq)
+                            .or_else(|| {
+                                session
+                                    .held_ack
+                                    .as_ref()
+                                    .filter(|held| held.id == ack.envelope_id)
+                                    .map(|_| 0)
+                            })
+                            .ok_or("unknown inbox ACK")?,
+                        last_envelope_id: Some(ack.envelope_id.clone()),
+                        acked_envelope_ids: vec![ack.envelope_id],
+                        nacked_envelope_ids: std::collections::BTreeMap::new(),
+                    };
+                    vec![
+                        GatewayServerFrame::Ack { cursor: cursor.clone() },
+                        GatewayServerFrame::Cursor { cursor: Some(cursor) },
+                    ]
+                }
+                GatewayClientFrame::Heartbeat { now } => {
+                    vec![GatewayServerFrame::Heartbeat { now }]
+                }
+                other => return Err(format!("unexpected scripted session frame {other:?}").into()),
+            }
+        };
+        for response in responses {
+            ramflux_transport::write_gateway_session_json(stream, &response).await?;
+        }
+    }
 }
 
 #[tokio::test]
@@ -212,12 +327,7 @@ async fn ordinary_native_gateway_busy_retries_outlive_the_legacy_timeout_with_fr
 async fn legacy_connection_deadline_stays_fifteen_seconds() {
     let start = tokio::time::Instant::now();
     let legacy: std::result::Result<(), crate::SdkError> =
-        crate::gateway::engine::gateway_connection_timeout(
-            false,
-            "legacy connect",
-            std::future::pending(),
-        )
-        .await;
+        crate::gateway::engine::connect_deadline(None, std::future::pending()).await;
     assert!(matches!(legacy, Err(crate::SdkError::GatewaySessionRejected(_))));
     assert_eq!(start.elapsed(), Duration::from_secs(15));
 }

@@ -13,6 +13,7 @@ use crate::prelude::*;
 use serde_json::json;
 use std::sync::{Arc, atomic::AtomicBool};
 
+#[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
 pub(super) struct Started {
     pub actor: AccountActor,
     pub root: PathBuf,
@@ -114,6 +115,7 @@ struct ResumeConfig {
     transfer_hook: Option<Arc<crate::bus::transfer_slots::test_hooks::Hook>>,
 }
 impl Started {
+    #[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
     pub(super) async fn restart(self) -> Case<Self> {
         let Self { actor, root, router, peer, sibling, resume } = self;
         actor.stop().await?;

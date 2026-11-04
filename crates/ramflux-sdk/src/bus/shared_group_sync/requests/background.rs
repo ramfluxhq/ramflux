@@ -100,9 +100,14 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
             &mut target.request,
             SendMaterialRequest { root: None, prekey: None },
         );
-        let material =
-            federation::material(&context, &target.plan.config, request, target.route.as_ref())
-                .await;
+        let material = federation::material(
+            &context,
+            &target.plan.config,
+            request,
+            crate::bus::connection_manager::CallClass::Bulk,
+            target.route.as_ref(),
+        )
+        .await;
         let Some(sealed) = writer.apply(move |account| seal(account, target, material)).await?
         else {
             return Ok(active);
