@@ -216,11 +216,18 @@ fn non_empty_env(name: &str) -> Option<String> {
 
 fn validate_migration_config(config: &ramflux_node_core::NodeServiceConfig) -> anyhow::Result<()> {
     if ramflux_node_core::home_migration_enabled()? {
-        ramflux_node_core::require_node_service_signing_key(config)?;
-        crate::home_migration::require_forward_client(
-            local_federation_forward_client_from_env(config).is_some(),
-        )?;
+        validate_enabled_migration_config(config)?;
     }
+    Ok(())
+}
+
+fn validate_enabled_migration_config(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> anyhow::Result<()> {
+    ramflux_node_core::require_node_service_signing_key(config)?;
+    crate::home_migration::require_forward_client(
+        local_federation_forward_client_from_env(config).is_some(),
+    )?;
     Ok(())
 }
 
@@ -260,3 +267,7 @@ mod release_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "migration_startup_tests.rs"]
+mod migration_startup_tests;

@@ -190,3 +190,59 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod migration_capability_tests {
+    #[test]
+    fn migration_capability_advertised_only_when_enabled_after_release_gate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const NAME: &str = "discovery::migration_capability_tests::migration_capability_advertised_only_when_enabled_after_release_gate";
+        if std::env::var_os("RAMFLUX_MIGRATION_DISCOVERY_CHILD").is_none() {
+            for flag in [None, Some("0"), Some("1")] {
+                let mut child = std::process::Command::new(std::env::current_exe()?);
+                child
+                    .args(["--exact", NAME])
+                    .env("RAMFLUX_MIGRATION_DISCOVERY_CHILD", "1")
+                    .env_remove("RAMFLUX_HOME_MIGRATION_ENABLED");
+                if let Some(flag) = flag {
+                    child.env("RAMFLUX_HOME_MIGRATION_ENABLED", flag);
+                }
+                let output = child.output()?;
+                assert!(
+                    output.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            }
+            return Ok(());
+        }
+        let config: ramflux_node_core::NodeServiceConfig = serde_json::from_value(
+            serde_json::json!({
+                "node_id": "A", "service_id": "ramflux-federation", "redb_path": "unused.redb",
+                "mesh": {"listen_addr": "127.0.0.1:0", "ca_cert": "unused.pem", "service_cert": "unused.pem", "service_key": "unused.key", "allowed_service_ids": [], "endpoints": {}}
+            }),
+        )?;
+        let expected = ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
+            && std::env::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() == Ok("1");
+        let mut surface = super::federation_discovery_surface(&config, [8; 32]);
+        surface.node_ca_cert_pem = "test-ca".into();
+        let client = surface.client_record()?;
+        let server = surface.well_known_record()?;
+        let contains = |caps: &[String]| {
+            caps.iter().any(|c| c == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+        };
+        assert_eq!(contains(&client.client_capabilities), expected);
+        assert_eq!(contains(&server.node_capabilities), expected);
+        assert!(client.client_capabilities.iter().any(|c| c == "opaque_delivery"));
+        assert!(server.node_capabilities.iter().any(|c| c == "opaque_delivery"));
+        ramflux_node_core::verify_federation_server_record(&server, server.updated_at)?;
+        ramflux_crypto::verify_canonical_signature(
+            &ramflux_protocol::client_discovery_signing_bytes(&client)?,
+            &client.signature,
+            &client.node_public_key,
+        )?;
+        Ok(())
+    }
+}

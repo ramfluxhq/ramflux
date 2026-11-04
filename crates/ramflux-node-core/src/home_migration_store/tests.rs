@@ -117,6 +117,9 @@ struct Scenario {
 }
 impl Scenario {
     fn prepared() -> TestResult<Self> {
+        Self::prepared_with_id(None)
+    }
+    fn prepared_with_id(migration_id: Option<String>) -> TestResult<Self> {
         let a = TestNode::new("A", 8, true)?;
         let b = TestNode::new("B", 9, false)?;
         let record = publication()?.record;
@@ -136,6 +139,9 @@ impl Scenario {
         )?;
         let mut prepare: Prepare =
             serde_json::from_value(fixture()?["messages"][0]["signed"]["body"].clone())?;
+        if let Some(migration_id) = migration_id {
+            prepare.migration_id = migration_id;
+        }
         prepare.destination_node = "B".into();
         prepare.destination_key = public(9);
         prepare.previous_home_hash = base.hash().into();

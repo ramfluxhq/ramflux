@@ -210,17 +210,22 @@ fn validate_migration_config(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     if ramflux_node_core::home_migration_enabled()? {
-        let signer = ramflux_node_core::require_node_service_signing_key(config)?;
-        let mounted = ramflux_node_core::NodeSecret::required_env(
-            "RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE",
-        )?;
-        let public =
-            mounted.with_bytes(|seed| ramflux_crypto::public_key_base64url_from_seed(*seed));
-        if signer.public_key_base64url() != public {
-            return Err(ramflux_node_core::NodeCoreError::InvalidConfiguration(
-                "migration node signer differs from federation identity".into(),
-            ));
-        }
+        validate_enabled_migration_config(config)?;
+    }
+    Ok(())
+}
+
+fn validate_enabled_migration_config(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let signer = ramflux_node_core::require_node_service_signing_key(config)?;
+    let mounted =
+        ramflux_node_core::NodeSecret::required_env("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE")?;
+    let public = mounted.with_bytes(|seed| ramflux_crypto::public_key_base64url_from_seed(*seed));
+    if signer.public_key_base64url() != public {
+        return Err(ramflux_node_core::NodeCoreError::InvalidConfiguration(
+            "migration node signer differs from federation identity".into(),
+        ));
     }
     Ok(())
 }
@@ -261,3 +266,7 @@ mod release_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "migration_startup_tests.rs"]
+mod migration_startup_tests;

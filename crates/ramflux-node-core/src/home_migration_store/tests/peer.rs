@@ -171,3 +171,46 @@ fn public_peer_resolve_is_purpose_bound_and_returns_no_private_operation_state()
     ));
     Ok(())
 }
+
+#[test]
+fn route_update_orders_by_epoch_cas_never_caller_time() -> TestResult {
+    let mut s = Scenario::prepared()?;
+    let alternate = Scenario::prepared_with_id(Some(hash(97)))?;
+    assert_eq!(s.base.hash(), alternate.base.hash());
+    let stale = alternate.seal()?.sealed_evidence()?;
+    let call = s.b.node.peer_commit_call(stale.clone(), NOW + 2)?;
+    let request = crate::MigrationPeerRequest { budget_ms: 1000, call };
+    let value = serde_json::to_value(&request)?;
+    // Neither private-hop layer accepts an unsigned caller clock.
+    for field in ["now", "issued_at"] {
+        for time in [i64::MIN, i64::MAX] {
+            let mut changed = value.clone();
+            changed[field] = json!(time);
+            assert!(serde_json::from_value::<crate::MigrationPeerRequest>(changed).is_err());
+            let mut changed = value.clone();
+            changed["call"][field] = json!(time);
+            assert!(serde_json::from_value::<crate::MigrationPeerRequest>(changed).is_err());
+        }
+    }
+    let decoded: crate::MigrationPeerRequest = serde_json::from_value(value)?;
+    assert_eq!(decoded.budget_ms, 1000);
+    let op = s.seal()?;
+    let committed = s.commit(&op)?;
+    // A different, correctly signed authorization for the same predecessor loses CAS.
+    assert!(matches!(
+        s.a.core.commit_home_migration(
+            s.a.store()?,
+            &s.a.node,
+            CommitMigration {
+                sealed: &stale,
+                peer: MigrationPeer { node_id: "B", node_key: &public(9) }
+            },
+            NOW + 3,
+        ),
+        Err(NodeCoreError::HomeMigration(Refusal::BaseMismatch))
+    ));
+    s.a.restart()?;
+    assert_eq!(s.commit(&op)?, committed);
+    assert_eq!(s.a.store()?.migration_home(&s.anchor)?.ok_or("head")?, committed);
+    Ok(())
+}

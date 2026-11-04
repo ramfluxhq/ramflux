@@ -471,3 +471,41 @@ fn foreign_prepare_cannot_demote_an_already_registered_unattested_local_root() -
     drop(existing.store()?.acquire_home_operation(&s.anchor)?);
     Ok(())
 }
+
+#[test]
+fn migration_enabled_startup_refuses_without_matching_node_signer() -> TestResult {
+    let s = Scenario::prepared()?;
+    let mut config: crate::NodeServiceConfig = serde_json::from_value(json!({
+        "node_id": "A", "service_id": "ramflux-router", "redb_path": "unused.redb",
+        "mesh": {
+            "listen_addr": "127.0.0.1:0", "ca_cert": "unused.pem",
+            "service_cert": "unused.pem", "service_key": "unused.key",
+            "allowed_service_ids": [], "endpoints": {}
+        }
+    }))?;
+    assert!(crate::require_node_service_signing_key(&config).is_err());
+    config.node_service_signing_seed_b64url =
+        Some(crate::RedactedString::new(ramflux_protocol::encode_base64url([9; 32])));
+    // A valid encoding containing the wrong seed still fails descriptor binding.
+    let wrong = crate::require_node_service_signing_key(&config)?;
+    let record = s.base.evidence().node_record.clone();
+    let endpoints = || MigrationEndpoints {
+        gateway_tcp_addr: "127.0.0.1:9000".into(),
+        federation_endpoint: "https://peer.example".into(),
+        discovery_hash: hash(19),
+        server_record_hash: hash(19),
+    };
+    assert!(wrong.home_migration_node(record.clone(), endpoints(), NOW).is_err());
+    config.node_service_signing_seed_b64url =
+        Some(crate::RedactedString::new(ramflux_protocol::encode_base64url([8; 32])));
+    let signer = crate::require_node_service_signing_key(&config)?;
+    let node = signer.home_migration_node(record, endpoints(), NOW)?;
+    s.a.store()?.validate_home_migration_runtime(Some((node.node_id(), node.public_key())))?;
+    assert!(s.a.store()?.validate_home_migration_runtime(None).is_err());
+    assert!(
+        s.a.store()?
+            .validate_home_migration_runtime(Some((node.node_id(), wrong.public_key_base64url())))
+            .is_err()
+    );
+    Ok(())
+}

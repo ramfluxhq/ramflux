@@ -179,3 +179,46 @@ fn legacy_route_expiry_does_not_truncate_committed_forward_window() -> TestResul
     assert!(matches!(prepare(&s, NOW + 10)?, RouterForwardPreparation::Forward(_)));
     closed(&s, NOW + 2 + FORWARD_SECONDS)
 }
+
+#[test]
+fn router_redb_store_restores_home_node_migration_state() -> TestResult {
+    let mut s = Scenario::prepared()?;
+    let committed = s.commit(&s.seal()?)?;
+    let hash = record_hash(&committed.record)?;
+    s.a.restart()?;
+    assert_eq!(s.a.store()?.migration_home(&s.anchor)?.ok_or("restored head")?, committed);
+    assert!(s.a.store()?.acquire_home_operation(&s.anchor).is_err());
+    let RouterForwardPreparation::Complete(outcome) = prepare(&s, NOW + 2 + FORWARD_SECONDS)?
+    else {
+        return Err("forwarded after restored window closure".into());
+    };
+    let RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) = *outcome else {
+        return Err("missing restored migrated refusal".into());
+    };
+    assert_eq!(delivery.proof_hash, hash);
+    assert_eq!(delivery.new_home_node_hint, "B");
+    assert_eq!(delivery.nack.reason, ramflux_protocol::NackReason::HomeNodeMigrated);
+    ramflux_protocol::verify_signed_fields(&delivery.nack, &delivery.nack.signed, &public(8))?;
+    Ok(())
+}
+
+#[test]
+fn router_redb_store_restores_home_node_route_state() -> TestResult {
+    let mut s = Scenario::prepared()?;
+    s.commit(&s.seal()?)?;
+    let RouterForwardPreparation::Forward(before) = prepare(&s, NOW + 3)? else {
+        return Err("expected committed route".into());
+    };
+    let plan = before.plan().ok_or("route plan")?.clone();
+    drop(before);
+    s.a.restart()?;
+    let RouterForwardPreparation::Forward(after) = prepare(&s, NOW + 3)? else {
+        return Err("committed route lost after restart".into());
+    };
+    let restored = after.plan().ok_or("restored route plan")?;
+    assert_eq!(restored.route, plan.route);
+    assert_eq!(restored.proof_hash, plan.proof_hash);
+    assert_eq!(restored.migration_evidence, plan.migration_evidence);
+    assert_eq!(restored.new_home_node, "B");
+    Ok(())
+}
