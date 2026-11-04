@@ -132,7 +132,12 @@ async fn fetch_material(
     if let Some(request) = plan.request.take() {
         tokio::time::timeout(
             context.network_wait(),
-            crate::bus::couriers::pair_material::fetch(context, &plan.config, request),
+            crate::bus::couriers::pair_material::fetch(
+                context,
+                &plan.config,
+                request,
+                crate::bus::connection_manager::CallClass::Priority,
+            ),
         )
         .await
         .unwrap_or_else(|_| Err(stopped()))

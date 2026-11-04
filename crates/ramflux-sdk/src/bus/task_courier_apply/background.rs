@@ -247,8 +247,14 @@ async fn send(context: &SessionContext, writer: &Writer, mut plan: Plan) -> Resu
                 crate::client::routed::SendMaterialRequest { root: None, prekey: None },
             );
             let route = draft.target.federation.clone();
-            let material =
-                federation::material(context, &plan.config, request, route.as_ref()).await?;
+            let material = federation::material(
+                context,
+                &plan.config,
+                request,
+                crate::bus::connection_manager::CallClass::Bulk,
+                route.as_ref(),
+            )
+            .await?;
             let item = plan.item.clone();
             let conversation = plan.conversation.clone();
             let routing = plan.routing.clone();

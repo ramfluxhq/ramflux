@@ -519,6 +519,8 @@ pub(in crate::bus) enum PreparedPut {
     Ready(PutBinding),
 }
 
+// The fault-injection barrier awaits only when its feature is enabled.
+#[cfg_attr(not(feature = "itest-rfd-fault"), allow(clippy::unused_async))]
 #[allow(clippy::too_many_lines)]
 async fn prepare_put_core(
     account: &mut LocalBusAccountState,

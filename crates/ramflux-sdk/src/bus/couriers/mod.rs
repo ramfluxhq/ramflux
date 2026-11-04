@@ -21,3 +21,6 @@ pub(crate) mod test_pass;
 pub(crate) mod surface;
 
 pub(crate) mod reset;
+
+#[cfg(test)]
+mod tests;

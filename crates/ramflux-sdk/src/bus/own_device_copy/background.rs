@@ -143,6 +143,7 @@ async fn pass(
                         context,
                         &draft.plan.config,
                         request,
+                        crate::bus::connection_manager::CallClass::Bulk,
                     ),
                 )
                 .await

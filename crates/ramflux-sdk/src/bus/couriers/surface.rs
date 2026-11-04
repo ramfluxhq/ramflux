@@ -26,7 +26,12 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
         std::mem::replace(&mut plan.request, SendMaterialRequest { root: None, prekey: None });
     let material = tokio::time::timeout(
         context.network_wait(),
-        pair_material::fetch(&context, &plan.config, request),
+        pair_material::fetch(
+            &context,
+            &plan.config,
+            request,
+            crate::bus::connection_manager::CallClass::Bulk,
+        ),
     )
     .await
     .map_err(|_| SdkError::NetworkingPending)?;

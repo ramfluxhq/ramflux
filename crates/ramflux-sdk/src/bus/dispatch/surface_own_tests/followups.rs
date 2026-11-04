@@ -50,7 +50,10 @@ async fn context_marker_requires_confirmation_and_failure_restores_context() -> 
     let mut failed = super::super::fixture::RecordingGateway::new(Arc::default());
     failed.fail_own_ack = true;
     let own = Arc::clone(&failed.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(failed)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(failed),
+    ));
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 0);
     assert_eq!(
         source.client.account_db()?.actor_state_usage("own-device/context-delivered/")?.0,
@@ -61,7 +64,10 @@ async fn context_marker_requires_confirmation_and_failure_restores_context() -> 
     due(&source.client)?;
     let mut healthy = super::super::fixture::RecordingGateway::new(Arc::default());
     healthy.own = own;
-    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(healthy)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(healthy),
+    ));
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
     assert_eq!(
         source.client.account_db()?.actor_state_usage("own-device/context-delivered/")?.0,
@@ -73,7 +79,8 @@ async fn context_marker_requires_confirmation_and_failure_restores_context() -> 
     let next = append(&source.client, &create, 2)?;
     let mut failed = super::super::fixture::RecordingGateway::new(Arc::default());
     failed.fail_own_ack = true;
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(failed)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(failed)));
     assert_eq!(send(&mut source, &next).await?["own_device_copy_state"], "pending");
     assert_eq!(
         source.client.account_db()?.actor_state_usage("own-device/context-delivered/")?.0,
@@ -140,7 +147,10 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
     let create = super::super::dm_tests::create_carrier(&source.client)?;
     let mut failed = super::super::fixture::RecordingGateway::new(Arc::default());
     failed.fail_own_ack = true;
-    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(failed)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(failed),
+    ));
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "pending");
     let key = source.client.account_db()?.actor_state_key_page("own-device/send/", 1)?.remove(0);
     let mut work: Value = source.client.account_db()?.load_actor_state(&key)?.ok_or("prepared")?;
@@ -160,7 +170,8 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
     let mut partial = super::super::fixture::RecordingGateway::new(Arc::default());
     partial.fail_own_target = Some("dead-sibling".into());
     let own = Arc::clone(&partial.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(partial)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(partial)));
     let attempted_at = now_unix_timestamp();
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 0);
     let mut parked: Value = source.client.account_db()?.load_actor_state(&key)?.ok_or("parked")?;
@@ -218,7 +229,8 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
     let (sibling, config, mut receiver, directory) = sibling_fixture(&root, &mut source).await?;
     let gateway = super::super::fixture::RecordingGateway::new(Arc::default());
     let own = Arc::clone(&gateway.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let create = super::super::dm_tests::create_carrier(&source.client)?;
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "submitted");
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
@@ -310,7 +322,8 @@ async fn a_full_live_replay_window_defers_new_copies_without_consuming_the_ratch
     let (sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
     let gateway = super::super::fixture::RecordingGateway::new(Arc::default());
     let own = Arc::clone(&gateway.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let create = super::super::dm_tests::create_carrier(&source.client)?;
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "submitted");
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
@@ -359,7 +372,8 @@ async fn a_slow_failure_parks_the_target_from_completion_instead_of_attempt_star
     gateway.fail_own_ack = true;
     gateway.own_delay = Duration::from_secs(3);
     let completed = Arc::clone(&gateway.own_completed_at);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let create = super::super::dm_tests::create_carrier(&source.client)?;
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "pending");
     let completed_at = completed

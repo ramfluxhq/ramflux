@@ -337,6 +337,7 @@ async fn send_controls(
                 context,
                 &plan.config,
                 request,
+                crate::bus::connection_manager::CallClass::Priority,
                 control.target.federation.as_ref(),
             )
             .await?;

@@ -170,8 +170,8 @@ mod tests {
             None,
             Arc::new(AtomicBool::new(false)),
         )?;
-        let live = account.take_live_engine().await?;
-        account.put_engine(GatewaySessionEngine::with_test_transport(
+        let live = account.session_client().await?;
+        account.install_test_session(GatewaySessionEngine::with_test_transport(
             live.config.clone(),
             Box::new(HangingLegacyGateway { last: None, stall_heartbeat: false }),
         ));
@@ -251,11 +251,11 @@ mod tests {
             None,
             Arc::new(AtomicBool::new(false)),
         )?;
-        let mut config = account.take_live_engine().await?.config.clone();
+        let mut config = account.session_client().await?.config.clone();
         config.previous_session_id = Some("acquire-session".into());
         config.resume_token = Some("acquire-resume".into());
         config.last_seen_inbox_seq = 41;
-        account.put_engine(GatewaySessionEngine::with_test_transport(
+        account.install_test_session(GatewaySessionEngine::with_test_transport(
             config,
             Box::new(HangingLegacyGateway { last: None, stall_heartbeat: true }),
         ));

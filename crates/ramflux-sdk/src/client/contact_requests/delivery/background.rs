@@ -205,7 +205,12 @@ async fn deliver(
 ) -> Result<Option<Plan>, SdkError> {
     let material = tokio::time::timeout(
         context.network_wait(),
-        crate::bus::couriers::pair_material::fetch(context, &plan.plan.config, request),
+        crate::bus::couriers::pair_material::fetch(
+            context,
+            &plan.plan.config,
+            request,
+            crate::bus::connection_manager::CallClass::Bulk,
+        ),
     )
     .await
     .map_err(|_| stopped())??;

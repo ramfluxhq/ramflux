@@ -108,6 +108,7 @@ mod tests {
 }
 /// Only stop-class errors escape. Every other error charges this item and permits the next result.
 #[cfg(test)]
+#[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
 pub(super) async fn apply(
     account: &mut LocalBusAccountState,
     item: Item,
@@ -139,6 +140,7 @@ fn apply_result(
 }
 
 #[cfg(test)]
+#[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
 async fn apply_item(
     account: &mut LocalBusAccountState,
     item: &Item,

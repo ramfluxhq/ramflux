@@ -237,6 +237,7 @@ impl Fixture {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn serve(
     stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     shared: &Arc<Mutex<Gateway>>,
@@ -276,7 +277,7 @@ async fn serve(
                 GatewayClientFrame::Resume { resume } => {
                     let hold = shared.lock().map_err(|_| "gateway")?.resume_hold.take();
                     if let Some(hold) = hold {
-                        hold.entered.notify_one();
+                        let _ = hold.entered.send(());
                         hold.release.notified().await;
                     }
                     let mut gateway = shared.lock().map_err(|_| "gateway")?;

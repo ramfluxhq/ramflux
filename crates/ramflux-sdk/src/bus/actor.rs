@@ -14,6 +14,7 @@ pub(super) type AccountInitializer =
 
 pub(super) enum PrivateCommand {
     #[cfg(test)]
+    #[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
     TransferCheckpoint {
         checkpoint: Box<super::account_runtime::uploads::Checkpoint>,
         applied: oneshot::Sender<()>,
@@ -293,6 +294,7 @@ impl AccountActor {
         self.backup_captures.load(std::sync::atomic::Ordering::Relaxed)
     }
     #[cfg(test)]
+    #[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
     pub(super) async fn inject_transfer_checkpoint(
         &self,
         checkpoint: super::account_runtime::uploads::Checkpoint,

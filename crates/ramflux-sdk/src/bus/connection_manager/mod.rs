@@ -355,7 +355,7 @@ impl ConnectionHandle {
     }
     #[cfg(test)]
     pub(crate) fn queued_calls(&self) -> usize {
-        CALL_QUEUE - self.places.available_permits()
+        2 * CALL_QUEUE - self.places.available_permits() - self.priority_places.available_permits()
     }
     #[cfg(test)]
     pub(crate) fn removals(&self) -> Vec<CallRemoval> {
