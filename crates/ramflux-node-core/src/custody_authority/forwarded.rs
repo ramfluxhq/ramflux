@@ -8,11 +8,11 @@ use crate::{
     RouterRedbStore,
 };
 use ramflux_crypto::custody::PinOutcome;
-use redb::{ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{ReadableTable, TableDefinition};
 
-const FOREIGN: TableDefinition<&str, &[u8]> = TableDefinition::new("foreign_custody_pins_v1");
-const MAX_FOREIGN: u64 = 4096;
-const MAX_FOREIGN_BYTES: usize = 1024 * 1024;
+pub(super) const FOREIGN: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("foreign_custody_pins_v1");
+mod budget;
 fn storage(e: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(e.to_string())
 }
@@ -23,6 +23,27 @@ impl RouterCore {
     /// Refuses client provenance, excessive evidence, unrelated roots, stale authority and forks.
     pub fn authenticated_native_forwarded_source_with_floors(
         &self,
+        envelope: &ramflux_protocol::Envelope,
+        floors: &[CustodyPublication],
+        store: &RouterRedbStore,
+        origin: crate::RouterEnvelopeOrigin,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        let _pin_admission =
+            crate::forwarded_delivery::FOREIGN_PIN_ADMISSION.lock().map_err(storage)?;
+        self.authenticated_native_forwarded_source_from_peer(
+            "unspecified",
+            envelope,
+            floors,
+            store,
+            origin,
+        )
+    }
+    /// Verify pins under the authenticated federation peer's independent quota.
+    /// # Errors
+    /// Refuses invalid authority, quota exhaustion and storage failures.
+    pub(crate) fn authenticated_native_forwarded_source_from_peer(
+        &self,
+        peer: &str,
         envelope: &ramflux_protocol::Envelope,
         floors: &[CustodyPublication],
         store: &RouterRedbStore,
@@ -102,14 +123,9 @@ impl RouterCore {
             };
             let state = CustodyAccountState { publication: accepted, pins };
             let bytes = serde_json::to_vec(&state).map_err(storage)?;
-            let mut table = tx.open_table(FOREIGN).map_err(storage)?;
-            if bytes.len() > MAX_FOREIGN_BYTES
-                || (table.get(anchor.as_str()).map_err(storage)?.is_none()
-                    && table.len().map_err(storage)? >= MAX_FOREIGN)
-            {
-                return Err(NodeCoreError::Capacity { resource: "foreign custody pins" });
+            if !local.iter().any(|p| p.record.body.account_anchor == *anchor) {
+                budget::insert(&tx, peer, anchor, &bytes, now)?;
             }
-            table.insert(anchor.as_str(), bytes.as_slice()).map_err(storage)?;
             registry.apply_custody_account(anchor.clone(), state)?;
             if let PinOutcome::Fenced(alert) = outcome {
                 refusal = Some(NodeCoreError::CustodyConflict { alert: Box::new(alert) });

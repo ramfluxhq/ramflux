@@ -20,9 +20,15 @@ pub struct ForwardedMigrationEvidence {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardedEnvelopeRequest {
+    #[serde(default)]
+    pub peer_node_id: String,
     pub envelope: ramflux_protocol::Envelope,
     pub migration_evidence: Option<ForwardedMigrationEvidence>,
 }
+// Serialize pin eviction with inbox acceptance so a newly verified pin cannot be
+// evicted between its authority transaction and its durable inbox receipt.
+pub(crate) static FOREIGN_PIN_ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl RouterCore {
     /// Accept an envelope from an authenticated federation peer without rewriting it.
     /// # Errors
@@ -34,7 +40,9 @@ impl RouterCore {
         request: ForwardedEnvelopeRequest,
         now: u64,
     ) -> Result<RouterSubmitOutcome, NodeCoreError> {
-        let ForwardedEnvelopeRequest { envelope, migration_evidence } = request;
+        let _pin_admission =
+            FOREIGN_PIN_ADMISSION.lock().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        let ForwardedEnvelopeRequest { envelope, migration_evidence, peer_node_id } = request;
         // Verify sender bytes without persistence, then the complete sealed proof, before pins.
         crate::DeviceAuthKeyResponse::forwarded_envelope_source(&envelope)?;
         let proof = migration_evidence.as_ref().and_then(|e| e.commit_proof.as_ref());
@@ -52,7 +60,8 @@ impl RouterCore {
             .and_then(|v| v.get("custody_authority"))
             .is_some_and(|v| !v.is_null());
         let source = if native {
-            self.authenticated_native_forwarded_source_with_floors(
+            self.authenticated_native_forwarded_source_from_peer(
+                &peer_node_id,
                 &envelope,
                 floors,
                 store,

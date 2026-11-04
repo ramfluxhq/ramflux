@@ -455,8 +455,53 @@ pub(crate) fn handle_s8_receive_envelope(
         store,
         observability,
         InboundForwardTiming { now, total_started, attempt_lease_seconds },
-        || post_forwarded_to_router(request, |path, body| router_post_json(router, path, body)),
+        || {
+            post_inbound_to_router(
+                request,
+                ramflux_node_core::home_migration_enabled()?,
+                |path, body| router_post_json(router, path, body),
+            )
+        },
     )
+}
+
+// The trusted federation service supplies the peer identity from the verified request.
+pub(crate) fn post_inbound_to_router<F>(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    migration_enabled: bool,
+    post: F,
+) -> Result<ramflux_node_core::EnvelopeSubmitResponse, ramflux_node_core::NodeCoreError>
+where
+    F: FnOnce(
+        &str,
+        &serde_json::Value,
+    ) -> Result<serde_json::Value, ramflux_node_core::NodeCoreError>,
+{
+    if request.migration_evidence.is_none() {
+        let response = post(
+            "/mvp0/envelope",
+            &serde_json::to_value(&request.envelope)
+                .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?,
+        )?;
+        return serde_json::from_value(response)
+            .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()));
+    }
+    if !migration_enabled {
+        return Ok(ramflux_node_core::EnvelopeSubmitResponse {
+            migration_refusal: None,
+            outcome: "forward_retryable".into(),
+            target_delivery_id: request.envelope.target_delivery_id.clone(),
+            inbox_seq: None,
+            cursor: None,
+            nack: None,
+        });
+    }
+    post_forwarded_to_router(request, |path, body| {
+        let body = serde_json::to_value(body)
+            .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?;
+        serde_json::from_value(post(path, &body)?)
+            .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -479,6 +524,7 @@ where
     let response = post(
         "/mvp0/envelope/forwarded",
         &ramflux_node_core::ForwardedEnvelopeRequest {
+            peer_node_id: request.source_node_id.clone(),
             envelope: request.envelope.clone(),
             migration_evidence: request.migration_evidence.clone(),
         },
@@ -528,7 +574,7 @@ where
         ramflux_node_core::NodeCoreError,
     >,
 {
-    let (_, source) =
+    let (authority, source) =
         ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
     tracing::info!(
         source_node_id = request.source_node_id,
@@ -541,7 +587,8 @@ where
     let step_started = std::time::Instant::now();
     // Migration retries must reach the router's durable tuple receipt. A federation
     // seen record cannot establish inbox activation or durable acceptance at B.
-    let delivery = if request.migration_evidence.is_some() {
+    let delivery = if request.migration_evidence.is_some() || authority.custody_authority.is_some()
+    {
         Some(deliver()?)
     } else {
         store.deliver_inbound_forward_once_with_lease(
@@ -1104,6 +1151,125 @@ mod tests {
         }
         drop(store);
         std::fs::remove_file(path)?;
+        Ok(())
+    }
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "same native sender proves plain refusal, forwarded acceptance and closed gate"
+    )]
+    fn federation_without_migration_evidence_uses_plain_ingress_and_refuses_unregistered_foreign_sender()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use ramflux_crypto::custody::{
+            GenesisInput, MasterKey, RecoveryPhrase, SelfSigningKey, create_genesis,
+        };
+        let now = ramflux_node_core::now_unix_seconds();
+        let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[70; 32])?)?;
+        let primary = SelfSigningKey::from_vault_seed(&zeroize::Zeroizing::new([71; 32]));
+        let branch = ramflux_crypto::create_device_branch("forward-sender", "primary", 1, [72; 32]);
+        let agreement = ramflux_crypto::X25519KeyPair::from_seed([73; 32]);
+        let record = create_genesis(
+            &master,
+            &primary,
+            &branch,
+            &agreement,
+            GenesisInput {
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                display_name: "Sender".into(),
+                issued_at: now,
+                master_cert_id: ramflux_protocol::encode_base64url([74; 32]),
+                branch_cert_id: ramflux_protocol::encode_base64url([75; 32]),
+                external_human_primary: None,
+            },
+        )?;
+        let path = std::env::temp_dir().join(format!(
+            "rf-plain-ingress-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        let source_store = ramflux_node_core::RouterRedbStore::open(path.with_extension("source"))?;
+        let destination_store =
+            ramflux_node_core::RouterRedbStore::open(path.with_extension("destination"))?;
+        let federation_store = ramflux_node_core::FederationRedbStore::open(&path)?;
+        let source = ramflux_node_core::RouterCore::new();
+        let destination = ramflux_node_core::RouterCore::new();
+        source.publish_custody_record(
+            &ramflux_node_core::CustodyPublication { record: record.clone(), compacted_ids: None },
+            now,
+            &source_store,
+        )?;
+        let mut request = inbound_handler_request()?;
+        request.migration_evidence = None;
+        request.envelope.source_principal_id = branch.principal_id.clone();
+        request.envelope.source_device_id = branch.device_id.clone();
+        request.envelope.created_at = i64::try_from(now)?;
+        request.envelope.ext.ext.remove("source_device_authority");
+        request
+            .envelope
+            .ext
+            .ext
+            .insert("source_root_commitment".into(), serde_json::json!(record.body.account_anchor));
+        request.envelope.signed.signature =
+            ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &request.envelope)?;
+        source.refresh_registered_envelope_authority(&mut request.envelope)?;
+        let result = handle_verified_s8_receive_envelope(
+            &request,
+            &federation_store,
+            None,
+            inbound_timing(now),
+            || {
+                post_inbound_to_router(&request, true, |path, body| {
+                    let envelope: ramflux_protocol::Envelope = serde_json::from_value(body.clone())
+                        .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?;
+                    assert_eq!(path, "/mvp0/envelope");
+                    assert!(
+                        destination
+                            .authenticated_envelope_source_from(
+                                &envelope,
+                                Some(&destination_store),
+                                ramflux_node_core::RouterEnvelopeOrigin::Federation
+                            )
+                            .is_err()
+                    );
+                    Ok(
+                        serde_json::json!({"outcome":"rejected_security","target_delivery_id":envelope.target_delivery_id,"inbox_seq":null,"cursor":null,"nack":null}),
+                    )
+                })
+            },
+        )?;
+        assert!(!result.accepted);
+        // Positive arm uses the same sender through explicitly enabled migration ingress.
+        request.migration_evidence = Some(ramflux_node_core::ForwardedMigrationEvidence {
+            commit_proof: None,
+            retain_until: i64::try_from(now + 300)?,
+            floors: vec![],
+        });
+        let accepted = post_inbound_to_router(&request, true, |path, body| {
+            assert_eq!(path, "/mvp0/envelope/forwarded");
+            let body = serde_json::from_value(body.clone())
+                .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?;
+            assert!(matches!(
+                destination.submit_forwarded_envelope(&destination_store, None, body, now)?,
+                ramflux_node_core::RouterSubmitOutcome::OfflineQueued(_)
+            ));
+            Ok(
+                serde_json::json!({"accepted":true,"retryable":false,"delivery":{"outcome":"offline_queued","target_delivery_id":"peer","inbox_seq":1,"cursor":null,"nack":null}}),
+            )
+        })?;
+        assert_eq!(accepted.outcome, "offline_queued");
+        let disabled = post_inbound_to_router(&request, false, |_, _| {
+            Err(ramflux_node_core::NodeCoreError::ItestHttp(
+                "closed gate posted migration ingress".into(),
+            ))
+        })?;
+        assert_eq!(disabled.outcome, "forward_retryable");
+        drop(source_store);
+        drop(destination_store);
+        drop(federation_store);
+        for file in
+            [path.clone(), path.with_extension("source"), path.with_extension("destination")]
+        {
+            std::fs::remove_file(file)?;
+        }
         Ok(())
     }
 }

@@ -417,11 +417,27 @@ impl RouterHandle {
                     crate::router_engine::submit_response_from_outcome(self.state(), outcome);
                 Ok(forwarded_delivery_reply(&delivery))
             }
-            Err(ramflux_node_core::NodeCoreError::HomeMigration(reason)) => {
-                Ok(forwarded_migration_reply(reason))
-            }
-            Err(error) => Err(error.into()),
+            Err(error) => forwarded_error_reply(error),
         }
+    }
+}
+
+fn forwarded_error_reply(
+    error: ramflux_node_core::NodeCoreError,
+) -> anyhow::Result<serde_json::Value> {
+    match error {
+        ramflux_node_core::NodeCoreError::HomeMigration(reason) => {
+            Ok(forwarded_migration_reply(reason))
+        }
+        ramflux_node_core::NodeCoreError::Capacity { .. } => Ok(
+            serde_json::json!({"accepted":false,"retryable":true,"reason":"foreign_pin_capacity","retry_after":5}),
+        ),
+        ramflux_node_core::NodeCoreError::SourceAuthorityRefused { .. }
+        | ramflux_node_core::NodeCoreError::Unauthorized(_)
+        | ramflux_node_core::NodeCoreError::CustodyConflict { .. } => Ok(
+            serde_json::json!({"accepted":false,"retryable":false,"reason":"sender_authority_refused"}),
+        ),
+        error => Err(error.into()),
     }
 }
 
@@ -494,6 +510,22 @@ pub(crate) mod tests {
             assert_eq!(reply["accepted"], false);
             assert_eq!(reply["retryable"], outcome == "forward_in_progress");
         }
+    }
+
+    #[test]
+    fn forwarded_capacity_and_stale_sender_are_classified_without_http_errors() -> anyhow::Result<()>
+    {
+        let full = forwarded_error_reply(ramflux_node_core::NodeCoreError::Capacity {
+            resource: "foreign custody pins",
+        })?;
+        assert_eq!(full["accepted"], false);
+        assert_eq!(full["retryable"], true);
+        assert_eq!(full["retry_after"], 5);
+        let stale =
+            forwarded_error_reply(ramflux_node_core::NodeCoreError::Unauthorized("stale".into()))?;
+        assert_eq!(stale["accepted"], false);
+        assert_eq!(stale["retryable"], false);
+        Ok(())
     }
 
     fn no_forward() -> crate::router_engine::AsyncForwardContext<'static> {

@@ -810,10 +810,11 @@ pub(crate) fn handle_s8_receive_envelope(
         target_delivery_id = request.envelope.target_delivery_id,
         "accepted federated envelope proof and delivering to local router"
     );
-    let delivery: ramflux_node_core::EnvelopeSubmitResponse =
-        crate::flow::post_forwarded_to_router(request, |path, body| {
-            router_post_json(router, path, body)
-        })?;
+    let delivery: ramflux_node_core::EnvelopeSubmitResponse = crate::flow::post_inbound_to_router(
+        request,
+        ramflux_node_core::home_migration_enabled()?,
+        |path, body| router_post_json(router, path, body),
+    )?;
     tracing::info!(
         source_node_id = %request.source_node_id,
         target_node_id = %request.target_node_id,

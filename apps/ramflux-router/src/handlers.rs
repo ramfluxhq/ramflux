@@ -1451,6 +1451,7 @@ mod tests {
         state.refresh_registered_envelope_authority(&mut envelope)?;
         let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
         let body = serde_json::to_vec(&ramflux_node_core::ForwardedEnvelopeRequest {
+            peer_node_id: "test-peer".into(),
             envelope,
             migration_evidence: None,
         })?;

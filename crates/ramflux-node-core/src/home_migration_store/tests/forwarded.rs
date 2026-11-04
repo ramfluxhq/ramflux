@@ -149,7 +149,11 @@ fn sender_with_seed(target: &str, seed: u8) -> TestResult<crate::ForwardedEnvelo
         a.store()?,
     )?;
     a.core.refresh_registered_envelope_authority(&mut envelope)?;
-    Ok(crate::ForwardedEnvelopeRequest { envelope, migration_evidence: None })
+    Ok(crate::ForwardedEnvelopeRequest {
+        peer_node_id: "test-peer".into(),
+        envelope,
+        migration_evidence: None,
+    })
 }
 
 #[test]
@@ -379,6 +383,7 @@ fn verified_forward(
         &ramflux_crypto::public_key_base64url_from_seed([81; 32]),
     )?;
     Ok(crate::ForwardedEnvelopeRequest {
+        peer_node_id: "test-peer".into(),
         envelope: request.envelope.clone(),
         migration_evidence: request.migration_evidence.clone(),
     })
@@ -509,5 +514,26 @@ fn backlog_forward_and_direct_retry_via_other_node_store_one_inbox_entry_after_r
     let entries = s.b.core.resume(&s.target, 0, 10);
     assert_eq!(entries.len(), 1);
     assert_eq!(serde_json::to_vec(&entries[0].envelope)?, original);
+    Ok(())
+}
+
+#[test]
+fn local_forwarded_sender_does_not_copy_local_custody_into_foreign_pins() -> TestResult {
+    let b = TestNode::with_registration("B", 9, false, false)?;
+    let request = sender("recipient")?;
+    let (authority, source) =
+        crate::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
+    let evidence = authority.custody_authority.ok_or("native")?;
+    let publication = crate::CustodyPublication {
+        record: evidence.publication.record,
+        compacted_ids: evidence.publication.compacted_ids,
+    };
+    let now = crate::now_unix_seconds();
+    b.core.publish_custody_record(&publication, now, b.store()?)?;
+    assert!(matches!(
+        b.core.submit_forwarded_envelope(b.store()?, None, request, now)?,
+        crate::RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    assert!(b.store()?.foreign_custody_state(source.root_commitment())?.is_none());
     Ok(())
 }
