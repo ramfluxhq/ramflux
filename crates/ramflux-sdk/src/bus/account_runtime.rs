@@ -41,6 +41,10 @@ struct AccountRuntime {
 }
 
 pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
+    #[cfg(test)]
+    if let Some(budget) = bootstrap.config.test_retry_budget {
+        crate::custody::retry::set_thread_budget(budget);
+    }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     LocalSet::new().block_on(&runtime, async move {
         let Bootstrap {
