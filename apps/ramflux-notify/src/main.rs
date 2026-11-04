@@ -114,8 +114,10 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         }
         return shutdown.wait_and_finalize(move || {
             ramflux_node_core::ensure_exclusive_service_owner(&ingress)?;
-            ramflux_node_core::ensure_exclusive_service_owner(&ingress.store)?;
+            let store = Arc::clone(&ingress.store);
             drop(ingress);
+            ramflux_node_core::ensure_exclusive_service_owner(&store)?;
+            drop(store);
             Ok(())
         });
     }
@@ -406,19 +408,25 @@ fn serve_itest_http(
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     }
     tracing::info!(addr, worker_count, queue_capacity, "notify itest HTTP surface listening");
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let stream = match listener.accept().map(|(stream, _)| stream) {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                backoff.success();
+                stream
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(25));
                 continue;
             }
             Err(source) => {
-                return Err(ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()));
+                backoff.wait_after_failure(&source);
+                continue;
             }
         };
         if let Err(error) = stream.set_nodelay(true) {
-            tracing::warn!(%error, "failed to enable TCP_NODELAY on notify ingress connection");
+            tracing::debug!(%error, "failed to enable TCP_NODELAY on notify ingress connection");
+            continue;
         }
         sender
             .send(stream)
@@ -649,18 +657,18 @@ fn serve_itest_http_async(
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
         tracing::info!(addr, worker_count, "notify async itest HTTP surface listening");
         let shutdown = ramflux_node_core::service_shutdown_token();
+        let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
         loop {
             let (stream, _peer) = tokio::select! {
                 () = shutdown.cancelled() => break,
-                accepted = listener.accept() => accepted.map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
-                })?,
+                accepted = ramflux_node_core::custody_accept(|| listener.accept(), &mut backoff) => accepted,
             };
             if let Err(error) = stream.set_nodelay(true) {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     "failed to enable TCP_NODELAY on async notify ingress connection"
                 );
+                continue;
             }
             let connection_ingress = Arc::clone(&runtime_ingress);
             tokio::spawn(async move {
@@ -1623,7 +1631,18 @@ struct ConcurrentNotifyFanoutCommand {
 
 struct ConcurrentNotifyFanoutWorkerPool {
     senders: Vec<std::sync::mpsc::SyncSender<ConcurrentNotifyFanoutCommand>>,
-    _threads: Vec<std::thread::JoinHandle<()>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ConcurrentNotifyFanoutWorkerPool {
+    fn drop(&mut self) {
+        self.senders.clear();
+        for thread in self.threads.drain(..) {
+            if thread.join().is_err() {
+                tracing::error!("notify runtime worker panicked during shutdown");
+            }
+        }
+    }
 }
 
 impl ConcurrentNotifyFanoutWorkerPool {
@@ -1657,7 +1676,7 @@ impl ConcurrentNotifyFanoutWorkerPool {
             senders.push(sender);
             threads.push(thread);
         }
-        Ok(Self { senders, _threads: threads })
+        Ok(Self { senders, threads })
     }
 
     fn dispatch(
@@ -1702,7 +1721,18 @@ struct ConcurrentProviderPushWorkerPool {
     next_worker: std::sync::atomic::AtomicUsize,
     _runtime: Arc<tokio::runtime::Runtime>,
     _h2_pool: Arc<ProviderH2ConnectionPool>,
-    _threads: Vec<std::thread::JoinHandle<()>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ConcurrentProviderPushWorkerPool {
+    fn drop(&mut self) {
+        self.senders.clear();
+        for thread in self.threads.drain(..) {
+            if thread.join().is_err() {
+                tracing::error!("notify runtime worker panicked during shutdown");
+            }
+        }
+    }
 }
 
 impl ConcurrentProviderPushWorkerPool {
@@ -1744,7 +1774,7 @@ impl ConcurrentProviderPushWorkerPool {
             next_worker: std::sync::atomic::AtomicUsize::new(0),
             _runtime: runtime,
             _h2_pool: h2_pool,
-            _threads: threads,
+            threads,
         })
     }
 
@@ -1875,7 +1905,19 @@ fn notify_compio_runtime_error() -> ramflux_node_core::NodeCoreError {
 struct CompioNotifyRuntime {
     shards: Vec<tokio::sync::mpsc::Sender<NotifyFanoutCommand>>,
     _fanout_workers: std::sync::Arc<NotifyFanoutWorkerPool>,
-    _runtime_thread: std::thread::JoinHandle<()>,
+    runtime_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-notify"))]
+impl Drop for CompioNotifyRuntime {
+    fn drop(&mut self) {
+        self.shards.clear();
+        if let Some(thread) = self.runtime_thread.take()
+            && thread.join().is_err()
+        {
+            tracing::error!("notify compio runtime panicked during shutdown");
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-notify"))]
@@ -1931,7 +1973,7 @@ impl CompioNotifyRuntime {
         Ok(Self {
             shards: senders,
             _fanout_workers: fanout_workers,
-            _runtime_thread: runtime_thread,
+            runtime_thread: Some(runtime_thread),
         })
     }
 
@@ -1971,7 +2013,19 @@ struct NotifyFanoutJob {
 struct NotifyFanoutWorkerPool {
     senders: Vec<std::sync::mpsc::SyncSender<NotifyFanoutJob>>,
     next_worker: std::sync::atomic::AtomicUsize,
-    _threads: Vec<std::thread::JoinHandle<()>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-notify"))]
+impl Drop for NotifyFanoutWorkerPool {
+    fn drop(&mut self) {
+        self.senders.clear();
+        for thread in self.threads.drain(..) {
+            if thread.join().is_err() {
+                tracing::error!("notify runtime worker panicked during shutdown");
+            }
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-notify"))]
@@ -2006,7 +2060,7 @@ impl NotifyFanoutWorkerPool {
             senders.push(sender);
             threads.push(thread);
         }
-        Ok(Self { senders, next_worker: std::sync::atomic::AtomicUsize::new(0), _threads: threads })
+        Ok(Self { senders, next_worker: std::sync::atomic::AtomicUsize::new(0), threads })
     }
 
     fn try_dispatch(&self, job: NotifyFanoutJob) -> Result<(), Box<NotifyFanoutJob>> {
@@ -2026,14 +2080,16 @@ fn run_notify_compio_runtime(
 ) -> anyhow::Result<()> {
     let runtime = compio::runtime::Runtime::new()?;
     runtime.block_on(async move {
+        let mut shards = Vec::with_capacity(receivers.len());
         for receiver in receivers {
             let workers = std::sync::Arc::clone(&fanout_workers);
-            compio::runtime::spawn(async move {
+            shards.push(compio::runtime::spawn(async move {
                 notify_compio_shard_loop(receiver, workers).await;
-            })
-            .detach();
+            }));
         }
-        std::future::pending::<()>().await;
+        for shard in shards {
+            let _ = shard.await;
+        }
     });
     Ok(())
 }

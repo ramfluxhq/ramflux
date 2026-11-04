@@ -236,7 +236,7 @@ async fn serve_gateway_quic_endpoint(
             () = shutdown.cancelled() => return Ok(()),
             incoming=endpoint.accept()=>match incoming {Some(incoming)=>incoming,None=>return Ok(())},
             event=failures.recv()=>{
-                if let Some(Some(error))=event {tokio::time::sleep(backoff.failure(&error)).await;}else{backoff.success();}
+                finish_gateway_quic_handshake(event.flatten(), &mut backoff).await;
                 continue;
             }
         };
@@ -263,6 +263,21 @@ async fn serve_gateway_quic_endpoint(
                 }
             }
         });
+    }
+}
+
+// Handshake completion is connection-local, never a listening-socket failure.
+async fn finish_gateway_quic_handshake(
+    error: Option<std::io::Error>,
+    backoff: &mut ramflux_node_core::ListenerAcceptBackoff,
+) {
+    if let Some(error) = error {
+        let delay = backoff.peer_failure(&error);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+    } else {
+        backoff.success();
     }
 }
 
@@ -295,7 +310,10 @@ pub(crate) async fn serve_gateway_tcp_listener(
                 accepted
             }
             Err(error) => {
-                tokio::time::sleep(backoff.failure(&error)).await;
+                let delay = backoff.failure(&error);
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
                 continue;
             }
         };
@@ -313,11 +331,11 @@ pub(crate) async fn serve_gateway_tcp_listener(
             {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
-                    tracing::warn!(%error, %remote_addr, "gateway TCP-TLS handshake rejected");
+                    tracing::debug!(%error, %remote_addr, "gateway TCP-TLS handshake rejected");
                     return;
                 }
                 Err(error) => {
-                    tracing::warn!(%error, %remote_addr, "gateway TCP-TLS handshake rejected");
+                    tracing::debug!(%error, %remote_addr, "gateway TCP-TLS handshake rejected");
                     return;
                 }
             };

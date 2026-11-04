@@ -103,13 +103,9 @@ impl MeshTlsServer {
     /// Accept TCP without performing any handshake on the listener thread.
     ///
     /// # Errors
-    /// Returns a TCP accept or socket-option error.
+    /// Returns only a listening-socket accept error. Socket setup belongs to authentication.
     pub fn accept_tcp_stream(&self) -> Result<TcpStream, TransportError> {
         let (stream, _peer_addr) = self.listener.accept()?;
-        stream.set_nonblocking(false)?;
-        stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(30)))?;
         Ok(stream)
     }
 }
@@ -122,6 +118,10 @@ pub fn authenticate_tcp_stream(
     stream: TcpStream,
     config: Arc<ServerConfig>,
 ) -> Result<MeshTlsAcceptedStream, TransportError> {
+    stream.set_nonblocking(false)?;
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let connection =
         ServerConnection::new(config).map_err(|error| TransportError::Tls(error.to_string()))?;
     let mut stream = rustls::StreamOwned::new(connection, stream);

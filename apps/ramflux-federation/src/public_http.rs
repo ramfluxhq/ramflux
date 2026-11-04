@@ -86,7 +86,9 @@ fn finish_public_accept(
 ) {
     match result {
         Ok(_) => backoff.success(),
-        Err(PublicConnectionError::Peer(error)) => backoff.wait_after_failure(&error),
+        Err(PublicConnectionError::Peer(error)) => {
+            let _ = backoff.peer_failure(&error);
+        }
         Err(PublicConnectionError::Resource(error)) => {
             std::thread::sleep(backoff.resource_failure(&error));
         }

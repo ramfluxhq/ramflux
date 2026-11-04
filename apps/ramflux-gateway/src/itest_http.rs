@@ -21,14 +21,21 @@ pub(crate) fn serve_itest_http(
     let listener = TcpListener::bind(&addr)?;
     listener.set_nonblocking(true)?;
     tracing::info!(addr, "gateway itest HTTP surface listening");
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let mut stream = match listener.accept().map(|(stream, _)| stream) {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                backoff.success();
+                stream
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(std::time::Duration::from_millis(25));
                 continue;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                backoff.wait_after_failure(&error);
+                continue;
+            }
         };
         let router = router.clone();
         let state = Arc::clone(state);

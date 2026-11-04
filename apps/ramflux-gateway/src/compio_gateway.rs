@@ -89,16 +89,11 @@ fn run_gateway_compio_quic(
             ramflux_transport::CompioGatewayQuicServer::bind(&addr.to_string(), &tls).await?;
         let local_addr = server.local_addr()?;
         tracing::info!(addr = %local_addr, "gateway compio QUIC session surface listening");
-        let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
         loop {
             let connection = match server.accept_connection().await {
-                Ok(connection) => {
-                    backoff.success();
-                    connection
-                }
+                Ok(connection) => connection,
                 Err(error) => {
-                    let error = std::io::Error::other(error.to_string());
-                    compio::time::sleep(backoff.failure(&error)).await;
+                    tracing::debug!(%error, "gateway compio QUIC handshake ended");
                     continue;
                 }
             };

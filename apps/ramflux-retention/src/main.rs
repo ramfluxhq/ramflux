@@ -326,15 +326,20 @@ fn serve_itest_http(
         .set_nonblocking(true)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     tracing::info!(addr, "retention itest HTTP surface listening");
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let mut stream = match listener.accept().map(|(stream, _)| stream) {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                backoff.success();
+                stream
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(25));
                 continue;
             }
             Err(source) => {
-                return Err(ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()));
+                backoff.wait_after_failure(&source);
+                continue;
             }
         };
         let Some(_in_flight) = ramflux_node_core::begin_service_request() else {

@@ -229,3 +229,29 @@ fn check_refusal(frame: &CustodyServerFrame, expected: &CustodyRefusal) -> Resul
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn failed_quic_handshakes_do_not_delay_the_next_gateway_admission() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
+    let mut next_admitted = false;
+    {
+        let admission = async {
+            for error in [
+                std::io::Error::other("QUIC handshake rejected"),
+                std::io::Error::from(std::io::ErrorKind::TimedOut),
+            ] {
+                finish_gateway_quic_handshake(Some(error), &mut backoff).await;
+            }
+            next_admitted = true;
+        };
+        // A single poll must reach the next admission: even a zero-duration sleep would yield.
+        let mut admission = std::pin::pin!(admission);
+        assert!(matches!(
+            admission.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(())
+        ));
+    }
+    assert!(next_admitted);
+}

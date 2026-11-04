@@ -62,29 +62,39 @@ fn validate_nofile(h: usize, a: usize, soft: u64) -> Result<(), NodeCoreError> {
     }
     Ok(())
 }
-/// Back off unknown and resource failures from 50 ms to one second; peer errors never delay acceptance.
+/// Back off listening-socket faults; per-connection failures never delay acceptance.
 #[derive(Default)]
 pub struct ListenerAcceptBackoff {
     seen: HashSet<io::ErrorKind>,
     failures: u32,
 }
 impl ListenerAcceptBackoff {
+    /// Classify errors returned by the listening socket itself, including pending peer errors.
     #[must_use]
     pub fn failure(&mut self, error: &io::Error) -> Duration {
         if matches!(
             error.kind(),
-            io::ErrorKind::NotConnected
-                | io::ErrorKind::InvalidInput
-                | io::ErrorKind::ConnectionAborted
+            io::ErrorKind::ConnectionAborted
                 | io::ErrorKind::ConnectionReset
                 | io::ErrorKind::Interrupted
                 | io::ErrorKind::WouldBlock
-        ) {
-            tracing::debug!(%error, "listener connection ended; accepting next peer");
-            Duration::ZERO
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::HostUnreachable
+                | io::ErrorKind::NetworkUnreachable
+                | io::ErrorKind::NetworkDown
+        ) || pending_connection_error(error)
+        {
+            self.peer_failure(error)
         } else {
             self.resource_failure(error)
         }
+    }
+
+    /// A failure after accepting a connection is peer-local, regardless of its error kind.
+    #[must_use]
+    pub fn peer_failure(&mut self, error: &io::Error) -> Duration {
+        tracing::debug!(%error, "listener connection ended; accepting next peer");
+        Duration::ZERO
     }
 
     /// A failed descriptor clone or worker spawn is always a resource failure.
@@ -107,6 +117,39 @@ impl ListenerAcceptBackoff {
     pub fn success(&mut self) {
         self.failures = 0;
         self.seen.clear();
+    }
+}
+fn pending_connection_error(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    if let Some(errno) = error.raw_os_error() {
+        use rustix::io::Errno;
+        // accept(2) can report a network error already pending on the new socket.
+        return [
+            Errno::PROTO,
+            Errno::NOPROTOOPT,
+            Errno::HOSTDOWN,
+            Errno::HOSTUNREACH,
+            Errno::OPNOTSUPP,
+            Errno::NETUNREACH,
+            Errno::TIMEDOUT,
+            Errno::PERM,
+        ]
+        .iter()
+        .any(|peer| peer.raw_os_error() == errno)
+            || pending_linux_connection_error(errno);
+    }
+    let _ = error;
+    false
+}
+fn pending_linux_connection_error(errno: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        errno == rustix::io::Errno::NONET.raw_os_error()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = errno;
+        false
     }
 }
 /// Accept a TCP holder before any TLS work; saturation closes only the newcomer.
@@ -258,22 +301,39 @@ mod tests {
     fn peer_errors_never_delay_or_escalate_resource_backoff() {
         let mut backoff = ListenerAcceptBackoff::default();
         for kind in [
-            io::ErrorKind::NotConnected,
-            io::ErrorKind::InvalidInput,
             io::ErrorKind::ConnectionAborted,
             io::ErrorKind::ConnectionReset,
             io::ErrorKind::Interrupted,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::HostUnreachable,
+            io::ErrorKind::NetworkUnreachable,
+            io::ErrorKind::NetworkDown,
         ] {
             assert_eq!(backoff.failure(&io::Error::from(kind)), Duration::ZERO);
         }
         #[cfg(unix)]
-        for errno in [rustix::io::Errno::NOTCONN, rustix::io::Errno::INVAL] {
+        for errno in [
+            rustix::io::Errno::PROTO,
+            rustix::io::Errno::NOPROTOOPT,
+            rustix::io::Errno::HOSTDOWN,
+            rustix::io::Errno::OPNOTSUPP,
+            rustix::io::Errno::PERM,
+        ] {
             assert_eq!(
                 backoff.failure(&io::Error::from_raw_os_error(errno.raw_os_error())),
                 Duration::ZERO
             );
         }
         assert_eq!(backoff.failures, 0);
+        assert_eq!(
+            backoff.peer_failure(&io::Error::from(io::ErrorKind::InvalidInput)),
+            Duration::ZERO
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            backoff.failure(&io::Error::from_raw_os_error(rustix::io::Errno::NONET.raw_os_error())),
+            Duration::ZERO
+        );
         #[cfg(unix)]
         for errno in [
             rustix::io::Errno::MFILE,
@@ -292,6 +352,16 @@ mod tests {
             backoff.resource_failure(&io::Error::other("spawn failed")),
             Duration::from_millis(50)
         );
+    }
+
+    #[test]
+    fn per_connection_other_never_delays_or_changes_listener_backoff() {
+        let mut backoff = ListenerAcceptBackoff::default();
+        assert_eq!(backoff.failure(&io::Error::other("listener fault")), Duration::from_millis(50));
+        assert_eq!(backoff.peer_failure(&io::Error::other("handshake fault")), Duration::ZERO);
+        assert_eq!(backoff.peer_failure(&io::Error::from(io::ErrorKind::TimedOut)), Duration::ZERO);
+        assert_eq!(backoff.failures, 1);
+        assert_eq!(backoff.seen.len(), 1);
     }
 
     #[test]

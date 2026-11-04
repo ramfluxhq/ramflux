@@ -72,6 +72,7 @@ fn run_itest_http_accept_loop(
         backoff.success();
         if let Err(error) = stream.set_nodelay(true) {
             tracing::debug!(%error, "failed to enable TCP_NODELAY on router ingress connection");
+            continue;
         }
         match sender.try_send(stream) {
             Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}

@@ -3,6 +3,7 @@
 
 //! Feature-gated compatibility HTTP ingress and response serialization.
 
+#[cfg(feature = "itest-object-v2")]
 use crate::config::relay_service_key;
 #[cfg(feature = "itest-object-v2")]
 use crate::legacy_object::{
@@ -14,6 +15,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[cfg(feature = "itest-object-v2")]
 use std::io::Write as _;
 
 #[cfg(feature = "itest-http")]
@@ -64,17 +66,25 @@ pub(crate) fn serve_itest_http(
         )?;
     }
     tracing::info!(addr, worker_count, queue_capacity, "relay itest HTTP surface listening");
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let stream = match listener.accept().map(|(stream, _)| stream) {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                backoff.success();
+                stream
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(std::time::Duration::from_millis(25));
                 continue;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                backoff.wait_after_failure(&error);
+                continue;
+            }
         };
         if let Err(error) = stream.set_nodelay(true) {
-            tracing::warn!(%error, "failed to enable TCP_NODELAY on relay ingress connection");
+            tracing::debug!(%error, "failed to enable TCP_NODELAY on relay ingress connection");
+            continue;
         }
         sender.send(stream)?;
     }

@@ -82,6 +82,20 @@ pub fn configured_shutdown_with_registration(
     Ok(())
 }
 
+#[allow(dead_code)]
+pub fn configured_notify_runtime_shutdown_is_clean(
+    binary: &str,
+    runtime: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new("ramflux-notify")?;
+    fixture.notify_runtime = Some(runtime.to_owned());
+    for mode in ["idle", "probe"] {
+        run_case(binary, "ramflux-notify", &fixture, mode)?;
+        assert_clean_reopen(&fixture.database)?;
+    }
+    Ok(())
+}
+
 struct Fixture {
     registration_seed: Option<RegistrationSeed>,
     root: PathBuf,
@@ -94,6 +108,7 @@ struct Fixture {
     voice_udp: String,
     voice_control: String,
     async_addr: String,
+    notify_runtime: Option<String>,
     public_addr: String,
     admin_addr: String,
 }
@@ -170,6 +185,7 @@ turn_tcp_addr = "127.0.0.1:0"
             std::fs::set_permissions(&signing_seed, std::fs::Permissions::from_mode(0o600))?;
         }
         Ok(Self {
+            notify_runtime: None,
             registration_seed: None,
             root,
             config,
@@ -692,6 +708,15 @@ fn configured_command(
         .env_remove("RAMFLUX_RELAY_CLIENT_QUIC_ADDR")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(runtime) = &fixture.notify_runtime {
+        child
+            .env("RAMFLUX_NOTIFY_RUNTIME", runtime)
+            .env("RAMFLUX_NOTIFY_TOKIO_CONCURRENT_WORKERS", "2")
+            .env("RAMFLUX_NOTIFY_TOKIO_CONCURRENT_PROVIDER_WORKERS", "2")
+            .env("RAMFLUX_NOTIFY_COMPIO_SHARDS", "2")
+            .env("RAMFLUX_NOTIFY_COMPIO_FANOUT_WORKERS", "2")
+            .env("RAMFLUX_NOTIFY_COMPIO_PROVIDER_WORKERS", "2");
+    }
     if service == "ramflux-gateway" {
         child.env(
             "RAMFLUX_RELAY_SERVICE_KEY_REF",
