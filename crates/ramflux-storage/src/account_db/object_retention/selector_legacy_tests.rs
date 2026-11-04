@@ -56,6 +56,10 @@ fn legacy_source(db: &AccountDb) -> Result<(), StorageError> {
 pub(super) fn fixture(db: &AccountDb) -> Result<(), StorageError> {
     legacy_source(db)?;
     db.set_object_tombstoned_with_revocation("private-canary", Some("peer"), Some("revoke"), 1)?;
+    count_payload_work(db)
+}
+
+fn count_payload_work(db: &AccountDb) -> Result<(), StorageError> {
     db.connection.execute_batch("CREATE TEMP TABLE legacy_work_count(n INTEGER); INSERT INTO legacy_work_count VALUES(0); CREATE TEMP TRIGGER legacy_count AFTER INSERT ON main.object_erasure_work BEGIN UPDATE legacy_work_count SET n=n+1; END;")?;
     Ok(())
 }
@@ -109,7 +113,7 @@ fn erased(db: &AccountDb, root: &std::path::Path) -> Result<(), StorageError> {
 }
 
 #[test]
-fn legacy_footprint_driver_deletes_without_retention_work() -> Result<(), StorageError> {
+fn e19_message_deleted_before_discovery() -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("legacy-driver")?;
     fixture(&db)?;
     no_payload_work(&db)?;
@@ -132,7 +136,100 @@ fn legacy_footprint_driver_deletes_without_retention_work() -> Result<(), Storag
 }
 
 #[test]
-fn legacy_footprint_driver_preserves_independent_witness() -> Result<(), StorageError> {
+fn e19_message_deleted_after_discovery_without_managed_owner() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("legacy-after-discovery")?;
+    legacy_source(&db)?;
+    // Historical attachment metadata may arrive before its DM projection.
+    // Remove only that projection, without invoking message-death cleanup.
+    db.connection
+        .execute("DELETE FROM direct_message_projection WHERE message_id='message'", [])?;
+    db.connection
+        .execute("UPDATE object_retention_upgrade SET phase=1,cursor=0 WHERE singleton=1", [])?;
+    db.maintain_object_retention()?;
+    let discovery: (i64, i64) = db.connection.query_row(
+        "SELECT phase,unsafe_references FROM object_retention_upgrade WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(discovery, (5, 1), "discovery must finish and skip the ownerless candidate");
+    no_payload_work(&db)?;
+    db.set_object_tombstoned_with_revocation("private-canary", Some("peer"), Some("revoke"), 1)?;
+    assert!(db.object_is_tombstoned("private-canary")?);
+    count_payload_work(&db)?;
+    no_payload_work(&db)?;
+    let generation = db.privacy_erasure_generation()?;
+    db.import_deleted_message_projection("thread", "message", false, 1)?;
+    assert_eq!(db.privacy_erasure_generation()?, generation + 1);
+    let work: i64 =
+        db.connection.query_row("SELECT n FROM legacy_work_count", [], |row| row.get(0))?;
+    assert_eq!(work, 0, "payload work must not mask the legacy-only generation bump");
+    no_payload_work(&db)?;
+    db.import_deleted_message_projection("thread", "message", false, 1)?;
+    assert_eq!(db.privacy_erasure_generation()?, generation + 1);
+    drop(db);
+    let db = reopen(&root)?;
+    erased(&db, &root)?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn e19_later_discovery_page_cannot_resurrect() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("legacy-later-discovery")?;
+    fixture(&db)?;
+    let reference = db
+        .load_actor_state::<serde_json::Value>("attachment/reference/private-canary")?
+        .ok_or(StorageError::AuthorizationRejected)?;
+    let directory =
+        db.client_record("object", "private-canary")?.ok_or(StorageError::AuthorizationRejected)?;
+    db.delete_direct_message("thread", "message", "local", "delete")?;
+    drop(db);
+    let db = reopen(&root)?;
+    erased(&db, &root)?;
+    // A later archive page still contains the old bytes. Discovery must leave
+    // the retired selector closed and create no payload, reference or owner.
+    db.connection.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind));")?;
+    for (key, value) in [
+        ("directory/object/private-canary", directory),
+        ("attachment/reference/private-canary", reference),
+    ] {
+        db.connection.execute(
+            "INSERT INTO backup_archived_actor_state VALUES('late',?1,?2)",
+            params![key, serde_json::to_vec(&value)?],
+        )?;
+    }
+    db.connection
+        .execute("UPDATE object_retention_upgrade SET phase=1,cursor=0 WHERE singleton=1", [])?;
+    db.maintain_object_retention()?;
+    let phase: i64 = db.connection.query_row(
+        "SELECT phase FROM object_retention_upgrade WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(phase, 5);
+    no_payload_work(&db)?;
+    assert!(!db.object_is_tombstoned("private-canary")?);
+    assert!(matches!(db.check_object_access("private-canary"), Err(StorageError::ObjectErased)));
+    let bindings: i64 = db.connection.query_row(
+        "SELECT count(*) FROM message_copy_binding WHERE copy_id='object:private-canary'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(bindings, 0);
+    drop(db);
+    let db = reopen(&root)?;
+    no_payload_work(&db)?;
+    assert!(matches!(db.check_object_access("private-canary"), Err(StorageError::ObjectErased)));
+    assert!(!db.object_is_tombstoned("private-canary")?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn e19_independent_same_selector_witness_survives_until_its_own_deletion()
+-> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("legacy-survivor")?;
     fixture(&db)?;
     db.send_direct_message("thread", "other", "peer", b"body")?;
@@ -187,7 +284,7 @@ fn legacy_footprint_driver_before_commit_failure_rolls_back() -> Result<(), Stor
 }
 
 #[test]
-fn legacy_footprint_driver_child_abort_rolls_back() -> Result<(), StorageError> {
+fn e19_legacy_delete_cut_before_commit() -> Result<(), StorageError> {
     const CHILD_ROOT: &str = "RAMFLUX_TEST_LEGACY_FOOTPRINT_ABORT_ROOT";
     if let Some(root) = std::env::var_os(CHILD_ROOT) {
         let root = std::path::PathBuf::from(root);
@@ -211,7 +308,7 @@ fn legacy_footprint_driver_child_abort_rolls_back() -> Result<(), StorageError> 
     fixture(&db)?;
     drop(db);
     let status = std::process::Command::new(std::env::current_exe()?)
-        .args(["--exact","account_db::object_retention::selector_legacy_tests::legacy_footprint_driver_child_abort_rolls_back","--nocapture"])
+        .args(["--exact","account_db::object_retention::selector_legacy_tests::e19_legacy_delete_cut_before_commit","--nocapture"])
         .env(CHILD_ROOT,&root).status()?;
     assert!(!status.success());
     assert_eq!(std::fs::read(root.join("legacy-cut-reached"))?, b"legacy cleanup reached");
@@ -226,6 +323,11 @@ fn legacy_footprint_driver_child_abort_rolls_back() -> Result<(), StorageError> 
     assert!(db.actor_state_exists("attachment/reference/private-canary")?);
     let footprints:i64=db.connection.query_row("SELECT COUNT(*) FROM message_footprint WHERE message_id='message' AND kind='revocation_selector'",[],|row|row.get(0))?;
     assert_eq!(footprints, 1);
+    let bindings: i64 = db.connection.query_row(
+        "SELECT count(*) FROM message_copy_binding WHERE copy_id='object:private-canary' AND message_id='message'",
+        [], |row| row.get(0),
+    )?;
+    assert_eq!(bindings, 1, "pre-COMMIT abort must preserve the binding");
     let lookups: i64 =
         db.connection
             .query_row("SELECT COUNT(*) FROM object_erasure_lookup", [], |row| row.get(0))?;
@@ -234,6 +336,7 @@ fn legacy_footprint_driver_child_abort_rolls_back() -> Result<(), StorageError> 
     db.delete_direct_message("thread", "message", "local", "retry")?;
     drop(db);
     let db = reopen(&root)?;
+    assert_eq!(db.privacy_erasure_generation()?, 1);
     erased(&db, &root)?;
     drop(db);
     std::fs::remove_dir_all(root)?;
