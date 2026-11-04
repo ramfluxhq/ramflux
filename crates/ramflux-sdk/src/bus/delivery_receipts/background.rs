@@ -318,6 +318,14 @@ fn complete(
     match outcome {
         Ok(()) => finish(&account.client, &plan.key, &plan.work, "sent"),
         Err(error) => {
+            if matches!(&error, SdkError::Transport(ramflux_transport::TransportError::Io(io))
+                if io.kind() == std::io::ErrorKind::TimedOut)
+            {
+                account.client.account_db()?.persist_actor_state(
+                    GATEWAY_RETRY_AT,
+                    &now_unix_timestamp().saturating_add(30),
+                )?;
+            }
             let mut work = plan.work.clone();
             let backoff = (1_i64 << work.attempts.min(6)).min(60);
             postpone(&account.client, &plan.key, &mut work, backoff)?;
@@ -469,41 +477,52 @@ pub(crate) async fn test_fetch_material(
     fetch_material(context, &mut plan).await
 }
 
-// Drive the production checkpoints explicitly for standalone account fixtures.
+// Run the actual courier loop; the fixture owns only its account-writer checkpoints.
 #[cfg(test)]
 pub(crate) async fn test_flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
-    let mut sent = 0;
-    for _ in 0..16 {
-        let Some(mut plan) = prepare(account)? else { break };
-        if account.connection.as_ref().is_some_and(|handle| {
-            handle.snapshot().state != crate::bus::connection_manager::NetworkingState::Live
-        }) && let Some(handle) = account.connection.take()
-        {
-            handle.stop().await;
-        }
-        account.ensure_gateway_live().await?;
-        let context = account.connection.as_ref().ok_or_else(stopped)?.test_context();
-        let material = fetch_material(&context, &mut plan).await;
-        let packet = match seal(account, &mut plan, material) {
-            Ok(Some(packet)) => packet,
-            Ok(None) => continue,
-            Err(_) => break,
-        };
-        let outcome = context
-            .priority_call(
-                move |engine| {
-                    Box::pin(async move { engine.submit_envelope(packet).await.map(|_| ()) })
-                },
-                context.receipt_timeout(),
-            )
-            .await;
-        if complete(account, &plan, outcome).is_err() {
-            if let Some(handle) = account.connection.take() {
-                handle.stop().await;
-            }
-            break;
-        }
-        sent += 1;
+    // Empty/invalid work must retain its offline preparation behavior.
+    let Some(initial) = prepare(account)? else { return Ok(0) };
+    let mut initial = Some(initial);
+    if account.connection.as_ref().is_some_and(|handle| {
+        handle.snapshot().state != crate::bus::connection_manager::NetworkingState::Live
+    }) && let Some(handle) = account.connection.take()
+    {
+        handle.stop().await;
     }
-    Ok(sent)
+    account.ensure_gateway_live().await?;
+    let context = account.connection.as_ref().ok_or_else(stopped)?.test_context();
+    let (writer, mut checkpoints) = mpsc::channel(2);
+    let courier = run(context, writer);
+    tokio::pin!(courier);
+    let mut sent = 0;
+    loop {
+        tokio::select! {
+            () = &mut courier => return Ok(sent),
+            work = checkpoints.recv() => match work {
+                Some(AccountWork::Receipts(work)) => match *work {
+                    ReceiptWork::Prepare { reply, .. } => {
+                        let plan = if let Some(plan) = initial.take() { Some(plan) } else { prepare(account)? };
+                        let idle = plan.is_none();
+                        let _ = reply.send(Ok(plan));
+                        if idle { return Ok(sent); }
+                    }
+                    ReceiptWork::Complete { plan, outcome, reply, .. } => {
+                        let delivered = outcome.is_ok();
+                        let result = complete(account, &plan, outcome);
+                        let failed = result.is_err();
+                        let _ = reply.send(result);
+                        sent += usize::from(delivered);
+                        if failed {
+                            if let Some(handle) = account.connection.take() {
+                                handle.stop().await;
+                            }
+                            return Ok(sent);
+                        }
+                    }
+                    work @ ReceiptWork::Seal { .. } => apply(account, work),
+                },
+                _ => return Err(stopped()),
+            }
+        }
+    }
 }

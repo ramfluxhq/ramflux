@@ -47,6 +47,8 @@ struct AccountRuntime {
     events: mpsc::Sender<EventBatch>,
     shutdown: watch::Receiver<bool>,
     courier: Option<super::task_courier::TaskCourier>,
+    networking_expiry_pending: bool,
+    networking_expiry_warned: bool,
     transfers: uploads::Transfers,
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
@@ -111,6 +113,8 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         events,
         shutdown,
         courier: None,
+        networking_expiry_pending: false,
+        networking_expiry_warned: false,
         transfers: uploads::Transfers::start(),
         connection_sender,
         connection_work,
@@ -137,6 +141,46 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
 }
 
 impl AccountRuntime {
+    fn networking_expiry_request(&self) -> LocalBusFrame {
+        LocalBusFrame::request(
+            "networking-expiry",
+            Some(self.id.clone()),
+            "runtime",
+            "account.networking.expired",
+            serde_json::json!({"cause":"runtime"}),
+        )
+    }
+
+    async fn refresh_networking_expiry(&mut self) {
+        match self.publish_networking_expiry().await {
+            Ok(true) => self.networking_expiry_warned = false,
+            Ok(false) => {}
+            Err(error) => {
+                if !self.networking_expiry_warned {
+                    tracing::warn!(account_id = %self.id,
+                        error_code = local_bus_error_code(&error),
+                        "networking expiry publication deferred; account remains open");
+                    self.networking_expiry_warned = true;
+                }
+            }
+        }
+    }
+
+    async fn publish_networking_expiry(&mut self) -> Result<bool, SdkError> {
+        if let Some(account) = self.state.accounts.get(&self.id)
+            && super::networking_events::refresh_expired(account)?
+        {
+            self.networking_expiry_pending = true;
+        }
+        if !self.networking_expiry_pending {
+            return Ok(false);
+        }
+        // Project expiry before another attempt can replace the actor-state snapshot.
+        self.publish(&self.networking_expiry_request()).await?;
+        self.networking_expiry_pending = false;
+        Ok(true)
+    }
+
     fn start_courier(&mut self) {
         if self.courier.is_none()
             && let Some(account) = self.state.accounts.get(&self.id)
@@ -325,6 +369,7 @@ impl AccountRuntime {
     }
 
     async fn sync(&mut self) -> Result<bool, SdkError> {
+        self.refresh_networking_expiry().await;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };
@@ -362,3 +407,7 @@ fn stopped() -> SdkError {
 #[cfg(test)]
 #[path = "tests/task_courier.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/networking_expiry.rs"]
+mod expiry_tests;

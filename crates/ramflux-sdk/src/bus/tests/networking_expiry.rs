@@ -26,6 +26,18 @@ fn networking(frame: &LocalBusFrame) -> bool {
         && frame.body["keys"]["state_kind"] == "account/networking"
 }
 
+// Hold admission outside the expiry window so only expiry publication changes the cause.
+struct HeldAdmission;
+impl super::super::connection_manager::SessionConnector for HeldAdmission {
+    fn connect(
+        &self,
+        _config: GatewaySessionConfig,
+        _deadline: tokio::time::Instant,
+    ) -> super::super::connection_manager::SessionFuture<'_, GatewaySessionEngine> {
+        Box::pin(std::future::pending())
+    }
+}
+
 impl Harness {
     async fn new() -> TestResult<Self> {
         let fixture = Fixture::new("expiry-runtime").await?;
@@ -39,6 +51,13 @@ impl Harness {
             Some(&SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::Capacity)),
             crate::custody::network_now()?,
         )?;
+        account.connection = Some(super::super::connection_manager::ConnectionHandle::start_with(
+            account.gateway_config.clone(),
+            None,
+            super::super::runtime_limits::RuntimeTimeouts::held_for_test(),
+            Arc::new(HeldAdmission),
+            None,
+        ));
         let (commands, receiver) = mpsc::channel(8);
         let (stop, shutdown) = watch::channel(false);
         let (events, mut batches) = mpsc::channel::<EventBatch>(8);
@@ -59,7 +78,21 @@ impl Harness {
                 let _ = batch.accepted.send(());
             }
         });
+        let (connection_sender, connection_work) = mpsc::channel(2);
+        let (lifecycle_sender, lifecycle) = mpsc::channel(4);
+        let (preempt_sender, preempt) = watch::channel(0);
+        let mut control_shutdown = shutdown.clone();
+        tokio::task::spawn_local(async move {
+            let _signals = (lifecycle_sender, preempt_sender);
+            let _ = control_shutdown.changed().await;
+        });
         let runtime = AccountRuntime {
+            timeouts: super::super::runtime_limits::RuntimeTimeouts::default(),
+            lifecycle,
+            preempt,
+            connection_sender,
+            connection_work,
+            transfers: super::uploads::Transfers::start(),
             id: "expiry-runtime".into(),
             state: LocalBusDaemonState {
                 account_index: None,
@@ -75,7 +108,6 @@ impl Harness {
             events,
             shutdown,
             courier: None,
-            courier_cycle: super::super::courier_cycle::Cycle::default(),
             networking_expiry_pending: false,
             networking_expiry_warned: false,
             courier_events: None,
@@ -95,6 +127,7 @@ async fn queue(commands: &mpsc::Sender<AccountCommand>, id: &str) -> TestResult<
     let (outbound, _) = mpsc::channel(1);
     commands
         .send(AccountCommand {
+            admission: None,
             private: None,
             request: LocalBusFrame::request(
                 id,
@@ -130,6 +163,7 @@ async fn custody_expiry_publish_failure_replies_and_keeps_actor_open() -> TestRe
             let actor = tokio::task::spawn_local(async move {
                 let result = h.runtime.serve(ready).await;
                 h.runtime.stop_courier().await;
+                h.runtime.stop_connection().await;
                 h.runtime.close_readers().await;
                 result
             });
@@ -171,6 +205,7 @@ async fn custody_expiry_publish_failure_does_not_skip_sync() -> TestResult {
                     .all(|f| f.request_id == "networking-expiry")
             );
             h.runtime.stop_courier().await;
+            h.runtime.stop_connection().await;
             Ok(())
         }))
         .await
@@ -189,6 +224,7 @@ async fn custody_background_tick_publishes_expiry_without_a_command() -> TestRes
             let actor = tokio::task::spawn_local(async move {
                 let result = h.runtime.serve(ready).await;
                 h.runtime.stop_courier().await;
+                h.runtime.stop_connection().await;
                 h.runtime.close_readers().await;
                 result
             });

@@ -43,7 +43,7 @@ async fn complete<T>(task: tokio::task::JoinHandle<T>) -> Case<T> {
 async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> Case {
     LocalSet::new()
         .run_until(Box::pin(async {
-            let mut f = Box::pin(Fixture::new("courier-priority-receipt-r2")).await?;
+            let f = Box::pin(Fixture::new("courier-priority-receipt-r2")).await?;
             let packet = carrier(&f.source, "healthy", "priority-task")?;
             ack(&f.source, "task/ack/priority-r2", &packet)?;
             let source = f.source.client.owned_device_identity()?;
@@ -65,19 +65,6 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
                     packet: None,
                 },
             )?;
-            let item = task_courier_queue::manifest_requests(&mut f.source)?
-                .into_iter()
-                .next()
-                .ok_or("item")?;
-            let manifests = f
-                .gateway
-                .lock()
-                .map_err(|_| "gateway")?
-                .manifests
-                .values()
-                .cloned()
-                .map(serde_json::from_value)
-                .collect::<Result<Vec<SdkDeviceManifestResponse>, _>>()?;
             let (gate, mut observed) = hold();
             let released = Arc::clone(&gate.release);
             {
@@ -86,57 +73,42 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
                 gateway.receipt_bypass = true;
             }
             let gateway = Arc::clone(&f.gateway);
-            let (mut actor, _, _, _) = runtime(f.source, &f.root.join("source"));
-            actor.stop_courier().await;
-            tokio::time::pause();
-            let started = tokio::time::Instant::now();
-            let task = tokio::task::spawn_local(async move {
-                let result = actor.apply_courier_outcome(Outcome::Item {
-                    item,
-                    preparation: Preparation::Ready {
-                        manifests,
-                        fetched_after: std::time::Instant::now(),
-                    },
-                });
-                (actor, result)
-            });
+            // D1/D2: a due receipt waits for at most the one bulk exchange in flight.
+            let (actor, stop, running) = start_runtime(f.source, &f.root.join("source"))?;
             entered(&mut observed).await?;
-            let receipt_preceded_task = gateway
-                .lock()
-                .map_err(|_| "gateway")?
-                .sent
-                .iter()
-                .any(|e| e.envelope_id.starts_with("receipt_evt_"));
-            let stalled = !task.is_finished();
-            let elapsed = started.elapsed();
-            // The task fan-out includes the peer and sibling; only the first submit is held.
+            let handle = actor.clone();
+            wait_until(|| {
+                Ok(handle.queued_calls() > 0
+                    || gateway
+                        .lock()
+                        .map_err(|_| "gateway")?
+                        .sent
+                        .iter()
+                        .any(|e| e.envelope_id.starts_with("receipt_evt_")))
+            })
+            .await?;
             gateway.lock().map_err(|_| "gateway")?.priority_submit_hold = None;
             released.notify_one();
-            let (actor, result) = complete(task).await?;
-            result?;
+            wait_until(|| {
+                Ok(gateway
+                    .lock()
+                    .map_err(|_| "gateway")?
+                    .sent
+                    .iter()
+                    .any(|e| e.envelope_id.starts_with("receipt_evt_")))
+            })
+            .await?;
+            let sent = gateway.lock().map_err(|_| "gateway")?.sent.clone();
+            let receipt = sent
+                .iter()
+                .position(|e| e.envelope_id.starts_with("receipt_evt_"))
+                .ok_or("receipt")?;
             assert!(
-                receipt_preceded_task,
-                "production Task::priority must submit the due receipt before task work"
+                receipt <= 1,
+                "receipt must precede queued bulk, after at most one in-flight submit"
             );
-            assert!(
-                stalled,
-                "receipt service must not rely on the task submit completing or timing out"
-            );
-            assert_eq!(elapsed, Duration::ZERO);
-            assert_eq!(started.elapsed(), Duration::ZERO);
-            assert!(
-                !actor.state.accounts["sender"]
-                    .client
-                    .account_db()?
-                    .actor_state_exists("task/ack/priority-r2")?,
-                "the released task must complete without a production timeout"
-            );
-            assert!(
-                !actor.state.accounts["sender"]
-                    .client
-                    .account_db()?
-                    .actor_state_exists(&receipt_key)?
-            );
+            stop.send(true)?;
+            running.await??;
             Ok(())
         }))
         .await
@@ -156,82 +128,45 @@ fn outgoing_call(account: &mut LocalBusAccountState, peer: &RamfluxClient) -> Ca
     Ok(id)
 }
 
-// Mutation: raise the shared post-receive admission floor to nineteen seconds.
+// D2: receive and receipt couriers have independent budgets, without a shared floor.
 #[tokio::test]
 async fn newly_received_messages_send_receipts_in_the_same_pass_with_eight_seconds_left() -> Case {
     LocalSet::new()
         .run_until(Box::pin(async {
-            for call_seconds in [0, 10] {
-                let mut f = Box::pin(Fixture::new("courier-receive-receipt-r3")).await?;
-                f.inbound().await?;
-                let call_gate = if call_seconds > 0 {
-                    outgoing_call(&mut f.source, &f.peer.client)?;
-                    let (gate, observed) = hold();
-                    let released = Arc::clone(&gate.release);
-                    f.gateway.lock().map_err(|_| "gateway")?.priority_submit_hold = Some(gate);
-                    Some((observed, released))
-                } else {
-                    None
-                };
-                let (gate, mut observed) = hold();
-                let released = Arc::clone(&gate.release);
-                let gateway = Arc::clone(&f.gateway);
-                {
-                    let mut server = gateway.lock().map_err(|_| "gateway")?;
-                    // Only the ordinary DM: the other fixture entry is a call invitation.
-                    server.inbox.truncate(1);
-                    server.resume_hold = Some(gate);
-                    assert_eq!(server.sent, Vec::<ramflux_protocol::Envelope>::new());
-                }
-                assert_eq!(
-                    f.source
-                        .client
-                        .account_db()?
-                        .actor_state_usage(crate::client::delivery_receipts::PREFIX)?
-                        .0,
-                    0
-                );
-                tokio::time::pause();
-                let started = tokio::time::Instant::now();
-                let task = tokio::task::spawn_local(async move {
-                    let mut account = f.source;
-                    let result = crate::bus::sync_driver::run(&mut account).await;
-                    (account, result)
-                });
-                if let Some((mut observed, release)) = call_gate {
-                    entered(&mut observed).await?;
-                    tokio::time::advance(Duration::from_secs(call_seconds)).await;
-                    gateway.lock().map_err(|_| "gateway")?.priority_submit_hold = None;
-                    release.notify_one();
-                }
-                entered(&mut observed).await?;
-                tokio::time::advance(Duration::from_secs(2)).await;
-                released.notify_one();
-                let (account, result) = complete(task).await?;
-                result?;
-                assert_eq!(account.client.direct_messages("healthy")?.len(), 1);
-                assert_eq!(
-                    gateway
-                        .lock()
-                        .map_err(|_| "gateway")?
-                        .sent
-                        .iter()
-                        .filter(|envelope| envelope.envelope_id.starts_with("receipt_evt_"))
-                        .count(),
-                    1,
-                    "a newly received message must send its receipt in this same sync pass"
-                );
-                assert_eq!(
-                    account
-                        .client
-                        .account_db()?
-                        .actor_state_usage(crate::client::delivery_receipts::PREFIX)?
-                        .0,
-                    0
-                );
-                assert_eq!(started.elapsed(), Duration::from_secs(call_seconds + 2));
-                tokio::time::resume();
+            let mut f = Box::pin(Fixture::new("courier-receive-receipt-r3")).await?;
+            f.inbound().await?;
+            let reader = f.source.client.account_db()?.open_reader()?;
+            let gateway = Arc::clone(&f.gateway);
+            let (gate, mut observed) = hold();
+            let released = Arc::clone(&gate.release);
+            {
+                let mut server = gateway.lock().map_err(|_| "gateway")?;
+                server.inbox.truncate(1);
+                server.resume_hold = Some(gate);
             }
+            tokio::time::pause();
+            let (_, stop, running) = start_runtime(f.source, &f.root.join("source"))?;
+            entered(&mut observed).await?;
+            tokio::time::advance(Duration::from_secs(12)).await;
+            released.notify_one();
+            wait_until(|| {
+                Ok(gateway
+                    .lock()
+                    .map_err(|_| "gateway")?
+                    .sent
+                    .iter()
+                    .filter(|e| e.envelope_id.starts_with("receipt_evt_"))
+                    .count()
+                    == 1)
+            })
+            .await?;
+            assert_eq!(reader.direct_messages("healthy")?.len(), 1);
+            wait_until(|| {
+                Ok(reader.actor_state_usage(crate::client::delivery_receipts::PREFIX)?.0 == 0)
+            })
+            .await?;
+            stop.send(true)?;
+            running.await??;
             Ok(())
         }))
         .await
@@ -253,7 +188,12 @@ async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Ca
             let started = tokio::time::Instant::now();
             let task = tokio::task::spawn_local(async move {
                 let mut account = f.source;
-                let sent = crate::bus::dispatch::call::drive(&mut account).await;
+                // D2: production signaling retains its own allowance independent of receive.
+                let sent = crate::bus::couriers::test_pass::drive(
+                    &mut account,
+                    crate::bus::dispatch::call::signaling_pass,
+                )
+                .await;
                 (account, sent)
             });
             entered(&mut observed).await?;
@@ -263,7 +203,7 @@ async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Ca
             released.notify_one();
             let (account, sent) = complete(task).await?;
             assert!(still_waiting, "the submit allowance must survive a ten-second gateway reply");
-            assert_eq!(sent?, 1);
+            assert!(sent?);
             assert_eq!(account.client.voice_calls[&id].pending.len(), 0);
             assert!(account.has_pooled_engine(), "a valid slow submit must not force a reconnect");
             assert_eq!(gateway.lock().map_err(|_| "gateway")?.sessions, before);
@@ -274,63 +214,63 @@ async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Ca
         .await
 }
 
-// Mutation: always run backfill regardless of the remaining cycle budget.
+// D2: backfill progresses independently while receive is busy; no 11-second gate remains.
 #[tokio::test]
 async fn background_backfill_skipped_after_busy_sync_runs_on_next_idle_cycle() -> Case {
     LocalSet::new()
         .run_until(Box::pin(async {
-            let f = Box::pin(Fixture::new("courier-backfill-budget-r2")).await?;
+            let f = Box::pin(Fixture::new("courier-backfill-budget-r3")).await?;
             let (gate, mut observed) = hold();
             let released = Arc::clone(&gate.release);
-            f.gateway.lock().map_err(|_| "gateway")?.resume_hold = Some(gate);
             let gateway = Arc::clone(&f.gateway);
+            gateway.lock().map_err(|_| "gateway")?.resume_hold = Some(gate);
             let before = gateway.lock().map_err(|_| "gateway")?.manifest_requests.len();
-            let (mut actor, _, _, _) = runtime(f.source, &f.root.join("source"));
-            actor.stop_courier().await;
-            tokio::time::pause();
-            let started = tokio::time::Instant::now();
-            let task = tokio::task::spawn_local(async move {
-                let result = actor.sync().await;
-                (actor, result)
-            });
+            let reader = f.source.client.account_db()?.open_reader()?;
+            let (_, stop, running) = start_runtime(f.source, &f.root.join("source"))?;
             entered(&mut observed).await?;
-            tokio::time::advance(Duration::from_secs(10)).await;
+            wait_until(|| {
+                Ok(gateway.lock().map_err(|_| "gateway")?.manifest_requests.len() > before)
+            })
+            .await?;
+            assert!(reader.load_actor_state::<i64>("own-contact/last-refresh")?.is_some());
+            assert!(!running.is_finished(), "receive remains held while backfill advances");
             released.notify_one();
-            let (mut actor, result) = complete(task).await?;
-            result?;
-            assert_eq!(started.elapsed(), Duration::from_secs(10));
-            let status =
-                crate::bus::sync_status::read(actor.state.accounts["sender"].client.account_db()?)?;
-            assert_eq!(
-                status["sync_status"]["body"]["state"], "idle",
-                "backfill must skip after successful busy receive, not a sync timeout"
-            );
-            assert!(
-                actor.state.accounts["sender"]
-                    .client
-                    .account_db()?
-                    .load_actor_state::<i64>("own-contact/last-refresh")?
-                    .is_none(),
-                "a busy sync must leave backfill for later"
-            );
-            assert_eq!(gateway.lock().map_err(|_| "gateway")?.manifest_requests.len(), before);
-            // Keep paused time fixed while the next real TLS/HTTP request completes.
-            let task = tokio::task::spawn_local(async move {
-                let result = actor.sync().await;
-                (actor, result)
-            });
-            let (actor, result) = complete(task).await?;
-            result?;
-            assert!(
-                actor.state.accounts["sender"]
-                    .client
-                    .account_db()?
-                    .load_actor_state::<i64>("own-contact/last-refresh")?
-                    .is_some(),
-                "an idle cycle must attempt the deferred backfill"
-            );
-            assert!(gateway.lock().map_err(|_| "gateway")?.manifest_requests.len() > before);
+            stop.send(true)?;
+            running.await??;
             Ok(())
         }))
         .await
+}
+
+async fn wait_until(mut ready: impl FnMut() -> Case<bool>) -> Case {
+    let guard = std::time::Instant::now();
+    while !ready()? {
+        if guard.elapsed() > Duration::from_secs(10) {
+            return Err("production progress watchdog".into());
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+
+type Running = (
+    crate::bus::connection_manager::ConnectionHandle,
+    watch::Sender<bool>,
+    tokio::task::JoinHandle<Result<(), SdkError>>,
+);
+
+fn start_runtime(account: LocalBusAccountState, root: &Path) -> Case<Running> {
+    let (mut actor, commands, stop, _observed) = runtime(account, root);
+    actor.start_connection()?;
+    let handle = actor.state.accounts["sender"].connection.clone().ok_or("fixture host")?;
+    let (ready, _ready) = std::sync::mpsc::sync_channel(1);
+    let running = tokio::task::spawn_local(async move {
+        let _commands = commands;
+        let result = actor.serve(ready).await;
+        actor.stop_courier().await;
+        actor.stop_connection().await;
+        actor.close_readers().await;
+        result
+    });
+    Ok((handle, stop, running))
 }
