@@ -401,6 +401,42 @@ fn failure(message: &str) -> SdkError {
     SdkError::LocalBus(message.to_owned())
 }
 
+// Hold only this upload's v3 token request; background gateway traffic must keep flowing.
+fn actor_account_with_blocked_upload(
+    root: &Path,
+    entered: oneshot::Sender<()>,
+    cancelled: Arc<AtomicBool>,
+) -> AccountInitializer {
+    let account_root = root.to_path_buf();
+    let cancelled_network = cancelled;
+    Box::new(move |index| {
+        let mut account = account_with_setup(
+            &account_root,
+            "alice",
+            Some(entered),
+            cancelled_network,
+            Arc::default(),
+            AccountSetup {
+                index: Some(index),
+                blocked_relay_token: true,
+                ..AccountSetup::default()
+            },
+        )?;
+        account.client.node_relay_options = Some(RelayTransferOptions {
+            relay_endpoint: "https://relay.invalid".into(),
+            token_provider: RelayTokenProvider::GatewayIssued,
+            interrupt_after_chunks: None,
+            relay_quic_peer_addr: None,
+            relay_quic_server_name: None,
+            relay_quic_ca_cert: None,
+            relay_owner_home_node_id: Some("home".into()),
+            relay_owner_principal_id: Some("alice".into()),
+            relay_audience_node_id: Some("relay".into()),
+        });
+        Ok(account)
+    })
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn object_upload_keeps_same_account_reads_live_and_disconnect_cancels_network()
 -> Result<(), SdkError> {
@@ -408,24 +444,7 @@ async fn object_upload_keeps_same_account_reads_live_and_disconnect_cancels_netw
         let root = root("object");
         let (entered, blocked) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let account_root = root.clone();
-        let cancelled_network = Arc::clone(&cancelled);
-        let account: AccountInitializer = Box::new(move |index| {
-            let mut account = account_with_setup(
-                &account_root, "alice", Some(entered), cancelled_network, Arc::default(),
-                AccountSetup { index: Some(index), blocked_relay_token: true, ..AccountSetup::default() },
-            )?;
-            account.client.node_relay_options = Some(RelayTransferOptions {
-                relay_endpoint: "https://relay.invalid".into(),
-                token_provider: RelayTokenProvider::GatewayIssued,
-                interrupt_after_chunks: None, relay_quic_peer_addr: None,
-                relay_quic_server_name: None, relay_quic_ca_cert: None,
-                relay_owner_home_node_id: Some("home".into()),
-                relay_owner_principal_id: Some("alice".into()),
-                relay_audience_node_id: Some("relay".into()),
-            });
-            Ok(account)
-        });
+        let account = actor_account_with_blocked_upload(&root, entered, Arc::clone(&cancelled));
         let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), account)]))?;
         let (one, server) = client(Rc::clone(&supervisor), 1).await?;
         let upload_client = one.clone();
@@ -884,7 +903,7 @@ async fn daemon_stop_cancels_network_flushes_outbox_and_removes_socket() -> Resu
         let root = root("stop-drain");
         let (entered,blocked) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let initialize = actor_account(&root,"alice",Some(entered),Arc::clone(&cancelled));
+        let initialize = actor_account_with_blocked_upload(&root, entered, Arc::clone(&cancelled));
         let supervisor = supervisor(&root,BTreeMap::from([("alice".to_owned(),initialize)]))?;
         let actor = supervisor.account_actor("alice").ok_or_else(|| failure("missing actor"))?;
         let socket = root.join("daemon.sock"); let listener = UnixListener::bind(&socket)?;
@@ -892,8 +911,11 @@ async fn daemon_stop_cancels_network_flushes_outbox_and_removes_socket() -> Resu
         let server = tokio::task::spawn_local(super::connection::accept(listener,uid,Rc::clone(&supervisor),receiver));
         let client = LocalBusClient::connect(&socket).await?;
         let upload_client = client.clone();
-        let upload = tokio::task::spawn_local(async move { upload_client.request_frame(request("upload","alice","object.put",serde_json::json!({"object_id":"object","operation_id":"upload-operation","plaintext_base64":ramflux_protocol::encode_base64url(b"durable upload"),"chunk_size":4096,"relay_endpoint":"https://relay.invalid"}))).await });
-        blocked.await.map_err(|_| failure("gateway dropped before the upload stalled"))?;
+        let mut upload = tokio::task::spawn_local(async move { upload_client.request_frame(request("upload","alice","object.put",serde_json::json!({"object_id":"object","operation_id":"upload-operation","plaintext_base64":ramflux_protocol::encode_base64url(b"durable upload"),"chunk_size":4096,"relay_endpoint":"https://relay.invalid"}))).await });
+        tokio::select! {
+            result = blocked => result.map_err(|_| failure("gateway dropped before the upload stalled"))?,
+            result = &mut upload => panic!("upload finished before reaching its gateway barrier: {result:?}"),
+        }
         assert!(!upload.is_finished());
         assert!(!actor.has_stopped());
         assert!(!cancelled.load(Ordering::SeqCst));
