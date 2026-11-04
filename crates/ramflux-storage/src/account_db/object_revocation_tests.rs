@@ -50,15 +50,18 @@ impl Fixture {
         if let Some(manifest) = metadata_manifest {
             metadata["manifest_hash"] = json!(manifest);
         }
-        self.db.register_object_reference(&crate::ObjectReferenceOwner {
-            reference_hash: "authenticated-reference",
-            wire_id: "object",
-            manifest_hash: "manifest",
-            selector,
-            message_id: "message",
-            reference: &reference,
-            metadata: &metadata,
-        })?;
+        self.db.register_object_reference(
+            crate::ObjectReferenceAdmission::FreshMessage,
+            &crate::ObjectReferenceOwner {
+                reference_hash: "authenticated-reference",
+                wire_id: "object",
+                manifest_hash: "manifest",
+                selector,
+                message_id: "message",
+                reference: &reference,
+                metadata: &metadata,
+            },
+        )?;
         self.db.persist_actor_state(&format!("attachment/reference/{selector}"), &reference)?;
         self.db.persist_client_record("object", selector, &metadata)?;
         Ok(())
@@ -184,7 +187,7 @@ fn backup_placeholder_roundtrip(known_manifest: bool) -> TestResult {
         )?;
     }
 
-    local.db.register_object_reference(&crate::ObjectReferenceOwner {
+    local.db.register_object_reference(crate::ObjectReferenceAdmission::FreshMessage, &crate::ObjectReferenceOwner {
         reference_hash: "backup-reference", wire_id: "object", manifest_hash: "manifest",
         selector: "object", message_id: "message",
         reference: &json!({"reference":{"object_id":"object","manifest_hash":"manifest","plaintext_hash":"plaintext"}}),
@@ -311,7 +314,7 @@ fn tombstone_placeholder_survives_retention_sweep_while_reference_exists() -> Te
         for (selector, known_manifest) in [("object", true), ("object", false), ("alias", false)] {
             let f = Fixture::new()?;
             f.db.retain_object("object", "manifest", crate::ObjectRetention::Imported)?;
-            f.db.register_object_reference(&crate::ObjectReferenceOwner {
+            f.db.register_object_reference(crate::ObjectReferenceAdmission::FreshMessage, &crate::ObjectReferenceOwner {
                 reference_hash: "reference",
                 wire_id: "object",
                 manifest_hash: "manifest",
@@ -394,15 +397,18 @@ fn revocation_after_erasure_does_not_insert_placeholder() -> TestResult {
 #[test]
 fn message_attachment_union_filters_revoked_retention_and_directory_selectors() -> TestResult {
     let f = Fixture::new()?;
-    f.db.register_object_reference(&crate::ObjectReferenceOwner {
-        reference_hash: "reference",
-        wire_id: "object",
-        manifest_hash: "manifest",
-        selector: "object",
-        message_id: "message",
-        reference: &json!({"reference":{"object_id":"object","manifest_hash":"manifest"}}),
-        metadata: &json!({"object_id":"object","message_id":"message"}),
-    })?;
+    f.db.register_object_reference(
+        crate::ObjectReferenceAdmission::FreshMessage,
+        &crate::ObjectReferenceOwner {
+            reference_hash: "reference",
+            wire_id: "object",
+            manifest_hash: "manifest",
+            selector: "object",
+            message_id: "message",
+            reference: &json!({"reference":{"object_id":"object","manifest_hash":"manifest"}}),
+            metadata: &json!({"object_id":"object","message_id":"message"}),
+        },
+    )?;
     f.db.persist_actor_state(
         "directory/object/directory",
         &json!({"object_id":"directory","message_id":"message"}),

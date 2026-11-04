@@ -9,15 +9,18 @@ fn owned(db: &AccountDb) -> Result<(), StorageError> {
     db.send_direct_message("thread", "message", "peer", b"body")?;
     let reference = json!({"reference":{"object_id":"wire","manifest_hash":"manifest"},"private":"attachment-canary"});
     let metadata = json!({"object_id":"wire","manifest_hash":"manifest","message_id":"message","direction":"incoming","private":"attachment-canary"});
-    db.register_object_reference(&ObjectReferenceOwner {
-        reference_hash: "reference",
-        wire_id: "wire",
-        manifest_hash: "manifest",
-        selector: "wire",
-        message_id: "message",
-        reference: &reference,
-        metadata: &metadata,
-    })?;
+    db.register_object_reference(
+        crate::ObjectReferenceAdmission::FreshMessage,
+        &ObjectReferenceOwner {
+            reference_hash: "reference",
+            wire_id: "wire",
+            manifest_hash: "manifest",
+            selector: "wire",
+            message_id: "message",
+            reference: &reference,
+            metadata: &metadata,
+        },
+    )?;
     db.upsert_object(&ObjectWrite {
         object_id: "wire",
         manifest_hash: "manifest",

@@ -211,15 +211,18 @@ impl RamfluxClient {
             &ramflux_protocol::canonical_json_bytes(reference)?,
         );
         db.write_transaction(|| -> Result<(), SdkError> {
-            db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
-                reference_hash: &hash,
-                wire_id: &reference.object_id,
-                manifest_hash: &reference.manifest_hash,
-                selector,
-                message_id: message,
-                reference: &received,
-                metadata: &metadata,
-            })?;
+            db.register_object_reference(
+                ramflux_storage::ObjectReferenceAdmission::FreshMessage,
+                &ramflux_storage::ObjectReferenceOwner {
+                    reference_hash: &hash,
+                    wire_id: &reference.object_id,
+                    manifest_hash: &reference.manifest_hash,
+                    selector,
+                    message_id: message,
+                    reference: &received,
+                    metadata: &metadata,
+                },
+            )?;
             if !existing {
                 db.persist_actor_state_batch(&[
                     (key, received),

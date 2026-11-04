@@ -2163,15 +2163,18 @@ mod spool_tests {
             .ok_or_else(|| SdkError::LocalBus("fixture account or session missing".into()))?;
         let db = account.client.account_db()?;
         db.send_direct_message("thread", "message", "peer", b"body")?;
-        db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
-            reference_hash: "spool-reference",
-            wire_id: GET_OBJECT_ID,
-            manifest_hash: &object.manifest_hash,
-            selector: GET_OBJECT_ID,
-            message_id: "message",
-            reference: &serde_json::json!({}),
-            metadata: &serde_json::json!({}),
-        })?;
+        db.register_object_reference(
+            ramflux_storage::ObjectReferenceAdmission::FreshMessage,
+            &ramflux_storage::ObjectReferenceOwner {
+                reference_hash: "spool-reference",
+                wire_id: GET_OBJECT_ID,
+                manifest_hash: &object.manifest_hash,
+                selector: GET_OBJECT_ID,
+                message_id: "message",
+                reference: &serde_json::json!({}),
+                metadata: &serde_json::json!({}),
+            },
+        )?;
         db.upsert_object(&ramflux_storage::ObjectWrite {
             object_id: GET_OBJECT_ID,
             manifest_hash: &object.manifest_hash,

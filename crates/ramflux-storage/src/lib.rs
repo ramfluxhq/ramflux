@@ -46,8 +46,8 @@ pub use account_db::journal::{
     InboxFailurePolicy, InboxFailureSource, JournalBounds, JournalEvent,
 };
 pub use account_db::object_retention::{
-    ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention, ObjectRetirementObserver,
-    PreSendObjectHold, PrivacyResourceRegistration,
+    ObjectReferenceAdmission, ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention,
+    ObjectRetirementObserver, PreSendObjectHold, PrivacyResourceRegistration,
 };
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;

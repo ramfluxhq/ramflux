@@ -383,13 +383,13 @@ async fn backup_publication_erasure_generation_orders_both_deletion_races() -> T
             let mut donor=ramflux_sync::ObjectStore::new();
             let object=donor.put_encrypted_object("publication-wire",b"publication-private-body")?;
             let key=donor.object_key(&object.object_id)?;
-            db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
+            db.register_object_reference(ramflux_storage::ObjectReferenceAdmission::FreshMessage, &ramflux_storage::ObjectReferenceOwner {
                 reference_hash:"publication-reference",wire_id:&object.object_id,manifest_hash:&object.manifest_hash,
                 selector:&object.object_id,message_id:"message",reference:&json!({}),metadata:&json!({}),
             })?;
             if shared_owner {
                 db.send_direct_message("thread","survivor","peer",b"body")?;
-                db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
+                db.register_object_reference(ramflux_storage::ObjectReferenceAdmission::FreshMessage, &ramflux_storage::ObjectReferenceOwner {
                     reference_hash:"publication-reference",wire_id:&object.object_id,manifest_hash:&object.manifest_hash,
                     selector:&object.object_id,message_id:"survivor",reference:&json!({}),metadata:&json!({}),
                 })?;

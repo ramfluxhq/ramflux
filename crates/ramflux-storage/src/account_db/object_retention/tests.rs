@@ -7,15 +7,18 @@ use serde_json::json;
 
 pub(super) fn install(db: &AccountDb, message: &str, reference: &str) -> Result<(), StorageError> {
     db.send_direct_message("thread", message, "peer", b"body")?;
-    db.register_object_reference(&ObjectReferenceOwner {
-        reference_hash: reference,
-        wire_id: "wire",
-        manifest_hash: "manifest",
-        selector: "wire",
-        message_id: message,
-        reference: &json!({"object_id":"wire","slot":reference}),
-        metadata: &json!({"object_id":"wire","message_id":message}),
-    })?;
+    db.register_object_reference(
+        crate::ObjectReferenceAdmission::FreshMessage,
+        &ObjectReferenceOwner {
+            reference_hash: reference,
+            wire_id: "wire",
+            manifest_hash: "manifest",
+            selector: "wire",
+            message_id: message,
+            reference: &json!({"object_id":"wire","slot":reference}),
+            metadata: &json!({"object_id":"wire","message_id":message}),
+        },
+    )?;
     Ok(())
 }
 
@@ -175,15 +178,18 @@ fn abandoned_pre_send_hold_erases_payload_but_converted_message_hold_survives()
     assert!(matches!(db.load_object::<Value>("wire"), Err(StorageError::ObjectErased)));
     let hold = db.pre_send_object_hold("other-wire", "other-manifest")?;
     db.send_direct_message("thread", "sent", "peer", b"body")?;
-    db.register_object_reference(&ObjectReferenceOwner {
-        reference_hash: "other-reference",
-        wire_id: "other-wire",
-        manifest_hash: "other-manifest",
-        selector: "other-wire",
-        message_id: "sent",
-        reference: &json!({}),
-        metadata: &json!({}),
-    })?;
+    db.register_object_reference(
+        crate::ObjectReferenceAdmission::FreshMessage,
+        &ObjectReferenceOwner {
+            reference_hash: "other-reference",
+            wire_id: "other-wire",
+            manifest_hash: "other-manifest",
+            selector: "other-wire",
+            message_id: "sent",
+            reference: &json!({}),
+            metadata: &json!({}),
+        },
+    )?;
     drop(hold);
     db.check_object_identity("other-wire", "other-manifest")?;
     drop(db);
@@ -199,15 +205,18 @@ fn erased_unmaterialized_reference_does_not_delete_a_different_live_manifest()
     install(&db, "one", "reference")?;
     payload(&db)?;
     db.send_direct_message("thread", "other", "peer", b"body")?;
-    db.register_object_reference(&ObjectReferenceOwner {
-        reference_hash: "other-reference",
-        wire_id: "wire",
-        manifest_hash: "different-manifest",
-        selector: "received:other",
-        message_id: "other",
-        reference: &json!({}),
-        metadata: &json!({}),
-    })?;
+    db.register_object_reference(
+        crate::ObjectReferenceAdmission::FreshMessage,
+        &ObjectReferenceOwner {
+            reference_hash: "other-reference",
+            wire_id: "wire",
+            manifest_hash: "different-manifest",
+            selector: "received:other",
+            message_id: "other",
+            reference: &json!({}),
+            metadata: &json!({}),
+        },
+    )?;
     db.delete_direct_message("thread", "other", "local", "delete-other")?;
     assert!(db.load_object::<Value>("wire")?.is_some());
     drop(db);
@@ -279,15 +288,18 @@ fn attachment_erasure_canary_covers_payload_legacy_tables_archives_journal_and_w
         "INSERT INTO backup_archived_local_event VALUES('archive','event',?1)",
         params![serde_json::to_vec(&value)?],
     )?;
-    db.register_object_reference(&ObjectReferenceOwner {
-        reference_hash: "private-reference",
-        wire_id: "wire",
-        manifest_hash: "manifest",
-        selector: "wire",
-        message_id: "one",
-        reference: &value,
-        metadata: &value,
-    })?;
+    db.register_object_reference(
+        crate::ObjectReferenceAdmission::FreshMessage,
+        &ObjectReferenceOwner {
+            reference_hash: "private-reference",
+            wire_id: "wire",
+            manifest_hash: "manifest",
+            selector: "wire",
+            message_id: "one",
+            reference: &value,
+            metadata: &value,
+        },
+    )?;
     db.reserve_operation("canary-operation", "fingerprint")?;
     db.bind_operation_objects("canary-operation", &json!({"object_id":"wire"}))?;
     db.complete_operation(

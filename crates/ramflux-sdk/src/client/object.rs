@@ -1055,6 +1055,7 @@ impl RamfluxClient {
                 &ramflux_protocol::canonical_json_bytes(&(object_id, manifest_hash, message_id))?,
             );
             self.account_db()?.register_object_reference(
+                ramflux_storage::ObjectReferenceAdmission::OwnCopy,
                 &ramflux_storage::ObjectReferenceOwner {
                     reference_hash: &hash,
                     wire_id: object_id,

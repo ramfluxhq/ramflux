@@ -13,6 +13,14 @@ impl AccountDb {
         {
             return Ok(());
         }
+        // Actor keys carry private selectors even when their JSON contains only a wire id.
+        if let Some(selector) = key
+            .strip_prefix("attachment/reference/")
+            .or_else(|| key.strip_prefix("directory/object/"))
+            .or_else(|| key.strip_prefix("sync/attachment/"))
+        {
+            self.check_object_access(selector)?;
+        }
         if let Some(reference) = value.get("reference").or_else(|| value.get("history_ref"))
             && let (Some(wire), Some(manifest)) = (
                 reference.get("object_id").and_then(Value::as_str),

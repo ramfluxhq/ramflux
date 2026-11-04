@@ -198,7 +198,7 @@ fn bind_fixture_attachment(
     );
     let db = client.account_db()?;
     db.write_transaction(||->Result<(),SdkError>{
-        db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {reference_hash:&hash,wire_id:wire,manifest_hash:manifest,selector,message_id:message,reference:value,metadata:&json!({"message_id":message,"manifest_hash":manifest,"direction":"incoming"})})?;
+        db.register_object_reference(ramflux_storage::ObjectReferenceAdmission::FreshMessage, &ramflux_storage::ObjectReferenceOwner {reference_hash:&hash,wire_id:wire,manifest_hash:manifest,selector,message_id:message,reference:value,metadata:&json!({"message_id":message,"manifest_hash":manifest,"direction":"incoming"})})?;
         db.persist_actor_state(&format!("attachment/reference/{selector}"),value)?;
         Ok(())
     })
@@ -847,7 +847,7 @@ async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestR
             let db = state.client.account_db()?;
             let (object, _) = db.load_object::<ramflux_sync::EncryptedObject>("file")?
                 .ok_or_else(|| SdkError::LocalBus("diagnostic fixture attachment missing".into()))?;
-            db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
+            db.register_object_reference(ramflux_storage::ObjectReferenceAdmission::FreshMessage, &ramflux_storage::ObjectReferenceOwner {
                 reference_hash: "diagnostic-reference", wire_id: &object.object_id,
                 manifest_hash: &object.manifest_hash, selector: "file", message_id: "m0",
                 reference: &json!({"object_id":"file","manifest_hash":object.manifest_hash}),

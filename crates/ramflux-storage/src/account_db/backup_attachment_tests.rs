@@ -52,15 +52,18 @@ fn incremental_merge_preserves_attachment_bytes_keys_and_hashes_and_refuses_miss
     })?;
     let reference = serde_json::json!({"reference":{"object_id":id,"manifest_hash":manifest,"plaintext_hash":plaintext}});
     source.send_direct_message("thread", "message", "peer", b"body")?;
-    source.register_object_reference(&crate::ObjectReferenceOwner {
-        reference_hash: "reference",
-        wire_id: id,
-        manifest_hash: &manifest,
-        selector: "received:selector",
-        message_id: "message",
-        reference: &reference,
-        metadata: &serde_json::json!({"message_id":"message"}),
-    })?;
+    source.register_object_reference(
+        crate::ObjectReferenceAdmission::FreshMessage,
+        &crate::ObjectReferenceOwner {
+            reference_hash: "reference",
+            wire_id: id,
+            manifest_hash: &manifest,
+            selector: "received:selector",
+            message_id: "message",
+            reference: &reference,
+            metadata: &serde_json::json!({"message_id":"message"}),
+        },
+    )?;
     source.persist_actor_state("attachment/reference/received:selector", &reference)?;
     let path = root.join("incoming.db");
     let incoming = source.write_backup_snapshot(&path)?;
