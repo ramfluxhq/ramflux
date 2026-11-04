@@ -440,7 +440,13 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     .await??;
     assert!(started.elapsed() >= Duration::from_secs(3));
     assert!(started.elapsed() < Duration::from_secs(6));
-    assert!(receiver.engine.is_none(), "the stalled receipt session must be retired");
+    assert!(
+        receiver
+            .connection
+            .as_ref()
+            .is_none_or(crate::bus::connection_manager::ConnectionHandle::retirement_requested),
+        "the stalled receipt session must be retired"
+    );
     for id in ["first", "second"] {
         assert_eq!(
             receiver.client.account_db()?.message_content(id)?,
@@ -477,7 +483,9 @@ async fn an_empty_receipt_queue_never_allocates_journal_events_or_requires_a_liv
             assert_eq!(flush(&mut account).await?, 0);
             assert_eq!(account.client.account_db()?.journal_bounds()?.head_seq, before);
             assert_eq!(account.client.account_db()?.actor_state_usage("delivery-receipt/")?, usage);
-            assert!(account.engine.is_none());
+            assert!(account.connection.as_ref().is_none_or(
+                crate::bus::connection_manager::ConnectionHandle::retirement_requested
+            ));
         }
     }
     drop(account);
@@ -492,13 +500,24 @@ async fn a_receipt_deadline_retires_the_session_and_throttles_other_queue_entrie
     let mut work = ready(&p)?;
     work.packet = None;
     p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
-    assert_eq!(flush(&mut p.receiver).await?, 0);
-    assert!(p.receiver.engine.is_none(), "deadline must explicitly retire the uncertain session");
+    assert_eq!(super::super::background::test_flush(&mut p.receiver).await?, 0);
+    assert!(
+        p.receiver
+            .connection
+            .as_ref()
+            .is_none_or(crate::bus::connection_manager::ConnectionHandle::retirement_requested),
+        "deadline must explicitly retire the uncertain session"
+    );
     let attempts =
         p.receiver.client.account_db()?.load_actor_state::<Work>(&p.key)?.ok_or("work")?.attempts;
     ready(&p)?;
-    assert_eq!(flush(&mut p.receiver).await?, 0);
-    assert!(p.receiver.engine.is_none());
+    assert_eq!(super::super::background::test_flush(&mut p.receiver).await?, 0);
+    assert!(
+        p.receiver
+            .connection
+            .as_ref()
+            .is_none_or(crate::bus::connection_manager::ConnectionHandle::retirement_requested)
+    );
     assert_eq!(
         p.receiver.client.account_db()?.load_actor_state::<Work>(&p.key)?.ok_or("work")?.attempts,
         attempts,

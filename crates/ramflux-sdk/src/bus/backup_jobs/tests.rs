@@ -838,7 +838,7 @@ fn r8_backup_actor_uses_the_manifests_current_branch_epoch() -> TestResult {
 // Mutation: retain the failed-backup diagnostic snapshot after its account erasure generation changes.
 #[tokio::test(flavor = "current_thread")]
 async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestResult {
-    LocalSet::new().run_until(async {
+    LocalSet::new().run_until(Box::pin(async {
         let root = crate::bus::runtime_tests::root("backup-diagnostic-erasure");
         let config = LocalBusConfig::new(root.join("bus.sock"), &root);
         let source = root.clone();
@@ -880,5 +880,5 @@ async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestR
         supervisor.shutdown().await?;
         std::fs::remove_dir_all(root)?;
         Ok(())
-    }).await
+    })).await
 }

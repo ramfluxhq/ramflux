@@ -18,9 +18,8 @@ pub(super) async fn execute(
     // A cold account can admit a read to its mailbox before its reader pool exists.
     // Once restored, use the same read dispatcher as the warm-pool path.
     if super::readers::is_reader_request(&command.request.method) {
-        let account = local_bus_account(state, account_id)?;
         return Ok(ActorResponse {
-            body: super::readers::read(&account.client, &command.request)?,
+            body: super::readers::read_account(state, account_id, &command.request)?,
             events: Vec::new(),
             nodes: None,
         });

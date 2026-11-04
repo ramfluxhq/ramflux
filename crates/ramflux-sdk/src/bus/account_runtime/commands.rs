@@ -145,6 +145,7 @@ impl AccountRuntime {
         Ok(())
     }
     pub(super) async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
+        self.refresh_networking_expiry().await;
         if command.admission.as_ref().is_some_and(|admission| !admission.claim()) {
             return Ok(false);
         }

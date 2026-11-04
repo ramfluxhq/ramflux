@@ -232,6 +232,16 @@ impl AccountReaders {
     }
 }
 
+pub(super) fn read_account(
+    state: &LocalBusDaemonState,
+    id: &str,
+    request: &LocalBusFrame,
+) -> Result<serde_json::Value, SdkError> {
+    let account = local_bus_account(state, id)?;
+    let view = local::AccountView::capture(state, id)?;
+    local::read(&account.client, &view, request)?.map_or_else(|| read(&account.client, request), Ok)
+}
+
 pub(super) fn is_reader_request(method: &str) -> bool {
     super::method_table::classify(method).is_some_and(|entry| {
         entry.class == super::method_table::MethodClass::LocalRead

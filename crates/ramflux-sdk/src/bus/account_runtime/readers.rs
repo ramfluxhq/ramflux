@@ -53,7 +53,15 @@ impl AccountRuntime {
                 pool.set_identity(account.client.owned_device_identity().ok())?;
                 pool.set_account_view(&self.state, &self.id)?;
             }
-            super::super::events::publish(&account.client, &self.id, request, &self.events).await?;
+            let expiry = self.networking_expiry_pending.then(|| self.networking_expiry_request());
+            super::super::events::publish(
+                &account.client,
+                &self.id,
+                request,
+                expiry.as_ref(),
+                &self.events,
+            )
+            .await?;
         }
         Ok(())
     }

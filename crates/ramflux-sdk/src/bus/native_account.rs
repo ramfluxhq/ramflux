@@ -395,7 +395,13 @@ pub(super) fn record_networking_at(
 ) -> Result<(), SdkError> {
     let root = account.client.account_index()?.root().to_path_buf();
     let id = account.client.account_db()?.local_account_id.clone();
-    let mut native = crate::custody::load_account(&root, &id, now)?;
+    // Admission refusal must leave fenced data accounts open for local reads.
+    let mut native = crate::custody::load_data_account(&root, &id, now)?;
+    if native.authority_blocked() {
+        super::networking_events::record(account, &native, now)?;
+        account.client.born_v3_account = Some(Box::new(native));
+        return Ok(());
+    }
     if native.state() == crate::custody::CreationState::NetworkingPending {
         // A shared cooldown can return before connect_admitted loads the account.
         // Persist its cause under the actual attempted node, including on a switch back.

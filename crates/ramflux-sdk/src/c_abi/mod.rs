@@ -858,14 +858,13 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
         | SdkError::CustodyModeDowngrade => RamfluxErrorCode::UnsupportedVersion,
-        SdkError::CustodyRandomUnavailable => RamfluxErrorCode::CryptoFailed,
         SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
         | SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected) => {
             RamfluxErrorCode::PermissionDenied
         }
-        SdkError::Crypto(_) | SdkError::SignatureVerificationFailed(_) => {
-            RamfluxErrorCode::CryptoFailed
-        }
+        SdkError::CustodyRandomUnavailable
+        | SdkError::Crypto(_)
+        | SdkError::SignatureVerificationFailed(_) => RamfluxErrorCode::CryptoFailed,
         SdkError::SurfaceCheckpointMismatch
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
