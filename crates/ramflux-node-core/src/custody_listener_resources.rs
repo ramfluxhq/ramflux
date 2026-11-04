@@ -62,7 +62,7 @@ fn validate_nofile(h: usize, a: usize, soft: u64) -> Result<(), NodeCoreError> {
     }
     Ok(())
 }
-/// Back off resource failures from 50 ms to one second; peer errors never delay acceptance.
+/// Back off unknown and resource failures from 50 ms to one second; peer errors never delay acceptance.
 #[derive(Default)]
 pub struct ListenerAcceptBackoff {
     seen: HashSet<io::ErrorKind>,
@@ -71,35 +71,33 @@ pub struct ListenerAcceptBackoff {
 impl ListenerAcceptBackoff {
     #[must_use]
     pub fn failure(&mut self, error: &io::Error) -> Duration {
-        let resource = error.kind() == io::ErrorKind::OutOfMemory;
-        #[cfg(unix)]
-        let resource = resource
-            || [
-                rustix::io::Errno::MFILE,
-                rustix::io::Errno::NFILE,
-                rustix::io::Errno::NOBUFS,
-                rustix::io::Errno::NOMEM,
-            ]
-            .iter()
-            .any(|errno| error.raw_os_error() == Some(errno.raw_os_error()));
-        if resource {
-            self.resource_failure(error)
-        } else {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::NotConnected
+                | io::ErrorKind::InvalidInput
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::Interrupted
+                | io::ErrorKind::WouldBlock
+        ) {
             tracing::debug!(%error, "listener connection ended; accepting next peer");
             Duration::ZERO
+        } else {
+            self.resource_failure(error)
         }
     }
+
     /// A failed descriptor clone or worker spawn is always a resource failure.
     #[must_use]
     pub fn resource_failure(&mut self, error: &io::Error) -> Duration {
         if self.seen.insert(error.kind()) {
-            tracing::warn!(%error,kind=?error.kind(),"listener accept failed; retrying");
+            tracing::warn!(%error,kind=?error.kind(),"listener operation failed; retrying");
         }
         let delay = Duration::from_millis((50_u64 << self.failures.min(5)).min(1000));
         self.failures = self.failures.saturating_add(1);
         delay
     }
-    /// Wait only for resource errors; peer failures do not call sleep, even with a zero duration.
+    /// Wait for unknown and resource errors; peer failures do not call sleep, even with a zero duration.
     pub fn wait_after_failure(&mut self, error: &io::Error) {
         let delay = self.failure(error);
         if !delay.is_zero() {
@@ -108,6 +106,7 @@ impl ListenerAcceptBackoff {
     }
     pub fn success(&mut self) {
         self.failures = 0;
+        self.seen.clear();
     }
 }
 /// Accept a TCP holder before any TLS work; saturation closes only the newcomer.
@@ -147,6 +146,51 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unknown_accept_errors_sleep_and_warn_once_per_episode() {
+        #[derive(Clone, Default)]
+        struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl io::Write for Log {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Log::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut backoff = ListenerAcceptBackoff::default();
+            let error = io::Error::other("injected unknown listener fault");
+            for _ in 0..2 {
+                let started = std::time::Instant::now();
+                backoff.wait_after_failure(&error);
+                assert!(started.elapsed() >= Duration::from_millis(50));
+            }
+            let warnings = || {
+                String::from_utf8_lossy(
+                    &log.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                )
+                .matches("WARN")
+                .count()
+            };
+            assert_eq!(warnings(), 1);
+            backoff.success();
+            assert_eq!(backoff.failure(&error), Duration::from_millis(50));
+            assert_eq!(warnings(), 2, "a new failure episode must warn again");
+        });
+    }
     #[test]
     fn low_nofile_refuses_with_all_three_numbers() -> Result<(), Box<dyn std::error::Error>> {
         let e = validate_nofile(512, 2048, 3000).err().ok_or("accepted low nofile")?.to_string();
@@ -219,7 +263,6 @@ mod tests {
             io::ErrorKind::ConnectionAborted,
             io::ErrorKind::ConnectionReset,
             io::ErrorKind::Interrupted,
-            io::ErrorKind::Other,
         ] {
             assert_eq!(backoff.failure(&io::Error::from(kind)), Duration::ZERO);
         }

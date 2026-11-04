@@ -486,9 +486,10 @@ fn run_gc_sweep_once_with_async_endpoints(
         .transpose()?
         .flatten();
     // Only these services expose authenticated cross-service GC. Other services self-sweep.
-    for service_id in ["router", "federation"] {
+    let shutdown = ramflux_node_core::service_shutdown_token();
+    for_each_gc_target(&shutdown, |service_id| {
         let Some(endpoint) = config.mesh.endpoints.get(service_id) else {
-            continue;
+            return Ok(());
         };
         let request = ramflux_node_core::RetentionGcSweepRequest {
             owner_service: service_id.to_owned(),
@@ -515,6 +516,20 @@ fn run_gc_sweep_once_with_async_endpoints(
             deleted_count = response.deleted_count,
             "retention cross-service GC sweep completed"
         );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn for_each_gc_target(
+    shutdown: &tokio_util::sync::CancellationToken,
+    mut send: impl FnMut(&str) -> Result<(), ramflux_node_core::NodeCoreError>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    for service in ["router", "federation"] {
+        if shutdown.is_cancelled() {
+            break;
+        }
+        send(service)?;
     }
     Ok(())
 }
@@ -891,6 +906,37 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn shutdown_during_gc_batch_stops_before_next_send() -> Result<(), Box<dyn std::error::Error>> {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let (started, receive) = mpsc::channel();
+        let attempted = std::thread::scope(|scope| -> Result<_, Box<dyn std::error::Error>> {
+            let worker = scope.spawn(|| {
+                let mut attempted = Vec::new();
+                let result = for_each_gc_target(&shutdown, |service| {
+                    attempted.push(service.to_owned());
+                    assert!(started.send(()).is_ok());
+                    while !shutdown.is_cancelled() {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                    Ok(())
+                });
+                assert!(result.is_ok());
+                attempted
+            });
+            let entered = receive.recv_timeout(Duration::from_secs(1));
+            let cancelled_at = std::time::Instant::now();
+            shutdown.cancel();
+            assert!(entered.is_ok());
+            let attempted = worker.join().map_err(|_| "GC worker panicked")?;
+            assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+            Ok(attempted)
+        })?;
+        assert_eq!(attempted, ["router"]);
+        Ok(())
+    }
 
     #[test]
     fn retention_async_ingress_defaults_on_and_opt_out_disables_it() {

@@ -9,13 +9,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+type RegistrationSeed = fn(&Path) -> Result<(), Box<dyn std::error::Error>>;
+
+#[allow(dead_code)] // Shared by several integration-test binaries.
 pub fn configured_shutdown_is_clean(
     binary: &str,
     service: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let fixture = Fixture::new(service)?;
+    configured_shutdown_with_registration(binary, service, None)
+}
+
+#[allow(dead_code)] // The router supplies a real registration; other services use the wrapper.
+pub fn configured_shutdown_with_registration(
+    binary: &str,
+    service: &str,
+    registration_seed: Option<RegistrationSeed>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new(service)?;
+    fixture.registration_seed = registration_seed;
     if let Ok(mode) = std::env::var("RAMFLUX_SHUTDOWN_TEST_ONLY") {
         run_case(binary, service, &fixture, &mode)?;
+        #[cfg(feature = "itest-http")]
+        if mode == "request" {
+            assert_committed_request(service, &fixture)?;
+        }
         return assert_clean_reopen(&fixture.database);
     }
     run_case(binary, service, &fixture, "idle")?;
@@ -66,6 +83,7 @@ pub fn configured_shutdown_is_clean(
 }
 
 struct Fixture {
+    registration_seed: Option<RegistrationSeed>,
     root: PathBuf,
     config: PathBuf,
     database: PathBuf,
@@ -152,6 +170,7 @@ turn_tcp_addr = "127.0.0.1:0"
             std::fs::set_permissions(&signing_seed, std::fs::Permissions::from_mode(0o600))?;
         }
         Ok(Self {
+            registration_seed: None,
             root,
             config,
             database,
@@ -185,6 +204,24 @@ impl Drop for ChildGuard {
     }
 }
 
+#[cfg(feature = "itest-http")]
+fn seed_request_case(
+    service: &str,
+    fixture: &Fixture,
+    mode: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if service == "ramflux-federation" && mode == "request" {
+        seed_federation_sweep(fixture)?;
+    }
+    if service == "ramflux-router"
+        && mode == "request"
+        && let Some(seed) = fixture.registration_seed
+    {
+        seed(&fixture.database)?;
+    }
+    Ok(())
+}
+
 fn run_case(
     binary: &str,
     service: &str,
@@ -192,9 +229,7 @@ fn run_case(
     mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "itest-http")]
-    if service == "ramflux-federation" && mode == "request" {
-        seed_federation_sweep(fixture)?;
-    }
+    seed_request_case(service, fixture, mode)?;
     let mut command = configured_command(binary, service, fixture, mode)?;
     if mode.starts_with("failure-") {
         let directory = fixture.root.join("connection-failures");
@@ -524,6 +559,11 @@ fn assert_committed_request(
     match service {
         "ramflux-router" => {
             let store = ramflux_node_core::RouterRedbStore::open(&fixture.database)?;
+            assert_eq!(
+                store.pending_identity_admission_count()?,
+                0,
+                "SIGTERM must drain the identity journal"
+            );
             let router = store.load_router()?.ok_or("missing router state")?;
             let session = router.session("shutdown-target");
             assert_eq!(session.is_some(), committed);

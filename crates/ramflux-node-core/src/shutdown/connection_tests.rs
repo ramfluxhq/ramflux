@@ -30,13 +30,22 @@ fn capacity_rejects_and_guard_drop_releases_slot() -> Result<(), Box<dyn std::er
 
 #[test]
 fn drain_count_reaches_zero_after_context_clones_drop() -> Result<(), Box<dyn std::error::Error>> {
-    let set = ConnectionSet::new(DEFAULT_CONNECTION_LIMIT);
-    let store = Arc::new(());
-    for _ in 0..2000 {
-        let (socket, _peer) = sockets()?;
-        set.spawn(socket, Arc::clone(&store), |_, _, _| {})?;
+    struct SlowContext(Arc<ConnectionSet>, Arc<()>, std::sync::mpsc::Sender<()>);
+    impl Drop for SlowContext {
+        fn drop(&mut self) {
+            std::thread::sleep(Duration::from_millis(25));
+            assert_eq!(self.0.len(), 1, "membership released before context drop");
+            assert_eq!(Arc::strong_count(&self.1), 2);
+            assert!(self.2.send(()).is_ok());
+        }
     }
-    assert_eq!(set.wait_empty(Instant::now() + Duration::from_secs(5)), 0);
+    let set = ConnectionSet::new(1);
+    let store = Arc::new(());
+    let (done, receive) = std::sync::mpsc::channel();
+    let (socket, _peer) = sockets()?;
+    set.spawn(socket, SlowContext(Arc::clone(&set), Arc::clone(&store), done), |_, _, _| {})?;
+    receive.recv_timeout(Duration::from_secs(1))?;
+    assert_eq!(set.wait_empty(Instant::now() + Duration::from_secs(1)), 0);
     assert_eq!(Arc::strong_count(&store), 1);
     Ok(())
 }

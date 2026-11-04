@@ -325,9 +325,31 @@ pub fn service_worker_count() -> usize {
     })
 }
 
+/// Refuse finalization while a store or its enclosing context has another owner.
+///
+/// # Errors
+/// Returns a shutdown error when a worker still holds an owner.
+pub fn ensure_exclusive_service_owner<T>(owner: &Arc<T>) -> Result<(), NodeCoreError> {
+    if Arc::strong_count(owner) != 1 {
+        return Err(NodeCoreError::ServiceShutdown(
+            "store owners remain after connection drain".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finalization_refuses_retained_store_or_context_owner() {
+        let store = Arc::new(());
+        let retained = Arc::clone(&store);
+        assert!(ensure_exclusive_service_owner(&store).is_err());
+        drop(retained);
+        assert!(ensure_exclusive_service_owner(&store).is_ok());
+    }
 
     #[cfg(unix)]
     #[test]

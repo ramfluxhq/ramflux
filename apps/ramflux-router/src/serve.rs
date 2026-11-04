@@ -42,20 +42,71 @@ pub(crate) fn serve_itest_http(
         )?;
     }
     tracing::info!(addr, worker_count, queue_capacity, "router itest HTTP surface listening");
-    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
-        let stream = match listener.accept().map(|(stream, _)| stream) {
+    run_itest_http_accept_loop(
+        || listener.accept().map(|(stream, _)| stream),
+        &sender,
+        &ramflux_node_core::service_shutdown_token(),
+    );
+    Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn run_itest_http_accept_loop(
+    mut accept: impl FnMut() -> std::io::Result<TcpStream>,
+    sender: &std::sync::mpsc::SyncSender<TcpStream>,
+    shutdown: &tokio_util::sync::CancellationToken,
+) {
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
+    while !shutdown.is_cancelled() {
+        let stream = match accept() {
             Ok(stream) => stream,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(std::time::Duration::from_millis(25));
                 continue;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                backoff.wait_after_failure(&error);
+                continue;
+            }
         };
+        backoff.success();
         if let Err(error) = stream.set_nodelay(true) {
-            tracing::warn!(%error, "failed to enable TCP_NODELAY on router ingress connection");
+            tracing::debug!(%error, "failed to enable TCP_NODELAY on router ingress connection");
         }
-        sender.send(stream)?;
+        match sender.try_send(stream) {
+            Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+        }
     }
+}
+
+#[cfg(all(test, feature = "itest-http"))]
+#[test]
+fn fixture_accept_retries_unknown_errors_and_shutdown_survives_full_queue() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut clients = Vec::new();
+    let mut calls = 0;
+    run_itest_http_accept_loop(
+        || {
+            calls += 1;
+            if calls == 1 {
+                return Err(std::io::Error::other("injected listener fault"));
+            }
+            if calls == 4 {
+                shutdown.cancel();
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            clients.push(TcpStream::connect(address)?);
+            listener.accept().map(|(stream, _)| stream)
+        },
+        &sender,
+        &shutdown,
+    );
+    assert_eq!(calls, 4, "listener must survive the injected error and full queue");
+    assert!(receiver.try_recv().is_ok());
     Ok(())
 }
 

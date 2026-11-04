@@ -100,6 +100,8 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         }
         return shutdown
             .wait_and_finalize(move || {
+                ramflux_node_core::ensure_exclusive_service_owner(&state)?;
+                ramflux_node_core::ensure_exclusive_service_owner(&store)?;
                 drop((router, notify, state, store));
                 Ok(())
             })

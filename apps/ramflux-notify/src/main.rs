@@ -113,6 +113,8 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             })?;
         }
         return shutdown.wait_and_finalize(move || {
+            ramflux_node_core::ensure_exclusive_service_owner(&ingress)?;
+            ramflux_node_core::ensure_exclusive_service_owner(&ingress.store)?;
             drop(ingress);
             Ok(())
         });

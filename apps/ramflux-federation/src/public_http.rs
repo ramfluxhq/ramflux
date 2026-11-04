@@ -40,32 +40,44 @@ pub(crate) fn serve_public_http(
         .set_nonblocking(true)
         .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
     ramflux_node_core::spawn_service_worker("ramflux-federation-public-http", move |shutdown| {
-        let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
-        while !shutdown.is_cancelled() {
-            let stream = match listener.accept() {
-                Ok((stream, _)) => stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                    continue;
-                }
-                Err(error) => {
-                    backoff.wait_after_failure(&error);
-                    continue;
-                }
-            };
-            finish_public_accept(
-                spawn_public_connection(
-                    stream,
-                    context.clone(),
-                    &connections,
-                    limits,
-                    &source_limits,
-                ),
-                &mut backoff,
-            );
-        }
+        run_public_http_listener(
+            &listener,
+            &context,
+            &connections,
+            limits,
+            &source_limits,
+            &shutdown,
+        );
     })?;
     Ok(())
+}
+
+fn run_public_http_listener(
+    listener: &TcpListener,
+    context: &FederationPublicHttpContext,
+    connections: &Arc<ramflux_node_core::ConnectionSet>,
+    limits: ramflux_node_core::HttpRequestLimits,
+    source_limits: &Arc<PublicSourceLimits>,
+    shutdown: &tokio_util::sync::CancellationToken,
+) {
+    let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
+    while !shutdown.is_cancelled() {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
+            Err(error) => {
+                backoff.wait_after_failure(&error);
+                continue;
+            }
+        };
+        finish_public_accept(
+            spawn_public_connection(stream, context.clone(), connections, limits, source_limits),
+            &mut backoff,
+        );
+    }
 }
 
 fn finish_public_accept(

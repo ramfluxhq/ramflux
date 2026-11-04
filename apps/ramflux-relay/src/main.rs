@@ -295,6 +295,8 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         }
         return shutdown
             .wait_and_finalize(move || {
+                ramflux_node_core::ensure_exclusive_service_owner(&state)?;
+                ramflux_node_core::ensure_exclusive_service_owner(&store)?;
                 drop((trust_snapshot_cache, state, store));
                 #[cfg(feature = "itest-alloc-prof")]
                 alloc_prof::flush_and_wait();

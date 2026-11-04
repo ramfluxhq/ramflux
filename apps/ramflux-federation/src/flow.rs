@@ -270,7 +270,8 @@ pub(crate) fn retry_outbound_spool_once(
     router: &RouterMeshClient,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let now = now_unix_seconds()?;
-    retry_outbound_spool_with(store, now, outbound_spool_retry_batch(), |entry| {
+    let shutdown = ramflux_node_core::service_shutdown_token();
+    retry_outbound_spool_with(store, now, outbound_spool_retry_batch(), &shutdown, |entry| {
         let peer = resolve_forward_peer(&entry.forward, state)?;
         let forward = refresh_spooled_forward(&entry.forward, state, |envelope| {
             attach_forward_source_authority(envelope, router)
@@ -284,6 +285,7 @@ fn retry_outbound_spool_with(
     store: &ramflux_node_core::FederationRedbStore,
     now: u64,
     batch: usize,
+    shutdown: &tokio_util::sync::CancellationToken,
     mut send: impl FnMut(
         &ramflux_node_core::FederationOutboundSpoolEntry,
     ) -> Result<String, ramflux_node_core::NodeCoreError>,
@@ -294,6 +296,9 @@ fn retry_outbound_spool_with(
     }
     let mut blocked_peers = BTreeSet::new();
     for entry in store.list_pending_outbound(batch)? {
+        if shutdown.is_cancelled() {
+            break;
+        }
         if blocked_peers.contains(&entry.peer_node_id) {
             continue;
         }
@@ -688,6 +693,45 @@ mod tests {
         Ok(request)
     }
     #[test]
+    fn shutdown_during_spool_batch_stops_before_next_send() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let path = std::env::temp_dir().join(format!(
+            "rf-spool-cancel-{}",
+            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+        ));
+        let store = ramflux_node_core::FederationRedbStore::open(&path)?;
+        let forward = retained_forward()?;
+        for _ in 0..64 {
+            store.spool_outbound_forward(&forward.target_node_id, &forward, 100, 1000)?;
+        }
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let (started, receive) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let worker = scope.spawn(|| {
+                retry_outbound_spool_with(&store, 101, 64, &shutdown, |_| {
+                    assert!(started.send(()).is_ok());
+                    while !shutdown.is_cancelled() {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    // Model one in-flight send; cancellation cannot interrupt that send.
+                    std::thread::sleep(Duration::from_millis(25));
+                    Ok("delivered".into())
+                })
+            });
+            let entered = receive.recv_timeout(Duration::from_secs(1));
+            let cancelled_at = std::time::Instant::now();
+            shutdown.cancel();
+            assert!(entered.is_ok());
+            worker.join().map_err(|_| "retry worker panicked")??;
+            assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+            Ok(())
+        })?;
+        assert_eq!(store.list_pending_outbound(64)?.len(), 63);
+        drop(store);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+    #[test]
     fn revoked_spool_head_is_dead_lettered_durably_and_other_sender_to_same_peer_delivers()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = std::env::temp_dir().join(format!(
@@ -703,24 +747,36 @@ mod tests {
         store.spool_outbound_forward(&first.target_node_id, &first, 100, 1000)?;
         store.spool_outbound_forward(&first.target_node_id, &second, 100, 1000)?;
         let mut attempted = Vec::new();
-        retry_outbound_spool_with(&store, 101, 64, |entry| {
-            attempted.push(entry.forward.envelope.envelope_id.clone());
-            Err(ramflux_node_core::NodeCoreError::ItestHttp("peer unreachable".into()))
-        })?;
+        retry_outbound_spool_with(
+            &store,
+            101,
+            64,
+            &tokio_util::sync::CancellationToken::new(),
+            |entry| {
+                attempted.push(entry.forward.envelope.envelope_id.clone());
+                Err(ramflux_node_core::NodeCoreError::ItestHttp("peer unreachable".into()))
+            },
+        )?;
         assert_eq!(attempted, vec!["retained"]);
         assert_eq!(store.list_pending_outbound(64)?.len(), 2);
         attempted.clear();
         // The peer returns after the first sender was revoked. Only its entry is terminal.
-        retry_outbound_spool_with(&store, 102, 64, |entry| {
-            attempted.push(entry.forward.envelope.envelope_id.clone());
-            if entry.forward.envelope.source_principal_id == "alice" {
-                Err(ramflux_node_core::NodeCoreError::SourceAuthorityRefused {
-                    reason_code: ramflux_node_core::EnvelopeAuthorityReason::Revoked,
-                })
-            } else {
-                Ok("delivered".into())
-            }
-        })?;
+        retry_outbound_spool_with(
+            &store,
+            102,
+            64,
+            &tokio_util::sync::CancellationToken::new(),
+            |entry| {
+                attempted.push(entry.forward.envelope.envelope_id.clone());
+                if entry.forward.envelope.source_principal_id == "alice" {
+                    Err(ramflux_node_core::NodeCoreError::SourceAuthorityRefused {
+                        reason_code: ramflux_node_core::EnvelopeAuthorityReason::Revoked,
+                    })
+                } else {
+                    Ok("delivered".into())
+                }
+            },
+        )?;
         assert_eq!(attempted, vec!["retained", "later-bob"]);
         assert_eq!(store.list_pending_outbound(64)?.len(), 0);
         assert_eq!(store.outbound_dead_letter_count()?, 1);

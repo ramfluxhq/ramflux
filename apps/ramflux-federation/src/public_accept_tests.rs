@@ -74,3 +74,60 @@ fn reset_after_connect_does_not_delay_the_next_public_accept()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn whole_public_listener_serves_concurrent_client_after_reset_burst()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = crate::test_certificates::temp_cert_root("public-whole-reset")?;
+    let admin = crate::http_listener_tests::context(&root)?;
+    let context = FederationPublicHttpContext {
+        router: admin.router.clone(),
+        discovery: admin.discovery.clone(),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    let connections = ramflux_node_core::ConnectionSet::new(8);
+    let worker_connections = Arc::clone(&connections);
+    let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::configured(8)?);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let server = scope.spawn(|| {
+            run_public_http_listener(
+                &listener,
+                &context,
+                &worker_connections,
+                crate::http_limits::defaults(true),
+                &source_limits,
+                &shutdown,
+            );
+        });
+        // The listener accepts independently while the reset burst and healthy client connect.
+        let response = (|| -> Result<_, Box<dyn std::error::Error>> {
+            for _ in 0..3 {
+                let reset = TcpStream::connect(address)?;
+                socket2::SockRef::from(&reset).set_linger(Some(Duration::ZERO))?;
+                drop(reset);
+            }
+            let started = Instant::now();
+            let mut healthy = TcpStream::connect(address)?;
+            healthy.set_read_timeout(Some(Duration::from_secs(2)))?;
+            healthy.write_all(
+                b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )?;
+            let mut response = String::new();
+            healthy.read_to_string(&mut response)?;
+            Ok((response, started.elapsed()))
+        })();
+        shutdown.cancel();
+        server.join().map_err(|_| "public listener panicked")?;
+        let (response, elapsed) = response?;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(elapsed < Duration::from_millis(100), "reset burst delayed client by {elapsed:?}");
+        Ok(())
+    })?;
+    crate::http_connections::TestWorker::from_connections(connections).join()?;
+    drop(admin);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
