@@ -188,6 +188,9 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  # The C ABI smoke test (crates/ramflux-sdk/tests/c_abi_smoke.rs) is excluded from PR CI below:
+  # it runs a nested cargo build, and nothing consumes the C ABI while mobile is frozen. It runs
+  # again when mobile/ABI integration starts. The all-features clippy job still compiles c_abi.
   test-sdk:
     name: Tests (sdk ${{ matrix.shard }}/6)
     needs: build-sdk
@@ -217,7 +220,7 @@ jobs:
         with:
           name: archive-sdk
       - name: Run shard
-        run: cargo nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci -E 'not test(c_abi_smoke)' --partition hash:${{ matrix.shard }}/6
+        run: cargo nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci -E 'not binary(c_abi_smoke)' --partition hash:${{ matrix.shard }}/6
 
       - name: Upload JUnit
         if: always()
@@ -409,41 +412,6 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
-
-  cabi:
-    name: C ABI smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      RAMFLUX_CABI_TARGET_DIR: ${{ github.workspace }}/cabi-target
-    steps:
-      - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
-        with:
-          persist-credentials: false
-
-      - name: Use tmpfs for /tmp
-        # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
-        run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
-
-      - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
-        with:
-          shared-key: cabi
-          workspaces: |
-            . -> target
-            . -> cabi-target
-
-      - name: Install nextest
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
-        with:
-          tool: nextest
-
-      - name: Build the C ABI library
-        run: cargo build -p ramflux-sdk --features c-abi --lib --target-dir cabi-target
-
-      - name: Test
-        run: cargo nextest run --profile ci -p ramflux-sdk --test c_abi_smoke
 
   mutants:
     name: Mutants (advisory, diff only)

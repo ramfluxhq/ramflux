@@ -21,16 +21,9 @@ fn c_abi_smoke_runs_real_sdk_storage_and_event_queue() -> Result<(), Box<dyn std
     drop(setup_client);
 
     // Keep the child build separate from the parent Cargo job and honor external build roots.
-    // CI prebuilds the library into RAMFLUX_CABI_TARGET_DIR so this test only re-checks
-    // that the build is current, links the C program and runs it.
-    let target_dir = std::env::var_os("RAMFLUX_CABI_TARGET_DIR").map_or_else(
-        || {
-            std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-                || manifest_dir.join("target"),
-                |root| std::path::PathBuf::from(root).join("cabi-smoke"),
-            )
-        },
-        std::path::PathBuf::from,
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || manifest_dir.join("target"),
+        |root| std::path::PathBuf::from(root).join("cabi-smoke"),
     );
     let build_status = Command::new(env!("CARGO"))
         .current_dir(&manifest_dir)
