@@ -15,8 +15,8 @@ fn locator(db: &AccountDb) -> String {
 }
 
 fn enroll_fixture(db: &AccountDb, message: &str) -> Result<(), StorageError> {
-    // Inject the future G2 enrollment output, not a retention owner. Production
-    // enrollment is a separate admission change; this fixture isolates the driver.
+    // Inject historical enrollment for an independent witness that cannot be
+    // created by revoking an already existing placeholder.
     db.connection.execute("INSERT INTO message_copy_binding VALUES('object:private-canary',?1) ON CONFLICT DO NOTHING",params![message])?;
     db.connection.execute(
         "INSERT INTO message_footprint VALUES(?1,'revocation_selector',?2)",
@@ -35,7 +35,7 @@ fn enroll_fixture(db: &AccountDb, message: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(super) fn fixture(db: &AccountDb) -> Result<(), StorageError> {
+fn legacy_source(db: &AccountDb) -> Result<(), StorageError> {
     db.send_direct_message("thread", "message", "peer", b"body")?;
     db.persist_actor_state(
         "attachment/reference/private-canary",
@@ -50,8 +50,12 @@ pub(super) fn fixture(db: &AccountDb) -> Result<(), StorageError> {
         "attachment/reference-by-slot/private-canary",
         &json!("private-canary"),
     )?;
+    Ok(())
+}
+
+pub(super) fn fixture(db: &AccountDb) -> Result<(), StorageError> {
+    legacy_source(db)?;
     db.set_object_tombstoned_with_revocation("private-canary", Some("peer"), Some("revoke"), 1)?;
-    enroll_fixture(db, "message")?;
     db.connection.execute_batch("CREATE TEMP TABLE legacy_work_count(n INTEGER); INSERT INTO legacy_work_count VALUES(0); CREATE TEMP TRIGGER legacy_count AFTER INSERT ON main.object_erasure_work BEGIN UPDATE legacy_work_count SET n=n+1; END;")?;
     Ok(())
 }
@@ -59,6 +63,7 @@ pub(super) fn fixture(db: &AccountDb) -> Result<(), StorageError> {
 fn no_payload_work(db: &AccountDb) -> Result<(), StorageError> {
     for table in [
         "object_retention_payload",
+        "object_retention_reference",
         "object_message_reference",
         "object_erasure_work",
         "object_reference_erasure_work",
@@ -381,4 +386,213 @@ fn managed_retirement_normalizes_zero_manifest_from_legacy_survivor() -> Result<
 #[test]
 fn managed_retirement_legacy_survivor_is_trigger_order_independent() -> Result<(), StorageError> {
     managed_deletion_with_legacy_survivor(false, false, true)
+}
+
+#[test]
+fn e19_live_legacy_revoke_enrolls_binding_and_footprint() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("legacy-enrollment")?;
+    fixture(&db)?;
+    drop(db);
+    let db = reopen(&root)?;
+    let footprints: Vec<String> = db.connection.prepare(
+        "SELECT locator FROM message_footprint WHERE message_id='message' AND kind='revocation_selector'",
+    )?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+    assert_eq!(
+        footprints,
+        vec![locator(&db)],
+        "canonical footprint must use actor identity, not revoke envelope"
+    );
+    let binding: i64 = db.connection.query_row(
+        "SELECT count(*) FROM message_copy_binding WHERE copy_id='object:private-canary' AND message_id='message'", [], |row| row.get(0),
+    )?;
+    assert_eq!(binding, 1);
+    for key in [
+        "attachment/reference/private-canary",
+        "directory/object/private-canary",
+        "attachment/reference-by-slot/private-canary",
+    ] {
+        let count: i64 = db.connection.query_row(
+            "SELECT count(*) FROM message_footprint WHERE message_id='message' AND kind='actor' AND locator=?1", params![key], |row| row.get(0),
+        )?;
+        assert_eq!(count, 1, "missing actor enrollment: {key}");
+    }
+    no_payload_work(&db)?;
+    assert!(db.object_is_tombstoned("private-canary")?);
+    db.upsert_object(&crate::ObjectWrite {
+        object_id: "private-canary",
+        manifest_hash: "manifest",
+        nonce: "nonce",
+        ciphertext: b"late",
+        plaintext_hash: "hash",
+        tombstoned: false,
+        backup_excluded: false,
+        content_key: None,
+        object: &json!({}),
+        updated_at: 2,
+    })?;
+    assert!(db.object_is_tombstoned("private-canary")?);
+    let ciphertext: Vec<u8> = db.connection.query_row(
+        "SELECT ciphertext FROM object_index WHERE object_id='private-canary'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(ciphertext.is_empty(), "late import must not replace the placeholder");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn e19_enrollment_failure_rolls_back_creation() -> Result<(), StorageError> {
+    for placeholder_first in [false, true] {
+        let (root, db) = crate::tests::test_db("legacy-enrollment-rollback")?;
+        legacy_source(&db)?;
+        // Remove the pre-existing trigger enrollment so every row under test is
+        // newly written in the creation transaction and must roll back.
+        db.connection
+            .execute_batch("DELETE FROM message_copy_binding; DELETE FROM message_footprint;")?;
+        if placeholder_first {
+            db.connection.execute_batch("CREATE TEMP TRIGGER enrollment_cut BEFORE INSERT ON main.message_footprint WHEN NEW.kind='revocation_selector' AND EXISTS(SELECT 1 FROM object_index) BEGIN SELECT RAISE(ABORT,'placeholder then enrollment cut'); END;")?;
+            // Exercise the inverse statement order with the same production
+            // resolver/enrollment and placeholder schema in one writer transaction.
+            let result: Result<(), StorageError> = db.write_transaction(|| {
+                db.connection.execute("INSERT INTO object_index(object_id,chunk_manifest_hash,object_state,total_cipher_size,chunk_count,created_at,updated_at,manifest_hash,nonce,ciphertext,tombstoned,backup_excluded,object_body) VALUES('private-canary',x'01','tombstoned',0,0,1,1,x'01',zeroblob(12),x'',1,0,x'7b7d')", [])?;
+                let record = db.client_record("object", "private-canary")?;
+                db.resolve_revocation_manifest("private-canary", Some("peer"), record.as_ref())?;
+                Ok(())
+            });
+            assert!(
+                matches!(result, Err(error) if error.to_string().contains("placeholder then enrollment cut"))
+            );
+        } else {
+            db.connection.execute_batch("CREATE TEMP TRIGGER enrollment_cut BEFORE INSERT ON main.object_index WHEN EXISTS(SELECT 1 FROM message_footprint WHERE kind='revocation_selector') BEGIN SELECT RAISE(ABORT,'enrollment then placeholder cut'); END;")?;
+            let result = db.set_object_tombstoned_with_revocation(
+                "private-canary",
+                Some("peer"),
+                Some("revoke"),
+                1,
+            );
+            assert!(
+                matches!(result, Err(error) if error.to_string().contains("enrollment then placeholder cut"))
+            );
+        }
+        drop(db);
+        let db = reopen(&root)?;
+        for table in
+            ["object_index", "message_copy_binding", "message_footprint", "object_erasure_lookup"]
+        {
+            let count: i64 =
+                db.connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))?;
+            assert_eq!(
+                count, 0,
+                "rollback retained {table}, placeholder_first={placeholder_first}"
+            );
+        }
+        assert!(!db.object_is_tombstoned("private-canary")?);
+        db.check_object_access("private-canary")?;
+        // A healthy retry commits the entire creation after the TEMP cut vanishes.
+        db.set_object_tombstoned_with_revocation("private-canary", Some("peer"), Some("retry"), 2)?;
+        assert!(db.object_is_tombstoned("private-canary")?);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn e19_missing_message_id_or_conflicting_manifest_refused() -> Result<(), StorageError> {
+    for record in [
+        json!({"owner":"peer","manifest_hash":"manifest"}),
+        json!({"owner":"peer","message_id":123,"manifest_hash":"manifest"}),
+        json!({"owner":"peer","message_id":"message","manifest_hash":"conflict"}),
+        json!({"owner":"other","message_id":"message","manifest_hash":"manifest"}),
+    ] {
+        let (root, db) = crate::tests::test_db("legacy-enrollment-refused")?;
+        legacy_source(&db)?;
+        db.persist_client_record("object", "private-canary", &record)?;
+        assert!(matches!(
+            db.set_object_tombstoned_with_revocation(
+                "private-canary",
+                Some("peer"),
+                Some("revoke"),
+                1
+            ),
+            Err(StorageError::AuthorizationRejected)
+        ));
+        drop(db);
+        let db = reopen(&root)?;
+        assert!(!db.object_is_tombstoned("private-canary")?);
+        let count: i64 = db.connection.query_row(
+            "SELECT count(*) FROM message_footprint WHERE kind='revocation_selector'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn e19_known_deleted_owner_or_fence_refuses() -> Result<(), StorageError> {
+    for fenced in [false, true] {
+        let (root, db) = crate::tests::test_db("legacy-enrollment-dead")?;
+        if !fenced {
+            db.send_direct_message("thread", "message", "peer", b"body")?;
+            db.delete_direct_message("thread", "message", "local", "delete")?;
+        }
+        // Historical actor bytes bypass admission: the creation guard itself
+        // must refuse a known deleted owner or consume an existing payload fence.
+        for (key, value) in [
+            (
+                "attachment/reference/private-canary",
+                json!({"reference":{"object_id":"wire","manifest_hash":"manifest"}}),
+            ),
+            (
+                "directory/object/private-canary",
+                json!({"owner":"peer","message_id":"message","manifest_hash":"manifest"}),
+            ),
+        ] {
+            db.connection.execute(
+                "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2)",
+                params![key, serde_json::to_vec(&value)?],
+            )?;
+        }
+        assert!(db.actor_state_exists("attachment/reference/private-canary")?);
+        assert!(db.client_record("object", "private-canary")?.is_some());
+        assert_eq!(db.message_is_deleted("message")?, !fenced);
+        if fenced {
+            db.connection.execute(
+                "INSERT INTO object_erasure_fence VALUES(?1)",
+                params![object_erasure_commitment(db.object_erasure_root(), "wire", "manifest")],
+            )?;
+        }
+        let result = db.set_object_tombstoned_with_revocation(
+            "private-canary",
+            Some("peer"),
+            Some("revoke"),
+            1,
+        );
+        if fenced {
+            // This legacy actor has no admitted retention identity, so G2
+            // resolves the fence and refuses before enrollment or insertion.
+            assert!(matches!(result, Err(StorageError::ObjectErased)));
+        } else {
+            assert!(matches!(result, Err(StorageError::AuthorizationRejected)));
+        }
+        drop(db);
+        let db = reopen(&root)?;
+        assert!(!db.object_is_tombstoned("private-canary")?);
+        let count: i64 = db.connection.query_row(
+            "SELECT count(*) FROM message_footprint WHERE kind='revocation_selector'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
 }

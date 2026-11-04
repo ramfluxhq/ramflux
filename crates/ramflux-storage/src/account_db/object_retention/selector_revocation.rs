@@ -70,6 +70,56 @@ impl AccountDb {
             return Err(StorageError::AuthorizationRejected);
         }
         self.check_object_identity(&wire, &manifest)?;
+        if !managed {
+            self.enroll_legacy_revocation(selector, sender, &wire, &manifest)?;
+        }
         Ok(manifest)
+    }
+
+    // Called only inside the missing-row creation transaction, after G2 agreement.
+    fn enroll_legacy_revocation(
+        &self,
+        selector: &str,
+        sender: Option<&str>,
+        wire: &str,
+        manifest: &str,
+    ) -> Result<(), StorageError> {
+        // Re-read the authorizing record under the account writer transaction.
+        let record = self.client_record("object", selector)?;
+        let record = record.as_ref().ok_or(StorageError::AuthorizationRejected)?;
+        if sender.is_none() || record["owner"].as_str() != sender {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        let message = record["message_id"].as_str().ok_or(StorageError::AuthorizationRejected)?;
+        if self.message_is_deleted(message)? {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        self.check_object_identity(wire, manifest)?;
+        let locator = serde_json::json!({
+            "selector": selector,
+            "wire": wire,
+            "manifest": manifest,
+            "commitment": object_erasure_commitment(self.object_erasure_root(), wire, manifest),
+            "selector_lookup": object_erasure_lookup(self.object_erasure_root(), selector),
+        });
+        self.connection.execute(
+            "INSERT INTO message_copy_binding(copy_id,message_id) VALUES(?1,?2) ON CONFLICT DO NOTHING",
+            params![format!("object:{selector}"), message],
+        )?;
+        self.connection.execute(
+            "INSERT INTO message_footprint(message_id,kind,locator) VALUES(?1,'revocation_selector',?2) ON CONFLICT DO NOTHING",
+            params![message, locator.to_string()],
+        )?;
+        for key in [
+            format!("attachment/reference/{selector}"),
+            format!("directory/object/{selector}"),
+            format!("attachment/reference-by-slot/{selector}"),
+        ] {
+            self.connection.execute(
+                "INSERT INTO message_footprint(message_id,kind,locator) VALUES(?1,'actor',?2) ON CONFLICT DO NOTHING",
+                params![message, key],
+            )?;
+        }
+        Ok(())
     }
 }
