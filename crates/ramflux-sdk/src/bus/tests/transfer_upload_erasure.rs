@@ -13,15 +13,18 @@ fn seed_adopted_attachment(account: &LocalBusAccountState, relay: &Relay) -> Cas
     let db = account.client.account_db()?;
     db.send_direct_message("erase-upload-thread", "erase-upload-message", "sender", b"attachment")?;
     // Seed the existing imported recovery state, rather than making a standalone object erasable.
-    db.register_object_reference(&ramflux_storage::ObjectReferenceOwner {
-        reference_hash: "adopted-upload-reference",
-        wire_id: OBJECT,
-        manifest_hash: &object.manifest_hash,
-        selector: OBJECT,
-        message_id: "erase-upload-message",
-        reference: &json!({}),
-        metadata: &json!({}),
-    })?;
+    db.register_object_reference(
+        ramflux_storage::ObjectReferenceAdmission::FreshMessage,
+        &ramflux_storage::ObjectReferenceOwner {
+            reference_hash: "adopted-upload-reference",
+            wire_id: OBJECT,
+            manifest_hash: &object.manifest_hash,
+            selector: OBJECT,
+            message_id: "erase-upload-message",
+            reference: &json!({}),
+            metadata: &json!({}),
+        },
+    )?;
     db.upsert_object(&ramflux_storage::ObjectWrite {
         object_id: OBJECT,
         manifest_hash: &object.manifest_hash,

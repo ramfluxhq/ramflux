@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Remove revocation placeholders with the last reference of their selector and refuse
+  revocations without an authenticated manifest.
+- **BREAKING (downgrade):** Account schema v13 uses a writer-floor sentinel;
+  older binaries refuse v13 accounts and archives.
+
 - Upgrade Ed25519 to dalek 3 and share curve25519-dalek 5 with X25519 while
   preserving RFC 8032 signatures and node identity record encodings.
 - Preserve same-cycle delivery receipts with an eight-second priority admission
