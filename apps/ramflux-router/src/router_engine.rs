@@ -813,3 +813,7 @@ mod window_tests;
 #[cfg(test)]
 #[path = "router_engine_concurrency_tests.rs"]
 mod concurrency_tests;
+
+#[cfg(test)]
+#[path = "router_engine_drain_tests.rs"]
+mod drain_tests;

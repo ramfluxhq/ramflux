@@ -7,11 +7,16 @@ use ramflux_node_core::{RouterCore, RouterEnvelopeOrigin, RouterRedbStore};
 use std::{sync::Arc, time::Duration};
 
 #[test]
-fn committed_sync_and_async_forwards_share_four_peer_permits()
+#[expect(
+    clippy::too_many_lines,
+    reason = "shared IO fixture covers mixed drain, sync and async concurrency"
+)]
+fn drain_and_new_forwards_share_peer_limit_of_four_in_flight()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = window_tests::FORWARD_IO.lock().map_err(|_| "forward IO fixture lock")?;
     let dir = migration_tests::directory()?;
     let path = dir.0.join("concurrent.redb");
+    drain_tests::seed(&path, 1)?;
     let head = window_tests::fixture(&path)?;
     let ramflux_protocol::home_migration::HomeRecord::Committed {
         commit_proof, authorization, ..
@@ -43,7 +48,11 @@ fn committed_sync_and_async_forwards_share_four_peer_permits()
                     semaphore: &semaphore,
                     timeout: Duration::from_secs(5),
                 };
-                if i % 2 == 0 {
+                if i == 0 {
+                    crate::migration_drain::tick(&store, &mut String::new(), now, |row, now| {
+                        crate::migration_drain::forward(&state, &store, forward, row, now)
+                    })?;
+                } else if i % 2 == 0 {
                     submit_envelope(
                         &state,
                         &store,
@@ -110,4 +119,10 @@ fn committed_sync_and_async_forwards_share_four_peer_permits()
     assert_eq!(semaphore.available_permits(), 16);
     drop(crate::migration_forward_limits::acquire(&authorization.body.destination_node)?);
     Ok(())
+}
+
+#[test]
+fn committed_sync_and_async_forwards_share_four_peer_permits()
+-> Result<(), Box<dyn std::error::Error>> {
+    drain_and_new_forwards_share_peer_limit_of_four_in_flight()
 }

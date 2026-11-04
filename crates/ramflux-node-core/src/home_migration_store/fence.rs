@@ -171,7 +171,10 @@ impl RouterRedbStore {
 }
 
 impl RouterRedbStore {
-    pub(crate) fn migration_clock_floor(&self, now: u64) -> Result<u64, NodeCoreError> {
+    /// Return time clamped to the durable migration clock floor.
+    /// # Errors
+    /// Returns storage errors without changing the clock.
+    pub fn migration_clock_floor(&self, now: u64) -> Result<u64, NodeCoreError> {
         use redb::ReadableDatabase;
         let tx = self.migration_db().begin_read().map_err(storage)?;
         match tx.open_table(super::CLOCK) {

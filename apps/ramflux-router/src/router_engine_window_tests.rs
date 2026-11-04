@@ -66,6 +66,7 @@ fn clock_rollback_after_observed_closure_never_reopens_forwarding_after_restart(
     let _guard = FORWARD_IO.lock().map_err(|_| "forward IO fixture lock")?;
     let dir = super::migration_tests::directory()?;
     let path = dir.0.join("window.redb");
+    super::drain_tests::seed(&path, 1)?;
     let head = fixture(&path)?;
     let HomeRecord::Committed { commit_proof, .. } = &head.record else {
         return Err("commit".into());
@@ -143,6 +144,17 @@ fn clock_rollback_after_observed_closure_never_reopens_forwarding_after_restart(
         store.migration_forward_window("moving", end - 100)?.is_none(),
         "drain window hook stays closed"
     );
+    let mut position = String::new();
+    let mut forwarded = false;
+    assert_eq!(
+        crate::migration_drain::tick(&store, &mut position, end - 100, |_, _| {
+            forwarded = true;
+            Ok(ramflux_node_core::MigrationDrainOutcome::Held)
+        })?,
+        1
+    );
+    assert!(!forwarded, "drain forwarded after durable closure");
+    assert_eq!(store.migration_drain_page("moving", 0)?.len(), 1);
     assert!(store.acquire_home_operation(head.record.account_anchor()).is_err());
     assert_eq!(listener.accept().err().map(|e| e.kind()), Some(std::io::ErrorKind::WouldBlock));
     // Same fixture without closure: real submit reaches the federation socket.

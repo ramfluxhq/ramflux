@@ -21,6 +21,7 @@ pub(crate) struct TokioRouterRuntime {
     forward_semaphore: Arc<tokio::sync::Semaphore>,
     forward_timeout: Duration,
     custody: std::sync::OnceLock<Arc<ramflux_node_core::CustodyService>>,
+    migration_drain: std::sync::OnceLock<crate::migration_drain::MigrationDrain>,
     migration_courier: std::sync::OnceLock<crate::migration_courier::MigrationCourier>,
 }
 
@@ -62,6 +63,7 @@ impl TokioRouterRuntime {
             forward_timeout,
             custody: std::sync::OnceLock::new(),
             migration_courier: std::sync::OnceLock::new(),
+            migration_drain: std::sync::OnceLock::new(),
         }
     }
 }
@@ -290,6 +292,19 @@ impl RouterHandle {
             .set(service.clone())
             .map_err(|_| anyhow::anyhow!("custody already configured"))?;
         if service.home_migration_enabled() {
+            if let Some(client) = &runtime.home_node_forward {
+                let drain = crate::migration_drain::MigrationDrain::start(
+                    Arc::downgrade(&runtime.state),
+                    Arc::downgrade(&runtime.store),
+                    client.clone(),
+                    runtime.forward_semaphore.clone(),
+                    runtime.forward_timeout,
+                )?;
+                runtime
+                    .migration_drain
+                    .set(drain)
+                    .map_err(|_| anyhow::anyhow!("migration drain already configured"))?;
+            }
             let worker = crate::migration_courier::MigrationCourier::start(
                 Arc::downgrade(&service),
                 Arc::downgrade(&runtime.store),

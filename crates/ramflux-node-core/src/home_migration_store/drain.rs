@@ -147,6 +147,29 @@ impl RouterRedbStore {
             })
             .collect()
     }
+    /// Read a bounded cross-account page strictly after an opaque worker position.
+    /// # Errors
+    /// Stops on storage or decoding failures without changing any obligation.
+    pub fn migration_drain_work_page(
+        &self,
+        after: &str,
+    ) -> Result<Vec<(String, MigrationDrainEntry)>, NodeCoreError> {
+        let tx = self.migration_db().begin_read().map_err(storage)?;
+        let table = match tx.open_table(ENTRIES) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+            Err(error) => return Err(storage(error)),
+        };
+        table
+            .range::<&str>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+            .map_err(storage)?
+            .take(64)
+            .map(|row| {
+                let (key, value) = row.map_err(storage)?;
+                Ok((key.value().to_owned(), decode(value.value())?))
+            })
+            .collect()
+    }
     /// Apply a classified reply to the current obligation; repeated replies are idempotent.
     /// # Errors
     /// Refuses premature expiry, stale obligations, overflow and storage failures.
