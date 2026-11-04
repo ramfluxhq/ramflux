@@ -52,7 +52,8 @@ fn outbound_spool_accepted_before_commit_still_delivers_without_extra_hop()
     trust.set_node_signing_seed([9; 32]);
     let trust = crate::SharedFederationTrustState::new(trust);
     let mut attempts = 0;
-    retry_outbound_spool_with(&store, 101, 64, |entry| {
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    retry_outbound_spool_with(&store, 101, 64, &shutdown, |entry| {
         attempts += 1;
         assert_eq!(entry.forward, retained);
         let forward = refresh_spooled_forward(&entry.forward, &trust, |envelope| {
