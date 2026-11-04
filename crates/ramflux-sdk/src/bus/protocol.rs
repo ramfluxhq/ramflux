@@ -20,6 +20,11 @@ pub struct LocalBusConfig {
     /// Test-only custody retry budget for this daemon's thread (production is always 90 s).
     #[cfg(test)]
     pub test_retry_budget: Option<std::time::Duration>,
+    #[cfg(test)]
+    pub(crate) test_suppress_receive_timers: bool,
+    #[cfg(test)]
+    pub(crate) test_network_command_gate:
+        Option<std::sync::Arc<super::native_account_tests::local_first::NetworkGate>>,
     #[cfg(any(test, feature = "itest-restore-state"))]
     #[doc(hidden)]
     pub startup_restore_gate: Option<LocalBusStartupRestoreGate>,
@@ -1173,6 +1178,10 @@ impl LocalBusConfig {
             data_root: data_root.into(),
             #[cfg(test)]
             test_retry_budget: None,
+            #[cfg(test)]
+            test_suppress_receive_timers: false,
+            #[cfg(test)]
+            test_network_command_gate: None,
             #[cfg(any(test, feature = "itest-restore-state"))]
             startup_restore_gate: None,
         }

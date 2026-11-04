@@ -9,6 +9,8 @@ use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 
+pub(crate) mod local_first;
+
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct Stop(watch::Sender<bool>);
 impl Drop for Stop {
@@ -65,6 +67,7 @@ pub(super) enum GatewayCause {
 pub(super) struct CauseGateway {
     pub(super) address: std::net::SocketAddr,
     pub(super) ca_pem: String,
+    admission_entered: Arc<tokio::sync::Notify>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -76,6 +79,14 @@ impl Drop for CauseGateway {
 
 impl CauseGateway {
     pub(super) async fn start(root: &std::path::Path, cause: GatewayCause) -> Result<Self> {
+        Self::start_held(root, cause, None).await
+    }
+
+    async fn start_held(
+        root: &std::path::Path,
+        cause: GatewayCause,
+        hold: Option<Arc<tokio::sync::Semaphore>>,
+    ) -> Result<Self> {
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
         let ca_pem = certificate.cert.pem();
         let tls = ramflux_transport::MeshTlsConfig {
@@ -99,22 +110,26 @@ impl CauseGateway {
                 Duration::from_secs(300),
             )
         });
-        let held = limiter.as_ref().and_then(|pool| {
+        let pool_permit = limiter.as_ref().and_then(|pool| {
             pool.acquire("127.0.0.1".parse().ok()?, None, std::time::Instant::now()).ok()
         });
+        let admission_entered = Arc::new(tokio::sync::Notify::new());
+        let entered = admission_entered.clone();
         let task = tokio::spawn(async move {
-            let _held = held;
+            let _pool_permit = pool_permit;
             while let Ok((socket, _)) = listener.accept().await {
                 let acceptor = acceptor.clone();
                 let cause = cause.clone();
                 let limiter = limiter.clone();
+                let hold = hold.clone();
+                let entered = entered.clone();
                 tokio::spawn(async move {
                     let Ok(stream) = acceptor.accept(socket).await else { return };
-                    let _ = serve_cause(stream, cause, limiter).await;
+                    let _ = serve_cause(stream, cause, limiter, hold, entered).await;
                 });
             }
         });
-        Ok(Self { address, ca_pem, task })
+        Ok(Self { address, ca_pem, admission_entered, task })
     }
 }
 
@@ -122,6 +137,8 @@ async fn serve_cause(
     stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     cause: GatewayCause,
     limiter: Option<Arc<ramflux_node_core::CustodyIngressLimiter>>,
+    hold: Option<Arc<tokio::sync::Semaphore>>,
+    entered: Arc<tokio::sync::Notify>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = ramflux_transport::GatewayTcpTlsStream::Server(stream);
     let bytes = ramflux_transport::read_custody_tcp_frame(&mut stream).await?;
@@ -134,6 +151,10 @@ async fn serve_cause(
         return Ok(());
     }
     let _: ramflux_protocol::custody::CustodyClientFrame = serde_json::from_slice(&bytes)?;
+    entered.notify_one();
+    if let Some(hold) = hold {
+        hold.acquire().await?.forget();
+    }
     let capacity = if let GatewayCause::DailyQuota(hint) = &cause { Some(*hint) } else { None };
     let retry = if let GatewayCause::Admission(_, retry) = &cause { Some(*retry) } else { None };
     let code = match cause {
@@ -445,6 +466,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         assert_eq!(account.networking, CreationState::NetworkingPending);
         assert_eq!(account.display_name, "New Ordinary Human");
         ceremony.cancel().await?;
+        local_first::wait_for_reason(&socket, &account.account_id).await?;
         let status = ordinary
             .request(Some(account.account_id.clone()), "account", "account.status", json!({}))
             .await?;
@@ -651,6 +673,7 @@ async fn per_account_home_node_does_not_change_daemon_default() -> Result {
         let account =
             ceremony.confirm(&answers, &Zeroizing::new("selected node data secret".into())).await?;
         assert_eq!(account.networking, CreationState::NetworkingPending);
+        local_first::wait_for_reason(&socket, &account.account_id).await?;
         let status = ordinary
             .request(Some(account.account_id), "account", "account.status", json!({}))
             .await?;
@@ -670,10 +693,11 @@ async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
     use crate::LocalBusCreationClient;
     use zeroize::Zeroizing;
 
-    // Only the saturated pool refuses Busy forever, so account creation retries until the
-    // budget is exhausted. A short budget keeps the assertion on the exhausted-budget
-    // mapping (typed node_busy with the 16 s ceiling) without waiting out the 90 s window.
-    let test_retry_budget = matches!(cause, GatewayCause::PoolBusy).then(|| Duration::from_secs(4));
+    // Bound both the silent endpoint and the endlessly Busy pool below the event wait.
+    // Preserve exhausted-budget mapping (node_busy with the 16 s ceiling for Busy,
+    // node_unreachable for silence) without waiting out the production 90 s budget.
+    let test_retry_budget = matches!(cause, GatewayCause::PoolBusy | GatewayCause::BlackHole)
+        .then(|| Duration::from_secs(4));
     let root = Root::new()?;
     let gateway = CauseGateway::start(&root.0, cause).await?;
     let profile =
@@ -703,6 +727,7 @@ async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
         drop(phrase);
         let account =
             ceremony.confirm(&answers, &Zeroizing::new("gateway cause secret".into())).await?;
+        local_first::wait_for_reason(&socket, &account.account_id).await?;
         let status = ordinary
             .request(Some(account.account_id), "account", "account.status", json!({}))
             .await?;

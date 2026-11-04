@@ -31,32 +31,6 @@ impl AccountRuntime {
         }
         Ok(())
     }
-    // Pump writer checkpoints until the first bounded attempt has installed its
-    // session or persisted its typed refusal. A refusal leaves the account open.
-    pub(super) async fn finish_native_admission(&mut self) -> Result<(), SdkError> {
-        let Some(handle) = self.state.accounts.get(&self.id).and_then(|a| a.connection.clone())
-        else {
-            return Ok(());
-        };
-        if handle.snapshot().state == super::super::connection_manager::NetworkingState::Live {
-            return Ok(());
-        }
-        while let Some(work) = self.connection_work.recv().await {
-            let completed = match &work {
-                AccountWork::Connected { metadata, .. } => {
-                    metadata.generation == handle.generation()
-                }
-                AccountWork::Failed { generation, .. } => *generation == handle.generation(),
-                _ => false,
-            };
-            self.apply_connection_work(work).await?;
-            if completed {
-                return Ok(());
-            }
-        }
-        Err(super::stopped())
-    }
-
     pub(super) async fn stop_connection(&mut self) {
         if let Some(handle) =
             self.state.accounts.get_mut(&self.id).and_then(|account| account.connection.take())
@@ -93,13 +67,26 @@ impl AccountRuntime {
         let handle = account.connection.clone().ok_or(SdkError::NetworkingPending)?;
         let admitted_at =
             command.admission.as_ref().map_or_else(Instant::now, |admission| admission.admitted_at);
+        #[cfg(test)]
+        if let Some(gate) = &self.state.config.test_network_command_gate {
+            gate.waiting.notify_one();
+        }
         let ready = handle.require_live_since(admitted_at, self.timeouts.network_wait);
         tokio::pin!(ready);
         loop {
             tokio::select! {
                 biased;
                 ready=&mut ready=>return ready,
-                work=self.connection_work.recv()=>{if let Some(work)=work {self.apply_connection_work(work).await?;}}
+                work=self.connection_work.recv()=>{if let Some(work)=work {
+                    #[cfg(test)]
+                    let outcome = matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
+                    self.apply_connection_work(work).await?;
+                    #[cfg(test)]
+                    if outcome && let Some(gate) = &self.state.config.test_network_command_gate {
+                        gate.applied.notify_one();
+                        let _ = gate.release.acquire().await;
+                    }
+                }}
             }
         }
     }
@@ -108,12 +95,31 @@ impl AccountRuntime {
         &mut self,
         work: AccountWork,
     ) -> Result<(), SdkError> {
+        let publish_networking = self.apply_connection_work_inner(work).await?;
+        if let Some(pool) = self.readers.lock().map_err(|_| super::stopped())?.as_ref() {
+            pool.set_account_view(&self.state, &self.id)?;
+        }
+        if publish_networking {
+            let request = crate::LocalBusFrame::request(
+                "networking",
+                Some(self.id.clone()),
+                "account",
+                "account.status",
+                serde_json::json!({}),
+            );
+            self.publish(&request).await?;
+        }
+        Ok(())
+    }
+
+    async fn apply_connection_work_inner(&mut self, work: AccountWork) -> Result<bool, SdkError> {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(handle) = account.connection.clone() else {
-            return Ok(());
+            return Ok(false);
         };
+        let mut publish_networking = false;
         match work {
             AccountWork::Fatal { generation, error } => {
                 if generation == handle.generation() {
@@ -143,7 +149,7 @@ impl AccountRuntime {
             AccountWork::Directory(work) => self.apply_directory_work(*work)?,
             AccountWork::ReceivePrepare { generation, trigger, reply } => {
                 if generation != handle.generation() || reply.is_closed() {
-                    return Ok(());
+                    return Ok(false);
                 }
                 tracing::trace!(?trigger, generation, "preparing stored receive cursor");
                 let result = super::super::sync_driver::prepare_receive(account);
@@ -151,7 +157,7 @@ impl AccountRuntime {
             }
             AccountWork::ReceiveApply { generation, entry, source, backpressure, reply } => {
                 if generation != handle.generation() || reply.is_closed() {
-                    return Ok(());
+                    return Ok(false);
                 }
                 self.apply_receive_entry(*entry, source, backpressure, reply).await?;
             }
@@ -185,28 +191,27 @@ impl AccountRuntime {
                     || generation != handle.generation()
                     || Instant::now() >= deadline
                 {
-                    return Ok(());
+                    return Ok(false);
                 }
                 let result = prepare_account_connection(account, deadline).await;
                 let _ = reply.send(result);
             }
             AccountWork::Connected { metadata, reply } => {
                 if reply.is_closed() || metadata.generation != handle.generation() {
-                    return Ok(());
+                    return Ok(false);
                 }
+                publish_networking = true;
                 let result = self.install_connection(*metadata).await;
                 let _ = reply.send(result);
             }
             AccountWork::Failed { generation, error } => {
                 if generation == handle.generation() && account.client.born_v3_account.is_some() {
                     super::super::native_account::record_networking(account, Some(&error))?;
+                    publish_networking = true;
                 }
             }
         }
-        if let Some(pool) = self.readers.lock().map_err(|_| super::stopped())?.as_ref() {
-            pool.set_account_view(&self.state, &self.id)?;
-        }
-        Ok(())
+        Ok(publish_networking)
     }
 
     async fn apply_receive_entry(

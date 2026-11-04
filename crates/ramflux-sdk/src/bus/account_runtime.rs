@@ -87,6 +87,10 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         if let Some(budget) = config.test_retry_budget {
             timeouts.retry_budget = budget;
         }
+        if config.test_suppress_receive_timers {
+            timeouts.receive_min = Duration::from_secs(600);
+            timeouts.receive_max = Duration::from_secs(600);
+        }
         timeouts
     };
     let initial = initial.map(|initialize| initialize(index.clone())).transpose()?;
