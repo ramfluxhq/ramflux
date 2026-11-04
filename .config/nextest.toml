@@ -1,0 +1,12 @@
+[profile.default]
+# A test running longer than 60 s fails: the first 30 s period flags it slow,
+# the second terminates it.
+slow-timeout = { period = "30s", terminate-after = 2 }
+fail-fast = false
+
+[profile.ci]
+inherits = "default"
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"

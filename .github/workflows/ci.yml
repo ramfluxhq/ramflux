@@ -37,7 +37,7 @@ jobs:
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -46,9 +46,13 @@ jobs:
 
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: checks
 
       - name: Install cargo-machete
-        run: cargo install cargo-machete --locked
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: cargo-machete
 
       - name: Production feature provenance
         run: python3 -B scripts/check-production-features.py
@@ -61,9 +65,6 @@ jobs:
       - name: Format
         run: cargo fmt --check --all
 
-      - name: Clippy
-        run: RAMFLUX_ITEST_BUILD=1 cargo clippy --workspace --all-targets --all-features -- -D warnings
-
       - name: Cargo machete
         # Unused-dependency detection is advisory: cargo-machete has known false
         # positives on workspace-inherited deps, so a finding reports but must
@@ -71,41 +72,196 @@ jobs:
         continue-on-error: true
         run: cargo machete
 
-      - name: Gateway local-mint regression tests
-        run: cargo test -p ramflux-gateway --features itest-local-mint
+  clippy-itest:
+    name: Clippy (itest, all features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: clippy-itest
+
+      - name: Clippy
+        run: RAMFLUX_ITEST_BUILD=1 cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  clippy-default:
+    name: Clippy (default features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: clippy-default
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  doctests:
+    name: Doctests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: doctests
+
+      - name: Doctests
+        run: cargo test --workspace --doc
+
+  build-sdk:
+    name: Build test archive (sdk)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: arch-sdk
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest
+
+      - name: Archive
+        run: cargo nextest archive -p ramflux-sdk --archive-file sdk.tar.zst
+
+      - name: Upload archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: archive-sdk
+          path: sdk.tar.zst
+          retention-days: 1
+          compression-level: 0
+
+  build-rest:
+    name: Build test archive (rest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: arch-rest
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest
+
+      - name: Archive
+        run: cargo nextest archive --workspace --exclude ramflux-sdk --archive-file rest.tar.zst
+
+      - name: Upload archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: archive-rest
+          path: rest.tar.zst
+          retention-days: 1
+          compression-level: 0
 
   test-sdk:
-    name: Rust tests (SDK)
+    name: Tests (sdk ${{ matrix.shard }}/6)
+    needs: build-sdk
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
 
-      - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest
 
-      - name: Test SDK
-        run: cargo test -p ramflux-sdk
+      - name: Download archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-sdk
+      - name: Run shard
+        run: cargo nextest run --archive-file sdk.tar.zst --workspace-remap . --profile ci --partition hash:${{ matrix.shard }}/6
 
-      - name: Born-v3 memory vault regression tests
-        run: RAMFLUX_ITEST_BUILD=1 cargo test -p ramflux-sdk --features itest-memory-vault custody
-
-      - name: Migration fixture approval dispatch
-        run: RAMFLUX_ITEST_BUILD=1 cargo test -p ramflux-sdk --features itest-memory-vault --lib approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error
-
-      - name: Migration fixture absent from production
-        run: RAMFLUX_PRODUCTION_BUILD=1 cargo test -p ramflux-sdk --lib itest_migration_approve_once_method_is_absent_from_a_production_build
-
-      - name: Legacy fixture regression tests
-        run: RAMFLUX_ITEST_BUILD=1 cargo test -p ramflux-sdk --features itest-legacy-accounts itest_legacy
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-sdk-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
 
   test-rest:
-    name: Rust tests (workspace except SDK)
+    name: Tests (rest ${{ matrix.shard }}/2)
+    needs: build-rest
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest
+
+      - name: Download archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-rest
+      - name: Run shard
+        run: cargo nextest run --archive-file rest.tar.zst --workspace-remap . --profile ci --partition hash:${{ matrix.shard }}/2
+
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-rest-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  v-memory-vault:
+    name: SDK variant: memory vault (custody + approve_once)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -114,6 +270,159 @@ jobs:
 
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: v-memory-vault
 
-      - name: Test workspace except SDK
-        run: cargo test --workspace --exclude ramflux-sdk
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest
+
+      - name: Test
+        run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
+
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-v-memory-vault
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+
+  v-production:
+    name: SDK variant: migration fixture absent from production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: v-production
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest
+
+      - name: Test
+        run: RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --profile ci -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
+
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-v-production
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+
+  v-legacy:
+    name: SDK variant: legacy accounts fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: v-legacy
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest
+
+      - name: Test
+        run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
+
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-v-legacy
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+
+  v-local-mint:
+    name: Gateway local-mint regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: v-local-mint
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest
+
+      - name: Test
+        run: cargo nextest run --profile ci -p ramflux-gateway --features itest-local-mint
+
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-v-local-mint
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+
+  mutants:
+    name: Mutants (advisory, diff only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rust diff
+        id: diff
+        run: |
+          git diff "origin/${{ github.base_ref }}...HEAD" -- '*.rs' > pr.diff
+          if [ -s pr.diff ]; then echo "has=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          shared-key: mutants
+
+      - name: Install nextest and cargo-mutants
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest,cargo-mutants
+
+      - name: cargo mutants --in-diff
+        if: steps.diff.outputs.has == 'true'
+        run: timeout 480 cargo mutants --in-diff pr.diff --test-tool nextest --timeout 120 --no-shuffle || true
+
+      - name: Upload mutants report
+        if: always() && steps.diff.outputs.has == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mutants-out
+          path: mutants.out
+          if-no-files-found: ignore
