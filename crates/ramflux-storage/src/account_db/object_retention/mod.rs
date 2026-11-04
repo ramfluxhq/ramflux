@@ -287,3 +287,6 @@ mod selector_lifecycle_tests;
 
 #[cfg(test)]
 mod selector_upgrade_tests;
+
+#[cfg(test)]
+mod selector_budget_tests;

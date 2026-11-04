@@ -130,8 +130,9 @@ const ERASE: &str = r"
  DELETE FROM object_reference_erasure_work WHERE EXISTS(SELECT 1 FROM object_message_reference m WHERE m.reference_hash=object_reference_erasure_work.reference_hash);
  DELETE FROM object_retention_reference WHERE reference_hash IN (SELECT reference_hash FROM object_reference_erasure_work);
  INSERT INTO object_erasure_work SELECT p.commitment,p.wire_id,p.manifest_hash
- FROM object_retention_payload p WHERE p.commitment IN (SELECT commitment FROM object_reference_erasure_work)
- AND (p.retention_class='transport' OR (p.retention_class='imported' AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.commitment=p.commitment)));
+ FROM (SELECT DISTINCT commitment FROM object_reference_erasure_work) w
+ CROSS JOIN object_retention_payload p ON p.commitment=w.commitment
+ WHERE (p.retention_class='transport' OR (p.retention_class='imported' AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.commitment=p.commitment)));
 
 ";
 
