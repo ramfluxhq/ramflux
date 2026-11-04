@@ -10,6 +10,44 @@ use tokio::time::Instant;
 const RETRY_BUDGET: Duration = Duration::from_secs(90);
 const MAX_BACKOFF: Duration = Duration::from_secs(16);
 
+#[cfg(test)]
+static BUDGET_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static BUDGET_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+/// Test-only: holds a shortened retry budget (all budgets in this process) until dropped.
+/// The daemon runs on its own thread, so the override is process-wide; tests that need the
+/// production budget take [`production_budget`] so they never overlap a shortened one when
+/// several tests share a process (nextest runs one test per process).
+#[cfg(test)]
+pub(crate) struct ShortBudget(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()>);
+#[cfg(test)]
+pub(crate) fn short_budget(budget: Duration) -> ShortBudget {
+    let guard = BUDGET_LOCK.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let millis = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX);
+    BUDGET_OVERRIDE_MS.store(millis, std::sync::atomic::Ordering::SeqCst);
+    ShortBudget(guard)
+}
+#[cfg(test)]
+impl Drop for ShortBudget {
+    fn drop(&mut self) {
+        BUDGET_OVERRIDE_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+/// Test-only: keeps the production retry budget for the guard's lifetime.
+#[cfg(test)]
+pub(crate) fn production_budget() -> std::sync::RwLockReadGuard<'static, ()> {
+    BUDGET_LOCK.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+fn retry_budget() -> Duration {
+    #[cfg(test)]
+    {
+        let millis = BUDGET_OVERRIDE_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if millis != 0 {
+            return Duration::from_millis(millis);
+        }
+    }
+    RETRY_BUDGET
+}
 pub(super) fn busy() -> SdkError {
     CustodyRefusal::Busy.into()
 }
@@ -28,7 +66,7 @@ pub(crate) struct Budget {
 impl Budget {
     pub(crate) fn new() -> Self {
         Self {
-            deadline: Instant::now() + RETRY_BUDGET,
+            deadline: Instant::now() + retry_budget(),
             backoff: Duration::from_secs(1),
             busy_observed: false,
             last_busy_hint: None,

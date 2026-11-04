@@ -73,6 +73,8 @@ impl CredentialVault {
         }
     }
 
+    // Other targets and the memory vault feature return errors here, so the signature stays fallible.
+    #[allow(clippy::unnecessary_wraps)]
     fn load(&self, account: &str) -> Result<Option<Zeroizing<String>>> {
         #[cfg(not(any(target_os = "macos", feature = "itest-memory-vault")))]
         let _ = account;

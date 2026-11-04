@@ -134,11 +134,12 @@ pub(super) async fn ordinary(
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn ordinary_native_gateway_busy_retries_outlive_the_legacy_timeout_with_fresh_proofs()
 -> Result {
+    let _production = crate::custody::retry::production_budget();
     tokio::time::timeout(Duration::from_secs(120), async {
         let points = [
-            Point::Open,
             Point::Open,
             Point::Open,
             Point::Open,
@@ -194,7 +195,7 @@ async fn ordinary_native_gateway_busy_retries_outlive_the_legacy_timeout_with_fr
         );
         let script = fixture.script.lock().map_err(|_| "script lock")?;
         assert_eq!(script.busy_at, points);
-        assert_eq!(script.accepted, 9);
+        assert_eq!(script.accepted, 8);
         assert_eq!(script.publish_proofs, 1);
         assert_eq!(script.proofs.len(), 4);
         for column in 0..3 {

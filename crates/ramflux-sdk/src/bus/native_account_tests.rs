@@ -670,6 +670,11 @@ async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
     use crate::LocalBusCreationClient;
     use zeroize::Zeroizing;
 
+    // Only the saturated pool refuses Busy forever, so account creation retries until the
+    // budget is exhausted. A short budget keeps the assertion on the exhausted-budget
+    // mapping (typed node_busy with the 16 s ceiling) without waiting out the 90 s window.
+    let _budget = matches!(cause, GatewayCause::PoolBusy)
+        .then(|| crate::custody::retry::short_budget(Duration::from_secs(4)));
     let root = Root::new()?;
     let gateway = CauseGateway::start(&root.0, cause).await?;
     let profile =
