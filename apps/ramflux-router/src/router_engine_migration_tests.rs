@@ -53,6 +53,7 @@ fn envelope(
             root.signing_key.verifying_key().to_bytes(),
         )),
         signed_device_set: Some(set),
+        custody_authority: None,
         branch_public_key: key,
         target_delivery_id: "sender-target".into(),
         revoked: false,
@@ -128,7 +129,11 @@ fn sync_and_async_submit_refuse_cutover_without_sequence_or_live_push_while_coll
         let response = submit_envelope(
             &state,
             &store,
-            None,
+            AsyncForwardContext {
+                client: None,
+                semaphore: &semaphore,
+                timeout: std::time::Duration::from_secs(1),
+            },
             envelope("moving", &format!("moving-{i}"))?,
             Instant::now(),
             RouterEnvelopeOrigin::Federation,
@@ -151,7 +156,11 @@ fn sync_and_async_submit_refuse_cutover_without_sequence_or_live_push_while_coll
         let response = submit_envelope(
             &state,
             &store,
-            None,
+            AsyncForwardContext {
+                client: None,
+                semaphore: &semaphore,
+                timeout: std::time::Duration::from_secs(1),
+            },
             envelope(&unrelated, &format!("other-{i}"))?,
             Instant::now(),
             RouterEnvelopeOrigin::Federation,
@@ -164,7 +173,11 @@ fn sync_and_async_submit_refuse_cutover_without_sequence_or_live_push_while_coll
     let response = submit_envelope(
         &state,
         &store,
-        None,
+        AsyncForwardContext {
+            client: None,
+            semaphore: &semaphore,
+            timeout: std::time::Duration::from_secs(1),
+        },
         envelope("moving", "retry")?,
         Instant::now(),
         RouterEnvelopeOrigin::Federation,
@@ -197,11 +210,16 @@ fn repeated_remote_submits_to_committed_home_return_signed_refusal_without_abort
     let store = RouterRedbStore::open(&path)?;
     let state = RouterCore::new();
     state.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([8; 32])));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
     for i in 0..16 {
         let response = submit_envelope(
             &state,
             &store,
-            None,
+            AsyncForwardContext {
+                client: None,
+                semaphore: &semaphore,
+                timeout: std::time::Duration::from_secs(1),
+            },
             envelope("moving", &format!("late-{i}"))?,
             Instant::now(),
             RouterEnvelopeOrigin::Federation,

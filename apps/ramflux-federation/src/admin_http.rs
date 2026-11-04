@@ -193,7 +193,7 @@ fn admin_response(
                 ramflux_node_core::NodeCoreError::ItestHttp("invalid migration RPC".into())
             })?;
             let reply = crate::home_migration::local(local, context, accepted_at)?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &reply)?;
+            HttpResponse::json(&reply)?
         }
         ("POST", "/internal/home-node-migration/forward") => {
             handle_home_node_forward_request(&request, context, admin_token)?

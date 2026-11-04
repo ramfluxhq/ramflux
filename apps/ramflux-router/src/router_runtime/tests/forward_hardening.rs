@@ -187,3 +187,131 @@ fn migrated_forward_remains_enabled_after_restart() -> anyhow::Result<()> {
     server.join().map_err(|_| anyhow::anyhow!("server failed"))?.map_err(anyhow::Error::msg)?;
     Ok(())
 }
+
+#[test]
+fn migration_lease_precedes_real_forward_and_replay_persistence_on_both_ingress_paths()
+-> anyhow::Result<()> {
+    use ramflux_protocol::home_migration::{DeliveryMapEntry, Refusal};
+    let runtime =
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    for asynchronous in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
+        let (handle, _) = migrated_test_handle(
+            &format!("http://{}/forward", listener.local_addr()?),
+            1,
+            Duration::from_secs(10),
+            now,
+        )?;
+        let handle = Arc::new(handle);
+        let envelope = current_envelope("lease-forward-persist", "target_alice")?;
+        let source =
+            handle.state().authenticated_envelope_source_durable(&envelope, handle.store())?;
+        let map = [DeliveryMapEntry {
+            device_ref: ramflux_protocol::custody::DeviceRef {
+                account_anchor: "anchor".into(),
+                device_id: "alice_phone".into(),
+                device_epoch: 1,
+            },
+            target_delivery_id: "target_alice".into(),
+        }];
+        let cutover = handle.store().migration_submission_barrier(&map)?;
+        let refused = if asynchronous {
+            runtime.block_on(handle.submit_envelope_async_from(
+                envelope.clone(),
+                Instant::now(),
+                ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+            ))?
+        } else {
+            handle.submit_envelope_from(
+                envelope.clone(),
+                Instant::now(),
+                ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+            )?
+        };
+        assert_eq!(refused.migration_refusal, Some(Refusal::MigrationInProgress));
+        assert_eq!(refused.inbox_seq, None);
+        assert_eq!(
+            listener.accept().err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::WouldBlock)
+        );
+        drop(cutover);
+        listener.set_nonblocking(false)?;
+        let (entered, receiver) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let server = thread::spawn(move || successful_held_forward(listener, entered, wait));
+        let sender = Arc::clone(&handle);
+        let message = envelope.clone();
+        let submit = thread::spawn(move || {
+            if asynchronous {
+                tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(
+                    sender.submit_envelope_async_from(
+                        message,
+                        Instant::now(),
+                        ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+                    ),
+                )
+            } else {
+                sender.submit_envelope_from(
+                    message,
+                    Instant::now(),
+                    ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+                )
+            }
+        });
+        receiver.recv_timeout(Duration::from_secs(5))?;
+        let barrier = handle.store().migration_submission_barrier(&map);
+        let before =
+            handle.store().load_router()?.ok_or_else(|| anyhow::anyhow!("missing router"))?;
+        let before_replay = before.accept_envelope_replay(&source, envelope.clone(), now);
+        release.send(())?;
+        let response = submit.join().map_err(|_| anyhow::anyhow!("submit worker failed"))??;
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("forward worker failed"))?
+            .map_err(anyhow::Error::msg)?;
+        assert!(matches!(
+            barrier,
+            Err(ramflux_node_core::NodeCoreError::HomeMigration(Refusal::MigrationInProgress))
+        ));
+        assert!(before_replay.is_ok(), "in-flight forward is not durably accepted");
+        assert_eq!(response.outcome, "forwarded_home_node_migrated");
+        assert_eq!(response.inbox_seq, Some(37));
+        assert!(handle.state().resume("target_alice", 0, 10).is_empty());
+        let restored =
+            handle.store().load_router()?.ok_or_else(|| anyhow::anyhow!("missing router"))?;
+        assert!(
+            restored.accept_envelope_replay(&source, envelope, now).is_err(),
+            "successful forward persists replay before returning"
+        );
+        assert!(restored.resume("target_alice", 0, 10).is_empty());
+        drop(handle.store().migration_submission_barrier(&map)?);
+    }
+    Ok(())
+}
+
+fn successful_held_forward(
+    listener: TcpListener,
+    entered: mpsc::Sender<()>,
+    wait: mpsc::Receiver<()>,
+) -> Result<(), String> {
+    let (mut stream, _) = listener.accept().map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    let request = ramflux_node_core::read_itest_http_request(&mut stream)
+        .map_err(|e| e.to_string())?
+        .ok_or("missing forward request")?;
+    assert_eq!(request.path, "/forward");
+    let body: serde_json::Value =
+        serde_json::from_slice(&request.body).map_err(|e| e.to_string())?;
+    let forward: ramflux_node_core::FederatedEnvelopeForwardRequest =
+        serde_json::from_value(body["forward"].clone()).map_err(|e| e.to_string())?;
+    entered.send(()).map_err(|e| e.to_string())?;
+    wait.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?;
+    let mut response = rejected_migration_forward(forward);
+    response.accepted = true;
+    response.delivery.outcome = "offline_queued".into();
+    response.delivery.inbox_seq = Some(37);
+    ramflux_node_core::write_itest_json_response(&mut stream, "200 OK", &response)
+        .map_err(|e| e.to_string())
+}

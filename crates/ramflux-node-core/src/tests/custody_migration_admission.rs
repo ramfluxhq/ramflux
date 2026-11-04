@@ -56,7 +56,11 @@ fn migration_direct_grant_respects_listener_capacity_revocation_and_one_use_scop
     };
     assert_eq!(
         service.tls_with_permit(&router, &store, prove()?, context, (NOW, Some(&permit))),
-        CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None },
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::Busy,
+            capacity: None,
+            retry: Some(crate::custody_budget_log::node_retry())
+        },
     );
     drop(wall);
     let response =
@@ -90,22 +94,34 @@ fn migration_direct_grant_respects_listener_capacity_revocation_and_one_use_scop
     };
     assert_eq!(
         send(CustodySessionAction::Inbox { after_seq: 0, limit: 1 })?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None },
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::BindingRefused,
+            capacity: None,
+            retry: None
+        },
     );
     let status = CustodySessionAction::HomeMigration { request: Box::new(control) };
     assert_ne!(
         send(status.clone())?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::BindingRefused,
+            capacity: None,
+            retry: None
+        }
     );
     assert_eq!(
         send(status)?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::SessionRequired, capacity: None }
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::SessionRequired,
+            capacity: None,
+            retry: None
+        }
     );
     let queued = prove()?;
     permit.revoke();
     assert_eq!(
         service.tls_with_permit(&router, &store, queued, context, (NOW, Some(&permit))),
-        CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None },
+        CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None, retry: None },
     );
     Ok(())
 }

@@ -149,7 +149,11 @@ fn migration_grant_binds_the_control_authority_even_when_possession_and_control_
     )?;
     assert_eq!(
         response,
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::BindingRefused,
+            capacity: None,
+            retry: None
+        }
     );
     assert_eq!(store.custody_publication_write_count(), 0);
     assert!(router.custody_record(&driver.reference.account_anchor, NOW)?.is_none());
@@ -167,11 +171,19 @@ fn new_to_destination_grant_is_one_use_and_does_not_import_authority_for_a_read(
     let response = send(&driver, &service, &router, &store, &session, action.clone())?;
     assert_ne!(
         response,
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::BindingRefused,
+            capacity: None,
+            retry: None
+        }
     );
     assert_eq!(
         send(&driver, &service, &router, &store, &session, action)?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::SessionRequired, capacity: None }
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::SessionRequired,
+            capacity: None,
+            retry: None
+        }
     );
     assert_eq!(store.custody_publication_write_count(), 0);
     assert!(router.custody_record(&driver.reference.account_anchor, NOW)?.is_none());
@@ -191,7 +203,11 @@ fn migration_possession_grant_cannot_lookup_peers_or_read_a_normal_inbox() -> Re
     ] {
         assert_eq!(
             send(&driver, &service, &router, &store, &session, action)?,
-            CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
+            CustodyServerFrame::Refused {
+                code: CustodyRefusal::BindingRefused,
+                capacity: None,
+                retry: None
+            }
         );
     }
     assert_eq!(store.custody_publication_write_count(), 0);
@@ -230,7 +246,11 @@ fn message_only_branch_can_obtain_a_one_use_read_grant_without_management_author
     )?;
     assert_ne!(
         response,
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::BindingRefused,
+            capacity: None,
+            retry: None
+        }
     );
     assert_eq!(store.custody_publication_write_count(), 0);
     Ok(())
@@ -270,7 +290,11 @@ fn read_grant_cannot_execute_a_management_control_even_for_a_privileged_branch()
             &session,
             CustodySessionAction::HomeMigration { request: Box::new(request) }
         )?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, capacity: None }
+        CustodyServerFrame::Refused {
+            code: CustodyRefusal::BindingRefused,
+            capacity: None,
+            retry: None
+        }
     );
     assert_eq!(store.custody_publication_write_count(), 0);
     Ok(())
@@ -312,6 +336,7 @@ fn ordinary_native_proofs_and_existing_sessions_obey_root_cutover() -> Result {
         store.cache_migration_root(&driver.reference.account_anchor, Some(reason))?;
         let expected = CustodyServerFrame::Refused {
             capacity: None,
+            retry: None,
             code: if reason == ramflux_protocol::home_migration::Refusal::HomeMigrated {
                 // A synthetic cache row has no committed proof: never emit an unsigned routing hint.
                 CustodyRefusal::PersistenceUnavailable

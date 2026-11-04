@@ -285,7 +285,7 @@ impl CustodyService {
             tick: Instant::now(),
             ..scope
         };
-        self.dispatch_locked(request, scope)
+        self.dispatch_locked(request, scope, admission)
     }
     #[cfg(test)]
     fn dispatch_at(
@@ -293,13 +293,14 @@ impl CustodyService {
         request: CustodyMeshRequest,
         scope: Scope<'_>,
     ) -> Result<CustodyServerFrame, CustodyRefusal> {
-        let _admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.dispatch_locked(request, scope)
+        let admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.dispatch_locked(request, scope, admission)
     }
     fn dispatch_locked(
         &self,
         request: CustodyMeshRequest,
         scope: Scope<'_>,
+        admission: std::sync::MutexGuard<'_, ()>,
     ) -> Result<CustodyServerFrame, CustodyRefusal> {
         match request {
             CustodyMeshRequest::Disconnect { connection_id } => {

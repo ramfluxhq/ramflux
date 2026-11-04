@@ -84,6 +84,65 @@ pub(super) fn context(
 }
 
 #[test]
+fn migration_local_rpc_returns_one_bounded_response_for_valid_and_malformed_bodies() -> TestResult {
+    let root = temp_cert_root("migration-local-response")?;
+    let admin = context(&root)?;
+    let valid = serde_json::to_string(&ramflux_node_core::LocalMigrationRequest {
+        admin_token: "secret".into(),
+        budget_ms: 1000,
+        action: ramflux_node_core::LocalMigrationAction::PeerKey { node_id: "node-b".into() },
+    })?;
+    for production in [false, true] {
+        for (body, expected) in [("{", "500 Internal Server Error"), (valid.as_str(), "200 OK")] {
+            let context = admin.clone();
+            let response =
+                request("POST", ramflux_node_core::MIGRATION_LOCAL_PATH, body, move |stream| {
+                    let limits = crate::http_limits::defaults(false);
+                    let accepted_at = std::time::Instant::now();
+                    if production {
+                        crate::admin_http::handle_admin_connection_with_limits(
+                            stream,
+                            &context,
+                            limits,
+                            accepted_at,
+                        );
+                    } else if let Err(error) = handle_admin_request(stream, &context) {
+                        crate::http_response::HttpResponse::text(
+                            "500 Internal Server Error",
+                            &error.to_string(),
+                        )
+                        .write_admin(stream, limits, accepted_at)?;
+                    }
+                    Ok(())
+                })?;
+            assert!(response.starts_with(&format!("HTTP/1.1 {expected}\r\n")), "{response}");
+            assert_eq!(response.matches("HTTP/1.1 ").count(), 1, "one response per RPC");
+            let (header, payload) =
+                response.split_once("\r\n\r\n").ok_or("missing response body")?;
+            let declared: usize = header
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .ok_or("missing response length")?
+                .parse()?;
+            assert_eq!(declared, payload.len(), "no second response or trailing bytes");
+            assert!(response.len() < 1024, "small RPC returns a bounded response");
+            if body == valid {
+                let reply: ramflux_node_core::LocalMigrationReply = serde_json::from_str(payload)?;
+                assert!(matches!(
+                    reply,
+                    ramflux_node_core::LocalMigrationReply::Refused {
+                        reason: ramflux_protocol::home_migration::Refusal::PeeringUnavailable
+                    }
+                ));
+            }
+        }
+    }
+    drop(admin);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn public_listener_has_no_admin_routes_even_with_valid_token() -> TestResult {
     let root = temp_cert_root("http-boundary")?;
     let mut admin = context(&root)?;

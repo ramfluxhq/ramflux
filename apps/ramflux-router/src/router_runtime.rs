@@ -274,7 +274,11 @@ impl RouterHandle {
             migration.as_ref().map(|_| (config.node_id.as_str(), trusted.as_str())),
         )?;
         let mut service = ramflux_node_core::CustodyService::with_issuance_settings(
-            node, allow, self.store(), now, settings,
+            node,
+            allow,
+            self.store(),
+            now,
+            settings,
         )?;
         if let Some(migration) = migration {
             service = service.with_home_migration(migration)?;
