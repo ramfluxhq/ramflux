@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Feature branches run through their pull request only; a push trigger on every branch would
+  # start a second identical run per push.
   push:
-    branches: ["**", "!backup/**"]
+    branches: ["main"]
   pull_request:
   workflow_dispatch:
 
