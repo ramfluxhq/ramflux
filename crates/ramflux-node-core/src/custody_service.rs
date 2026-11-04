@@ -476,3 +476,11 @@ impl CustodyService {
         }
     }
 }
+
+impl CustodyService {
+    /// Destination signer configured for private forwarded activation.
+    #[must_use]
+    pub fn migration_node(&self) -> Option<&crate::MigrationNode> {
+        self.migration.as_ref().map(|service| service.node.as_ref())
+    }
+}

@@ -90,6 +90,13 @@ struct RouterCommitRequest {
 }
 
 enum RouterCommitOp {
+    Forwarded {
+        replay_key: String,
+        replay_expires_at: i64,
+        entry: Box<InboxEntry>,
+        root: String,
+        retain_until: i64,
+    },
     Submission {
         replay_key: String,
         replay_expires_at: i64,
@@ -232,6 +239,11 @@ fn router_apply_commit_op(
     op: &RouterCommitOp,
 ) -> Result<(), NodeCoreError> {
     match op {
+        RouterCommitOp::Forwarded { replay_key, replay_expires_at, entry, root, retain_until } => {
+            record_replay_tuple_in_txn(write_txn, replay_key, *replay_expires_at)?;
+            record_inbox_entry_until_in_txn(write_txn, entry, *retain_until)?;
+            record_local_delivery_envelope_in_txn(write_txn, entry, *replay_expires_at, Some(root))
+        }
         RouterCommitOp::Submission { replay_key, replay_expires_at, entry, local_delivery } => {
             record_replay_tuple_in_txn(write_txn, replay_key, *replay_expires_at)?;
             if let Some(entry) = entry {
@@ -1912,5 +1924,32 @@ impl RouterRedbStore {
             .as_ref()
             .map(crate::router_wal::RouterWalStore::pause_next_ack)
             .ok_or_else(|| NodeCoreError::Redb("submission WAL disabled".into()))
+    }
+}
+
+impl RouterRedbStore {
+    /// Commit forwarded bytes, retention and tuple receipt in one durable transaction.
+    /// # Errors
+    /// Rejects an invalid admission lease or a persistence failure.
+    pub(crate) fn record_forwarded_submission(
+        &self,
+        replay_key: &str,
+        entry: &InboxEntry,
+        root: &str,
+        retain_until: i64,
+        lease: SubmissionLease,
+    ) -> Result<(), NodeCoreError> {
+        self.validate_submission_lease(Some(entry), Some(&lease))?;
+        let _lease = lease;
+        self.commit_router_op(RouterCommitOp::Forwarded {
+            replay_key: replay_key.into(),
+            replay_expires_at: entry
+                .envelope
+                .created_at
+                .saturating_add(i64::from(entry.envelope.ttl)),
+            entry: Box::new(entry.clone()),
+            root: root.into(),
+            retain_until,
+        })
     }
 }

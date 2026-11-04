@@ -495,7 +495,7 @@ jobs:
           tool: nextest@0.9.150
 
       - name: Migration release gate regressions
-        run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(release_gate_closed)'
+        run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(release_gate_closed) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
 
       - name: Configured graceful shutdown regressions
         timeout-minutes: 13

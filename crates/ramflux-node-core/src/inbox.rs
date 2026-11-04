@@ -231,7 +231,7 @@ impl OpaqueDeviceInbox {
             .unwrap_or_else(|| inbox_legacy_retain_until(&entry.envelope, server_now()))
     }
 
-    fn set_deadline(&mut self, target: &str, seq: u64, deadline: i64) {
+    pub(crate) fn set_deadline(&mut self, target: &str, seq: u64, deadline: i64) {
         let previous =
             self.retain_until.entry(target.to_owned()).or_default().insert(seq, deadline);
         if self.expiry.ready {

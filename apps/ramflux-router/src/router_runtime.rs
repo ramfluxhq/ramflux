@@ -399,6 +399,38 @@ impl RouterHandle {
     }
 }
 
+impl RouterHandle {
+    pub(crate) fn submit_forwarded(
+        &self,
+        request: ramflux_node_core::ForwardedEnvelopeRequest,
+    ) -> anyhow::Result<serde_json::Value> {
+        let Self::Tokio(runtime) = self;
+        let node = runtime.custody.get().and_then(|s| s.migration_node());
+        match self.state().submit_forwarded_envelope(
+            self.store(),
+            node,
+            request,
+            ramflux_node_core::now_unix_seconds(),
+        ) {
+            Ok(outcome) => {
+                let delivery =
+                    crate::router_engine::submit_response_from_outcome(self.state(), outcome);
+                let accepted = matches!(
+                    delivery.outcome.as_str(),
+                    "online" | "offline_queued" | "duplicate_federated_forward"
+                );
+                Ok(
+                    serde_json::json!({"accepted": accepted, "retryable": !accepted, "delivery": delivery}),
+                )
+            }
+            Err(ramflux_node_core::NodeCoreError::HomeMigration(reason)) => {
+                Ok(serde_json::json!({"accepted": false, "retryable": true, "reason": reason}))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::net::TcpListener;

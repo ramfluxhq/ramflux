@@ -53,3 +53,11 @@ impl RouterCore {
         removed
     }
 }
+
+impl RouterCore {
+    pub(crate) fn constrain_forwarded_retention(&self, entry: &crate::InboxEntry, deadline: i64) {
+        let mut shard = self.target_shard(&entry.target_delivery_id);
+        let deadline = deadline.min(shard.inbox.retain_until(entry));
+        shard.inbox.set_deadline(&entry.target_delivery_id, entry.inbox_seq, deadline);
+    }
+}

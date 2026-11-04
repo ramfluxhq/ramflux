@@ -87,3 +87,164 @@ fn forwarded_activation_without_proof_refuses_dormant_but_allows_active_target()
     s.b.store()?.activate_forwarded_target(&s.b.node, &s.target, None, NOW + 2)?;
     Ok(())
 }
+
+fn sender(target: &str) -> TestResult<crate::ForwardedEnvelopeRequest> {
+    use ramflux_crypto::custody::{GenesisInput, MasterKey, RecoveryPhrase, create_genesis};
+    let now = crate::now_unix_seconds();
+    let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[70; 32])?)?;
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([71; 32]));
+    let branch = ramflux_crypto::create_device_branch("forward-sender", "primary", 1, [72; 32]);
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed([73; 32]);
+    let record = create_genesis(
+        &master,
+        &primary,
+        &branch,
+        &agreement,
+        GenesisInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            display_name: "Sender".into(),
+            issued_at: now,
+            master_cert_id: hash(74),
+            branch_cert_id: hash(75),
+            external_human_primary: None,
+        },
+    )?;
+    let mut envelope = ramflux_protocol::Envelope {
+        schema: "ramflux.envelope.v1".into(),
+        version: 1,
+        domain: "ramflux.envelope.v1".into(),
+        ext: ramflux_protocol::Ext::default(),
+        signed: ramflux_protocol::SignedFields {
+            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+            signature: String::new(),
+            signing_key_id: "sender".into(),
+        },
+        envelope_id: "forward-test".into(),
+        source_principal_id: branch.principal_id.clone(),
+        source_device_id: branch.device_id.clone(),
+        target_delivery_id: target.into(),
+        routing_set_id: None,
+        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+        priority: ramflux_protocol::Priority::Normal,
+        ttl: 3600,
+        created_at: i64::try_from(now)?,
+        encrypted_payload: "ciphertext".into(),
+        payload_hash: hash(76),
+    };
+    envelope.ext.ext.insert("source_root_commitment".into(), json!(record.body.account_anchor));
+    envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &envelope)?;
+    let a = TestNode::with_registration("sender", 80, false, false)?;
+    a.core.publish_custody_record(
+        &crate::CustodyPublication { record, compacted_ids: None },
+        now,
+        a.store()?,
+    )?;
+    a.core.refresh_registered_envelope_authority(&mut envelope)?;
+    Ok(crate::ForwardedEnvelopeRequest { envelope, migration_evidence: None })
+}
+
+#[test]
+fn forwarded_delivery_with_commit_proof_activates_dormant_inbox_then_queues_once() -> TestResult {
+    let mut s = Scenario::prepared()?;
+    let op = s.seal()?;
+    let valid = proof(&s, &op)?;
+    let mut request = sender(&s.target)?;
+    let bytes = serde_json::to_vec(&request.envelope)?;
+    request.migration_evidence = Some(crate::ForwardedMigrationEvidence {
+        commit_proof: Some(valid),
+        retain_until: i64::try_from(crate::now_unix_seconds())? + 600,
+        floors: vec![],
+    });
+    let first = s.b.core.submit_forwarded_envelope(
+        s.b.store()?,
+        Some(&s.b.node),
+        request.clone(),
+        crate::now_unix_seconds(),
+    )?;
+    assert!(matches!(first, crate::RouterSubmitOutcome::OfflineQueued(_)));
+    assert!(s.b.store()?.home_migration_target_active(&s.target)?);
+    s.b.restart()?;
+    let second = s.b.core.submit_forwarded_envelope(
+        s.b.store()?,
+        Some(&s.b.node),
+        request,
+        crate::now_unix_seconds(),
+    )?;
+    assert!(matches!(second, crate::RouterSubmitOutcome::DuplicateFederatedForward { .. }));
+    let entries = s.b.core.resume(&s.target, 0, 10);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(serde_json::to_vec(&entries[0].envelope)?, bytes);
+    Ok(())
+}
+
+#[test]
+fn forwarded_delivery_without_proof_to_dormant_inbox_is_retryable_and_not_acked() -> TestResult {
+    let s = Scenario::prepared()?;
+    let op = s.seal()?;
+    let mut request = sender(&s.target)?;
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            request.clone(),
+            crate::now_unix_seconds()
+        ),
+        Err(NodeCoreError::HomeMigration(Refusal::DormantInbox))
+    ));
+    assert_eq!(s.b.core.resume(&s.target, 0, 10), []);
+    assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
+    request.migration_evidence = Some(crate::ForwardedMigrationEvidence {
+        commit_proof: Some(proof(&s, &op)?),
+        retain_until: i64::try_from(crate::now_unix_seconds())? + 600,
+        floors: vec![],
+    });
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            request,
+            crate::now_unix_seconds()
+        )?,
+        crate::RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn ordinary_forward_to_active_home_without_migration_proof_is_accepted() -> TestResult {
+    let mut b = TestNode::with_registration("B", 9, false, false)?;
+    let request = sender("active-recipient")?;
+    let now = crate::now_unix_seconds();
+    assert!(matches!(
+        b.core.submit_forwarded_envelope(b.store()?, None, request.clone(), now)?,
+        crate::RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    b.restart()?;
+    assert!(matches!(
+        b.core.submit_forwarded_envelope(b.store()?, None, request, now)?,
+        crate::RouterSubmitOutcome::DuplicateFederatedForward { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn forwarded_entry_keeps_a_original_retain_until_at_b() -> TestResult {
+    let mut b = TestNode::with_registration("B", 9, false, false)?;
+    let now = crate::now_unix_seconds();
+    let deadline = i64::try_from(now)? + 30;
+    let mut request = sender("retained-recipient")?;
+    request.migration_evidence = Some(crate::ForwardedMigrationEvidence {
+        commit_proof: None,
+        retain_until: deadline,
+        floors: vec![],
+    });
+    b.core.submit_forwarded_envelope(b.store()?, None, request, now)?;
+    let entry = b.core.resume("retained-recipient", 0, 10)[0].clone();
+    assert_eq!(b.core.inbox_snapshot().retain_until(&entry), deadline);
+    b.restart()?;
+    assert_eq!(b.core.inbox_snapshot().retain_until(&entry), deadline);
+    assert_eq!(b.core.sweep_delivery_retention(deadline - 1), 0);
+    assert_eq!(b.core.sweep_delivery_retention(deadline), 1);
+    Ok(())
+}

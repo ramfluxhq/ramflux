@@ -462,6 +462,7 @@ pub(crate) async fn handle_mesh_quic_request_value(
     };
     let response = if request.path == ramflux_protocol::custody::CUSTODY_RPC_PATH
         || request.path == ramflux_node_core::MIGRATION_PEER_PATH
+        || request.path == "/mvp0/envelope/forwarded"
     {
         let router = router.clone();
         let peer = peer_service_id.to_owned();
@@ -517,6 +518,19 @@ fn handle_mesh_fast_path_value(
     peer_service_id: &str,
 ) -> anyhow::Result<Option<MeshResponse>> {
     match (method, path) {
+        ("POST", "/mvp0/envelope/forwarded") => {
+            if peer_service_id != "ramflux-federation" {
+                return Ok(Some(MeshResponse::text(
+                    "403 Forbidden",
+                    "forwarded ingress requires federation peer",
+                )));
+            }
+            let request = serde_json::from_slice(body)?;
+            Ok(Some(MeshResponse::json(
+                "200 OK",
+                serde_json::to_vec(&router.submit_forwarded(request)?)?,
+            )))
+        }
         ("POST", "/s1/session/upsert") => {
             let response = handle_s1_session_upsert(body, router.state(), router.store())?;
             tracing::info!(
@@ -1423,6 +1437,67 @@ mod tests {
         assert_eq!(value["rows"], serde_json::json!([]));
         assert!(value["observed_at"].is_u64());
         assert_eq!(handle.store().custody_publication_write_count(), 0);
+        drop(handle);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn forwarded_endpoint_is_not_reachable_from_client_listener() -> anyhow::Result<()> {
+        let (state, store, path) = crate::router_runtime::tests::test_router("forwarded-role")?;
+        let mut envelope =
+            crate::router_runtime::tests::current_envelope("forwarded-role", "active-target")?;
+        state.refresh_registered_envelope_authority(&mut envelope)?;
+        let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
+        let body = serde_json::to_vec(&ramflux_node_core::ForwardedEnvelopeRequest {
+            envelope,
+            migration_evidence: None,
+        })?;
+        for peer in ["ramflux-gateway", "ramflux-relay", "ramflux-retention"] {
+            let response = handle_mesh_request_value(
+                ramflux_transport::MeshHttpRequest {
+                    method: "POST".into(),
+                    path: "/mvp0/envelope/forwarded".into(),
+                    body: body.clone(),
+                },
+                &handle,
+                peer,
+            )?;
+            assert_eq!(response.status, "403 Forbidden");
+        }
+        #[cfg(feature = "itest-http")]
+        {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let mut client = std::net::TcpStream::connect(listener.local_addr()?)?;
+            client.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+            let (mut server, _) = listener.accept()?;
+            write!(
+                client,
+                "POST /mvp0/envelope/forwarded HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )?;
+            client.write_all(&body)?;
+            handle_itest_request(&mut server, &handle)?;
+            drop(server);
+            let mut reply = String::new();
+            client.read_to_string(&mut reply)?;
+            assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+        }
+        assert_eq!(handle.state().resume("active-target", 0, 10), []);
+        let response = handle_mesh_request_value(
+            ramflux_transport::MeshHttpRequest {
+                method: "POST".into(),
+                path: "/mvp0/envelope/forwarded".into(),
+                body,
+            },
+            &handle,
+            "ramflux-federation",
+        )?;
+        assert_eq!(response.status, "200 OK");
+        let body: serde_json::Value = serde_json::from_slice(&response.body)?;
+        assert_eq!(body["accepted"], true);
+        assert_eq!(handle.state().resume("active-target", 0, 10).len(), 1);
         drop(handle);
         let _ = std::fs::remove_file(path);
         Ok(())
