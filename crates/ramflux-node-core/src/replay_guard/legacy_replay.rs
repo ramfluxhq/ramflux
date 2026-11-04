@@ -16,10 +16,14 @@ pub(super) fn deserialize_entries<'de, D: Deserializer<'de>>(
 pub(super) fn isolate_unknown_key(key: String) -> String {
     let current = key.strip_prefix("request/v2/").is_some_and(|hash| {
         ramflux_protocol::decode_base64url(hash).is_ok_and(|bytes| bytes.len() == 32)
-    }) || key.strip_prefix("envelope/v2/").is_some_and(|suffix| {
-        suffix.split_once('/').is_some_and(|(source, envelope)| {
+    }) || key.strip_prefix("envelope/v3/").is_some_and(|suffix| {
+        suffix.split_once('/').is_some_and(|(source, tail)| {
+            let Some((envelope, target)) = tail.split_once('/') else {
+                return false;
+            };
             ramflux_protocol::parse_qualified_device_id(source).is_ok_and(|value| value.is_some())
                 && ramflux_protocol::decode_base64url(envelope).is_ok()
+                && ramflux_protocol::decode_base64url(target).is_ok()
         })
     });
     if current || key.starts_with("legacy/replay/") {

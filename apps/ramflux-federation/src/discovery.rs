@@ -26,7 +26,7 @@ pub(crate) fn federation_discovery_surface(
             "friend_request".to_owned(),
         ],
     };
-    if ramflux_node_core::environment::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() == Ok("1") {
+    if ramflux_node_core::home_migration_enabled().unwrap_or(false) {
         surface.node_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
     }
     surface
@@ -93,10 +93,11 @@ impl FederationDiscoverySurface {
             expires_at: now.saturating_add(ramflux_protocol::DISCOVERY_MAX_CACHE_TTL_SECONDS),
             signature: String::new(),
         };
-        if self
-            .node_capabilities
-            .iter()
-            .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+        if ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
+            && self
+                .node_capabilities
+                .iter()
+                .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
         {
             record.client_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
         }
@@ -119,7 +120,15 @@ impl FederationDiscoverySurface {
             node_endpoint: self.public_endpoint.clone(),
             protocol_versions: self.protocol_versions.clone(),
             transport_backends: self.transport_backends.clone(),
-            node_capabilities: self.node_capabilities.clone(),
+            node_capabilities: self
+                .node_capabilities
+                .iter()
+                .filter(|cap| {
+                    ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
+                        || cap.as_str() != ramflux_node_core::HOME_MIGRATION_CAPABILITY
+                })
+                .cloned()
+                .collect(),
             node_policy_hash: ramflux_crypto::blake3_256_base64url(
                 ramflux_protocol::domain::FEDERATION_HANDSHAKE,
                 self.node_id.as_bytes(),
@@ -153,10 +162,27 @@ mod tests {
             node_signing_seed: seed,
             protocol_versions: vec!["v1".to_owned()],
             transport_backends: vec!["https_json".to_owned()],
-            node_capabilities: vec!["opaque_delivery".to_owned()],
+            node_capabilities: vec![
+                "opaque_delivery".to_owned(),
+                ramflux_node_core::HOME_MIGRATION_CAPABILITY.into(),
+            ],
         };
 
+        let client = surface.client_record()?;
+        assert!(
+            !client
+                .client_capabilities
+                .iter()
+                .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+        );
         let record = surface.well_known_record()?;
+        assert!(record.node_capabilities.iter().any(|cap| cap == "opaque_delivery"));
+        assert!(
+            !record
+                .node_capabilities
+                .iter()
+                .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+        );
 
         assert!(record.updated_at >= now);
         assert_eq!(record.expires_at, record.updated_at.saturating_add(86_400));

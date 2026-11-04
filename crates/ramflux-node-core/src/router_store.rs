@@ -40,6 +40,7 @@ mod identity_registry;
 mod migration_barrier;
 mod retention;
 mod submission_barrier;
+mod tuple_upgrade;
 pub use identity_registry::IdentityJournalDiscardReport;
 pub use submission_barrier::SubmissionLease;
 
@@ -287,7 +288,9 @@ fn record_local_delivery_envelope_in_txn(
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     let storage_key = sender_root_commitment.map_or_else(
         || entry.envelope.envelope_id.clone(),
-        |root| local_delivery_storage_key(root, &entry.envelope.envelope_id),
+        |root| {
+            local_delivery_storage_key(root, &entry.envelope.envelope_id, &entry.target_delivery_id)
+        },
     );
     table
         .insert(storage_key.as_str(), bytes.as_slice())
@@ -297,8 +300,17 @@ fn record_local_delivery_envelope_in_txn(
     Ok(())
 }
 
-fn local_delivery_storage_key(sender_root_commitment: &str, envelope_id: &str) -> String {
-    format!("s:{}:{}{}", sender_root_commitment.len(), sender_root_commitment, envelope_id)
+fn local_delivery_storage_key(
+    sender_root_commitment: &str,
+    envelope_id: &str,
+    target: &str,
+) -> String {
+    format!(
+        "v3/{}/{}/{}",
+        ramflux_protocol::encode_base64url(sender_root_commitment),
+        ramflux_protocol::encode_base64url(envelope_id),
+        ramflux_protocol::encode_base64url(target)
+    )
 }
 
 fn legacy_scoped_local_delivery_storage_key(
@@ -434,6 +446,7 @@ impl RouterRedbStore {
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?,
         );
         Self::initialize_mailbox_schema(&db)?;
+        tuple_upgrade::upgrade(&db)?;
         let mut legacy_registry: IdentityRegistry =
             load_snapshot(&db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
                 .unwrap_or_default();
@@ -889,7 +902,8 @@ impl RouterRedbStore {
         let table = read_txn
             .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        let storage_key = local_delivery_storage_key(sender_root_commitment, envelope_id);
+        let storage_key =
+            local_delivery_storage_key(sender_root_commitment, envelope_id, target_delivery_id);
         let legacy_scoped_key =
             legacy_scoped_local_delivery_storage_key(sender_root_commitment, envelope_id);
         for key in [storage_key.as_str(), legacy_scoped_key.as_str()] {
@@ -1319,7 +1333,7 @@ impl RouterRedbStore {
 
     /// Mailbox entries, cursors and replay tuples from redb plus the submission WAL. Sequence
     /// watermarks of every logged record are observed, so no sequence is reissued.
-    fn load_delivery_state(
+    pub(crate) fn load_delivery_state(
         &self,
         now: i64,
     ) -> Result<(OpaqueDeviceInbox, NodeReplayGuardState), NodeCoreError> {

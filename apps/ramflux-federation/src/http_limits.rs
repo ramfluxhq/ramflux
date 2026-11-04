@@ -20,6 +20,7 @@ pub(crate) fn defaults(public: bool) -> HttpRequestLimits {
     }
 }
 pub(crate) fn configured(public: bool) -> Result<HttpRequestLimits, NodeCoreError> {
+    ramflux_node_core::home_migration_enabled()?;
     let mut limits = defaults(public);
     let prefix = if public { "RAMFLUX_FEDERATION_PUBLIC" } else { "RAMFLUX_FEDERATION_ADMIN" };
     limits.max_header_bytes =
@@ -47,7 +48,7 @@ pub(crate) fn configured(public: bool) -> Result<HttpRequestLimits, NodeCoreErro
     Ok(limits)
 }
 fn migration_enabled() -> bool {
-    ramflux_node_core::environment::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() == Ok("1")
+    ramflux_node_core::home_migration_enabled().unwrap_or(false)
 }
 fn setting(key: &str, default: usize, maximum: usize) -> Result<usize, NodeCoreError> {
     let Some(value) = ramflux_node_core::environment::var_os(key) else { return Ok(default) };

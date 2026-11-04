@@ -72,11 +72,7 @@ impl HomeMigrationMesh for LocalFederation {
     }
 }
 pub(crate) fn enabled() -> anyhow::Result<bool> {
-    match ramflux_node_core::environment::var("RAMFLUX_HOME_MIGRATION_ENABLED").ok().as_deref() {
-        None | Some("0") => Ok(false),
-        Some("1") => Ok(true),
-        _ => anyhow::bail!("RAMFLUX_HOME_MIGRATION_ENABLED must be 0 or 1"),
-    }
+    Ok(ramflux_node_core::home_migration_enabled()?)
 }
 fn required(name: &str) -> anyhow::Result<String> {
     ramflux_node_core::environment::var(name)

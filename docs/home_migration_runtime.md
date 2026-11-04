@@ -7,7 +7,7 @@ Migration control uses native custody possession grants. A grant is bound to one
 signed control hash, requester, custody record, source address and purpose. It is
 consumed before any peer exchange. It is not an ordinary account session.
 
-The runtime is opt-in with `RAMFLUX_HOME_MIGRATION_ENABLED=1`. It requires the
+The runtime is release-gated and currently unavailable, including legacy admin apply routes. After the release gate opens, it is opt-in with `RAMFLUX_HOME_MIGRATION_ENABLED=1`. It requires the
 configured node service signer, `RAMFLUX_CUSTODY_NODE_RECORD_FILE`, the independently
 pinned custody node public key, the mesh CA, `RAMFLUX_CLIENT_GATEWAY_TCP_ADDR`,
 `RAMFLUX_FEDERATION_PUBLIC_ENDPOINT`,

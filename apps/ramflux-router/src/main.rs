@@ -33,6 +33,7 @@ fn main() {
 }
 
 fn run_service(service: &'static str) -> anyhow::Result<()> {
+    ramflux_node_core::home_migration_enabled()?;
     if std::env::args().any(|arg| arg == "--health-check") {
         println!("{service}:healthy");
         return Ok(());
@@ -208,4 +209,35 @@ fn non_empty_env(name: &str) -> Option<String> {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     })
+}
+
+#[cfg(test)]
+mod release_tests {
+    #[test]
+    fn migration_env_enabled_refuses_startup_while_release_gate_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os("RAMFLUX_RELEASE_TEST_CHILD").is_some() {
+            match std::env::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() {
+                Ok("1") => assert!(
+                    super::run_service("release-test")
+                        .err()
+                        .ok_or("expected closed gate")?
+                        .to_string()
+                        .contains("release gate is closed")
+                ),
+                _ => assert!(!ramflux_node_core::home_migration_enabled()?),
+            }
+            return Ok(());
+        }
+        for flag in [None, Some("0"), Some("1")] {
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command.args(["--exact", "release_tests::migration_env_enabled_refuses_startup_while_release_gate_closed"])
+                .env("RAMFLUX_RELEASE_TEST_CHILD", "1").env_remove("RAMFLUX_HOME_MIGRATION_ENABLED");
+            if let Some(flag) = flag {
+                command.env("RAMFLUX_HOME_MIGRATION_ENABLED", flag);
+            }
+            assert!(command.status()?.success());
+        }
+        Ok(())
+    }
 }

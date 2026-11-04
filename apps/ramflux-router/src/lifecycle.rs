@@ -94,6 +94,10 @@ pub(crate) fn handle_home_node_migration_apply(
 ) -> anyhow::Result<ramflux_node_core::HomeNodeMigrationApplyResponse> {
     let request: ramflux_node_core::HomeNodeMigrationApplyRequest = serde_json::from_slice(body)?;
     require_router_admin_token(&request.admin_token)?;
+    anyhow::ensure!(
+        ramflux_node_core::HOME_MIGRATION_RELEASE_GATE,
+        "home migration release gate is closed"
+    );
     let record =
         state.apply_home_node_migration(&request.proof, &request.branch_proof, request.now)?;
     store.save_router(state)?;
@@ -107,6 +111,10 @@ pub(crate) fn handle_home_node_route_update_apply(
 ) -> anyhow::Result<ramflux_node_core::HomeNodeRouteUpdateApplyResponse> {
     let request: ramflux_node_core::HomeNodeRouteUpdateApplyRequest = serde_json::from_slice(body)?;
     require_router_admin_token(&request.admin_token)?;
+    anyhow::ensure!(
+        ramflux_node_core::HOME_MIGRATION_RELEASE_GATE,
+        "home migration release gate is closed"
+    );
     let record = state.apply_home_node_route_update_proof(&request.proof, request.now)?;
     store.save_router(state)?;
     Ok(ramflux_node_core::HomeNodeRouteUpdateApplyResponse { record })

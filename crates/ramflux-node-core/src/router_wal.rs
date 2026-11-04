@@ -308,7 +308,7 @@ struct RouterWalState {
     submissions_by_replay_key: BTreeMap<String, RouterWalSubmissionRecord>,
     submissions_by_target: BTreeMap<String, BTreeMap<u64, BTreeSet<String>>>,
     local_delivery_by_sender_envelope:
-        HashMap<String, HashMap<String, RouterWalLocalDeliveryIndex>>,
+        HashMap<String, HashMap<(String, String), RouterWalLocalDeliveryIndex>>,
     /// Highest sequence ever logged per mailbox, including records that later expired.
     issued_by_target: BTreeMap<String, u64>,
     replay_due: BTreeSet<(i64, String)>,
@@ -337,6 +337,19 @@ impl RouterWalState {
                         self.issued_by_target.entry(entry.target_delivery_id.clone()).or_default();
                     *issued = (*issued).max(entry.inbox_seq);
                 }
+                let replay_key = if let Some(tail) = replay_key.strip_prefix("envelope/v2/") {
+                    entry.as_ref().map_or_else(
+                        || replay_key.clone(),
+                        |entry| {
+                            format!(
+                                "envelope/v3/{tail}/{}",
+                                ramflux_protocol::encode_base64url(&entry.target_delivery_id)
+                            )
+                        },
+                    )
+                } else {
+                    replay_key
+                };
                 let record = RouterWalSubmissionRecord {
                     replay_key: replay_key.clone(),
                     replay_expires_at,
@@ -370,7 +383,7 @@ impl RouterWalState {
                 .entry(delivery.sender_root_commitment.clone())
                 .or_default()
                 .insert(
-                    delivery.envelope_id.clone(),
+                    (delivery.envelope_id.clone(), delivery.target_delivery_id.clone()),
                     RouterWalLocalDeliveryIndex {
                         replay_key: record.replay_key.clone(),
                         target_delivery_id: delivery.target_delivery_id.clone(),
@@ -391,10 +404,13 @@ impl RouterWalState {
                 self.local_delivery_by_sender_envelope.get_mut(&delivery.sender_root_commitment)
             {
                 if by_envelope
-                    .get(&delivery.envelope_id)
+                    .get(&(delivery.envelope_id.clone(), delivery.target_delivery_id.clone()))
                     .is_some_and(|indexed| indexed.replay_key == record.replay_key)
                 {
-                    by_envelope.remove(&delivery.envelope_id);
+                    by_envelope.remove(&(
+                        delivery.envelope_id.clone(),
+                        delivery.target_delivery_id.clone(),
+                    ));
                 }
                 by_envelope.is_empty()
             } else {
@@ -480,7 +496,9 @@ impl RouterWalState {
     ) -> bool {
         self.local_delivery_by_sender_envelope
             .get(sender_root_commitment)
-            .and_then(|by_envelope| by_envelope.get(envelope_id))
+            .and_then(|by_envelope| {
+                by_envelope.get(&(envelope_id.to_owned(), target_delivery_id.to_owned()))
+            })
             .is_some_and(|delivery| {
                 delivery.target_delivery_id == target_delivery_id
                     && delivery.replay_expires_at > now
@@ -1518,6 +1536,75 @@ mod tests {
     use super::*;
     use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
     use std::sync::Barrier;
+
+    #[test]
+    fn same_sender_envelope_id_two_targets_survive_restart_and_dedup_independently()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+        let branch = ramflux_crypto::create_device_branch(
+            "alice",
+            "device_router_wal",
+            1,
+            ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+        );
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
+        for use_wal in [false, true] {
+            let path = temp_router_wal_dir("tuple-v3")?;
+            fs::create_dir_all(&path)?;
+            let open = || {
+                if use_wal {
+                    crate::RouterRedbStore::open_with_wal(path.join("db"), path.join("wal"))
+                } else {
+                    crate::RouterRedbStore::open_without_wal(path.join("db"))
+                }
+            };
+            let store = open()?;
+            let mut guard = crate::NodeReplayGuardState::new();
+            for target in ["left", "right"] {
+                let mut entry = router_wal_inbox_entry("same-id", target);
+                // Forwarder attribution is deliberately outside the sender tuple.
+                entry.envelope.ext.ext.insert("forwarder".into(), serde_json::json!(target));
+                assert!(guard.accept_envelope_once(&source, &entry.envelope, 1_760_000_001)?);
+                store.record_submission_increment_for_sender(
+                    &crate::envelope_replay_tuple_key(&source, &entry.envelope),
+                    1_760_000_300,
+                    Some(&entry),
+                    Some(source.root_commitment()),
+                )?;
+            }
+            drop(store);
+            let store = open()?;
+            let (inbox, mut guard) = store.load_delivery_state(1_760_000_001)?;
+            assert_eq!(inbox.pending_entries().count(), 2);
+            for target in ["left", "right"] {
+                let envelope = router_wal_envelope("same-id", target);
+                assert_eq!(
+                    inbox
+                        .pending_entries()
+                        .filter(|entry| entry.target_delivery_id == target
+                            && entry.envelope.envelope_id == "same-id")
+                        .count(),
+                    1
+                );
+                assert!(store.has_local_delivery_envelope(
+                    source.root_commitment(),
+                    "same-id",
+                    target,
+                    1_760_000_001
+                )?);
+                assert!(!guard.accept_envelope_once(&source, &envelope, 1_760_000_001)?);
+            }
+            assert!(!store.has_local_delivery_envelope(
+                source.root_commitment(),
+                "same-id",
+                "third",
+                1_760_000_001
+            )?);
+            drop(store);
+            remove_router_wal_dir(path);
+        }
+        Ok(())
+    }
 
     #[test]
     fn local_delivery_index_is_keyed_rebuilt_and_pruned_without_submission_scan() {

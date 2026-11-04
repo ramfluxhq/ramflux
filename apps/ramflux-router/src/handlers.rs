@@ -1246,6 +1246,127 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "itest-http")]
+    fn legacy_release_subprocesses() -> anyhow::Result<bool> {
+        const CHILD: &str = "RAMFLUX_LEGACY_RELEASE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            for flag in [None, Some("0")] {
+                let mut command = std::process::Command::new(std::env::current_exe()?);
+                command.args(["--exact", "handlers::tests::release_gate_closed_rejects_legacy_apply_on_http_and_mesh_without_state_change"])
+                    .env(CHILD, "1").env("RAMFLUX_ROUTER_ADMIN_TOKEN", "release-token").env_remove("RAMFLUX_HOME_MIGRATION_ENABLED");
+                if let Some(flag) = flag {
+                    command.env("RAMFLUX_HOME_MIGRATION_ENABLED", flag);
+                }
+                assert!(command.status()?.success());
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    #[test]
+    #[cfg(feature = "itest-http")]
+    fn release_gate_closed_rejects_legacy_apply_on_http_and_mesh_without_state_change()
+    -> anyhow::Result<()> {
+        if legacy_release_subprocesses()? {
+            return Ok(());
+        }
+        let (state, store, path) = crate::router_runtime::tests::test_router("legacy-release")?;
+        let now = 1_760_000_020;
+        let request = crate::router_runtime::tests::register_test_device_at(
+            &state,
+            "alice",
+            "alice_phone",
+            "target_alice",
+            1,
+            now,
+        )?;
+        store.save_router(&state)?;
+        let before = serde_json::to_value(state.mvp1_identities_snapshot())?;
+        // Positive arm verifies both signed requests through real core mutations.
+        let positive = ramflux_node_core::RouterCore::new();
+        crate::router_runtime::tests::register_test_device_at(
+            &positive,
+            "alice",
+            "alice_phone",
+            "target_alice",
+            1,
+            now,
+        )?;
+        let (migration, update) = crate::router_runtime::tests::legacy_apply_requests(
+            &positive,
+            &request,
+            "node-new.example",
+        )?;
+        let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let _client = std::net::TcpStream::connect(listener.local_addr()?)?;
+        let (mut stream, _) = listener.accept()?;
+        for (path, body) in [
+            ("/admin/home-node-migration/apply", serde_json::to_vec(&migration)?),
+            ("/admin/home-node-route/update/apply", serde_json::to_vec(&update)?),
+        ] {
+            let request = ramflux_transport::MeshHttpRequest {
+                method: "POST".into(),
+                path: path.into(),
+                body: body.clone(),
+            };
+            let error = handle_mesh_request_value(request, &handle, "ramflux-gateway")
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("expected closed gate"))?;
+            assert!(error.to_string().contains("release gate is closed"));
+            let request = ramflux_node_core::NodeHttpRequest {
+                method: "POST".into(),
+                path: path.into(),
+                body,
+                keep_alive: false,
+                source_ip_hash: None,
+                pre_auth_cookie: None,
+                pre_auth_now: None,
+            };
+            let error = handle_itest_admin_request(&mut stream, &request, &handle)
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("expected closed gate"))?;
+            assert!(error.to_string().contains("release gate is closed"));
+        }
+        let sibling = handle_mesh_request_value(
+            ramflux_transport::MeshHttpRequest {
+                method: "POST".into(),
+                path: "/admin/custody/budgets".into(),
+                body: br#"{"admin_token":"release-token"}"#.to_vec(),
+            },
+            &handle,
+            "ramflux-gateway",
+        )?;
+        assert_eq!(sibling.status, "200 OK");
+        assert!(handle_healthz_request(
+            &mut stream,
+            &ramflux_node_core::NodeHttpRequest {
+                method: "GET".into(),
+                path: "/healthz".into(),
+                body: Vec::new(),
+                keep_alive: false,
+                source_ip_hash: None,
+                pre_auth_cookie: None,
+                pre_auth_now: None,
+            }
+        )?);
+
+        assert_eq!(before, serde_json::to_value(handle.state().mvp1_identities_snapshot())?);
+        assert!(handle.state().home_node_migration(&request.proof.principal_id).is_none());
+        assert!(handle.state().resolve_home_node_route(&request.proof.principal_id).is_none());
+        drop(handle);
+        let store = ramflux_node_core::RouterRedbStore::open(&path)?;
+        let restored =
+            store.load_router()?.ok_or_else(|| anyhow::anyhow!("missing restored router"))?;
+        assert_eq!(before, serde_json::to_value(restored.mvp1_identities_snapshot())?);
+        assert!(restored.home_node_migration(&request.proof.principal_id).is_none());
+        assert!(restored.resolve_home_node_route(&request.proof.principal_id).is_none());
+        drop(store);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
     #[test]
     fn custody_budget_inspection_requires_admin_token_and_mesh_peer() -> anyhow::Result<()> {
         const CHILD: &str = "RAMFLUX_BUDGET_ADMIN_TEST_CHILD";

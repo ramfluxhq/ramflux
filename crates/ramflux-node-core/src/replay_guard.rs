@@ -46,7 +46,7 @@ impl NodeReplayGuardState {
 
     /// # Errors
     /// Returns an error when the envelope TTL has expired or the same
-    /// root-qualified device and envelope-id replay tuple has already been accepted.
+    /// root-qualified device, envelope-id and target replay tuple has already been accepted.
     pub fn check_envelope(
         &mut self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -110,7 +110,16 @@ impl NodeReplayGuardState {
         }
         self.prune(now_unix_seconds);
         let key = envelope_replay_tuple_key(source, envelope);
-        if self.accepted_by_key.contains_key(&key) {
+        let legacy = format!(
+            "envelope/v2/{}/{}",
+            source.storage_key(),
+            ramflux_protocol::encode_base64url(&envelope.envelope_id)
+        );
+        let isolated = format!("legacy/replay/{}", ramflux_protocol::encode_base64url(&legacy));
+        if self.accepted_by_key.contains_key(&key)
+            || self.accepted_by_key.contains_key(&legacy)
+            || self.accepted_by_key.contains_key(&isolated)
+        {
             return Ok(false);
         }
         self.accepted_by_key.insert(key, expires_at);
@@ -146,8 +155,9 @@ pub fn envelope_replay_tuple_key(
     envelope: &ramflux_protocol::Envelope,
 ) -> String {
     format!(
-        "envelope/v2/{}/{}",
+        "envelope/v3/{}/{}/{}",
         source.storage_key(),
-        ramflux_protocol::encode_base64url(&envelope.envelope_id)
+        ramflux_protocol::encode_base64url(&envelope.envelope_id),
+        ramflux_protocol::encode_base64url(&envelope.target_delivery_id)
     )
 }
