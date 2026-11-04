@@ -259,7 +259,7 @@ jobs:
           if-no-files-found: ignore
 
   v-memory-vault:
-    name: SDK variant: memory vault (custody + approve_once)
+    name: "SDK variant: memory vault (custody + approve_once)"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -291,7 +291,7 @@ jobs:
 
 
   v-production:
-    name: SDK variant: migration fixture absent from production
+    name: "SDK variant: migration fixture absent from production"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -323,7 +323,7 @@ jobs:
 
 
   v-legacy:
-    name: SDK variant: legacy accounts fixture
+    name: "SDK variant: legacy accounts fixture"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
