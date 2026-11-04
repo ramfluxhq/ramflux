@@ -1023,7 +1023,7 @@ fn serve_mesh_mtls(
                     ramflux_transport::TransportError::Io(error) => error,
                     other => std::io::Error::other(other.to_string()),
                 };
-                std::thread::sleep(backoff.failure(&error));
+                backoff.wait_after_failure(&error);
                 continue;
             }
         };
@@ -1078,7 +1078,7 @@ fn serve_mesh_mtls(
             },
         ) {
             Ok(_) => backoff.success(),
-            Err(error) => std::thread::sleep(backoff.failure(&error)),
+            Err(error) => std::thread::sleep(backoff.resource_failure(&error)),
         }
     }
 }

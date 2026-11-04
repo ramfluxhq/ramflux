@@ -65,13 +65,13 @@ pub(crate) fn serve_admin_http(
                     continue;
                 }
                 Err(error) => {
-                    std::thread::sleep(backoff.failure(&error));
+                    backoff.wait_after_failure(&error);
                     continue;
                 }
             };
             match spawn_admin_connection(stream, context.clone(), &connections, limits) {
                 Ok(_) => backoff.success(),
-                Err(error) => std::thread::sleep(backoff.failure(&error)),
+                Err(error) => std::thread::sleep(backoff.resource_failure(&error)),
             }
         }
     })?;

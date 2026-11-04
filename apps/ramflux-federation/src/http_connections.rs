@@ -34,6 +34,9 @@ pub(crate) fn spawn_connection<T: Send + 'static>(
 pub(crate) struct TestWorker(Arc<ramflux_node_core::ConnectionSet>);
 #[cfg(test)]
 impl TestWorker {
+    pub(crate) fn from_connections(connections: Arc<ramflux_node_core::ConnectionSet>) -> Self {
+        Self(connections)
+    }
     pub(crate) fn join(self) -> std::io::Result<()> {
         let deadline = Instant::now() + std::time::Duration::from_secs(8);
         while !self.0.is_empty() {

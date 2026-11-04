@@ -62,7 +62,7 @@ fn validate_nofile(h: usize, a: usize, soft: u64) -> Result<(), NodeCoreError> {
     }
     Ok(())
 }
-/// Log each accept error kind once; consecutive failures back off from 50 ms to one second.
+/// Back off resource failures from 50 ms to one second; peer errors never delay acceptance.
 #[derive(Default)]
 pub struct ListenerAcceptBackoff {
     seen: HashSet<io::ErrorKind>,
@@ -71,12 +71,40 @@ pub struct ListenerAcceptBackoff {
 impl ListenerAcceptBackoff {
     #[must_use]
     pub fn failure(&mut self, error: &io::Error) -> Duration {
+        let resource = error.kind() == io::ErrorKind::OutOfMemory;
+        #[cfg(unix)]
+        let resource = resource
+            || [
+                rustix::io::Errno::MFILE,
+                rustix::io::Errno::NFILE,
+                rustix::io::Errno::NOBUFS,
+                rustix::io::Errno::NOMEM,
+            ]
+            .iter()
+            .any(|errno| error.raw_os_error() == Some(errno.raw_os_error()));
+        if resource {
+            self.resource_failure(error)
+        } else {
+            tracing::debug!(%error, "listener connection ended; accepting next peer");
+            Duration::ZERO
+        }
+    }
+    /// A failed descriptor clone or worker spawn is always a resource failure.
+    #[must_use]
+    pub fn resource_failure(&mut self, error: &io::Error) -> Duration {
         if self.seen.insert(error.kind()) {
             tracing::warn!(%error,kind=?error.kind(),"listener accept failed; retrying");
         }
         let delay = Duration::from_millis((50_u64 << self.failures.min(5)).min(1000));
         self.failures = self.failures.saturating_add(1);
         delay
+    }
+    /// Wait only for resource errors; peer failures do not call sleep, even with a zero duration.
+    pub fn wait_after_failure(&mut self, error: &io::Error) {
+        let delay = self.failure(error);
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
     }
     pub fn success(&mut self) {
         self.failures = 0;
@@ -107,7 +135,12 @@ where
                 backoff.success();
                 return value;
             }
-            Err(error) => tokio::time::sleep(backoff.failure(&error)).await,
+            Err(error) => {
+                let delay = backoff.failure(&error);
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
         }
     }
 }
@@ -131,7 +164,7 @@ mod tests {
             || {
                 calls += 1;
                 std::future::ready(if calls <= 3 {
-                    Err(io::Error::from(io::ErrorKind::Other))
+                    Err(io::Error::from(io::ErrorKind::OutOfMemory))
                 } else {
                     Ok(7)
                 })
@@ -154,7 +187,7 @@ mod tests {
             let (mut socket, _) = custody_accept(
                 || async {
                     if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
-                        Err(io::Error::from(io::ErrorKind::Other))
+                        Err(io::Error::from(io::ErrorKind::OutOfMemory))
                     } else {
                         listener.accept().await
                     }
@@ -178,9 +211,50 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn peer_errors_never_delay_or_escalate_resource_backoff() {
+        let mut backoff = ListenerAcceptBackoff::default();
+        for kind in [
+            io::ErrorKind::NotConnected,
+            io::ErrorKind::InvalidInput,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::Other,
+        ] {
+            assert_eq!(backoff.failure(&io::Error::from(kind)), Duration::ZERO);
+        }
+        #[cfg(unix)]
+        for errno in [rustix::io::Errno::NOTCONN, rustix::io::Errno::INVAL] {
+            assert_eq!(
+                backoff.failure(&io::Error::from_raw_os_error(errno.raw_os_error())),
+                Duration::ZERO
+            );
+        }
+        assert_eq!(backoff.failures, 0);
+        #[cfg(unix)]
+        for errno in [
+            rustix::io::Errno::MFILE,
+            rustix::io::Errno::NFILE,
+            rustix::io::Errno::NOBUFS,
+            rustix::io::Errno::NOMEM,
+        ] {
+            backoff.success();
+            assert_eq!(
+                backoff.failure(&io::Error::from_raw_os_error(errno.raw_os_error())),
+                Duration::from_millis(50)
+            );
+        }
+        backoff.success();
+        assert_eq!(
+            backoff.resource_failure(&io::Error::other("spawn failed")),
+            Duration::from_millis(50)
+        );
+    }
+
+    #[test]
     fn backoff_is_bounded_and_logs_once_per_kind() {
         let mut b = ListenerAcceptBackoff::default();
-        let e = io::Error::from(io::ErrorKind::Other);
+        let e = io::Error::from(io::ErrorKind::OutOfMemory);
         assert_eq!(b.failure(&e), Duration::from_millis(50));
         for _ in 0..20 {
             assert!(b.failure(&e) <= Duration::from_secs(1));

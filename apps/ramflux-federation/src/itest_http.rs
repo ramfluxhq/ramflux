@@ -50,7 +50,7 @@ pub(crate) fn serve_itest_http(
                 continue;
             }
             Err(error) => {
-                std::thread::sleep(backoff.failure(&error));
+                backoff.wait_after_failure(&error);
                 continue;
             }
         };
@@ -68,7 +68,7 @@ pub(crate) fn serve_itest_http(
             },
         ) {
             Ok(_) => backoff.success(),
-            Err(error) => std::thread::sleep(backoff.failure(&error)),
+            Err(error) => std::thread::sleep(backoff.resource_failure(&error)),
         }
     }
     Ok(())
