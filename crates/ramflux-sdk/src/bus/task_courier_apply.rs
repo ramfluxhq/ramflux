@@ -3,9 +3,13 @@
 
 //! Actor-owned, failure-isolated submission and durable per-item retry bookkeeping.
 
-use super::dispatch::{task_approval, task_approval_transport, task_transport};
-use super::task_courier::{Failure, Item, Preparation, manifest_request_keys};
-use super::task_courier_queue::{self as queue, JobRow, stop_class};
+use super::dispatch::task_approval;
+#[cfg(test)]
+use super::dispatch::{task_approval_transport, task_transport};
+use super::task_courier::{Failure, Item};
+use super::task_courier::{Preparation, manifest_request_keys};
+use super::task_courier_queue::stop_class;
+use super::task_courier_queue::{self as queue, JobRow};
 use crate::prelude::*;
 use serde_json::json;
 
@@ -103,6 +107,7 @@ mod tests {
     }
 }
 /// Only stop-class errors escape. Every other error charges this item and permits the next result.
+#[cfg(test)]
 pub(super) async fn apply(
     account: &mut LocalBusAccountState,
     item: Item,
@@ -114,6 +119,7 @@ pub(super) async fn apply(
     apply_result(account, &item, result)
 }
 
+#[cfg(test)]
 fn apply_result(
     account: &LocalBusAccountState,
     item: &Item,
@@ -132,6 +138,7 @@ fn apply_result(
     }
 }
 
+#[cfg(test)]
 async fn apply_item(
     account: &mut LocalBusAccountState,
     item: &Item,

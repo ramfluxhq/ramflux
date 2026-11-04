@@ -188,3 +188,100 @@ async fn overflow_case(count: usize, body_size: usize, retained: usize, dropped:
     handle.stop().await;
     Ok(())
 }
+
+async fn wait_for_queued(handle: &ConnectionHandle, bulk: usize, priority: usize) {
+    while handle.places.available_permits() != super::super::CALL_QUEUE - bulk
+        || handle.priority_places.available_permits() != super::super::CALL_QUEUE - priority
+    {
+        tokio::task::yield_now().await;
+    }
+}
+
+fn receipt_cursor(
+    handle: ConnectionHandle,
+) -> tokio::task::JoinHandle<Result<Option<crate::GatewayCursor>, crate::SdkError>> {
+    tokio::spawn(async move {
+        handle
+            .test_context()
+            .priority_call(|engine| Box::pin(engine.cursor()), Duration::from_secs(3))
+            .await
+    })
+}
+
+#[tokio::test]
+async fn session_host_priority_call_dequeues_before_queued_bulk() -> Case {
+    super::watchdog(async {
+        let (handle, mut io) = fixture().await?;
+        let first = cursor(handle.clone(), Instant::now() + Duration::from_secs(600));
+        assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Cursor { .. })));
+        let bulk = cursor(handle.clone(), Instant::now() + Duration::from_secs(600));
+        wait_for_queued(&handle, 1, 0).await;
+        let receipt = receipt_cursor(handle.clone());
+        wait_for_queued(&handle, 1, 1).await;
+        send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
+        first.await??;
+        assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Cursor { .. })));
+        send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
+        receipt.await??;
+        assert!(!bulk.is_finished());
+        assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Cursor { .. })));
+        send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
+        bulk.await??;
+        handle.stop().await;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn receipt_waits_at_most_one_inflight_bulk_call() -> Case {
+    super::watchdog(async {
+        let (handle, mut io) = fixture().await?;
+        let first = cursor(handle.clone(), Instant::now() + Duration::from_secs(600));
+        assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Cursor { .. })));
+        let mut bulk = Vec::new();
+        // Fill all bulk places: the receipt still has reserved admission capacity.
+        for _ in 0..super::super::CALL_QUEUE {
+            bulk.push(cursor(handle.clone(), Instant::now() + Duration::from_secs(600)));
+        }
+        wait_for_queued(&handle, super::super::CALL_QUEUE, 0).await;
+        let receipt = receipt_cursor(handle.clone());
+        wait_for_queued(&handle, super::super::CALL_QUEUE, 1).await;
+        send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
+        first.await??;
+        assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Cursor { .. })));
+        send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
+        receipt.await??;
+        assert!(bulk.iter().all(|call| !call.is_finished()));
+        for call in bulk {
+            call.abort();
+            let _ = call.await;
+        }
+        handle.stop().await;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_host_receipt_deadline_counts_from_dequeue() -> Case {
+    super::watchdog(async {
+        let (handle, mut io) = fixture().await?;
+        let first = cursor(handle.clone(), Instant::now() + Duration::from_secs(600));
+        assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Cursor { .. })));
+        let receipt = receipt_cursor(handle.clone());
+        wait_for_queued(&handle, 0, 1).await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(!receipt.is_finished(), "queue wait must not consume the exchange budget");
+        send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
+        first.await??;
+        assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Cursor { .. })));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(!receipt.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(receipt.await?.is_err(), "the exchange must expire three seconds after dequeue");
+        handle.stop().await;
+        Ok(())
+    })
+    .await
+}

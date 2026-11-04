@@ -104,6 +104,7 @@ impl RamfluxClient {
             operation_id: operation.into(),
             transfer_state: if attempts > 1 { "retrying" } else { "fetching" }.into(),
             last_error: None,
+            retryable: true,
             attempts,
         };
         // F0 is durable before the slot may issue its first GET.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! FIFO uncorrelated RPC ownership, independent queued expiry, and cancellation retirement.
+//! Priority-first uncorrelated RPC ownership, independent queued expiry, and cancellation retirement.
 
 use super::{
     Call, Child, ConnectionHandle, DisconnectReason, RuntimeTimeouts, expire_calls, expired,
@@ -38,8 +38,15 @@ pub(super) async fn run(
         if let Some(reason) = handle.take_retirement() {
             return HostExit::Retired(reason);
         }
+        while let Ok(call) = calls.try_recv() {
+            queue.push_back(call);
+        }
         expire_calls(handle, &mut queue);
-        if let Some(call) = queue.pop_front() {
+        let next = queue
+            .iter()
+            .position(|call| call.class == super::CallClass::Priority)
+            .or_else(|| (!queue.is_empty()).then_some(0));
+        if let Some(call) = next.and_then(|index| queue.remove(index)) {
             if call.generation != handle.generation() {
                 let _ = call.reply.send(Err(handle.pending()));
                 continue;
@@ -110,7 +117,8 @@ async fn exchange(
     }
     drop(call.place);
     let before = engine.wire_writes;
-    let deadline = call.deadline.min(Instant::now() + timeouts.call);
+    let deadline =
+        call.deadline.min(Instant::now() + call.exchange_timeout.unwrap_or(timeouts.call));
     let operation = (call.operation)(engine);
     let result;
     let mut interrupted = None;

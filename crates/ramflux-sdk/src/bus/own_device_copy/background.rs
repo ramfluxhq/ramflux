@@ -214,7 +214,7 @@ fn finish(
 }
 fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     let now = now_unix_timestamp();
-    for (key, mut work) in pending_ordered(&account.client)? {
+    for (key, mut work) in pending_ordered(&account.client, now)? {
         if (!work.local_manifest && message_owner(&work).is_some())
             || work.intent.created_at.saturating_add(600) <= now
             || work.attempts >= 10

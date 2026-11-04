@@ -4,7 +4,7 @@
 //! Independent ACK progress and bounded retry parking for prepared sibling targets.
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Target {
     device: String,
     attempts: u32,
@@ -12,6 +12,7 @@ pub(super) struct Target {
     acknowledged: bool,
 }
 
+#[cfg(test)]
 impl Target {
     pub(super) fn new(device: String, attempts: u32, next_at: i64) -> Self {
         Self { device, attempts, next_at, acknowledged: false }

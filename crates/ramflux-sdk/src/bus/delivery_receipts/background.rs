@@ -59,9 +59,7 @@ pub(crate) async fn run(context: SessionContext, writer: mpsc::Sender<AccountWor
         let result = tokio::select! {
             biased;
             _ = cancel.changed() => break,
-            result = tokio::time::timeout_at(context.receipt_deadline(), pass(&context, &writer)) => {
-                result.unwrap_or_else(|_| Err(stopped()))
-            },
+            result = pass(&context, &writer) => result,
         };
         let failed = result.is_err();
         let active = match result {
@@ -104,9 +102,9 @@ async fn pass(
         .map_err(|_| stopped())?;
     let Some((plan, packet)) = response.await.map_err(|_| stopped())?? else { return Ok(true) };
     let outcome = context
-        .call(
+        .priority_call(
             move |engine| Box::pin(async move { engine.submit_envelope(packet).await.map(|_| ()) }),
-            context.call_deadline(),
+            context.receipt_timeout(),
         )
         .await;
     let (reply, response) = oneshot::channel();

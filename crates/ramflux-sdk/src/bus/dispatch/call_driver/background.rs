@@ -236,9 +236,9 @@ async fn exchange_lease(
     }
     let request = lease.request;
     let result = context
-        .call(
+        .priority_call(
             move |engine| Box::pin(async move { engine.voice_lease(request).await }),
-            context.call_deadline(),
+            context.call_deadline().saturating_duration_since(tokio::time::Instant::now()),
         )
         .await;
     let refused = matches!(result, Ok(VoiceLeaseResponse::Refused { .. }));
@@ -344,7 +344,8 @@ async fn send_controls(
             let envelope =
                 writer.apply(move |account| seal_control(account, control, material)).await?;
             let Some(envelope) = envelope else { return Ok(false) };
-            federation::submit(context, envelope, route).await?;
+            federation::submit_until(context, envelope, route, context.call_deadline(), true)
+                .await?;
         }
         Ok(true)
     }
@@ -464,9 +465,9 @@ async fn release(context: &SessionContext, writer: &Writer, id: &str) -> Result<
     }
     let request = VoiceLeaseRequest::Release { scope: scope(&plan.original) };
     let result = context
-        .call(
+        .priority_call(
             move |engine| Box::pin(async move { engine.voice_lease(request).await }),
-            context.call_deadline(),
+            context.call_deadline().saturating_duration_since(tokio::time::Instant::now()),
         )
         .await;
     writer

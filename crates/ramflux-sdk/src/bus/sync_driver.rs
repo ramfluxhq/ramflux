@@ -176,23 +176,6 @@ pub(crate) fn prepare_receive(
     Ok(super::connection_manager::ReceivePlan { cursor, limit: 64, retries, backpressure })
 }
 
-async fn courier_count(
-    deadline: tokio::time::Instant,
-    courier: &'static str,
-    future: impl std::future::Future<Output = Result<usize, SdkError>>,
-) -> usize {
-    if deadline.saturating_duration_since(tokio::time::Instant::now()) < Duration::from_secs(1) {
-        return 0;
-    }
-    match future.await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error, courier, "lower-priority courier deferred");
-            0
-        }
-    }
-}
-
 /// Projection is best-effort; the durable message remains available when its claim cannot be written.
 pub(crate) fn project_committed_message(
     account: &mut LocalBusAccountState,

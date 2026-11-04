@@ -147,6 +147,7 @@ fn pending_ordered(client: &RamfluxClient, now: i64) -> Result<Vec<(String, Work
     });
     Ok(ordered)
 }
+#[cfg(test)]
 fn persist_work(client: &RamfluxClient, key: &str, work: &Work) -> Result<bool, SdkError> {
     let db = client.account_db()?;
     db.write_transaction(|| {
@@ -162,6 +163,7 @@ fn persist_work(client: &RamfluxClient, key: &str, work: &Work) -> Result<bool, 
     })
 }
 
+#[cfg(test)]
 async fn prepare_work(
     account: &mut LocalBusAccountState,
     id: &str,
@@ -215,6 +217,7 @@ async fn prepare_work(
     Ok(true)
 }
 
+#[cfg(test)]
 fn finish_attempt(
     client: &RamfluxClient,
     id: &str,

@@ -74,29 +74,63 @@ pub(crate) async fn submit(
     envelope: ramflux_protocol::Envelope,
     route: Option<LocalBusFederationRoute>,
 ) -> Result<(), SdkError> {
+    submit_until(context, envelope, route, context.call_deadline(), false).await
+}
+
+pub(crate) async fn submit_until(
+    context: &SessionContext,
+    envelope: ramflux_protocol::Envelope,
+    route: Option<LocalBusFederationRoute>,
+    deadline: tokio::time::Instant,
+    priority: bool,
+) -> Result<(), SdkError> {
     if let Some(route) = route {
+        if deadline <= tokio::time::Instant::now() {
+            return Err(SdkError::TaskDeliveryTimeout);
+        }
+        let _permit = crate::client::federation::forward_slots()
+            .try_acquire()
+            .map_err(|_| SdkError::TaskForwardWorkerCapacity)?;
         let request = crate::client::federation::federated_forward_request(&route, envelope);
-        let response =
+        let response = tokio::time::timeout_at(
+            deadline,
             crate::prekey::http_async::post::<_, crate::SdkFederatedEnvelopeForwardResponse>(
                 &route.federation_url,
                 "/s8/federation/forward",
                 &request,
-                context.network_wait(),
-            )
-            .await?;
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            ),
+        )
+        .await
+        .map_err(|_| SdkError::TaskDeliveryTimeout)?
+        .map_err(|error| match error {
+            SdkError::Io(ref io) if io.kind() == std::io::ErrorKind::TimedOut => {
+                SdkError::TaskDeliveryTimeout
+            }
+            other => other,
+        })?;
         if !response.accepted {
             return Err(SdkError::InboundPending(
                 "group state federation submission refused".into(),
             ));
         }
         Ok(())
+    } else if priority {
+        context
+            .priority_call(
+                move |engine| {
+                    Box::pin(async move { engine.submit_envelope(envelope).await.map(|_| ()) })
+                },
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+            .await
     } else {
         context
             .call(
                 move |engine| {
                     Box::pin(async move { engine.submit_envelope(envelope).await.map(|_| ()) })
                 },
-                context.call_deadline(),
+                deadline,
             )
             .await
     }

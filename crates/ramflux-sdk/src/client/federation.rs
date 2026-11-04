@@ -10,6 +10,10 @@ pub(crate) use async_send::PlaintextForward;
 
 mod forward;
 
+pub(crate) fn forward_slots() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
+    forward::slots()
+}
+
 struct FederatedSendOptions {
     franking: bool,
     route: crate::client::routed::Route,

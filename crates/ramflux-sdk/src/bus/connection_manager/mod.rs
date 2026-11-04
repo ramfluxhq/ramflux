@@ -118,6 +118,7 @@ pub(crate) struct ConnectionHandle {
     shared: Arc<Shared>,
     calls: mpsc::Sender<Call>,
     places: Arc<Semaphore>,
+    priority_places: Arc<Semaphore>,
     children: mpsc::Sender<Child>,
     safety_refresh: mpsc::Sender<String>,
     task_delivery: crate::bus::task_courier_apply::background::Queue,
@@ -125,7 +126,15 @@ pub(crate) struct ConnectionHandle {
     finished: watch::Receiver<bool>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallClass {
+    Priority,
+    Bulk,
+}
+
 struct Call {
+    class: CallClass,
+    exchange_timeout: Option<std::time::Duration>,
     operation: Operation,
     deadline: Instant,
     generation: u64,
@@ -160,7 +169,10 @@ impl SessionContext {
         Instant::now() + self.connection.shared.timeouts.call
     }
     pub(crate) fn receipt_deadline(&self) -> Instant {
-        Instant::now() + self.connection.shared.timeouts.receipt
+        Instant::now() + self.receipt_timeout()
+    }
+    pub(crate) fn receipt_timeout(&self) -> std::time::Duration {
+        self.connection.shared.timeouts.receipt
     }
     pub(crate) fn network_wait(&self) -> std::time::Duration {
         self.connection.shared.timeouts.network_wait
@@ -178,6 +190,25 @@ impl SessionContext {
         kinds: impl IntoIterator<Item = FrameKind>,
     ) -> SessionSubscription {
         self.connection.subscribe(kinds)
+    }
+    pub(crate) async fn priority_call<T, F>(
+        &self,
+        operation: F,
+        exchange_timeout: std::time::Duration,
+    ) -> Result<T, SdkError>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(&'a mut GatewaySessionEngine) -> SessionFuture<'a, T> + Send + 'static,
+    {
+        self.connection
+            .call_class_generation(
+                operation,
+                self.call_deadline() + exchange_timeout,
+                self.generation,
+                CallClass::Priority,
+                Some(exchange_timeout),
+            )
+            .await
     }
     pub(crate) async fn call<T, F>(&self, operation: F, deadline: Instant) -> Result<T, SdkError>
     where
@@ -259,7 +290,7 @@ impl ConnectionHandle {
             retirement: std::sync::Mutex::new(None),
             retirement_changed: Notify::new(),
         });
-        let (calls, receive) = mpsc::channel(CALL_QUEUE);
+        let (calls, receive) = mpsc::channel(2 * CALL_QUEUE);
         let (children, registrations) = mpsc::channel(32);
         let (stop, stopping) = watch::channel(false);
         let (complete, finished) = watch::channel(false);
@@ -272,6 +303,7 @@ impl ConnectionHandle {
             shared,
             calls,
             places: Arc::new(Semaphore::new(CALL_QUEUE)),
+            priority_places: Arc::new(Semaphore::new(CALL_QUEUE)),
             children,
             stop,
             finished,
@@ -399,18 +431,38 @@ impl ConnectionHandle {
         T: Send + 'static,
         F: for<'a> FnOnce(&'a mut GatewaySessionEngine) -> SessionFuture<'a, T> + Send + 'static,
     {
+        self.call_class_generation(operation, deadline, generation, CallClass::Bulk, None).await
+    }
+    async fn call_class_generation<T, F>(
+        &self,
+        operation: F,
+        deadline: Instant,
+        generation: u64,
+        class: CallClass,
+        exchange_timeout: Option<std::time::Duration>,
+    ) -> Result<T, SdkError>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(&'a mut GatewaySessionEngine) -> SessionFuture<'a, T> + Send + 'static,
+    {
         if self.snapshot().state != NetworkingState::Live
             || generation != self.generation()
             || self.retirement_requested()
         {
             return Err(self.pending());
         }
-        let place = Arc::clone(&self.places).try_acquire_owned().map_err(|_| full())?;
+        let places = match class {
+            CallClass::Priority => &self.priority_places,
+            CallClass::Bulk => &self.places,
+        };
+        let place = Arc::clone(places).try_acquire_owned().map_err(|_| full())?;
         let (reply, response) = oneshot::channel();
         let (cancel, cancelled) = watch::channel(false);
         let _cancel = CancelOnDrop { cancel, changed: Arc::clone(&self.shared.call_changed) };
         self.calls
             .try_send(Call {
+                class,
+                exchange_timeout,
                 operation: Box::new(move |engine| {
                     Box::pin(async move {
                         operation(engine).await.map(|result| Box::new(result) as Erased)

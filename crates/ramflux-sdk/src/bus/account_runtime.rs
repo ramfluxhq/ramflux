@@ -19,7 +19,6 @@ pub(super) mod uploads;
 type ReaderSlot = Arc<RoutingMutex<Option<AccountReaders>>>;
 
 // Two five-second directory attempts plus local backfill staging.
-const BACKFILL_MINIMUM: Duration = Duration::from_secs(11);
 
 pub(super) struct Bootstrap {
     pub timeouts: super::runtime_limits::RuntimeTimeouts,
@@ -48,7 +47,6 @@ struct AccountRuntime {
     events: mpsc::Sender<EventBatch>,
     shutdown: watch::Receiver<bool>,
     courier: Option<super::task_courier::TaskCourier>,
-    courier_cycle: super::courier_cycle::Cycle,
     transfers: uploads::Transfers,
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
@@ -105,7 +103,6 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         events,
         shutdown,
         courier: None,
-        courier_cycle: super::courier_cycle::Cycle::default(),
         transfers: uploads::Transfers::start(),
         connection_sender,
         connection_work,
@@ -170,7 +167,6 @@ impl AccountRuntime {
         }
         match outcome {
             super::task_courier::Outcome::Requested { job_id } => {
-                self.courier_cycle = super::courier_cycle::Cycle::default();
                 tracing::trace!(job_id, "task courier pass requested");
                 let requests = if let Some(account) = self
                     .state
