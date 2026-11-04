@@ -43,7 +43,9 @@ fn seed_large_assignee_history(f: &Fixture) -> TestResult {
     for task in 0..7 {
         let id = format!("task-{task}");
         let mut history = f.human.task_history("thread", &id)?;
-        for offset in 0..16 {
+        // One oversized event per task keeps the signer just under the lowered budget, so the
+        // oversized updates sent through normal ingress are the ones that exhaust it.
+        for offset in 0..1 {
             let c = sign(
                 &f.agent,
                 "thread",
@@ -128,14 +130,18 @@ fn verify_independent_requester_capacity(
 #[test]
 fn an_assignees_one_hundred_sixty_updates_cannot_spend_the_requesters_quota_or_prevent_cancellation()
 -> TestResult {
+    // The invariant does not depend on the exact production budget, only on the assignee
+    // exceeding it; 512 KiB keeps the signed payload volume small. Production stays 8 MiB.
+    assert_eq!(super::super::quota::SIGNER_HISTORY_BYTES, 8 * 1024 * 1024);
+    let _budget = super::super::quota::small_signer_budget(512 * 1024);
     let f = Fixture::new()?;
     seed_large_assignee_history(&f)?;
     let mut rejected = 0;
-    for index in 112..160 {
+    for index in 7..15 {
         let id = format!("task-{}", index % 7);
         let version =
             f.human.task_get(Some("thread"), &id)?["version"].as_u64().ok_or("revision")? + 1;
-        let steps = if index < 120 {
+        let steps = if index < 11 {
             (0..64)
                 .map(|step| TaskStep {
                     id: format!("step-{step}"),

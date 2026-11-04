@@ -9,6 +9,34 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 const SIGNER_QUOTA: &str = "task signer history quota reached";
+/// Per-signer history byte budget, per account and per conversation.
+pub(super) const SIGNER_HISTORY_BYTES: u64 = 8 * 1024 * 1024;
+#[cfg(test)]
+thread_local! {
+    static BYTE_BUDGET_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+/// Test-only: lowers the signer byte budget on the current thread until the guard drops.
+/// Task projection runs synchronously on the calling thread, so no other test sees it.
+#[cfg(test)]
+pub(super) struct SmallBudget;
+#[cfg(test)]
+pub(super) fn small_signer_budget(bytes: u64) -> SmallBudget {
+    BYTE_BUDGET_OVERRIDE.with(|cell| cell.set(Some(bytes)));
+    SmallBudget
+}
+#[cfg(test)]
+impl Drop for SmallBudget {
+    fn drop(&mut self) {
+        BYTE_BUDGET_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+fn signer_history_bytes() -> u64 {
+    #[cfg(test)]
+    if let Some(bytes) = BYTE_BUDGET_OVERRIDE.with(std::cell::Cell::get) {
+        return bytes;
+    }
+    SIGNER_HISTORY_BYTES
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct Usage {
     pub(super) bytes: u64,
@@ -167,8 +195,8 @@ impl RamfluxClient {
                     "task requester decision quota reached",
                 ));
             }
-        } else if total.bytes > 8 * 1024 * 1024
-            || conversation.bytes > 8 * 1024 * 1024
+        } else if total.bytes > signer_history_bytes()
+            || conversation.bytes > signer_history_bytes()
             || total.events > 8192
             || conversation.events > 4096
             || (matches!(c.event()?.event(), TaskEventBody::Start(_) | TaskEventBody::Proposal(_))

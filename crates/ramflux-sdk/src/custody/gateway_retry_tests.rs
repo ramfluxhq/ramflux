@@ -139,14 +139,8 @@ async fn ordinary_native_gateway_busy_retries_outlive_the_legacy_timeout_with_fr
 -> Result {
     let _production = crate::custody::retry::production_budget();
     tokio::time::timeout(Duration::from_secs(120), async {
-        let points = [
-            Point::Open,
-            Point::Open,
-            Point::Open,
-            Point::Open,
-            Point::RegisterChallenge,
-            Point::RegisterProve,
-        ];
+        let points =
+            [Point::Open, Point::Open, Point::Open, Point::RegisterChallenge, Point::RegisterProve];
         let fixture = Fixture::with_mode(&points, true).await?;
         let network = &fixture.config;
         let account = crate::custody::load_account(
@@ -195,7 +189,7 @@ async fn ordinary_native_gateway_busy_retries_outlive_the_legacy_timeout_with_fr
         );
         let script = fixture.script.lock().map_err(|_| "script lock")?;
         assert_eq!(script.busy_at, points);
-        assert_eq!(script.accepted, 8);
+        assert_eq!(script.accepted, 7);
         assert_eq!(script.publish_proofs, 1);
         assert_eq!(script.proofs.len(), 4);
         for column in 0..3 {

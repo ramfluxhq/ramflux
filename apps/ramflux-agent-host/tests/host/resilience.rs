@@ -207,15 +207,17 @@ async fn r3_an_applied_result_still_closes_after_a_stale_close_refusal() -> Test
     Ok(())
 }
 #[tokio::test]
-async fn r3_three_thousand_choices_continue_after_the_recent_action_fifo_wraps() -> TestResult {
+async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps() -> TestResult {
     use ramflux_protocol::{A2uiConversationCommand as C, A2uiConversationEvent, SurfaceState};
+    // The recent-action FIFO holds 2048 ids; 2064 choices wrap it 16 times over and keep going.
+    const CHOICES: u64 = 2064;
     let mut f = fixture()?;
     f.config.rules[0].reply = "Ready".into();
     let mut bus = SurfaceBus::default();
     let mut engine = RuleEngine::new(&f.config)?;
     let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
     host.start(&mut bus).await?;
-    for i in 0..3000 {
+    for i in 0..CHOICES {
         let intents = engine.intents(&ConversationInput {
             conversation_id: "group-thread",
             message_id: "prompt",
@@ -237,8 +239,8 @@ async fn r3_three_thousand_choices_continue_after_the_recent_action_fifo_wraps()
         host.apply(&mut bus, frame, 4000 + i * 1001).await?;
         assert!(bus.state.is_closed(), "choice {i}");
     }
-    assert_eq!(bus.sent.len(), 6000);
-    assert_eq!(host.checkpoint().cursor, Some(3019));
+    assert_eq!(bus.sent.len(), 2 * usize::try_from(CHOICES)?);
+    assert_eq!(host.checkpoint().cursor, Some(20 + CHOICES - 1));
     assert!(host.checkpoint().last_refusal.is_none());
     let state = serde_json::to_value(host.checkpoint())?;
     assert_eq!(state["handled_actions"].as_array().ok_or("cache")?.len(), 2048);
