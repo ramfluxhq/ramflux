@@ -39,6 +39,7 @@ pub(super) struct Supervisor {
     stop_requested: watch::Sender<bool>,
     stop_response: watch::Sender<bool>,
     stop_owner: RefCell<Option<(u64, String)>>,
+    lifecycle_tasks: RefCell<tokio::task::JoinSet<()>>,
 }
 
 impl Supervisor {
@@ -67,6 +68,7 @@ impl Supervisor {
             stop_requested,
             stop_response,
             stop_owner: RefCell::new(None),
+            lifecycle_tasks: RefCell::new(tokio::task::JoinSet::new()),
             events,
             event_receiver: RefCell::new(Some(event_receiver)),
             event_task: RefCell::new(None),
@@ -219,12 +221,41 @@ impl Supervisor {
 
     pub(super) async fn request(
         &self,
-        mut request: LocalBusFrame,
+        request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
         if !super::lifecycle::handles(&request.method) {
             return self.route(request, connection).await;
         }
+        let keyed = request.operation_id.is_some()
+            || request.body.get("idempotency_key").and_then(serde_json::Value::as_str).is_some();
+        if !keyed {
+            return Box::pin(self.lifecycle_request(request, connection)).await;
+        }
+        self.ensure_request_allowed(&request)?;
+        let owner = self
+            .owner
+            .borrow()
+            .upgrade()
+            .ok_or_else(|| SdkError::LocalBus("supervisor is stopping".to_owned()))?;
+        let connection = connection.clone();
+        let (send, receive) = oneshot::channel();
+        {
+            let mut tasks = self.lifecycle_tasks.borrow_mut();
+            while tasks.try_join_next().is_some() {}
+            tasks.spawn_local(super::command_admission::RETAIN_COMPLETION.scope((), async move {
+                let result = owner.lifecycle_request(request, &connection).await;
+                let _ = send.send(result);
+            }));
+        }
+        receive.await.map_err(|_| SdkError::LocalBus("lifecycle task cancelled".to_owned()))?
+    }
+
+    async fn lifecycle_request(
+        &self,
+        mut request: LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<ActorResponse, SdkError> {
         if request.method == "account.backup.import" {
             request.account_id = Some(super::lifecycle::import_account_id(&request).await?);
         }
@@ -246,6 +277,10 @@ impl Supervisor {
         let result = self.route(request, connection).await;
         if let (Some(receipt), Ok(response)) = (receipt, &result) {
             super::lifecycle::complete(self.index.clone(), receipt, response.body.clone()).await?;
+            #[cfg(test)]
+            if let Some(gate) = &self.config.lifecycle_gate {
+                gate.completed.notify_one();
+            }
         }
         result
     }

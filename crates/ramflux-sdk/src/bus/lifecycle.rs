@@ -99,3 +99,24 @@ pub(super) async fn import_account_id(request: &LocalBusFrame) -> Result<String,
         .await
         .map_err(|error| SdkError::LocalBus(format!("backup inspection failed: {error}")))?
 }
+
+/// Holds a keyed operation after actor claim and signals durable receipt completion.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestGate {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+    pub completed: tokio::sync::Notify,
+    pub executions: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+pub(super) async fn hold_claimed(config: &LocalBusConfig, command: &super::actor::AccountCommand) {
+    if command.request.method == "account.unlock"
+        && let Some(gate) = &config.lifecycle_gate
+    {
+        gate.executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+}

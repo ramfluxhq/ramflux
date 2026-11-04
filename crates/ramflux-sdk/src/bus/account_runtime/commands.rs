@@ -135,6 +135,8 @@ impl AccountRuntime {
             return Ok(false);
         }
 
+        #[cfg(test)]
+        super::super::lifecycle::hold_claimed(&self.state.config, &command).await;
         if let Some(backup) = command.private.take() {
             self.apply_private(backup, &command.request).await?;
             return Ok(false);

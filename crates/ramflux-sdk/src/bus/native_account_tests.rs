@@ -466,7 +466,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         assert_eq!(account.networking, CreationState::NetworkingPending);
         assert_eq!(account.display_name, "New Ordinary Human");
         ceremony.cancel().await?;
-        local_first::wait_for_reason(&socket, &account.account_id).await?;
+        local_first::wait_for_reason(&socket, &account.account_id, "no_node_selected").await?;
         let status = ordinary
             .request(Some(account.account_id.clone()), "account", "account.status", json!({}))
             .await?;
@@ -673,7 +673,7 @@ async fn per_account_home_node_does_not_change_daemon_default() -> Result {
         let account =
             ceremony.confirm(&answers, &Zeroizing::new("selected node data secret".into())).await?;
         assert_eq!(account.networking, CreationState::NetworkingPending);
-        local_first::wait_for_reason(&socket, &account.account_id).await?;
+        local_first::wait_for_reason(&socket, &account.account_id, "node_unreachable").await?;
         let status = ordinary
             .request(Some(account.account_id), "account", "account.status", json!({}))
             .await?;
@@ -698,6 +698,15 @@ async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
     // node_unreachable for silence) without waiting out the production 90 s budget.
     let test_retry_budget = matches!(cause, GatewayCause::PoolBusy | GatewayCause::BlackHole)
         .then(|| Duration::from_secs(4));
+    let expected_kind = match &cause {
+        GatewayCause::BlackHole => "node_unreachable",
+        GatewayCause::NoCustody => "node_custody_unavailable",
+        GatewayCause::ShortExpiry => "custody_expired",
+        GatewayCause::Refused(_) => "registration_refused",
+        GatewayCause::PoolBusy | GatewayCause::DailyQuota(_) | GatewayCause::Admission(_, _) => {
+            "node_busy"
+        }
+    };
     let root = Root::new()?;
     let gateway = CauseGateway::start(&root.0, cause).await?;
     let profile =
@@ -727,7 +736,7 @@ async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
         drop(phrase);
         let account =
             ceremony.confirm(&answers, &Zeroizing::new("gateway cause secret".into())).await?;
-        local_first::wait_for_reason(&socket, &account.account_id).await?;
+        local_first::wait_for_reason(&socket, &account.account_id, expected_kind).await?;
         let status = ordinary
             .request(Some(account.account_id), "account", "account.status", json!({}))
             .await?;

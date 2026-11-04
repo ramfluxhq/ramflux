@@ -623,6 +623,7 @@ impl LocalBusAccountState {
         Ok(pool)
     }
 }
+#[derive(Clone)]
 pub(crate) struct LocalBusConnectionState {
     pub(crate) connection_id: u64,
     pub(crate) outbound: mpsc::Sender<LocalBusFrame>,

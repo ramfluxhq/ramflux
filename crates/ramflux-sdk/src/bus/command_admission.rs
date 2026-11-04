@@ -22,6 +22,7 @@ pub(super) struct CommandAdmission {
     residence_deadline: Instant,
     post_claim_deadline: Instant,
     state: AtomicU8,
+    pub(super) retain_completion: bool,
     #[cfg(test)]
     pub expired_replies: Option<std::sync::Arc<ExpiredReplies>>,
 }
@@ -34,6 +35,7 @@ impl CommandAdmission {
             residence_deadline: admitted_at + timeouts.network_wait,
             post_claim_deadline: admitted_at + timeouts.post_claim,
             state: AtomicU8::new(QUEUED),
+            retain_completion: RETAIN_COMPLETION.try_with(|()| ()).is_ok(),
             #[cfg(test)]
             expired_replies: None,
         }
@@ -74,6 +76,11 @@ impl CommandAdmission {
             }
             Err(_) => {}
         }
+        // A supervisor-owned receipt must observe the actual result after claim.
+        // The queue residence fence above still rejects work that never started.
+        if self.retain_completion {
+            return response.await.map_err(|_| unavailable("account command cancelled"))?;
+        }
         timeout_at(self.post_claim_deadline, response)
             .await
             .map_err(|_| unavailable("account command deadline expired"))?
@@ -89,7 +96,10 @@ pub(super) fn unavailable(message: &'static str) -> SdkError {
     .into()
 }
 
-tokio::task_local! { pub(super) static COMMAND_CONTEXT: Instant; }
+tokio::task_local! {
+    pub(super) static COMMAND_CONTEXT: Instant;
+    pub(super) static RETAIN_COMPLETION: ();
+}
 pub(super) fn current_deadline() -> Option<Instant> {
     COMMAND_CONTEXT.try_with(|deadline| *deadline).ok()
 }

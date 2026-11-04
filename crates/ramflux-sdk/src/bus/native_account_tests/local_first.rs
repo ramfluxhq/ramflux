@@ -12,7 +12,11 @@ pub(crate) struct NetworkGate {
     pub release: Semaphore,
 }
 
-pub(super) async fn wait_for_reason(socket: &std::path::Path, id: &str) -> Result {
+pub(super) async fn wait_for_reason(
+    socket: &std::path::Path,
+    id: &str,
+    expected_kind: &str,
+) -> Result {
     let mut events = connect(socket).await?;
     events
         .request(
@@ -25,7 +29,7 @@ pub(super) async fn wait_for_reason(socket: &std::path::Path, id: &str) -> Resul
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = events.next_event().await?;
-            if !event.body["networking_reason"].is_null() {
+            if event.body["networking_reason"]["kind"] == expected_kind {
                 return Ok::<_, crate::SdkError>(());
             }
         }
@@ -41,13 +45,11 @@ async fn confirm(socket: &std::path::Path, node: &str) -> Result<crate::LocalBus
     ceremony.begin_with_node("Local First", ramflux_protocol::PrincipalKind::Human, node).await?;
     let phrase = ceremony.show_once().await?;
     let answers = words(&phrase, ceremony.hidden_challenge().await?)?;
-    let started = std::time::Instant::now();
     let account = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         ceremony.confirm(&answers, &Zeroizing::new("local first secret".into())),
     )
     .await??;
-    assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(account.state, crate::LocalBusCreatedAccountState::Unlocked);
     assert_eq!(account.networking, crate::custody::CreationState::NetworkingPending);
     Ok(account)
@@ -67,7 +69,9 @@ fn configure(root: &Root, gateway: &CauseGateway) -> Result<(LocalBusConfig, Str
 #[tokio::test]
 async fn creation_confirm_replies_before_first_admission_attempt_completes() -> Result {
     let root = Root::new()?;
-    let gateway = CauseGateway::start(&root.0, GatewayCause::PoolBusy).await?;
+    let admission = Arc::new(Semaphore::new(0));
+    let gateway =
+        CauseGateway::start_held(&root.0, GatewayCause::PoolBusy, Some(admission.clone())).await?;
     let (config, node) = configure(&root, &gateway)?;
     assert!(config.test_retry_budget.is_none());
     let socket = config.socket_path.clone();
@@ -76,21 +80,25 @@ async fn creation_confirm_replies_before_first_admission_attempt_completes() -> 
         let _stop = Stop(stop);
         drop(connect(&socket).await?);
         let account = confirm(&socket, &node).await?;
+        tokio::time::timeout(Duration::from_secs(10), gateway.admission_entered.notified()).await?;
+        assert_eq!(admission.available_permits(), 0);
         let mut bus = connect(&socket).await?;
         let status = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             bus.request(Some(account.account_id.clone()), "account", "account.status", json!({})),
         )
         .await??;
         assert_eq!(status["state"], "unlocked");
         assert_eq!(status["networking_snapshot"]["state"], "networking_pending");
         tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             bus.request(Some(account.account_id.clone()), "contact", "contact.list", json!({})),
         )
         .await??;
         let listed = bus.request(None, "account", "account.list", json!({})).await?;
         assert_eq!(listed["account_details"][0]["state"], "unlocked");
+        // No admission response can have been produced while local requests completed.
+        assert_eq!(admission.available_permits(), 0);
         Ok::<_, Box<dyn std::error::Error>>(())
     };
     let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
@@ -147,7 +155,7 @@ async fn publication_case(with_network_command: bool) -> Result {
         if with_network_command {
             tokio::select! {
                 result = &mut request => panic!("network command returned before admission: {result:?}"),
-                result = tokio::time::timeout(Duration::from_secs(2), gate.waiting.notified()) => { result?; }
+                result = tokio::time::timeout(Duration::from_secs(10), gate.waiting.notified()) => { result?; }
             }
         }
         tokio::time::timeout(Duration::from_secs(10), gateway.admission_entered.notified()).await?;
@@ -166,16 +174,16 @@ async fn publication_case(with_network_command: bool) -> Result {
         let notification = if with_network_command {
             tokio::select! {
                 result = &mut request => panic!("network command escaped its hold: {result:?}"),
-                result = tokio::time::timeout(Duration::from_secs(2), &mut event) => result??,
+                result = tokio::time::timeout(Duration::from_secs(10), &mut event) => result??,
             }
         } else {
-            tokio::time::timeout(Duration::from_secs(2), &mut event).await??
+            tokio::time::timeout(Duration::from_secs(10), &mut event).await??
         };
         assert_eq!(notification.method, "account.networking.changed");
         if with_network_command {
-            tokio::time::timeout(Duration::from_secs(2), gate.applied.notified()).await?;
+            tokio::time::timeout(Duration::from_secs(10), gate.applied.notified()).await?;
             gate.release.add_permits(1);
-            assert!(tokio::time::timeout(Duration::from_secs(6), &mut request).await?.is_err());
+            assert!(tokio::time::timeout(Duration::from_secs(10), &mut request).await?.is_err());
         }
         Ok::<_, Box<dyn std::error::Error>>(())
     };

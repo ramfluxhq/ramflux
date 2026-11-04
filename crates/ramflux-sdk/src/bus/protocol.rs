@@ -14,6 +14,8 @@ pub struct LocalBusConfig {
     pub custody_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
     #[cfg(test)]
     pub(crate) custody_confirm_completed: Option<std::sync::Arc<tokio::sync::Notify>>,
+    #[cfg(test)]
+    pub(crate) lifecycle_gate: Option<std::sync::Arc<super::lifecycle::TestGate>>,
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
@@ -1173,6 +1175,8 @@ impl LocalBusConfig {
             itest_legacy_accounts: false,
             #[cfg(test)]
             custody_confirm_completed: None,
+            #[cfg(test)]
+            lifecycle_gate: None,
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),
