@@ -808,7 +808,7 @@ mod migration_tests;
 
 #[cfg(test)]
 #[path = "router_engine_window_tests.rs"]
-mod window_tests;
+pub(crate) mod window_tests;
 
 #[cfg(test)]
 #[path = "router_engine_concurrency_tests.rs"]

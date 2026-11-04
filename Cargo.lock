@@ -2765,6 +2765,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "compio",
+ "ed25519-dalek",
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",

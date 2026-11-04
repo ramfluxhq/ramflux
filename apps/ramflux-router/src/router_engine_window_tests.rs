@@ -11,11 +11,36 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub(super) fn fixture(
     path: &std::path::Path,
 ) -> Result<ramflux_protocol::home_migration::RecordEvidence> {
+    fixture_at(path, "moving", None)
+}
+pub(crate) fn fixture_at(
+    path: &std::path::Path,
+    target: &str,
+    now: Option<u64>,
+) -> Result<ramflux_protocol::home_migration::RecordEvidence> {
     let f: serde_json::Value = serde_json::from_str(include_str!(
         "../../../crates/ramflux-crypto/tests/fixtures/home_migration_v1.json"
     ))?;
-    let head: ramflux_protocol::home_migration::RecordEvidence =
+    let mut head: ramflux_protocol::home_migration::RecordEvidence =
         serde_json::from_value(f["committed_home"].clone())?;
+    if let Some(now) = now {
+        let HomeRecord::Committed { commit_proof, .. } = &mut head.record else {
+            return Err("commit".into());
+        };
+        let mut body = commit_proof.body.clone();
+        body.committed_at = now;
+        body.forward_until = now + 86_400;
+        **commit_proof = ramflux_crypto::home_migration::sign_node(
+            body,
+            "A",
+            &ed25519_dalek::SigningKey::from_bytes(&[8; 32]),
+        )?;
+        ramflux_crypto::home_migration::verify_node(
+            commit_proof.as_ref(),
+            "A",
+            &head.node_record.body.node_signing_public_key,
+        )?;
+    }
     let HomeRecord::Committed { authorization, .. } = &head.record else {
         return Err("commit".into());
     };
@@ -35,7 +60,7 @@ pub(super) fn fixture(
         serde_json::to_vec(&Refusal::HomeMigrated)?.as_slice(),
     )?;
     tx.open_table(redb::TableDefinition::<&str, &[u8]>::new("migration_inbox_routes_v1"))?
-        .insert("moving", serde_json::to_vec(&serde_json::json!({"anchor":head.record.account_anchor(),
+        .insert(target, serde_json::to_vec(&serde_json::json!({"anchor":head.record.account_anchor(),
             "migration_id":authorization.body.migration_id,"epoch":head.record.epoch(),"active":false}))?.as_slice())?;
     let key = serde_json::to_string(&(
         head.record.account_anchor(),

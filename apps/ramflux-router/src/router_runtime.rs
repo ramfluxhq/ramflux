@@ -986,10 +986,10 @@ pub(crate) mod tests {
                         .ok_or_else(|| "missing real forward body".to_owned())?,
                 )
                 .map_err(|source| source.to_string())?;
-            let (_, source) = ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(
-                &forward.envelope,
-            )
-            .map_err(|source| source.to_string())?;
+            let source = router
+                .state()
+                .authenticated_envelope_source_durable(&forward.envelope, router.store())
+                .map_err(|source| source.to_string())?;
             let delivered = federation_store
                 .deliver_inbound_forward_once_with_lease(
                     &source,
@@ -1018,7 +1018,10 @@ pub(crate) mod tests {
                 nack: None,
             });
             let response = ramflux_node_core::FederatedEnvelopeForwardResponse {
-                accepted: matches!(delivery.outcome.as_str(), "online" | "offline_queued"),
+                accepted: matches!(
+                    delivery.outcome.as_str(),
+                    "online" | "offline_queued" | "duplicate_federated_forward"
+                ),
                 source_node_id: forward.source_node_id,
                 target_node_id: forward.target_node_id,
                 delivery,
@@ -1110,11 +1113,15 @@ pub(crate) mod tests {
         now: i64,
     ) -> anyhow::Result<(RouterHandle, PathBuf)> {
         let path = temp_store_path("migrated_runtime")?;
+        crate::router_engine::window_tests::fixture_at(
+            &path,
+            "target_alice",
+            Some(u64::try_from(now)?),
+        )
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
         let state = Arc::new(ramflux_node_core::RouterCore::new());
-        let request =
-            register_test_device_at(&state, "alice", "alice_phone", "target_alice", 1, now)?;
-        install_test_migration(&state, &request, "node-new.example")?;
+        register_test_device_at(&state, "alice", "alice_phone", "target_alice", 1, now)?;
         store.record_identity_registry(&state.mvp1_identities_snapshot())?;
         let client = LocalFederationForwardClient {
             url: url.to_owned(),
@@ -1167,6 +1174,16 @@ pub(crate) mod tests {
             &envelope,
             ramflux_crypto::blake3_256("ramflux.test.runtime.device.v1", b"alice/alice_phone"),
         )?;
+        let authority = ramflux_node_core::RouterCore::new();
+        register_test_device_at(
+            &authority,
+            "alice",
+            "alice_phone",
+            "target_alice",
+            1,
+            envelope.created_at,
+        )?;
+        authority.refresh_registered_envelope_authority(&mut envelope)?;
         Ok(envelope)
     }
 
@@ -1370,88 +1387,6 @@ pub(crate) mod tests {
         };
         state.mvp1_register_identity(&request)?;
         Ok(request)
-    }
-
-    fn install_test_migration(
-        state: &ramflux_node_core::RouterCore,
-        request: &ramflux_node_core::IdentityRegisterRequest,
-        new_home_node: &str,
-    ) -> anyhow::Result<()> {
-        install_signed_test_route(state, request, new_home_node)
-    }
-
-    fn install_signed_test_route(
-        state: &ramflux_node_core::RouterCore,
-        request: &ramflux_node_core::IdentityRegisterRequest,
-        new_home_node: &str,
-    ) -> anyhow::Result<()> {
-        let route_signer = ramflux_node_core::NodeServiceSigningKey::from_seed([0x73; 32]);
-        let new_home_node_key_hash = ramflux_crypto::blake3_256_base64url(
-            ramflux_protocol::domain::FEDERATION_HANDSHAKE,
-            route_signer.public_key_base64url().as_bytes(),
-        );
-        let expires_at = request.now.saturating_add(3_600);
-        let route_commitment = ramflux_node_core::HomeNodeRouteRecordCommitment {
-            schema: ramflux_node_core::HOME_NODE_ROUTE_RECORD_DOMAIN.to_owned(),
-            domain: ramflux_node_core::HOME_NODE_ROUTE_RECORD_DOMAIN.to_owned(),
-            new_home_node: new_home_node.to_owned(),
-            new_home_node_key_hash: new_home_node_key_hash.clone(),
-            node_public_key: route_signer.public_key_base64url().to_owned(),
-            node_endpoint: "new-home.example:7443".to_owned(),
-            expires_at,
-        };
-        let route_record_hash = ramflux_node_core::home_node_route_record_hash(&route_commitment)?;
-        let device = ramflux_crypto::create_device_branch(
-            &request.proof.principal_id,
-            &request.proof.device_id,
-            request.proof.device_epoch,
-            ramflux_crypto::blake3_256(
-                "ramflux.test.runtime.device.v1",
-                format!("{}/{}", request.proof.principal_id, request.proof.device_id).as_bytes(),
-            ),
-        );
-        let proof = ramflux_crypto::sign_home_node_migration_proof(
-            ramflux_protocol::HomeNodeMigrationProof {
-                schema: ramflux_protocol::domain::HOME_NODE_MIGRATION_PROOF.to_owned(),
-                domain: ramflux_protocol::domain::HOME_NODE_MIGRATION_PROOF.to_owned(),
-                signed: signed_fields(),
-                proof_id: "runtime_migration".to_owned(),
-                identity_commitment: request.proof.principal_id.clone(),
-                lineage_head: "runtime_lineage_head".to_owned(),
-                actor_device_id: request.proof.device_id.clone(),
-                actor_device_epoch: request.proof.device_epoch,
-                old_home_node: "node-old.example".to_owned(),
-                new_home_node: new_home_node.to_owned(),
-                new_home_node_key_hash: new_home_node_key_hash.clone(),
-                route_record_hash: route_record_hash.clone(),
-                effective_at: request.now,
-                expires_at,
-                issued_at: request.now.saturating_sub(1),
-                nonce: ramflux_protocol::encode_base64url("runtime-migration-nonce"),
-                branch_proof_hash: ramflux_crypto::branch_proof_document_hash(&request.proof)?,
-                previous_home_node_binding_hash: None,
-                old_home_node_handoff_signature: None,
-            },
-            &device,
-        )?;
-        let migration = state.apply_home_node_migration(&proof, &request.proof, request.now)?;
-        let mut update = ramflux_node_core::HomeNodeRouteUpdateProof {
-            schema: ramflux_node_core::HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN.to_owned(),
-            domain: ramflux_node_core::HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN.to_owned(),
-            signed: signed_fields(),
-            identity_commitment: request.proof.principal_id.clone(),
-            new_home_node: new_home_node.to_owned(),
-            new_home_node_key_hash,
-            node_public_key: route_signer.public_key_base64url().to_owned(),
-            node_endpoint: "new-home.example:7443".to_owned(),
-            route_record_hash,
-            migration_proof_hash: migration.migration_proof_hash,
-            issued_at: request.now,
-            expires_at,
-        };
-        route_signer.sign_home_node_route_update_proof(&mut update)?;
-        state.apply_home_node_route_update_proof(&update, request.now)?;
-        Ok(())
     }
 
     fn temp_store_path(test_name: &str) -> anyhow::Result<PathBuf> {

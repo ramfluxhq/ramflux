@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Explicit enabled preflight tests leave the production release interlock closed.
+//! Released migration startup requires the configured node signer.
 #[test]
 fn migration_enabled_startup_refuses_without_matching_node_signer()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -11,6 +11,7 @@ fn migration_enabled_startup_refuses_without_matching_node_signer()
         let output = std::process::Command::new(std::env::current_exe()?)
             .args(["--exact", NAME])
             .env("RAMFLUX_MIGRATION_PREFLIGHT_CHILD", "1")
+            .env("RAMFLUX_HOME_MIGRATION_ENABLED", "1")
             .env(
                 super::ROUTER_FEDERATION_FORWARD_URL_ENV,
                 "http://127.0.0.1:1/internal/home-node-migration/forward",
@@ -25,6 +26,7 @@ fn migration_enabled_startup_refuses_without_matching_node_signer()
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
         return Ok(());
     }
+    assert!(ramflux_node_core::home_migration_enabled()?);
     let mut config: ramflux_node_core::NodeServiceConfig = serde_json::from_value(
         serde_json::json!({
             "node_id": "A", "service_id": "ramflux-router", "redb_path": "unused.redb",

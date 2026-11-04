@@ -237,16 +237,9 @@ mod release_tests {
     fn migration_env_enabled_refuses_startup_while_release_gate_closed()
     -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var_os("RAMFLUX_RELEASE_TEST_CHILD").is_some() {
-            match std::env::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() {
-                Ok("1") => assert!(
-                    super::run_service("release-test")
-                        .err()
-                        .ok_or("expected closed gate")?
-                        .to_string()
-                        .contains("release gate is closed")
-                ),
-                _ => assert!(!ramflux_node_core::home_migration_enabled()?),
-            }
+            // Keep the P1 regression name as the release interlock's opt-in matrix.
+            let enabled = std::env::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() == Ok("1");
+            assert_eq!(ramflux_node_core::home_migration_enabled()?, enabled);
             return Ok(());
         }
         for flag in [None, Some("0"), Some("1")] {

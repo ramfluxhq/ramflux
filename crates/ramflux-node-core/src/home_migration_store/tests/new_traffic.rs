@@ -222,3 +222,75 @@ fn router_redb_store_restores_home_node_route_state() -> TestResult {
     assert_eq!(restored.new_home_node, "B");
     Ok(())
 }
+
+#[test]
+fn blocked_federation_forward_does_not_hold_submission_shard_lock() -> TestResult {
+    let s = Scenario::prepared()?;
+    s.commit(&s.seal()?)?;
+    let (source, envelope) = input(&s)?;
+    let RouterForwardPreparation::Forward(held) = s.a.core.prepare_committed_home_forward(
+        s.a.store()?,
+        &source,
+        envelope.clone(),
+        NOW + 3,
+        1,
+    )?
+    else {
+        return Err("reservation required".into());
+    };
+    // Keep the reservation alive while another thread submits to the same index shard.
+    std::thread::scope(|scope| -> TestResult {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let core = &s.a.core;
+        let source = &source;
+        let mut other = envelope.clone();
+        other.target_delivery_id = "unrelated-target".into();
+        other.created_at = i64::try_from(NOW + 3)?;
+        let submit_now = i64::try_from(NOW + 3)?;
+        scope.spawn(move || {
+            let _sent = tx.send(core.submit_envelope_at(source, other, submit_now));
+        });
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(1))?,
+            RouterSubmitOutcome::OfflineQueued(_) | RouterSubmitOutcome::Online(_)
+        ));
+        Ok(())
+    })?;
+    assert!(matches!(s.a.core.prepare_committed_home_forward(
+        s.a.store()?, &source, envelope.clone(), NOW + 3, 1,
+    )?, RouterForwardPreparation::Complete(outcome)
+        if matches!(*outcome, RouterSubmitOutcome::ForwardInProgress { .. })));
+    drop(held);
+    let RouterForwardPreparation::Forward(retry) = s.a.core.prepare_committed_home_forward(
+        s.a.store()?,
+        &source,
+        envelope.clone(),
+        NOW + 3,
+        1,
+    )?
+    else {
+        return Err("drop must release reservation".into());
+    };
+    // A lost worker's lease can be reclaimed; dropping its old guard cannot release the new one.
+    let RouterForwardPreparation::Forward(reclaimed) = s.a.core.prepare_committed_home_forward(
+        s.a.store()?,
+        &source,
+        envelope.clone(),
+        NOW + 4,
+        1,
+    )?
+    else {
+        return Err("expired lease must be reclaimed".into());
+    };
+    drop(retry);
+    assert!(matches!(s.a.core.prepare_committed_home_forward(
+        s.a.store()?, &source, envelope.clone(), NOW + 4, 1,
+    )?, RouterForwardPreparation::Complete(outcome)
+        if matches!(*outcome, RouterSubmitOutcome::ForwardInProgress { .. })));
+    drop(reclaimed);
+    assert!(matches!(
+        s.a.core.prepare_committed_home_forward(s.a.store()?, &source, envelope, NOW + 4, 1,)?,
+        RouterForwardPreparation::Forward(_)
+    ));
+    Ok(())
+}

@@ -282,177 +282,12 @@ impl RouterCore {
         lock_unpoisoned(&self.local_home_node_id).clone()
     }
 
-    /// # Errors
-    /// Returns an error when the proof cannot be verified or would roll back an applied migration.
-    pub fn apply_home_node_migration(
-        &self,
-        proof: &ramflux_protocol::HomeNodeMigrationProof,
-        branch_proof: &ramflux_crypto::BranchProofDocument,
-        now: i64,
-    ) -> Result<HomeNodeMigrationRecord, NodeCoreError> {
-        let mut control = lock_unpoisoned(&self.control);
-        let actor_lookup =
-            if control.mvp1_identities.root_public_keys.contains_key(&proof.identity_commitment) {
-                IdentityRegistry::principal_device_lookup(
-                    &proof.identity_commitment,
-                    &proof.actor_device_id,
-                )
-            } else {
-                format!(
-                    "root~{}",
-                    ramflux_protocol::encode_base64url(
-                        serde_json::to_vec(&(&proof.identity_commitment, &proof.actor_device_id))
-                            .map_err(|e| NodeCoreError::ItestHttp(e.to_string()))?
-                    )
-                )
-            };
-        let actor_identity = control
-            .mvp1_identities
-            .resolve_device_selector(&actor_lookup)
-            .ok_or_else(|| NodeCoreError::ItestHttp("migration actor authority missing".into()))?;
-        let actor = control.mvp1_identities.device_auth_key(&actor_identity).ok_or_else(|| {
-            NodeCoreError::ItestHttp(format!(
-                "unknown migration actor device: {}",
-                proof.actor_device_id
-            ))
-        })?;
-        if actor.revoked {
-            return Err(NodeCoreError::ItestHttp(format!(
-                "migration actor device revoked: {}",
-                proof.actor_device_id
-            )));
-        }
-        ramflux_crypto::verify_home_node_migration_proof(
-            proof,
-            &actor.branch_public_key,
-            branch_proof,
-            now,
-        )
-        .map_err(|source| {
-            NodeCoreError::ItestHttp(format!("home node migration invalid: {source}"))
-        })?;
-        if proof.identity_commitment != actor.principal_id
-            && control
-                .mvp1_identities
-                .principal_commitment_for_device(&actor_identity)
-                .is_none_or(|commitment| commitment != proof.identity_commitment)
-        {
-            return Err(NodeCoreError::ItestHttp("migration actor identity mismatch".to_owned()));
-        }
-        let migration_proof_hash = ramflux_crypto::migration_proof_hash(proof)
-            .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
-        let record = HomeNodeMigrationRecord {
-            format_version: 1,
-            identity_commitment: proof.identity_commitment.clone(),
-            old_home_node: proof.old_home_node.clone(),
-            new_home_node: proof.new_home_node.clone(),
-            new_home_node_key_hash: proof.new_home_node_key_hash.clone(),
-            route_record_hash: proof.route_record_hash.clone(),
-            effective_at: proof.effective_at,
-            issued_at: proof.issued_at,
-            migration_proof_hash,
-            migrated_at: now,
-        };
-        let existing = control.home_node_migrations.get(&record.identity_commitment);
-        if let Some(existing) = existing {
-            if existing.migration_proof_hash == record.migration_proof_hash {
-                return Ok(existing.clone());
-            }
-            if record.issued_at <= existing.issued_at || record.effective_at < existing.effective_at
-            {
-                return Err(NodeCoreError::ItestHttp(
-                    "home node migration rollback rejected".to_owned(),
-                ));
-            }
-        }
-        control.home_node_migrations.insert(record.identity_commitment.clone(), record.clone());
-        self.refresh_migration_read_snapshot_from_control(&control);
-        Ok(record)
-    }
-
     #[must_use]
     pub fn home_node_migration(
         &self,
         identity_commitment: &str,
     ) -> Option<HomeNodeMigrationRecord> {
         lock_unpoisoned(&self.control).home_node_migrations.get(identity_commitment).cloned()
-    }
-
-    /// # Errors
-    /// Returns an error when the route proof is invalid, unsigned by the new home node,
-    /// or does not reference an applied home-node migration.
-    pub fn apply_home_node_route_update_proof(
-        &self,
-        proof: &HomeNodeRouteUpdateProof,
-        now: i64,
-    ) -> Result<HomeNodeRouteRecord, NodeCoreError> {
-        validate_home_node_route_update_proof(proof, now)?;
-        let mut control = lock_unpoisoned(&self.control);
-        let migration =
-            control.home_node_migrations.get(&proof.identity_commitment).ok_or_else(|| {
-                NodeCoreError::ItestHttp(format!(
-                    "home node route update references unknown migration: {}",
-                    proof.identity_commitment
-                ))
-            })?;
-        if migration.migration_proof_hash != proof.migration_proof_hash {
-            return Err(NodeCoreError::ItestHttp(
-                "home node route update migration proof hash mismatch".to_owned(),
-            ));
-        }
-        if migration.new_home_node != proof.new_home_node {
-            return Err(NodeCoreError::ItestHttp(
-                "home node route update new home node mismatch".to_owned(),
-            ));
-        }
-        if migration.new_home_node_key_hash != proof.new_home_node_key_hash {
-            return Err(NodeCoreError::ItestHttp(
-                "home node route update key hash mismatch".to_owned(),
-            ));
-        }
-        if migration.route_record_hash != proof.route_record_hash {
-            return Err(NodeCoreError::ItestHttp(
-                "home node route update route record hash mismatch".to_owned(),
-            ));
-        }
-        let computed_key_hash = ramflux_crypto::blake3_256_base64url(
-            ramflux_protocol::domain::FEDERATION_HANDSHAKE,
-            proof.node_public_key.as_bytes(),
-        );
-        if computed_key_hash != proof.new_home_node_key_hash {
-            return Err(NodeCoreError::ItestHttp(
-                "home node route update public key hash mismatch".to_owned(),
-            ));
-        }
-        let route_hash = crate::home_node_route_record_hash(
-            &crate::home_node_route_commitment_from_update(proof),
-        )?;
-        if route_hash != proof.route_record_hash {
-            return Err(NodeCoreError::ItestHttp(
-                "home node route update route commitment mismatch".to_owned(),
-            ));
-        }
-        ramflux_protocol::verify_signed_fields(proof, &proof.signed, &proof.node_public_key)
-            .map_err(|source| {
-                NodeCoreError::Unauthorized(format!(
-                    "home node route update signature rejected: {source}"
-                ))
-            })?;
-        let route_update_proof_hash = crate::home_node_route_update_proof_hash(proof)?;
-        let record = HomeNodeRouteRecord {
-            identity_commitment: proof.identity_commitment.clone(),
-            home_node: proof.new_home_node.clone(),
-            home_node_key_hash: proof.new_home_node_key_hash.clone(),
-            node_public_key: proof.node_public_key.clone(),
-            node_endpoint: proof.node_endpoint.clone(),
-            route_record_hash: proof.route_record_hash.clone(),
-            migration_proof_hash: proof.migration_proof_hash.clone(),
-            route_update_proof_hash,
-            updated_at: proof.issued_at,
-            expires_at: proof.expires_at,
-        };
-        control.home_node_routes.insert(record.identity_commitment.clone(), record.clone());
-        Ok(record)
     }
 
     #[must_use]
@@ -486,21 +321,10 @@ impl RouterCore {
         request: &IdentityRegisterRequest,
         store: Option<&crate::RouterRedbStore>,
     ) -> Result<IdentityRegistrationResponse, NodeCoreError> {
-        let local_home_node_id = self.local_home_node_id();
         let registration_trust_tier = {
             let mut control = lock_unpoisoned(&self.control);
             let registration_trust_tier =
                 control.mvp1_identities.validate_registration_policy(request)?;
-            if let Some(migration) = effective_migration_for_registration(
-                &control,
-                local_home_node_id.as_deref(),
-                request,
-            ) {
-                return Err(NodeCoreError::ItestHttp(format!(
-                    "home node migrated: proof_hash={} new_home_node={}",
-                    migration.migration_proof_hash, migration.new_home_node
-                )));
-            }
             let renewal = control
                 .mvp1_identities
                 .device_identity_for_root(&request.principal_commitment, &request.proof.device_id)
@@ -1716,65 +1540,6 @@ impl RouterCore {
             forward_count: forward_count.saturating_add(1),
         })
     }
-}
-
-fn effective_migration_for_registration(
-    control: &RouterControlState,
-    local_home_node_id: Option<&str>,
-    request: &IdentityRegisterRequest,
-) -> Option<HomeNodeMigrationRecord> {
-    let mut keys = Vec::with_capacity(2);
-    if !request.principal_commitment.is_empty() {
-        keys.push(request.principal_commitment.as_str());
-    }
-    if !keys.iter().any(|key| **key == request.proof.principal_id) {
-        keys.push(request.proof.principal_id.as_str());
-    }
-    keys.into_iter().find_map(|key| {
-        control
-            .home_node_migrations
-            .get(key)
-            .filter(|migration| migration.is_effective(request.now))
-            .filter(|migration| {
-                local_home_node_id
-                    .is_none_or(|local_node_id| local_node_id != migration.new_home_node)
-            })
-            .cloned()
-    })
-}
-
-fn validate_home_node_route_update_proof(
-    proof: &HomeNodeRouteUpdateProof,
-    now: i64,
-) -> Result<(), NodeCoreError> {
-    if proof.schema != crate::HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN
-        || proof.domain != crate::HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN
-    {
-        return Err(NodeCoreError::ItestHttp(
-            "home node route update proof schema rejected".to_owned(),
-        ));
-    }
-    if proof.identity_commitment.is_empty()
-        || proof.new_home_node.is_empty()
-        || proof.new_home_node_key_hash.is_empty()
-        || proof.node_public_key.is_empty()
-        || proof.node_endpoint.is_empty()
-        || proof.route_record_hash.is_empty()
-        || proof.migration_proof_hash.is_empty()
-    {
-        return Err(NodeCoreError::ItestHttp(
-            "home node route update proof missing required field".to_owned(),
-        ));
-    }
-    if proof.issued_at > now {
-        return Err(NodeCoreError::ItestHttp(
-            "home node route update proof issued in the future".to_owned(),
-        ));
-    }
-    if proof.expires_at <= now || proof.expires_at <= proof.issued_at {
-        return Err(NodeCoreError::ItestHttp("home node route update proof expired".to_owned()));
-    }
-    Ok(())
 }
 
 fn home_node_forward_window_is_open(

@@ -10,13 +10,13 @@ fn reservation(
 ) -> anyhow::Result<Box<ramflux_node_core::RouterForwardReservation>> {
     let envelope = current_envelope(id, "target_alice")?;
     let source = handle.state().authenticated_envelope_source_durable(&envelope, handle.store())?;
-    match handle.state().prepare_envelope_with_home_node_forward_at(
+    match handle.state().prepare_committed_home_forward(
+        handle.store(),
         &source,
         envelope,
-        i64::try_from(ramflux_node_core::now_unix_seconds())?,
-        ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+        ramflux_node_core::now_unix_seconds(),
         20,
-    ) {
+    )? {
         ramflux_node_core::RouterForwardPreparation::Forward(reservation) => Ok(reservation),
         ramflux_node_core::RouterForwardPreparation::Complete(_) => {
             anyhow::bail!("expected forward reservation")
@@ -189,7 +189,7 @@ fn migrated_forward_remains_enabled_after_restart() -> anyhow::Result<()> {
 }
 
 #[test]
-fn migration_lease_precedes_real_forward_and_replay_persistence_on_both_ingress_paths()
+fn committed_forward_checks_cutover_without_claiming_local_delivery_on_both_ingress_paths()
 -> anyhow::Result<()> {
     use ramflux_protocol::home_migration::{DeliveryMapEntry, Refusal};
     let runtime =
@@ -271,10 +271,8 @@ fn migration_lease_precedes_real_forward_and_replay_persistence_on_both_ingress_
             .join()
             .map_err(|_| anyhow::anyhow!("forward worker failed"))?
             .map_err(anyhow::Error::msg)?;
-        assert!(matches!(
-            barrier,
-            Err(ramflux_node_core::NodeCoreError::HomeMigration(Refusal::MigrationInProgress))
-        ));
+        // Committed forwards do not enter the old home's mailbox or take its submission lease.
+        drop(barrier?);
         assert!(before_replay.is_ok(), "in-flight forward is not durably accepted");
         assert_eq!(response.outcome, "forwarded_home_node_migrated");
         assert_eq!(response.inbox_seq, Some(37));
@@ -282,8 +280,8 @@ fn migration_lease_precedes_real_forward_and_replay_persistence_on_both_ingress_
         let restored =
             handle.store().load_router()?.ok_or_else(|| anyhow::anyhow!("missing router"))?;
         assert!(
-            restored.accept_envelope_replay(&source, envelope, now).is_err(),
-            "successful forward persists replay before returning"
+            restored.accept_envelope_replay(&source, envelope, now).is_ok(),
+            "destination acceptance does not create local acceptance at the former home"
         );
         assert_eq!(restored.resume("target_alice", 0, 10), []);
         drop(handle.store().migration_submission_barrier(&map)?);
