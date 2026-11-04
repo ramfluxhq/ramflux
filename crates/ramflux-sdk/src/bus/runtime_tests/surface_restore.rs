@@ -149,21 +149,6 @@ async fn surface_get_and_list_survive_repeated_socket_daemon_restart()
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             };
-            loop {
-                let accounts = bus.request(None, "account", "account.list", json!({})).await?;
-                let restored = accounts["account_details"].as_array().is_some_and(|details| {
-                    details
-                        .iter()
-                        .any(|detail| detail["id"] == "alice" && detail["state"] == "unlocked")
-                });
-                if restored {
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err("account did not restore".into());
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
             let get = bus
                 .request(
                     Some("alice".into()),
@@ -195,4 +180,75 @@ async fn surface_get_and_list_survive_repeated_socket_daemon_restart()
     }
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn supervisor_surface_read_waits_for_startup_restore_and_reports_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    tokio::task::LocalSet::new()
+        .run_until(Box::pin(async {
+            for healthy in [true, false] {
+                let root = runtime_tests::root("surface-supervisor-restore");
+                let expected = persisted_surface(&root)?;
+                if !healthy {
+                    let path = local_bus_account_manifest_path(&root, "alice");
+                    let mut manifest = read_local_bus_account_manifest(&path)?;
+                    manifest.account_secret = "wrong-startup-secret".into();
+                    write_local_bus_account_manifest(&root, &manifest)?;
+                }
+                let (gate, control) = crate::bus::LocalBusStartupRestoreGate::new("alice");
+                let supervisor = crate::bus::supervisor::Supervisor::new(
+                    LocalBusConfig::new(root.join("bus.sock"), &root)
+                        .with_startup_restore_gate(gate),
+                )?;
+                let mut background = tokio::task::JoinSet::new();
+                supervisor.hydrate(&mut background)?;
+                tokio::time::timeout(Duration::from_secs(5), control.entered()).await?;
+                let (outbound, _receiver) = mpsc::channel(8);
+                let connection = LocalBusConnectionState::new(1, outbound);
+                let get = LocalBusFrame::request(
+                    "get",
+                    Some("alice".into()),
+                    "surface",
+                    "surface.get",
+                    json!({"surface_id":"surface"}),
+                );
+                let read = supervisor.request(get, &connection);
+                tokio::pin!(read);
+                let early = tokio::select! {
+                    biased;
+                    result = &mut read => Some(result.err()),
+                    () = std::future::ready(()) => None,
+                };
+                assert!(
+                    early.is_none(),
+                    "surface read completed before startup restore: {early:?}"
+                );
+                let status = LocalBusFrame::request(
+                    "status",
+                    Some("alice".into()),
+                    "account",
+                    "account.status",
+                    json!({}),
+                );
+                assert!(matches!(
+                    supervisor.request(status, &connection).await,
+                    Err(SdkError::AccountRestorePending(_))
+                ));
+                control.release();
+                let result = tokio::time::timeout(Duration::from_secs(5), &mut read).await?;
+                while let Some(task) = background.join_next().await {
+                    task?;
+                }
+                supervisor.shutdown().await?;
+                std::fs::remove_dir_all(root)?;
+                if healthy {
+                    assert_eq!(result?.body, expected);
+                } else {
+                    assert!(matches!(result, Err(SdkError::AccountRestoreFailed { .. })));
+                }
+            }
+            Ok(())
+        }))
+        .await
 }

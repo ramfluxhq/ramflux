@@ -11,7 +11,8 @@ use tokio::sync::oneshot;
 
 #[derive(Clone)]
 enum RestoreState {
-    Pending,
+    // Removing or replacing this state wakes reads waiting for startup unlock.
+    Pending(watch::Sender<()>),
     Failed(String),
 }
 
@@ -150,9 +151,10 @@ impl Supervisor {
             {
                 continue;
             }
-            self.restore_states
-                .borrow_mut()
-                .insert(manifest.local_account_id.clone(), RestoreState::Pending);
+            self.restore_states.borrow_mut().insert(
+                manifest.local_account_id.clone(),
+                RestoreState::Pending(watch::channel(()).0),
+            );
             let supervisor = Rc::clone(self);
             tasks.spawn_local(async move {
                 #[cfg(any(test, feature = "itest-restore-state"))]
@@ -307,6 +309,9 @@ impl Supervisor {
         let id = account_actor_id(&request)?;
         if self.installing.borrow().contains(&id) {
             return Err(super::backup_jobs::refusal("restore_install_in_progress"));
+        }
+        if super::readers::is_reader_request(&request.method) {
+            self.wait_for_startup_restore(&id).await?;
         }
         let actor = self.accounts.borrow().get(&id).cloned();
         if let Some(status) = self.locked_native_status(&request, &id).await? {
@@ -495,7 +500,7 @@ impl Supervisor {
             let id =
                 row.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
             row["state"] = serde_json::json!(match restore_states.get(&id) {
-                Some(RestoreState::Pending) => "restore_pending",
+                Some(RestoreState::Pending(_)) => "restore_pending",
                 Some(RestoreState::Failed(_)) => "restore_failed",
                 None if *manifest_unreadable => "restore_failed",
                 None if accounts.iter().any(|account| account == &id) => "unlocked",
@@ -595,12 +600,28 @@ impl Supervisor {
 
     fn account_unavailable(&self, id: &str) -> SdkError {
         match self.restore_states.borrow().get(id) {
-            Some(RestoreState::Pending) => SdkError::AccountRestorePending(id.to_owned()),
+            Some(RestoreState::Pending(_)) => SdkError::AccountRestorePending(id.to_owned()),
             Some(RestoreState::Failed(reason)) => {
                 SdkError::AccountRestoreFailed { account_id: id.to_owned(), reason: reason.clone() }
             }
             None => not_open(id),
         }
+    }
+
+    async fn wait_for_startup_restore(&self, id: &str) -> Result<(), SdkError> {
+        let completion = match self.restore_states.borrow().get(id) {
+            Some(RestoreState::Pending(completion)) => Some(completion.subscribe()),
+            _ => None,
+        };
+        if let Some(mut completion) = completion {
+            // Keep cold reads behind startup unlock, as in the actor mailbox. State queries
+            // remain immediate; the request's existing deadline also cancels this wait.
+            let _ = completion.changed().await;
+        }
+        if self.installing.borrow().contains(id) {
+            return Err(super::backup_jobs::refusal("restore_install_in_progress"));
+        }
+        Ok(())
     }
 
     fn require_restore_ready(&self, id: &str, allow_unlock: bool) -> Result<(), SdkError> {
