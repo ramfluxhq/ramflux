@@ -1166,6 +1166,7 @@ pub(crate) mod tests {
 
     fn forward_plan() -> ramflux_node_core::HomeNodeMigrationForwardPlan {
         ramflux_node_core::HomeNodeMigrationForwardPlan {
+            migration_evidence: None,
             target_delivery_id: "target-b".to_owned(),
             proof_hash: "proof-hash".to_owned(),
             new_home_node: "node-b".to_owned(),

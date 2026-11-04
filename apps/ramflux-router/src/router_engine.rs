@@ -18,13 +18,7 @@ pub(crate) fn submit_envelope(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-    ramflux_node_core::record_router_submit_started();
-    tracing::info!(
-        envelope_id = %envelope.envelope_id,
-        target_delivery_id = %envelope.target_delivery_id,
-        source_device_id = %envelope.source_device_id,
-        "router decoded mvp0 envelope"
-    );
+    record_decoded(&envelope);
     let source = match state.authenticated_envelope_source_from(&envelope, Some(store), origin) {
         Ok(source) => source,
         Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
@@ -39,11 +33,21 @@ pub(crate) fn submit_envelope(
         }
         Err(error) => return Err(error.into()),
     };
-    state.refresh_registered_envelope_authority(&mut envelope)?;
     let submission = match store.acquire_submission(&envelope.target_delivery_id) {
         Ok(lease) => lease,
+        Err(ramflux_node_core::NodeCoreError::HomeMigration(
+            ramflux_protocol::home_migration::Refusal::HomeMigrated,
+        )) if forward.client.is_some() => {
+            let preparation =
+                committed_preparation(state, store, &source, envelope, forward.timeout);
+            return Ok(submit_response_from_outcome(
+                state,
+                complete_sync_forward(state, forward, preparation)?,
+            ));
+        }
         Err(error) => return submission_refusal(state, store, &envelope, error),
     };
+    state.refresh_registered_envelope_authority(&mut envelope)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let sender_root_commitment = source.root_commitment().to_owned();
     let replay_expires_at = envelope
@@ -145,13 +149,7 @@ pub(crate) async fn submit_envelope_async(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-    ramflux_node_core::record_router_submit_started();
-    tracing::info!(
-        envelope_id = %envelope.envelope_id,
-        target_delivery_id = %envelope.target_delivery_id,
-        source_device_id = %envelope.source_device_id,
-        "router decoded mvp0 envelope"
-    );
+    record_decoded(&envelope);
     let source = match state.authenticated_envelope_source_from(&envelope, Some(store), origin) {
         Ok(source) => source,
         Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
@@ -166,11 +164,21 @@ pub(crate) async fn submit_envelope_async(
         }
         Err(error) => return Err(error.into()),
     };
-    state.refresh_registered_envelope_authority(&mut envelope)?;
     let submission = match store.acquire_submission(&envelope.target_delivery_id) {
         Ok(lease) => lease,
+        Err(ramflux_node_core::NodeCoreError::HomeMigration(
+            ramflux_protocol::home_migration::Refusal::HomeMigrated,
+        )) if forward.client.is_some() => {
+            let preparation =
+                committed_preparation(state, store, &source, envelope, forward.timeout);
+            return Ok(submit_response_from_outcome(
+                state,
+                complete_async_forward(state, forward, preparation).await?,
+            ));
+        }
         Err(error) => return submission_refusal(state, store, &envelope, error),
     };
+    state.refresh_registered_envelope_authority(&mut envelope)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let sender_root_commitment = source.root_commitment().to_owned();
     let replay_expires_at = envelope
@@ -238,6 +246,39 @@ pub(crate) async fn submit_envelope_async(
     Ok(response)
 }
 
+fn record_decoded(envelope: &ramflux_protocol::Envelope) {
+    ramflux_node_core::record_router_submit_started();
+    tracing::info!(
+        envelope_id = %envelope.envelope_id,
+        target_delivery_id = %envelope.target_delivery_id,
+        source_device_id = %envelope.source_device_id,
+        "router decoded mvp0 envelope"
+    );
+}
+
+fn committed_preparation(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: ramflux_protocol::Envelope,
+    timeout: std::time::Duration,
+) -> ramflux_node_core::RouterForwardPreparation {
+    let target_delivery_id = envelope.target_delivery_id.clone();
+    state
+        .prepare_committed_home_forward(
+            store,
+            source,
+            envelope,
+            ramflux_node_core::now_unix_seconds(),
+            timeout.as_secs().max(1),
+        )
+        .unwrap_or_else(|_| {
+            ramflux_node_core::RouterForwardPreparation::Complete(Box::new(
+                ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id },
+            ))
+        })
+}
+
 fn submission_refusal(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
@@ -245,13 +286,24 @@ fn submission_refusal(
     error: ramflux_node_core::NodeCoreError,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     match error {
-        ramflux_node_core::NodeCoreError::HomeMigration(reason) => Ok(state
-            .migration_submission_refusal(
+        ramflux_node_core::NodeCoreError::HomeMigration(mut reason) => {
+            if reason == ramflux_protocol::home_migration::Refusal::HomeMigrated
+                && store
+                    .migration_forward_window(
+                        &envelope.target_delivery_id,
+                        ramflux_node_core::now_unix_seconds(),
+                    )
+                    .is_err()
+            {
+                reason = ramflux_protocol::home_migration::Refusal::StorageUnavailable;
+            }
+            Ok(state.migration_submission_refusal(
                 store,
                 envelope,
                 reason,
                 ramflux_node_core::now_unix_seconds(),
-            )?),
+            )?)
+        }
         error => Err(error.into()),
     }
 }

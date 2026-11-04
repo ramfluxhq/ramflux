@@ -12,6 +12,8 @@ pub const HOME_NODE_FORWARD_COUNT_EXT_KEY: &str = "home_node_migration_forward_c
 /// Applied home-node migration state for one identity binding.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HomeNodeMigrationRecord {
+    #[serde(default = "legacy_migration_format")]
+    pub format_version: u8,
     pub identity_commitment: String,
     pub old_home_node: String,
     pub new_home_node: String,
@@ -23,10 +25,14 @@ pub struct HomeNodeMigrationRecord {
     pub migrated_at: i64,
 }
 
+fn legacy_migration_format() -> u8 {
+    1
+}
+
 impl HomeNodeMigrationRecord {
     #[must_use]
     pub fn is_effective(&self, now: i64) -> bool {
-        now >= self.effective_at
+        self.format_version == 1 && now >= self.effective_at
     }
 }
 
@@ -40,6 +46,8 @@ pub struct HomeNodeMigratedNackDelivery {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HomeNodeMigrationForwardPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_evidence: Option<crate::ForwardedMigrationEvidence>,
     pub target_delivery_id: String,
     pub proof_hash: String,
     pub new_home_node: String,
@@ -55,7 +63,7 @@ impl HomeNodeMigrationForwardPlan {
         source_node_id: &str,
     ) -> crate::FederatedEnvelopeForwardRequest {
         crate::FederatedEnvelopeForwardRequest {
-            migration_evidence: None,
+            migration_evidence: self.migration_evidence.clone(),
             signed: crate::default_federation_forward_signed_fields(),
             admin_token: String::new(),
             source_node_id: source_node_id.to_owned(),

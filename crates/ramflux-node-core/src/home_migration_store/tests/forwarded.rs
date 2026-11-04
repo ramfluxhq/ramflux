@@ -88,7 +88,7 @@ fn forwarded_activation_without_proof_refuses_dormant_but_allows_active_target()
     Ok(())
 }
 
-fn sender(target: &str) -> TestResult<crate::ForwardedEnvelopeRequest> {
+pub(super) fn sender(target: &str) -> TestResult<crate::ForwardedEnvelopeRequest> {
     sender_with_seed(target, 70)
 }
 fn sender_with_seed(target: &str, seed: u8) -> TestResult<crate::ForwardedEnvelopeRequest> {

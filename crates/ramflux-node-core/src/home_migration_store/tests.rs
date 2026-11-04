@@ -686,3 +686,5 @@ fn declaration(
 mod genesis;
 
 mod forwarded;
+
+mod new_traffic;

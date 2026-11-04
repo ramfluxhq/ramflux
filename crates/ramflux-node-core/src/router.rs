@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod committed_forward;
 mod retention;
 
 const ROUTER_TARGET_SHARD_COUNT: usize = 64;
@@ -341,6 +342,7 @@ impl RouterCore {
         let migration_proof_hash = ramflux_crypto::migration_proof_hash(proof)
             .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
         let record = HomeNodeMigrationRecord {
+            format_version: 1,
             identity_commitment: proof.identity_commitment.clone(),
             old_home_node: proof.old_home_node.clone(),
             new_home_node: proof.new_home_node.clone(),
@@ -1120,7 +1122,7 @@ impl RouterCore {
             };
         };
         if let Ok(response) = response {
-            if federation_forward_succeeded(&response) {
+            if federation_forward_succeeded(&response, plan.migration_evidence.is_some()) {
                 return RouterSubmitOutcome::ForwardedHomeNodeMigrated(Box::new(
                     HomeNodeMigrationForwardDelivery {
                         target_delivery_id: envelope.target_delivery_id,
@@ -1137,6 +1139,11 @@ impl RouterCore {
                     target_delivery_id: envelope.target_delivery_id,
                 };
             }
+        }
+        if plan.migration_evidence.is_some() {
+            return RouterSubmitOutcome::ForwardInProgress {
+                target_delivery_id: envelope.target_delivery_id,
+            };
         }
         RouterSubmitOutcome::RejectedHomeNodeMigrated(home_node_migrated_delivery(
             &envelope,
@@ -1689,7 +1696,9 @@ impl RouterCore {
             return None;
         }
         let route = self.resolve_home_node_route(&migration.identity_commitment)?;
-        if route.home_node != migration.new_home_node || route.expires_at <= now_unix_seconds {
+        if route.home_node != migration.new_home_node
+            || (migration.format_version == 1 && route.expires_at <= now_unix_seconds)
+        {
             return None;
         }
         let mut forwarded_envelope = envelope.clone();
@@ -1698,6 +1707,7 @@ impl RouterCore {
             serde_json::Value::from(u64::from(forward_count.saturating_add(1))),
         );
         Some(HomeNodeMigrationForwardPlan {
+            migration_evidence: None,
             target_delivery_id: envelope.target_delivery_id.clone(),
             proof_hash: migration.migration_proof_hash.clone(),
             new_home_node: migration.new_home_node.clone(),
@@ -1786,13 +1796,21 @@ fn envelope_home_node_forward_count(envelope: &ramflux_protocol::Envelope) -> u8
         .unwrap_or(0)
 }
 
-fn federation_forward_succeeded(response: &FederatedEnvelopeForwardResponse) -> bool {
-    response.delivery.outcome == "duplicate_federated_forward"
-        || response.accepted
-            && matches!(
-                response.delivery.outcome.as_str(),
-                "online" | "offline_queued" | "federation_spooled_offline_peer"
-            )
+fn federation_forward_succeeded(
+    response: &FederatedEnvelopeForwardResponse,
+    committed: bool,
+) -> bool {
+    if !committed
+        && (response.delivery.outcome == "duplicate_federated_forward"
+            || response.accepted && response.delivery.outcome == "federation_spooled_offline_peer")
+    {
+        return true;
+    }
+    response.accepted
+        && matches!(
+            response.delivery.outcome.as_str(),
+            "online" | "offline_queued" | "duplicate_federated_forward"
+        )
 }
 
 fn home_node_migrated_delivery(
