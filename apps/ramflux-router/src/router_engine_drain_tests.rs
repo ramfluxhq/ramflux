@@ -179,7 +179,7 @@ fn poison_entry_does_not_stop_later_entries_drain() -> Result {
 }
 
 /// Inject only the federation bridge: B still verifies sender authority and commits its inbox.
-fn destination_reply(
+pub(super) fn destination_reply(
     listener: &std::net::TcpListener,
     b: &ramflux_node_core::RouterCore,
     store: &RouterRedbStore,
@@ -372,7 +372,7 @@ fn expired_lease_sender_entry_is_held_evidence_required_without_blocking_others(
     Ok(())
 }
 
-fn install_expired_authority(path: &std::path::Path) -> Result {
+pub(super) fn install_expired_authority(path: &std::path::Path) -> Result {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../crates/ramflux-crypto/tests/fixtures/custody_v3.json"
     ))?;

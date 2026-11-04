@@ -817,3 +817,7 @@ mod concurrency_tests;
 #[cfg(test)]
 #[path = "router_engine_drain_tests.rs"]
 mod drain_tests;
+
+#[cfg(test)]
+#[path = "router_engine_drain_recovery_tests.rs"]
+mod drain_recovery_tests;

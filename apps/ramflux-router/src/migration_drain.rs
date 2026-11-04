@@ -105,8 +105,11 @@ pub(crate) fn tick(
         }
         for (key, row) in page {
             // Window persistence precedes every decision, even expiry and authority failures.
-            let open =
-                store.migration_forward_window(&row.entry.target_delivery_id, now)?.is_some();
+            let open = match store.migration_forward_window(&row.entry.target_delivery_id, now) {
+                Ok(window) => window.is_some(),
+                Err(error @ NodeCoreError::Redb(_)) => return Err(error),
+                Err(_) => false,
+            };
             let expired = i64::try_from(now).unwrap_or(i64::MAX) >= row.retain_until;
             if expired || row.state != MigrationDrainState::Rejected && row.next_attempt <= now {
                 let outcome = if expired {
@@ -114,7 +117,11 @@ pub(crate) fn tick(
                 } else if !open {
                     MigrationDrainOutcome::Held
                 } else {
-                    send(&row, now)?
+                    match send(&row, now) {
+                        Ok(outcome) => outcome,
+                        Err(error @ NodeCoreError::Redb(_)) => return Err(error),
+                        Err(_) => MigrationDrainOutcome::Held,
+                    }
                 };
                 store.settle_migration_drain(&row, outcome, now)?;
                 transitions += 1;
@@ -154,7 +161,14 @@ pub(crate) fn forward(
     };
     let semaphore = context.semaphore;
     let timeout = context.timeout;
-    let envelope = &row.entry.envelope;
+    // Authority is unsigned transport evidence; refresh a copy without rewriting the obligation.
+    let mut envelope = row.entry.envelope.clone();
+    match state.refresh_registered_envelope_authority(&mut envelope) {
+        Ok(()) => {}
+        Err(error @ NodeCoreError::Redb(_)) => return Err(error),
+        Err(_) => return Ok(MigrationDrainOutcome::Held),
+    }
+    let envelope = &envelope;
     let native = envelope
         .ext
         .ext
@@ -212,5 +226,42 @@ pub(crate) fn forward(
             )
     });
     drop(reservation);
-    Ok(if ack { MigrationDrainOutcome::BAck } else { MigrationDrainOutcome::Held })
+    Ok(if ack {
+        MigrationDrainOutcome::BAck
+    } else if response.as_ref().is_ok_and(|reply| signed_permanent_refusal(&plan, reply)) {
+        MigrationDrainOutcome::Rejected
+    } else {
+        MigrationDrainOutcome::Held
+    })
+}
+
+/// Only a destination-signed permanent refusal can stop retries; unsigned failures stay held.
+pub(super) fn signed_permanent_refusal(
+    plan: &ramflux_node_core::HomeNodeMigrationForwardPlan,
+    reply: &ramflux_node_core::FederatedEnvelopeForwardResponse,
+) -> bool {
+    let Some(nack) = &reply.delivery.nack else { return false };
+    !reply.accepted
+        && reply.target_node_id == plan.new_home_node
+        && reply.delivery.target_delivery_id == plan.target_delivery_id
+        && reply.delivery.outcome.starts_with("rejected_")
+        && nack.envelope_id == plan.envelope.envelope_id
+        && nack.receiver_device_id == plan.target_delivery_id
+        && nack.retry_after.is_none()
+        && matches!(
+            nack.reason,
+            ramflux_protocol::NackReason::InvalidSignature
+                | ramflux_protocol::NackReason::UnknownDevice
+                | ramflux_protocol::NackReason::RevokedCapability
+                | ramflux_protocol::NackReason::PayloadTooLarge
+                | ramflux_protocol::NackReason::UnsupportedSchema
+        )
+        && ramflux_protocol::signed_bytes(nack).is_ok_and(|bytes| {
+            ramflux_crypto::verify_canonical_signature(
+                &bytes,
+                &nack.signed.signature,
+                &plan.route.node_public_key,
+            )
+            .is_ok()
+        })
 }
