@@ -170,7 +170,7 @@ mod tests {
 
         let client = surface.client_record()?;
         assert!(
-            !client
+            client
                 .client_capabilities
                 .iter()
                 .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
@@ -178,7 +178,7 @@ mod tests {
         let record = surface.well_known_record()?;
         assert!(record.node_capabilities.iter().any(|cap| cap == "opaque_delivery"));
         assert!(
-            !record
+            record
                 .node_capabilities
                 .iter()
                 .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
@@ -224,8 +224,7 @@ mod migration_capability_tests {
                 "mesh": {"listen_addr": "127.0.0.1:0", "ca_cert": "unused.pem", "service_cert": "unused.pem", "service_key": "unused.key", "allowed_service_ids": [], "endpoints": {}}
             }),
         )?;
-        let expected = ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
-            && std::env::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() == Ok("1");
+        let expected = std::env::var("RAMFLUX_HOME_MIGRATION_ENABLED").as_deref() == Ok("1");
         let mut surface = super::federation_discovery_surface(&config, [8; 32]);
         surface.node_ca_cert_pem = "test-ca".into();
         let client = surface.client_record()?;
