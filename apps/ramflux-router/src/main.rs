@@ -55,6 +55,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
+        validate_migration_config(&config)?;
         let pools = ramflux_node_core::CustodyPoolSettings::from_env()?;
         ramflux_node_core::CustodyIssuanceSettings::from_env()?;
         ramflux_node_core::custody_listener_resources(pools, 0)?;
@@ -211,6 +212,16 @@ fn non_empty_env(name: &str) -> Option<String> {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     })
+}
+
+fn validate_migration_config(config: &ramflux_node_core::NodeServiceConfig) -> anyhow::Result<()> {
+    if ramflux_node_core::home_migration_enabled()? {
+        ramflux_node_core::require_node_service_signing_key(config)?;
+        crate::home_migration::require_forward_client(
+            local_federation_forward_client_from_env(config).is_some(),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

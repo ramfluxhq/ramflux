@@ -6,7 +6,6 @@ use std::io::Write;
 use std::time::Instant;
 
 use crate::lifecycle::{
-    handle_home_node_migration_apply, handle_home_node_route_update_apply,
     handle_mvp7_abuse_report, handle_mvp7_abuse_report_get, handle_mvp7_federated_tombstone,
     handle_mvp7_lifecycle_cancel, handle_mvp7_lifecycle_event, handle_mvp7_lifecycle_finalize,
     handle_mvp7_lifecycle_get, handle_mvp7_metadata_get,
@@ -167,16 +166,6 @@ fn handle_itest_admin_request(
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/admin/custody/budgets") => {
             let response = crate::lifecycle::handle_custody_budgets(&request.body, router.store())?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
-        }
-        ("POST", "/admin/home-node-migration/apply") => {
-            let response =
-                handle_home_node_migration_apply(&request.body, router.state(), router.store())?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
-        }
-        ("POST", "/admin/home-node-route/update/apply") => {
-            let response =
-                handle_home_node_route_update_apply(&request.body, router.state(), router.store())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         _ => return Ok(false),
@@ -697,15 +686,6 @@ fn handle_mesh_general_value(
         }
         ("POST", "/admin/custody/budgets") => {
             let response = crate::lifecycle::handle_custody_budgets(body, router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("POST", "/admin/home-node-migration/apply") => {
-            let response = handle_home_node_migration_apply(body, router.state(), router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("POST", "/admin/home-node-route/update/apply") => {
-            let response =
-                handle_home_node_route_update_apply(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
         ("POST", "/mvp7/abuse/report") => {
@@ -1271,7 +1251,7 @@ mod tests {
         if std::env::var_os(CHILD).is_none() {
             for flag in [None, Some("0")] {
                 let mut command = std::process::Command::new(std::env::current_exe()?);
-                command.args(["--exact", "handlers::tests::release_gate_closed_rejects_legacy_apply_on_http_and_mesh_without_state_change"])
+                command.args(["--exact", "handlers::tests::legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin"])
                     .env(CHILD, "1").env("RAMFLUX_ROUTER_ADMIN_TOKEN", "release-token").env_remove("RAMFLUX_HOME_MIGRATION_ENABLED");
                 if let Some(flag) = flag {
                     command.env("RAMFLUX_HOME_MIGRATION_ENABLED", flag);
@@ -1291,8 +1271,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "itest-http")]
-    fn release_gate_closed_rejects_legacy_apply_on_http_and_mesh_without_state_change()
-    -> anyhow::Result<()> {
+    fn legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin() -> anyhow::Result<()> {
         if legacy_release_subprocesses()? {
             return Ok(());
         }
@@ -1308,38 +1287,21 @@ mod tests {
         )?;
         store.save_router(&state)?;
         let before = serde_json::to_value(state.mvp1_identities_snapshot())?;
-        // Positive arm verifies both signed requests through real core mutations.
-        let positive = ramflux_node_core::RouterCore::new();
-        crate::router_runtime::tests::register_test_device_at(
-            &positive,
-            "alice",
-            "alice_phone",
-            "target_alice",
-            1,
-            now,
-        )?;
-        let (migration, update) = crate::router_runtime::tests::legacy_apply_requests(
-            &positive,
-            &request,
-            "node-new.example",
-        )?;
         let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let _client = std::net::TcpStream::connect(listener.local_addr()?)?;
         let (mut stream, _) = listener.accept()?;
         for (path, body) in [
-            ("/admin/home-node-migration/apply", serde_json::to_vec(&migration)?),
-            ("/admin/home-node-route/update/apply", serde_json::to_vec(&update)?),
+            (concat!("/admin/home-node-", "migration/apply"), b"{}".to_vec()),
+            (concat!("/admin/home-node-", "route/update/apply"), b"{}".to_vec()),
         ] {
             let request = ramflux_transport::MeshHttpRequest {
                 method: "POST".into(),
                 path: path.into(),
                 body: body.clone(),
             };
-            let error = handle_mesh_request_value(request, &handle, "ramflux-gateway")
-                .err()
-                .ok_or_else(|| anyhow::anyhow!("expected closed gate"))?;
-            assert!(error.to_string().contains("release gate is closed"));
+            let response = handle_mesh_request_value(request, &handle, "ramflux-gateway")?;
+            assert_eq!(response.status, "404 Not Found");
             let request = ramflux_node_core::NodeHttpRequest {
                 method: "POST".into(),
                 path: path.into(),
@@ -1349,10 +1311,7 @@ mod tests {
                 pre_auth_cookie: None,
                 pre_auth_now: None,
             };
-            let error = handle_itest_admin_request(&mut stream, &request, &handle)
-                .err()
-                .ok_or_else(|| anyhow::anyhow!("expected closed gate"))?;
-            assert!(error.to_string().contains("release gate is closed"));
+            assert!(!handle_itest_admin_request(&mut stream, &request, &handle)?);
         }
         let sibling = handle_mesh_request_value(
             ramflux_transport::MeshHttpRequest {

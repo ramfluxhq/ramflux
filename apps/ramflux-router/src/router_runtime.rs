@@ -292,6 +292,7 @@ impl RouterHandle {
             .set(service.clone())
             .map_err(|_| anyhow::anyhow!("custody already configured"))?;
         if service.home_migration_enabled() {
+            crate::home_migration::require_forward_client(runtime.home_node_forward.is_some())?;
             if let Some(client) = &runtime.home_node_forward {
                 let drain = crate::migration_drain::MigrationDrain::start(
                     Arc::downgrade(&runtime.state),
@@ -1376,17 +1377,14 @@ pub(crate) mod tests {
         request: &ramflux_node_core::IdentityRegisterRequest,
         new_home_node: &str,
     ) -> anyhow::Result<()> {
-        legacy_apply_requests(state, request, new_home_node).map(|_| ())
+        install_signed_test_route(state, request, new_home_node)
     }
 
-    pub(crate) fn legacy_apply_requests(
+    fn install_signed_test_route(
         state: &ramflux_node_core::RouterCore,
         request: &ramflux_node_core::IdentityRegisterRequest,
         new_home_node: &str,
-    ) -> anyhow::Result<(
-        ramflux_node_core::HomeNodeMigrationApplyRequest,
-        ramflux_node_core::HomeNodeRouteUpdateApplyRequest,
-    )> {
+    ) -> anyhow::Result<()> {
         let route_signer = ramflux_node_core::NodeServiceSigningKey::from_seed([0x73; 32]);
         let new_home_node_key_hash = ramflux_crypto::blake3_256_base64url(
             ramflux_protocol::domain::FEDERATION_HANDSHAKE,
@@ -1453,19 +1451,7 @@ pub(crate) mod tests {
         };
         route_signer.sign_home_node_route_update_proof(&mut update)?;
         state.apply_home_node_route_update_proof(&update, request.now)?;
-        Ok((
-            ramflux_node_core::HomeNodeMigrationApplyRequest {
-                admin_token: "release-token".into(),
-                proof,
-                branch_proof: request.proof.clone(),
-                now: request.now,
-            },
-            ramflux_node_core::HomeNodeRouteUpdateApplyRequest {
-                admin_token: "release-token".into(),
-                proof: update,
-                now: request.now,
-            },
-        ))
+        Ok(())
     }
 
     fn temp_store_path(test_name: &str) -> anyhow::Result<PathBuf> {

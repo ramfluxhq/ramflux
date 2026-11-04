@@ -163,7 +163,7 @@ fn poison_entry_does_not_stop_other_accounts_drain() -> Result {
         row
     };
     let store = RouterRedbStore::open(&path)?;
-    assert_eq!(store.migration_drain_work_page("")?[0].1, poison);
+    assert_eq!(store.migration_drain_work_page("")?[0].1, Some(poison.clone()));
     let state = RouterCore::new();
     let b = Arc::new(RouterCore::new());
     let destination = Arc::new(RouterRedbStore::open(dir.0.join("destination.redb"))?);
@@ -277,5 +277,87 @@ fn permanent_drain_refusal_requires_destination_signature_and_matching_tuple() -
         ramflux_node_core::MigrationRole::Source,
     )?;
     assert_eq!((progress.remaining, progress.rejected, progress.forwarded), (1, 1, 0));
+    Ok(())
+}
+
+#[test]
+fn idle_drain_page_of_backoff_and_rejected_rows_opens_no_write_transaction() -> Result {
+    let dir = migration_tests::directory()?;
+    let path = dir.0.join("idle.redb");
+    let now = drain_tests::seed(&path, 2)?;
+    {
+        let db = redb::Database::create(&path)?;
+        let tx = db.begin_write()?;
+        let mut table =
+            tx.open_table(redb::TableDefinition::<&str, &[u8]>::new("migration_drain_entries_v1"))?;
+        let rows = table
+            .iter()?
+            .map(|row| {
+                let (key, value) = row?;
+                Ok((key.value().to_owned(), value.value().to_vec()))
+            })
+            .collect::<std::result::Result<Vec<_>, redb::StorageError>>()?;
+        for (i, (key, bytes)) in rows.into_iter().enumerate() {
+            let mut row: MigrationDrainEntry = serde_json::from_slice(&bytes)?;
+            row.state =
+                if i == 0 { MigrationDrainState::Held } else { MigrationDrainState::Rejected };
+            row.next_attempt = now + 1000;
+            table.insert(key.as_str(), serde_json::to_vec(&row)?.as_slice())?;
+        }
+        drop(table);
+        // A due-row window access must fail against this schema; idle rows must never touch it.
+        tx.delete_table(redb::TableDefinition::<&str, u64>::new("migration_window_closed_v1"))?;
+        tx.open_table(redb::TableDefinition::<u64, u64>::new("migration_window_closed_v1"))?;
+        tx.commit()?;
+    }
+    let store = RouterRedbStore::open(path)?;
+    assert_eq!(
+        crate::migration_drain::tick(&store, &mut String::new(), now, |_, _| Err(
+            ramflux_node_core::NodeCoreError::Redb("unexpected idle IO".into())
+        ))?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn corrupt_drain_row_is_isolated_and_other_accounts_keep_draining() -> Result {
+    let dir = migration_tests::directory()?;
+    let path = dir.0.join("corruption.redb");
+    let now = drain_tests::seed(&path, 1)?;
+    {
+        let db = redb::Database::create(&path)?;
+        let tx = db.begin_write()?;
+        let mut entries =
+            tx.open_table(redb::TableDefinition::<&str, &[u8]>::new("migration_drain_entries_v1"))?;
+        let (_, bytes) = entries.iter()?.next().ok_or("healthy")??;
+        let mut poison: MigrationDrainEntry = serde_json::from_slice(bytes.value())?;
+        drop(bytes);
+        poison.entry.target_delivery_id = "a".into();
+        poison.account_anchor = "missing-cursor-account".into();
+        entries.insert(
+            "delivery/v1/YQ/00000000000000000001",
+            serde_json::to_vec(&poison)?.as_slice(),
+        )?;
+        drop(entries);
+        tx.open_table(redb::TableDefinition::<&str, &[u8]>::new("migration_drain_entries_v1"))?
+            .insert("a-corrupt-account", b"not-json".as_slice())?;
+        tx.commit()?;
+    }
+    let store = RouterRedbStore::open(&path)?;
+    let mut sends = 0;
+    assert_eq!(
+        crate::migration_drain::tick(&store, &mut String::new(), now, |_, _| {
+            sends += 1;
+            Ok(ramflux_node_core::MigrationDrainOutcome::BAck)
+        })?,
+        1
+    );
+    assert_eq!(sends, 1);
+    assert_eq!(store.migration_drain_page("moving", 0)?, []);
+    assert!(store.migration_drain_work_page("")?[0].1.is_none());
+    drop(store);
+    let store = RouterRedbStore::open(path)?;
+    assert!(store.migration_drain_work_page("")?[0].1.is_none());
     Ok(())
 }

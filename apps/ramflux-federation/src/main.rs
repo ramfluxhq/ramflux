@@ -69,6 +69,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
+        validate_migration_config(&config)?;
         let redb_path = ramflux_node_core::effective_redb_path(&config);
         let mut store = ramflux_node_core::FederationRedbStore::open(&redb_path)?;
         let mut state = match store.load_state()? {
@@ -203,6 +204,25 @@ fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
     tracing_subscriber::fmt().with_target(false).with_writer(writer).init();
     guard
+}
+
+fn validate_migration_config(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    if ramflux_node_core::home_migration_enabled()? {
+        let signer = ramflux_node_core::require_node_service_signing_key(config)?;
+        let mounted = ramflux_node_core::NodeSecret::required_env(
+            "RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE",
+        )?;
+        let public =
+            mounted.with_bytes(|seed| ramflux_crypto::public_key_base64url_from_seed(*seed));
+        if signer.public_key_base64url() != public {
+            return Err(ramflux_node_core::NodeCoreError::InvalidConfiguration(
+                "migration node signer differs from federation identity".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

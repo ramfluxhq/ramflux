@@ -104,13 +104,21 @@ pub(crate) fn tick(
             break;
         }
         for (key, row) in page {
-            // Window persistence precedes every decision, even expiry and authority failures.
+            let Some(row) = row else {
+                *position = key;
+                continue;
+            };
+            let expired = i64::try_from(now).unwrap_or(i64::MAX) >= row.retain_until;
+            if !expired && (row.state == MigrationDrainState::Rejected || row.next_attempt > now) {
+                *position = key;
+                continue;
+            }
+            // Only due rows make a decision requiring the durable window latch.
             let open = match store.migration_forward_window(&row.entry.target_delivery_id, now) {
                 Ok(window) => window.is_some(),
                 Err(error @ NodeCoreError::Redb(_)) => return Err(error),
                 Err(_) => false,
             };
-            let expired = i64::try_from(now).unwrap_or(i64::MAX) >= row.retain_until;
             if expired || row.state != MigrationDrainState::Rejected && row.next_attempt <= now {
                 let outcome = if expired {
                     MigrationDrainOutcome::Expired
@@ -123,7 +131,15 @@ pub(crate) fn tick(
                         Err(_) => MigrationDrainOutcome::Held,
                     }
                 };
-                store.settle_migration_drain(&row, outcome, now)?;
+                match store.settle_migration_drain(&row, outcome, now) {
+                    Ok(()) => {}
+                    Err(NodeCoreError::MigrationDrainCorrupt(error)) => {
+                        tracing::warn!(%error, %key, "corrupt drain obligation retained");
+                        *position = key;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
                 transitions += 1;
                 if matches!(outcome, MigrationDrainOutcome::BAck | MigrationDrainOutcome::Expired)
                     && store

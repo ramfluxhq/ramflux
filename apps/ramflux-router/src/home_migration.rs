@@ -112,3 +112,17 @@ pub(crate) fn configured(
         signer.home_migration_node(record.clone(), endpoints, now)?.require_client_discovery(ca)?;
     Ok(Some(HomeMigrationService::new(Arc::new(node), Arc::new(LocalFederation { url, token }))))
 }
+
+pub(crate) fn require_forward_client(configured: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(configured, "migration requires a federation forward client");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn migration_enabled_startup_refuses_without_forward_client() {
+        assert!(super::require_forward_client(false).is_err());
+        assert!(super::require_forward_client(true).is_ok());
+    }
+}

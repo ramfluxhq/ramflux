@@ -43,6 +43,21 @@ pub(super) enum DrainFailPoint {
     AfterBAckBeforeACommit,
 }
 
+fn read_drain<T: for<'a> Deserialize<'a>>(
+    tx: &redb::WriteTransaction,
+    table: TableDefinition<&str, &[u8]>,
+    key: &str,
+) -> Result<Option<T>, NodeCoreError> {
+    tx.open_table(table)
+        .map_err(storage)?
+        .get(key)
+        .map_err(storage)?
+        .map(|value| {
+            serde_json::from_slice(value.value())
+                .map_err(|error| NodeCoreError::MigrationDrainCorrupt(error.to_string()))
+        })
+        .transpose()
+}
 fn cursor_key(row: &MigrationDrainEntry) -> Result<String, NodeCoreError> {
     serde_json::to_string(&(&row.account_anchor, &row.migration_id, &row.entry.target_delivery_id))
         .map_err(storage)
@@ -149,11 +164,11 @@ impl RouterRedbStore {
     }
     /// Read a bounded cross-account page strictly after an opaque worker position.
     /// # Errors
-    /// Stops on storage or decoding failures without changing any obligation.
+    /// Stops on storage failures. A `None` row is corrupt and retained at its opaque key.
     pub fn migration_drain_work_page(
         &self,
         after: &str,
-    ) -> Result<Vec<(String, MigrationDrainEntry)>, NodeCoreError> {
+    ) -> Result<Vec<(String, Option<MigrationDrainEntry>)>, NodeCoreError> {
         let tx = self.migration_db().begin_read().map_err(storage)?;
         let table = match tx.open_table(ENTRIES) {
             Ok(table) => table,
@@ -166,7 +181,14 @@ impl RouterRedbStore {
             .take(64)
             .map(|row| {
                 let (key, value) = row.map_err(storage)?;
-                Ok((key.value().to_owned(), decode(value.value())?))
+                let row = match decode(value.value()) {
+                    Ok(row) => Some(row),
+                    Err(error) => {
+                        tracing::warn!(%error, key = key.value(), "corrupt drain obligation retained");
+                        None
+                    }
+                };
+                Ok((key.value().to_owned(), row))
             })
             .collect()
     }
@@ -191,14 +213,16 @@ impl RouterRedbStore {
         let tx = self.migration_db().begin_write().map_err(storage)?;
         let now = clock(&tx, now)?;
         let key = inbox_entry_storage_key(&row.entry.target_delivery_id, row.entry.inbox_seq);
-        let Some(current) = read::<MigrationDrainEntry>(&tx, ENTRIES, &key)? else {
+        let Some(current) = read_drain::<MigrationDrainEntry>(&tx, ENTRIES, &key)? else {
             return Ok(());
         };
         if current.account_anchor != row.account_anchor
             || current.migration_id != row.migration_id
             || current.entry != row.entry
         {
-            return Err(storage("stale migration drain obligation"));
+            return Err(NodeCoreError::MigrationDrainCorrupt(
+                "stale migration drain obligation".into(),
+            ));
         }
         if fail {
             return Err(storage("injected AfterBAckBeforeACommit"));
@@ -227,11 +251,15 @@ impl RouterRedbStore {
     }
 }
 fn sub(value: &mut u64) -> Result<(), NodeCoreError> {
-    *value = value.checked_sub(1).ok_or_else(|| storage("migration counter underflow"))?;
+    *value = value.checked_sub(1).ok_or_else(|| {
+        NodeCoreError::MigrationDrainCorrupt("migration counter underflow".into())
+    })?;
     Ok(())
 }
 fn add(value: &mut u64) -> Result<(), NodeCoreError> {
-    *value = value.checked_add(1).ok_or_else(|| storage("migration counter overflow"))?;
+    *value = value
+        .checked_add(1)
+        .ok_or_else(|| NodeCoreError::MigrationDrainCorrupt("migration counter overflow".into()))?;
     Ok(())
 }
 fn apply(
@@ -242,8 +270,8 @@ fn apply(
     receiver: bool,
 ) -> Result<(), NodeCoreError> {
     let ck = cursor_key(&row)?;
-    let mut cursor: MigrationBacklogCursor =
-        read(tx, BACKLOG, &ck)?.ok_or_else(|| storage("missing drain cursor"))?;
+    let mut cursor: MigrationBacklogCursor = read_drain(tx, BACKLOG, &ck)?
+        .ok_or_else(|| NodeCoreError::MigrationDrainCorrupt("missing drain cursor".into()))?;
     let terminal =
         receiver || matches!(outcome, MigrationDrainOutcome::BAck | MigrationDrainOutcome::Expired);
     if outcome == MigrationDrainOutcome::Expired
@@ -282,7 +310,9 @@ fn apply(
             .map_err(storage)?;
         cursor.next_seq = next
             .map(|(_, value)| {
-                decode::<MigrationDrainEntry>(value.value()).map(|r| r.entry.inbox_seq)
+                decode::<MigrationDrainEntry>(value.value())
+                    .map(|r| r.entry.inbox_seq)
+                    .map_err(|error| NodeCoreError::MigrationDrainCorrupt(error.to_string()))
             })
             .transpose()?
             .unwrap_or(cursor.high_water.saturating_add(1));
@@ -321,10 +351,18 @@ fn apply(
             .checked_add(cursor.progress.forwarded)
             .and_then(|n| n.checked_add(cursor.progress.receiver_acked))
             .and_then(|n| n.checked_add(cursor.progress.expired))
-            .ok_or_else(|| storage("migration counter overflow"))?
-        || cursor.progress.rejected + cursor.progress.evidence_required > cursor.progress.remaining
+            .ok_or_else(|| {
+                NodeCoreError::MigrationDrainCorrupt("migration counter overflow".into())
+            })?
+        || cursor
+            .progress
+            .rejected
+            .checked_add(cursor.progress.evidence_required)
+            .is_none_or(|held| held > cursor.progress.remaining)
     {
-        return Err(storage("migration counters do not conserve"));
+        return Err(NodeCoreError::MigrationDrainCorrupt(
+            "migration counters do not conserve".into(),
+        ));
     }
     write(tx, BACKLOG, &ck, &cursor)
 }

@@ -33,6 +33,8 @@ pub enum NodeCoreError {
     StoreDoesNotExist { path: std::path::PathBuf },
     #[error("redb operation failed: {0}")]
     Redb(String),
+    #[error("corrupt migration drain row: {0}")]
+    MigrationDrainCorrupt(String),
     #[error(
         "identity admission journal base mismatch: snapshot={snapshot_hash} journal={journal_hash}; stop the router and run --discard-stale-identity-journal against this store; restoring a pre-downgrade backup can roll back authority changes"
     )]
