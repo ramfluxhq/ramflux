@@ -66,6 +66,18 @@ impl Fixture {
                 home_node_key: public.clone(),
                 custody_record_hash: object_hash(account.record())?,
                 registered_at: NOW,
+                home_declaration: Box::new(account.group_primary(&vault)?.sign_home_declaration(
+                    wire::HomeDeclarationV1 {
+                        version: 1,
+                        principal_id: account.record().body.principal_id.clone(),
+                        account_anchor: actor.account_anchor.clone(),
+                        home_node: "source".into(),
+                        created_at: NOW,
+                        nonce: hash(90),
+                    },
+                    account.verified(),
+                    NOW,
+                )?),
             },
             "source",
             &keypair,
@@ -81,16 +93,8 @@ impl Fixture {
             node_record: node,
         };
         let home = crypto::verify_home_chain(
-            &wire::ResolveResult { home: evidence, predecessors: vec![] },
-            &crypto::HomeTrust {
-                account_anchor: &actor.account_anchor,
-                node_id: "source",
-                node_key: &public,
-                home_epoch: 0,
-                home_hash: None,
-                cached_manager_range: 0,
-                cached_manager_certificate_hash: None,
-            },
+            &wire::ResolveResult { home: evidence.clone(), predecessors: vec![] },
+            &evidence,
             NOW,
         )?;
         Ok(Self { _root: root, index, account, db, key, vault, home, actor })

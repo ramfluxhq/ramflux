@@ -21,14 +21,15 @@ fn migration_direct_grant_respects_listener_capacity_revocation_and_one_use_scop
             compacted_ids: None,
         }),
     };
-    let pool =
-        crate::CustodyIngressLimiter::with_pools(1, 1, 4, std::time::Duration::from_secs(300));
-    let wall =
-        pool.acquire("192.0.2.1".parse()?, None, std::time::Instant::now()).ok_or("wall permit")?;
+    let pool = crate::CustodyIngressLimiter::with_pools(
+        1,
+        1,
+        Some(4),
+        std::time::Duration::from_secs(300),
+    );
+    let wall = pool.acquire("192.0.2.1".parse()?, None, std::time::Instant::now())?;
     assert!(wall.mark_authenticated("wall"));
-    let permit = pool
-        .acquire("198.51.100.1".parse()?, None, std::time::Instant::now())
-        .ok_or("migration permit")?;
+    let permit = pool.acquire("198.51.100.1".parse()?, None, std::time::Instant::now())?;
     let context = crate::CustodyTlsContext {
         connection_id: &driver.connection,
         remote_ip: "198.51.100.1",
@@ -69,9 +70,7 @@ fn migration_direct_grant_respects_listener_capacity_revocation_and_one_use_scop
         return Err(format!("migration grant after capacity release: {response:?}").into());
     };
     // The successful grant releases H, but still cannot open an ordinary inbox.
-    let spare = pool
-        .acquire("203.0.113.1".parse()?, None, std::time::Instant::now())
-        .ok_or("migration grant did not release H")?;
+    let spare = pool.acquire("203.0.113.1".parse()?, None, std::time::Instant::now())?;
     drop(spare);
     let send = |action: CustodySessionAction| -> Result<CustodyServerFrame> {
         let request = signed_request(

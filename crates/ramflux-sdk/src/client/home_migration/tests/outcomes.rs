@@ -102,17 +102,7 @@ impl Fixture {
         };
         Ok(crypto::verify_home_chain(
             &wire::ResolveResult { home: evidence, predecessors: vec![] },
-            &crypto::HomeTrust {
-                account_anchor: &self.actor.account_anchor,
-                node_id: "source",
-                node_key: self.home.home().1,
-                home_epoch: 0,
-                home_hash: Some(self.home.hash()),
-                cached_manager_range: authority.body.master_certificate.body.range_index,
-                cached_manager_certificate_hash: Some(&object_hash(
-                    &authority.body.master_certificate,
-                )?),
-            },
+            self.home.evidence(),
             at,
         )?)
     }
