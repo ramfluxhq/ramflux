@@ -134,10 +134,8 @@ pub(super) async fn ordinary(
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn ordinary_native_gateway_busy_retries_outlive_the_legacy_timeout_with_fresh_proofs()
 -> Result {
-    let _production = crate::custody::retry::production_budget();
     tokio::time::timeout(Duration::from_secs(120), async {
         let points =
             [Point::Open, Point::Open, Point::Open, Point::RegisterChallenge, Point::RegisterProve];

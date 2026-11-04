@@ -15,5 +15,5 @@ path = "junit.xml"
 # register across two real one-minute challenge-issuance windows (16 per IP per minute),
 # and the gateway has no injectable clock. Every other test must finish inside 60 s.
 [[profile.default.overrides]]
-filter = 'test(ten_existing_sdk_clients_behind_one_ip_register_in_waves_with_ninety_seconds_per_flight)'
-slow-timeout = { period = "60s", terminate-after = 3 }
+filter = 'package(ramflux-gateway) & test(=custody::tests::nat::gateway::ten_existing_sdk_clients_behind_one_ip_register_in_waves_with_ninety_seconds_per_flight)'
+slow-timeout = { period = "60s", terminate-after = 2 }

@@ -73,8 +73,12 @@ impl CredentialVault {
         }
     }
 
-    // Other targets and the memory vault feature return errors here, so the signature stays fallible.
-    #[allow(clippy::unnecessary_wraps)]
+    // Without the macOS keychain or the memory vault this can only return `Ok(None)`; the other
+    // configurations return errors, so the fallible signature stays.
+    #[cfg_attr(
+        not(any(target_os = "macos", feature = "itest-memory-vault")),
+        allow(clippy::unnecessary_wraps)
+    )]
     fn load(&self, account: &str) -> Result<Option<Zeroizing<String>>> {
         #[cfg(not(any(target_os = "macos", feature = "itest-memory-vault")))]
         let _ = account;

@@ -11,40 +11,20 @@ const RETRY_BUDGET: Duration = Duration::from_secs(90);
 const MAX_BACKOFF: Duration = Duration::from_secs(16);
 
 #[cfg(test)]
-static BUDGET_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-#[cfg(test)]
-static BUDGET_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
-/// Test-only: holds a shortened retry budget (all budgets in this process) until dropped.
-/// The daemon runs on its own thread, so the override is process-wide; tests that need the
-/// production budget take [`production_budget`] so they never overlap a shortened one when
-/// several tests share a process (nextest runs one test per process).
-#[cfg(test)]
-pub(crate) struct ShortBudget(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()>);
-#[cfg(test)]
-pub(crate) fn short_budget(budget: Duration) -> ShortBudget {
-    let guard = BUDGET_LOCK.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let millis = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX);
-    BUDGET_OVERRIDE_MS.store(millis, std::sync::atomic::Ordering::SeqCst);
-    ShortBudget(guard)
+thread_local! {
+    static BUDGET_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
+/// Test-only: shortens the retry budget of every `Budget` created on the current thread. A test
+/// daemon sets it on its own (single-threaded) runtime thread from `LocalBusConfig`, so the
+/// override belongs to that daemon alone and never reaches another test sharing the process.
 #[cfg(test)]
-impl Drop for ShortBudget {
-    fn drop(&mut self) {
-        BUDGET_OVERRIDE_MS.store(0, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-/// Test-only: keeps the production retry budget for the guard's lifetime.
-#[cfg(test)]
-pub(crate) fn production_budget() -> std::sync::RwLockReadGuard<'static, ()> {
-    BUDGET_LOCK.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+pub(crate) fn set_thread_budget(budget: Duration) {
+    BUDGET_OVERRIDE.with(|cell| cell.set(Some(budget)));
 }
 fn retry_budget() -> Duration {
     #[cfg(test)]
-    {
-        let millis = BUDGET_OVERRIDE_MS.load(std::sync::atomic::Ordering::SeqCst);
-        if millis != 0 {
-            return Duration::from_millis(millis);
-        }
+    if let Some(budget) = BUDGET_OVERRIDE.with(std::cell::Cell::get) {
+        return budget;
     }
     RETRY_BUDGET
 }

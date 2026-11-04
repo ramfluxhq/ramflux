@@ -35,6 +35,10 @@ fn run_local_bus_thread(
     config: LocalBusConfig,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), SdkError> {
+    #[cfg(test)]
+    if let Some(budget) = config.test_retry_budget {
+        crate::custody::retry::set_thread_budget(budget);
+    }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let local_set = LocalSet::new();
     local_set.block_on(&runtime, serve_local_bus_until_local(config, shutdown))

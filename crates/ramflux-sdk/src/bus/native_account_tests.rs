@@ -673,8 +673,7 @@ async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
     // Only the saturated pool refuses Busy forever, so account creation retries until the
     // budget is exhausted. A short budget keeps the assertion on the exhausted-budget
     // mapping (typed node_busy with the 16 s ceiling) without waiting out the 90 s window.
-    let _budget = matches!(cause, GatewayCause::PoolBusy)
-        .then(|| crate::custody::retry::short_budget(Duration::from_secs(4)));
+    let test_retry_budget = matches!(cause, GatewayCause::PoolBusy).then(|| Duration::from_secs(4));
     let root = Root::new()?;
     let gateway = CauseGateway::start(&root.0, cause).await?;
     let profile =
@@ -685,6 +684,7 @@ async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
     let socket = root.0.join("typed-gateway-cause.sock");
     let mut config = LocalBusConfig::new(&socket, &root.0);
     config.custody_vault = Some(Arc::new(TestVault::default()));
+    config.test_retry_budget = test_retry_budget;
     let (stop, receiver) = watch::channel(false);
     let flow = async {
         let _stop = Stop(stop);

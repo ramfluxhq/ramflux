@@ -209,7 +209,7 @@ async fn r3_an_applied_result_still_closes_after_a_stale_close_refusal() -> Test
 #[tokio::test]
 async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps() -> TestResult {
     use ramflux_protocol::{A2uiConversationCommand as C, A2uiConversationEvent, SurfaceState};
-    // The recent-action FIFO holds 2048 ids; 2064 choices wrap it 16 times over and keep going.
+    // The recent-action FIFO holds 2048 ids; 2064 choices wrap it once (evicting 16 ids) and keep going.
     const CHOICES: u64 = 2064;
     let mut f = fixture()?;
     f.config.rules[0].reply = "Ready".into();

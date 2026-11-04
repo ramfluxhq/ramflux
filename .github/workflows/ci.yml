@@ -49,12 +49,13 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: checks
 
       - name: Install cargo-machete
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: cargo-machete
+          tool: cargo-machete@0.9.2
 
       - name: Production feature provenance
         run: python3 -B scripts/check-production-features.py
@@ -87,6 +88,7 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: clippy-itest
 
       - name: Clippy
@@ -105,6 +107,7 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: clippy-default
 
       - name: Clippy
@@ -123,6 +126,7 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: doctests
 
       - name: Doctests
@@ -141,12 +145,13 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: arch-sdk
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: nextest
+          tool: nextest@0.9.150
 
       - name: Archive
         run: cargo nextest archive -p ramflux-sdk --archive-file sdk.tar.zst
@@ -172,12 +177,13 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: arch-rest
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: nextest
+          tool: nextest@0.9.150
 
       - name: Archive
         run: cargo nextest archive --workspace --exclude ramflux-sdk --archive-file rest.tar.zst
@@ -215,7 +221,7 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: nextest
+          tool: nextest@0.9.150
 
       - name: Download archive
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
@@ -254,7 +260,7 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: nextest
+          tool: nextest@0.9.150
 
       - name: Download archive
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
@@ -288,15 +294,16 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: v-memory-vault
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: nextest
+          tool: nextest@0.9.150
 
       - name: Test
-        run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
+        run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
 
       - name: Upload JUnit
         if: always()
@@ -324,15 +331,16 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: v-production
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: nextest
+          tool: nextest@0.9.150
 
       - name: Test
-        run: RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --profile ci -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
+        run: RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
 
       - name: Upload JUnit
         if: always()
@@ -360,15 +368,16 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: v-legacy
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: nextest
+          tool: nextest@0.9.150
 
       - name: Test
-        run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
+        run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
 
       - name: Upload JUnit
         if: always()
@@ -396,15 +405,16 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: v-local-mint
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: nextest
+          tool: nextest@0.9.150
 
       - name: Test
-        run: cargo nextest run --profile ci -p ramflux-gateway --features itest-local-mint
+        run: cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
 
       - name: Upload JUnit
         if: always()
@@ -437,16 +447,23 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: mutants
 
       - name: Install nextest and cargo-mutants
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
-          tool: nextest,cargo-mutants
+          tool: nextest@0.9.150,cargo-mutants@27.1.0
 
       - name: cargo mutants --in-diff
         if: steps.diff.outputs.has == 'true'
-        run: timeout 480 cargo mutants --in-diff pr.diff --test-tool nextest --timeout 120 --no-shuffle || true
+        run: |
+          # The shards already ran the baseline suite, so it is skipped here. A failure stays
+          # visible as a failed (advisory) job; only the 8 minute time box itself is tolerated.
+          rc=0
+          timeout 480 cargo mutants --in-diff pr.diff --test-tool nextest --baseline=skip --timeout 120 --no-shuffle || rc=$?
+          if [ "$rc" -eq 124 ]; then echo "time box reached"; exit 0; fi
+          exit "$rc"
 
       - name: Upload mutants report
         if: always() && steps.diff.outputs.has == 'true'

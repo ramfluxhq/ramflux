@@ -15,6 +15,9 @@ pub struct LocalBusConfig {
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
+    /// Test-only custody retry budget for this daemon's thread (production is always 90 s).
+    #[cfg(test)]
+    pub test_retry_budget: Option<std::time::Duration>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -1112,6 +1115,8 @@ impl LocalBusConfig {
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),
+            #[cfg(test)]
+            test_retry_budget: None,
         }
     }
 }
