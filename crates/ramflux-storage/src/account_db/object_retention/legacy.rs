@@ -38,10 +38,8 @@ impl AccountDb {
     /// # Errors
     /// Performs one bounded discovery page and at most one measured orphan reclamation.
     pub fn maintain_object_retention(&self) -> Result<(), StorageError> {
-        let root = self.principal_commitment.clone();
         let now = self.now_unix();
-        let complete =
-            self.write_transaction(|| self.connection.call(move |db| Ok(step(db, &root)))?)?;
+        let complete = self.write_transaction(|| step(self))?;
         // Reclamation remains a separate bounded writer phase after discovery commits.
         if complete {
             self.write_transaction(|| {
@@ -52,7 +50,9 @@ impl AccountDb {
     }
 }
 
-fn step(db: &Connection, root: &str) -> Result<bool, StorageError> {
+fn step(account: &AccountDb) -> Result<bool, StorageError> {
+    let db = &account.connection;
+    let root = &account.principal_commitment;
     let (mut phase, mut cursor): (i64, i64) = db.query_row(
         "SELECT phase,cursor FROM object_retention_upgrade WHERE singleton=1",
         [],
@@ -82,7 +82,13 @@ fn step(db: &Connection, root: &str) -> Result<bool, StorageError> {
         let archive = phase == 2 || phase == 4;
         let directory = phase <= 2;
         let table = if archive { "backup_archived_actor_state" } else { "runtime_actor_state" };
-        if archive && !super::super::message_footprint::table_exists(db, table)? {
+        if archive
+            && !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                params![table],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
             phase += 1;
             cursor = 0;
             continue;
@@ -111,7 +117,7 @@ fn step(db: &Connection, root: &str) -> Result<bool, StorageError> {
         } else if let Ok(value) = serde_json::from_slice::<LegacyReference>(&encoded)
             && let Some(reference) = value.reference
         {
-            discover_reference(db, root, &kind, &reference, &encoded)?;
+            discover_reference(account, &kind, &reference, &encoded)?;
         } else {
             db.execute("UPDATE object_retention_upgrade SET unsafe_references=unsafe_references+1 WHERE singleton=1",[])?;
         }
@@ -124,12 +130,12 @@ fn step(db: &Connection, root: &str) -> Result<bool, StorageError> {
 }
 
 fn discover_reference(
-    db: &Connection,
-    root: &str,
+    account: &AccountDb,
     key: &str,
     value: &Value,
     encoded: &[u8],
 ) -> Result<(), StorageError> {
+    let db = &account.connection;
     let reference = value;
     let (Some(wire), Some(manifest)) = (
         reference.get("object_id").and_then(Value::as_str),
@@ -138,7 +144,7 @@ fn discover_reference(
         return Ok(());
     };
     let selector = key.trim_start_matches("attachment/reference/");
-    let context: Option<(String,String,Vec<u8>)> = db.query_row("SELECT message_id,manifest_hash,metadata_json FROM object_legacy_reference_context WHERE selector=?1",[selector],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let context: Option<(String,String,Vec<u8>)> = db.query_row("SELECT message_id,manifest_hash,metadata_json FROM object_legacy_reference_context WHERE selector=?1",params![selector],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     let Some((message, expected, metadata)) = context else {
         // A private archive may not install a reference whose ownership cannot be reconstructed.
         db.execute("UPDATE object_retention_upgrade SET unsafe_references=unsafe_references+1 WHERE singleton=1",[])?;
@@ -147,37 +153,40 @@ fn discover_reference(
     if expected != manifest {
         return Ok(());
     }
-    let digest = object_erasure_commitment(root, wire, manifest);
-    let fenced: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?1)",
-        [&digest],
-        |r| r.get(0),
+    // Discovery needs a reconstructible live projection as well as the common
+    // admission checks. Reject before registration can insert a payload or edge.
+    let live: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE message_id=?1 AND deleted=0)",
+        params![message],
+        |row| row.get(0),
     )?;
-    if fenced {
+    if !live || account.message_is_deleted(&message)? {
+        db.execute("UPDATE object_retention_upgrade SET unsafe_references=unsafe_references+1 WHERE singleton=1", [])?;
         return Ok(());
     }
-    db.execute("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class) VALUES(?1,?2,?3,?4,CASE WHEN EXISTS(SELECT 1 FROM object_index WHERE object_id=?2) THEN 'legacy' ELSE 'imported' END) ON CONFLICT DO NOTHING",params![digest,wire,manifest,object_erasure_lookup(root,wire)])?;
-    db.execute(
-        "INSERT INTO object_retention_reference VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
-        params![
-            ramflux_crypto::blake3_256_base64url(
-                "ramflux.attachment.reference.v1",
-                &ramflux_protocol::canonical_json_bytes(reference)?
-            ),
-            digest,
-            selector,
-            object_erasure_lookup(root, selector),
-            encoded
-        ],
-    )?;
     let hash = ramflux_crypto::blake3_256_base64url(
         "ramflux.attachment.reference.v1",
         &ramflux_protocol::canonical_json_bytes(reference)?,
     );
-    db.execute("INSERT INTO object_message_reference SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM direct_message_projection WHERE message_id=?1 AND deleted=0) ON CONFLICT DO NOTHING",params![message,hash,metadata])?;
-    // A discovered live owner proves import provenance; zero-reference legacy rows stay ambiguous.
-    db.execute("UPDATE object_retention_payload SET retention_class='imported' WHERE commitment=?1 AND retention_class='legacy' AND EXISTS(SELECT 1 FROM object_message_reference WHERE message_id=?2 AND reference_hash=?3)",params![digest,message,hash])?;
-    Ok(())
+    let reference: Value = serde_json::from_slice(encoded)?;
+    let metadata: Value = serde_json::from_slice(&metadata)?;
+    match account.register_object_reference(
+        ObjectReferenceAdmission::ArchiveDiscovery,
+        &ObjectReferenceOwner {
+            reference_hash: &hash,
+            wire_id: wire,
+            manifest_hash: manifest,
+            selector,
+            message_id: &message,
+            reference: &reference,
+            metadata: &metadata,
+        },
+    ) {
+        // Historical erasure is an expected skipped candidate; storage faults
+        // still abort the page, including its cursor and budget accounting.
+        Err(StorageError::ObjectErased) => Ok(()),
+        result => result,
+    }
 }
 
 fn reclaim_one(db: &Connection, now: i64, discovery_complete: bool) -> Result<(), StorageError> {
