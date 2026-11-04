@@ -376,6 +376,7 @@ fn a_received_object_selector_resolves_only_its_expected_manifest() -> Result<()
 mod ack_progress;
 
 mod cached_commit;
+mod revocation_refusal;
 // Mutation: omit the in-transaction fence check after the relay ACK future completes.
 #[tokio::test]
 async fn attachment_ack_completion_after_deletion_returns_object_erased_without_new_progress()

@@ -4,6 +4,15 @@
 //! Typed control projections, with source/target ownership checked before transactional mutation.
 use super::{A2iControlEvent, GatewayInboxEntry, Kind, Opened, RamfluxClient, SdkError, invalid};
 use serde_json::Value;
+fn revocation_error(error: ramflux_storage::StorageError) -> SdkError {
+    match error {
+        ramflux_storage::StorageError::AuthorizationRejected => {
+            invalid("object revocation has no admissible manifest source")
+        }
+        error => SdkError::from(error),
+    }
+}
+
 impl RamfluxClient {
     pub(super) fn project_routed_control(
         &self,
@@ -156,12 +165,14 @@ impl RamfluxClient {
                     "object revocation sender does not own the received reference",
                 ));
             }
-            self.account_db()?.set_object_tombstoned_with_revocation(
-                id,
-                Some(&entry.envelope.source_principal_id),
-                Some(&entry.envelope.envelope_id),
-                super::now_unix_timestamp(),
-            )?;
+            self.account_db()?
+                .set_object_tombstoned_with_revocation(
+                    id,
+                    Some(&entry.envelope.source_principal_id),
+                    Some(&entry.envelope.envelope_id),
+                    super::now_unix_timestamp(),
+                )
+                .map_err(revocation_error)?;
             return Ok(());
         }
         if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some() {

@@ -9,7 +9,7 @@ use crate::object::{
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
 use tracing::instrument::WithSubscriber;
 
-fn revocation_entry(f: &Fixture) -> Result<GatewayInboxEntry, SdkError> {
+pub(super) fn revocation_entry(f: &Fixture) -> Result<GatewayInboxEntry, SdkError> {
     let seed = [41; 32];
     let manifest = crate::client::identity_authority::test_support::remote_manifest(
         "owner",
@@ -678,8 +678,9 @@ async fn attachment_deleted_and_unverified_causes_keep_one_warning_each()
 // Mutation: stop normalizing placeholder identity conflicts at the attachment boundary.
 #[tokio::test]
 async fn attachment_fetch_maps_zero_manifest_placeholder_conflict_to_deleted()
--> Result<(), SdkError> {
+-> Result<(), Box<dyn std::error::Error>> {
     let mut f = Fixture::new()?;
+    let sql = super::revocation_refusal::connection(&f)?;
     let object = f.package.object.clone();
     let receipt = f
         .client
@@ -690,9 +691,11 @@ async fn attachment_fetch_maps_zero_manifest_placeholder_conflict_to_deleted()
             async |client, _| {
                 let db = client.account_db()?;
                 db.persist_client_record("object", "remote-object", &json!({"owner":"owner"}))?;
-                // Emulate a legacy fence created before its authenticated reference was stored.
+                // Keep the managed source for creation, then inject the historical v12 zero identity.
                 db.remove_actor_state(&reference_key("remote-object"))?;
                 db.set_object_tombstoned("remote-object")?;
+                sql.execute_batch("UPDATE object_index SET manifest_hash=zeroblob(32), chunk_manifest_hash=zeroblob(32) WHERE object_id='remote-object';")
+                    .map_err(ramflux_storage::StorageError::from)?;
                 // The actual checked storage write observes the unknown-manifest placeholder.
                 db.upsert_object(&ramflux_storage::ObjectWrite {
                     object_id: &object.object_id,

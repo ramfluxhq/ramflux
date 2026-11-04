@@ -56,6 +56,27 @@ fn make_state(root: &Path) -> Result<LocalBusDaemonState, SdkError> {
     })
 }
 
+// Deletion fixtures need an admitted message reference, as real receive supplies.
+fn admit_deletion_reference(client: &RamfluxClient) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    let reference: serde_json::Value = db
+        .load_actor_state("attachment/reference/object")?
+        .ok_or(SdkError::AccountDbNotUnlocked)?;
+    db.register_object_reference(
+        ramflux_storage::ObjectReferenceAdmission::FreshMessage,
+        &ramflux_storage::ObjectReferenceOwner {
+            reference_hash: "deletion-fixture-reference",
+            wire_id: "object",
+            manifest_hash: "manifest",
+            selector: "object",
+            message_id: "attachment-message",
+            reference: &reference,
+            metadata: &json!({"owner":"owner","message_id":"attachment-message"}),
+        },
+    )?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn deleted_attachment_receipt_is_not_retried() -> Result<(), SdkError> {
     let root = test_root();
@@ -65,6 +86,7 @@ async fn deleted_attachment_receipt_is_not_retried() -> Result<(), SdkError> {
         account.client.account_db()?.pending_received_attachment_ids(i64::MAX, 64)?,
         vec!["object"]
     );
+    admit_deletion_reference(&account.client)?;
     account.client.account_db()?.set_object_tombstoned("object")?;
     let request = LocalBusFrame::request(
         "fetch",
@@ -139,6 +161,7 @@ async fn deleted_attachment_page_fetch_preserves_typed_error() -> Result<(), Sdk
         crate::bus::attachment_scheduler::ensure_page_attachment_available(&failed),
         Err(SdkError::LocalBus(_))
     ));
+    admit_deletion_reference(&account.client)?;
     account.client.account_db()?.set_object_tombstoned("object")?;
     let request = LocalBusFrame::request(
         "fetch",
