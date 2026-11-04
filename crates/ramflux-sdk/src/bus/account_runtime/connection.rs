@@ -31,6 +31,32 @@ impl AccountRuntime {
         }
         Ok(())
     }
+    // Pump writer checkpoints until the first bounded attempt has installed its
+    // session or persisted its typed refusal. A refusal leaves the account open.
+    pub(super) async fn finish_native_admission(&mut self) -> Result<(), SdkError> {
+        let Some(handle) = self.state.accounts.get(&self.id).and_then(|a| a.connection.clone())
+        else {
+            return Ok(());
+        };
+        if handle.snapshot().state == super::super::connection_manager::NetworkingState::Live {
+            return Ok(());
+        }
+        while let Some(work) = self.connection_work.recv().await {
+            let completed = match &work {
+                AccountWork::Connected { metadata, .. } => {
+                    metadata.generation == handle.generation()
+                }
+                AccountWork::Failed { generation, .. } => *generation == handle.generation(),
+                _ => false,
+            };
+            self.apply_connection_work(work).await?;
+            if completed {
+                return Ok(());
+            }
+        }
+        Err(super::stopped())
+    }
+
     pub(super) async fn stop_connection(&mut self) {
         if let Some(handle) =
             self.state.accounts.get_mut(&self.id).and_then(|account| account.connection.take())
@@ -239,6 +265,20 @@ impl AccountRuntime {
     }
 
     async fn install_connection(&mut self, metadata: SessionMetadata) -> Result<(), SdkError> {
+        let result = self.install_connection_inner(metadata).await;
+        if let Err(error) = &result
+            && let Some(account) = self.state.accounts.get_mut(&self.id)
+            && account.client.born_v3_account.is_some()
+        {
+            super::super::native_account::record_networking(account, Some(error))?;
+        }
+        result
+    }
+
+    async fn install_connection_inner(
+        &mut self,
+        metadata: SessionMetadata,
+    ) -> Result<(), SdkError> {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Err(SdkError::NetworkingPending);
         };

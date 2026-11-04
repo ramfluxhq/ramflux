@@ -77,14 +77,18 @@ impl Spec {
         let client = self.client(index)?;
         let config = self.config(&client)?;
         let root = client.surface_local_root_commitment()?;
-        Ok(LocalBusAccountState::new(
+        let reconnect = mail.clone();
+        let mut account = LocalBusAccountState::new(
             client,
             GatewaySessionEngine::with_test_transport(
                 config,
                 Box::new(Gateway { target: self.device.clone(), mail, last: None, cursor: None }),
             ),
             root,
-        ))
+        );
+        account.test_connector =
+            Some(Arc::new(ReceiptConnector { mail: reconnect, target: self.device.clone() }));
+        Ok(account)
     }
     pub fn daemon(&self, mail: Shared) -> Result<Rc<Supervisor>, SdkError> {
         let spec = self.clone();
@@ -225,6 +229,29 @@ pub(super) async fn delivered(
             )));
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+struct ReceiptConnector {
+    mail: Shared,
+    target: String,
+}
+impl crate::bus::connection_manager::SessionConnector for ReceiptConnector {
+    fn connect(
+        &self,
+        config: GatewaySessionConfig,
+        _: tokio::time::Instant,
+    ) -> crate::bus::connection_manager::SessionFuture<'_, GatewaySessionEngine> {
+        Box::pin(async move {
+            Ok(GatewaySessionEngine::with_test_transport(
+                config,
+                Box::new(Gateway {
+                    target: self.target.clone(),
+                    mail: self.mail.clone(),
+                    last: None,
+                    cursor: None,
+                }),
+            ))
+        })
     }
 }
 struct Gateway {

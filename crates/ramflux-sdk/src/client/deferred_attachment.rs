@@ -134,7 +134,7 @@ impl RamfluxClient {
             acknowledge(index).await?;
             let confirmed = std::time::Instant::now();
             if resumable {
-                self.persist_received_attachment_ack(reference, index)?;
+                self.persist_received_attachment_ack_with_limit(reference, index, total_chunks)?;
             }
             tracing::debug!(
                 target: "ramflux_sdk::attachment_timing",

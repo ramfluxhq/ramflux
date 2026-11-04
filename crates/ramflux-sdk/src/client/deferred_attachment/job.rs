@@ -193,7 +193,16 @@ impl RamfluxClient {
         reference: &SdkDmAttachmentRef,
         index: u32,
     ) -> Result<(), SdkError> {
-        if index >= reference.total_chunks {
+        self.persist_received_attachment_ack_with_limit(reference, index, reference.total_chunks)
+    }
+
+    pub(super) fn persist_received_attachment_ack_with_limit(
+        &self,
+        reference: &SdkDmAttachmentRef,
+        index: u32,
+        total_chunks: u32,
+    ) -> Result<(), SdkError> {
+        if index >= total_chunks {
             return Err(SdkError::InboundRejected("attachment ACK index outside manifest".into()));
         }
         let db = self.account_db()?;

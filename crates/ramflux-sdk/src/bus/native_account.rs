@@ -82,7 +82,7 @@ pub(super) fn unlock(
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());
     // The owning runtime starts networking after installing its bounded writer channel.
-    // This local unlock never starts an unbound manager or waits for admission.
+    // NativeUnlock pumps the first admission outcome after installing that channel.
     let result = response(&account)?;
     state.accounts.insert(id.into(), account);
     state.active_account_id = Some(id.into());

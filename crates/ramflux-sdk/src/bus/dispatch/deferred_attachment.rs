@@ -153,7 +153,17 @@ pub(super) fn read_relay_options(
 ) -> Result<Option<RelayTransferOptions>, SdkError> {
     account.client.account_db()?.check_object_access(object_id)?;
     if account.client.account_db()?.object_is_tombstoned(object_id)? {
-        return Err(SdkError::ObjectErased);
+        return Err(
+            if account
+                .client
+                .account_db()?
+                .actor_state_exists(&format!("attachment/reference/{object_id}"))?
+            {
+                SdkError::ObjectErased
+            } else {
+                SyncError::ObjectTombstoned.into()
+            },
+        );
     }
     if endpoint.is_none()
         && service_key.is_none()

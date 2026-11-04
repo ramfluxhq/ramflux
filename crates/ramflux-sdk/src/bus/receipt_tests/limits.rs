@@ -38,6 +38,7 @@ async fn pending(name: &str) -> Result<Pending, Box<dyn std::error::Error>> {
     mail.lock().map_err(|_| "mailbox")?.reject_id = Some(format!("receipt_evt_{receipt}"));
     let mut receiver = b.account(None, mail.clone())?;
     crate::bus::sync_driver::run(&mut receiver).await?;
+    super::super::background::test_flush(&mut receiver).await?;
     let key = receiver
         .client
         .account_db()?
@@ -95,7 +96,7 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     // not consume an attempt merely because the real wall clock crossed the backoff deadline.
     first.next_at = i64::MAX;
     p.receiver.client.account_db()?.persist_actor_state(&p.key, &first)?;
-    assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
+    assert_eq!(super::super::background::test_flush(&mut p.receiver).await?, 0);
     assert_eq!(
         p.mail
             .lock()
@@ -124,6 +125,7 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     drop(engine);
     drop(sender);
     crate::bus::sync_driver::run(&mut p.receiver).await?;
+    super::super::background::test_flush(&mut p.receiver).await?;
     assert_eq!(
         p.receiver
             .client
@@ -133,14 +135,14 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     );
     for attempts in 2..=8 {
         ready(&p)?;
-        assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
+        assert_eq!(super::super::background::test_flush(&mut p.receiver).await?, 0);
         let work =
             p.receiver.client.account_db()?.load_actor_state::<Work>(&p.key)?.ok_or("work")?;
         assert_eq!(work.attempts, attempts);
         assert!(work.next_at > now_unix_timestamp());
     }
     ready(&p)?;
-    assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
+    assert_eq!(super::super::background::test_flush(&mut p.receiver).await?, 0);
     assert_eq!(
         p.receiver
             .client
@@ -198,7 +200,7 @@ async fn expired_revoked_or_rebound_receipts_are_retired_without_reusing_a_prepa
             work.sender = foreign.identity()?.storage_key().into();
             p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
         }
-        assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
+        assert_eq!(super::super::background::test_flush(&mut p.receiver).await?, 0);
         assert_eq!(
             p.mail
                 .lock()
@@ -431,8 +433,11 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     // Database/crypto work under host load must not consume the receipt courier deadline.
     tokio::time::pause();
     let started = tokio::time::Instant::now();
-    tokio::time::timeout(Duration::from_secs(6), crate::bus::sync_driver::run(&mut receiver))
-        .await??;
+    tokio::time::timeout(Duration::from_secs(6), async {
+        crate::bus::sync_driver::run(&mut receiver).await?;
+        super::super::background::test_flush(&mut receiver).await
+    })
+    .await??;
     assert!(started.elapsed() >= Duration::from_secs(3));
     assert!(started.elapsed() < Duration::from_secs(6));
     assert!(receiver.engine.is_none(), "the stalled receipt session must be retired");
@@ -609,7 +614,8 @@ async fn malformed_receipt_retention_metadata_does_not_abort_the_sync_pass() -> 
                     .retain_delivery_receipts(now_unix_timestamp(), 128)
                     .is_err()
             );
-            assert!(crate::bus::sync_driver::run(&mut p.receiver).await? >= 1);
+            crate::bus::sync_driver::run(&mut p.receiver).await?;
+            assert!(super::super::background::test_flush(&mut p.receiver).await? >= 1);
             assert!(!p.receiver.client.account_db()?.actor_state_exists(&p.key)?);
             assert_eq!(
                 p.receiver

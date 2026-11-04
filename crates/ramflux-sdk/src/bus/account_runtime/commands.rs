@@ -84,7 +84,7 @@ impl AccountRuntime {
             super::super::actor::PrivateCommand::NativeUnlock {
                 passphrase,
                 home_node_id,
-                reply,
+                mut reply,
             } => {
                 if !reply.is_closed() {
                     let result = super::super::native_account::unlock(
@@ -103,6 +103,27 @@ impl AccountRuntime {
                     };
                     self.start_connection()?;
                     self.start_courier();
+                    if result.is_ok() {
+                        let mut shutdown = self.shutdown.clone();
+                        tokio::select! {
+                            biased;
+                            () = reply.closed() => {
+                                self.cancel_native_unlock().await;
+                                return Ok(());
+                            }
+                            _ = shutdown.changed() => {
+                                self.cancel_native_unlock().await;
+                                return Ok(());
+                            }
+                            outcome = self.finish_native_admission() => outcome?,
+                        }
+                    }
+                    let result = result.and_then(|_| {
+                        super::super::native_account::response(local_bus_account(
+                            &self.state,
+                            &self.id,
+                        )?)
+                    });
                     let result = match self.publish(request).await {
                         Ok(()) => result,
                         Err(error) => Err(error),

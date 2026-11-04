@@ -183,10 +183,22 @@ pub(super) fn read(
 
 fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError> {
     let mut status = view.status.clone();
-    if let Some(native) = view.native.as_ref() {
+    if view.native.is_some() {
         let now = crate::custody::network_now()?;
+        let native = crate::custody::load_data_account(
+            view.account_root.as_deref().ok_or(SdkError::AccountDbNotUnlocked)?,
+            &client.account_db()?.local_account_id,
+            now,
+        )?;
         status["networking"] = serde_json::to_value(native.state())?;
-        status["networking_reason"] = serde_json::to_value(native.networking_view(now))?;
+        let reason = native.networking_view(now);
+        status["networking_reason"] = serde_json::to_value(&reason)?;
+        status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
+        if let Some(crate::AccountNetworkingReason::NodeBusy { capacity: Some(hint), .. }) =
+            reason.as_ref().map(|view| &view.cause)
+        {
+            status["networking_hint"] = crate::custody::capacity_hint::message(hint).into();
+        }
         let device = status["device_id"].as_str().ok_or(SdkError::CustodySetupInvalid)?;
         let authorized = !native.authority_blocked()
             && !native.branch_pending()
@@ -216,7 +228,9 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
     }
     if let Some(connection) = &view.connection {
         let snapshot = connection.snapshot();
-        status["networking"] = json!(snapshot.state);
+        if view.native.is_none() {
+            status["networking"] = json!(snapshot.state);
+        }
         status["networking_snapshot"] = json!(snapshot);
         status["active_transport_kind"] = json!(snapshot.active_transport_kind);
         status["session_id"] = json!(snapshot.session_id);

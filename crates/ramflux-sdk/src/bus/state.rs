@@ -363,12 +363,19 @@ impl LocalBusAccountState {
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SdkError>> + '_>> {
         Box::pin(async move {
+            if self.connection.as_ref().is_some_and(ConnectionHandle::retirement_requested)
+                && self.connection_work.is_none()
+                && let Some(handle) = self.connection.take()
+            {
+                handle.stop().await;
+            }
             self.start_connection()?;
             let handle = self.connection.as_ref().ok_or(SdkError::GatewaySessionNotEstablished)?;
             handle.require_live(self.timeouts.network_wait).await?;
             if let Some(metadata) = handle.metadata() {
                 self.gateway_config = metadata.config;
                 self.target_delivery_id.clone_from(&self.gateway_config.target_delivery_id);
+                self.finish_restored_resume_checkpoint(true)?;
             }
             Ok(())
         })
@@ -465,7 +472,10 @@ impl LocalBusAccountState {
             client.generation(),
             super::connection_manager::DisconnectReason::CallTimeout,
         );
-        self.checkpoint_gateway_resume_from(config)
+        let config = config.clone();
+        self.checkpoint_gateway_resume_from(&config)?;
+        self.apply_resume_metadata(config);
+        Ok(())
     }
 
     pub(super) fn checkpoint_gateway_resume_from(
