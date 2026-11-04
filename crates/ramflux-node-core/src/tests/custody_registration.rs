@@ -426,3 +426,150 @@ fn native_registered_envelope_uses_current_custody_without_a_legacy_device_set()
     assert!(reopened.authenticated_envelope_source_durable(&envelope, &store).is_err());
     Ok(())
 }
+
+#[test]
+fn forwarded_unregistered_at_b_v3_sender_is_admitted_via_native_foreign_authority() -> TestResult {
+    let now = crate::now_unix_seconds();
+    let seed = 70;
+    let publication = native_at("foreign-native-sender", seed, now)?;
+    let a_path = temp_store_path("native-forward-a")?;
+    let b_path = temp_store_path("native-forward-b")?;
+    let a_store = RouterRedbStore::open_without_wal(&a_path)?;
+    let b_store = RouterRedbStore::open_without_wal(&b_path)?;
+    let a = RouterCore::new();
+    let b = RouterCore::new();
+    b_store.save_router(&b)?;
+    a.publish_custody_record(&publication, now, &a_store)?;
+    let branch =
+        ramflux_crypto::create_device_branch("foreign-native-sender", "primary", 1, [seed + 2; 32]);
+    let mut message =
+        envelope("native-forward", "recipient", ramflux_protocol::DeliveryClass::OpaqueEvent);
+    message.source_principal_id = branch.principal_id.clone();
+    message.source_device_id = branch.device_id.clone();
+    message.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::json!(publication.record.body.account_anchor),
+    );
+    message.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &message)?;
+    a.refresh_registered_envelope_authority(&mut message)?;
+    let bytes = serde_json::to_vec(&message)?;
+    assert!(b.custody_record(&publication.record.body.account_anchor, now)?.is_none());
+    assert!(
+        b.authenticated_envelope_source_from(
+            &message,
+            Some(&b_store),
+            crate::RouterEnvelopeOrigin::Gateway
+        )
+        .is_err()
+    );
+    let source = b.authenticated_envelope_source_from(
+        &message,
+        Some(&b_store),
+        crate::RouterEnvelopeOrigin::Federation,
+    )?;
+    assert_eq!(source.root_commitment(), publication.record.body.account_anchor);
+    assert_eq!(serde_json::to_vec(&message)?, bytes);
+    let reopened = b_store.load_router()?.ok_or("router")?;
+    assert_eq!(
+        reopened.authenticated_envelope_source_from(
+            &message,
+            Some(&b_store),
+            crate::RouterEnvelopeOrigin::Federation
+        )?,
+        source
+    );
+    drop((a, b, reopened, a_store, b_store));
+    std::fs::remove_file(a_path)?;
+    std::fs::remove_file(b_path)?;
+    Ok(())
+}
+
+#[test]
+fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_refuses_stale_sender()
+-> TestResult {
+    let now = crate::now_unix_seconds();
+    let seed = 80;
+    let publication = native_at("forwarded-floors", seed, now)?;
+    let a_path = temp_store_path("floor-a")?;
+    let b_path = temp_store_path("floor-b")?;
+    let a_store = RouterRedbStore::open_without_wal(&a_path)?;
+    let b_store = RouterRedbStore::open_without_wal(&b_path)?;
+    let a = RouterCore::new();
+    let b = RouterCore::new();
+    b_store.save_router(&b)?;
+    a.publish_custody_record(&publication, now, &a_store)?;
+    let branch =
+        ramflux_crypto::create_device_branch("forwarded-floors", "primary", 1, [seed + 2; 32]);
+    let mut message =
+        envelope("native-floors", "recipient", ramflux_protocol::DeliveryClass::OpaqueEvent);
+    message.source_principal_id = branch.principal_id.clone();
+    message.source_device_id = branch.device_id.clone();
+    message.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::json!(publication.record.body.account_anchor),
+    );
+    message.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &message)?;
+    a.refresh_registered_envelope_authority(&mut message)?;
+    let origin = crate::RouterEnvelopeOrigin::Federation;
+    // Positive arm: the same signed sender is admitted before observing newer evidence.
+    b.authenticated_native_forwarded_source_with_floors(&message, &[], &b_store, origin)?;
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
+    let verified = ramflux_crypto::custody::verify_record(&publication.record, now, None, None)?;
+    let revoked = crate::CustodyPublication {
+        record: primary.revoke_device(&verified, "primary", now)?,
+        compacted_ids: None,
+    };
+    assert!(
+        b.authenticated_native_forwarded_source_with_floors(
+            &message,
+            std::slice::from_ref(&revoked),
+            &b_store,
+            origin
+        )
+        .is_err()
+    );
+    let reopened = b_store.load_router()?.ok_or("router")?;
+    assert_eq!(
+        reopened.custody_record(&publication.record.body.account_anchor, now)?,
+        Some(revoked.clone())
+    );
+    assert!(
+        reopened
+            .authenticated_native_forwarded_source_with_floors(&message, &[], &b_store, origin)
+            .is_err()
+    );
+    let mut conflict = revoked.record.body.clone();
+    conflict.profile.display_name = "Conflicting name".into();
+    let conflict =
+        crate::CustodyPublication { record: primary.sign_record(conflict)?, compacted_ids: None };
+    assert!(matches!(
+        reopened.authenticated_native_forwarded_source_with_floors(
+            &message,
+            &[conflict],
+            &b_store,
+            origin
+        ),
+        Err(NodeCoreError::CustodyConflict { .. })
+    ));
+    let reopened = b_store.load_router()?.ok_or("router")?;
+    assert!(reopened.custody_record(&publication.record.body.account_anchor, now).is_err());
+    assert!(
+        reopened
+            .custody_conflict_evidence(
+                &publication.record.body.account_anchor,
+                revoked.record.body.master_certificate.body.range_index
+            )
+            .is_some()
+    );
+    assert!(
+        reopened
+            .authenticated_native_forwarded_source_with_floors(&message, &[], &b_store, origin)
+            .is_err()
+    );
+    drop((a, b, reopened, a_store, b_store));
+    std::fs::remove_file(a_path)?;
+    std::fs::remove_file(b_path)?;
+    Ok(())
+}

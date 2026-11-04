@@ -65,8 +65,8 @@ impl RouterCore {
             .ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
         // Acquire before the global authority lock; another account never waits on this target.
         let _submissions = store.migration_submission_barrier(&pending.delivery_map)?;
-        self.with_migration_authority(&a.account_anchor, now, |authority, _publication| {
-            seal_in_transaction(store, node, authorization, authority, now)
+        self.with_migration_authority(&a.account_anchor, now, |authority, publication| {
+            seal_in_transaction(store, node, authorization, authority, publication, now)
         })
     }
 }
@@ -332,6 +332,7 @@ pub(crate) fn prepare_in_transaction(
         offer: offer.clone(),
         authorization: None,
         seal: None,
+        sealed_authority: None,
         proof: None,
         fence: None,
         base: input.base.evidence().clone(),
@@ -430,6 +431,7 @@ fn seal_in_transaction(
     node: &MigrationNode,
     authorization: &Signed<Authorization>,
     authority: &VerifiedRecord,
+    publication: &crate::CustodyPublication,
     now: u64,
 ) -> Result<Signed<Receipt>, NodeCoreError> {
     let a = &authorization.body;
@@ -484,6 +486,10 @@ fn seal_in_transaction(
     let seal = seal_receipt(node, authorization, &auth_hash, now, deadline)?;
     op.authorization = Some(authorization.clone());
     op.seal = Some(seal.clone());
+    op.sealed_authority = Some(ramflux_protocol::custody::Publication {
+        record: publication.record.clone(),
+        compacted_ids: publication.compacted_ids.clone(),
+    });
     op.phase = Phase::Sealed;
     op.state_version = 2;
     op.next_due = now;

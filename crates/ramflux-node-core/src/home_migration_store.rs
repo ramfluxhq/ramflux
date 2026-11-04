@@ -26,6 +26,7 @@ mod authority_evidence;
 mod courier;
 pub(crate) use courier::MigrationCourierClaim;
 mod fence;
+mod forwarded;
 mod genesis;
 mod maintenance;
 mod queries;
@@ -61,6 +62,8 @@ pub struct MigrationOperation {
     pub offer: Signed<Offer>,
     pub authorization: Option<Signed<Authorization>>,
     pub seal: Option<Signed<Receipt>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_authority: Option<ramflux_protocol::custody::Publication>,
     pub proof: Option<Signed<CommitProof>>,
     pub fence: Option<Signed<NoncommitFence>>,
     pub base: RecordEvidence,
@@ -150,6 +153,7 @@ impl SealedMigration {
             offer: self.offer.clone(),
             authorization: Some(self.authorization.clone()),
             seal: Some(self.seal.clone()),
+            sealed_authority: None,
             proof: None,
             fence: None,
             base,
