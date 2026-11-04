@@ -5,9 +5,13 @@
 use crate::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 
-pub(crate) const VERSION: i64 = 12;
-pub(crate) const CHECKSUM: &str = "2026-11-02-object-ownership-erasure-v1";
-pub(crate) const SENTINEL: &str = "2026-06-14-account-core-v1;writer-floor=12;object-erasure-v1";
+pub(crate) const VERSION: i64 = 13;
+pub(crate) const CHECKSUM: &str = "2026-11-05-selector-lifecycle-v13";
+pub(crate) const SENTINEL: &str = "2026-06-14-account-core-v1;writer-floor=13;object-erasure-v1";
+
+pub(crate) const V12_CHECKSUM: &str = "2026-11-02-object-ownership-erasure-v1";
+pub(crate) const V12_SENTINEL: &str =
+    "2026-06-14-account-core-v1;writer-floor=12;object-erasure-v1";
 
 pub(crate) fn validate(db: &Connection) -> Result<(), StorageError> {
     let newest: i64 =
@@ -25,14 +29,15 @@ pub(crate) fn validate(db: &Connection) -> Result<(), StorageError> {
             row.get(0)
         })
         .optional()?;
-    if newest == VERSION && first.as_deref() != Some(SENTINEL) {
+    let expected_sentinel = if newest == 12 { V12_SENTINEL } else { SENTINEL };
+    if newest >= 12 && first.as_deref() != Some(expected_sentinel) {
         return Err(StorageError::MigrationChecksumMismatch {
             schema_version: 1,
-            expected: SENTINEL.into(),
+            expected: expected_sentinel.into(),
             actual: first.clone().unwrap_or_default(),
         });
     }
-    if newest == VERSION {
+    if newest >= 12 {
         for table in [
             "account_erasure_generation",
             "object_erasure_fence",
@@ -58,18 +63,26 @@ pub(crate) fn validate(db: &Connection) -> Result<(), StorageError> {
             }
         }
     }
-    if first.as_deref() == Some(SENTINEL) {
+    for (version, checksum) in [(12, V12_CHECKSUM), (VERSION, CHECKSUM)] {
+        let sentinel_requires_version = match first.as_deref() {
+            Some(SENTINEL) => true,
+            Some(V12_SENTINEL) => version == 12,
+            _ => false,
+        };
+        if newest < version && !sentinel_requires_version {
+            continue;
+        }
         let actual: Option<String> = db
             .query_row(
                 "SELECT checksum FROM schema_migration WHERE schema_version=?1",
-                [VERSION],
+                [version],
                 |row| row.get(0),
             )
             .optional()?;
-        if actual.as_deref() != Some(CHECKSUM) {
+        if actual.as_deref() != Some(checksum) {
             return Err(StorageError::MigrationChecksumMismatch {
-                schema_version: VERSION,
-                expected: CHECKSUM.into(),
+                schema_version: version,
+                expected: checksum.into(),
                 actual: actual.unwrap_or_default(),
             });
         }
@@ -82,7 +95,7 @@ pub(crate) fn install_sentinel(db: &Connection) -> Result<(), StorageError> {
         db.query_row("SELECT checksum FROM schema_migration WHERE schema_version=1", [], |row| {
             row.get(0)
         })?;
-    if first != "2026-06-14-account-core-v1" && first != SENTINEL {
+    if first != "2026-06-14-account-core-v1" && first != V12_SENTINEL && first != SENTINEL {
         return Err(StorageError::MigrationChecksumMismatch {
             schema_version: 1,
             expected: "2026-06-14-account-core-v1".into(),
@@ -105,9 +118,36 @@ pub(crate) fn upgrade_private(db: &crate::database::Connection) -> Result<(), St
         return Ok(());
     }
     let transaction = db.immediate_transaction()?;
+    let has_v12: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migration WHERE schema_version=12)",
+        [],
+        |r| r.get(0),
+    )?;
     db.execute_batch(crate::account_db::object_retention::SCHEMA)?;
+    if !has_v12 {
+        db.execute("INSERT INTO schema_migration VALUES(12,?1,'v1-object-erasure',?2,'portable attachment erasure writer floor')", params![crate::unix_now(), V12_CHECKSUM])?;
+    }
+    rebuild_triggers(db)?;
     db.call(|raw| Ok(install_sentinel(raw)))??;
     db.execute("INSERT INTO schema_migration VALUES(?1,?2,'v1-object-erasure',?3,'portable attachment erasure writer floor')",params![VERSION,crate::unix_now(),CHECKSUM])?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// Install the generated erasure bodies before publishing the new writer floor.
+pub(crate) fn rebuild_triggers(db: &crate::database::Connection) -> Result<(), StorageError> {
+    let runtime_exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_outbox')",
+        [],
+        |r| r.get(0),
+    )?;
+    // Fresh databases install runtime and its triggers before the first account operation.
+    if !runtime_exists {
+        return Ok(());
+    }
+    db.call(|raw| {
+        crate::account_db::object_retention::install(raw)?;
+        crate::account_db::message_footprint::install(raw)
+    })?;
     Ok(())
 }

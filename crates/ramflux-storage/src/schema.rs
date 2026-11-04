@@ -817,6 +817,13 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
             DELETE FROM group_member_device_key WHERE EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=group_member_device_key.group_id AND m.member_id=COALESCE(group_member_device_key.raw_device_id,group_member_device_key.member_id) AND (m.active=0 OR m.principal_commitment IS NOT group_member_device_key.principal_commitment));",
     },
     AccountMigration {
+        schema_version: 12,
+        app_version: "v1-object-erasure",
+        checksum: crate::schema_object_erasure::V12_CHECKSUM,
+        notes: "portable attachment ownership and append-only erasure writer floor",
+        sql: crate::account_db::object_retention::SCHEMA,
+    },
+    AccountMigration {
         schema_version: crate::schema_object_erasure::VERSION,
         app_version: "v1-object-erasure",
         checksum: crate::schema_object_erasure::CHECKSUM,
@@ -864,6 +871,9 @@ fn apply_account_migration(
     connection: &Connection,
     migration: &AccountMigration,
 ) -> Result<(), StorageError> {
+    if migration.schema_version == crate::schema_object_erasure::VERSION {
+        return crate::schema_object_erasure::upgrade_private(connection);
+    }
     let existing: Option<String> = connection
         .query_row(
             "SELECT checksum FROM schema_migration WHERE schema_version = ?1",
@@ -873,7 +883,12 @@ fn apply_account_migration(
         .optional()?;
     if let Some(checksum) = existing {
         if checksum == migration.checksum
-            || (migration.schema_version == 1 && checksum == crate::schema_object_erasure::SENTINEL)
+            || (migration.schema_version == 1
+                && [
+                    crate::schema_object_erasure::V12_SENTINEL,
+                    crate::schema_object_erasure::SENTINEL,
+                ]
+                .contains(&checksum.as_str()))
         {
             return Ok(());
         }
@@ -886,8 +901,11 @@ fn apply_account_migration(
     let transaction = connection.immediate_transaction()?;
     let result = (|| -> Result<(), StorageError> {
         connection.execute_batch(migration.sql)?;
-        if migration.schema_version == crate::schema_object_erasure::VERSION {
-            connection.call(|db| Ok(crate::schema_object_erasure::install_sentinel(db)))??;
+        if migration.schema_version == 12 {
+            connection.execute(
+                "UPDATE schema_migration SET checksum=?1 WHERE schema_version=1",
+                params![crate::schema_object_erasure::V12_SENTINEL],
+            )?;
         }
         connection.execute(
             "INSERT INTO schema_migration

@@ -53,12 +53,18 @@ impl BackupDatabase {
             let checksum: Option<String> = self
                 .db
                 .query_row(
-                    "SELECT checksum FROM incoming.schema_migration WHERE schema_version=12",
-                    [],
+                    "SELECT checksum FROM incoming.schema_migration WHERE schema_version=?1",
+                    [version],
                     |r| r.get(0),
                 )
                 .optional()?;
-            if checksum.as_deref() != Some(crate::schema_object_erasure::CHECKSUM) {
+            if checksum.as_deref()
+                != Some(if version == 12 {
+                    crate::schema_object_erasure::V12_CHECKSUM
+                } else {
+                    crate::schema_object_erasure::CHECKSUM
+                })
+            {
                 return Err(StorageError::ObjectOwnershipUnverified { schema_version: version });
             }
             self.db.execute_batch("INSERT INTO object_erasure_fence SELECT commitment FROM incoming.object_erasure_fence WHERE 1 ON CONFLICT DO NOTHING; INSERT INTO object_erasure_lookup SELECT lookup,commitment FROM incoming.object_erasure_lookup WHERE 1 ON CONFLICT DO NOTHING;")?;

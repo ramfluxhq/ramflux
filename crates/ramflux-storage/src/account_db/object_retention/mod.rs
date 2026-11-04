@@ -284,3 +284,6 @@ mod selector_admission_tests;
 
 #[cfg(test)]
 mod selector_lifecycle_tests;
+
+#[cfg(test)]
+mod selector_upgrade_tests;

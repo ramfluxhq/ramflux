@@ -512,3 +512,49 @@ fn selector_projection_outbox_drain_budget() -> Result<(), StorageError> {
     }
     Ok(())
 }
+
+fn upgraded_zero_placeholder(survivor: bool) -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("selector-v12-zero")?;
+    register(&db, "wire", "other-message", "wire-ref")?;
+    register(&db, "private-canary", "m1", "r1")?;
+    if survivor {
+        register(&db, "private-canary", "m2", "r2")?;
+    }
+    placeholder(&db, "private-canary")?;
+    super::selector_upgrade_tests::v12_fixture(&db)?;
+    // The payload-free v12 placeholder shape, including both zero manifests.
+    db.connection.execute("UPDATE object_index SET manifest_hash=zeroblob(32),chunk_manifest_hash=zeroblob(32) WHERE object_id='private-canary'", [])?;
+    drop(db);
+    let db = reopen(&root)?;
+    let before: Vec<u8> = db.connection.query_row(
+        "SELECT manifest_hash FROM object_index WHERE object_id='private-canary'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(before, vec![0; 32], "upgrade must not scrub untouched rows");
+    db.delete_direct_message("thread", "m1", "local", "delete-first")?;
+    if survivor {
+        let (manifest, chunks): (Vec<u8>, Vec<u8>) = db.connection.query_row("SELECT manifest_hash,chunk_manifest_hash FROM object_index WHERE object_id='private-canary'", [], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        assert_eq!(manifest, b"manifest");
+        assert_eq!(chunks, b"manifest");
+        db.check_object_access("private-canary")?;
+        db.delete_direct_message("thread", "m2", "local", "delete-second")?;
+    }
+    drop(db);
+    let db = reopen(&root)?;
+    assert_retired(&db, "private-canary")?;
+    db.check_object_access("wire")?;
+    assert_eq!(db.object_erasure_generation()?, 0, "wire owner keeps payload alive");
+    verify_snapshot(&db, &root)?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[test]
+fn e1_v12_zero_placeholder_retired_with_last_reference_after_upgrade() -> Result<(), StorageError> {
+    upgraded_zero_placeholder(false)
+}
+#[test]
+fn e1_v12_zero_placeholder_survivor_normalized_then_deleted() -> Result<(), StorageError> {
+    upgraded_zero_placeholder(true)
+}

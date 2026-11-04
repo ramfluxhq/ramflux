@@ -12,7 +12,7 @@ use rusqlite::params;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-pub(super) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
+pub(crate) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
     super::object_retention::install(db)?;
     schema::install(db)
 }

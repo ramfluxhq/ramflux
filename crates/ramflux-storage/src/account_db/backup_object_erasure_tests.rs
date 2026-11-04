@@ -179,7 +179,7 @@ fn unsafe_archive_reference_is_a_typed_refusal_before_install() -> Result<(), St
     let snapshot = db.write_backup_snapshot(&path)?;
     assert!(matches!(
         BackupDatabase::open(&path, &snapshot.key),
-        Err(StorageError::ObjectOwnershipUnverified { schema_version: 12 })
+        Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 })
     ));
     drop(db);
     std::fs::remove_dir_all(root)?;

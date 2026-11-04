@@ -4,10 +4,16 @@
 //! Retire captured selectors while their authenticated payload identities still exist.
 
 pub(super) const RETIRE: &str = r"
+ UPDATE object_index SET manifest_hash=CAST((SELECT p.manifest_hash FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) JOIN object_retention_payload p USING(commitment) WHERE r.selector=object_index.object_id ORDER BY r.reference_hash,m.message_id LIMIT 1) AS BLOB),
+ chunk_manifest_hash=CAST((SELECT p.manifest_hash FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) JOIN object_retention_payload p USING(commitment) WHERE r.selector=object_index.object_id ORDER BY r.reference_hash,m.message_id LIMIT 1) AS BLOB)
+ WHERE object_id IN (SELECT selector FROM object_reference_erasure_work)
+ AND tombstoned=1 AND chunk_count=0 AND length(ciphertext)=0 AND manifest_hash=zeroblob(32)
+ AND EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=object_index.object_id);
+
  DELETE FROM object_index WHERE object_id IN (SELECT selector FROM object_reference_erasure_work)
  AND tombstoned=1 AND chunk_count=0 AND length(ciphertext)=0
  AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=object_index.object_id)
- AND EXISTS(SELECT 1 FROM object_reference_erasure_work w JOIN object_retention_payload p USING(commitment) WHERE w.selector=object_index.object_id AND p.manifest_hash=CAST(object_index.manifest_hash AS TEXT));
+ AND EXISTS(SELECT 1 FROM object_reference_erasure_work w JOIN object_retention_payload p USING(commitment) WHERE w.selector=object_index.object_id AND (p.manifest_hash=CAST(object_index.manifest_hash AS TEXT) OR object_index.manifest_hash=zeroblob(32)));
  INSERT INTO object_erasure_lookup SELECT w.selector_lookup,w.commitment FROM object_reference_erasure_work w
  WHERE NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=w.selector) ON CONFLICT DO NOTHING;
  DELETE FROM runtime_outbox WHERE actor_state_kind IN (SELECT a.state_kind FROM object_reference_actor a JOIN object_reference_erasure_work w USING(reference_hash))

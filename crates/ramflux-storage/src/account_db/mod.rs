@@ -52,7 +52,7 @@ pub(crate) mod home_migration;
 pub mod identity_verification;
 pub mod journal;
 pub mod mcp;
-mod message_footprint;
+pub(crate) mod message_footprint;
 pub mod messages;
 pub mod object;
 mod object_payload;
