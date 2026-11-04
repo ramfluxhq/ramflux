@@ -154,6 +154,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         return code;
     }
     match error {
+        SdkError::DataRootInUse => "DataRootInUse",
         SdkError::ObjectErased => "ObjectErased",
         SdkError::Storage(StorageError::ObjectIdentityConflict) => "ObjectIdentityConflict",
         SdkError::Storage(StorageError::ObjectOwnershipUnverified { .. }) => {

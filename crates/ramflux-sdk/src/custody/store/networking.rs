@@ -3,7 +3,8 @@
 
 //! Node-bound capacity deadlines and their persisted and displayed representations.
 use super::{
-    BornAccount, CreationState, MAX_STORED_AUTHORITY_BYTES, directory, load_account, write_public,
+    BornAccount, CreationState, MAX_STORED_AUTHORITY_BYTES, create_private_temp, directory,
+    load_account,
 };
 use crate::custody::{CAPACITY_RETRY_AFTER_MS, CAPACITY_RETRY_AFTER_SECS, capacity_hint};
 use crate::{AccountNetworkingReason, SdkError};
@@ -215,7 +216,7 @@ impl BornAccount {
                 ".authority-{}",
                 ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
             ));
-            write_public(&temp, &bytes)?;
+            create_private_temp(&temp, &bytes)?;
             fs::rename(temp, dir.join("authority.json"))?;
             fs::File::open(&dir)?.sync_all()?;
             if clamped {

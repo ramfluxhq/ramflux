@@ -428,9 +428,7 @@ async fn custody_shutdown_cannot_release_the_data_root_while_confirmation_is_blo
             crate::serve_local_bus_until(second, stop.subscribe()),
         )
         .await?;
-        assert!(
-            matches!(attempt, Err(SdkError::Io(e)) if e.kind()==std::io::ErrorKind::WouldBlock)
-        );
+        assert!(matches!(attempt, Err(SdkError::DataRootInUse)));
         assert!(root.0.join("custody_accounts/late-confirm").exists());
         assert!(!root.0.join("second.sock").exists());
         vault.release();
@@ -484,9 +482,7 @@ async fn custody_native_shutdown_retains_root_lease_and_cancels_uncommitted_auth
             crate::serve_local_bus_until(second, stop.subscribe()),
         )
         .await?;
-        assert!(
-            matches!(attempt, Err(SdkError::Io(e)) if e.kind()==std::io::ErrorKind::WouldBlock)
-        );
+        assert!(matches!(attempt, Err(SdkError::DataRootInUse)));
         let ids = ramflux_storage::AccountIndex::open(&root.0)?.known_account_ids()?;
         assert_eq!(ids.len(), 1);
         assert!(root.0.join("custody_accounts").join(&ids[0]).exists());
@@ -503,7 +499,7 @@ async fn custody_native_shutdown_retains_root_lease_and_cancels_uncommitted_auth
         loop {
             match super::data_root_lock::DataRootLock::acquire(&root.0) {
                 Ok(lease) => break Ok::<_, SdkError>(lease),
-                Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(SdkError::DataRootInUse) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => break Err(error),

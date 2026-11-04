@@ -832,6 +832,7 @@ fn clear_optional_out_error(out_error_json: *mut *mut RamfluxBuffer) {
 fn map_sdk_error(error: &SdkError) -> CAbiError {
     let message = error.to_string();
     let code = match error {
+        SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
         SdkError::Storage(ramflux_storage::StorageError::ObjectIdentityConflict) => {
             RamfluxErrorCode::ObjectIdentityConflict
@@ -1007,6 +1008,14 @@ mod group_error_tests;
 fn backup_authorization_rejection_maps_to_c_abi_permission_denied() {
     let error = SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected);
     assert_eq!(map_sdk_error(&error).code, RamfluxErrorCode::PermissionDenied);
+}
+
+#[cfg(test)]
+#[test]
+fn custody_busy_data_root_maps_to_c_abi_account_busy() {
+    let error = map_sdk_error(&SdkError::DataRootInUse);
+    assert_eq!(error.code, RamfluxErrorCode::AccountBusy);
+    assert_eq!(error.message, "data root is in use by another daemon");
 }
 
 #[cfg(test)]

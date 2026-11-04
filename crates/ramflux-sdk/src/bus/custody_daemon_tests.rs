@@ -31,7 +31,7 @@ async fn custody_second_daemon_cannot_unlink_the_live_socket_or_reconcile_its_ro
             crate::serve_local_bus_until(LocalBusConfig::new(&socket, &root.0), stop.subscribe()),
         )
         .await?;
-        assert!(matches!(attempt,Err(SdkError::Io(e)) if e.kind()==std::io::ErrorKind::WouldBlock));
+        assert!(matches!(attempt, Err(SdkError::DataRootInUse)));
         assert!(marker.exists());
         assert_eq!(std::fs::metadata(&socket)?.ino(), inode);
         let mut ordinary = LocalBusClient::connect(&socket).await?;

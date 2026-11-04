@@ -42,6 +42,8 @@ impl GroupOperation {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("data root is in use by another daemon")]
+    DataRootInUse,
     #[error("object erased")]
     ObjectErased,
     #[error("{}", ATTACHMENT_DELETED)]

@@ -423,7 +423,7 @@ fn private_directory(path: &Path) -> Result<(), SdkError> {
     builder.create(path)?;
     Ok(())
 }
-fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
+fn create_private_temp(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
     file.write_all(bytes)?;
@@ -705,7 +705,7 @@ impl BornAccount {
             ".authority-{}",
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
         ));
-        write_public(&temp, &bytes)?;
+        create_private_temp(&temp, &bytes)?;
         fs::rename(temp, dir.join("authority.json"))?;
         fs::File::open(&dir)?.sync_all()?;
         self.stored.state = CreationState::Live;

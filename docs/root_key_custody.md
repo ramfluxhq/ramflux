@@ -195,9 +195,10 @@ The stage-1 Rust implementation preallocates its normalization, phrase-display
 and setup-frame buffers so secret-bearing writes cannot reallocate. Owned buffers
 use zeroizing wrappers. Residual library-boundary copies remain: BIP39
 `to_entropy_array` returns an entropy array by value before it enters a zeroizing
-wrapper; X25519 `StaticSecret::from(*seed)` copies its input seed; HKDF 0.12 retains
-an internal PRK that it does not zeroize on drop; and serde_json may allocate a
-non-zeroizing deserializer scratch buffer for escaped confirmation words. The
+wrapper; X25519 `StaticSecret::from(*seed)` copies its input seed; HKDF 0.13 uses
+internal PRK and HMAC state buffers whose synchronous zeroization is not guaranteed
+by this implementation; and serde_json may allocate a non-zeroizing deserializer
+scratch buffer for escaped confirmation words. The
 Unicode NFKD `Decompositions` iterator uses a non-zeroizing `TinyVec` buffer, which
 can spill to the heap for runs of more than four combining marks. These
 copies are bounded and short-lived but are not claimed to be synchronously scrubbed.

@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Atomic public own-head adoption keeps independently held credentials and mode immutable.
-use super::{MAX_STORED_AUTHORITY_BYTES, directory, invalid, load_data_account, write_public};
+use super::{
+    MAX_STORED_AUTHORITY_BYTES, create_private_temp, directory, invalid, load_data_account,
+};
 use crate::SdkError;
 use ramflux_crypto::custody::PinOutcome;
 use ramflux_protocol::custody::CustodyAuthority;
@@ -53,7 +55,7 @@ pub(crate) fn accept_publication(
         ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
     ));
     let result = (|| -> Result<(), SdkError> {
-        write_public(&temp, &bytes)?;
+        create_private_temp(&temp, &bytes)?;
         fs::rename(&temp, dir.join("authority.json"))?;
         fs::File::open(&dir)?.sync_all()?;
         Ok(())

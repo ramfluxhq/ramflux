@@ -23,7 +23,13 @@ impl DataRootLock {
             .truncate(false)
             .mode(0o600)
             .open(root.join("daemon.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&file)?;
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                SdkError::DataRootInUse
+            } else {
+                SdkError::Io(error)
+            }
+        })?;
         Ok(Arc::new(Self { _file: file }))
     }
 }
@@ -36,9 +42,9 @@ mod tests {
         let root = crate::custody::tests::Root::new()?;
         let owner = DataRootLock::acquire(&root.0)?;
         let worker = Arc::clone(&owner);
-        assert!(
-            matches!(DataRootLock::acquire(&root.0), Err(SdkError::Io(e)) if e.kind()==std::io::ErrorKind::WouldBlock)
-        );
+        assert!(matches!(DataRootLock::acquire(&root.0), Err(SdkError::DataRootInUse)));
+        assert_eq!(crate::bus::io::local_bus_error_code(&SdkError::DataRootInUse), "DataRootInUse");
+        assert_eq!(SdkError::DataRootInUse.to_string(), "data root is in use by another daemon");
         drop(owner);
         assert!(DataRootLock::acquire(&root.0).is_err());
         drop(worker);

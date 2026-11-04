@@ -22,6 +22,8 @@ pub(super) fn reserve_account(root: &Path, id: &str, anchor: &str) -> Result<Pat
     fs::File::open(&parent)?.sync_all()?;
     // Create the crash marker before the insert-only index reservation. Startup can remove
     // a marker with neither an index row nor authority without retiring the account id.
+    #[cfg(test)]
+    super::race_hooks::run(super::race_hooks::Stage::BeforeReservation, root, id)?;
     let index = ramflux_storage::AccountIndex::open(root)?;
     if let Err(error) = index.reserve_account(id, anchor) {
         fs::remove_dir(&dir)?;
@@ -79,11 +81,22 @@ pub(super) fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     checkpoints::run(checkpoints::Stage::TemporarySynced)?;
     // Linking a fully synced inode publishes all bytes atomically and refuses any existing name.
     fs::hard_link(&temporary, path)?;
+    // Publication is irreversible here. Cleanup failures must not delete live vault credentials.
+    if let Err(error) = remove_publication_temporary(&temporary) {
+        tracing::warn!(%error, "published custody authority temporary cleanup failed");
+    } else {
+        cleanup.0 = None;
+    }
+    if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+        tracing::warn!(%error, "published custody authority directory sync failed");
+    }
+    Ok(())
+}
+
+fn remove_publication_temporary(path: &Path) -> Result<(), SdkError> {
     #[cfg(test)]
     checkpoints::run(checkpoints::Stage::Linked)?;
-    fs::remove_file(&temporary)?;
-    cleanup.0 = None;
-    File::open(parent)?.sync_all()?;
+    fs::remove_file(path)?;
     Ok(())
 }
 
@@ -132,3 +145,7 @@ mod checkpoints {
 #[cfg(test)]
 #[path = "genesis/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "genesis/flow_tests.rs"]
+mod flow_tests;

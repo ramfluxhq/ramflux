@@ -6,6 +6,7 @@ use crate::SdkError;
 use std::{cell::RefCell, path::Path};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Stage {
+    BeforeReservation,
     AfterReservation,
     AfterReservationCheck,
     BeforeAuthorityPublish,

@@ -3,8 +3,8 @@
 
 //! Local user-started recovery and public crash journals; no master material is serializable.
 use super::{
-    BornAccount, CreationState, MAX_STORED_AUTHORITY_BYTES, StoredAuthority, directory, invalid,
-    load_data_account, private_directory, write_public,
+    BornAccount, CreationState, MAX_STORED_AUTHORITY_BYTES, StoredAuthority, create_private_temp,
+    directory, genesis, invalid, load_data_account,
 };
 use crate::{SdkError, custody::PrimaryVault};
 use ramflux_crypto::custody::{
@@ -87,7 +87,7 @@ fn replace_public(path: &Path, value: &impl Serialize) -> Result<(), SdkError> {
     if bytes.len() > MAX_STORED_AUTHORITY_BYTES {
         return Err(invalid());
     }
-    write_public(&temporary, &bytes)?;
+    create_private_temp(&temporary, &bytes)?;
     fs::rename(&temporary, path)?;
     fs::File::open(path.parent().ok_or_else(invalid)?)?.sync_all()?;
     Ok(())
@@ -437,16 +437,8 @@ pub(crate) fn pending_restore(
     let mut seeds = Zeroizing::new([0; 64]);
     seeds[..32].copy_from_slice(&*crate::custody::random()?);
     seeds[32..].copy_from_slice(&*crate::custody::random()?);
-    let index = ramflux_storage::AccountIndex::open(root)?;
-    index.create_account(id, &authority.publication.record.body.account_anchor)?;
-    let parent = root.join("custody_accounts");
-    if !parent.try_exists()? {
-        private_directory(&parent)?;
-        fs::File::open(root)?.sync_all()?;
-    }
-    let dir = directory(root, id)?;
-    private_directory(&dir)?;
-    fs::File::open(&parent)?.sync_all()?;
+    let dir =
+        genesis::reserve_account(root, id, &authority.publication.record.body.account_anchor)?;
     let mut pins = ramflux_crypto::custody::AuthorityPins::default();
     pins.observe(&verified)?;
     let stored = StoredAuthority {
@@ -474,11 +466,11 @@ pub(crate) fn pending_restore(
         let mut client = crate::RamfluxClient::new();
         client.open_account_index(root)?;
         client.seal_new_account_data(id, &stored.record.body.account_anchor, passphrase)?;
-        write_public(
+        genesis::require_owned_reservation(root, id, &stored.record.body.account_anchor, &dir)?;
+        genesis::write_public(
             &dir.join("authority.json"),
             &ramflux_protocol::canonical_json_bytes(&stored)?,
         )?;
-        fs::File::open(&dir)?.sync_all()?;
         Ok(BornAccount { stored, verified, authority_blocked: false, networking_path: dir.clone() })
     })();
     if result.is_err() {
