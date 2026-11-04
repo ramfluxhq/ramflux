@@ -176,7 +176,9 @@ pub(crate) fn apply(account: &mut LocalBusAccountState, work: ReceiptWork) {
 fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     let db = account.client.account_db()?;
     let now = now_unix_timestamp();
-    db.retain_delivery_receipts(now, 128)?;
+    if let Err(error) = db.retain_delivery_receipts(now, 128) {
+        tracing::warn!(%error, "delivery receipt retention deferred");
+    }
     if db
         .load_actor_state::<i64>(GATEWAY_RETRY_AT)?
         .is_some_and(|at| now < at && at <= now.saturating_add(30))
@@ -207,17 +209,24 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
         } else if work.at.saturating_add(LIFETIME) <= now || work.attempts >= ATTEMPTS {
             finish(&account.client, &key, &work, "failed")?;
         } else {
-            selected = Some((key, work));
-            break;
+            match receipt_message(account, &account.gateway_config, &work) {
+                Ok(message) => {
+                    selected = Some((key, work, message));
+                    break;
+                }
+                Err(SdkError::InboundRejected(_)) => {
+                    finish(&account.client, &key, &work, "failed")?;
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
-    let Some((key, work)) = selected else {
+    let Some((key, work, (message, body))) = selected else {
         if let Some(scan_end) = scan_end {
             db.persist_actor_state(SCAN_CURSOR, &scan_end)?;
         }
         return Ok(None);
     };
-    let (message, body) = receipt_message(account, &account.gateway_config, &work)?;
     let request = if work.packet.is_none() {
         Some(account.client.routed_send_material_request(&account.gateway_config, &message)?)
     } else {
@@ -458,4 +467,43 @@ pub(crate) async fn test_fetch_material(
         request: Some(SendMaterialRequest { root: None, prekey: Some("receipt-peer".into()) }),
     };
     fetch_material(context, &mut plan).await
+}
+
+// Drive the production checkpoints explicitly for standalone account fixtures.
+#[cfg(test)]
+pub(crate) async fn test_flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    let mut sent = 0;
+    for _ in 0..16 {
+        let Some(mut plan) = prepare(account)? else { break };
+        if account.connection.as_ref().is_some_and(|handle| {
+            handle.snapshot().state != crate::bus::connection_manager::NetworkingState::Live
+        }) && let Some(handle) = account.connection.take()
+        {
+            handle.stop().await;
+        }
+        account.ensure_gateway_live().await?;
+        let context = account.connection.as_ref().ok_or_else(stopped)?.test_context();
+        let material = fetch_material(&context, &mut plan).await;
+        let packet = match seal(account, &mut plan, material) {
+            Ok(Some(packet)) => packet,
+            Ok(None) => continue,
+            Err(_) => break,
+        };
+        let outcome = context
+            .priority_call(
+                move |engine| {
+                    Box::pin(async move { engine.submit_envelope(packet).await.map(|_| ()) })
+                },
+                context.receipt_timeout(),
+            )
+            .await;
+        if complete(account, &plan, outcome).is_err() {
+            if let Some(handle) = account.connection.take() {
+                handle.stop().await;
+            }
+            break;
+        }
+        sent += 1;
+    }
+    Ok(sent)
 }

@@ -102,11 +102,19 @@ async fn forwarded_session_resume_checkpoint_clears_only_after_success()
     );
     account.gateway_config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
     account.gateway_config.tcp_gateway_addr = Some(account.gateway_config.gateway_addr);
+    // D1: join the retired host before forcing the next admission attempt.
+    if let Some(handle) = account.connection.take() {
+        handle.stop().await;
+    }
+    account.test_connector = None;
     // A failed real connection retains the journal for another attempt.
     assert!(account.ensure_gateway_live().await.is_err());
     assert!(
         account.client.projection_checkpoint(checkpoint)?.is_some_and(|value| !value.is_empty())
     );
+    if let Some(handle) = account.connection.take() {
+        handle.stop().await;
+    }
     let server = reconnect_gateway(&mut account, &root).await?;
     tokio::time::timeout(std::time::Duration::from_secs(5), account.ensure_gateway_live())
         .await??;

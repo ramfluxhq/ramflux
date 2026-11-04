@@ -37,7 +37,23 @@ async fn submit(
     delivery: &Delivery,
     deadline: tokio::time::Instant,
 ) -> Result<(), SdkError> {
-    let mut engine = account.session_client().await?;
+    let mut engine =
+        if let Ok(result) = tokio::time::timeout_at(deadline, account.session_client()).await {
+            result?
+        } else {
+            account.checkpoint_gateway_resume_from(&account.gateway_config)?;
+            if let Some(handle) = &account.connection {
+                handle.request_retirement(
+                    handle.generation(),
+                    super::connection_manager::DisconnectReason::CallTimeout,
+                );
+            }
+            return Err(if delivery.federation.is_some() {
+                SdkError::TaskDeliveryTimeout
+            } else {
+                SdkError::InboundPending("task delivery tick budget exhausted".into())
+            });
+        };
     let result = if let Some(destination) = &delivery.federation {
         match federated_envelope(&engine.config, delivery, destination) {
             Ok(envelope) => {
@@ -107,6 +123,16 @@ mod tests {
 
     type FrameFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;
 
+    struct HeldAdmission;
+    impl super::super::connection_manager::SessionConnector for HeldAdmission {
+        fn connect(
+            &self,
+            _: GatewaySessionConfig,
+            _: tokio::time::Instant,
+        ) -> super::super::connection_manager::SessionFuture<'_, GatewaySessionEngine> {
+            Box::pin(std::future::pending())
+        }
+    }
     struct HangingLegacyGateway {
         last: Option<GatewayClientFrame>,
         stall_heartbeat: bool,
@@ -259,6 +285,10 @@ mod tests {
             config,
             Box::new(HangingLegacyGateway { last: None, stall_heartbeat: true }),
         ));
+        // D1: acquisition waits for admission, rather than issuing a heartbeat
+        // on a borrowed engine. Hold that actual admission boundary.
+        account.engine = None;
+        account.test_connector = Some(Arc::new(HeldAdmission));
         let envelope = serde_json::from_value(serde_json::json!({
             "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
             "signing_key_id":"device-sender","signature_alg":"ed25519","signature":"fixture",

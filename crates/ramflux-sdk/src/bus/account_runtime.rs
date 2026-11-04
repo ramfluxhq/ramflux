@@ -79,6 +79,14 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         shutdown,
         ready,
     } = bootstrap;
+    #[cfg(test)]
+    let timeouts = {
+        let mut timeouts = timeouts;
+        if let Some(budget) = config.test_retry_budget {
+            timeouts.retry_budget = budget;
+        }
+        timeouts
+    };
     let initial = initial.map(|initialize| initialize(index.clone())).transpose()?;
     let state = LocalBusDaemonState {
         account_index: Some(index),

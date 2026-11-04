@@ -36,7 +36,9 @@ pub(super) async fn execute(
             return Ok(ActorResponse { body, events: Vec::new(), nodes: None });
         }
     }
-    if needs_network {
+    // Fetch owns a durable retryable failure receipt, including admission failures.
+    // The account runtime uses its fetch worker; direct dispatch preserves that contract.
+    if needs_network && command.request.method != "object.fetch" {
         let account = local_bus_account_mut(state, account_id)?;
         account.ensure_gateway_live().await?;
     }

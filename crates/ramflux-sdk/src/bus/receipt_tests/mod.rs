@@ -229,6 +229,7 @@ async fn an_uncertain_receipt_ack_reuses_its_ciphertext_after_restart_and_client
             mail.lock().map_err(|_| "mailbox")?.lose_ack = true;
             let mut receiver = b.account(None, mail.clone())?;
             crate::bus::sync_driver::run(&mut receiver).await?;
+            super::background::test_flush(&mut receiver).await?;
             let prefix = crate::client::delivery_receipts::PREFIX;
             let key = receiver
                 .client
@@ -259,8 +260,8 @@ async fn an_uncertain_receipt_ack_reuses_its_ciphertext_after_restart_and_client
             assert_eq!(recovered.packet, work.packet);
             recovered.next_at = 0;
             receiver.client.account_db()?.persist_actor_state(&key, &recovered)?;
-            assert_eq!(super::flush(&mut receiver).await?, 1);
-            assert_eq!(super::flush(&mut receiver).await?, 0);
+            assert_eq!(super::background::test_flush(&mut receiver).await?, 1);
+            assert_eq!(super::background::test_flush(&mut receiver).await?, 0);
             let packets = mail
                 .lock()
                 .map_err(|_| "mailbox")?

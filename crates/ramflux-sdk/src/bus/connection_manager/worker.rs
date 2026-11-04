@@ -223,6 +223,16 @@ async fn run_account(
                 Ok(connected) => *engine = Some(connected),
                 Err(error) => {
                     retry.record(&error, Instant::now());
+                    // Every failed admission needs a future retry boundary, including
+                    // frame/transport errors without a server-provided cooldown.
+                    if retry.not_before().is_none_or(|at| at <= Instant::now()) {
+                        retry.record(
+                            &SdkError::NodeTimeout {
+                                retry_after_ms: crate::node::NODE_RETRY_AFTER_MS,
+                            },
+                            Instant::now(),
+                        );
+                    }
                     failed(handle, retry, &error);
                     if let Some(work) = &handle.shared.account_work {
                         let failed =
