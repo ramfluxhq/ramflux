@@ -21,6 +21,7 @@ fn unrelated_rows(db: &AccountDb, count: i64) -> Result<(), StorageError> {
             INSERT INTO object_reference_actor SELECT 'ref-'||i,'attachment/reference/alias-'||i FROM budget_unrelated;
             INSERT INTO message_copy_binding SELECT 'object:alias-'||i,'message-'||i FROM budget_unrelated;
             INSERT OR IGNORE INTO message_footprint SELECT 'message-'||i,'actor','attachment/reference/alias-'||i FROM budget_unrelated;
+            INSERT INTO message_footprint SELECT 'message-'||i,'revocation_selector',json_object('selector','alias-'||i,'wire','wire-'||i,'manifest','manifest','commitment','c-'||i,'selector_lookup','selector-'||i) FROM budget_unrelated;
             DROP TABLE budget_unrelated;
         ")?;
         Ok(())
@@ -235,7 +236,6 @@ fn b1_legacy_hook_delete_budget() -> Result<(), StorageError> {
         let (root, db) = crate::tests::test_db("legacy-hook-budget")?;
         super::selector_legacy_tests::fixture(&db)?;
         unrelated_rows(&db, count)?;
-        db.connection.execute("INSERT INTO message_footprint SELECT message_id,'revocation_selector',json_object('selector',selector,'wire','wire','manifest','manifest','commitment',commitment,'selector_lookup',selector_lookup) FROM object_message_reference JOIN object_retention_reference USING(reference_hash) WHERE message_id GLOB 'message-*'",[])?;
         let (result, steps) = db.measure_sqlite_vm_steps(|| {
             db.delete_direct_message("thread", "message", "local", "delete")
         })?;
@@ -256,6 +256,49 @@ fn b1_legacy_hook_delete_budget() -> Result<(), StorageError> {
             |row| row.get(0),
         )?;
         assert_eq!(footprints, count);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn b1_managed_legacy_survivor_budget() -> Result<(), StorageError> {
+    let mut baseline = None;
+    for count in [0, 1_000, 10_000] {
+        let (root, db) = crate::tests::test_db("managed-legacy-budget")?;
+        super::selector_legacy_tests::fixture(&db)?;
+        super::tests::install(&db, "wire-owner", "wire-reference")?;
+        db.send_direct_message("thread", "managed", "peer", b"body")?;
+        db.register_object_reference(
+            ObjectReferenceAdmission::FreshMessage,
+            &ObjectReferenceOwner {
+                reference_hash: "managed-reference",
+                wire_id: "wire",
+                manifest_hash: "manifest",
+                selector: "private-canary",
+                message_id: "managed",
+                reference: &json!({"reference":{"object_id":"wire","manifest_hash":"manifest"}}),
+                metadata: &json!({"message_id":"managed"}),
+            },
+        )?;
+        unrelated_rows(&db, count)?;
+        let (result, steps) = db.measure_sqlite_vm_steps(|| {
+            db.delete_direct_message("thread", "managed", "local", "delete")
+        })?;
+        result?;
+        bound(&mut baseline, steps, count, "managed legacy survivor");
+        assert!(db.object_is_tombstoned("private-canary")?);
+        assert!(db.actor_state_exists("attachment/reference/private-canary")?);
+        let survivors: i64 =
+            db.connection.query_row("SELECT COUNT(*) FROM object_index", [], |r| r.get(0))?;
+        assert_eq!(survivors, count + 1);
+        let lookups: i64 = db.connection.query_row(
+            "SELECT COUNT(*) FROM object_erasure_lookup WHERE lookup=?1",
+            params![object_erasure_lookup(db.object_erasure_root(), "private-canary")],
+            |r| r.get(0),
+        )?;
+        assert_eq!(lookups, 0);
         drop(db);
         std::fs::remove_dir_all(root)?;
     }

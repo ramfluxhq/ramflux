@@ -267,3 +267,118 @@ fn legacy_footprint_driver_preserves_managed_survivor() -> Result<(), StorageErr
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn managed_deletion_with_legacy_survivor(
+    retire_payload: bool,
+    zero_manifest: bool,
+    reverse_triggers: bool,
+) -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("managed-legacy-survivor")?;
+    fixture(&db)?;
+    db.send_direct_message("thread", "managed", "peer", b"body")?;
+    db.register_object_reference(
+        ObjectReferenceAdmission::FreshMessage,
+        &ObjectReferenceOwner {
+            reference_hash: "managed-reference",
+            wire_id: "wire",
+            manifest_hash: "manifest",
+            selector: "private-canary",
+            message_id: "managed",
+            reference: &json!({"reference":{"object_id":"wire","manifest_hash":"manifest"}}),
+            metadata: &json!({"message_id":"managed"}),
+        },
+    )?;
+    for key in
+        ["attachment/reference/private-canary", "attachment/reference-by-slot/private-canary"]
+    {
+        db.register_object_reference_actor("managed-reference", key)?;
+    }
+    if !retire_payload {
+        super::tests::install(&db, "wire-owner", "wire-reference")?;
+    }
+    if zero_manifest {
+        // Inject the touched v12 row shape; upgrade itself has separate witnesses.
+        db.connection.execute("UPDATE object_index SET manifest_hash=zeroblob(32),chunk_manifest_hash=zeroblob(32) WHERE object_id='private-canary'", [])?;
+    }
+    if reverse_triggers {
+        // Recreate the footprint trigger last to exercise the opposite SQLite
+        // AFTER-trigger order without changing either production trigger body.
+        db.connection.call(|raw| {
+            let sql: String = raw.query_row(
+                "SELECT sql FROM sqlite_master WHERE name='footprint_erase_message'",
+                [],
+                |r| r.get(0),
+            )?;
+            raw.execute_batch("DROP TRIGGER footprint_erase_message;")?;
+            raw.execute_batch(&sql)
+        })?;
+    }
+    db.delete_direct_message("thread", "managed", "local", "delete-managed")?;
+    if retire_payload {
+        // The fence dominates even the still-live legacy message. Its private
+        // enrollment must disappear together with the fenced selector graph.
+        drop(db);
+        let db = reopen(&root)?;
+        erased(&db, &root)?;
+        db.delete_direct_message("thread", "message", "local", "delete-legacy")?;
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        return Ok(());
+    }
+    assert!(db.object_is_tombstoned("private-canary")?);
+    let manifest: Vec<u8> = db.connection.query_row(
+        "SELECT manifest_hash FROM object_index WHERE object_id='private-canary'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(manifest, b"manifest");
+    for key in [
+        "attachment/reference/private-canary",
+        "directory/object/private-canary",
+        "attachment/reference-by-slot/private-canary",
+    ] {
+        assert!(db.actor_state_exists(key)?, "legacy actor lost: {key}");
+    }
+    let bindings: i64 = db.connection.query_row("SELECT count(*) FROM message_copy_binding WHERE copy_id='object:private-canary' AND message_id='message'", [], |r| r.get(0))?;
+    assert_eq!(bindings, 1);
+    let lookups: i64 = db.connection.query_row(
+        "SELECT count(*) FROM object_erasure_lookup WHERE lookup=?1",
+        params![object_erasure_lookup(db.object_erasure_root(), "private-canary")],
+        |r| r.get(0),
+    )?;
+    assert_eq!(lookups, 0, "live legacy selector must not acquire a lookup");
+    drop(db);
+    let db = reopen(&root)?;
+    db.check_object_access("private-canary")?;
+    assert!(db.object_is_tombstoned("private-canary")?);
+    db.delete_direct_message("thread", "message", "local", "delete-legacy")?;
+    if !retire_payload {
+        db.delete_direct_message("thread", "wire-owner", "local", "delete-wire")?;
+    }
+    drop(db);
+    let db = reopen(&root)?;
+    erased(&db, &root)?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn managed_retirement_preserves_enrolled_legacy_survivor() -> Result<(), StorageError> {
+    managed_deletion_with_legacy_survivor(false, false, false)
+}
+
+#[test]
+fn payload_fence_retires_enrolled_legacy_witness() -> Result<(), StorageError> {
+    managed_deletion_with_legacy_survivor(true, false, false)
+}
+
+#[test]
+fn managed_retirement_normalizes_zero_manifest_from_legacy_survivor() -> Result<(), StorageError> {
+    managed_deletion_with_legacy_survivor(false, true, false)
+}
+
+#[test]
+fn managed_retirement_legacy_survivor_is_trigger_order_independent() -> Result<(), StorageError> {
+    managed_deletion_with_legacy_survivor(false, false, true)
+}

@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS message_footprint(
  PRIMARY KEY(message_id,kind,locator));
 CREATE INDEX IF NOT EXISTS message_footprint_message ON message_footprint(message_id);
 CREATE INDEX IF NOT EXISTS message_footprint_locator ON message_footprint(kind,locator,message_id);
+CREATE INDEX IF NOT EXISTS message_footprint_revocation_selector ON message_footprint(CAST(json_extract(locator,'$.selector') AS TEXT),message_id) WHERE kind='revocation_selector';
 CREATE TABLE IF NOT EXISTS message_copy_binding(copy_id TEXT NOT NULL,message_id TEXT NOT NULL,
  PRIMARY KEY(copy_id,message_id));
 CREATE INDEX IF NOT EXISTS message_copy_binding_message ON message_copy_binding(message_id);
