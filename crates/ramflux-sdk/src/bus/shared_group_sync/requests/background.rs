@@ -147,7 +147,9 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
     let now = now_unix_timestamp();
     let client = &account.client;
     let db = client.account_db()?;
-    client.advance_group_transfer_deadlines(now)?;
+    if let Err(error) = client.advance_group_transfer_deadlines(now) {
+        tracing::warn!(%error, "group transfer deadline scan deferred");
+    }
     db.retain_expiring_actor_states("group-beacon/", now, 4096)?;
     db.retain_expiring_actor_states(TRANSFER_SEND_PREFIX, now, 512)?;
     db.retain_expiring_actor_states("group-courier/sealed/", now, 4096)?;
@@ -487,4 +489,9 @@ fn incoming(account: &mut LocalBusAccountState) -> Result<Vec<Incoming>, SdkErro
         });
     }
     Ok(output)
+}
+
+#[cfg(test)]
+pub(super) fn prepare_for_test(account: &mut LocalBusAccountState) -> Result<bool, SdkError> {
+    prepare(account).map(|plan| plan.is_some())
 }

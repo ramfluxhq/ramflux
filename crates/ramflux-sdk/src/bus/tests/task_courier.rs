@@ -865,3 +865,49 @@ mod transfer_fetch;
 
 #[path = "courier_independence.rs"]
 mod courier_independence;
+
+#[tokio::test]
+async fn ordinary_commands_are_served_while_courier_checkpoints_loop() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(async {
+            let fixture = Box::pin(Fixture::new("courier-command-fairness")).await?;
+            let (mut actor, sender, stop, _events) =
+                runtime(fixture.source, &fixture.root.join("source"));
+            let writer = actor.connection_sender.clone();
+            let producer = tokio::task::spawn_local(async move {
+                loop {
+                    if writer
+                        .send(crate::bus::connection_manager::AccountWork::Observation {
+                            event: crate::bus::connection_manager::ConnectionEvent::AttemptFailed {
+                                reason: "checkpoint-loop".into(),
+                                retry_after_ms: None,
+                                generation: 0,
+                            },
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            let driver = async {
+                for _ in 0..16 {
+                    tokio::time::timeout(
+                        Duration::from_secs(1),
+                        command(&sender, "identity.directory", json!({"limit":16})),
+                    )
+                    .await??;
+                    assert!(!producer.is_finished());
+                }
+                producer.abort();
+                let _ = producer.await;
+                stop.send(true)?;
+                Ok::<_, Box<dyn std::error::Error>>(())
+            };
+            let (served, result) = tokio::join!(serving(&mut actor), driver);
+            served?;
+            result
+        }))
+        .await
+}

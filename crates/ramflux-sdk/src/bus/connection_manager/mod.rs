@@ -13,7 +13,7 @@ mod metadata_child;
 pub(crate) use account_work::AccountWork;
 mod client;
 pub(crate) use client::SessionClient;
-mod session_host;
+pub(crate) mod session_host;
 pub(crate) mod subscriptions;
 mod worker;
 

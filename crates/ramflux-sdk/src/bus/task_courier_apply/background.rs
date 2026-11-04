@@ -116,14 +116,9 @@ async fn pass(
         }
     };
     let result = send(context, writer, plan).await;
-    match result {
-        Ok(()) => Ok(true),
-        Err(error) if stop_class(&error) => Err(error),
-        Err(_) => writer
-            .apply(move |account| charge(account, &failure_item, Failure::Application))
-            .await
-            .map(|()| false),
-    }
+    writer
+        .apply(move |account| super::apply_result(account, &failure_item, result.map(|()| true)))
+        .await
 }
 fn valid(
     account: &LocalBusAccountState,

@@ -29,13 +29,6 @@ pub(crate) struct OwnDeviceMessage {
     pub slots: Vec<OwnKeySlot>,
     pub signature: String,
     #[serde(skip)]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "background context completion port follows in the next integration round"
-        )
-    )]
     pub(crate) context_delivery: Option<super::surface::OwnContextDelivery>,
 }
 impl OwnDeviceMessage {
@@ -259,42 +252,6 @@ pub(crate) struct OwnCopyDraft {
 }
 
 impl RamfluxClient {
-    #[cfg(test)]
-    pub(crate) async fn prepare_own_device_message_with_source(
-        &self,
-        engine: &mut impl GatewaySessionAccess,
-        input: OwnMessageInput<'_>,
-        local_manifest: bool,
-    ) -> Result<Option<OwnDeviceMessage>, SdkError> {
-        if input.body.len() > MAX_PACKET_BYTES {
-            return Err(invalid(TOO_LARGE));
-        }
-        if local_manifest && !self.own_sent_has_siblings()? {
-            return Ok(None);
-        }
-        let root = self.surface_local_root_commitment()?;
-        let manifest = if local_manifest {
-            self.refreshed_own_copy_manifest(engine.config()).await?
-        } else {
-            self.cache_verified_device_manifest(engine.config(), &root, "own_device_message")
-                .await?
-        };
-        let Some(mut draft) = self.prepare_own_copy_draft(engine.config(), input, manifest)? else {
-            return Ok(None);
-        };
-        for message in &draft.messages {
-            let slot = self
-                .make_pair_object_slot(engine, message, &draft.packet.id, &draft.key, "")
-                .await?;
-            draft.packet.slots.push(OwnKeySlot {
-                recipient_device_id: slot.recipient_device_id,
-                x3dh: slot.x3dh,
-                ciphertext: slot.ciphertext,
-            });
-        }
-        self.finish_own_copy_packet(draft.packet).map(Some)
-    }
-
     pub(crate) fn prepare_own_copy_draft(
         &self,
         config: &GatewaySessionConfig,

@@ -151,8 +151,10 @@ impl AccountRuntime {
                 }
             }
             AccountWork::Metadata { metadata } => {
-                if metadata.generation == handle.generation() {
-                    account.gateway_config = metadata.config;
+                if metadata.generation == handle.generation()
+                    && account.session_route_matches(&metadata.config)
+                {
+                    account.apply_resume_metadata(metadata.config);
                     account.persist_push_route_seq();
                     account.forget_confirmed_push_clear();
                 }

@@ -4,7 +4,7 @@
 //! Ordered own-copy network work with local ratchet and unchanged-row checkpoints.
 
 use super::{
-    MAX_PENDING_BYTES, PREFIX, Work, copy_id, message_owner, pending_ordered, state, work_bytes,
+    Target, Work, copy_id, finish_attempt, message_owner, pending_ordered, persist_work, state,
 };
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::client::{
@@ -59,7 +59,7 @@ pub(crate) enum OwnCopyWork {
     Complete {
         generation: u64,
         plan: Box<SendPlan>,
-        outcome: Result<(), SdkError>,
+        outcome: Result<Vec<String>, SdkError>,
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
 }
@@ -97,7 +97,15 @@ async fn pass(
     let generation = context.generation;
     let (reply, response) = oneshot::channel();
     send(writer, OwnCopyWork::Prepare { generation, reply }).await?;
-    let Some(mut plan) = response.await.map_err(|_| stopped())?? else { return Ok(false) };
+    let Some(plan) = response.await.map_err(|_| stopped())?? else { return Ok(false) };
+    deliver_plan(context, writer, plan).await
+}
+async fn deliver_plan(
+    context: &SessionContext,
+    writer: &mpsc::Sender<AccountWork>,
+    mut plan: Plan,
+) -> Result<bool, SdkError> {
+    let generation = context.generation;
     let manifest = if plan.work.packet.is_some() {
         Ok(None)
     } else if let Some(manifest) = plan.manifest.take() {
@@ -218,7 +226,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     for (key, mut work) in pending_ordered(&account.client, now)? {
         if (!work.local_manifest && message_owner(&work).is_some())
             || work.intent.created_at.saturating_add(600) <= now
-            || work.attempts >= 10
+            || (work.packet.is_none() && work.attempts >= 10)
             || copy_id(&account.client, &work.intent.id)? != work.intent.copy_id
         {
             finish(account, &key, &work, "failed")?;
@@ -228,7 +236,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             continue;
         }
         if work.next_at > now {
-            break;
+            continue;
         }
         if let Some(message) = message_owner(&work)
             && account.client.account_db()?.message_is_deleted(message)?
@@ -236,8 +244,21 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             finish(account, &key, &work, "failed")?;
             continue;
         }
-        work.attempts += 1;
-        work.next_at = now.saturating_add((1_i64 << work.attempts.min(6)).min(60));
+        if !work.targets.is_empty() {
+            if work.targets.iter().all(Target::finished) {
+                let status = if work.targets.iter().all(Target::acknowledged) {
+                    "submitted"
+                } else {
+                    "failed"
+                };
+                finish(account, &key, &work, status)?;
+                continue;
+            }
+            if !work.targets.iter().any(|target| target.due(now)) {
+                continue;
+            }
+        }
+        work.next_at = now.saturating_add(2);
         account.client.account_db()?.persist_actor_state(&key, &work)?;
         if work.packet.is_none()
             && work.local_manifest
@@ -283,6 +304,27 @@ fn draft(
             finish(account, &plan.key, &plan.work, "failed")?;
             return Ok(None);
         };
+        let mut plan = plan;
+        let now = now_unix_timestamp();
+        if plan.work.targets.is_empty() {
+            plan.work.targets = packet
+                .slots
+                .iter()
+                .map(|slot| Target::new(slot.recipient_device_id.clone(), plan.work.attempts, 0))
+                .collect();
+        }
+        if plan.work.targets.iter().all(Target::finished) {
+            let status = if plan.work.targets.iter().all(Target::acknowledged) {
+                "submitted"
+            } else {
+                "failed"
+            };
+            finish(account, &plan.key, &plan.work, status)?;
+            return Ok(None);
+        }
+        if !plan.work.targets.iter().any(|target| target.due(now)) {
+            return Ok(None);
+        }
         return envelope(account, plan, packet).map(|plan| Some(Prepared::Send(Box::new(plan))));
     }
     let manifest = account.client.accept_fetched_device_manifest(
@@ -342,21 +384,15 @@ fn seal(
         }
         result => result?,
     };
-    let old_bytes = work_bytes(&plan.work)?;
+    plan.work.context_delivery.clone_from(&packet.context_delivery);
+    plan.work.targets = packet
+        .slots
+        .iter()
+        .map(|slot| Target::new(slot.recipient_device_id.clone(), 0, now_unix_timestamp()))
+        .collect();
     plan.work.packet = Some(serde_json::to_value(&packet)?);
     plan.work.intent.body.zeroize();
-    let db = account.client.account_db()?;
-    let admitted = db.write_transaction(|| {
-        let (_, bytes) = db.actor_state_usage(PREFIX)?;
-        if bytes.saturating_sub(old_bytes).saturating_add(work_bytes(&plan.work)?)
-            > MAX_PENDING_BYTES
-        {
-            return Ok::<_, SdkError>(false);
-        }
-        db.persist_actor_state(&plan.key, &plan.work)?;
-        Ok(true)
-    })?;
-    if !admitted {
+    if !persist_work(&account.client, &plan.key, &plan.work)? {
         finish(account, &plan.key, &plan.work, "failed")?;
         return Ok(None);
     }
@@ -365,7 +401,7 @@ fn seal(
 }
 fn envelope(
     account: &LocalBusAccountState,
-    plan: Plan,
+    mut plan: Plan,
     packet: OwnDeviceMessage,
 ) -> Result<SendPlan, SdkError> {
     let message = GatewayDirectMessage {
@@ -387,33 +423,46 @@ fn envelope(
         account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &envelope,
     )?;
+    let now = now_unix_timestamp();
+    for target in &mut plan.work.targets {
+        target.charge(now);
+    }
+    if !persist_work(&account.client, &plan.key, &plan.work)? {
+        return Err(SdkError::LocalBus("own-device retry capacity exceeded".into()));
+    }
+    plan.fingerprint = serde_json::to_value(&plan.work)?;
     Ok(SendPlan { plan, packet, envelope })
 }
 fn complete(
     account: &LocalBusAccountState,
     plan: &SendPlan,
-    outcome: Result<(), SdkError>,
+    outcome: Result<Vec<String>, SdkError>,
 ) -> Result<(), SdkError> {
     if !current(account, &plan.plan)? {
         return Ok(());
     }
-    match outcome {
-        Ok(()) => finish(account, &plan.plan.key, &plan.plan.work, "submitted"),
-        Err(error) => {
-            state(&account.client, &plan.plan.work, "pending", false)?;
-            Err(error)
-        }
-    }
+    let mut work = plan.plan.work.clone();
+    finish_attempt(
+        &account.client,
+        &plan.plan.key,
+        &mut work,
+        outcome.as_ref().ok().map(Vec::as_slice),
+        now_unix_timestamp(),
+    )?;
+    outcome.map(|_| ())
 }
 
 #[cfg(test)]
 pub(crate) async fn drive_once(account: &mut LocalBusAccountState) -> Result<bool, SdkError> {
+    let Some(plan) = prepare(account)? else {
+        return Ok(false);
+    };
     let client = account.session_client().await?;
     account.apply_session_metadata(client);
     let context =
         account.connection.as_ref().ok_or(SdkError::GatewaySessionNotEstablished)?.test_context();
     let (writer, mut work) = mpsc::channel(2);
-    let pass = pass(&context, &writer);
+    let pass = deliver_plan(&context, &writer, plan);
     tokio::pin!(pass);
     loop {
         tokio::select! {
@@ -425,7 +474,7 @@ pub(crate) async fn drive_once(account: &mut LocalBusAccountState) -> Result<boo
     }
 }
 
-async fn fanout(context: &SessionContext, plan: &SendPlan) -> Result<(), SdkError> {
+async fn fanout(context: &SessionContext, plan: &SendPlan) -> Result<Vec<String>, SdkError> {
     let principal = plan.plan.config.principal_id.clone();
     let source = plan.plan.config.device_id.clone();
     let packet = plan.packet.clone();
@@ -437,26 +486,64 @@ async fn fanout(context: &SessionContext, plan: &SendPlan) -> Result<(), SdkErro
                     let response = engine
                         .own_device_fanout(principal.clone(), source.clone(), envelope)
                         .await?;
-                    if response.principal_id != principal
-                        || response.source_device_id != source
-                        || packet.slots.iter().any(|slot| {
-                            !response.delivered.iter().any(|delivery| {
-                                delivery.device_id == slot.recipient_device_id
-                                    && matches!(
-                                        delivery.outcome.as_str(),
-                                        "online" | "offline_queued"
-                                    )
-                            })
-                        })
-                    {
+                    if response.principal_id != principal || response.source_device_id != source {
                         return Err(SdkError::LocalBus(
                             "own-device fanout acknowledgement mismatch".into(),
                         ));
                     }
-                    Ok(())
+                    Ok(response
+                        .delivered
+                        .into_iter()
+                        .filter(|delivery| {
+                            packet
+                                .slots
+                                .iter()
+                                .any(|slot| slot.recipient_device_id == delivery.device_id)
+                                && matches!(delivery.outcome.as_str(), "online" | "offline_queued")
+                        })
+                        .map(|delivery| delivery.device_id)
+                        .collect())
                 })
             },
             context.call_deadline(),
         )
         .await
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn own_copy_prepare_does_not_double_charge_target_budget() -> Result<(), SdkError> {
+        let root = crate::bus::runtime_tests::root("own-copy-single-charge");
+        let account = crate::bus::runtime_tests::account(
+            &root,
+            "sender",
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )?;
+        super::super::stage(
+            &account.client,
+            OwnMessageInput {
+                id: "copy",
+                created_at: now_unix_timestamp(),
+                conversation: "thread",
+                group: None,
+                body: b"body",
+            },
+            None,
+        )?;
+        let plan =
+            prepare(&account)?.ok_or_else(|| SdkError::LocalBus("missing own-copy plan".into()))?;
+        assert_eq!(plan.work.attempts, 0, "prepare must not consume the target budget");
+        let mut target = Target::new("sibling".into(), plan.work.attempts, 0);
+        for attempt in 0..10 {
+            assert!(!target.finished());
+            target.charge(attempt * 60);
+        }
+        assert!(target.finished());
+        drop(account);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

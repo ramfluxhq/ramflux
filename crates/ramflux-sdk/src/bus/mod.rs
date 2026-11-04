@@ -65,7 +65,7 @@ pub use daemon::*;
 pub use protocol::*;
 
 #[cfg(test)]
-mod runtime_tests;
+pub(crate) mod runtime_tests;
 
 mod task_courier;
 mod task_courier_apply;

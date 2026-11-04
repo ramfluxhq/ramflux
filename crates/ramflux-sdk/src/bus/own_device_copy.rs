@@ -2,14 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded durable per-message `OwnDeviceFanout` retries, independent of peer delivery status.
-#[cfg(test)]
-use crate::client::own_device_copy::OwnDeviceMessage;
 use crate::client::own_device_copy::OwnMessageInput;
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-#[cfg(test)]
-use zeroize::Zeroize;
 mod targets;
 use targets::Target;
 const PREFIX: &str = "own-device/send/";
@@ -147,7 +143,6 @@ fn pending_ordered(client: &RamfluxClient, now: i64) -> Result<Vec<(String, Work
     });
     Ok(ordered)
 }
-#[cfg(test)]
 fn persist_work(client: &RamfluxClient, key: &str, work: &Work) -> Result<bool, SdkError> {
     let db = client.account_db()?;
     db.write_transaction(|| {
@@ -163,61 +158,6 @@ fn persist_work(client: &RamfluxClient, key: &str, work: &Work) -> Result<bool, 
     })
 }
 
-#[cfg(test)]
-async fn prepare_work(
-    account: &mut LocalBusAccountState,
-    id: &str,
-    work: &mut Work,
-    now: i64,
-) -> Result<bool, SdkError> {
-    if work.next_at > now {
-        return Ok(false);
-    }
-    work.attempts += 1;
-    work.next_at = now.saturating_add((1_i64 << work.attempts.min(6)).min(60));
-    if !persist_work(&account.client, id, work)? {
-        account.client.account_db()?.remove_actor_state(id)?;
-        state(&account.client, work, "failed", false)?;
-        return Ok(false);
-    }
-    match prepare(account, &work.intent, work.local_manifest).await {
-        Ok(Some(packet)) => {
-            work.context_delivery.clone_from(&packet.context_delivery);
-            work.targets = packet
-                .slots
-                .iter()
-                .map(|slot| Target::new(slot.recipient_device_id.clone(), 0, now))
-                .collect();
-            work.packet = Some(serde_json::to_value(packet)?);
-            work.intent.body.zeroize();
-            let admitted = persist_work(&account.client, id, work)?;
-            if !admitted {
-                account.client.account_db()?.remove_actor_state(id)?;
-                state(&account.client, work, "failed", false)?;
-                return Ok(false);
-            }
-        }
-        Ok(None) => {
-            account.client.account_db()?.remove_actor_state(id)?;
-            state(&account.client, work, "not_needed", false)?;
-            return Ok(false);
-        }
-        Err(SdkError::InboundRejected(reason))
-            if reason == crate::client::own_device_copy::TOO_LARGE =>
-        {
-            account.client.account_db()?.remove_actor_state(id)?;
-            state(&account.client, work, "failed", false)?;
-            return Ok(false);
-        }
-        Err(error) => {
-            tracing::warn!(%error,"own-device message preparation deferred");
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-#[cfg(test)]
 fn finish_attempt(
     client: &RamfluxClient,
     id: &str,
@@ -249,175 +189,16 @@ fn finish_attempt(
 
 #[cfg(test)]
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
-    let now = now_unix_timestamp();
-    let started = std::time::Instant::now();
-    let ordered = pending_ordered(&account.client, now)?;
+    let keys = pending_ordered(&account.client, now_unix_timestamp())?;
     let mut sent = 0;
-    for (id, mut work) in ordered {
-        if started.elapsed() >= Duration::from_millis(250) {
-            break;
-        }
-        // Pre-confirmation plain intents from older versions have no submit receipt. Do not
-        // infer success on upgrade; surfaces and other legacy controls keep their lifecycle.
-        if !work.local_manifest
-            && work.intent.owner_record.as_ref().is_some_and(|(kind, _)| kind == "message")
-        {
-            account.client.account_db()?.remove_actor_state(&id)?;
-            state(&account.client, &work, "failed", false)?;
+    for (key, work) in keys {
+        if !account.client.account_db()?.actor_state_exists(&key)? {
             continue;
         }
-        if work.intent.created_at.saturating_add(600) <= now
-            || (work.packet.is_none() && work.attempts >= 10)
-            || copy_id(&account.client, &work.intent.id)? != work.intent.copy_id
-        {
-            account.client.account_db()?.remove_actor_state(&id)?;
-            state(&account.client, &work, "failed", false)?;
-            continue;
-        }
-        if work.held {
-            continue;
-        }
-        if work.packet.is_none() && !prepare_work(account, &id, &mut work, now).await? {
-            continue;
-        }
-        let packet = work
-            .packet
-            .as_ref()
-            .ok_or_else(|| SdkError::LocalBus("own-device message absent".into()))?;
-        let Ok(packet) = serde_json::from_value::<OwnDeviceMessage>(packet.clone()) else {
-            account.client.account_db()?.remove_actor_state(&id)?;
-            state(&account.client, &work, "failed", false)?;
-            continue;
-        };
-        if work.targets.is_empty() {
-            // Upgrade prepared rows without granting an extra retry budget.
-            work.targets = packet
-                .slots
-                .iter()
-                .map(|slot| {
-                    Target::new(slot.recipient_device_id.clone(), work.attempts, work.next_at)
-                })
-                .collect();
-        }
-        if work.targets.iter().all(Target::finished) {
-            let completed = work.targets.iter().all(Target::acknowledged);
-            account.client.account_db()?.write_transaction(|| {
-                account.client.account_db()?.remove_actor_state(&id)?;
-                state(&account.client, &work, if completed { "submitted" } else { "failed" }, false)
-            })?;
-            continue;
-        }
-        if !work.targets.iter().any(|target| target.due(now)) {
-            // A parked target never holds the account-wide queue head.
-            continue;
-        }
-        for target in &mut work.targets {
-            target.charge(now);
-        }
-        if !persist_work(&account.client, &id, &work)? {
-            account.client.account_db()?.remove_actor_state(&id)?;
-            state(&account.client, &work, "failed", false)?;
-            continue;
-        }
-        match send(account, &packet).await {
-            Ok(delivered) => {
-                sent += usize::from(finish_attempt(
-                    &account.client,
-                    &id,
-                    &mut work,
-                    Some(&delivered),
-                    now_unix_timestamp(),
-                )?);
-            }
-            Err(error) => {
-                finish_attempt(&account.client, &id, &mut work, None, now_unix_timestamp())?;
-                tracing::warn!(%error,"own-device message copy deferred");
-            }
-        }
+        let _ = background::drive_once(account).await;
+        sent += usize::from(status(&account.client, &work.intent.id)? == "submitted");
     }
     Ok(sent)
-}
-#[cfg(test)]
-async fn prepare(
-    account: &mut LocalBusAccountState,
-    intent: &Intent,
-    local_manifest: bool,
-) -> Result<Option<OwnDeviceMessage>, SdkError> {
-    let body = zeroize::Zeroizing::new(
-        ramflux_protocol::decode_base64url(&intent.body)
-            .map_err(|_| SdkError::LocalBus("own-device intent encoding".into()))?,
-    );
-    let mut engine = account.session_client().await?;
-    let prepared = account
-        .client
-        .prepare_own_device_message_with_source(
-            &mut engine,
-            OwnMessageInput {
-                id: &intent.id,
-                created_at: intent.created_at,
-                conversation: &intent.conversation,
-                group: intent.group.as_deref(),
-                body: &body,
-            },
-            local_manifest,
-        )
-        .await;
-    account.apply_session_metadata(engine);
-    prepared
-}
-#[cfg(test)]
-async fn send(
-    account: &mut LocalBusAccountState,
-    packet: &OwnDeviceMessage,
-) -> Result<Vec<String>, SdkError> {
-    let mut engine = account.session_client().await?;
-    let result = async {
-        // Fresh outer ids allow lost-ACK retries through the router's replay guard.
-        // The immutable logical packet and sibling receipts prevent duplicate projection.
-        let message = GatewayDirectMessage {
-            conversation_id: packet.id.clone(),
-            message_id: packet.id.clone(),
-            envelope_id: crate::new_surface_message_id()?,
-            source_principal_id: engine.config.principal_id.clone(),
-            sender_id: engine.config.device_id.clone(),
-            recipient_device_id: None,
-            recipient_principal_commitment: None,
-            target_delivery_id: engine.config.target_delivery_id.clone(),
-            encrypted_body: packet.bytes()?,
-            created_at: now_unix_timestamp(),
-            ttl: 600,
-        };
-        let mut envelope = gateway_direct_message_envelope(&engine.config, &message, None)?;
-        envelope.delivery_class = ramflux_protocol::DeliveryClass::SelfDeviceControl;
-        envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
-            account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &envelope,
-        )?;
-        let response = engine
-            .own_device_fanout(
-                engine.config.principal_id.clone(),
-                engine.config.device_id.clone(),
-                envelope,
-            )
-            .await?;
-        if response.principal_id != engine.config.principal_id
-            || response.source_device_id != engine.config.device_id
-        {
-            return Err(SdkError::LocalBus("own-device fanout acknowledgement mismatch".into()));
-        }
-        Ok(response
-            .delivered
-            .into_iter()
-            .filter(|delivery| {
-                packet.slots.iter().any(|slot| slot.recipient_device_id == delivery.device_id)
-                    && matches!(delivery.outcome.as_str(), "online" | "offline_queued")
-            })
-            .map(|delivery| delivery.device_id)
-            .collect())
-    }
-    .await;
-    account.apply_session_metadata(engine);
-    result
 }
 fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Result<(), SdkError> {
     let id = &work.intent.copy_id;

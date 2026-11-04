@@ -421,26 +421,51 @@ impl LocalBusAccountState {
         Ok(true)
     }
 
+    pub(crate) fn session_route_matches(&self, config: &GatewaySessionConfig) -> bool {
+        let current = &self.gateway_config;
+        config.device_epoch == current.device_epoch
+            && config.target_delivery_id == current.target_delivery_id
+            && config.gateway_addr == current.gateway_addr
+            && config.principal_id == current.principal_id
+            && config.device_id == current.device_id
+    }
+
     pub(crate) fn apply_session_metadata(&mut self, client: SessionClient) {
         if self.connection.as_ref().is_some_and(|handle| handle.generation() == client.generation())
+            && self.session_route_matches(&client.config)
         {
-            self.gateway_config = client.config;
-            self.target_delivery_id.clone_from(&self.gateway_config.target_delivery_id);
+            self.apply_resume_metadata(client.config);
         }
     }
 
+    pub(crate) fn apply_resume_metadata(&mut self, config: GatewaySessionConfig) {
+        self.gateway_config.previous_session_id = config.previous_session_id;
+        self.gateway_config.resume_token = config.resume_token;
+        self.gateway_config.last_seen_inbox_seq =
+            self.gateway_config.last_seen_inbox_seq.max(config.last_seen_inbox_seq);
+    }
+
     pub(crate) fn retire_session(&mut self, client: &SessionClient) -> Result<(), SdkError> {
-        let Some(metadata) = self.connection.as_ref().and_then(ConnectionHandle::metadata) else {
+        let Some(connection) = &self.connection else {
             return Ok(());
         };
-        self.gateway_config = metadata.config;
-        if let Some(connection) = &self.connection {
-            connection.request_retirement(
-                client.generation(),
-                super::connection_manager::DisconnectReason::CallTimeout,
-            );
+        if connection.generation() != client.generation() {
+            return Ok(());
         }
-        self.checkpoint_gateway_resume_from(&self.gateway_config)
+        let candidate = connection.metadata().map(|metadata| metadata.config);
+        let candidate = candidate.as_ref().unwrap_or(&client.config);
+        let config = if self.session_route_matches(&client.config)
+            && self.session_route_matches(candidate)
+        {
+            candidate
+        } else {
+            &self.gateway_config
+        };
+        connection.request_retirement(
+            client.generation(),
+            super::connection_manager::DisconnectReason::CallTimeout,
+        );
+        self.checkpoint_gateway_resume_from(config)
     }
 
     pub(super) fn checkpoint_gateway_resume_from(

@@ -72,9 +72,21 @@ async fn forwarded_session_resume_checkpoint_clears_only_after_success()
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
     let mut engine = account.session_client().await?;
-    engine.config.previous_session_id = Some("forwarded-session".into());
-    engine.config.resume_token = Some("forwarded-resume".into());
-    engine.config.last_seen_inbox_seq = 41;
+    engine.test_update_resume("forwarded-session", "forwarded-resume").await?;
+    account
+        .connection
+        .as_ref()
+        .ok_or("connection")?
+        .call(
+            |engine| {
+                Box::pin(async move {
+                    engine.config.last_seen_inbox_seq = 41;
+                    Ok(())
+                })
+            },
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .await?;
     account.retire_session(&engine)?;
     let checkpoint = LocalBusAccountState::GATEWAY_RESUME_CHECKPOINT;
     let mut config = account.gateway_config.clone();
@@ -103,5 +115,46 @@ async fn forwarded_session_resume_checkpoint_clears_only_after_success()
     assert!(!account.restore_gateway_resume_checkpoint(&mut config)?);
     drop(account);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn priority_timeout_retires_with_resume_without_restoring_rotated_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    for borrowed in [false, true] {
+        for rotate in [false, true] {
+            let root = super::super::runtime_tests::root("retire-fence");
+            let mut account = super::super::runtime_tests::account(
+                &root,
+                "sender",
+                None,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )?;
+            let client = account.session_client().await?;
+            let client = if borrowed { client } else { account.session_client().await? };
+            if rotate {
+                account.gateway_config.device_epoch += 1;
+                account.gateway_config.target_delivery_id = "rotated-target".into();
+                account.gateway_config.gateway_addr = "127.0.0.1:1234".parse()?;
+                account.gateway_config.previous_session_id = Some("current-session".into());
+                account.gateway_config.resume_token = Some("current-token".into());
+            }
+            let expected = account.gateway_config.clone();
+            account.retire_session(&client)?;
+            account.apply_session_metadata(client);
+            assert_eq!(account.gateway_config.device_epoch, expected.device_epoch);
+            assert_eq!(account.gateway_config.target_delivery_id, expected.target_delivery_id);
+            assert_eq!(account.gateway_config.gateway_addr, expected.gateway_addr);
+            let mut restored = expected.clone();
+            assert!(account.restore_gateway_resume_checkpoint(&mut restored)?);
+            assert_eq!(restored.previous_session_id, expected.previous_session_id);
+            assert_eq!(restored.resume_token, expected.resume_token);
+            assert!(account.connection.as_ref().is_some_and(
+                super::super::connection_manager::ConnectionHandle::retirement_requested
+            ));
+            drop(account);
+            std::fs::remove_dir_all(root)?;
+        }
+    }
     Ok(())
 }

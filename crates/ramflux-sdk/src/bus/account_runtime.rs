@@ -204,6 +204,20 @@ impl AccountRuntime {
         Ok(())
     }
 
+    fn queued_command(&mut self, checkpoints: &mut u8) -> Option<AccountCommand> {
+        if *checkpoints < 8 {
+            return None;
+        }
+        *checkpoints = 0;
+        self.lifecycle
+            .try_recv()
+            .inspect(|_| {
+                self.preempt.borrow_and_update();
+            })
+            .or_else(|_| self.receiver.try_recv())
+            .ok()
+    }
+
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         self.initialize_readers()?;
         self.start_connection()?;
@@ -227,15 +241,23 @@ impl AccountRuntime {
             interval: self.timeouts.receive_min,
         };
         let mut next = tokio::time::Instant::now() + schedule.min;
+        let mut checkpoints = 0_u8;
         loop {
+            if let Some(command) = self.queued_command(&mut checkpoints) {
+                if Box::pin(self.apply(command)).await? {
+                    break;
+                }
+                continue;
+            }
             self.reap_upload_jobs();
             self.reap_fetch_jobs();
             let command = tokio::select! {
                 biased;
                 _ = self.shutdown.changed() => break,
                 command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
-                checkpoint=self.transfers.receive.recv()=>{if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}continue;},
+                checkpoint=self.transfers.receive.recv()=>{checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}continue;},
                 work=self.connection_work.recv()=>{
+                    checkpoints += 1;
                     if let Some(work)=work {
                         let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
                         tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.apply_connection_work(work)=>result?}
@@ -283,6 +305,7 @@ impl AccountRuntime {
                     continue;
                 },
             };
+            checkpoints = 0;
             let Some(command) = command else {
                 break;
             };

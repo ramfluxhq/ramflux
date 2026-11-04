@@ -12,7 +12,6 @@ pub(super) struct Target {
     acknowledged: bool,
 }
 
-#[cfg(test)]
 impl Target {
     pub(super) fn new(device: String, attempts: u32, next_at: i64) -> Self {
         Self { device, attempts, next_at, acknowledged: false }

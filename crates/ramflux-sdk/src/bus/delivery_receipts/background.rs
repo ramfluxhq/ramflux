@@ -176,6 +176,7 @@ pub(crate) fn apply(account: &mut LocalBusAccountState, work: ReceiptWork) {
 fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     let db = account.client.account_db()?;
     let now = now_unix_timestamp();
+    db.retain_delivery_receipts(now, 128)?;
     if db
         .load_actor_state::<i64>(GATEWAY_RETRY_AT)?
         .is_some_and(|at| now < at && at <= now.saturating_add(30))
@@ -391,3 +392,70 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod test_hooks;
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    #[test]
+    fn receipt_prepare_applies_retention() -> Result<(), SdkError> {
+        let root = crate::bus::runtime_tests::root("receipt-prepare-retention");
+        let account = crate::bus::runtime_tests::account(
+            &root,
+            "sender",
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )?;
+        let db = account.client.account_db()?;
+        let key = "delivery-receipt/status/expired";
+        db.persist_receipt_state(key, &serde_json::json!({"state":"sent","delivered_at":1}), 1)?;
+        assert!(db.actor_state_exists(key)?);
+        assert!(prepare(&account)?.is_none());
+        assert!(!db.actor_state_exists(key)?);
+        drop(account);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn test_fetch_material(
+    context: &SessionContext,
+    config: GatewaySessionConfig,
+) -> Result<SendMaterial, SdkError> {
+    let work = Work {
+        status_id: String::new(),
+        conversation: String::new(),
+        message: String::new(),
+        wire_message: None,
+        receiver: String::new(),
+        sender: "receipt-peer".into(),
+        root: None,
+        at: 0,
+        attempts: 0,
+        next_at: 0,
+        packet: None,
+    };
+    let message = GatewayDirectMessage {
+        conversation_id: String::new(),
+        message_id: String::new(),
+        envelope_id: String::new(),
+        source_principal_id: String::new(),
+        sender_id: String::new(),
+        recipient_device_id: None,
+        recipient_principal_commitment: None,
+        target_delivery_id: String::new(),
+        encrypted_body: Vec::new(),
+        created_at: 0,
+        ttl: 600,
+    };
+    let mut plan = Plan {
+        key: String::new(),
+        fingerprint: serde_json::Value::Null,
+        work,
+        message,
+        body: Vec::new(),
+        config,
+        request: Some(SendMaterialRequest { root: None, prekey: Some("receipt-peer".into()) }),
+    };
+    fetch_material(context, &mut plan).await
+}

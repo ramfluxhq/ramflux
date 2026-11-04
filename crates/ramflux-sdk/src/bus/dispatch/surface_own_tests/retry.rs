@@ -12,7 +12,14 @@ pub(super) async fn exhaust_parked_target(
     let before = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len();
     let mut previous: Value = source.client.account_db()?.load_actor_state(key)?.ok_or("parked")?;
     let live_attempts = previous["targets"][0]["attempts"].clone();
-    for attempts in 3..=10 {
+    let initial = previous["targets"]
+        .as_array()
+        .ok_or("targets")?
+        .iter()
+        .find(|target| target["device"] == "dead-sibling")
+        .and_then(|target| target["attempts"].as_u64())
+        .ok_or("initial attempts")?;
+    for attempts in (initial + 1)..=10 {
         due(&source.client)?;
         assert_eq!(crate::bus::own_device_copy::flush(source).await?, 0);
         let work: Value = source.client.account_db()?.load_actor_state(key)?.ok_or("retry")?;
@@ -30,7 +37,10 @@ pub(super) async fn exhaust_parked_target(
         assert_eq!(work["packet"], previous["packet"], "retry ciphertext stays immutable");
         previous = work;
     }
-    assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), before + 8);
+    assert_eq!(
+        own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
+        before + usize::try_from(10 - initial)?
+    );
     assert_eq!(crate::bus::own_device_copy::flush(source).await?, 0);
     assert!(!source.client.account_db()?.actor_state_exists(key)?, "ten attempts exhaust the copy");
     let copy = previous["intent"]["copy_id"].as_str().ok_or("copy")?;
