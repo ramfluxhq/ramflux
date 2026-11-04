@@ -5,10 +5,11 @@
 use super::*;
 
 type ServerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type HeldServer = (tokio::task::JoinHandle<ServerResult>, tokio::sync::oneshot::Sender<()>);
 async fn reconnect_gateway(
     account: &mut LocalBusAccountState,
     root: &std::path::Path,
-) -> Result<tokio::task::JoinHandle<ServerResult>, Box<dyn std::error::Error>> {
+) -> Result<HeldServer, Box<dyn std::error::Error>> {
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
     let ca = root.join("ca.pem");
     let cert = root.join("server.pem");
@@ -29,6 +30,7 @@ async fn reconnect_gateway(
     account.gateway_config.tcp_gateway_addr = Some(address);
     account.gateway_config.server_name = "localhost".into();
     account.gateway_config.ca_cert = ca;
+    let (release, held) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (tcp, _) = listener.accept().await?;
         let mut stream = tokio_rustls::TlsStream::Server(acceptor.accept(tcp).await?);
@@ -56,9 +58,10 @@ async fn reconnect_gateway(
             },
         )
         .await?;
+        let _ = held.await;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
-    Ok(server)
+    Ok((server, release))
 }
 
 #[tokio::test]
@@ -115,9 +118,10 @@ async fn forwarded_session_resume_checkpoint_clears_only_after_success()
     if let Some(handle) = account.connection.take() {
         handle.stop().await;
     }
-    let server = reconnect_gateway(&mut account, &root).await?;
+    let (server, release) = reconnect_gateway(&mut account, &root).await?;
     tokio::time::timeout(std::time::Duration::from_secs(5), account.ensure_gateway_live())
         .await??;
+    let _ = release.send(());
     server.await?.map_err(|error| error.to_string())?;
     assert_eq!(account.client.projection_checkpoint(checkpoint)?.as_deref(), Some(""));
     assert!(!account.restore_gateway_resume_checkpoint(&mut config)?);

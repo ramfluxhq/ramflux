@@ -483,6 +483,19 @@ async fn failed_directory_resolution_preserves_contacts_and_returns_retryable_or
         0
     );
     d.unavailable.store(false, Ordering::SeqCst);
+    // D1: a transport failure retires the managed session; reconnect the fixture.
+    let account = s.accounts.get_mut("alice").ok_or_else(|| invalid("account"))?;
+    account.install_test_session(GatewaySessionEngine::with_test_transport(
+        account.gateway_config.clone(),
+        Box::new(DirectorySession {
+            captured: d.captured.clone(),
+            incoming: d.incoming.clone(),
+            acknowledged: d.acknowledged.clone(),
+            records: d.records.clone(),
+            unavailable: d.unavailable.clone(),
+            responses: VecDeque::new(),
+        }),
+    ));
     call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
     let first = call(&mut s, "alice", "contact.list", json!({})).await?;
     let retry = call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"})).await?;

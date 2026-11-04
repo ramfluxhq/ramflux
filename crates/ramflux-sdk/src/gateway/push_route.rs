@@ -301,6 +301,37 @@ impl GatewaySessionEngine {
     async fn await_push_reply(&mut self, request_id: &str) -> Result<Option<u64>, SdkError> {
         loop {
             let frame = self.read_stream_frame("push route answer").await?;
+            if !matches!(
+                frame,
+                GatewayServerFrame::Deliver { .. } | GatewayServerFrame::InBandWake { .. }
+            ) && push_route_reply_id(&frame).is_none()
+                && !matches!(frame, GatewayServerFrame::Nack { .. })
+            {
+                let terminal = matches!(
+                    frame,
+                    GatewayServerFrame::Drain { .. } | GatewayServerFrame::Close { .. }
+                );
+                if self.deferred_frames.len() >= 64 {
+                    return Err(SdkError::GatewaySessionRejected(
+                        "too many unrelated push route frames".into(),
+                    ));
+                }
+                if terminal {
+                    self.terminal_reason =
+                        Some(if matches!(frame, GatewayServerFrame::Drain { .. }) {
+                            crate::bus::connection_manager::DisconnectReason::Drain
+                        } else {
+                            crate::bus::connection_manager::DisconnectReason::Close
+                        });
+                }
+                self.deferred_frames.push_back(frame);
+                if terminal {
+                    return Err(SdkError::GatewaySessionRejected(
+                        "gateway session is ending".into(),
+                    ));
+                }
+                continue;
+            }
             let matched = push_route_reply_id(&frame) == Some(request_id);
             // Apply even superseded registrations before delivering their notification.
             let admitted = self.dispatch_frame_for_request(

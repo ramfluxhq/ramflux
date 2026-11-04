@@ -116,3 +116,22 @@ fn seal(
     plan.message.encrypted_body = serde_json::to_vec(&packet)?;
     crate::dm::gateway_direct_message_envelope(&plan.config, &plan.message, None).map(Some)
 }
+
+#[cfg(test)]
+pub(crate) async fn drive_once(account: &mut LocalBusAccountState) -> Result<bool, SdkError> {
+    let _ = account.session_client().await?;
+    let context = account.connection.as_ref().ok_or(SdkError::NetworkingPending)?.test_context();
+    let (sender, mut work) = mpsc::channel(2);
+    let pass = pass(context.clone(), Writer::new(sender, context.generation));
+    tokio::pin!(pass);
+    loop {
+        tokio::select! {
+            result = &mut pass => return result,
+            checkpoint = work.recv() => {
+                if let Some(crate::bus::connection_manager::AccountWork::Courier(checkpoint)) = checkpoint {
+                    checkpoint.apply(account);
+                }
+            }
+        }
+    }
+}

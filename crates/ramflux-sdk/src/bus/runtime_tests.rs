@@ -28,6 +28,7 @@ struct Cancelled {
 struct GatewayBlock {
     entered: oneshot::Sender<()>,
     submit_envelope: Option<String>,
+    relay_token: bool,
 }
 impl Drop for Cancelled {
     fn drop(&mut self) {
@@ -68,6 +69,11 @@ impl GatewaySessionFrameSource for Gateway {
                 .and_then(|block| block.submit_envelope.as_deref())
                 .is_none_or(|id| {
                     matches!(&self.last, Some(GatewayClientFrame::Submit { submit }) if submit.envelope.envelope_id == id)
+                });
+            let block = block
+                && self.blocked.as_ref().is_none_or(|block| {
+                    !block.relay_token
+                        || matches!(self.last, Some(GatewayClientFrame::RelayTokenV3Issue { .. }))
                 });
             if block && let Some(blocked) = self.blocked.take() {
                 let _guard = Cancelled {
@@ -161,6 +167,7 @@ fn account_with_counter(
 struct AccountSetup {
     index: Option<AccountIndex>,
     blocked_submit_envelope: Option<String>,
+    blocked_relay_token: bool,
     cancelled_notice: Option<oneshot::Sender<()>>,
 }
 fn account_with_setup(
@@ -230,6 +237,7 @@ fn account_with_setup(
             blocked: blocked.map(|entered| GatewayBlock {
                 entered,
                 submit_envelope: setup.blocked_submit_envelope,
+                relay_token: setup.blocked_relay_token,
             }),
             cancelled,
             submits,
@@ -316,6 +324,7 @@ fn actor_account_with_cancellation_notice(
                 index: Some(index),
                 blocked_submit_envelope: Some("slow-envelope".to_owned()),
                 cancelled_notice: Some(notice),
+                blocked_relay_token: false,
             },
         )
     })
@@ -399,7 +408,24 @@ async fn object_upload_keeps_same_account_reads_live_and_disconnect_cancels_netw
         let root = root("object");
         let (entered, blocked) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let account = actor_account(&root, "alice", Some(entered), Arc::clone(&cancelled));
+        let account_root = root.clone();
+        let cancelled_network = Arc::clone(&cancelled);
+        let account: AccountInitializer = Box::new(move |index| {
+            let mut account = account_with_setup(
+                &account_root, "alice", Some(entered), cancelled_network, Arc::default(),
+                AccountSetup { index: Some(index), blocked_relay_token: true, ..AccountSetup::default() },
+            )?;
+            account.client.node_relay_options = Some(RelayTransferOptions {
+                relay_endpoint: "https://relay.invalid".into(),
+                token_provider: RelayTokenProvider::GatewayIssued,
+                interrupt_after_chunks: None, relay_quic_peer_addr: None,
+                relay_quic_server_name: None, relay_quic_ca_cert: None,
+                relay_owner_home_node_id: Some("home".into()),
+                relay_owner_principal_id: Some("alice".into()),
+                relay_audience_node_id: Some("relay".into()),
+            });
+            Ok(account)
+        });
         let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), account)]))?;
         let (one, server) = client(Rc::clone(&supervisor), 1).await?;
         let upload_client = one.clone();

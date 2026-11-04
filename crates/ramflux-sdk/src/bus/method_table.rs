@@ -50,6 +50,7 @@ macro_rules! methods {
 methods! {
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin"];
+    LocalRead(Always) => Actor: ["a2i.list_pending"];
     LocalMutation(Always) => Actor: [
         "a2i.acknowledge",
         "a2ui.action",
@@ -113,7 +114,6 @@ methods! {
     ];
     LocalRead(Always) => Reader: [
         "a2i.list",
-        "a2i.list_pending",
         "account.status",
         "bot.list",
         "bus.subscribe",
