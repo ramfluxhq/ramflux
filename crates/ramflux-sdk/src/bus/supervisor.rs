@@ -318,7 +318,7 @@ impl Supervisor {
         if self.installing.borrow().contains(&id) {
             return Err(super::backup_jobs::refusal("restore_install_in_progress"));
         }
-        if super::readers::is_reader_request(&request.method) {
+        if super::readers::waits_for_startup_restore(&request.method) {
             self.wait_for_startup_restore(&id).await?;
         }
         let actor = self.accounts.borrow().get(&id).cloned();

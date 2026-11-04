@@ -249,6 +249,23 @@ pub(super) fn is_reader_request(method: &str) -> bool {
     })
 }
 
+/// Cold data reads wait for startup restore; state queries remain immediate.
+pub(super) fn waits_for_startup_restore(method: &str) -> bool {
+    super::read_model::handles(method)
+        || matches!(
+            method,
+            "sync.status.get"
+                | "message.list"
+                | "message.read"
+                | "conversation.list"
+                | "surface.get"
+                | "surface.list"
+                | "task.get"
+                | "task.list"
+                | "call.list"
+        )
+}
+
 pub(super) fn read(
     client: &RamfluxClient,
     request: &LocalBusFrame,
