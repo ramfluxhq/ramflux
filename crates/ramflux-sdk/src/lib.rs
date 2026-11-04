@@ -159,3 +159,6 @@ pub use client::identity_authority::profile_read::VerifiedIdentityProfile;
 
 #[cfg(test)]
 mod storage_failure_fixture;
+
+#[cfg(test)]
+mod test_peers;

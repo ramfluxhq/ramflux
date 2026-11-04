@@ -603,6 +603,14 @@ pub(in crate::bus) async fn fetch_federated_manifest(
     url: &str,
     commitment: &str,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
+    fetch_federated_manifest_bounded(url, commitment, TASK_PREPARATION_TIMEOUT).await
+}
+
+async fn fetch_federated_manifest_bounded(
+    url: &str,
+    commitment: &str,
+    wall: Duration,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
     let url = url.to_owned();
     let commitment = commitment.to_owned();
     let flight_key = format!("{}/mvp1/device-manifest/{commitment}", url.trim_end_matches('/'));
@@ -625,7 +633,7 @@ pub(in crate::bus) async fn fetch_federated_manifest(
         crate::client::contact::fetch_verified_device_manifest_from_url_bounded(
             &url,
             &commitment,
-            TASK_PREPARATION_TIMEOUT,
+            wall,
         )
     })
     .await

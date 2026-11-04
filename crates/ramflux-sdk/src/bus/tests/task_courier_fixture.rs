@@ -34,8 +34,12 @@ pub(super) struct Gateway {
     pub protocol_errors: Vec<String>,
     pub submit_hold: Option<Hold>,
     pub receipt_bypass: bool,
+    pub receipt_hold: Option<Hold>,
     pub resume_hold: Option<Hold>,
     pub manifest_requests: Vec<String>,
+    pub lease_hold: Option<Hold>,
+    pub lease_requests: Vec<ramflux_protocol::VoiceLeaseRequest>,
+    pub network_requests: usize,
 }
 
 impl Gateway {
@@ -235,6 +239,7 @@ async fn serve(
         let mut bytes = vec![0; usize::try_from(size)?];
         stream.read_exact(&mut bytes).await?;
         let value: Value = serde_json::from_slice(&bytes)?;
+        shared.lock().map_err(|_| "gateway")?.network_requests += 1;
         let response = if let Some(path) = value["path"].as_str() {
             shared.lock().map_err(|_| "gateway")?.manifest_response(path)
         } else {
@@ -277,10 +282,14 @@ async fn serve(
                 GatewayClientFrame::Submit { submit } => {
                     let hold = {
                         let gateway = shared.lock().map_err(|_| "gateway")?;
-                        if gateway.receipt_bypass
-                            && submit.envelope.envelope_id.starts_with("receipt_evt_")
-                        {
-                            None
+                        if submit.envelope.envelope_id.starts_with("receipt_evt_") {
+                            gateway.receipt_hold.clone().or_else(|| {
+                                if gateway.receipt_bypass {
+                                    None
+                                } else {
+                                    gateway.submit_hold.clone()
+                                }
+                            })
                         } else {
                             gateway.submit_hold.clone()
                         }
@@ -297,6 +306,35 @@ async fn serve(
                             envelope: submit.envelope,
                         },
                     }
+                }
+                GatewayClientFrame::VoiceLease { request } => {
+                    let hold = {
+                        let mut gateway = shared.lock().map_err(|_| "gateway")?;
+                        gateway.lease_requests.push(request.body.clone());
+                        gateway.lease_hold.clone()
+                    };
+                    if let Some(hold) = hold {
+                        hold.wait().await;
+                    }
+                    use ramflux_protocol::{VoiceLeaseRequest as R, VoiceLeaseResponse as S};
+                    let response = match request.body {
+                        R::Allocate { .. } => S::Allocation { allocation: allocation(0) },
+                        R::Accept { consent } => {
+                            let mut private = allocation(1);
+                            private.lease_id.clone_from(&consent.lease_id);
+                            private.hard_expires_at = consent.expires_at;
+                            S::Allocation { allocation: private }
+                        }
+                        R::Renew { .. } => S::Status {
+                            status: ramflux_protocol::VoiceLeaseStatus {
+                                expires_at: now_unix_timestamp().unsigned_abs() + 100,
+                            },
+                        },
+                        R::Release { .. } => S::Status {
+                            status: ramflux_protocol::VoiceLeaseStatus { expires_at: 0 },
+                        },
+                    };
+                    GatewayServerFrame::VoiceLease { response: Box::new(response) }
                 }
                 GatewayClientFrame::OwnDeviceFanout { fanout } => own_copy_response(fanout)?,
                 GatewayClientFrame::Close { .. } => return Ok(()),
@@ -369,4 +407,16 @@ fn acknowledged_cursor(
         acked_envelope_ids: vec![ack.envelope_id],
         nacked_envelope_ids: BTreeMap::new(),
     })
+}
+
+pub(super) fn allocation(side: u8) -> ramflux_protocol::VoiceAllocation {
+    ramflux_protocol::VoiceAllocation {
+        endpoint: "relay.example:17449".into(),
+        lease_id: ramflux_protocol::encode_base64url([8; 16]),
+        side,
+        token: ramflux_protocol::encode_base64url([9; 32]),
+        rebind_key: ramflux_protocol::encode_base64url([12; 32]),
+        hard_expires_at: now_unix_timestamp().unsigned_abs() + 14400,
+        expires_at: now_unix_timestamp().unsigned_abs() + 100,
+    }
 }

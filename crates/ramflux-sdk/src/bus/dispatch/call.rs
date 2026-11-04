@@ -185,7 +185,9 @@ fn media(account: &mut LocalBusAccountState, id: &str) -> Result<LocalBusDispatc
 }
 #[path = "call_driver.rs"]
 mod driver;
-pub(crate) use driver::{drive, expire_due};
+#[cfg(test)]
+pub(crate) use driver::deliver_pending as deliver_pending_for_test;
+pub(crate) use driver::{drive, drive_until, expire_due};
 
 pub(crate) fn list(client: &RamfluxClient) -> Result<Value, SdkError> {
     let mut rows = client.account_db()?.voice_call_rows(false)?;

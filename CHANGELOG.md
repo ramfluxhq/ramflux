@@ -179,6 +179,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Admit call signaling per fifteen-second network item with deadline-first cancellation,
+  resume checkpoints and network backoff; reserve receive time and defer short
+  post-receive call windows. Make manifest worker and federation timeout regressions
+  use explicit clock and peer barriers with complete cleanup.
+
 - Evict expired requester rollback floors oldest first and expose capacity plus
   explicit retired-floor clearing in contact request settings, preserving consent
   fences and pending authority. Duplicate receipts no longer resurrect requester

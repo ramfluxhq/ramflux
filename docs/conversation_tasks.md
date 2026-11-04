@@ -108,8 +108,8 @@ cleanup and new-request admission.
 
 Task preparation workers remain separate from the account actor. Each result pass
 has a 20-second active actor budget: receipt and call couriers run first, with up
-to four seconds for receipts and fifteen seconds for call signaling (matching
-its submit allowance). Every task application charges its complete elapsed time,
+to four seconds for receipts. Each call network item requires a full fifteen-second
+total budget for lease maintenance, directory lookup, sealing, submission and release. Every task application charges its complete elapsed time,
 including submits and failures. Another task starts only with seven seconds left
 (five for actor-side authority/sealing, one for submit and one for local bookkeeping).
 Manifest preparation in courier workers is outside that active actor budget. Budget
@@ -120,18 +120,33 @@ The periodic 20-second sync cycle also services receipts and calls before receiv
 and lower-priority transfers. Lower-priority network couriers need at least one
 second remaining before starting. Newly received receipts can still be sent in
 the same cycle when at least eight seconds remain for a second priority pass.
-This admission floor is independent of the fifteen-second call allowance. Each
-courier timeout is capped by the time left in the existing cycle, so a second
-pass cannot allocate a fresh call window beyond that deadline.
-Explicit `message.receive` and `group.receive` use this path too: priority work
-can add up to nineteen seconds before inbox receive begins. Each priority pass
+This admission floor is independent of call admission: post-receive call items
+start only with at least fifteen seconds remaining. The first pass reserves four
+seconds for receive, admitting a call only with at least nineteen seconds left
+after receipt work. Receipt and call work share the existing twenty-second window.
+Explicit `message.receive` and `group.receive` use this path too. Each priority pass
 scans at most 256 pending receipt keys and loads those rows; a second pass can
-repeat that local scan when the eight-second admission floor remains. Both priority passes
-share the same twenty-second accounting window, rather than adding independent
-allowances. The background account loop has an outer twenty-second timeout;
-explicit receive retains the existing timeouts of its network steps. A timed-out
-priority operation retains pending work and checkpoints the gateway resume state
-before reconnecting; it never clears a pending call merely because time ran out.
+repeat that local scan when the eight-second admission floor remains.
+
+Local call recovery, ring/media expiry and row persistence run for every call
+before network admission. Deferred items do no network work, retain pending
+controls and delivery retry state, and do not retire the session. Each admitted
+item has one fifteen-second deadline. Deadline-first polling checks expiry before
+polling any nested operation, including after a delayed executor poll. Nested
+submission has a one-second defensive slack; typed nested expiry never updates
+ordinary delivery retry state. Item expiry retires the session with exactly one
+resume checkpoint, retains pending controls and the last persisted row, and sets
+a runtime-only network backoff from handler time (1, 2, 4, 8, then at most 16 seconds).
+Every network phase observes that backoff; local expiry still runs. Later calls
+are deferred after an item timeout. The actor priority path reserves no receive
+time because its own cycle accounting guards later task submissions.
+
+Receive therefore retains at least four seconds after first-pass network work.
+A slow receive or local operation can still overrun: the background account loop
+has an outer twenty-second timeout and records `SyncTimeout` for that cycle,
+retaining pending work for retry. Explicit receive retains the existing timeouts
+of its network steps. A step deadline remains a backstop for local processing;
+no admitted call is truncated by a fresh aggregate call allowance.
 Sibling/contact discovery remains in the background account loop; explicit receive
 and read operations do not initiate that discovery. Background backfill starts
 only with eleven seconds left, allowing both five-second directory windows and

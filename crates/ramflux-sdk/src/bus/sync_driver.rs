@@ -64,10 +64,16 @@ async fn run_with_receive_clock(
     account.client.finish_pair_retirement()?;
     super::dispatch::call::expire_due(account)?;
     // Explicit message/group receive shares this same 20-second accounting window.
-    // Priority can spend 4s on receipts plus 15s on call signaling before receive;
-    // this is cooperative accounting, not an outer timeout on explicit receive.
+    // First-pass calls require 15s plus a 4s receive reserve after receipts (up to 4s).
+    // Explicit receive is cooperative; the background actor records SyncTimeout at 20s
+    // if receive still overruns. Pending work is retained for a later cycle.
     // Preserve retirement and expiry preconditions before servicing any network courier.
-    let mut priority_sent = super::courier_cycle::priority_until(account, deadline).await;
+    let mut priority_sent = super::courier_cycle::priority_until(
+        account,
+        deadline,
+        super::courier_cycle::RECEIVE_RESERVE,
+    )
+    .await;
     let mut engine = account.take_live_engine().await?;
     let result = receive(account, &mut engine, receive_now()).await;
     account.put_engine(engine);
@@ -110,11 +116,12 @@ async fn run_with_receive_clock(
     account.signal_task_courier();
     let tasks_applied = account.client.retry_pending_tasks(now_unix_timestamp())?;
     // Newly received messages can enqueue receipts. Admit their second pass with 8s
-    // left; each courier is capped by the remaining window, including call signaling.
+    // left; calls separately require a full 15s item budget and otherwise defer.
     if deadline.saturating_duration_since(tokio::time::Instant::now())
         >= super::courier_cycle::PRIORITY_ALLOWANCE
     {
-        priority_sent += super::courier_cycle::priority_until(account, deadline).await;
+        priority_sent +=
+            super::courier_cycle::priority_until(account, deadline, Duration::ZERO).await;
     }
     Ok(received
         + tasks_applied

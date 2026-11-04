@@ -28,7 +28,36 @@ pub(super) async fn submit_until(
 ) -> Result<usize, SdkError> {
     let count = deliveries.len();
     for delivery in deliveries {
-        submit(account, &delivery, deadline).await?;
+        submit(account, &delivery, deadline, true).await.map_err(|error| match error {
+            SubmitError::Failure(error) => error,
+            SubmitError::DeadlineExceeded if delivery.federation.is_some() => {
+                SdkError::TaskDeliveryTimeout
+            }
+            SubmitError::DeadlineExceeded => {
+                SdkError::InboundPending("task delivery tick budget exhausted".into())
+            }
+        })?;
+    }
+    Ok(count)
+}
+#[derive(Debug)]
+pub(crate) enum SubmitError {
+    DeadlineExceeded,
+    Failure(SdkError),
+}
+impl From<SdkError> for SubmitError {
+    fn from(error: SdkError) -> Self {
+        Self::Failure(error)
+    }
+}
+pub(super) async fn submit_until_typed(
+    account: &mut LocalBusAccountState,
+    deliveries: Vec<Delivery>,
+    deadline: tokio::time::Instant,
+) -> Result<usize, SubmitError> {
+    let count = deliveries.len();
+    for delivery in deliveries {
+        submit(account, &delivery, deadline, false).await?;
     }
     Ok(count)
 }
@@ -36,18 +65,17 @@ async fn submit(
     account: &mut LocalBusAccountState,
     delivery: &Delivery,
     deadline: tokio::time::Instant,
-) -> Result<(), SdkError> {
+    retire_on_timeout: bool,
+) -> Result<(), SubmitError> {
     let resume = super::gateway_resume::Snapshot::capture(account);
     let mut engine =
         if let Ok(result) = tokio::time::timeout_at(deadline, account.take_live_engine()).await {
             result?
         } else {
-            resume.retire(account)?;
-            return Err(if delivery.federation.is_some() {
-                SdkError::TaskDeliveryTimeout
-            } else {
-                SdkError::InboundPending("task delivery tick budget exhausted".into())
-            });
+            if retire_on_timeout {
+                resume.retire(account)?;
+            }
+            return Err(SubmitError::DeadlineExceeded);
         };
     drop(resume);
     let result = if let Some(destination) = &delivery.federation {
@@ -74,11 +102,19 @@ async fn submit(
     {
         result.map(|_| ())
     } else {
-        account.retire_engine(engine)?;
-        return Err(SdkError::InboundPending("task delivery tick budget exhausted".into()));
+        // Call items own cancellation cleanup, including defensive nested expiry.
+        if retire_on_timeout {
+            account.retire_engine(engine)?;
+        } else {
+            drop(engine);
+        }
+        return Err(SubmitError::DeadlineExceeded);
     };
     account.put_engine(engine);
-    result
+    match result {
+        Err(SdkError::TaskDeliveryTimeout) => Err(SubmitError::DeadlineExceeded),
+        other => other.map_err(SubmitError::Failure),
+    }
 }
 
 fn federated_envelope(
@@ -159,22 +195,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn federated_submit_respects_the_shared_deadline_and_returns_the_actor_engine()
     -> Result<(), Box<dyn std::error::Error>> {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let url = format!("http://{}", listener.local_addr()?);
-        let (arrived, mut observed) = tokio::sync::oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        let server = std::thread::spawn(move || -> std::io::Result<()> {
-            let (mut socket, _) = listener.accept()?;
-            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let mut buffer = [0; 4096];
-            let _ = socket.read(&mut buffer)?;
-            let _ = arrived.send(());
-            // Release-controlled peer; this generous wall guard only bounds cleanup.
-            let _ = released.recv_timeout(Duration::from_secs(5));
-            let _ = socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n");
-            Ok(())
-        });
+        use crate::test_peers::{Peers, wait_for};
+        let mut peers = Peers::default();
+        let url = peers.spawn(true)?;
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let _override = crate::client::federation::ForwardOverride::install(
+            std::time::Instant::now() + Duration::from_secs(60),
+            capacity.clone(),
+        );
         let root = super::super::runtime_tests::root("federated-submit-deadline");
         let mut account = super::super::runtime_tests::account(
             &root,
@@ -217,7 +245,7 @@ mod tests {
         };
         let started = tokio::time::Instant::now();
         let envelope = Delivery { envelope, federation: Some(destination) };
-        let (result, account) = LocalSet::new()
+        let (result, account, mut peers) = LocalSet::new()
             .run_until(async move {
                 let task = tokio::task::spawn_local(async move {
                     let result = submit_until(
@@ -228,28 +256,23 @@ mod tests {
                     .await;
                     (result, account)
                 });
-                let guard = std::time::Instant::now();
-                while observed.try_recv().is_err() {
-                    assert!(!task.is_finished(), "submit ended before the HTTP barrier");
-                    assert!(guard.elapsed() < Duration::from_secs(10), "HTTP barrier not reached");
-                    tokio::task::yield_now().await;
-                }
+                wait_for(|| peers.accepted() == 1 || task.is_finished(), 10).await;
+                assert!(!task.is_finished(), "submit ended before the HTTP barrier");
                 assert_eq!(started.elapsed(), Duration::ZERO);
                 tokio::time::advance(Duration::from_secs(1)).await;
-                task.await
+                let (result, account) = task.await?;
+                Ok::<_, tokio::task::JoinError>((result, account, peers))
             })
             .await?;
-        let _ = release.send(());
         assert!(matches!(result, Err(SdkError::TaskDeliveryTimeout)), "{result:?}");
         assert_eq!(started.elapsed(), Duration::from_secs(1));
         assert!(
             account.has_pooled_engine(),
             "HTTP timeout must not discard the unrelated gateway session"
         );
-        tokio::task::spawn_blocking(move || {
-            server.join().map_err(|_| std::io::Error::other("stub panicked"))?
-        })
-        .await??;
+        assert!(capacity.try_acquire().is_err(), "submit must use the isolated permit");
+        assert!(peers.finish()? < Duration::from_secs(2));
+        wait_for(|| capacity.available_permits() == 1, 10).await;
         Ok(())
     }
 

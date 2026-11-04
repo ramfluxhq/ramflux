@@ -23,6 +23,8 @@ pub(super) async fn maintain_lease(
         .account_db()?
         .client_record("conversation", &next.row.conversation_id)?
         .ok_or_else(|| invalid("call conversation absent"))?;
+    #[cfg(test)]
+    account.call_test_phase("lookup").await;
     let targets = match crate::bus::dispatch::task_transport::direct_targets(
         account,
         &account.gateway_config,

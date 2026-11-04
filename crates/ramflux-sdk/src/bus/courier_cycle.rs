@@ -13,7 +13,8 @@ const TASK_MINIMUM: Duration = Duration::from_secs(7);
 // Admission floor for the post-receive pass, independent of the call submit budget.
 pub(super) const PRIORITY_ALLOWANCE: Duration = Duration::from_secs(8);
 const RECEIPT_ALLOWANCE: Duration = Duration::from_secs(4);
-const CALL_ALLOWANCE: Duration = super::task_delivery::SUBMIT_ALLOWANCE;
+pub(super) const RECEIVE_RESERVE: Duration = Duration::from_secs(4);
+pub(super) const CALL_ALLOWANCE: Duration = super::task_delivery::SUBMIT_ALLOWANCE;
 
 pub(super) trait Couriers {
     async fn priority(&mut self);
@@ -51,42 +52,57 @@ impl Cycle {
 }
 
 pub(super) async fn priority(account: &mut LocalBusAccountState) -> usize {
-    priority_until(account, tokio::time::Instant::now() + LIMIT).await
+    priority_until(account, tokio::time::Instant::now() + LIMIT, Duration::ZERO).await
 }
 
 pub(super) async fn priority_until(
     account: &mut LocalBusAccountState,
     deadline: tokio::time::Instant,
+    reserve: Duration,
 ) -> usize {
     if !super::task_courier_queue::networking_ready(account) {
+        // Admission can block networking without blocking local call timers.
+        if let Err(error) = super::dispatch::call::expire_due(account) {
+            tracing::warn!(%error, "local call expiry deferred");
+        }
         return 0;
     }
     let receipts = priority_step(account, "receipt", Priority::Receipt, deadline).await;
-    receipts + priority_step(account, "call", Priority::Call, deadline).await
+    receipts + priority_step(account, "call", Priority::Call { reserve }, deadline - reserve).await
 }
 
 trait PriorityOperation {
     fn allowance(&self) -> Duration {
         Duration::from_secs(4)
     }
-    async fn run(&self, account: &mut LocalBusAccountState) -> Result<usize, SdkError>;
+    async fn run(
+        &self,
+        account: &mut LocalBusAccountState,
+        deadline: tokio::time::Instant,
+    ) -> Result<usize, SdkError>;
 }
 
 enum Priority {
     Receipt,
-    Call,
+    Call { reserve: Duration },
 }
 impl PriorityOperation for Priority {
     fn allowance(&self) -> Duration {
         match self {
             Self::Receipt => RECEIPT_ALLOWANCE,
-            Self::Call => CALL_ALLOWANCE,
+            Self::Call { .. } => LIMIT,
         }
     }
-    async fn run(&self, account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    async fn run(
+        &self,
+        account: &mut LocalBusAccountState,
+        deadline: tokio::time::Instant,
+    ) -> Result<usize, SdkError> {
         match self {
             Self::Receipt => super::delivery_receipts::flush(account).await,
-            Self::Call => super::dispatch::call::drive(account).await,
+            Self::Call { reserve } => {
+                super::dispatch::call::drive_until(account, deadline + *reserve, *reserve).await
+            }
         }
     }
 }
@@ -103,7 +119,7 @@ async fn priority_step(
     }
     let resume = super::gateway_resume::Snapshot::capture(account);
     let deadline = deadline.min(now + operation.allowance());
-    let result = tokio::time::timeout_at(deadline, operation.run(account)).await;
+    let result = tokio::time::timeout_at(deadline, operation.run(account, deadline)).await;
     match result {
         Ok(Ok(n)) => n,
         Ok(Err(error)) => {
@@ -201,7 +217,11 @@ mod tests {
         rotate_scope: bool,
     }
     impl PriorityOperation for StalledPriority {
-        async fn run(&self, account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+        async fn run(
+            &self,
+            account: &mut LocalBusAccountState,
+            _deadline: tokio::time::Instant,
+        ) -> Result<usize, SdkError> {
             let engine = if self.takes_engine { account.engine.take() } else { None };
             if self.rotate_scope {
                 account.gateway_config.device_epoch += 1;

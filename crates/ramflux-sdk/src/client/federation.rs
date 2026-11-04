@@ -6,6 +6,8 @@
 use crate::prelude::*;
 
 mod forward;
+#[cfg(test)]
+pub(crate) use forward::ForwardOverride;
 
 struct FederatedSendOptions {
     franking: bool,

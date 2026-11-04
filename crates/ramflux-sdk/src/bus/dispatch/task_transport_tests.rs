@@ -40,79 +40,109 @@ async fn manifest_worker_capacity_is_the_only_retry_neutral_preparation_outcome(
     assert!(matches!(charged, Err(SdkError::InboundPending(_))));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stalled_federated_manifest_fetch_respects_the_preparation_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
-    use std::net::TcpListener;
-    use std::sync::mpsc;
-
-    tokio::time::timeout(Duration::from_secs(30), async {
-        let _guard = manifest_test_lock().lock().await;
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let address = listener.local_addr()?;
-        let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let server = std::thread::spawn(move || -> Result<(), String> {
-            let (stream, _) = listener.accept().map_err(|error| error.to_string())?;
-            accepted_tx.send(()).map_err(|error| error.to_string())?;
-            release_rx.recv_timeout(Duration::from_secs(10)).map_err(|error| error.to_string())?;
-            drop(stream);
-            Ok(())
-        });
-        let started = std::time::Instant::now();
-        let outcome = super::await_preparation(
-            super::fetch_federated_manifest(&format!("http://{address}"), "stalled-root"),
+    use crate::test_peers::{Peers, wait_until};
+    let _guard = manifest_test_lock().lock().await;
+    let hang = std::time::Instant::now() + Duration::from_secs(30);
+    wait_until(|| manifest_worker_count().load(std::sync::atomic::Ordering::Acquire) == 0, hang)
+        .await;
+    let mut peers = Peers::default();
+    let url = peers.spawn(false)?;
+    let started = tokio::time::Instant::now();
+    let task = tokio::spawn(async move {
+        super::await_preparation(
+            super::fetch_federated_manifest_bounded(&url, "stalled-root", Duration::from_secs(60)),
             "task federated manifest preparation deferred",
         )
+        .await
+    });
+    wait_until(
+        || peers.accepted() == 1 || task.is_finished(),
+        hang.min(std::time::Instant::now() + Duration::from_secs(10)),
+    )
+    .await;
+    assert!(!task.is_finished(), "fetch ended before the accepted barrier");
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    tokio::time::advance(TASK_PREPARATION_TIMEOUT).await;
+    wait_until(|| task.is_finished(), hang).await;
+    let outcome = task.await?;
+    assert!(
+        matches!(outcome, Err(SdkError::InboundPending(_))),
+        "preparation must time out with its typed retry outcome"
+    );
+    assert_eq!(started.elapsed(), TASK_PREPARATION_TIMEOUT);
+    assert!(peers.finish()? < Duration::from_secs(2));
+    wait_until(|| manifest_worker_count().load(std::sync::atomic::Ordering::Acquire) == 0, hang)
         .await;
-        assert!(
-            !matches!(outcome, Ok(super::Preparation::Ready(_))),
-            "a stalled fetch must report its per-item timeout"
-        );
-        assert!(started.elapsed() < Duration::from_secs(7));
-        accepted_rx.recv_timeout(Duration::from_secs(1))?;
-        release_tx.send(())?;
-        server.join().map_err(|_| "stalled manifest server panicked")??;
-        Ok::<_, Box<dyn std::error::Error>>(())
-    })
-    .await
-    .map_err(|_| "stalled manifest test exceeded its outer timeout")??;
     Ok(())
+}
+
+async fn manifest_admission_barrier(
+    peers: &crate::test_peers::Peers,
+    jobs: &mut tokio::task::JoinSet<Result<SdkDeviceManifestResponse, SdkError>>,
+    deadline: std::time::Instant,
+) -> usize {
+    let mut deferrals = 0;
+    crate::test_peers::wait_until(
+        || {
+            while let Some(result) = jobs.try_join_next() {
+                assert!(
+                    matches!(result, Ok(Err(SdkError::TaskManifestWorkerCapacity))),
+                    "only capacity refusals may finish while peers are held"
+                );
+                deferrals += 1;
+            }
+            peers.accepted() + deferrals == 12
+        },
+        deadline,
+    )
+    .await;
+    deferrals
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeated_stalled_manifest_fetches_never_exceed_the_global_worker_cap()
 -> Result<(), Box<dyn std::error::Error>> {
-    use std::net::TcpListener;
-
-    tokio::time::timeout(Duration::from_secs(12), async {
-        let _guard = manifest_test_lock().lock().await;
-        let listeners =
-            (0..12).map(|_| TcpListener::bind("127.0.0.1:0")).collect::<Result<Vec<_>, _>>()?;
-        let urls = listeners
-            .iter()
-            .map(|listener| listener.local_addr().map(|address| format!("http://{address}")))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut jobs = tokio::task::JoinSet::new();
-        for (index, url) in urls.into_iter().enumerate() {
-            jobs.spawn(async move {
-                super::fetch_federated_manifest(&url, &format!("stalled-{index}")).await
-            });
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        assert!(super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire) <= 4);
-        let mut capacity_deferrals = 0;
-        while let Some(result) = jobs.join_next().await {
-            if matches!(result?, Err(SdkError::TaskManifestWorkerCapacity)) {
-                capacity_deferrals += 1;
+    use crate::test_peers::{Peers, wait_until};
+    let _guard = manifest_test_lock().lock().await;
+    let hang = std::time::Instant::now() + Duration::from_secs(60);
+    wait_until(
+        || manifest_worker_count().load(std::sync::atomic::Ordering::Acquire) == 0,
+        hang.min(std::time::Instant::now() + Duration::from_secs(30)),
+    )
+    .await;
+    let mut peers = Peers::default();
+    let urls = (0..12).map(|_| peers.spawn(false)).collect::<Result<Vec<_>, _>>()?;
+    let mut jobs = tokio::task::JoinSet::new();
+    for (index, url) in urls.into_iter().enumerate() {
+        jobs.spawn(async move {
+            super::fetch_federated_manifest_bounded(
+                &url,
+                &format!("stalled-{index}"),
+                Duration::from_secs(60),
+            )
+            .await
+        });
+    }
+    let deferrals = manifest_admission_barrier(&peers, &mut jobs, hang).await;
+    assert_eq!(peers.accepted(), 4);
+    assert_eq!(deferrals, 8, "every excess fetch must receive the typed capacity refusal");
+    assert_eq!(manifest_worker_count().load(std::sync::atomic::Ordering::Acquire), 4);
+    assert!(peers.finish()? < Duration::from_secs(2));
+    wait_until(
+        || {
+            while let Some(result) = jobs.try_join_next() {
+                assert!(result.is_ok(), "manifest task panicked");
             }
-        }
-        assert!(capacity_deferrals >= 8, "excess stalled fetches must be deferred");
-        drop(listeners);
-        Ok::<_, Box<dyn std::error::Error>>(())
-    })
-    .await
-    .map_err(|_| "manifest worker cap regression exceeded its outer timeout")??;
+            jobs.is_empty()
+        },
+        hang,
+    )
+    .await;
+    wait_until(|| manifest_worker_count().load(std::sync::atomic::Ordering::Acquire) == 0, hang)
+        .await;
     Ok(())
 }
 
@@ -489,5 +519,76 @@ async fn private_task_approvals_are_pair_encrypted_only_to_the_requester_among_g
     drop(peers);
     drop(source);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cleanup_with_never_accepted_listeners_finishes_within_2s()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "RAMFLUX_TEST_LISTENER_CLEANUP_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let pid = self.0.id();
+                let killed = self.0.kill();
+                let waited = self.0.wait();
+                eprintln!("cleanup child {pid}: kill={killed:?}, wait={waited:?}");
+            }
+        }
+        let started = std::time::Instant::now();
+        let mut child = Child(std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "bus::dispatch::task_transport::tests::cleanup_with_never_accepted_listeners_finishes_within_2s", "--nocapture"])
+            .env(CHILD, "1").spawn()?);
+        loop {
+            if let Some(status) = child.0.try_wait()? {
+                assert!(status.success(), "cleanup child failed: {status}");
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "cleanup child exceeded its 10 s parent wall timeout"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "cleanup child exceeded its parent wall budget"
+        );
+        return Ok(());
+    }
+    let _guard = manifest_test_lock().lock().await;
+    let mut peers = crate::test_peers::Peers::default();
+    let mut jobs = tokio::task::JoinSet::new();
+    let urls = (0..12).map(|_| peers.spawn(false)).collect::<Result<Vec<_>, _>>()?;
+    crate::test_peers::wait_for(|| peers.ready() == 12, 10).await;
+    for (index, url) in urls.into_iter().enumerate() {
+        jobs.spawn(async move {
+            super::fetch_federated_manifest_bounded(
+                &url,
+                &format!("cleanup-{index}"),
+                Duration::from_secs(60),
+            )
+            .await
+        });
+    }
+    let deferrals = manifest_admission_barrier(
+        &peers,
+        &mut jobs,
+        std::time::Instant::now() + Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(deferrals, 8);
+    assert_eq!(super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire), 4);
+    assert_eq!(peers.accepted(), 4, "eight listeners must remain never accepted");
+    assert!(peers.finish()? < Duration::from_secs(2));
+    while let Some(result) = jobs.join_next().await {
+        let _ = result?;
+    }
+    crate::test_peers::wait_for(
+        || super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire) == 0,
+        10,
+    )
+    .await;
     Ok(())
 }

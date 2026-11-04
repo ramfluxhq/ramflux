@@ -12,13 +12,43 @@ fn slots() -> &'static Arc<Semaphore> {
     SLOTS.get_or_init(|| Arc::new(Semaphore::new(4)))
 }
 
+#[cfg(test)]
+thread_local! {
+    static OVERRIDE: std::cell::RefCell<Option<(std::time::Instant, Arc<Semaphore>)>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+#[must_use]
+pub(crate) struct ForwardOverride;
+#[cfg(test)]
+impl ForwardOverride {
+    pub(crate) fn install(wall: std::time::Instant, capacity: Arc<Semaphore>) -> Self {
+        OVERRIDE.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some((wall, capacity));
+        });
+        Self
+    }
+}
+#[cfg(test)]
+impl Drop for ForwardOverride {
+    fn drop(&mut self) {
+        OVERRIDE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
 impl RamfluxClient {
     pub(crate) async fn forward_task_envelope_until(
         federation: LocalBusFederationRoute,
         envelope: ramflux_protocol::Envelope,
         deadline: tokio::time::Instant,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        forward_until(federation, envelope, deadline, slots().clone()).await
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let (wall, capacity) = (std::time::Instant::now() + remaining, slots().clone());
+        #[cfg(test)]
+        let (wall, capacity) =
+            OVERRIDE.with(|slot| slot.borrow().clone()).unwrap_or((wall, capacity));
+        forward_until(federation, envelope, deadline, wall, capacity).await
     }
 }
 
@@ -26,6 +56,7 @@ async fn forward_until(
     federation: LocalBusFederationRoute,
     envelope: ramflux_protocol::Envelope,
     deadline: tokio::time::Instant,
+    wall_deadline: std::time::Instant,
     capacity: Arc<Semaphore>,
 ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -33,7 +64,6 @@ async fn forward_until(
         return Err(SdkError::TaskDeliveryTimeout);
     }
     let permit = capacity.try_acquire_owned().map_err(|_| SdkError::TaskForwardWorkerCapacity)?;
-    let wall_deadline = std::time::Instant::now() + remaining;
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         crate::prekey::sdk_http_post_json_with_deadline(
@@ -61,7 +91,7 @@ async fn forward_until(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use crate::test_peers::{Peers, wait_for};
 
     fn envelope() -> Result<ramflux_protocol::Envelope, SdkError> {
         Ok(serde_json::from_value(serde_json::json!({
@@ -88,40 +118,19 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stalled_forward_returns_typed_timeout_without_blocking_runtime_or_leaking_slot()
     -> Result<(), Box<dyn std::error::Error>> {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let target = route(format!("http://{}", listener.local_addr()?));
-        let (arrived, mut observed) = tokio::sync::oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        let guard_expired = Arc::new(AtomicBool::new(false));
-        let server_guard = Arc::clone(&guard_expired);
-        let server = std::thread::spawn(move || -> std::io::Result<()> {
-            let (mut socket, _) = listener.accept()?;
-            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
-            let mut buffer = [0; 4096];
-            let _ = socket.read(&mut buffer)?;
-            let _ = arrived.send(());
-            // A release barrier keeps the peer stalled. This wall guard only bounds
-            // cleanup if the HTTP deadline is broken; it must not win in a passing test.
-            if matches!(
-                released.recv_timeout(Duration::from_secs(5)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ) {
-                server_guard.store(true, Ordering::SeqCst);
-            }
-            let _ = socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n");
-            Ok(())
-        });
+        let mut peers = Peers::default();
+        let target = route(peers.spawn(true)?);
         let capacity = Arc::new(Semaphore::new(1));
         let started = tokio::time::Instant::now();
-        let deadline = started + Duration::from_secs(1);
-        let task = tokio::spawn(forward_until(target, envelope()?, deadline, capacity.clone()));
-        let guard = std::time::Instant::now();
-        while observed.try_recv().is_err() {
-            assert!(!task.is_finished(), "the forward ended before entering its held HTTP request");
-            assert!(guard.elapsed() < Duration::from_secs(10), "HTTP barrier not reached");
-            tokio::task::yield_now().await;
-        }
+        let task = tokio::spawn(forward_until(
+            target,
+            envelope()?,
+            started + Duration::from_secs(1),
+            std::time::Instant::now() + Duration::from_secs(60),
+            capacity.clone(),
+        ));
+        wait_for(|| peers.accepted() == 1 || task.is_finished(), 10).await;
+        assert!(!task.is_finished(), "the forward ended before entering its held HTTP request");
         assert_eq!(started.elapsed(), Duration::ZERO);
         let heartbeat = tokio::spawn(async {
             tokio::task::yield_now().await;
@@ -132,20 +141,31 @@ mod tests {
         assert!(matches!(result, Err(SdkError::TaskDeliveryTimeout)), "{result:?}");
         assert!(heartbeat.await?);
         assert_eq!(started.elapsed(), Duration::from_secs(1));
-        // No paused-clock timeout here: the real socket's deadline must release the
-        // permit while the peer is still held. A broken deadline trips the server guard.
-        let permit = capacity.clone().acquire_owned().await?;
-        let released_by_deadline = !guard_expired.load(Ordering::SeqCst);
-        drop(permit);
-        let _ = release.send(());
-        tokio::task::spawn_blocking(move || {
-            server.join().map_err(|_| std::io::Error::other("stub panicked"))?
-        })
-        .await??;
-        assert!(
-            released_by_deadline,
-            "the HTTP deadline must release its slot before the peer guard"
-        );
+        assert!(capacity.try_acquire().is_err(), "held peer must retain its isolated permit");
+        assert!(peers.finish()? < Duration::from_secs(2));
+        wait_for(|| capacity.available_permits() == 1, 10).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_socket_deadline_releases_the_permit_before_the_peer_guard()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut peers = Peers::default();
+        let target = route(peers.spawn(false)?);
+        let capacity = Arc::new(Semaphore::new(1));
+        let task = tokio::spawn(forward_until(
+            target,
+            envelope()?,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            std::time::Instant::now() + Duration::from_millis(500),
+            capacity.clone(),
+        ));
+        let result = task.await?;
+        assert!(matches!(result, Err(SdkError::TaskDeliveryTimeout)), "{result:?}");
+        assert_eq!(peers.accepted(), 1);
+        assert!(!peers.guard_expired());
+        assert!(capacity.try_acquire().is_ok());
+        assert!(peers.finish()? < Duration::from_secs(2));
         Ok(())
     }
 
@@ -160,6 +180,7 @@ mod tests {
                 target.clone(),
                 envelope()?,
                 tokio::time::Instant::now(),
+                std::time::Instant::now() + Duration::from_secs(60),
                 capacity.clone()
             )
             .await,
@@ -170,6 +191,7 @@ mod tests {
                 target,
                 envelope()?,
                 tokio::time::Instant::now() + Duration::from_secs(1),
+                std::time::Instant::now() + Duration::from_secs(60),
                 capacity.clone()
             )
             .await,

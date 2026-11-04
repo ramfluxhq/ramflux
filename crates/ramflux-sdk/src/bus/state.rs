@@ -74,11 +74,27 @@ impl Drop for ObjectGetSpoolSession {
     }
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct CallProbe {
+    pub(crate) enabled: bool,
+    pub(crate) polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) events: Vec<&'static str>,
+    pub(crate) holds:
+        BTreeMap<&'static str, (mpsc::UnboundedSender<()>, std::sync::Arc<tokio::sync::Notify>)>,
+}
+
 pub(crate) struct LocalBusAccountState {
     pub(crate) native_setup: Option<LocalBusConfig>,
     pub(crate) activation_pending: bool,
     pub(crate) client: RamfluxClient,
     pub(crate) engine: Option<GatewaySessionEngine>,
+    #[cfg(test)]
+    pub(crate) resume_checkpoint_writes: std::cell::Cell<usize>,
+    #[cfg(test)]
+    pub(crate) call_outcomes: Vec<(String, &'static str)>,
+    #[cfg(test)]
+    pub(crate) call_probe: CallProbe,
     /// Per-account relay QUIC connection pool (T24-A2), shared via `Arc`. Lazily built on first
     /// relay transfer and then owned by the account for its whole lifetime; each relay request
     /// takes only an `Arc::clone` (never moving the instance out), so a cancelled or failing
@@ -126,6 +142,17 @@ struct PersistedGatewayResume {
 impl LocalBusAccountState {
     pub(crate) const GATEWAY_RESUME_CHECKPOINT: &'static str = "gateway_session_resume.v1";
 
+    #[cfg(test)]
+    pub(crate) async fn call_test_phase(&mut self, phase: &'static str) {
+        if self.call_probe.enabled {
+            self.call_probe.events.push(phase);
+            if let Some((entered, released)) = self.call_probe.holds.get(phase).cloned() {
+                let notified = released.notified();
+                let _ = entered.send(());
+                notified.await;
+            }
+        }
+    }
     pub(crate) fn signal_task_courier(&self) {
         if let Some(wake) = &self.task_courier_wake {
             let _ = wake.try_send(());
@@ -140,6 +167,12 @@ impl LocalBusAccountState {
         let gateway_config = engine.config.clone();
         let target_delivery_id = engine.target_delivery_id().to_owned();
         Self {
+            #[cfg(test)]
+            resume_checkpoint_writes: std::cell::Cell::new(0),
+            #[cfg(test)]
+            call_outcomes: Vec::new(),
+            #[cfg(test)]
+            call_probe: CallProbe::default(),
             native_setup: None,
             activation_pending: false,
             client,
@@ -180,6 +213,12 @@ impl LocalBusAccountState {
     ) -> Self {
         let target_delivery_id = gateway_config.target_delivery_id.clone();
         Self {
+            #[cfg(test)]
+            resume_checkpoint_writes: std::cell::Cell::new(0),
+            #[cfg(test)]
+            call_outcomes: Vec::new(),
+            #[cfg(test)]
+            call_probe: CallProbe::default(),
             native_setup: None,
             activation_pending: false,
             client,
@@ -404,6 +443,8 @@ impl LocalBusAccountState {
     }
 
     pub(crate) async fn take_live_engine(&mut self) -> Result<GatewaySessionEngine, SdkError> {
+        #[cfg(test)]
+        self.call_test_phase("engine").await;
         self.ensure_gateway_live().await?;
         self.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)
     }
@@ -466,6 +507,8 @@ impl LocalBusAccountState {
             Self::GATEWAY_RESUME_CHECKPOINT,
             &serde_json::to_string(&persisted)?,
         )?;
+        #[cfg(test)]
+        self.resume_checkpoint_writes.set(self.resume_checkpoint_writes.get() + 1);
         Ok(())
     }
 
