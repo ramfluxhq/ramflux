@@ -977,11 +977,7 @@ impl RouterRedbStore {
         let sequence = cursor.last_acknowledged_inbox_seq.ok_or_else(|| {
             NodeCoreError::ItestHttp("ACK lacks a mailbox delivery sequence".into())
         })?;
-        crate::home_migration_store::drain::receiver_ack(
-            &write_txn,
-            &cursor.target_delivery_id,
-            sequence,
-        )?;
+        crate::home_migration_store::drain::receiver_settled(&write_txn, cursor)?;
         for sequence in std::iter::once(sequence).chain(cursor.retired_inbox_seqs.iter().copied()) {
             let key = inbox_entry_storage_key(&cursor.target_delivery_id, sequence);
             expiry_index::remove_inbox_row(&write_txn, &key)?;
@@ -1024,6 +1020,7 @@ impl RouterRedbStore {
                 .insert(cursor.target_delivery_id.as_str(), cursor_bytes.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
+        crate::home_migration_store::drain::receiver_settled(&write_txn, cursor)?;
         for sequence in &cursor.retired_inbox_seqs {
             let key = inbox_entry_storage_key(&cursor.target_delivery_id, *sequence);
             expiry_index::remove_inbox_row(&write_txn, &key)?;

@@ -29,6 +29,7 @@ pub struct MigrationDrainEntry {
     pub next_attempt: u64,
 }
 /// Only a durable B commit/duplicate reply is a `BAck`; transport failures are `Held`.
+/// A late durable ACK may settle a rejected row; workers must not retry rejected rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrationDrainOutcome {
     BAck,
@@ -105,7 +106,11 @@ pub(super) fn capture(
                 attempts: 0,
                 next_attempt: now,
             };
-            write(tx, ENTRIES, &inbox_entry_storage_key(target, seq), &row)?;
+            let key = inbox_entry_storage_key(target, seq);
+            if read::<MigrationDrainEntry>(tx, ENTRIES, &key)?.is_some() {
+                return Err(storage("overlapping migration drain obligation"));
+            }
+            write(tx, ENTRIES, &key, &row)?;
             count += 1;
         }
         if count != cursor.progress.remaining {
@@ -308,6 +313,44 @@ pub(crate) fn receiver_ack(
     let key = inbox_entry_storage_key(target, seq);
     if let Some(row) = read::<MigrationDrainEntry>(tx, ENTRIES, &key)? {
         apply(tx, row, MigrationDrainOutcome::BAck, 0, true)?;
+    }
+    Ok(())
+}
+
+/// Receiver retirement, including dead letters, counts as `receiver_acked`.
+/// Select before mutating because settlement updates the same table and cursor.
+pub(crate) fn receiver_settled(
+    tx: &redb::WriteTransaction,
+    cursor: &CursorAckState,
+) -> Result<(), NodeCoreError> {
+    let mut merged: CursorAckState =
+        read(tx, ROUTER_CURSOR_STATE_TABLE, &cursor.target_delivery_id)?
+            .unwrap_or_else(|| cursor.clone());
+    merged.retired_inbox_seqs.extend(&cursor.retired_inbox_seqs);
+    let cursor = &merged;
+    let rows = {
+        let table = tx.open_table(ENTRIES).map_err(storage)?;
+        table
+            .range(
+                inbox_entry_storage_key(&cursor.target_delivery_id, 0).as_str()
+                    ..=inbox_entry_storage_key(&cursor.target_delivery_id, u64::MAX).as_str(),
+            )
+            .map_err(storage)?
+            .map(|row| {
+                let (_, bytes) = row.map_err(storage)?;
+                decode::<MigrationDrainEntry>(bytes.value())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for row in rows {
+        let seq = row.entry.inbox_seq;
+        if seq <= cursor.settled_inbox_seq
+            || cursor.acked_inbox_seqs.contains(&seq)
+            || cursor.retired_inbox_seqs.contains(&seq)
+            || cursor.last_acknowledged_inbox_seq == Some(seq)
+        {
+            receiver_ack(tx, &cursor.target_delivery_id, seq)?;
+        }
     }
     Ok(())
 }

@@ -117,6 +117,7 @@ fn drain_crash_after_b_commit_before_a_ack_replays_same_entry_and_b_keeps_one_co
     s.b.restart()?;
     assert_eq!(s.a.store()?.migration_drain_page(&s.target, 0)?, vec![row.clone()]);
     assert_eq!(cursor(&s)?, before);
+    assert_eq!(s.a.core.resume(&s.target, 0, 10), vec![row.entry.clone()]);
     assert_eq!(s.b.core.resume(&s.target, 0, 10).len(), 1);
     assert!(matches!(
         accept(&s, request)?,
@@ -196,7 +197,57 @@ fn receiver_ack_at_a_after_commit_counts_receiver_acked_and_releases() -> TestRe
     s.a.restart()?;
     let p = progress(&s)?;
     assert_eq!((p.remaining, p.receiver_acked, p.forwarded), (0, 1, 0));
-    finish(&s, NOW + 3)
+    finish(&s, NOW + 3)?;
+    // NACK retirement/dead-letter and cumulative settled ranges use the same writer.
+    for nack_path in [false, true] {
+        let (mut s, _, _) = setup_count(3)?;
+        let rows = s.a.store()?.migration_drain_page(&s.target, 0)?;
+        let cursor = crate::CursorAckState {
+            target_delivery_id: s.target.clone(),
+            last_acknowledged_inbox_seq: (!nack_path).then_some(rows[2].entry.inbox_seq),
+            retired_inbox_seqs: vec![rows[1].entry.inbox_seq],
+            settled_inbox_seq: rows[0].entry.inbox_seq,
+            acked_inbox_seqs: [rows[2].entry.inbox_seq].into(),
+            ..Default::default()
+        };
+        if nack_path {
+            s.a.store()?.record_nack_increment(&cursor)?;
+        } else {
+            s.a.store()?.record_ack_increment(&cursor, &rows[2].entry.envelope.envelope_id)?;
+        }
+        s.a.restart()?;
+        assert_eq!(s.a.store()?.migration_drain_page(&s.target, 0)?, []);
+        let p = progress(&s)?;
+        assert_eq!((p.scheduled, p.receiver_acked, p.remaining, p.forwarded), (3, 3, 0, 0));
+        finish(&s, NOW + 3)?;
+    }
+    let (mut s, _, row) = setup()?;
+    s.a.restart()?;
+    let nack = ramflux_protocol::Nack {
+        schema: "ramflux.nack.v1".into(),
+        version: 1,
+        domain: "ramflux.nack.v1".into(),
+        ext: ramflux_protocol::Ext::default(),
+        signed: row.entry.envelope.signed.clone(),
+        nack_id: "receiver-dead-letter".into(),
+        envelope_id: row.entry.envelope.envelope_id.clone(),
+        receiver_device_id: s.target.clone(),
+        reason: ramflux_protocol::NackReason::EpochRollback,
+        received_at: i64::try_from(NOW + 3)?,
+        retry_after: None,
+        proof_hash: None,
+        new_home_node_hint: None,
+    };
+    for _ in 0..crate::inbox::ROUTER_NACK_RETRY_LIMIT {
+        let cursor = s.a.core.apply_nack_for_target(&s.target, &nack)?;
+        s.a.store()?.record_nack_increment(&cursor)?;
+    }
+    assert_eq!(s.a.core.cursor_state(&s.target).ok_or("cursor")?.dead_letters.len(), 1);
+    s.a.restart()?;
+    assert_eq!(s.a.store()?.migration_drain_page(&s.target, 0)?, []);
+    assert_eq!(progress(&s)?.receiver_acked, 1);
+    finish(&s, NOW + 3)?;
+    Ok(())
 }
 #[test]
 fn backlog_counters_conserve_across_retries_and_transitions() -> TestResult {
@@ -236,4 +287,16 @@ fn later_settlement_does_not_skip_an_earlier_held_entry() -> TestResult {
     s.a.store()?.settle_migration_drain(&rows[0], MigrationDrainOutcome::BAck, NOW + 4)?;
     assert_eq!(cursor(&s)?.next_seq, c.high_water + 1);
     finish(&s, NOW + 4)
+}
+
+#[test]
+fn overlapping_capture_cannot_replace_an_outstanding_migration_obligation() -> TestResult {
+    let (s, _, row) = setup()?;
+    let store = s.a.store()?;
+    let cursor = cursor(&s)?;
+    let tx = store.migration_db().begin_write()?;
+    assert!(super::super::drain::capture(store, &tx, &[cursor], NOW + 2).is_err());
+    drop(tx);
+    assert_eq!(store.migration_drain_page(&s.target, 0)?, vec![row]);
+    Ok(())
 }

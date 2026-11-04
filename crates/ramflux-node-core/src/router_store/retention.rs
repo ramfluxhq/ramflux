@@ -87,6 +87,7 @@ impl RouterRedbStore {
             }
         }
         for cursor in cursors {
+            crate::home_migration_store::drain::receiver_settled(&txn, cursor)?;
             for sequence in &cursor.retired_inbox_seqs {
                 super::expiry_index::remove_inbox_row(
                     &txn,
