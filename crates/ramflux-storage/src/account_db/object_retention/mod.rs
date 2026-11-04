@@ -10,6 +10,9 @@ mod resources;
 mod schema;
 mod selector_admission;
 mod selector_erasure;
+mod selector_legacy;
+#[cfg(test)]
+mod selector_legacy_tests;
 use super::AccountDb;
 use crate::StorageError;
 pub use generation::PrivacyResourceRegistration;
@@ -24,6 +27,7 @@ use std::sync::Arc;
 
 pub(crate) use schema::{SCHEMA, install};
 pub(super) use schema::{erasure_body, payload_erasure_body};
+pub(super) use selector_legacy::erasure_body as legacy_erasure_body;
 
 /// The reason an object may outlive message ownership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

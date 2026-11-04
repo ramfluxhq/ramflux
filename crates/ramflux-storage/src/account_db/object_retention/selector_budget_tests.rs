@@ -227,3 +227,37 @@ fn b1_g3_capture_and_lookup_budget() -> Result<(), StorageError> {
     }
     Ok(())
 }
+
+#[test]
+fn b1_legacy_hook_delete_budget() -> Result<(), StorageError> {
+    let mut baseline = None;
+    for count in [0, 1_000, 10_000] {
+        let (root, db) = crate::tests::test_db("legacy-hook-budget")?;
+        super::selector_legacy_tests::fixture(&db)?;
+        unrelated_rows(&db, count)?;
+        db.connection.execute("INSERT INTO message_footprint SELECT message_id,'revocation_selector',json_object('selector',selector,'wire','wire','manifest','manifest','commitment',commitment,'selector_lookup',selector_lookup) FROM object_message_reference JOIN object_retention_reference USING(reference_hash) WHERE message_id GLOB 'message-*'",[])?;
+        let (result, steps) = db.measure_sqlite_vm_steps(|| {
+            db.delete_direct_message("thread", "message", "local", "delete")
+        })?;
+        result?;
+        bound(&mut baseline, steps, count, "legacy footprint deletion");
+        assert!(matches!(
+            db.check_object_access("private-canary"),
+            Err(StorageError::ObjectErased)
+        ));
+        assert!(!db.object_is_tombstoned("private-canary")?);
+        assert_eq!(db.privacy_erasure_generation()?, 1);
+        let survivors: i64 =
+            db.connection.query_row("SELECT COUNT(*) FROM object_index", [], |row| row.get(0))?;
+        assert_eq!(survivors, count);
+        let footprints: i64 = db.connection.query_row(
+            "SELECT COUNT(*) FROM message_footprint WHERE kind='revocation_selector'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(footprints, count);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}

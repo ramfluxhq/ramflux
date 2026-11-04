@@ -6,7 +6,8 @@ use rusqlite::Connection;
 
 pub(super) fn install(db: &Connection) -> rusqlite::Result<()> {
     let objects = super::super::object_retention::erasure_body(db)?;
-    let mut body = String::from(BODY);
+    let mut body = super::super::object_retention::legacy_erasure_body();
+    body.push_str(BODY);
     for (table, kind) in [
         ("backup_archived_actor_state", "archived_actor"),
         ("backup_archived_local_event", "archived_event"),
