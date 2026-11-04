@@ -28,12 +28,12 @@ pub(crate) async fn dispatch_a2i_bus_request(
                 acknowledged: false,
             };
             account.client.bind_owned_a2i_event(&mut event)?;
-            let mut engine = account.take_live_engine().await?;
+            let mut engine = account.session_client().await?;
             let entry = account
                 .client
                 .send_a2i_control_event_via_gateway(&mut engine, &event, body.target_delivery_id)
                 .await;
-            account.put_engine(engine);
+            account.apply_session_metadata(engine);
             let entry = entry?;
             Ok(local_bus_ok(serde_json::json!({
                 "event": event,
@@ -41,9 +41,9 @@ pub(crate) async fn dispatch_a2i_bus_request(
             })))
         }
         "a2i.list" | "a2i.list_pending" => {
-            let mut engine = account.take_live_engine().await?;
+            let mut engine = account.session_client().await?;
             let received = account.client.receive_a2i_control_events(&mut engine, 100).await;
-            account.put_engine(engine);
+            account.apply_session_metadata(engine);
             let received = received?;
             for event in received {
                 let key = crate::client::routed::control::a2i_key(

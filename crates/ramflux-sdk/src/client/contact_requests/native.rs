@@ -118,6 +118,31 @@ fn validate(
     Ok(())
 }
 
+fn authenticate(
+    carrier: &Carrier<'_>,
+    manifest: &SdkDeviceManifestResponse,
+    now: u64,
+) -> Result<(), SdkError> {
+    ramflux_protocol::custody::validate_contact_consent(&carrier.consent.body)?;
+    let native =
+        manifest.custody.as_deref().ok_or_else(|| invalid("native consent authority absent"))?;
+    if manifest.principal_commitment != carrier.consent.body.actor_root
+        || manifest.principal_id != carrier.entry.envelope.source_principal_id
+    {
+        return Err(invalid("native consent transport root mismatch"));
+    }
+    ramflux_crypto::verify_canonical_signature(
+        &ramflux_protocol::custody::signing_bytes(
+            ramflux_protocol::domain::CONTACT_REQUEST_V2,
+            &carrier.consent.body,
+        )?,
+        &carrier.consent.signature,
+        &native.publication.record.body.master_certificate.body.self_signing_public_key,
+    )?;
+    carrier.verify_transport(&current_authority(manifest, now)?, now)?;
+    Ok(())
+}
+
 impl RamfluxClient {
     /// Resolve delayed evidence outside the receive transaction, then recheck it at commit.
     pub(crate) async fn prepare_native_contact_control(
@@ -128,91 +153,103 @@ impl RamfluxClient {
         bytes: &[u8],
         candidate: Option<&SdkDeviceManifestResponse>,
     ) -> Result<(), SdkError> {
-        let Some(consent) = decode(bytes)? else {
-            return Ok(());
-        };
-        ramflux_protocol::custody::validate_contact_consent(&consent.body)?;
-        let now = crate::custody::network_now()?;
+        let Some(root) = Self::native_contact_root(bytes)? else { return Ok(()) };
         let fetched;
         let manifest = if let Some(candidate) = candidate {
             candidate
         } else {
-            fetched = crate::client::contact::fetch_verified_device_manifest(
-                gateway,
-                &consent.body.actor_root,
-            )
-            .await?;
+            fetched =
+                crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
             &fetched
         };
+        let history = self.native_contact_history_request(entry, route, bytes, manifest)?;
+        let historical = history.resolve(gateway).await?;
+        self.apply_native_contact_evidence(entry, route, bytes, manifest, &historical)
+    }
+
+    pub(crate) fn native_contact_root(bytes: &[u8]) -> Result<Option<String>, SdkError> {
+        let Some(consent) = decode(bytes)? else { return Ok(None) };
+        ramflux_protocol::custody::validate_contact_consent(&consent.body)?;
+        Ok(Some(consent.body.actor_root))
+    }
+
+    pub(crate) fn native_contact_history_request(
+        &self,
+        entry: &GatewayInboxEntry,
+        route: &Routing,
+        bytes: &[u8],
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<super::NativeContactHistory, SdkError> {
+        let consent = decode(bytes)?.ok_or_else(|| invalid("native consent required"))?;
+        let now = crate::custody::network_now()?;
+        authenticate(&Carrier { client: self, entry, route, consent: &consent }, manifest, now)?;
         let native = manifest
             .custody
             .as_deref()
             .ok_or_else(|| invalid("native consent authority absent"))?;
-        // Authenticate the primary signature before a sender can cause a historical lookup.
-        if manifest.principal_commitment != consent.body.actor_root
-            || manifest.principal_id != entry.envelope.source_principal_id
-        {
-            return Err(invalid("native consent transport root mismatch"));
+        if object_hash(&native.publication.record)? == consent.body.actor_record_hash {
+            return Ok(super::NativeContactHistory::Ready(Box::new(native.publication.clone())));
         }
-        ramflux_crypto::verify_canonical_signature(
-            &ramflux_protocol::custody::signing_bytes(
-                ramflux_protocol::domain::CONTACT_REQUEST_V2,
-                &consent.body,
-            )?,
-            &consent.signature,
-            &native.publication.record.body.master_certificate.body.self_signing_public_key,
-        )?;
+        if let Some(publication) = self.cached_contact_consent_authority(
+            &consent.body.actor_root,
+            &consent.body.actor_record_hash,
+            now,
+        )? {
+            return Ok(super::NativeContactHistory::Ready(Box::new(publication)));
+        }
+        let db = self.account_db()?;
+        let at = i64::try_from(now).map_err(|_| invalid("invalid consent clock"))?;
+        if !db.charge_contact_request(
+            &format!("consent-history:{}", consent.body.actor_root),
+            32,
+            3600,
+            at,
+        )? || !db.charge_contact_request("consent-history-global", 256, 3600, at)?
+        {
+            return Err(SdkError::ContactRequestCapacity(
+                "native consent history lookup budget exhausted".into(),
+            ));
+        }
+        Ok(super::NativeContactHistory::Fetch(format!(
+            "{}{}/{}",
+            ramflux_protocol::custody::CUSTODY_HISTORY_PATH_PREFIX,
+            consent.body.actor_root,
+            consent.body.actor_record_hash,
+        )))
+    }
+
+    pub(crate) fn apply_native_contact_evidence(
+        &self,
+        entry: &GatewayInboxEntry,
+        route: &Routing,
+        bytes: &[u8],
+        manifest: &SdkDeviceManifestResponse,
+        historical: &Publication,
+    ) -> Result<(), SdkError> {
+        let consent = decode(bytes)?.ok_or_else(|| invalid("native consent required"))?;
+        let now = crate::custody::network_now()?;
         let carrier = Carrier { client: self, entry, route, consent: &consent };
-        carrier.verify_transport(&current_authority(manifest, now)?, now)?;
-        let historical =
-            if object_hash(&native.publication.record)? == consent.body.actor_record_hash {
-                native.publication.clone()
-            } else if let Some(publication) = self.cached_contact_consent_authority(
-                &consent.body.actor_root,
-                &consent.body.actor_record_hash,
-                now,
-            )? {
-                publication
-            } else {
-                let db = self.account_db()?;
-                let at = i64::try_from(now).map_err(|_| invalid("invalid consent clock"))?;
-                if !db.charge_contact_request(
-                    &format!("consent-history:{}", consent.body.actor_root),
-                    32,
-                    3600,
-                    at,
-                )? || !db.charge_contact_request("consent-history-global", 256, 3600, at)?
-                {
-                    return Err(SdkError::ContactRequestCapacity(
-                        "native consent history lookup budget exhausted".into(),
-                    ));
-                }
-                crate::prekey::sdk_gateway_get_json::<Option<Publication>>(
-                    gateway,
-                    &format!(
-                        "{}{}/{}",
-                        ramflux_protocol::custody::CUSTODY_HISTORY_PATH_PREFIX,
-                        consent.body.actor_root,
-                        consent.body.actor_record_hash
-                    ),
-                )
-                .await?
-                .ok_or_else(|| {
-                    SdkError::ContactUnavailable(Box::new(SdkError::InboundPending(
-                        "signed consent authority is unavailable".into(),
-                    )))
-                })?
-            };
-        validate(&carrier, manifest, &historical, now)?;
+        authenticate(&carrier, manifest, now)?;
+        validate(&carrier, manifest, historical, now)?;
         let first_seen =
             self.account_db()?.client_record("identity", &manifest.principal_id)?.is_none();
         self.remember_contact_request_cache(manifest)?;
         self.persist_fetched_identity_directory(manifest)?;
         if first_seen {
-            // Verified network consent is lookup provenance, not an imported card pin.
             self.mark_lookup_root(&manifest.principal_id)?;
         }
-        self.cache_contact_consent_authority(&historical, consent.body.expires_at, now)?;
+        self.cache_contact_consent_authority(historical, consent.body.expires_at, now)
+    }
+
+    pub(crate) fn confirm_prepared_native_contact_control(
+        &self,
+        entry: &GatewayInboxEntry,
+        route: &Routing,
+        bytes: &[u8],
+    ) -> Result<(), SdkError> {
+        if let Some(consent) = decode(bytes)? {
+            self.verify_native_contact_control(entry, route, consent)?;
+        }
         Ok(())
     }
 

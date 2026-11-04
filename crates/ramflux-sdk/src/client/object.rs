@@ -4,6 +4,10 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+pub(crate) mod fetch_job;
+#[cfg(feature = "itest-local-mint")]
+mod local_relay;
+pub(crate) mod upload_job;
 use ramflux_storage::ObjectRetention;
 #[cfg(test)]
 #[path = "object_cache_tests.rs"]
@@ -100,7 +104,7 @@ impl RamfluxClient {
 
     pub async fn share_object_key_with_dm_recipient(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         request: LocalBusObjectShareRequest,
     ) -> Result<SdkObjectSharePackage, SdkError> {
         let object =
@@ -133,7 +137,7 @@ impl RamfluxClient {
             created_at: now_unix_timestamp(),
             ttl: 3_600,
         };
-        self.resolve_message_recipient(&engine.config, &mut message).await?;
+        self.resolve_message_recipient(engine.config(), &mut message).await?;
         let key_slot = self
             .make_pair_object_slot(
                 engine,
@@ -156,14 +160,14 @@ impl RamfluxClient {
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn dm_attachment_ref_for_recipient(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         message: &GatewayDirectMessage,
         attachment: &LocalBusMessageAttachmentInput,
         plaintext: &[u8],
     ) -> Result<(SdkDmAttachmentRef, ramflux_storage::PreSendObjectHold), SdkError> {
         let mut message = message.clone();
-        self.resolve_message_recipient(&engine.config, &mut message).await?;
+        self.resolve_message_recipient(engine.config(), &mut message).await?;
         let message = &message;
         let relay_options = self
             .relay_transfer_options(
@@ -512,7 +516,7 @@ impl RamfluxClient {
 
     pub(crate) async fn import_dm_attachment_from_relay_via_gateway(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         attachment: &SdkDmAttachmentRef,
         relay_service_key_base64: Option<String>,
@@ -529,7 +533,7 @@ impl RamfluxClient {
 
     pub(crate) async fn import_dm_attachment_retained(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         attachment: &SdkDmAttachmentRef,
         relay_service_key_base64: Option<String>,
@@ -652,7 +656,7 @@ impl RamfluxClient {
 
     async fn acknowledge_dm_attachment_chunks(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         attachment: &SdkDmAttachmentRef,
         context: &DmAttachmentFetch<'_>,
@@ -832,7 +836,7 @@ impl RamfluxClient {
 
     async fn download_dm_attachment_ciphertext_via_gateway(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         attachment: &SdkDmAttachmentRef,
         object_key: zeroize::Zeroizing<[u8; 32]>,
@@ -1277,7 +1281,7 @@ impl RamfluxClient {
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn tombstone_object_to_relay_via_gateway(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         object_id: &str,
         options: &RelayTransferOptions,
@@ -1413,7 +1417,7 @@ impl RamfluxClient {
 
     pub(crate) async fn upload_object_to_relay_via_gateway(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         object_id: &str,
         chunk_size: usize,
@@ -1608,7 +1612,7 @@ impl RamfluxClient {
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn download_object_from_relay_via_gateway(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         object_id: &str,
         options: &RelayTransferOptions,
@@ -1774,136 +1778,27 @@ impl RamfluxClient {
         self.decrypt_object(object_id)
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn upload_object_to_relay_inner_via_gateway(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         object: &EncryptedObject,
         chunk_size: usize,
         options: &RelayTransferOptions,
     ) -> Result<SdkObjectTransferStatus, SdkError> {
-        let object_key = zeroize::Zeroizing::new(self.object_content_key(&object.object_id)?);
-        let branch = self.device_branch.as_ref().ok_or_else(|| {
-            SdkError::LocalBus("object relay requires a device branch".to_owned())
-        })?;
-        let chunk_size = chunk_size.max(1);
-        let manifest =
-            chunk_manifest_for_object(&object.object_id, &object.ciphertext, chunk_size, None);
-        let transfer_id =
-            object_transfer_id(&object.object_id, &object.manifest_hash, OBJECT_TRANSFER_UPLOAD);
-        let mut completed = self
-            .account_db()?
-            .object_transfer(&object.object_id, Some(OBJECT_TRANSFER_UPLOAD))?
-            .map_or_else(Vec::new, |record| record.completed_chunks);
-        let mut done_bytes = completed
-            .iter()
-            .filter_map(|chunk_index| {
-                ciphertext_slice(&object.ciphertext, chunk_size, *chunk_index)
-            })
-            .map(|slice| u64::try_from(slice.len()).unwrap_or(0))
-            .sum::<u64>();
-        let expires_at = relay_expires_at();
-        let mut transferred = 0_u32;
-        for chunk_index in 0..manifest.total_chunks {
-            if completed.contains(&chunk_index) {
-                continue;
-            }
-            if options.interrupt_after_chunks.is_some_and(|limit| transferred >= limit) {
-                self.persist_object_transfer(ObjectTransferPersist {
-                    transfer_id: &transfer_id,
-                    object,
-                    direction: OBJECT_TRANSFER_UPLOAD,
-                    relay_endpoint: Some(&options.relay_endpoint),
-                    chunk_size,
-                    total_chunks: manifest.total_chunks,
-                    completed: &completed,
-                    done_bytes,
-                    state: "paused",
-                    last_error: None,
-                    resume_token: None,
-                    expires_at: Some(i64::try_from(expires_at).unwrap_or(i64::MAX)),
-                })?;
-                return Err(SdkError::LocalBus("object relay upload interrupted".to_owned()));
-            }
-            let Some(ciphertext_chunk) =
-                ciphertext_slice(&object.ciphertext, chunk_size, chunk_index)
-            else {
-                continue;
-            };
-            let payload =
-                ramflux_sync::chunk_payload(&object_key, &manifest, chunk_index, ciphertext_chunk);
-            let encrypted_chunk = serde_json::to_vec(&payload)?;
-            let expected_chunk_id =
-                object_relay_chunk_id(&object.object_id, &object.manifest_hash, chunk_index);
-            // T21-A1: GatewayIssued owner PUT is v3 QUIC only; no implicit HTTP/v2 fallback. The
-            // QUIC helper fails closed on missing/partial QUIC config or owner lineage.
-            if !matches!(options.token_provider, RelayTokenProvider::GatewayIssued) {
-                return Err(SdkError::CapabilityDenied(
-                    "gateway object PUT requires gateway-issued v3 QUIC transport".to_owned(),
-                ));
-            }
-            let response: SdkObjectRelayPutResponse = put_object_chunk_via_relay_quic(
-                engine,
-                pool,
-                options,
-                branch,
-                object,
-                chunk_index,
-                encrypted_chunk,
-                expires_at,
-            )
-            .await?;
-            if response.chunk_id != expected_chunk_id
-                || response.object_id != object.object_id
-                || response.manifest_hash != object.manifest_hash
-                || response.status != SdkRelayChunkStatus::Available
-            {
-                return Err(SdkError::LocalBus(
-                    "object relay put response binding mismatch".to_owned(),
-                ));
-            }
-            completed.push(chunk_index);
-            completed.sort_unstable();
-            completed.dedup();
-            done_bytes =
-                done_bytes.saturating_add(u64::try_from(ciphertext_chunk.len()).unwrap_or(0));
-            transferred = transferred.saturating_add(1);
-            self.persist_object_transfer(ObjectTransferPersist {
-                transfer_id: &transfer_id,
-                object,
-                direction: OBJECT_TRANSFER_UPLOAD,
-                relay_endpoint: Some(&options.relay_endpoint),
-                chunk_size,
-                total_chunks: manifest.total_chunks,
-                completed: &completed,
-                done_bytes,
-                state: "running",
-                last_error: None,
-                resume_token: None,
-                expires_at: Some(i64::try_from(expires_at).unwrap_or(i64::MAX)),
-            })?;
-            #[cfg(feature = "itest-rfd-fault")]
-            crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::OwnerPut).await?;
-        }
-        self.persist_object_transfer(ObjectTransferPersist {
-            transfer_id: &transfer_id,
-            object,
-            direction: OBJECT_TRANSFER_UPLOAD,
-            relay_endpoint: Some(&options.relay_endpoint),
+        let input = self.prepare_upload_input(
+            std::sync::Arc::new(object.clone()),
             chunk_size,
-            total_chunks: manifest.total_chunks,
-            completed: &completed,
-            done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
-            state: "complete",
-            last_error: None,
-            resume_token: None,
-            expires_at: Some(i64::try_from(expires_at).unwrap_or(i64::MAX)),
-        })?;
+            options.clone(),
+        )?;
+        upload_job::run(engine, pool, &input, |progress| {
+            std::future::ready(self.persist_upload_progress(&input, &progress).map(|_| ()))
+        })
+        .await?;
         let record = self
             .account_db()?
             .object_transfer(&object.object_id, Some(OBJECT_TRANSFER_UPLOAD))?
-            .ok_or_else(|| SdkError::LocalBus("missing object transfer state".to_owned()))?;
+            .ok_or_else(|| SdkError::LocalBus("missing object transfer state".into()))?;
         Ok(object_transfer_status(record))
     }
 
@@ -2203,7 +2098,7 @@ fn fetch_dm_attachment_chunk(
 }
 
 async fn fetch_dm_attachment_chunk_via_gateway(
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     ctx: &DmAttachmentFetch<'_>,
     chunk_index: u32,
@@ -2220,7 +2115,7 @@ async fn fetch_dm_attachment_chunk_via_gateway(
 }
 
 async fn fetch_dm_attachment_chunk_via_relay_quic(
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     ctx: &DmAttachmentFetch<'_>,
     chunk_index: u32,
@@ -2246,7 +2141,7 @@ async fn fetch_dm_attachment_chunk_via_relay_quic(
         attachment.access_grant.as_ref(),
         attachment,
         ctx.branch,
-        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        engine.config().source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &chunk_id,
         issued_at,
         expires_at,
@@ -2296,7 +2191,7 @@ async fn fetch_dm_attachment_chunk_via_relay_quic(
 // authorize Ack; `build_v3_ack_token_issue_body` reuses the grant's canonical bytes and rejects a
 // grant that does not carry the Ack capability. GatewayIssued v3 QUIC only, no HTTP fallback.
 async fn ack_dm_attachment_chunk_via_relay_quic(
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     ctx: &DmAttachmentFetch<'_>,
     chunk_index: u32,
@@ -2323,7 +2218,7 @@ async fn ack_dm_attachment_chunk_via_relay_quic(
         attachment.access_grant.as_ref(),
         attachment,
         ctx.branch,
-        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        engine.config().source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &chunk_id,
         issued_at,
         expires_at,
@@ -2462,7 +2357,7 @@ fn relay_quic_success_body(
 
 #[allow(clippy::too_many_arguments)]
 async fn get_object_chunk_via_relay_quic(
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     options: &RelayTransferOptions,
     branch: &DeviceBranch,
@@ -2498,7 +2393,7 @@ async fn get_object_chunk_via_relay_quic(
         object.object_id.clone(),
         object.manifest_hash.clone(),
         recipient_device_hash(
-            engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            engine.config().source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         ),
         vec![ramflux_protocol::ObjectRelayCapability::Get],
         issued_at,
@@ -2507,7 +2402,7 @@ async fn get_object_chunk_via_relay_quic(
     let issue_body = build_v3_grant_token_issue_body(
         &grant,
         branch,
-        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        engine.config().source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &object.object_id,
         &object.manifest_hash,
         &chunk_id,
@@ -2560,7 +2455,7 @@ async fn get_object_chunk_via_relay_quic(
 
 #[allow(clippy::too_many_arguments)]
 async fn ack_object_chunk_via_relay_quic(
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     options: &RelayTransferOptions,
     branch: &DeviceBranch,
@@ -2596,7 +2491,7 @@ async fn ack_object_chunk_via_relay_quic(
         object.object_id.clone(),
         object.manifest_hash.clone(),
         recipient_device_hash(
-            engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            engine.config().source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         ),
         vec![ramflux_protocol::ObjectRelayCapability::Ack],
         issued_at,
@@ -2605,7 +2500,7 @@ async fn ack_object_chunk_via_relay_quic(
     let issue_body = build_v3_grant_token_issue_body(
         &grant,
         branch,
-        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        engine.config().source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &object.object_id,
         &object.manifest_hash,
         &chunk_id,
@@ -2658,7 +2553,7 @@ async fn ack_object_chunk_via_relay_quic(
 
 #[allow(clippy::too_many_arguments)]
 async fn put_object_chunk_via_relay_quic(
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     options: &RelayTransferOptions,
     branch: &DeviceBranch,
@@ -2707,7 +2602,7 @@ async fn put_object_chunk_via_relay_quic(
     );
     let issue_body = build_v3_owner_session_token_issue_body(
         branch,
-        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        engine.config().source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         object,
         &chunk_id,
         ramflux_protocol::ObjectRelayCapability::Put,
@@ -2775,7 +2670,7 @@ fn local_relay_token_for_chunk(
 #[cfg(feature = "itest-local-mint")]
 #[allow(dead_code)]
 async fn issue_or_mint_relay_token(
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     ctx: &RelayTokenIssueContext<'_>,
 ) -> Result<SdkRelayToken, SdkError> {
     match &ctx.options.token_provider {

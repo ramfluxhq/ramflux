@@ -362,6 +362,11 @@ impl ramflux_transport::GatewaySessionFrameSink for Inbox {
     }
 }
 impl ramflux_transport::GatewaySessionFrameSource for Inbox {
+    fn recv_idle_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
+        // This fixture emits solicited replies only; an idle reader waits for a request.
+        Box::pin(std::future::pending())
+    }
+
     fn recv_frame(
         &mut self,
     ) -> std::pin::Pin<
@@ -704,7 +709,7 @@ async fn transient_sender_lookup_retries_with_backoff_while_later_messages_progr
     let key = account.client.inbox_admission_key(&pending)?;
     assert_eq!(db.defer_inbox_entry(&key, &serde_json::to_vec(&pending)?, now + 3)?, 2);
     let (engine, _) = Inbox::engine(account.gateway_config.clone(), vec![pending])?;
-    account.engine = Some(engine);
+    account.install_test_session(engine);
     crate::bus::sync_driver::run_at(&mut account, now + 3).await?;
     assert_eq!(account.client.account_db()?.due_inbox_retries(now + 6)?.len(), 0);
     assert_eq!(account.client.account_db()?.due_inbox_retries(now + 7)?.len(), 1);
@@ -984,7 +989,7 @@ async fn root_commitment_submit_remains_readable_after_autonomous_receive_ack()
     assert_eq!(account.pending_deliveries.len(), 1);
     assert!(writes.lock().map_err(|_| invalid("mutex"))?.iter().any(|v| v["frame_type"] == "ack"));
     let (engine, _) = Inbox::engine(account.gateway_config.clone(), Vec::new())?;
-    account.engine = Some(engine);
+    account.install_test_session(engine);
     let mut state = crate::bus::state::LocalBusDaemonState {
         account_index: None,
         nodes: crate::node::NodeStore::default(),
@@ -1060,7 +1065,7 @@ async fn unfiltered_receive_decrypts_own_device_delivery_after_background_ack()
         2
     );
     let (engine, _) = Inbox::engine(account.gateway_config.clone(), Vec::new())?;
-    account.engine = Some(engine);
+    account.install_test_session(engine);
     let mut state = crate::bus::state::LocalBusDaemonState {
         account_index: None,
         nodes: crate::node::NodeStore::default(),

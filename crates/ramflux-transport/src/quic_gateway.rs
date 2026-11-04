@@ -52,6 +52,30 @@ pub trait GatewaySessionFrameSink {
 }
 
 pub trait GatewaySessionFrameSource {
+    /// Reads while idle without applying a response deadline before any byte arrives.
+    /// Network client streams retain partial bytes and their deadline across cancellation.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid frame, an expired partial read, or a closed stream.
+    fn recv_idle_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        self.recv_frame()
+    }
+
+    /// Reads a native idle frame under the custody allocation limit.
+    ///
+    /// # Errors
+    /// Returns framing, allocation-limit, partial-read deadline, or transport errors.
+    fn recv_idle_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        let future = self.recv_idle_frame();
+        Box::pin(async move {
+            let bytes = future.await?;
+            if bytes.len() > ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES {
+                return Err(TransportError::FrameTooLarge { len: bytes.len() });
+            }
+            Ok(bytes)
+        })
+    }
+
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>>;
 
     /// Read custody frames with their stricter wire budget. Network implementations
@@ -83,6 +107,13 @@ impl<T: GatewaySessionFrameSink + ?Sized> GatewaySessionFrameSink for Box<T> {
     }
 }
 impl<T: GatewaySessionFrameSource + ?Sized> GatewaySessionFrameSource for Box<T> {
+    fn recv_idle_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        (**self).recv_idle_custody_frame()
+    }
+
+    fn recv_idle_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        (**self).recv_idle_frame()
+    }
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         (**self).recv_frame()
     }
@@ -145,6 +176,7 @@ fn quic_request_phase_from_transport(error: TransportError) -> QuicRequestPhase 
 }
 
 pub struct QuicGatewayBidiStream {
+    frame_reader: crate::gateway_frame_reader::GatewayFrameReader,
     connection: quinn::Connection,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
@@ -156,6 +188,7 @@ pub type GatewayTcpTlsStream = tokio_rustls::TlsStream<TcpStream>;
 pub struct TcpTlsGatewayClient;
 
 pub struct TcpTlsGatewayBidiStream {
+    frame_reader: crate::gateway_frame_reader::GatewayFrameReader,
     stream: GatewayTcpTlsStream,
     timeout: Duration,
 }
@@ -348,6 +381,7 @@ impl QuicGatewayClient {
             .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?
             .map_err(|error| crate::quic_errors::connection(&error))?;
         Ok(QuicGatewayBidiStream {
+            frame_reader: crate::gateway_frame_reader::GatewayFrameReader::default(),
             connection: self.connection.clone(),
             send,
             recv,
@@ -496,7 +530,11 @@ impl TcpTlsGatewayClient {
             .map_err(TransportError::Io)?;
         Ok((
             Self,
-            TcpTlsGatewayBidiStream { stream: tokio_rustls::TlsStream::Client(stream), timeout },
+            TcpTlsGatewayBidiStream {
+                frame_reader: crate::gateway_frame_reader::GatewayFrameReader::default(),
+                stream: tokio_rustls::TlsStream::Client(stream),
+                timeout,
+            },
         ))
     }
 }
@@ -531,6 +569,13 @@ impl QuicGatewayBidiStream {
 }
 
 impl TcpTlsGatewayBidiStream {
+    /// Read-only progress for a deterministic partial-frame integration barrier.
+    #[cfg(feature = "itest-fingerprint")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn frame_progress_for_test(&mut self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        self.frame_reader.progress_probe()
+    }
     /// Retain the live TLS object for channel-bound custody RPC instead of splitting it.
     #[must_use]
     pub fn into_tls_stream(self) -> GatewayTcpTlsStream {
@@ -562,20 +607,71 @@ impl GatewaySessionFrameSink for QuicGatewayBidiStream {
 }
 
 impl GatewaySessionFrameSource for QuicGatewayBidiStream {
+    fn recv_idle_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(async move {
+            self.frame_reader
+                .idle(
+                    &mut self.recv,
+                    ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES,
+                    self.timeout,
+                )
+                .await
+        })
+    }
+
     fn recv_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
-            tokio::time::timeout(self.timeout, crate::read_custody_tcp_frame(&mut self.recv))
+            self.frame_reader
+                .timed(
+                    &mut self.recv,
+                    ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES,
+                    self.timeout,
+                )
                 .await
                 .map_err(|error| {
-                    TransportError::Io(io::Error::new(io::ErrorKind::TimedOut, error))
-                })?
+                    if let TransportError::Io(io) = &error
+                        && let Some(read) = io
+                            .get_ref()
+                            .and_then(|source| source.downcast_ref::<quinn::ReadError>())
+                    {
+                        return crate::quic_errors::read(read);
+                    }
+                    error
+                })
         })
     }
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
-            tokio::time::timeout(self.timeout, read_quic_raw_frame(&mut self.recv))
+            self.frame_reader
+                .timed(&mut self.recv, MAX_QUIC_FRAME_BYTES, self.timeout)
                 .await
-                .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?
+                .map_err(|error| {
+                    if let TransportError::Io(io) = &error
+                        && let Some(read) = io
+                            .get_ref()
+                            .and_then(|source| source.downcast_ref::<quinn::ReadError>())
+                    {
+                        return crate::quic_errors::read(read);
+                    }
+                    error
+                })
+        })
+    }
+    fn recv_idle_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(async move {
+            self.frame_reader
+                .idle(&mut self.recv, MAX_QUIC_FRAME_BYTES, self.timeout)
+                .await
+                .map_err(|error| {
+                    if let TransportError::Io(io) = &error
+                        && let Some(read) = io
+                            .get_ref()
+                            .and_then(|source| source.downcast_ref::<quinn::ReadError>())
+                    {
+                        return crate::quic_errors::read(read);
+                    }
+                    error
+                })
         })
     }
 }
@@ -601,20 +697,37 @@ impl GatewaySessionFrameSink for TcpTlsGatewayBidiStream {
 }
 
 impl GatewaySessionFrameSource for TcpTlsGatewayBidiStream {
+    fn recv_idle_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(async move {
+            self.frame_reader
+                .idle(
+                    &mut self.stream,
+                    ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES,
+                    self.timeout,
+                )
+                .await
+        })
+    }
+
     fn recv_custody_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
-            tokio::time::timeout(self.timeout, crate::read_custody_tcp_frame(&mut self.stream))
+            self.frame_reader
+                .timed(
+                    &mut self.stream,
+                    ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES,
+                    self.timeout,
+                )
                 .await
-                .map_err(|error| {
-                    TransportError::Io(io::Error::new(io::ErrorKind::TimedOut, error))
-                })?
         })
     }
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
-            tokio::time::timeout(self.timeout, read_tcp_raw_frame(&mut self.stream)).await.map_err(
-                |error| TransportError::Io(io::Error::new(io::ErrorKind::TimedOut, error)),
-            )?
+            self.frame_reader.timed(&mut self.stream, MAX_QUIC_FRAME_BYTES, self.timeout).await
+        })
+    }
+    fn recv_idle_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(async move {
+            self.frame_reader.idle(&mut self.stream, MAX_QUIC_FRAME_BYTES, self.timeout).await
         })
     }
 }

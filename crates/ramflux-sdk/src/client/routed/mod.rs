@@ -5,9 +5,11 @@
 
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
+mod federated_async;
+pub(crate) use federated_async::SealForward;
 mod archive;
 mod auth;
-pub(crate) use auth::verify_sender_record;
+pub(crate) use auth::{PreparedInbound, verify_sender_record};
 pub(crate) mod bootstrap_sequence;
 mod committed;
 mod contact_preview;
@@ -16,18 +18,26 @@ pub(crate) mod control;
 #[cfg(test)]
 mod native_contact_tests;
 mod object_slot;
+mod own_history;
+pub(crate) use object_slot::PairObjectSlotRequest;
 mod project;
 pub(crate) use committed::{conversation_watermark, object_watermark};
+mod group_directory;
 mod legacy;
+pub(crate) use group_directory::ReceiveGroupDirectory;
 mod receive;
 pub(crate) use receive::Delivery;
 mod pair_lifecycle;
+mod prepared;
 mod recovery;
 mod replay_migration;
 mod reset_policy;
+mod reset_prepare;
 mod reset_work;
+pub(crate) use reset_prepare::{PairControlDraft, PairControlKind};
 mod send_candidate;
 mod session;
+pub(crate) use prepared::{SendMaterial, SendMaterialRequest};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -132,7 +142,7 @@ struct SealPair<'a> {
 impl RamfluxClient {
     pub(crate) async fn seal_routed_as(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
         body: &[u8],
         route: Route,
@@ -143,7 +153,7 @@ impl RamfluxClient {
         let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
         self.bind_outgoing_delivery(
-            &self.local_device_identity(&engine.config.device_id)?,
+            &self.local_device_identity(&engine.config().device_id)?,
             message,
             &route.kind,
         )?;
@@ -152,7 +162,7 @@ impl RamfluxClient {
             body,
             route,
             SealPair {
-                local: &engine.config.device_id,
+                local: &engine.config().device_id,
                 remote: &recipient,
                 session: &mut session,
                 header,
@@ -163,7 +173,7 @@ impl RamfluxClient {
 
     pub(crate) fn seal_routed_federated_as(
         &self,
-        engine: &GatewaySessionEngine,
+        engine: &impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
         body: &[u8],
         url: Option<&str>,
@@ -171,12 +181,12 @@ impl RamfluxClient {
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
         let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) = self.send_pair_session_from_url(
-            &self.local_device_identity(&engine.config.device_id)?,
+            &self.local_device_identity(&engine.config().device_id)?,
             message,
             url,
         )?;
         self.bind_outgoing_delivery(
-            &self.local_device_identity(&engine.config.device_id)?,
+            &self.local_device_identity(&engine.config().device_id)?,
             message,
             &route.kind,
         )?;
@@ -185,7 +195,7 @@ impl RamfluxClient {
             body,
             route,
             SealPair {
-                local: &engine.config.device_id,
+                local: &engine.config().device_id,
                 remote: &recipient,
                 session: &mut session,
                 header,

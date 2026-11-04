@@ -10,6 +10,7 @@ use std::ops::{AsyncFnMut, AsyncFnOnce};
 use std::time::Duration;
 
 mod cached_import;
+pub(crate) mod job;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ReferenceContext<'a> {
@@ -133,20 +134,7 @@ impl RamfluxClient {
             acknowledge(index).await?;
             let confirmed = std::time::Instant::now();
             if resumable {
-                // object_id also registers the erasure footprint, including sender-scoped aliases.
-                db.write_transaction(|| -> Result<(), SdkError> {
-                    db.check_object_identity(&reference.object_id, &reference.manifest_hash)?;
-                    db.persist_actor_state(
-                        &key,
-                        &AckProgress { object_id: selector.clone(), acknowledged: true },
-                    )?;
-                    let hash = ramflux_crypto::blake3_256_base64url(
-                        "ramflux.attachment.reference.v1",
-                        &ramflux_protocol::canonical_json_bytes(reference)?,
-                    );
-                    db.register_object_reference_actor(&hash, &key)?;
-                    Ok(())
-                })?;
+                self.persist_received_attachment_ack(reference, index)?;
             }
             tracing::debug!(
                 target: "ramflux_sdk::attachment_timing",
@@ -252,7 +240,7 @@ impl RamfluxClient {
     /// Transfer errors are returned as a retryable `failed` receipt with no access material.
     pub async fn fetch_received_attachment(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         object_id: &str,
         operation_id: &str,
@@ -578,10 +566,10 @@ impl RamfluxClient {
         payload: &ChunkPayload,
     ) -> Result<(), SdkError> {
         let Some(db) = self.active_account_db.as_ref() else { return Ok(()) };
-        if db
-            .load_actor_state::<ReceivedAttachment>(&reference_key(&reference.object_id))?
-            .is_some()
-        {
+        let selector = db
+            .load_actor_state::<String>(&slot_reference_key(reference)?)?
+            .unwrap_or_else(|| reference.object_id.clone());
+        if db.load_actor_state::<ReceivedAttachment>(&reference_key(&selector))?.is_some() {
             db.persist_actor_state(&chunk_key(reference, payload.chunk_index), payload)?;
         }
         Ok(())

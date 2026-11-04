@@ -17,6 +17,7 @@ mod contact_safety_preview;
 pub(crate) mod contact_verification;
 pub mod conversation;
 mod deferred_attachment;
+pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
 pub(crate) mod delivery_receipts;
 pub mod dm;
 pub mod dm_session;
@@ -72,6 +73,8 @@ pub struct RamfluxClient {
         std::cell::RefCell<Option<Box<identity_authority::profile_read::ProfileReadCache>>>,
     pub(crate) identity_root: Option<IdentityRoot>,
     pub(crate) reader_device_identity: Option<ramflux_crypto::RootQualifiedDeviceRef>,
+    // Public authority files are read directly; readers never open the mutable index.
+    pub(crate) reader_account_root: Option<PathBuf>,
     pub(crate) device_branch: Option<DeviceBranch>,
     pub(crate) account_index: Option<AccountIndex>,
     pub(crate) vault_secret_source: Option<Box<dyn VaultSecretSource>>,
@@ -93,6 +96,7 @@ impl Default for RamfluxClient {
             profile_read_cache: std::cell::RefCell::new(None),
             identity_root: None,
             reader_device_identity: None,
+            reader_account_root: None,
             device_branch: None,
             account_index: None,
             vault_secret_source: None,

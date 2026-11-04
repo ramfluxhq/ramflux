@@ -157,7 +157,16 @@ fn runtime(
         }
     });
     let (observations, observed) = mpsc::unbounded_channel();
+    let (lifecycle_sender, lifecycle) = mpsc::channel(4);
+    let (preempt_sender, preempt) = watch::channel(0);
+    let (connection_sender, connection_work) = mpsc::channel(2);
+    let mut control_shutdown = shutdown.clone();
+    tokio::task::spawn_local(async move {
+        let _signals = (lifecycle_sender, preempt_sender);
+        let _ = control_shutdown.changed().await;
+    });
     let runtime = AccountRuntime {
+        timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
         id: "sender".into(),
         state: LocalBusDaemonState {
             account_index: None,
@@ -169,6 +178,11 @@ fn runtime(
             subscribers: BTreeMap::new(),
         },
         receiver,
+        lifecycle,
+        preempt,
+        connection_sender,
+        connection_work,
+        transfers: super::uploads::Transfers::start(),
         readers: Arc::new(Mutex::new(None)),
         events,
         shutdown,
@@ -186,6 +200,7 @@ async fn command(sender: &mpsc::Sender<AccountCommand>, method: &str, body: Valu
     let (outbound, _) = mpsc::channel(1);
     sender
         .send(AccountCommand {
+            admission: None,
             private: None,
             request: LocalBusFrame::request(method, Some("sender".into()), "test", method, body),
             connection_id: 1,
@@ -319,7 +334,7 @@ async fn r6_dead_rows_are_quarantined_and_actor_delivers_dm_and_call_after_resta
             )?;
             reopened.principal_commitment = commitment;
             reopened.engine = None;
-            reopened.put_engine(GatewaySessionEngine::connect(config).await?);
+            reopened.install_test_session(GatewaySessionEngine::connect(config).await?);
             let (mut restarted, sender, stop, mut events) = runtime(reopened, &root.join("source"));
             let driver = async {
                 let _shutdown = Shutdown(stop.clone());
@@ -654,6 +669,7 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
             for index in 0..100 {
                 ack(&fixture.source, &format!("task/ack/{index:03}"), &c)?;
             }
+            let completion_reader = fixture.source.client.account_db()?.open_reader()?;
             let root = fixture.root.clone();
             let gateway = fixture.gateway.clone();
             let (mut actor, _sender, stop, mut events) =
@@ -678,6 +694,8 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
                     passes += 1;
                 }
                 assert_eq!(passes, 50);
+                // Finished reports preparation; wait for the independent sends to commit.
+                await_ack_commits(&completion_reader, &gateway, 100).await?;
                 stop.send(true)?;
                 Ok::<_, Box<dyn std::error::Error>>(())
             };
@@ -780,6 +798,8 @@ async fn r6_application_error_charges_one_forward_and_account_keeps_serving() ->
                 .client
                 .account_db()?
                 .persist_actor_state(&history, &json!({"events":false}))?;
+            let completion_reader = fixture.source.client.account_db()?.open_reader()?;
+            let gateway = fixture.gateway.clone();
             let root = fixture.root.clone();
             let (mut actor, sender, stop, mut events) =
                 runtime(fixture.source, &root.join("source"));
@@ -788,6 +808,8 @@ async fn r6_application_error_charges_one_forward_and_account_keeps_serving() ->
                 let rows = pass(&mut events).await?;
                 assert_eq!(rows.len(), 2);
                 command(&sender, "identity.directory", json!({"limit":16})).await?;
+                // Preparation completion does not stop its independent healthy delivery.
+                await_ack_commits(&completion_reader, &gateway, 1).await?;
                 stop.send(true)?;
                 Ok::<_, Box<dyn std::error::Error>>(())
             };
@@ -858,3 +880,64 @@ mod native;
 
 #[path = "courier_priority_r2.rs"]
 mod priority_r2;
+async fn await_ack_commits(
+    reader: &ramflux_storage::AccountDb,
+    gateway: &Arc<Mutex<fixture::Gateway>>,
+    expected: usize,
+) -> Case {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    loop {
+        if reader.task_state_usage("task/ack/")?.0 == 0 {
+            assert_eq!(
+                gateway
+                    .lock()
+                    .map_err(|_| "gateway")?
+                    .sent
+                    .iter()
+                    .filter(|entry| entry.target_delivery_id == "peer")
+                    .count(),
+                expected
+            );
+            return Ok(());
+        }
+        tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(10))).await?;
+    }
+}
+
+#[path = "receive_ack.rs"]
+mod receive_ack;
+#[path = "receive_resync.rs"]
+mod receive_resync;
+
+#[path = "receive_source.rs"]
+mod receive_source;
+
+#[path = "receive_own_copy.rs"]
+mod receive_own_copy;
+
+#[path = "receive_group.rs"]
+mod receive_group;
+
+#[path = "receive_reset.rs"]
+mod receive_reset;
+
+#[path = "receive_history.rs"]
+mod receive_history;
+
+#[cfg(feature = "itest-local-mint")]
+#[path = "receive_history_relay.rs"]
+mod receive_history_relay;
+#[cfg(feature = "itest-local-mint")]
+#[path = "relay_fixture.rs"]
+mod relay_fixture;
+
+#[cfg(feature = "itest-local-mint")]
+#[path = "transfer_upload.rs"]
+mod transfer_upload;
+
+#[cfg(feature = "itest-local-mint")]
+#[path = "transfer_fetch.rs"]
+mod transfer_fetch;
+
+#[path = "courier_independence.rs"]
+mod courier_independence;

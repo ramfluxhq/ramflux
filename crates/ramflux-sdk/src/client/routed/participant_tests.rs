@@ -128,7 +128,7 @@ async fn assert_honest_delivery_is_root_scoped(
     alice: &mut Fixture,
     bob: &Fixture,
     mallory: &Fixture,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl crate::GatewaySessionAccess,
 ) -> Result<(), SdkError> {
     // Accepted receipts retain the authenticated root address, never the name shared by both roots.
     let honest_ack = seal_as(
@@ -168,7 +168,7 @@ async fn assert_honest_read_is_root_scoped(
     alice: &mut Fixture,
     bob: &Fixture,
     mallory: &Fixture,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl crate::GatewaySessionAccess,
     read: &[u8],
 ) -> Result<(), SdkError> {
     let honest_read =

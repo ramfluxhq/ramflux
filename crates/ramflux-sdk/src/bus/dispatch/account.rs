@@ -64,8 +64,7 @@ pub(crate) async fn dispatch_account_bus_request(
                     return Err(crate::custody::failed_setup_error(&account_id, reason));
                 }
                 let result =
-                    super::super::native_account::unlock_request(state, &account_id, request)
-                        .await?;
+                    super::super::native_account::unlock_request(state, &account_id, request)?;
                 return Ok(local_bus_ok(serde_json::to_value(result)?));
             }
 

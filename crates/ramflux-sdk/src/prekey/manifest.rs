@@ -35,7 +35,8 @@ impl SdkDeviceManifestEntry {
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct SdkDeviceManifestResponse {
+/// Directory material returned by a gateway capability; callers must verify its authority.
+pub struct SdkDeviceManifestResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) custody: Option<Box<CustodyManifest>>,
     #[serde(default)]

@@ -82,7 +82,7 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
             let released = Arc::clone(&gate.release);
             {
                 let mut gateway = f.gateway.lock().map_err(|_| "gateway")?;
-                gateway.submit_hold = Some(gate);
+                gateway.priority_submit_hold = Some(gate);
                 gateway.receipt_bypass = true;
             }
             let gateway = Arc::clone(&f.gateway);
@@ -112,7 +112,7 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
             let stalled = !task.is_finished();
             let elapsed = started.elapsed();
             // The task fan-out includes the peer and sibling; only the first submit is held.
-            gateway.lock().map_err(|_| "gateway")?.submit_hold = None;
+            gateway.lock().map_err(|_| "gateway")?.priority_submit_hold = None;
             released.notify_one();
             let (actor, result) = complete(task).await?;
             result?;
@@ -170,7 +170,7 @@ async fn newly_received_messages_send_receipts_in_the_same_pass_with_eight_secon
                     outgoing_call(&mut f.source, &f.peer.client)?;
                     let (gate, observed) = hold();
                     let released = Arc::clone(&gate.release);
-                    f.gateway.lock().map_err(|_| "gateway")?.submit_hold = Some(gate);
+                    f.gateway.lock().map_err(|_| "gateway")?.priority_submit_hold = Some(gate);
                     Some((observed, released))
                 } else {
                     None
@@ -203,7 +203,7 @@ async fn newly_received_messages_send_receipts_in_the_same_pass_with_eight_secon
                 if let Some((mut observed, release)) = call_gate {
                     entered(&mut observed).await?;
                     tokio::time::advance(Duration::from_secs(call_seconds)).await;
-                    gateway.lock().map_err(|_| "gateway")?.submit_hold = None;
+                    gateway.lock().map_err(|_| "gateway")?.priority_submit_hold = None;
                     release.notify_one();
                 }
                 entered(&mut observed).await?;
@@ -248,7 +248,7 @@ async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Ca
             let id = outgoing_call(&mut f.source, &f.peer.client)?;
             let (gate, mut observed) = hold();
             let released = Arc::clone(&gate.release);
-            f.gateway.lock().map_err(|_| "gateway")?.submit_hold = Some(gate);
+            f.gateway.lock().map_err(|_| "gateway")?.priority_submit_hold = Some(gate);
             let gateway = Arc::clone(&f.gateway);
             let before = gateway.lock().map_err(|_| "gateway")?.sessions.clone();
             tokio::time::pause();

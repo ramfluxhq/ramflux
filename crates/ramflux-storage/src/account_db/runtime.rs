@@ -9,6 +9,7 @@ mod config;
 mod control;
 pub(super) mod message_origin;
 mod operations;
+pub use operations::OperationLookup;
 mod outbox;
 mod own_copy;
 mod ratchet_metadata;

@@ -9,7 +9,7 @@ use crate::client::task::{
 use crate::prelude::*;
 use serde_json::{Value, json};
 
-pub(super) fn list(account: &LocalBusAccountState) -> Result<Vec<Value>, SdkError> {
+pub(in crate::bus) fn list(account: &LocalBusAccountState) -> Result<Vec<Value>, SdkError> {
     let mut rows = account
         .mcp_pending_approvals
         .values()

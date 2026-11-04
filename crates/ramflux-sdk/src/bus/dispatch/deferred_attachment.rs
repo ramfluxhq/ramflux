@@ -32,7 +32,7 @@ pub(crate) async fn dispatch_until(
     };
     let connect_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     let connect_deadline = deadline.map_or(connect_deadline, |at| at.min(connect_deadline));
-    let engine = match tokio::time::timeout_at(connect_deadline, account.take_live_engine()).await {
+    let engine = match tokio::time::timeout_at(connect_deadline, account.session_client()).await {
         Ok(Ok(engine)) => engine,
         Ok(Err(error)) => {
             crate::client::attachment_diagnostics::failed(
@@ -59,7 +59,7 @@ pub(crate) async fn dispatch_until(
 
 async fn run_fetch<F>(
     account: &mut LocalBusAccountState,
-    mut engine: GatewaySessionEngine,
+    mut engine: super::super::connection_manager::SessionClient,
     object_id: &str,
     deadline: Option<tokio::time::Instant>,
     fetch: F,
@@ -67,7 +67,7 @@ async fn run_fetch<F>(
 where
     F: for<'a> std::ops::AsyncFnOnce(
             &'a mut RamfluxClient,
-            &'a mut GatewaySessionEngine,
+            &'a mut super::super::connection_manager::SessionClient,
         ) -> Result<serde_json::Value, SdkError>,
 {
     // The engine remains owned outside either timed future, including a simultaneous expiry.
@@ -82,7 +82,7 @@ where
 
 fn finish_fetch(
     account: &mut LocalBusAccountState,
-    engine: GatewaySessionEngine,
+    engine: super::super::connection_manager::SessionClient,
     object_id: &str,
     result: Result<Result<serde_json::Value, SdkError>, tokio::time::error::Elapsed>,
     deadline: Option<tokio::time::Instant>,
@@ -115,7 +115,7 @@ fn finish_fetch(
                 &error,
             );
         }
-        account.retire_engine(engine)?;
+        account.retire_session(&engine)?;
         account.client.recover_received_attachment_fetches()?;
         return Err(error);
     }
@@ -123,9 +123,9 @@ fn finish_fetch(
     if result.as_ref().is_ok_and(|receipt| {
         receipt["last_error"] == "attachment fetch deadline exceeded; retry object.fetch"
     }) {
-        account.retire_engine(engine)?;
+        account.retire_session(&engine)?;
     } else {
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
     }
     Ok(local_bus_ok(result?))
 }
@@ -152,6 +152,9 @@ pub(super) fn read_relay_options(
     interrupt: Option<u32>,
 ) -> Result<Option<RelayTransferOptions>, SdkError> {
     account.client.account_db()?.check_object_access(object_id)?;
+    if account.client.account_db()?.object_is_tombstoned(object_id)? {
+        return Err(SdkError::ObjectErased);
+    }
     if endpoint.is_none()
         && service_key.is_none()
         && interrupt.is_none()

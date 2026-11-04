@@ -168,7 +168,7 @@ impl RamfluxClient {
         gateway: &GatewaySessionConfig,
         own_gateway: &GatewaySessionConfig,
         input: ContactResolution<'_>,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
     ) -> Result<Value, SdkError> {
         let ContactResolution {
             selector,

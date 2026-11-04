@@ -3,10 +3,15 @@
 
 //! Bounded account-owned signaling retries, ring timers and authenticated relay lease maintenance.
 use super::{invalid, recover};
-use crate::client::call::{self, state::LiveCall};
+#[cfg(test)]
+use crate::client::call;
+use crate::client::call::state::LiveCall;
+#[cfg(test)]
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
-use ramflux_protocol::{VoiceAllocationRequest, VoiceLeaseRequest};
+use ramflux_protocol::VoiceAllocationRequest;
+#[cfg(test)]
+use ramflux_protocol::VoiceLeaseRequest;
 fn scope(c: &LiveCall) -> VoiceAllocationRequest {
     VoiceAllocationRequest {
         call_id: c.row.call_id.clone(),
@@ -14,6 +19,7 @@ fn scope(c: &LiveCall) -> VoiceAllocationRequest {
         callee: c.callee.clone(),
     }
 }
+#[cfg(test)]
 pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     recover(account)?;
     let ids = account.client.voice_calls.keys().cloned().collect::<Vec<_>>();
@@ -44,10 +50,12 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
     Ok(count)
 }
 
+#[cfg(test)]
 trait ControlDriver {
     async fn deliver(&mut self, id: &str, now: i64) -> Result<usize, SdkError>;
     async fn release(&mut self, id: &str, now: i64) -> Result<(), SdkError>;
 }
+#[cfg(test)]
 impl ControlDriver for LocalBusAccountState {
     async fn deliver(&mut self, id: &str, now: i64) -> Result<usize, SdkError> {
         deliver_pending(self, id, now).await
@@ -56,6 +64,7 @@ impl ControlDriver for LocalBusAccountState {
         release_lease(self, id, now).await
     }
 }
+#[cfg(test)]
 async fn drive_controls(
     driver: &mut impl ControlDriver,
     id: &str,
@@ -74,6 +83,7 @@ mod refresh_barrier;
 #[cfg(test)]
 #[path = "call_driver_tests.rs"]
 mod tests;
+#[cfg(test)]
 async fn flush(account: &mut LocalBusAccountState, id: &str) -> Result<usize, SdkError> {
     account.client.require_native_operation(
         &account.client.owned_device_identity()?,
@@ -96,7 +106,7 @@ async fn flush(account: &mut LocalBusAccountState, id: &str) -> Result<usize, Sd
         &thread,
     )
     .await?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = async {
         let mut deliveries = Vec::new();
         for mut control in pending {
@@ -131,7 +141,7 @@ async fn flush(account: &mut LocalBusAccountState, id: &str) -> Result<usize, Sd
         Ok::<_, SdkError>(deliveries)
     }
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     let deliveries = result?;
     let n = crate::bus::task_delivery::submit_all(account, deliveries).await?;
     account.client.voice_calls.get_mut(id).ok_or_else(|| invalid("call vanished"))?.pending.clear();
@@ -158,9 +168,12 @@ pub(crate) fn expire_due(account: &mut LocalBusAccountState) -> Result<(), SdkEr
     Ok(())
 }
 
+#[cfg(test)]
 #[path = "call_lease.rs"]
 mod leases;
+#[cfg(test)]
 use leases::maintain_lease;
+#[cfg(test)]
 async fn release_lease(
     account: &mut LocalBusAccountState,
     id: &str,
@@ -169,13 +182,13 @@ async fn release_lease(
     if account.client.voice_calls[id].release_until > now.unsigned_abs()
         && account.client.voice_calls[id].next_lease_refresh <= now
     {
-        let mut engine = account.take_live_engine().await?;
+        let mut engine = account.session_client().await?;
         let result = engine
             .voice_lease(VoiceLeaseRequest::Release {
                 scope: scope(&account.client.voice_calls[id]),
             })
             .await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         let call =
             account.client.voice_calls.get_mut(id).ok_or_else(|| invalid("call vanished"))?;
         if result.is_ok() {
@@ -186,6 +199,7 @@ async fn release_lease(
     }
     Ok(())
 }
+#[cfg(test)]
 async fn deliver_pending(
     account: &mut LocalBusAccountState,
     id: &str,
@@ -215,3 +229,6 @@ async fn deliver_pending(
     }
     Ok(count)
 }
+
+#[path = "call_driver/background.rs"]
+pub(super) mod background;

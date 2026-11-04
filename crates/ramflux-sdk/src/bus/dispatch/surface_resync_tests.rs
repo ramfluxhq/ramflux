@@ -33,7 +33,7 @@ impl Group {
             &json!({"kind":"group","group_id":"group"}),
         )?;
         let captured = Arc::new(Mutex::new(Vec::new()));
-        source.put_engine(GatewaySessionEngine::with_test_transport(
+        source.install_test_session(GatewaySessionEngine::with_test_transport(
             config.clone(),
             Box::new(super::fixture::RecordingGateway::new(Arc::clone(&captured))),
         ));
@@ -140,7 +140,7 @@ impl Group {
             .account_db()?
             .remove_actor_state(&crate::client::surface::key("resync_requested", &reference))?;
         let sent = Arc::new(Mutex::new(Vec::new()));
-        peer.put_engine(GatewaySessionEngine::with_test_transport(
+        peer.install_test_session(GatewaySessionEngine::with_test_transport(
             config,
             Box::new(super::fixture::RecordingGateway::new(Arc::clone(&sent))),
         ));
@@ -176,11 +176,20 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
             envelope,
         })
         .collect();
-    group.source.put_engine(GatewaySessionEngine::with_test_transport(
+    group.source.install_test_session(GatewaySessionEngine::with_test_transport(
         group.config.clone(),
         Box::new(gateway),
     ));
     assert_eq!(crate::bus::sync_driver::run(&mut group.source).await?, 2);
+    for _ in 0..2 {
+        assert!(
+            crate::bus::couriers::test_pass::drive(
+                &mut group.source,
+                crate::bus::couriers::surface::pass,
+            )
+            .await?
+        );
+    }
     let frames = replies.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     assert_eq!(frames.len(), 2);
     assert!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
@@ -227,9 +236,10 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
         target_delivery_id: duplicate.target_delivery_id.clone(),
         envelope: duplicate,
     });
-    group
-        .source
-        .put_engine(GatewaySessionEngine::with_test_transport(group.config, Box::new(gateway)));
+    group.source.install_test_session(GatewaySessionEngine::with_test_transport(
+        group.config,
+        Box::new(gateway),
+    ));
     assert_eq!(crate::bus::sync_driver::run(&mut group.source).await?, 1);
     assert_eq!(replies.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 2);
     group.directory.abort();

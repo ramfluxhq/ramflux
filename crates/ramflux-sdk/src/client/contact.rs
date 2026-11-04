@@ -5,6 +5,10 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prekey::SdkDeviceManifestEntry;
 use crate::prelude::*;
+mod federation;
+pub(crate) use federation::{
+    RemoteManifest, fetch as fetch_verified_device_manifest_from_url_async,
+};
 
 impl RamfluxClient {
     pub(crate) fn persist_identity_directory(
@@ -159,6 +163,15 @@ impl RamfluxClient {
             )
             .await?
             .ok_or_else(|| SdkError::InboundRejected("device manifest unavailable".into()))?;
+        self.accept_fetched_device_manifest(manifest, principal_commitment, source)
+    }
+
+    pub(crate) fn accept_fetched_device_manifest(
+        &self,
+        manifest: SdkDeviceManifestResponse,
+        principal_commitment: &str,
+        source: &str,
+    ) -> Result<SdkDeviceManifestResponse, SdkError> {
         super::identity_authority::verify_manifest_authority(&manifest, principal_commitment)?;
         self.persist_fetched_identity_directory(&manifest)?;
         let verified_at = now_unix_timestamp();
@@ -173,9 +186,6 @@ impl RamfluxClient {
         Ok(manifest)
     }
 
-    /// # Errors
-    /// Returns an error when no trusted local source can resolve the commitment, or when the
-    /// resolved commitment fails device-manifest membership verification.
     pub(crate) async fn resolve_target_principal_commitment(
         &self,
         gateway: &GatewaySessionConfig,
@@ -307,56 +317,6 @@ impl RamfluxClient {
         Ok(())
     }
 
-    /// Resolve and verify the recipient principal commitment for a federated (cross-node) send.
-    ///
-    /// The recipient lives on a remote home node, so the sender's local gateway/device directory
-    /// cannot serve the manifest. Instead the manifest is fetched directly from the recipient home
-    /// node's federation HTTP surface (`manifest_url`, the same base the federated send already uses
-    /// for the recipient prekey). Verification is identical to the local path: the manifest's root
-    /// public key must commit to the expected `principal_commitment` and every device branch proof
-    /// must be signed by that root, so a lying remote node can only fail closed, never forge a
-    /// manifest for a commitment it does not control. The verified entries are cached into the local
-    /// trusted device directory.
-    ///
-    /// # Errors
-    /// Returns an error (fail-closed) when no explicit recipient principal commitment is supplied,
-    /// when the manifest cannot be fetched or verified, or when the target device is absent from the
-    /// verified manifest.
-    pub(crate) fn resolve_federated_target_principal_commitment(
-        &self,
-        manifest_url: &str,
-        explicit_principal_commitment: Option<&str>,
-        device_id: &str,
-    ) -> Result<String, SdkError> {
-        let qualified = if explicit_principal_commitment.is_none_or(str::is_empty) {
-            ramflux_protocol::parse_qualified_device_id(device_id)?
-        } else {
-            None
-        };
-        let principal_commitment = explicit_principal_commitment
-            .filter(|commitment| !commitment.is_empty())
-            .or_else(||qualified.as_ref().map(|(root,_)|root.as_str()))
-            .ok_or_else(|| SdkError::LocalBus("federated direct messages require an explicit root or root-qualified device address".into()))?;
-        let device_id = qualified.as_ref().map_or(device_id, |(_, raw)| raw.as_str());
-        let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
-        self.persist_fetched_identity_directory(&manifest)?;
-        let verified_at = now_unix_timestamp();
-        for device in &manifest.devices {
-            self.account_db()?.upsert_device_directory_entry(
-                &device.device_id,
-                &manifest.principal_commitment,
-                "federation",
-                verified_at,
-            )?;
-        }
-        if !manifest.devices.iter().any(|device| device.device_id == device_id) {
-            return Err(SdkError::LocalBus(format!(
-                "recipient device {device_id} is not in verified manifest for {principal_commitment}"
-            )));
-        }
-        Ok(principal_commitment.to_owned())
-    }
-
     /// # Errors
     /// Returns an error when the verified manifest does not contain the active target device.
     pub(crate) async fn assert_manifest_active_device_cached(
@@ -368,33 +328,6 @@ impl RamfluxClient {
     ) -> Result<SdkDeviceManifestEntry, SdkError> {
         let manifest =
             self.cache_verified_device_manifest(gateway, principal_commitment, source).await?;
-        manifest.devices.into_iter().find(|device| device.device_id == device_id).ok_or_else(|| {
-            SdkError::LocalBus(format!(
-                "recipient device {device_id} is not in verified manifest for {principal_commitment}"
-            ))
-        })
-    }
-
-    /// # Errors
-    /// Returns an error when the remote verified manifest does not contain the active target device.
-    pub(crate) fn assert_manifest_active_device_from_url(
-        &self,
-        manifest_url: &str,
-        principal_commitment: &str,
-        device_id: &str,
-        source: &str,
-    ) -> Result<SdkDeviceManifestEntry, SdkError> {
-        let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
-        self.persist_fetched_identity_directory(&manifest)?;
-        let verified_at = now_unix_timestamp();
-        for device in &manifest.devices {
-            self.account_db()?.upsert_device_directory_entry(
-                &device.device_id,
-                &manifest.principal_commitment,
-                source,
-                verified_at,
-            )?;
-        }
         manifest.devices.into_iter().find(|device| device.device_id == device_id).ok_or_else(|| {
             SdkError::LocalBus(format!(
                 "recipient device {device_id} is not in verified manifest for {principal_commitment}"

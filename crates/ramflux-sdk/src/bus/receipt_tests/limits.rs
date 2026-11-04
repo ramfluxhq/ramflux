@@ -22,7 +22,7 @@ async fn pending(name: &str) -> Result<Pending, Box<dyn std::error::Error>> {
     let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail.clone())?;
-    let mut engine = source.take_live_engine().await?;
+    let mut engine = source.session_client().await?;
     source
         .client
         .send_plaintext_direct_message_without_franking(
@@ -111,7 +111,7 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     held.next_at = now_unix_timestamp() + 3600;
     p.receiver.client.account_db()?.persist_actor_state(&p.key, &held)?;
     let mut sender = p.a.account(None, p.mail.clone())?;
-    let mut engine = sender.take_live_engine().await?;
+    let mut engine = sender.session_client().await?;
     sender
         .client
         .send_plaintext_direct_message_without_franking(
@@ -230,7 +230,7 @@ async fn a_receipt_backlog_never_blocks_the_authenticated_dm_commit() -> TestRes
     let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail.clone())?;
-    let mut engine = source.take_live_engine().await?;
+    let mut engine = source.session_client().await?;
     let entry = source
         .client
         .send_plaintext_direct_message_without_franking(
@@ -243,7 +243,7 @@ async fn a_receipt_backlog_never_blocks_the_authenticated_dm_commit() -> TestRes
     drop(engine);
     drop(source);
     let mut receiver = b.account(None, mail)?;
-    let mut engine = receiver.take_live_engine().await?;
+    let mut engine = receiver.session_client().await?;
     let pool = receiver.relay_quic_pool()?;
     backlog(&receiver.client, &a, &b)?;
     receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
@@ -281,7 +281,7 @@ async fn group_storage_and_its_receipt_remain_atomic_with_a_large_backlog() -> T
     let raw = source.encrypt_group_message("group", &a.device, b"group body")?;
     let group: SdkGroupEncryptedEnvelope = serde_json::from_slice(&raw)?;
     let mut account = a.account(None, mail)?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let mut message = a.message(&b, "group-admission");
     let sealed = source
         .seal_routed_as(
@@ -340,7 +340,7 @@ async fn own_principal_messages_never_stage_a_peer_delivery_receipt() -> TestRes
     let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail)?;
-    let engine = source.take_live_engine().await?;
+    let engine = source.session_client().await?;
     let mut message = a.message(&a, "own-message");
     message.recipient_device_id = Some("own-sibling".into());
     let entry = GatewayInboxEntry {
@@ -411,7 +411,7 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail.clone())?;
-    let mut engine = source.take_live_engine().await?;
+    let mut engine = source.session_client().await?;
     for id in ["first", "second"] {
         source
             .client

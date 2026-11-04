@@ -2,10 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! Detect new active siblings and backfill accepted contacts through the bounded own-device queue.
+#[cfg(test)]
 use crate::prelude::*;
 
+#[cfg(test)]
 const MANIFEST_REFRESH_WINDOW: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
 pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkError> {
     let client = &account.client;
     let db = client.account_db()?;

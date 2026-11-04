@@ -163,7 +163,8 @@ async fn streamed_surface_fans_out_sixty_four_events_without_history_bundles_or_
     let own = Arc::clone(&gateway.own);
     // Only Submit/OwnDeviceFanout/PrekeyFetch frames are accepted by this fixture: relay uploads fail.
     gateway.fail_own_ack = false;
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let create = super::dm_tests::create_carrier(&source.client)?;
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "submitted");
     let first = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
@@ -227,7 +228,10 @@ async fn lost_own_copy_ack_keeps_peer_submitted_and_replays_one_immutable_messag
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
     gateway.fail_own_ack = true;
     let own = Arc::clone(&gateway.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(gateway),
+    ));
     let carrier = super::dm_tests::create_carrier(&source.client)?;
     let result = send(&mut source, &carrier).await?;
     assert_eq!(result["delivery_state"], "submitted");
@@ -256,7 +260,8 @@ async fn lost_own_copy_ack_keeps_peer_submitted_and_replays_one_immutable_messag
     }
     let mut healthy = super::fixture::RecordingGateway::new(Arc::default());
     healthy.own = own.clone();
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(healthy)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(healthy)));
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
     let second = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[1].clone();
     assert_ne!(first.envelope_id, second.envelope_id);
@@ -287,7 +292,10 @@ async fn first_peer_device_failure_does_not_hide_delivery_to_the_second_device()
     let captured = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = super::fixture::RecordingGateway::new(captured.clone());
     gateway.fail_target = Some("device-peer-one".into());
-    source.put_engine(GatewaySessionEngine::with_test_transport(fixture.config, Box::new(gateway)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        fixture.config,
+        Box::new(gateway),
+    ));
     let carrier = super::dm_tests::create_carrier(&source.client)?;
     assert!(send(&mut source, &carrier).await.is_err());
     assert_eq!(captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 1);
@@ -320,7 +328,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
     let initial = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         fixture.config.clone(),
         Box::new(super::fixture::RecordingGateway::new(initial.clone())),
     ));
@@ -350,7 +358,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         .account_db()?
         .persist_actor_state(&crate::client::surface::key("out_of_sync", &reference), &2_u64)?;
     let controls = Arc::new(Mutex::new(Vec::new()));
-    peer.put_engine(GatewaySessionEngine::with_test_transport(
+    peer.install_test_session(GatewaySessionEngine::with_test_transport(
         peer_config.clone(),
         Box::new(super::fixture::RecordingGateway::new(controls.clone())),
     ));
@@ -371,7 +379,10 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         target_delivery_id: request.target_delivery_id.clone(),
         envelope: request,
     });
-    source.put_engine(GatewaySessionEngine::with_test_transport(fixture.config, Box::new(gateway)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        fixture.config,
+        Box::new(gateway),
+    ));
     assert_eq!(crate::bus::sync_driver::run(&mut source).await?, 1);
     let reply = replies
         .lock()
@@ -441,7 +452,8 @@ async fn own_copy_node_payload_hides_private_group_root_principal_and_dates() ->
     let own = Arc::default();
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
     gateway.own = Arc::clone(&own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     assert!(source.client.queue_surface_own_copy(&create, Some(1))?);
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
@@ -494,7 +506,10 @@ async fn a_backed_off_copy_allows_newer_copies_and_preserves_each_immutable_retr
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
     gateway.own = Arc::clone(&own);
     gateway.fail_own_ack = true;
-    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(gateway),
+    ));
     for id in [first, second] {
         crate::bus::own_device_copy::stage(
             &source.client,
@@ -522,7 +537,8 @@ async fn a_backed_off_copy_allows_newer_copies_and_preserves_each_immutable_retr
     }
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
     gateway.own = Arc::clone(&own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     for _ in 0..3 {
         let _ = crate::bus::own_device_copy::flush(&mut source).await?;
     }
@@ -567,7 +583,8 @@ async fn an_oversized_prepared_copy_is_terminal_after_one_ratchet_step() -> Test
     let own = Arc::default();
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
     gateway.own = Arc::clone(&own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let body = vec![b'x'; crate::client::own_device_copy::MAX_PACKET_BYTES - 100];
     crate::bus::own_device_copy::stage(
         &source.client,
@@ -617,7 +634,8 @@ async fn fresh_sibling_bootstraps_its_first_surface_copy_without_a_preseeded_pai
             bundle: Some(sibling.client.load_x3dh_private_state(&identity)?.bundle),
         },
     );
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let create = super::dm_tests::create_carrier(&source.client)?;
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "submitted");
     let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
@@ -633,7 +651,7 @@ async fn fresh_sibling_bootstraps_its_first_surface_copy_without_a_preseeded_pai
 async fn receive_with_invalid_pending_row(
     root: &Path,
     mut sibling: LocalBusAccountState,
-    receiver_engine: GatewaySessionEngine,
+    receiver_engine: crate::bus::connection_manager::SessionClient,
     incoming: GatewayInboxEntry,
 ) -> Result<LocalBusDaemonState, Box<dyn std::error::Error>> {
     // A stale/forged pending row cannot abort projection of the valid next DM.
@@ -642,7 +660,7 @@ async fn receive_with_invalid_pending_row(
     bad.envelope.envelope_id = "bad-pending-signature".into();
     bad.envelope.signed.signature = ramflux_protocol::encode_base64url([0_u8; 64]);
     sibling.pending_deliveries = vec![bad, incoming];
-    sibling.put_engine(receiver_engine);
+    sibling.install_test_session(receiver_engine);
     let mut state = receiving_state(root, sibling);
     let (outbound, _) = tokio::sync::mpsc::channel(16);
     let connection = LocalBusConnectionState::new(1, outbound);
@@ -712,7 +730,8 @@ async fn sibling_control_is_applied_and_acked_without_entering_message_receive_p
         sibling_fixture_inner(&root, &mut source, false).await?;
     let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
     let own = Arc::clone(&gateway.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let carrier = super::dm_tests::create_carrier(&source.client)?;
     send(&mut source, &carrier).await?;
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
@@ -721,7 +740,10 @@ async fn sibling_control_is_applied_and_acked_without_entering_message_receive_p
     incoming.envelope.target_delivery_id.clone_from(&receiver.target_delivery_id);
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
     gateway.inbox.push(incoming);
-    sibling.put_engine(GatewaySessionEngine::with_test_transport(receiver, Box::new(gateway)));
+    sibling.install_test_session(GatewaySessionEngine::with_test_transport(
+        receiver,
+        Box::new(gateway),
+    ));
     assert_eq!(crate::bus::sync_driver::run(&mut sibling).await?, 1);
     assert!(
         sibling.pending_deliveries.is_empty(),
@@ -785,7 +807,7 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
     } else {
         let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
         let own = Arc::clone(&gateway.own);
-        source.put_engine(GatewaySessionEngine::with_test_transport(
+        source.install_test_session(GatewaySessionEngine::with_test_transport(
             config.clone(),
             Box::new(gateway),
         ));
@@ -889,7 +911,10 @@ async fn receive_first_bootstrap(
     mut sibling: LocalBusAccountState,
     config: GatewaySessionConfig,
     incoming: GatewayInboxEntry,
-) -> Result<(LocalBusAccountState, GatewaySessionEngine), Box<dyn std::error::Error>> {
+) -> Result<
+    (LocalBusAccountState, crate::bus::connection_manager::SessionClient),
+    Box<dyn std::error::Error>,
+> {
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
     let admission = sibling.client.inbox_admission_key(&incoming)?;
     let target = incoming.target_delivery_id.clone();
@@ -897,7 +922,7 @@ async fn receive_first_bootstrap(
     let retry = incoming.clone();
     gateway.inbox.push(incoming);
     let rejected = Arc::new(AtomicBool::new(false));
-    sibling.put_engine(GatewaySessionEngine::with_test_transport(
+    sibling.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
         Box::new(RejectFirstAck { inner: gateway, pending: false, rejected: rejected.clone() }),
     ));
@@ -968,14 +993,14 @@ async fn receive_first_bootstrap(
     let mut malformed = old_receipt.clone();
     malformed["projected"] = json!("invalid stored claim flag");
     account.client.account_db()?.persist_actor_state(&key, &malformed)?;
-    crate::bus::sync_driver::project_committed_message(account, &retry)?;
+    crate::bus::sync_driver::project_committed_message(account, &retry);
     assert!(account.pending_deliveries.is_empty(), "claim errors do not project or fail receive");
     old_receipt["projected"] = json!(false);
     account.client.account_db()?.persist_actor_state(&key, &old_receipt)?;
-    crate::bus::sync_driver::project_committed_message(account, &retry)?;
+    crate::bus::sync_driver::project_committed_message(account, &retry);
     assert_eq!(account.pending_deliveries.len(), 1, "a valid later claim remains usable");
     let mut sibling = state.accounts.remove("sender").ok_or("account")?;
-    let engine = sibling.take_live_engine().await?;
+    let engine = sibling.session_client().await?;
     Ok((sibling, engine))
 }
 
@@ -1004,6 +1029,10 @@ impl ramflux_transport::GatewaySessionFrameSink for RejectFirstAck {
     }
 }
 impl ramflux_transport::GatewaySessionFrameSource for RejectFirstAck {
+    fn recv_idle_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
+        ramflux_transport::GatewaySessionFrameSource::recv_idle_frame(&mut self.inner)
+    }
+
     fn recv_frame(&mut self) -> AckFrameFuture<'_, Vec<u8>> {
         if std::mem::take(&mut self.pending) {
             return Box::pin(async {

@@ -57,12 +57,15 @@ async fn shared_group_routed_fanout_resumes_one_round_and_one_failed_device_does
     let captured = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = super::fixture::RecordingGateway::new(captured.clone());
     gateway.fail_target = Some(devices[0].into());
-    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(gateway),
+    ));
     assert_eq!(crate::bus::shared_group_sync::flush(&mut source).await?, 3);
     let first = pending(&source.client)?;
     assert_eq!(first["attempt"], 1);
     assert_eq!(first["round_active"], true);
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         config.clone(),
         Box::new(super::fixture::RecordingGateway::new(captured.clone())),
     ));
@@ -299,7 +302,7 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
         GroupStateChange::SetName { name: "Private later title".into() },
     )?;
     let captured = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         config.clone(),
         Box::new(super::fixture::RecordingGateway::new(captured.clone())),
     ));
@@ -360,4 +363,81 @@ fn other_root_snapshot(
             now: now_unix_timestamp(),
         },
     )?)
+}
+
+#[tokio::test]
+async fn background_group_delivery_preserves_partial_round_and_recipient_crypto() -> TestResult {
+    let root = runtime_tests::root("group-background-round");
+    let mut source = runtime_tests::account(
+        &root.join("source"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let names =
+        ["device-peer-0", "device-peer-1", "device-peer-2", "device-peer-3", "device-peer-4"];
+    let super::dm_tests::PeerFixture { mut peers, config, directory, .. } =
+        super::dm_tests::peer_fixture_devices(&root, &mut source, &names).await?;
+    source.gateway_config = config.clone();
+    source.target_delivery_id = config.target_delivery_id.clone();
+    create_group(&source.client, peers[0].client.owned_group_actor(names[0])?.identity)?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(super::fixture::RecordingGateway::new(captured.clone())),
+    ));
+    assert!(
+        crate::bus::couriers::test_pass::drive(
+            &mut source,
+            crate::bus::shared_group_sync::deliver_pass
+        )
+        .await?
+    );
+    assert_eq!(captured.lock().map_err(|_| "capture")?.len(), 4);
+    let partial = pending(&source.client)?;
+    assert_eq!(partial["attempt"], 1);
+    assert_eq!(partial["round_active"], true);
+    assert!(
+        crate::bus::couriers::test_pass::drive(
+            &mut source,
+            crate::bus::shared_group_sync::deliver_pass
+        )
+        .await?
+    );
+    let envelopes = captured.lock().map_err(|_| "capture")?.clone();
+    assert_eq!(envelopes.len(), 5);
+    assert_eq!(
+        source.client.account_db()?.list_actor_states::<Value>("group-state/send/")?.len(),
+        0
+    );
+    let pool = ramflux_transport::RelayQuicPool::new(
+        ramflux_transport::RelayQuicPoolConfig::functional_default()?,
+    );
+    for envelope in envelopes {
+        let index =
+            names.iter().position(|name| *name == envelope.target_delivery_id).ok_or("target")?;
+        let peer = &mut peers[index];
+        let commitment = source.client.owned_device_identity()?.root_commitment().to_owned();
+        peer.client.establish_friend_link("owner-consent", "peer", &commitment)?;
+        let mut receiver = config.clone();
+        receiver.principal_id = "peer".into();
+        receiver.device_id = names[index].into();
+        receiver.target_delivery_id = names[index].into();
+        let mut receiver = GatewaySessionEngine::with_test_transport(
+            receiver.with_account_identity(&peer.client)?,
+            Box::new(super::fixture::RecordingGateway::new(Arc::default())),
+        );
+        let entry = GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 1,
+            target_delivery_id: envelope.target_delivery_id.clone(),
+            envelope,
+        };
+        peer.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await?;
+        assert_eq!(peer.client.group_state("group")?.group_epoch, 2);
+    }
+    directory.abort();
+    drop((source, peers));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }

@@ -12,13 +12,20 @@ mod metadata;
 mod native;
 mod native_delivery;
 mod native_history;
+mod native_prepare;
+pub(crate) use native_prepare::NativeContactHistory;
 #[cfg(test)]
 pub(crate) mod native_tests;
 mod retention;
 use metadata::Metadata;
 pub(crate) use retention::authority_digest;
 mod wire;
-pub(crate) use delivery::{flush, status as delivery_status};
+pub(crate) use delivery::background::{
+    ContactWork, apply as apply_background, run as run_background,
+};
+#[cfg(test)]
+pub(crate) use delivery::flush;
+pub(crate) use delivery::status as delivery_status;
 pub(crate) use wire::{Control, Decision, ENVELOPE_SCHEMA, conversation};
 use wire::{TTL, invalid};
 pub(super) const DECLINE_COOLDOWN_SECONDS: i64 = 24 * 3600;

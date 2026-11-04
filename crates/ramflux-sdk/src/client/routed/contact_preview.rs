@@ -23,7 +23,24 @@ impl From<ramflux_storage::StorageError> for Rollback {
 }
 
 impl RamfluxClient {
-    pub(super) fn preview_native_contact_request(
+    pub(crate) fn preview_inbound_route(
+        &self,
+        entry: &GatewayInboxEntry,
+        local: &str,
+    ) -> Result<Preview, SdkError> {
+        let result: Result<(), Rollback> = self.account_db()?.write_transaction(|| {
+            self.require_pair_device_active(&self.local_device_identity(local)?)?;
+            let opened = self.open_routed(entry, local)?;
+            Err(Rollback::Ready(Box::new(Some((opened.routing, opened.body)))))
+        });
+        match result {
+            Err(Rollback::Ready(preview)) => Ok(*preview),
+            Err(Rollback::Failed(error)) => Err(error),
+            Ok(()) => Err(super::invalid("receive preview unexpectedly committed")),
+        }
+    }
+
+    pub(crate) fn preview_native_contact_request(
         &self,
         entry: &GatewayInboxEntry,
         manifest: &SdkDeviceManifestResponse,

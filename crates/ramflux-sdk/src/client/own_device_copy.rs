@@ -17,6 +17,7 @@ pub(crate) const MAX_PACKET_BYTES: usize = 512 * 1024;
 pub(crate) const TOO_LARGE: &str = "own-device message byte budget exceeded";
 mod receipts;
 pub(crate) use receipts::MAX_DELIVERY_ROWS;
+mod receive;
 const RECEIPTS: &str = "own-device/message-receipt/";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -244,10 +245,17 @@ pub(crate) struct OwnMessageInput<'a> {
     pub group: Option<&'a str>,
     pub body: &'a [u8],
 }
+pub(crate) struct OwnCopyDraft {
+    packet: OwnDeviceMessage,
+    key: zeroize::Zeroizing<[u8; 32]>,
+    messages: Vec<GatewayDirectMessage>,
+}
+
 impl RamfluxClient {
+    #[cfg(test)]
     pub(crate) async fn prepare_own_device_message_with_source(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         input: OwnMessageInput<'_>,
         local_manifest: bool,
     ) -> Result<Option<OwnDeviceMessage>, SdkError> {
@@ -259,11 +267,38 @@ impl RamfluxClient {
         }
         let root = self.surface_local_root_commitment()?;
         let manifest = if local_manifest {
-            self.refreshed_own_copy_manifest(&engine.config).await?
+            self.refreshed_own_copy_manifest(engine.config()).await?
         } else {
-            self.cache_verified_device_manifest(&engine.config, &root, "own_device_message").await?
+            self.cache_verified_device_manifest(engine.config(), &root, "own_device_message")
+                .await?
         };
-        let source = engine.config.device_id.clone();
+        let Some(mut draft) = self.prepare_own_copy_draft(engine.config(), input, manifest)? else {
+            return Ok(None);
+        };
+        for message in &draft.messages {
+            let slot = self
+                .make_pair_object_slot(engine, message, &draft.packet.id, &draft.key, "")
+                .await?;
+            draft.packet.slots.push(OwnKeySlot {
+                recipient_device_id: slot.recipient_device_id,
+                x3dh: slot.x3dh,
+                ciphertext: slot.ciphertext,
+            });
+        }
+        self.finish_own_copy_packet(draft.packet).map(Some)
+    }
+
+    pub(crate) fn prepare_own_copy_draft(
+        &self,
+        config: &GatewaySessionConfig,
+        input: OwnMessageInput<'_>,
+        manifest: SdkDeviceManifestResponse,
+    ) -> Result<Option<OwnCopyDraft>, SdkError> {
+        if input.body.len() > MAX_PACKET_BYTES {
+            return Err(invalid(TOO_LARGE));
+        }
+        let root = self.surface_local_root_commitment()?;
+        let source = config.device_id.clone();
         self.require_native_operation(
             &self.device_identity_for_root(&root, &source)?,
             NativeOperation::Sync,
@@ -290,7 +325,7 @@ impl RamfluxClient {
             self.prepare_own_surface_context(input.body, &target_keys)?;
         let context = PrivateContext {
             message: input.id.into(),
-            principal: engine.config.principal_id.clone(),
+            principal: config.principal_id.clone(),
             root,
             source: source.clone(),
             conversation: input.conversation.into(),
@@ -323,6 +358,7 @@ impl RamfluxClient {
                 )
                 .map_err(|_| invalid("own-device encryption failed"))?,
         );
+        let mut messages = Vec::new();
         for target in targets {
             self.require_native_operation(
                 &self.device_identity_for_root(&context.root, &target.device_id)?,
@@ -332,19 +368,68 @@ impl RamfluxClient {
                 json!({"conversation_id":packet.id,"message_id":packet.id,"envelope_id":packet.id,"source_principal_id":context.principal,"sender_id":source,"recipient_device_id":target.device_id,"recipient_principal_commitment":context.root,"target_delivery_id":target.target_delivery_id,"encrypted_body_base64":"","created_at":input.created_at,"ttl":600}),
             )?;
             let message = request.into_gateway_message_with_body(Vec::new());
-            let slot = self.make_pair_object_slot(engine, &message, &packet.id, &key, "").await?;
-            packet.slots.push(OwnKeySlot {
+            messages.push(message);
+        }
+        Ok(Some(OwnCopyDraft { packet, key, messages }))
+    }
+
+    pub(crate) fn own_copy_material_requests(
+        &self,
+        config: &GatewaySessionConfig,
+        draft: &OwnCopyDraft,
+    ) -> Result<Vec<crate::client::routed::SendMaterialRequest>, SdkError> {
+        draft
+            .messages
+            .iter()
+            .map(|message| self.routed_send_material_request(config, message))
+            .collect()
+    }
+
+    pub(crate) fn seal_own_copy_prepared(
+        &self,
+        config: &GatewaySessionConfig,
+        mut draft: OwnCopyDraft,
+        materials: Vec<crate::client::routed::SendMaterial>,
+    ) -> Result<OwnDeviceMessage, SdkError> {
+        if materials.len() != draft.messages.len() {
+            return Err(invalid("own-device material count mismatch"));
+        }
+        self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
+        for (message, material) in draft.messages.iter().zip(materials) {
+            let recipient = Self::qualified_recipient(message)?;
+            self.require_native_operation(
+                &self.device_identity(&recipient)?,
+                NativeOperation::Sync,
+            )?;
+            let slot = self.make_prepared_pair_object_slot(
+                crate::client::routed::PairObjectSlotRequest {
+                    config,
+                    message,
+                    object_id: &draft.packet.id,
+                    key: &draft.key,
+                    conversation: "",
+                },
+                material,
+            )?;
+            draft.packet.slots.push(OwnKeySlot {
                 recipient_device_id: slot.recipient_device_id,
                 x3dh: slot.x3dh,
                 ciphertext: slot.ciphertext,
             });
         }
+        self.finish_own_copy_packet(draft.packet)
+    }
+
+    fn finish_own_copy_packet(
+        &self,
+        mut packet: OwnDeviceMessage,
+    ) -> Result<OwnDeviceMessage, SdkError> {
         packet.signature = ramflux_crypto::sign_with_device_branch(
             self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             &packet.signing()?,
         )?;
         packet.bytes()?;
-        Ok(Some(packet))
+        Ok(packet)
     }
     fn apply_own_device_control(
         &self,
@@ -414,106 +499,6 @@ impl RamfluxClient {
             },
         )?;
         Ok(())
-    }
-    pub(crate) async fn receive_own_device_message(
-        &self,
-        gateway: &GatewaySessionConfig,
-        entry: &GatewayInboxEntry,
-    ) -> Result<bool, SdkError> {
-        let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
-            .map_err(|_| invalid("own-device encoding"))?;
-        if bytes.starts_with(b"ramflux.own_device_message.v1\n") {
-            return Err(invalid("legacy own-device message requires a fresh copy"));
-        }
-        let Some(raw) = bytes.strip_prefix(PREFIX) else { return Ok(false) };
-        if bytes.len() > MAX_PACKET_BYTES {
-            return Err(invalid(TOO_LARGE));
-        }
-        let packet: OwnDeviceMessage = ramflux_protocol::parse_i_json(raw)?;
-        packet.validate(entry)?;
-        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if entry.envelope.source_principal_id != local.principal_id {
-            return Err(invalid("own-device principal mismatch"));
-        }
-        let root = self.surface_local_root_commitment()?;
-        let now = now_unix_timestamp();
-        let db = self.account_db()?;
-        let replay = self.own_copy_replay(entry, &packet, &bytes, now)?;
-        if replay.committed {
-            return Ok(true);
-        }
-        let receipt_key = format!("{RECEIPTS}{}", packet.id);
-        let fingerprint = ramflux_protocol::hash_base64url(DOMAIN, &bytes);
-        let manifest = self
-            .cache_verified_device_manifest(gateway, &root, "own_device_message_receive")
-            .await?;
-        self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
-        self.require_native_operation(
-            &self.device_identity_for_root(&root, &entry.envelope.source_device_id)?,
-            NativeOperation::Sync,
-        )?;
-        packet.verify_source(entry, &manifest, &local.device_id)?;
-        let recipient = packet.recipient_slot(&local.device_id)?;
-        let slot = recipient.object_slot(&packet.id, &manifest.principal_commitment);
-        if slot.ciphertext.sender_device_id_hash
-            != dm_device_id_hash(&entry.envelope.source_device_id)
-        {
-            return Err(invalid("own-device key slot scope mismatch"));
-        }
-        let mut deferred = match self.decrypt_object_key_slot(&slot) {
-            Ok(deferred) => deferred,
-            Err(SdkError::PairRecoveryRequired) => {
-                self.begin_pair_recovery(
-                    &self.owned_device_identity()?,
-                    &self.authenticated_device_identity(entry)?,
-                    now,
-                )?;
-                return Err(SdkError::PairRecoveryRequired);
-            }
-            Err(error) => return Err(error),
-        };
-        let key = zeroize::Zeroizing::new(deferred.object_key);
-        deferred.object_key.zeroize();
-        let (context, body) = packet.open(&key)?;
-        context.validate(
-            &packet.id,
-            &local.principal_id,
-            &root,
-            &entry.envelope.source_device_id,
-            now,
-        )?;
-        db.write_transaction(|| {
-            // The packet signature and root-signed active set above authenticate this source;
-            // generic envelope signatures are not the own-device packet's signature scheme.
-            let source_identity =
-                self.device_identity_for_root(&root, &entry.envelope.source_device_id)?;
-            // Reserve replay capacity before consuming a ratchet step or applying the control.
-            receipts::remember(
-                db,
-                &replay.key,
-                &replay.fingerprint,
-                context.expires_at,
-                false,
-                now,
-            )?;
-            let scope = self.apply_own_device_control(
-                entry,
-                &source_identity,
-                &context,
-                &body,
-                &local.device_id,
-            )?;
-            self.commit_inline_pair_key_slot(&slot, &key)?;
-            self.persist_own_device_receipt(
-                &receipt_key,
-                &context,
-                fingerprint,
-                scope,
-                &source_identity,
-            )?;
-            Ok::<_, SdkError>(())
-        })?;
-        Ok(true)
     }
 }
 pub(crate) fn copy_id(root: &str, source: &str, message: &str) -> Result<String, SdkError> {

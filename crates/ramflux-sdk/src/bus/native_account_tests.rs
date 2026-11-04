@@ -52,7 +52,7 @@ fn node_profile_with_ca(
 }
 
 #[derive(Clone)]
-enum GatewayCause {
+pub(super) enum GatewayCause {
     BlackHole,
     NoCustody,
     PoolBusy,
@@ -62,9 +62,9 @@ enum GatewayCause {
     ShortExpiry,
 }
 
-struct CauseGateway {
-    address: std::net::SocketAddr,
-    ca_pem: String,
+pub(super) struct CauseGateway {
+    pub(super) address: std::net::SocketAddr,
+    pub(super) ca_pem: String,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -75,7 +75,7 @@ impl Drop for CauseGateway {
 }
 
 impl CauseGateway {
-    async fn start(root: &std::path::Path, cause: GatewayCause) -> Result<Self> {
+    pub(super) async fn start(root: &std::path::Path, cause: GatewayCause) -> Result<Self> {
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
         let ca_pem = certificate.cert.pem();
         let tls = ramflux_transport::MeshTlsConfig {

@@ -24,6 +24,7 @@ pub(crate) mod itest_migration;
 pub mod message;
 pub mod node;
 pub mod object;
+pub(in crate::bus) mod object_status;
 pub(crate) mod surface;
 
 pub(crate) use a2i_a2ui::*;

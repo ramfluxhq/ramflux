@@ -395,12 +395,13 @@ async fn gateway_tcp_tls_503_during_first_contact_is_backed_off_without_acking_t
         }
         Ok::<(), SdkError>(())
     });
-    let mut engine = receiver.take_live_engine().await?;
+    // Set the directory endpoint on the fixture seed before the resident host owns it.
+    let mut engine = receiver.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
     engine.config.transport_kind = GatewaySessionTransportKind::TcpTls;
     engine.config.tcp_gateway_addr = Some(address);
     engine.config.server_name = "lookup.test".into();
     engine.config.ca_cert = ca;
-    receiver.put_engine(engine);
+    receiver.install_test_session(engine);
     receiver.client.retain_legacy_group_entry(&good)?;
     let request = LocalBusFrame::request(
         "receive",

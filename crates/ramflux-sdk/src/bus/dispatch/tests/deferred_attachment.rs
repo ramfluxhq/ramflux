@@ -174,6 +174,7 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
         request.operation_id = Some("fetch-op".to_owned());
         let (outbound, _events) = mpsc::channel(16);
         let command = AccountCommand {
+            admission: None,
             private: None,
             request,
             connection_id: 1,
@@ -206,6 +207,7 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
     request.operation_id = Some(String::new());
     let (outbound, _events) = mpsc::channel(16);
     let command = AccountCommand {
+        admission: None,
         private: None,
         request,
         connection_id: 1,
@@ -315,9 +317,8 @@ async fn scheduler_deadline_preserves_resume_before_retiring_the_borrowed_gatewa
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
-    let mut engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
-    engine.config.previous_session_id = Some("current-session".into());
-    engine.config.resume_token = Some("current-resume".into());
+    let mut engine = account.session_client().await?;
+    engine.test_update_resume("current-session", "current-resume").await?;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         std::future::pending::<Result<serde_json::Value, SdkError>>(),
@@ -354,12 +355,11 @@ async fn simultaneous_attachment_and_engine_deadlines_preserve_resume_and_retry(
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
-    let engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    let engine = account.session_client().await?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     let inner_expired = std::cell::Cell::new(false);
     let result = run_fetch(&mut account, engine, "object", Some(deadline), async |client, engine| {
-        engine.config.previous_session_id = Some("same-tick-session".into());
-        engine.config.resume_token = Some("same-tick-resume".into());
+        engine.test_update_resume("same-tick-session","same-tick-resume").await?;
         client.account_db()?.persist_actor_state("attachment/fetch/object", &json!({
             "object_id":"object","operation_id":"fetch-op","transfer_state":"fetching",
             "last_error":null,"attempts":1,
@@ -391,6 +391,8 @@ async fn simultaneous_attachment_and_engine_deadlines_preserve_resume_and_retry(
     )?;
     let mut resumed = spare.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
     resumed.config = account.gateway_config.clone();
+    account.install_test_session(resumed);
+    let resumed = account.session_client().await?;
     let retry = run_fetch(
         &mut account,
         resumed,
@@ -409,3 +411,6 @@ async fn simultaneous_attachment_and_engine_deadlines_preserve_resume_and_retry(
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[path = "deferred_attachment/local_first.rs"]
+mod local_first;

@@ -7,6 +7,7 @@ use crate::prelude::*;
 use ramflux_crypto::RootQualifiedDeviceRef;
 use std::sync::{Arc, RwLock};
 use tokio::sync::oneshot;
+mod local;
 type ReaderIdentity = Arc<RwLock<Option<RootQualifiedDeviceRef>>>;
 #[cfg(test)]
 #[path = "readers_backup_tests.rs"]
@@ -14,11 +15,18 @@ mod backup_tests;
 #[cfg(test)]
 #[path = "readers_deleted_tests.rs"]
 mod deleted_tests;
+#[cfg(test)]
+mod queue_tests;
 
 pub(super) enum ReadCommand {
     Request(Box<LocalBusFrame>, oneshot::Sender<Result<serde_json::Value, SdkError>>),
     MissingAttachments(oneshot::Sender<Result<super::backup_jobs::MissingAttachments, SdkError>>),
     Stop(oneshot::Sender<()>),
+    #[cfg(test)]
+    Hold {
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
 }
 
 #[cfg(test)]
@@ -35,11 +43,35 @@ pub(crate) async fn test_account_reader_request(
 #[derive(Clone)]
 pub(super) struct AccountReaders {
     identity: ReaderIdentity,
+    view: Arc<RwLock<Arc<local::AccountView>>>,
     senders: Vec<mpsc::Sender<ReadCommand>>,
     next: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AccountReaders {
+    #[cfg(test)]
+    pub(super) fn connection_for_test(
+        &self,
+    ) -> Option<super::connection_manager::ConnectionHandle> {
+        self.view.read().unwrap_or_else(std::sync::PoisonError::into_inner).connection.clone()
+    }
+    fn enqueue(&self, mut command: ReadCommand) -> Result<(), SdkError> {
+        let first =
+            self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.senders.len();
+        for offset in 0..self.senders.len() {
+            match self.senders[(first + offset) % self.senders.len()].try_send(command) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Full(returned)) => command = returned,
+                Err(mpsc::error::TrySendError::Closed(_)) => return Err(closed()),
+            }
+        }
+        Err(ramflux_transport::TransportError::BackpressureRejected {
+            capacity: 128,
+            in_flight: 128,
+        }
+        .into())
+    }
+
     pub(super) fn start(
         db: &AccountDb,
         device: Option<RootQualifiedDeviceRef>,
@@ -47,10 +79,12 @@ impl AccountReaders {
         super::sync_status::initialize_coordinates(db)?;
         crate::client::contact_verification::migrate_legacy_contact_verifications(db)?;
         let identity = Arc::new(RwLock::new(device));
+        let view = Arc::new(RwLock::new(Arc::new(local::AccountView::default())));
         let mut senders = Vec::new();
         for _ in 0..2 {
             let reader = db.open_reader()?;
             let identity = Arc::clone(&identity);
+            let view = Arc::clone(&view);
             let (sender, mut receiver) = mpsc::channel::<ReadCommand>(64);
             std::thread::Builder::new().name("ramflux-account-reader".to_owned()).spawn(
                 move || {
@@ -66,8 +100,21 @@ impl AccountReaders {
                                         .map(|device| device.clone())
                                         .and_then(|device| {
                                             client.reader_device_identity = device;
+                                            let view =
+                                                Arc::clone(&*view.read().map_err(|_| closed())?);
+                                            client.born_v3_account.clone_from(&view.native);
+                                            client
+                                                .reader_account_root
+                                                .clone_from(&view.account_root);
                                             client.account_db().and_then(|db| {
-                                                db.read_snapshot(|| read(&client, &request))
+                                                db.read_snapshot(|| {
+                                                    if let Some(result) =
+                                                        local::read(&client, &view, &request)?
+                                                    {
+                                                        return Ok(result);
+                                                    }
+                                                    read(&client, &request)
+                                                })
                                             })
                                         });
                                     let _ = reply.send(result);
@@ -93,6 +140,11 @@ impl AccountReaders {
                                 let _ = reply.send(());
                                 return;
                             }
+                            #[cfg(test)]
+                            ReadCommand::Hold { entered, release } => {
+                                let _ = entered.send(());
+                                let _ = release.recv();
+                            }
                         }
                     }
                 },
@@ -101,9 +153,20 @@ impl AccountReaders {
         }
         Ok(Self {
             identity,
+            view,
             senders,
             next: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
+    }
+
+    pub(super) fn set_account_view(
+        &self,
+        state: &LocalBusDaemonState,
+        id: &str,
+    ) -> Result<(), SdkError> {
+        let view = Arc::new(local::AccountView::capture(state, id)?);
+        *self.view.write().map_err(|_| closed())? = view;
+        Ok(())
     }
 
     pub(super) fn set_identity(
@@ -114,30 +177,48 @@ impl AccountReaders {
         Ok(())
     }
 
+    pub(super) fn requires_network(&self, request: &LocalBusFrame) -> bool {
+        let Ok(view) = self.view.read() else {
+            return true;
+        };
+        let spool = request
+            .body
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| view.upload_relays.get(id))
+            .copied();
+        super::method_table::requires_network(
+            &request.method,
+            &request.body,
+            view.account_has_relay,
+            spool,
+        )
+    }
+
+    pub(super) fn networking_pending(&self) -> SdkError {
+        self.view
+            .read()
+            .ok()
+            .and_then(|view| {
+                view.connection.as_ref().map(super::connection_manager::ConnectionHandle::pending)
+            })
+            .unwrap_or(SdkError::NetworkingPending)
+    }
+
     pub(super) async fn request(
         &self,
         request: LocalBusFrame,
     ) -> Result<serde_json::Value, SdkError> {
-        let index =
-            self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.senders.len();
         let (sender, receiver) = oneshot::channel();
-        self.senders[index]
-            .send(ReadCommand::Request(Box::new(request), sender))
-            .await
-            .map_err(|_| closed())?;
+        self.enqueue(ReadCommand::Request(Box::new(request), sender))?;
         receiver.await.map_err(|_| closed())?
     }
 
     pub(super) async fn backup_missing_references(
         &self,
     ) -> Result<super::backup_jobs::MissingAttachments, SdkError> {
-        let index =
-            self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.senders.len();
         let (reply, result) = oneshot::channel();
-        self.senders[index]
-            .send(ReadCommand::MissingAttachments(reply))
-            .await
-            .map_err(|_| closed())?;
+        self.enqueue(ReadCommand::MissingAttachments(reply))?;
         result.await.map_err(|_| closed())?
     }
 
@@ -152,19 +233,10 @@ impl AccountReaders {
 }
 
 pub(super) fn is_reader_request(method: &str) -> bool {
-    super::read_model::handles(method)
-        || matches!(
-            method,
-            "sync.status.get"
-                | "message.list"
-                | "message.read"
-                | "conversation.list"
-                | "surface.get"
-                | "surface.list"
-                | "task.get"
-                | "task.list"
-                | "call.list"
-        )
+    super::method_table::classify(method).is_some_and(|entry| {
+        entry.class == super::method_table::MethodClass::LocalRead
+            && entry.route == super::method_table::MethodRoute::Reader
+    })
 }
 
 pub(super) fn read(

@@ -16,7 +16,7 @@ async fn confirmed_background_deregistration_clears_the_persisted_marker() -> Re
     // The engine's background retry was confirmed by the node.
     engine.config.push_route = None;
     engine.config.push_route_clear_pending = false;
-    account.put_engine(engine);
+    account.install_test_session(engine);
     assert_eq!(account.client.projection_checkpoint(checkpoint)?.as_deref(), Some(""));
     drop(account);
     std::fs::remove_dir_all(root)?;
@@ -31,7 +31,7 @@ async fn the_push_route_sequence_is_persisted_and_never_reused() -> Result<(), S
     // A control was signed while the device clock was far ahead.
     let ahead = 4_000_000_000_000_u64;
     engine.config.push_route_last_seq = ahead;
-    account.put_engine(engine);
+    account.install_test_session(engine);
     let saved = account
         .client
         .projection_checkpoint(crate::bus::dispatch::device::PUSH_ROUTE_SEQ_CHECKPOINT)?;

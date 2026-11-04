@@ -49,7 +49,7 @@ impl RamfluxClient {
     /// Returns an error when local projection write or gateway submit fails.
     pub async fn send_direct_message_via_gateway(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         message: GatewayDirectMessage,
     ) -> Result<GatewayInboxEntry, SdkError> {
         self.send_direct_message(
@@ -58,7 +58,7 @@ impl RamfluxClient {
             &message.sender_id,
             &message.encrypted_body,
         )?;
-        let envelope = gateway_direct_message_envelope(&engine.config, &message, None)?;
+        let envelope = gateway_direct_message_envelope(engine.config(), &message, None)?;
         engine.submit_envelope(envelope).await
     }
 
@@ -66,10 +66,10 @@ impl RamfluxClient {
     /// Returns an error when the gateway rejects or cannot deliver the envelope.
     pub async fn submit_direct_message_via_gateway(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         message: GatewayDirectMessage,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        let envelope = gateway_direct_message_envelope(&engine.config, &message, None)?;
+        let envelope = gateway_direct_message_envelope(engine.config(), &message, None)?;
         engine.submit_envelope(envelope).await
     }
 
@@ -78,7 +78,7 @@ impl RamfluxClient {
     /// fails.
     pub async fn send_plaintext_direct_message_via_gateway(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         message: GatewayDirectMessage,
         plaintext: &[u8],
     ) -> Result<GatewayInboxEntry, SdkError> {
@@ -94,7 +94,7 @@ impl RamfluxClient {
 
     pub(crate) async fn send_plaintext_direct_message_without_franking(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         message: GatewayDirectMessage,
         plaintext: &[u8],
         route: crate::client::routed::Route,
@@ -107,13 +107,13 @@ impl RamfluxClient {
 
     async fn send_plaintext_direct_message_via_gateway_inner(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         mut message: GatewayDirectMessage,
         plaintext: &[u8],
         include_franking_ext: bool,
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        self.resolve_message_recipient(&engine.config, &mut message).await?;
+        self.resolve_message_recipient(engine.config(), &mut message).await?;
         let copy_plain = route.kind == crate::client::routed::Kind::Direct;
         let attachments = route.attachments;
         let own_history_control = matches!(route.kind, crate::client::routed::Kind::Control)
@@ -155,7 +155,7 @@ impl RamfluxClient {
         }
         let result = async {
             let envelope =
-                gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
+                gateway_direct_message_envelope(engine.config(), &message, franking.as_ref())?;
             // Persist the advanced send ratchet before the remote submit. A process death after the
             // gateway accepts the envelope must never reopen the pre-send chain state and reuse the
             // same message key for a later message. If submit fails, skipping one send key is safe;
@@ -174,7 +174,7 @@ impl RamfluxClient {
     /// Returns an error when attachment encryption/upload, DM encryption, or gateway submit fails.
     pub async fn send_plaintext_direct_message_with_attachments_via_gateway(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         message: GatewayDirectMessage,
         plaintext: &[u8],
@@ -194,7 +194,7 @@ impl RamfluxClient {
     #[allow(clippy::too_many_arguments)]
     async fn send_plaintext_direct_message_with_attachments_via_gateway_inner(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         message: GatewayDirectMessage,
         plaintext: &[u8],
@@ -265,7 +265,7 @@ impl RamfluxClient {
     /// delivery fails.
     pub(crate) async fn send_receipt_event_via_gateway(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         mut message: GatewayDirectMessage,
         envelope: SdkReceiptEventEnvelope,
     ) -> Result<GatewayInboxEntry, SdkError> {
@@ -274,7 +274,7 @@ impl RamfluxClient {
             .seal_routed_as(engine, &message, &plaintext, crate::client::routed::Route::receipt())
             .await?;
         message.encrypted_body = serde_json::to_vec(&sealed)?;
-        let gateway_envelope = gateway_direct_message_envelope(&engine.config, &message, None)?;
+        let gateway_envelope = gateway_direct_message_envelope(engine.config(), &message, None)?;
         let entry = engine.submit_envelope(gateway_envelope).await?;
         Ok(entry)
     }
@@ -283,7 +283,7 @@ impl RamfluxClient {
     /// Returns an error when the target device prekey cannot be fetched, the A2I control event
     pub async fn receive_gateway_deliveries(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         limit: usize,
     ) -> Result<Vec<GatewayInboxEntry>, SdkError> {
         let after_inbox_seq = self.gateway_cursor(engine.target_delivery_id())?;
@@ -301,7 +301,7 @@ impl RamfluxClient {
     #[allow(clippy::too_many_arguments)]
     pub async fn receive_gateway_plaintext_deliveries(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         limit: usize,
         conversation_id: &str,
@@ -373,12 +373,12 @@ impl RamfluxClient {
 
     pub(crate) async fn receive_legacy_entry(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         entry: GatewayInboxEntry,
         options: LegacyReceive<'_>,
     ) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
-        self.authorize_bound_legacy(&engine.config, &entry, options.conversation_id).await?;
+        self.authorize_bound_legacy(engine.config(), &entry, options.conversation_id).await?;
 
         let conversation_id = options.conversation_id;
         let terminal = self.legacy_committed_key(&entry)?;
@@ -467,7 +467,7 @@ impl RamfluxClient {
         )?;
         if self.account_db()?.client_record("conversation", conversation_id)?.is_none() {
             self.account_db()?.persist_client_record("conversation",conversation_id,&serde_json::json!({
-                    "kind":"direct","title":null,"group_id":null,"participants":[engine.config.principal_id,entry.envelope.source_principal_id],"direct_route":null
+                    "kind":"direct","title":null,"group_id":null,"participants":[engine.config().principal_id,entry.envelope.source_principal_id],"direct_route":null
                 }))?;
         }
         // Every attachment was imported, ACKed, and projected: only now do we commit the
@@ -597,7 +597,7 @@ impl RamfluxClient {
 
     async fn import_legacy_attachments(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         attachment_refs: &[SdkDmAttachmentRef],
         auto_fetch_attachments: bool,
@@ -701,12 +701,12 @@ impl RamfluxClient {
     /// Rejects a foreign mailbox/engine identity, or a failed ACK/cursor commit.
     pub async fn ack_gateway_entry(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         entry: &GatewayInboxEntry,
         received_at: i64,
     ) -> Result<GatewayCursor, SdkError> {
         let receiver = self.owned_device_identity()?;
-        if engine.config.source_identity.as_ref() != Some(&receiver)
+        if engine.config().source_identity.as_ref() != Some(&receiver)
             || entry.target_delivery_id != engine.target_delivery_id()
         {
             return Err(SdkError::InboundRejected("ACK mailbox identity mismatch".into()));
@@ -729,13 +729,13 @@ impl RamfluxClient {
     /// Returns an error when the gateway ack fails or the durable cursor cannot be persisted.
     pub async fn ack_gateway_delivery(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         envelope_id: &str,
         receiver: &ramflux_crypto::RootQualifiedDeviceRef,
         received_at: i64,
     ) -> Result<GatewayCursor, SdkError> {
         if self.owned_device_identity()? != *receiver
-            || engine.config.source_identity.as_ref() != Some(receiver)
+            || engine.config().source_identity.as_ref() != Some(receiver)
         {
             return Err(SdkError::InboundRejected("ACK receiver context mismatch".into()));
         }

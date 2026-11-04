@@ -29,6 +29,10 @@ struct Script {
     busy_at: Vec<Point>,
     capacity: bool,
     retry: Option<RetryHint>,
+    hold_established: Option<Arc<tokio::sync::Notify>>,
+    release_established: Option<Arc<tokio::sync::Notify>>,
+    ordinary: Option<ordinary::SessionScript>,
+    protocol_errors: Vec<String>,
 }
 struct Fixture {
     _root: tempfile::TempDir,
@@ -78,10 +82,25 @@ impl Fixture {
         let context =
             Arc::new(Context { router, store, service, script: Arc::clone(&script), node: proxy });
         let server = tokio::spawn(async move {
+            let mut sessions = tokio::task::JoinSet::new();
             loop {
                 let (socket, _) = listener.accept().await?;
                 context.script.lock().map_err(|_| "script lock")?.accepted += 1;
                 let stream = acceptor.accept(socket).await?;
+                if context.script.lock().map_err(|_| "script lock")?.ordinary.is_some() {
+                    let context = Arc::clone(&context);
+                    sessions.spawn(async move {
+                        if let Err(error) = handle(stream, &context).await {
+                            context
+                                .script
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .protocol_errors
+                                .push(error.to_string());
+                        }
+                    });
+                    continue;
+                }
                 if let Err(error) = handle(stream, &context).await {
                     eprintln!("custody retry server failed: {error}");
                     return Err(error);
@@ -151,12 +170,14 @@ async fn handle(
             }
             Err(error) => return Err(error.into()),
         };
-        if context.node.is_some() && ordinary::public_lookup(&bytes, &mut stream).await? {
+        if context.node.is_some()
+            && ordinary::public_lookup(&bytes, &mut stream, &context.script).await?
+        {
             return Ok(());
         }
         let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
         if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
-            return ordinary::ordinary(&mut stream, session_id).await;
+            return ordinary::ordinary(&mut stream, session_id, &context.script).await;
         }
         let point = match &frame {
             CustodyClientFrame::CustodyOpen { .. } => Some(Point::Open),
@@ -306,3 +327,8 @@ async fn capacity_is_shared_across_new_connections_and_blocks_network_retries() 
 
 #[path = "admission_retry_tests.rs"]
 mod admission;
+#[path = "gateway_budget_tests.rs"]
+mod budgets;
+
+#[path = "gateway_runtime_tests.rs"]
+mod runtime;

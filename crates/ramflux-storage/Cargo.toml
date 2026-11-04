@@ -27,6 +27,8 @@ thiserror = "2.0"
 tracing = "0.1"
 
 [features]
+# Opt-in counters for integration-test complexity proofs; disabled in production.
+itest-work-budget = []
 default = ["sqlcipher"]
 sqlcipher = ["rusqlite/bundled-sqlcipher"]
 test-instrumentation = ["rusqlite/hooks"]

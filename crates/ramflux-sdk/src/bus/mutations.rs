@@ -11,9 +11,9 @@ pub(super) async fn execute(
     account_id: &str,
     command: &AccountCommand,
 ) -> Result<ActorResponse, SdkError> {
-    if let Some(nodes) = &command.nodes {
-        state.nodes = nodes.clone();
-    }
+    let needs_network = state.accounts.get(account_id).is_some_and(|account| {
+        super::method_table::account_requires_network(&command.request, account)
+    });
     super::read_model::validate(&command.request)?;
     // A cold account can admit a read to its mailbox before its reader pool exists.
     // Once restored, use the same read dispatcher as the warm-pool path.
@@ -28,38 +28,36 @@ pub(super) async fn execute(
     let mut connection =
         LocalBusConnectionState::new(command.connection_id, command.outbound.clone());
     connection.topics.clone_from(&command.topics);
+    let intent = super::mutation_intent::MutationIntent::new(&command.request)?;
+    let key = intent.key;
+    if let Some(account) = state.accounts.get(account_id) {
+        let db = account.client.account_db()?;
+        if let Some(body) = intent.lookup(db)? {
+            return Ok(ActorResponse { body, events: Vec::new(), nodes: None });
+        }
+    }
+    if needs_network {
+        let account = local_bus_account_mut(state, account_id)?;
+        account.ensure_gateway_live().await?;
+    }
+    if super::method_table::classify(&command.request.method)
+        .is_some_and(|entry| entry.class == super::method_table::MethodClass::LocalFirst)
+    {
+        let account = local_bus_account(state, account_id)?;
+        super::dispatch::object::prepare_local_first_network(account, &command.request)?;
+    }
+    if let Some(account) = state.accounts.get(account_id)
+        && let Some(body) = intent.reserve(account.client.account_db()?)?
+    {
+        return Ok(ActorResponse { body, events: Vec::new(), nodes: None });
+    }
+    if let Some(nodes) = &command.nodes {
+        state.nodes = nodes.clone();
+    }
     if command.attended {
         state.attended_accounts.insert(account_id.to_owned());
     } else {
         state.attended_accounts.remove(account_id);
-    }
-    let key = command.request.operation_id.as_deref().or_else(|| {
-        command.request.body.get("idempotency_key").and_then(serde_json::Value::as_str)
-    });
-    if let Some(key) = key
-        && (key.is_empty() || key.len() > 256)
-    {
-        return Err(SdkError::LocalBus("operation_id must contain 1 to 256 bytes".to_owned()));
-    }
-    // Fetch owns retryable receipts; media keys must never be replayed from a cached response.
-    // Generic header validation above still applies to both methods.
-    let key = key.filter(|_| {
-        !matches!(command.request.method.as_str(), "object.fetch" | "call.media.session")
-    });
-    let fingerprint = if key.is_some() {
-        let intent = ramflux_protocol::canonical_json_bytes(&(
-            &command.request.method,
-            &command.request.body,
-        ))?;
-        Some(ramflux_crypto::blake3_256_base64url("ramflux.operation.v1", &intent))
-    } else {
-        None
-    };
-    if let (Some(key), Some(account), Some(fingerprint)) =
-        (key, state.accounts.get(account_id), fingerprint.as_deref())
-        && let Some(body) = account.client.account_db()?.reserve_operation(key, fingerprint)?
-    {
-        return Ok(ActorResponse { body, events: Vec::new(), nodes: None });
     }
     bind_operation_objects(state, account_id, key, &command.request.body)?;
     let snapshot = state

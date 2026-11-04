@@ -5,6 +5,8 @@
 use crate::prelude::*;
 use serde_json::json;
 
+pub(crate) mod source;
+
 type PendingEntryId = (String, u64, String);
 
 #[cfg(test)]
@@ -54,43 +56,26 @@ async fn run_with_receive_clock(
     account: &mut LocalBusAccountState,
     receive_now: impl FnOnce() -> i64,
 ) -> Result<usize, SdkError> {
-    let deadline = tokio::time::Instant::now() + super::courier_cycle::LIMIT;
-    account.client.account_db()?.expire_backup_pairs(now_unix_timestamp())?;
-    if let Err(error) = account.client.account_db().and_then(|db| {
-        db.retain_delivery_receipts(now_unix_timestamp(), 128).map_err(SdkError::from)
-    }) {
-        tracing::warn!(%error, "receipt retention failed; continuing sync");
-    }
-    account.client.finish_pair_retirement()?;
-    super::dispatch::call::expire_due(account)?;
-    // Explicit message/group receive shares this same 20-second accounting window.
-    // Priority can spend 4s on receipts plus 15s on call signaling before receive;
-    // this is cooperative accounting, not an outer timeout on explicit receive.
-    // Preserve retirement and expiry preconditions before servicing any network courier.
-    let mut priority_sent = super::courier_cycle::priority_until(account, deadline).await;
-    let mut engine = account.take_live_engine().await?;
+    let tasks_applied = maintain_local(account)?;
+    let mut engine = account.session_client().await?;
     let result = receive(account, &mut engine, receive_now()).await;
-    account.put_engine(engine);
-    let (received, replies) = result?;
-    for reply in replies {
-        if deadline.saturating_duration_since(tokio::time::Instant::now()) < Duration::from_secs(1)
-        {
-            break;
-        }
-        if let Err(error) =
-            super::dispatch::surface_transport::send_resync_reply(account, &reply).await
-        {
-            tracing::warn!(%error,"surface resync reply failed; requester may retry next window");
-        }
+    account.apply_session_metadata(engine);
+    let (received, _replies) = result?;
+    #[cfg(test)]
+    if let Err(error) = super::own_device_copy::flush(account).await {
+        tracing::warn!(%error, "own-device message copy deferred");
     }
-    courier_count(deadline, "own-device copy", Box::pin(super::own_device_copy::flush(account)))
-        .await;
-    let contacts = courier_count(
-        deadline,
-        "contact control",
-        Box::pin(crate::client::contact_requests::flush(account)),
-    )
-    .await;
+    #[cfg(test)]
+    let contacts = match Box::pin(crate::client::contact_requests::flush(account)).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error,"contact control delivery deferred");
+            0
+        }
+    };
+    #[cfg(not(test))]
+    let contacts = 0;
+    #[cfg(test)]
     let group_staged = match super::shared_group_sync::stage(account) {
         Ok(count) => count,
         Err(error) => {
@@ -98,31 +83,97 @@ async fn run_with_receive_clock(
             0
         }
     };
-    let group_controls = courier_count(
-        deadline,
-        "group request",
-        Box::pin(super::shared_group_sync::flush_requests(account)),
-    )
-    .await;
-    let group_sent =
-        courier_count(deadline, "group state", Box::pin(super::shared_group_sync::flush(account)))
-            .await;
+    #[cfg(not(test))]
+    let group_staged = 0;
+    #[cfg(test)]
+    let group_controls = match Box::pin(super::shared_group_sync::flush_requests(account)).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error,"group request courier deferred");
+            0
+        }
+    };
+    #[cfg(not(test))]
+    let group_controls = 0;
+    #[cfg(test)]
+    let group_sent = match Box::pin(super::shared_group_sync::flush(account)).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error, "group state delivery deferred");
+            0
+        }
+    };
+    #[cfg(not(test))]
+    let group_sent = 0;
     account.signal_task_courier();
-    let tasks_applied = account.client.retry_pending_tasks(now_unix_timestamp())?;
-    // Newly received messages can enqueue receipts. Admit their second pass with 8s
-    // left; each courier is capped by the remaining window, including call signaling.
-    if deadline.saturating_duration_since(tokio::time::Instant::now())
-        >= super::courier_cycle::PRIORITY_ALLOWANCE
-    {
-        priority_sent += super::courier_cycle::priority_until(account, deadline).await;
+    #[cfg(test)]
+    let voice = match super::dispatch::call::drive(account).await {
+        Ok(n) => n,
+        Err(error) => {
+            tracing::warn!(%error,"call signaling deferred");
+            0
+        }
+    };
+    #[cfg(not(test))]
+    let voice = 0;
+    Ok(received + tasks_applied + voice + contacts + group_staged + group_sent + group_controls)
+}
+
+pub(crate) async fn apply_prepared_receive(
+    account: &mut LocalBusAccountState,
+    prepared: super::connection_manager::ReceiveEntry,
+    prepared_source: source::PreparedSource,
+    mut backpressure: Box<super::contact_backpressure::Backpressure>,
+) -> Result<super::connection_manager::ReceiveApplied, SdkError> {
+    let mut engine = account.live_session_client()?;
+    let now = now_unix_timestamp();
+    let mut retry_keys = BTreeMap::new();
+    if let Some(key) = prepared.retry_key {
+        retry_keys.insert(pending_entry_id(&prepared.entry), key);
     }
-    Ok(received
-        + tasks_applied
-        + priority_sent
-        + contacts
-        + group_staged
-        + group_sent
-        + group_controls)
+    let pool = account.relay_quic_pool()?;
+    let prepared = Box::pin(prepare_entry(
+        account,
+        &mut engine,
+        &pool,
+        EntryInput { entry: prepared.entry, source: prepared_source },
+        &mut backpressure,
+        PageContext { replay: prepared.replay, defer_controls: true, now, retry_keys: &retry_keys },
+    ))
+    .await?;
+    let acknowledgement = prepared
+        .map(|prepared| {
+            debug_assert!(prepared.replies.is_empty());
+            let mut ack = ack::stage(account, prepared.state)?;
+            ack.pair_reply = prepared.pair_reply;
+            Ok::<_, SdkError>(ack)
+        })
+        .transpose()?;
+    account.apply_session_metadata(engine);
+    Ok((acknowledgement, backpressure))
+}
+
+pub(crate) fn prepare_receive(
+    account: &LocalBusAccountState,
+) -> Result<super::connection_manager::ReceivePlan, SdkError> {
+    account.client.prune_surface_resync_state()?;
+    account.client.account_db()?.expire_inbox_holds(now_unix_timestamp())?;
+    redrive_if_state_changed(&account.client)?;
+    let cursor = account.client.gateway_receive_cursor(&account.target_delivery_id)?;
+    let mut entries = Vec::new();
+    let mut keys = append_pending_entries(account, &mut entries, now_unix_timestamp())?;
+    let retries = entries
+        .into_iter()
+        .map(|entry| {
+            let retry_key = keys.remove(&pending_entry_id(&entry));
+            super::connection_manager::ReceiveEntry { entry, retry_key, replay: false }
+        })
+        .collect();
+    let backpressure = Box::new(super::contact_backpressure::Backpressure::load(
+        &account.client,
+        now_unix_timestamp(),
+    )?);
+    Ok(super::connection_manager::ReceivePlan { cursor, limit: 64, retries, backpressure })
 }
 
 async fn courier_count(
@@ -146,33 +197,36 @@ async fn courier_count(
 pub(crate) fn project_committed_message(
     account: &mut LocalBusAccountState,
     entry: &GatewayInboxEntry,
-) -> Result<(), SdkError> {
+) {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
     match account.client.claim_inbox_projection(entry) {
         Ok(true) => {}
-        Ok(false) => return Ok(()),
+        Ok(false) => return,
         Err(error) => {
             tracing::warn!(%error, envelope_id = %entry.envelope.envelope_id,
                 "inbox projection claim failed; message remains durable");
-            return Ok(());
+            return;
         }
     }
-    let pending_keys = account
-        .pending_deliveries
-        .iter()
-        .map(|item| account.client.inbox_admission_key(item))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if !pending_keys.contains(&account.client.inbox_admission_key(entry)?) {
+    // The durable authenticated claim above owns authorization and exactly-once projection.
+    // RAM cache membership compares immutable wire bytes; reauthenticating every cached
+    // envelope here makes draining a page quadratic in signatures and payload size.
+    if !account.pending_deliveries.iter().any(|pending| pending.envelope == entry.envelope) {
         account.pending_deliveries.push(entry.clone());
         if account.pending_deliveries.len() > 64 {
             account.pending_deliveries.remove(0);
         }
     }
-    Ok(())
+    #[cfg(test)]
+    if let Some(handle) = &account.connection {
+        handle.test_record_receive("projection", started.elapsed());
+    }
 }
 
 async fn receive(
     account: &mut LocalBusAccountState,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     now: i64,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
     account.client.prune_surface_resync_state()?;
@@ -190,7 +244,7 @@ async fn receive(
         &pool,
         entries,
         &mut backpressure,
-        PageContext { replay: false, now, retry_keys: &retry_keys },
+        PageContext { replay: false, defer_controls: true, now, retry_keys: &retry_keys },
     )
     .await?;
     let walk = account.client.gateway_receive_cursor(engine.target_delivery_id())?;
@@ -206,7 +260,7 @@ async fn receive(
             &pool,
             page,
             &mut backpressure,
-            PageContext { replay: true, now, retry_keys: &retry_keys },
+            PageContext { replay: true, defer_controls: true, now, retry_keys: &retry_keys },
         )
         .await?;
         applied += more;
@@ -222,8 +276,10 @@ fn advance_cursor(client: &RamfluxClient, target: &str, sequence: u64) -> Result
         client.gateway_receive_cursor(target)?.max(sequence),
     )
 }
+#[derive(Clone, Copy)]
 struct PageContext<'a> {
     replay: bool,
+    defer_controls: bool,
     now: i64,
     retry_keys: &'a BTreeMap<PendingEntryId, String>,
 }
@@ -251,96 +307,35 @@ fn retry_context(
 }
 async fn receive_page(
     account: &mut LocalBusAccountState,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     entries: Vec<GatewayInboxEntry>,
     backpressure: &mut super::contact_backpressure::Backpressure,
     context: PageContext<'_>,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
-    let PageContext { replay, now, retry_keys } = context;
     let mut applied = 0;
     let mut replies = Vec::new();
     for entry in entries {
-        let already_seen = account.client.routed_seen_marker(&entry)?.is_some();
-        let (key, committed_retry) = retry_context(&account.client, &entry, retry_keys)?;
-        if !account.client.account_db()?.inbox_retry_ready(&key, now)? {
-            advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
+        let Some(prepared) = Box::pin(prepare_entry(
+            account,
+            engine,
+            pool,
+            EntryInput { entry, source: None },
+            backpressure,
+            context,
+        ))
+        .await?
+        else {
             continue;
-        }
-        if replay && backpressure.saturated(&account.client, &entry, now)? {
-            continue;
-        }
-        let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
-        let outcome = match committed_retry {
-            Err(error) => Err(error),
-            Ok(true) => Ok(Processed::control()),
-            Ok(false) => {
-                if backpressure.duplicate(&entry) {
-                    Err(SdkError::InboundRejected(
-                        "another contact envelope for this root is already deferred".into(),
-                    ))
-                } else if now >= expires && account.client.account_db()?.has_inbox_retry(&key)? {
-                    Err(SdkError::InboundRejected("gateway TTL expired".to_owned()))
-                } else {
-                    Box::pin(process(account, engine, pool, &entry)).await
-                }
-            }
         };
-        let mut project_message = false;
-        let mut strip_call_ciphertext = false;
-        let accepted = match outcome {
-            Ok(Processed { consumed: false, .. }) => {
-                advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
-                continue;
-            }
-            Ok(Processed { reply, publish, call_control, .. }) => {
-                replies.extend(reply);
-                project_message = publish;
-                strip_call_ciphertext = call_control;
-                true
-            }
-            Err(mut error) => {
-                if super::contact_backpressure::deferred(&entry, &error)
-                    && backpressure.record(&account.client, &entry, now)?
-                {
-                    if !replay {
-                        advance_cursor(
-                            &account.client,
-                            engine.target_delivery_id(),
-                            entry.inbox_seq,
-                        )?;
-                    }
-                    continue;
-                }
-                if matches!(error, SdkError::ContactRequestCapacity(_)) {
-                    error = SdkError::InboundRejected(
-                        "deferred contact root capacity exhausted".into(),
-                    );
-                }
-                if !quarantine_failure(
-                    &account.client,
-                    &engine.config.device_id,
-                    &entry,
-                    &key,
-                    &error,
-                    now,
-                )? {
-                    advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
-                    continue;
-                }
-
-                false
-            }
-        };
-        // Keep committed messages visible while acknowledgement retries remain pending.
-        if project_message {
-            project_committed_message(account, &entry)?;
-        }
-        if account.client.ack_gateway_entry(engine, &entry, now).await.is_err() {
+        replies.extend(prepared.replies);
+        let AckState { entry, key, already_seen, strip_call_ciphertext, accepted, received_at } =
+            prepared.state;
+        if account.client.ack_gateway_entry(engine, &entry, received_at).await.is_err() {
             if already_seen && !account.client.account_db()?.has_inbox_retry(&key)? {
                 break;
             }
-            retain_ack_retry(&account.client, &entry, strip_call_ciphertext, &key, now)?;
+            retain_ack_retry(&account.client, &entry, strip_call_ciphertext, &key, received_at)?;
             advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
             continue;
         }
@@ -355,6 +350,121 @@ async fn receive_page(
         }
     }
     Ok((applied, replies))
+}
+
+struct EntryInput {
+    entry: GatewayInboxEntry,
+    source: source::PreparedSource,
+}
+
+async fn prepare_entry(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    pool: &ramflux_transport::RelayQuicPool,
+    input: EntryInput,
+    backpressure: &mut super::contact_backpressure::Backpressure,
+    context: PageContext<'_>,
+) -> Result<Option<PreparedEntry>, SdkError> {
+    let EntryInput { entry, source: prepared_source } = input;
+    let PageContext { replay, defer_controls, now, retry_keys } = context;
+    let mut replies = Vec::new();
+    let already_seen = account.client.routed_seen_marker(&entry)?.is_some();
+    let (key, committed_retry) = retry_context(&account.client, &entry, retry_keys)?;
+    if !account.client.account_db()?.inbox_retry_ready(&key, now)? {
+        advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
+        return Ok(None);
+    }
+    if replay && backpressure.saturated(&account.client, &entry, now)? {
+        return Ok(None);
+    }
+    let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
+    let outcome = match committed_retry {
+        Err(error) => Err(error),
+        Ok(true) => Ok(Processed::control()),
+        Ok(false) => {
+            if backpressure.duplicate(&entry) {
+                Err(SdkError::InboundRejected(
+                    "another contact envelope for this root is already deferred".into(),
+                ))
+            } else if now >= expires && account.client.account_db()?.has_inbox_retry(&key)? {
+                Err(SdkError::InboundRejected("gateway TTL expired".to_owned()))
+            } else {
+                Box::pin(process_with_prepared_source(
+                    account,
+                    engine,
+                    pool,
+                    &entry,
+                    defer_controls,
+                    prepared_source,
+                ))
+                .await
+            }
+        }
+    };
+    let mut project_message = false;
+    let mut strip_call_ciphertext = false;
+    let mut pair_reply = None;
+    let accepted = match outcome {
+        Ok(Processed { consumed: false, .. }) => {
+            advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
+            return Ok(None);
+        }
+        Ok(Processed { reply, publish, call_control, pair_reply: reset_reply, .. }) => {
+            replies.extend(reply);
+            project_message = publish;
+            strip_call_ciphertext = call_control;
+            pair_reply = reset_reply;
+            true
+        }
+        Err(mut error) => {
+            if super::contact_backpressure::deferred(&entry, &error)
+                && backpressure.record(&account.client, &entry, now)?
+            {
+                if !replay {
+                    advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
+                }
+                return Ok(None);
+            }
+            if matches!(error, SdkError::ContactRequestCapacity(_)) {
+                error =
+                    SdkError::InboundRejected("deferred contact root capacity exhausted".into());
+            }
+            if !quarantine_failure(
+                &account.client,
+                &engine.config().device_id,
+                &entry,
+                &key,
+                &error,
+                now,
+            )? {
+                advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
+                return Ok(None);
+            }
+
+            false
+        }
+    };
+    // Keep committed messages visible while acknowledgement retries remain pending.
+    if project_message {
+        project_committed_message(account, &entry);
+    }
+    Ok(Some(PreparedEntry {
+        state: AckState {
+            entry,
+            key,
+            already_seen,
+            strip_call_ciphertext,
+            accepted,
+            received_at: now,
+        },
+        replies,
+        pair_reply,
+    }))
+}
+struct PreparedEntry {
+    state: AckState,
+    replies: Vec<crate::client::surface::ResyncReply>,
+    pair_reply: Option<ramflux_protocol::Envelope>,
 }
 
 fn retain_ack_retry(
@@ -377,36 +487,63 @@ pub(super) struct Processed {
     publish: bool,
     reply: Option<crate::client::surface::ResyncReply>,
     call_control: bool,
+    pair_reply: Option<ramflux_protocol::Envelope>,
 }
 impl Processed {
     fn message(reply: Option<crate::client::surface::ResyncReply>) -> Self {
-        Self { consumed: true, publish: true, reply, call_control: false }
+        Self { consumed: true, publish: true, reply, call_control: false, pair_reply: None }
     }
     fn control() -> Self {
-        Self { consumed: true, publish: false, reply: None, call_control: false }
+        Self { consumed: true, publish: false, reply: None, call_control: false, pair_reply: None }
     }
     fn held() -> Self {
-        Self { consumed: false, publish: false, reply: None, call_control: false }
+        Self { consumed: false, publish: false, reply: None, call_control: false, pair_reply: None }
     }
 }
 
-pub(super) async fn process(
+#[cfg(test)]
+pub(super) async fn process_with_mode(
     account: &mut LocalBusAccountState,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     entry: &GatewayInboxEntry,
+    defer_controls: bool,
+) -> Result<Processed, SdkError> {
+    process_with_prepared_source(account, engine, pool, entry, defer_controls, None).await
+}
+
+async fn process_with_prepared_source(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    pool: &ramflux_transport::RelayQuicPool,
+    entry: &GatewayInboxEntry,
+    defer_controls: bool,
+    prepared_source: source::PreparedSource,
 ) -> Result<Processed, SdkError> {
     if account.client.routed_seen_marker(entry)?.is_some() {
         return Ok(Processed::control());
     }
-    if account.client.receive_own_device_message(&engine.config, entry).await? {
+    let mut prepared_source = prepared_source.map(|prepared| *prepared).transpose()?;
+    if let Some(manifest) =
+        prepared_source.as_mut().and_then(|prepared| prepared.own_copy_manifest.take())
+    {
+        if account.client.receive_prepared_own_device_message(entry, manifest)? {
+            return Ok(Processed::control());
+        }
+    } else if account.client.receive_own_device_message(engine.config(), entry).await? {
         return Ok(Processed::control());
     }
     if crate::client::routed::decode(&entry.envelope).is_ok() {
-        let delivery = account.client.apply_routed_entry(engine, pool, entry, false).await?;
-        let reply = account.client.take_surface_resync_answer(entry)?;
+        let delivery = if let Some(prepared) = prepared_source {
+            account.client.apply_routed_prepared_entry(engine, pool, entry, Ok(prepared)).await?
+        } else {
+            account.client.apply_routed_entry(engine, pool, entry, false).await?
+        };
+        let reply =
+            if defer_controls { None } else { account.client.take_surface_resync_answer(entry)? };
         let mut processed = Processed::message(reply);
         processed.call_control = delivery.call_control;
+        processed.pair_reply = delivery.pair_reply;
         return Ok(processed);
     }
     let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
@@ -436,7 +573,7 @@ pub(super) async fn process(
         return Ok(Processed::held());
     }
     if let Some(conversation) =
-        account.client.legacy_routing_binding(&engine.config.device_id, entry)?
+        account.client.legacy_routing_binding(&engine.config().device_id, entry)?
     {
         account
             .client
@@ -588,3 +725,29 @@ fn append_pending_entries(
     }
     Ok(retry_keys)
 }
+
+/// Bounded local housekeeping is available even while admission is pending.
+pub(crate) fn maintain_local(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    account.client.account_db()?.expire_backup_pairs(now_unix_timestamp())?;
+    if let Err(error) = account.client.account_db().and_then(|db| {
+        db.retain_delivery_receipts(now_unix_timestamp(), 128).map_err(SdkError::from)
+    }) {
+        tracing::warn!(%error, "receipt retention failed; continuing sync");
+    }
+    account.client.finish_pair_retirement()?;
+    super::dispatch::call::expire_due(account)?;
+    account.client.retry_pending_tasks(now_unix_timestamp())
+}
+
+#[cfg(test)]
+pub(super) async fn process(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    pool: &ramflux_transport::RelayQuicPool,
+    entry: &GatewayInboxEntry,
+) -> Result<Processed, SdkError> {
+    process_with_mode(account, engine, pool, entry, false).await
+}
+
+mod ack;
+pub(crate) use ack::{AckState, PreparedAck, finish as finish_prepared_ack};

@@ -174,13 +174,13 @@ async fn cf02_registration_rate_limit_keeps_its_typed_bus_reason_and_retry_hint(
         "test",
         &account.principal_commitment,
     )?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let error = engine
         .register_identity(request)
         .await
         .err()
         .ok_or_else(|| invalid("registration accepted"))?;
-    account.put_engine(engine);
+    account.install_test_session(engine);
     let wire = crate::bus::io::local_bus_error_body(&error);
     assert_eq!(wire.code, "Unavailable");
     assert_eq!(wire.reason_code.as_deref(), Some("rate_limited"));

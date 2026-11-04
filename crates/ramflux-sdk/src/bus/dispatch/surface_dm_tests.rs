@@ -24,7 +24,10 @@ async fn two_device_peer_retries_keep_one_logical_timeline_and_safe_failed_fallb
     let captured = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = super::fixture::RecordingGateway::new(captured.clone());
     gateway.fail_after = Some(1);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(gateway),
+    ));
     let carrier = create_carrier(&source.client)?;
     let failed = send(&mut source, &carrier).await;
     eprintln!("injected failure result: {failed:?}");
@@ -37,7 +40,7 @@ async fn two_device_peer_retries_keep_one_logical_timeline_and_safe_failed_fallb
     assert_eq!(source.client.surface_get("surface", 0, None)?["delivery_state"], "failed");
     let fallback = source.client.account_db()?.message_content(&timeline)?.ok_or("fallback")?;
     assert!(String::from_utf8(fallback)?.contains("Safe fallback"));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
         Box::new(super::fixture::RecordingGateway::new(captured.clone())),
     ));

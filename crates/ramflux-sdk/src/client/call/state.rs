@@ -9,7 +9,7 @@ use ramflux_protocol::{
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct LiveCall {
     pub row: CallRow,
     pub caller: CallEndpoint,

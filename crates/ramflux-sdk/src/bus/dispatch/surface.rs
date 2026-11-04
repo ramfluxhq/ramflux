@@ -237,7 +237,7 @@ pub(super) async fn request_resync(
             })
             .ok_or_else(|| invalid("surface author root is unknown"))?
     };
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result=async {
         let manifest=account.client.cache_verified_device_manifest(&engine.config,&root,"surface_resync_author").await?;
         if manifest.principal_id!=request.author || manifest.devices.is_empty() {return Err(invalid("surface resync author manifest mismatch"));}
@@ -256,7 +256,7 @@ pub(super) async fn request_resync(
         if submitted==0 && let Some(error)=failure {return Err(error);}
         Ok(json!({"submitted_devices":submitted,"rate_limited":false,"retry_after_seconds":60}))
     }.await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 

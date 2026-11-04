@@ -75,13 +75,13 @@ pub(super) async fn dispatch(
         _ => "blocked",
     };
     if decision == "accepted" && record.state == "pending" {
-        let engine = account.take_live_engine().await?;
+        let engine = account.session_client().await?;
         let manifest = crate::client::contact::fetch_verified_device_manifest(
             &engine.config,
             &record.contact_identity_commitment,
         )
         .await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         account.client.persist_fetched_identity_directory(&manifest?)?;
     }
     let response = account.client.account_db()?.write_transaction(|| {

@@ -169,7 +169,7 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
     let peers = members_count(&root, &source, 1)?;
     let (config, directory) = directory_config(&root, &mut source, &peers).await?;
     let captured = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
         Box::new(fixture::RecordingGateway::new(captured.clone())),
     ));
@@ -199,7 +199,7 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
     assert_eq!(result["accepted"], true);
     let before = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len();
     assert_eq!(before, 2);
-    let mut engine = source.take_live_engine().await?;
+    let mut engine = source.session_client().await?;
     let target = super::Target {
         identity: source.client.device_identity_for_root(
             &source
@@ -229,7 +229,7 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
         },
     )
     .await?;
-    source.put_engine(engine);
+    source.install_test_session(engine);
     crate::bus::task_delivery::submit_all(&mut source, vec![delivery]).await?;
     assert_eq!(
         captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
@@ -373,7 +373,7 @@ async fn requester_cancellation_after_compaction_prepares_original_sibling_event
     let peers = members_count(&root, &source, 1)?;
     let (config, directory) = directory_config(&root, &mut source, &peers).await?;
     let captured = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
         Box::new(fixture::RecordingGateway::new(captured.clone())),
     ));
@@ -451,7 +451,7 @@ async fn private_task_approvals_are_pair_encrypted_only_to_the_requester_among_g
         )?;
     }
     let captured = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
         Box::new(fixture::RecordingGateway::new(captured.clone())),
     ));

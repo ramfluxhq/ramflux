@@ -342,7 +342,7 @@ async fn invalid_directory_signatures_return_a_typed_manifest_error_without_a_co
 async fn valid_delivery_after_rejected_control(
     a: &Fixture,
     b: &mut Fixture,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl crate::GatewaySessionAccess,
     session: &mut ramflux_crypto::DmSession,
 ) -> Result<(), SdkError> {
     let mut next = super::super::message("legacy-next", "history");

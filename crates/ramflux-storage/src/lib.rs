@@ -17,6 +17,10 @@ mod clock;
 mod constants;
 mod conversation_helpers;
 mod database;
+#[cfg(feature = "itest-work-budget")]
+mod database_work;
+#[cfg(feature = "itest-work-budget")]
+pub use database_work::{SqlWorkProbe, SqlWorkScope, SqlWorkSnapshot};
 mod database_checkpoint;
 mod encryption;
 mod error;
@@ -45,7 +49,7 @@ pub use account_db::object_retention::{
     ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention, ObjectRetirementObserver,
     PreSendObjectHold, PrivacyResourceRegistration,
 };
-pub use account_db::runtime::AccountOutboxEntry;
+pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
 pub use account_index::AccountIndex;
 pub use clock::{AccountClock, unix_now};

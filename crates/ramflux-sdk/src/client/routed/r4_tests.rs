@@ -155,7 +155,7 @@ async fn group_message_before_membership_update_retries_then_delivers_without_ac
             std::mem::take(&mut redelivery),
             1,
         )?;
-        account.engine = Some(engine);
+        account.install_test_session(engine);
         crate::bus::sync_driver::run(&mut account).await?;
         let acknowledgements = retry_writes
             .lock()

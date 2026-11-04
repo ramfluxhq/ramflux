@@ -14,7 +14,7 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
     let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail.clone())?;
-    let mut sender = source.take_live_engine().await?;
+    let mut sender = source.session_client().await?;
     let entry = source
         .client
         .send_plaintext_direct_message_without_franking(
@@ -25,7 +25,7 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
         )
         .await?;
     let mut recipient = b.account(None, mail.clone())?;
-    let mut receiver = recipient.take_live_engine().await?;
+    let mut receiver = recipient.session_client().await?;
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
@@ -65,7 +65,7 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
         if restart {
             drop(recipient);
             recipient = b.account(None, mail.clone())?;
-            receiver = recipient.take_live_engine().await?;
+            receiver = recipient.session_client().await?;
         }
         // The replay check must not need any retained identity/authority evidence.
         let raw = super::erasure_audit::open(&b, &recipient.client)?;
@@ -141,7 +141,7 @@ fn sign_conflict(source: &RamfluxClient, conflict: &mut GatewayInboxEntry) -> Te
 
 async fn assert_conflict_quarantine(
     recipient: &mut LocalBusAccountState,
-    receiver: &mut GatewaySessionEngine,
+    receiver: &mut impl crate::GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     mut conflict: GatewayInboxEntry,
     committed: &str,
@@ -154,7 +154,7 @@ async fn assert_conflict_quarantine(
     assert!(!matches!(error, SdkError::ReplayMismatch));
     assert!(sync_driver::quarantine_failure(
         &recipient.client,
-        &receiver.config.device_id,
+        &receiver.config().device_id,
         &conflict,
         committed,
         &error,
@@ -171,7 +171,7 @@ async fn assert_conflict_quarantine(
     assert!(unverified.starts_with("inbox/unverified/"));
     sync_driver::quarantine_failure(
         &recipient.client,
-        &receiver.config.device_id,
+        &receiver.config().device_id,
         &conflict,
         &unverified,
         &SdkError::InboundRejected("invalid signature".into()),
@@ -188,7 +188,7 @@ async fn assert_conflict_quarantine(
     assert!(replaced.starts_with("inbox/unverified/"));
     sync_driver::quarantine_failure(
         &recipient.client,
-        &receiver.config.device_id,
+        &receiver.config().device_id,
         &conflict,
         &replaced,
         &SdkError::InboundRejected("current root replaced".into()),

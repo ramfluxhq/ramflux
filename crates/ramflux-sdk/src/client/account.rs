@@ -166,6 +166,7 @@ impl RamfluxClient {
             self.identity_root = None;
             self.device_branch = None;
             self.reader_device_identity = None;
+            self.reader_account_root = None;
         }
         if let Some(device_branch) = self.device_branch.clone() {
             db.set_device_signer(device_branch);

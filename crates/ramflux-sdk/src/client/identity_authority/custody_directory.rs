@@ -304,11 +304,11 @@ impl RamfluxClient {
         if let Some(owned) = &self.born_v3_account
             && owned.record().body.account_anchor == anchor
         {
-            let current = crate::custody::load_account(
-                self.account_index()?.root(),
-                owned.local_account_id(),
-                now,
-            )?;
+            let root = match &self.reader_account_root {
+                Some(root) => root.as_path(),
+                None => self.account_index()?.root(),
+            };
+            let current = crate::custody::load_account(root, owned.local_account_id(), now)?;
             if ramflux_protocol::custody::object_hash(current.record())?
                 != ramflux_protocol::custody::object_hash(cached.envelope())?
             {

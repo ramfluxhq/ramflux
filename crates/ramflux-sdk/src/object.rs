@@ -38,7 +38,8 @@ pub struct SdkObjectSharePackage {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SdkObjectRelayCapability {
+/// Capability carried by an authenticated relay token.
+pub enum SdkObjectRelayCapability {
     Put,
     Get,
     Ack,
@@ -54,7 +55,8 @@ pub(crate) enum SdkRelayChunkStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct SdkRelayToken {
+/// Legacy relay token, available to fixture-enabled session capabilities.
+pub struct SdkRelayToken {
     #[serde(default = "sdk_relay_token_default_version")]
     pub token_version: u32,
     pub token_id: String,

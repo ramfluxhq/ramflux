@@ -34,7 +34,7 @@ async fn peer_dm_is_delivered_without_a_recipient_ui_and_restart_does_not_send_a
             )?;
             drop(existing);
             let mut source = a.account(None, mail.clone())?;
-            let mut gateway = source.take_live_engine().await?;
+            let mut gateway = source.session_client().await?;
             source
                 .client
                 .send_plaintext_direct_message_without_franking(
@@ -48,7 +48,7 @@ async fn peer_dm_is_delivered_without_a_recipient_ui_and_restart_does_not_send_a
                     crate::client::routed::Route::direct(),
                 )
                 .await?;
-            source.put_engine(gateway);
+            source.install_test_session(gateway);
             drop(source);
             let sender = a.daemon(mail.clone())?;
             let recipient = b.daemon(mail.clone())?;
@@ -142,7 +142,7 @@ async fn group_delivery_receipts_go_only_to_the_sender_device_without_recipient_
             let encrypted = source.encrypt_group_message("group", &a.device, b"group hello")?;
             source.send_direct_message("thread", "group-one", &a.device, &encrypted)?;
             let mut account = a.account(None, mail.clone())?;
-            let mut gateway = account.take_live_engine().await?;
+            let mut gateway = account.session_client().await?;
             for member in [&b, &c] {
                 let mut message = a.message(member, "group-one");
                 message.envelope_id = format!("group-one:{}", member.device);
@@ -214,7 +214,7 @@ async fn an_uncertain_receipt_ack_reuses_its_ciphertext_after_restart_and_client
             let mail: Shared = Arc::new(Mutex::default());
             fixture::seed_pair(&a, &b)?;
             let mut source = a.account(None, mail.clone())?;
-            let mut gateway = source.take_live_engine().await?;
+            let mut gateway = source.session_client().await?;
             source
                 .client
                 .send_plaintext_direct_message_without_franking(
@@ -224,7 +224,7 @@ async fn an_uncertain_receipt_ack_reuses_its_ciphertext_after_restart_and_client
                     crate::client::routed::Route::direct(),
                 )
                 .await?;
-            source.put_engine(gateway);
+            source.install_test_session(gateway);
             drop(source);
             mail.lock().map_err(|_| "mailbox")?.lose_ack = true;
             let mut receiver = b.account(None, mail.clone())?;

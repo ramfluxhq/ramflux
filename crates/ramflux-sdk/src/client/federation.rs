@@ -4,6 +4,9 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+mod async_send;
+pub(crate) use crate::client::routed::SealForward;
+pub(crate) use async_send::PlaintextForward;
 
 mod forward;
 
@@ -13,6 +16,7 @@ struct FederatedSendOptions {
 }
 
 impl RamfluxClient {
+    #[cfg(test)]
     pub(crate) fn forward_federated_envelope(
         federation: &LocalBusFederationRoute,
         envelope: ramflux_protocol::Envelope,
@@ -22,7 +26,7 @@ impl RamfluxClient {
 
     pub fn send_plaintext_federated_direct_message(
         &self,
-        engine: &GatewaySessionEngine,
+        engine: &impl GatewaySessionAccess,
         message: GatewayDirectMessage,
         plaintext: &[u8],
         federation: &LocalBusFederationRoute,
@@ -32,13 +36,13 @@ impl RamfluxClient {
             message,
             plaintext,
             federation,
-            FederatedSendOptions { franking: true, route: crate::client::routed::Route::direct() },
+            &FederatedSendOptions { franking: true, route: crate::client::routed::Route::direct() },
         )
     }
 
     pub(crate) fn send_plaintext_federated_direct_message_without_franking(
         &self,
-        engine: &GatewaySessionEngine,
+        engine: &impl GatewaySessionAccess,
         message: GatewayDirectMessage,
         plaintext: &[u8],
         federation: &LocalBusFederationRoute,
@@ -49,28 +53,51 @@ impl RamfluxClient {
             message,
             plaintext,
             federation,
-            FederatedSendOptions { franking: false, route },
+            &FederatedSendOptions { franking: false, route },
         )
     }
 
     fn send_plaintext_federated_direct_message_inner(
         &self,
-        engine: &GatewaySessionEngine,
+        engine: &impl GatewaySessionAccess,
         mut message: GatewayDirectMessage,
         plaintext: &[u8],
         federation: &LocalBusFederationRoute,
-        options: FederatedSendOptions,
+        options: &FederatedSendOptions,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
         Self::normalize_recipient(&mut message)?;
+        let prekey_url = federation
+            .recipient_prekey_url
+            .as_deref()
+            .or(engine.config().prekey_http_url.as_deref());
+        let sealed = self.seal_routed_federated_as(
+            engine,
+            &message,
+            plaintext,
+            prekey_url,
+            options.route.clone(),
+        )?;
+        let pending =
+            self.prepare_federated_packet(engine, &mut message, plaintext, &sealed, options)?;
+        trace_forward(federation, &pending.envelope);
+        let result = post_federated_envelope_forward(federation, pending.envelope);
+        self.finish_own_sent_copy(&pending.message, pending.own_copy.as_deref(), result.is_ok());
+        result
+    }
+
+    fn prepare_federated_packet(
+        &self,
+        engine: &impl GatewaySessionAccess,
+        message: &mut GatewayDirectMessage,
+        plaintext: &[u8],
+        sealed: &SdkDmEncryptedEnvelope,
+        options: &FederatedSendOptions,
+    ) -> Result<PendingForward, SdkError> {
         let copy_plain = options.route.kind == crate::client::routed::Kind::Direct;
         let attachments = options.route.attachments;
-        let prekey_url =
-            federation.recipient_prekey_url.as_deref().or(engine.config.prekey_http_url.as_deref());
-        let sealed =
-            self.seal_routed_federated_as(engine, &message, plaintext, prekey_url, options.route)?;
         let franking =
             options.franking.then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
-        message.encrypted_body = serde_json::to_vec(&sealed)?;
+        message.encrypted_body = serde_json::to_vec(sealed)?;
         let mut own_copy = None;
         self.account_db()?.write_transaction(|| {
             self.send_direct_message(
@@ -90,38 +117,30 @@ impl RamfluxClient {
                 &content,
             )?;
             if copy_plain {
-                own_copy = self.queue_own_sent_dm(&message, &content);
+                own_copy = self.queue_own_sent_dm(message, &content);
             }
             Ok::<_, SdkError>(())
         })?;
-        let result = (|| {
-            let envelope =
-                gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
-            tracing::info!(
-                source_node_id = %federation.source_node_id,
-                target_node_id = %federation.target_node_id,
-                federation_url = %federation.federation_url,
-                envelope_id = %envelope.envelope_id,
-                target_delivery_id = %envelope.target_delivery_id,
-                route_decision = "remote_federation_forward",
-                "submitting federated direct message to source node federation surface"
-            );
-
-            post_federated_envelope_forward(federation, envelope)
-        })();
-        self.finish_own_sent_copy(&message.message_id, own_copy.as_deref(), result.is_ok());
-        result
+        let envelope =
+            match gateway_direct_message_envelope(engine.config(), message, franking.as_ref()) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    self.finish_own_sent_copy(&message.message_id, own_copy.as_deref(), false);
+                    return Err(error);
+                }
+            };
+        Ok(PendingForward { envelope, message: message.message_id.clone(), own_copy })
     }
 
     /// # Errors
     /// Returns an error when envelope construction or the federation forward request fails.
     pub fn forward_federated_gateway_message(
         &self,
-        engine: &GatewaySessionEngine,
+        engine: &impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
         federation: &LocalBusFederationRoute,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let envelope = gateway_direct_message_envelope(&engine.config, message, None)?;
+        let envelope = gateway_direct_message_envelope(engine.config(), message, None)?;
         tracing::info!(
             source_node_id = %federation.source_node_id,
             target_node_id = %federation.target_node_id,
@@ -138,35 +157,14 @@ impl RamfluxClient {
     /// Returns an error when the contact event cannot be encrypted or forwarded.
     pub fn send_plaintext_federated_contact_event(
         &self,
-        engine: &GatewaySessionEngine,
+        engine: &impl GatewaySessionAccess,
         event_type: &str,
         request: &LocalBusContactFederatedRequest,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let body = serde_json::to_vec(&serde_json::json!({
-            "type": event_type,
-            "link_id": request.link_id,
-            "requester": request.requester_id,
-            "target": request.target_id,
-        }))?;
+        let (message, body) = contact_message(event_type, request)?;
         self.send_plaintext_federated_direct_message_without_franking(
             engine,
-            GatewayDirectMessage {
-                conversation_id: request.conversation_id.clone(),
-                message_id: request.message_id.clone(),
-                envelope_id: request.envelope_id.clone(),
-                source_principal_id: request.source_principal_id.clone(),
-                sender_id: request.sender_id.clone(),
-                recipient_device_id: Some(request.recipient_device_id.clone()),
-                recipient_principal_commitment: Some(if event_type == "friend.requested" {
-                    request.target_id.clone()
-                } else {
-                    request.requester_id.clone()
-                }),
-                target_delivery_id: request.target_delivery_id.clone(),
-                encrypted_body: Vec::new(),
-                created_at: now_unix_timestamp(),
-                ttl: 300,
-            },
+            message,
             &body,
             &request.federation,
             crate::client::routed::Route::control(),
@@ -213,8 +211,66 @@ fn post_federated_envelope_forward(
     sdk_http_post_json(
         &federation.federation_url,
         "/s8/federation/forward",
-        &forward_request(federation, envelope),
+        &federated_forward_request(federation, envelope),
     )
+}
+pub(crate) fn federated_forward_request(
+    federation: &LocalBusFederationRoute,
+    envelope: ramflux_protocol::Envelope,
+) -> SdkFederatedEnvelopeForwardRequest {
+    SdkFederatedEnvelopeForwardRequest {
+        signed: ramflux_protocol::SignedFields {
+            signing_key_id: format!("{}#federation", federation.source_node_id),
+            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+            signature: String::new(),
+        },
+        admin_token: federation.admin_token.clone(),
+        source_node_id: federation.source_node_id.clone(),
+        target_node_id: federation.target_node_id.clone(),
+        delivery_class: "opaque_event".into(),
+        required_capability: federation.required_capability.clone(),
+        envelope,
+    }
+}
+
+struct PendingForward {
+    envelope: ramflux_protocol::Envelope,
+    message: String,
+    own_copy: Option<String>,
+}
+fn contact_message(
+    event_type: &str,
+    request: &LocalBusContactFederatedRequest,
+) -> Result<(GatewayDirectMessage, Vec<u8>), SdkError> {
+    let body = serde_json::to_vec(
+        &serde_json::json!({"type":event_type,"link_id":request.link_id,"requester":request.requester_id,"target":request.target_id}),
+    )?;
+    Ok((
+        GatewayDirectMessage {
+            conversation_id: request.conversation_id.clone(),
+            message_id: request.message_id.clone(),
+            envelope_id: request.envelope_id.clone(),
+            source_principal_id: request.source_principal_id.clone(),
+            sender_id: request.sender_id.clone(),
+            recipient_device_id: Some(request.recipient_device_id.clone()),
+            recipient_principal_commitment: Some(if event_type == "friend.requested" {
+                request.target_id.clone()
+            } else {
+                request.requester_id.clone()
+            }),
+            target_delivery_id: request.target_delivery_id.clone(),
+            encrypted_body: Vec::new(),
+            created_at: now_unix_timestamp(),
+            ttl: 300,
+        },
+        body,
+    ))
+}
+fn trace_forward(route: &LocalBusFederationRoute, envelope: &ramflux_protocol::Envelope) {
+    tracing::info!(source_node_id=%route.source_node_id,target_node_id=%route.target_node_id,
+        federation_url=%route.federation_url,envelope_id=%envelope.envelope_id,
+        target_delivery_id=%envelope.target_delivery_id,route_decision="remote_federation_forward",
+        "submitting federated direct message to source node federation surface");
 }
 
 fn forward_request(

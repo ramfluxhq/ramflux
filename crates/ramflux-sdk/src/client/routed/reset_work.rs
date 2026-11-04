@@ -3,18 +3,16 @@
 
 //! Durable reset retry and encrypted acknowledgement, independent of inbox retry retention.
 use super::reset_policy::{MAX_RESET_LIFETIME, ResetWork};
-use super::{
-    GatewayDirectMessage, GatewaySessionEngine, Kind, Opened, RamfluxClient, Route, SdkError,
-};
+use super::{GatewaySessionAccess, Kind, Opened, PairControlKind, RamfluxClient, Route, SdkError};
 impl RamfluxClient {
     pub(super) async fn send_pair_reset(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), SdkError> {
         self.send_pair_control(engine, remote, "pair.session.reset.v1").await
     }
-    fn pair_delivery_id(
+    pub(super) fn pair_delivery_id(
         &self,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<String, SdkError> {
@@ -42,52 +40,22 @@ impl RamfluxClient {
     }
     async fn send_pair_control(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
         kind: &str,
     ) -> Result<(), SdkError> {
-        let id = format!(
-            "pair-control-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        );
-        let root = remote.root_commitment().to_owned();
-        let wire_remote = remote.device_id().to_owned();
-        let target_delivery_id = self.pair_delivery_id(remote)?;
-        let mut message = GatewayDirectMessage {
-            conversation_id: id.clone(),
-            message_id: id.clone(),
-            envelope_id: id,
-            source_principal_id: engine.config.principal_id.clone(),
-            sender_id: engine.config.principal_id.clone(),
-            recipient_device_id: Some(wire_remote),
-            recipient_principal_commitment: Some(root),
-            target_delivery_id,
-            encrypted_body: Vec::new(),
-            created_at: super::now_unix_timestamp(),
-            ttl: 300,
+        let kind = match kind {
+            "pair.session.reset.v1" => PairControlKind::Reset,
+            "pair.session.reset.ack.v1" => PairControlKind::Ack,
+            _ => return Err(super::invalid("unknown pair control")),
         };
-        let sealed = self
-            .seal_routed_as(
-                engine,
-                &message,
-                &serde_json::to_vec(&serde_json::json!({"type":kind,"rejected_bootstrap_floor":if kind=="pair.session.reset.v1"{self.bootstrap_high_water(&self.local_device_identity(&engine.config.device_id)?,remote)?}else{0}}))?,
-                Route::control(),
-            )
-            .await?;
-        if kind == "pair.session.reset.v1" {
-            self.account_db()?.persist_actor_state(
-                &format!("dm-pair/reset/{}", sealed.ciphertext.session_id),
-                &true,
-            )?;
+        let draft = self.prepare_pair_control_draft(engine.config(), remote, kind)?;
+        let sealed =
+            self.seal_routed_as(engine, &draft.message, &draft.body, Route::control()).await?;
+        if self.pair_control_draft_current(&draft)? {
+            let envelope = self.finish_pair_control_draft(engine.config(), draft, &sealed)?;
+            engine.submit_envelope(envelope).await?;
         }
-        message.encrypted_body = serde_json::to_vec(&sealed)?;
-        engine
-            .submit_envelope(super::gateway_direct_message_envelope(
-                &engine.config,
-                &message,
-                None,
-            )?)
-            .await?;
         // Submission is transport acceptance, not peer confirmation. Work remains durable.
         Ok(())
     }
@@ -132,10 +100,10 @@ impl RamfluxClient {
 
     pub(crate) async fn retry_pair_resets(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         at: i64,
     ) -> Result<(), SdkError> {
-        let local = self.local_device_identity(&engine.config.device_id)?;
+        let local = self.local_device_identity(&engine.config().device_id)?;
         let work = self.legacy_upgrade_reset_work(&local)?;
         let mut attempted = false;
         for mut item in work.into_iter().filter(|work| work.local == local.storage_key()) {
@@ -162,7 +130,7 @@ impl RamfluxClient {
     }
     pub(super) async fn reply_pair_reset(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         opened: &Opened,
         body: &[u8],
     ) {

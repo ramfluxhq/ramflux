@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Account receive scheduling uses only ticks, connection establishment, and explicit resync.
+
+use super::{AccountWork, ConnectionHandle, NetworkingState, RuntimeTimeouts};
+use crate::SdkError;
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{Instant, timeout},
+};
+
+pub(crate) struct ReceivePlan {
+    pub cursor: u64,
+    pub limit: usize,
+    pub retries: Vec<ReceiveEntry>,
+    pub backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+}
+pub(crate) type ReceiveApplied = (
+    Option<crate::bus::sync_driver::PreparedAck>,
+    Box<crate::bus::contact_backpressure::Backpressure>,
+);
+pub(crate) type ReceiveAcked = (bool, Box<crate::bus::contact_backpressure::Backpressure>);
+pub(crate) struct ReceiveEntry {
+    pub entry: crate::GatewayInboxEntry,
+    pub retry_key: Option<String>,
+    pub replay: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReceiveTrigger {
+    Tick,
+    Connected,
+    Resync,
+}
+
+pub(super) async fn run(
+    handle: ConnectionHandle,
+    work: mpsc::Sender<AccountWork>,
+    limits: RuntimeTimeouts,
+) {
+    let mut stop = handle.stop.subscribe();
+    let mut interval = limits.receive_min;
+    let mut next = Instant::now() + interval;
+    let mut connected_generation = None;
+    loop {
+        let tick = tokio::select! {biased;_=stop.changed()=>break,()=handle.receive_wake()=>false,()=tokio::time::sleep_until(next)=>true};
+        let snapshot = handle.snapshot();
+        if snapshot.state != NetworkingState::Live {
+            interval = interval.saturating_mul(2).min(limits.receive_max);
+            next = Instant::now() + interval;
+            continue;
+        }
+        let trigger = if connected_generation != Some(snapshot.generation) {
+            ReceiveTrigger::Connected
+        } else if handle.resync_needed() {
+            ReceiveTrigger::Resync
+        } else if tick {
+            ReceiveTrigger::Tick
+        } else {
+            continue;
+        };
+        tracing::trace!(?trigger, generation = snapshot.generation, "account receive pass");
+        #[cfg(test)]
+        handle
+            .shared
+            .receive_trace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((trigger, false));
+        let epoch = handle.resync_epoch();
+        let pass =
+            timeout(limits.sync, pass(&handle, &work, snapshot.generation, trigger, limits.call));
+        let result = tokio::select! {biased;_=stop.changed()=>break,result=pass=>result};
+        connected_generation = Some(snapshot.generation);
+        match result {
+            Ok(Ok(active)) => {
+                handle.resync_applied(snapshot.generation, epoch);
+                #[cfg(test)]
+                handle
+                    .shared
+                    .receive_trace
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((trigger, true));
+                interval = if active {
+                    limits.receive_min
+                } else {
+                    interval.saturating_mul(2).min(limits.receive_max)
+                };
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(%error,"receive pass deferred");
+                interval = interval.saturating_mul(2).min(limits.receive_max);
+            }
+            Err(_) => {
+                tracing::debug!("receive pass deadline expired");
+                interval = interval.saturating_mul(2).min(limits.receive_max);
+            }
+        }
+        next = Instant::now() + interval;
+    }
+}
+
+async fn pass(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    trigger: ReceiveTrigger,
+    call_timeout: std::time::Duration,
+) -> Result<bool, SdkError> {
+    let (reply, response) = oneshot::channel();
+    work.send(AccountWork::ReceivePrepare { generation, trigger, reply })
+        .await
+        .map_err(|_| handle.pending())?;
+    let plan = response.await.map_err(|_| handle.pending())??;
+    let mut cursor = plan.cursor;
+    let mut backpressure = plan.backpressure;
+    let mut retries: std::collections::BTreeMap<_, _> =
+        plan.retries.into_iter().map(|prepared| (entry_id(&prepared.entry), prepared)).collect();
+    let mut active = false;
+    loop {
+        let entries = handle
+            .call(
+                move |engine| Box::pin(engine.resume_authoritative_after(cursor, plan.limit)),
+                Instant::now() + call_timeout,
+            )
+            .await?;
+        let count = entries.len();
+        let last = entries.iter().map(|entry| entry.inbox_seq).max().unwrap_or(cursor);
+        for entry in entries {
+            let retry_key =
+                retries.remove(&entry_id(&entry)).and_then(|prepared| prepared.retry_key);
+            let (accepted, next) = apply_entry(
+                handle,
+                work,
+                generation,
+                ReceiveEntry { entry, retry_key, replay: false },
+                call_timeout,
+                backpressure,
+            )
+            .await?;
+            active |= accepted;
+            backpressure = next;
+        }
+        // A gateway can return a short page at its byte limit. Only an empty page
+        // (or a non-advancing cursor) proves this bounded pass has caught up.
+        if count == 0 || last <= cursor {
+            break;
+        }
+        cursor = last;
+    }
+    for entry in retries.into_values() {
+        let (accepted, next) =
+            apply_entry(handle, work, generation, entry, call_timeout, backpressure).await?;
+        active |= accepted;
+        backpressure = next;
+    }
+    let (more, _) = rescan(handle, work, generation, call_timeout, backpressure).await?;
+    Ok(active || more)
+}
+
+/// Contact capacity can leave an unacknowledged range behind the live cursor. Redrive one
+/// bounded page with the same durable floor and per-pass root deduplication as normal receive.
+async fn rescan(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    call_timeout: std::time::Duration,
+    mut backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+) -> Result<ReceiveAcked, SdkError> {
+    let writer = crate::bus::couriers::writer::Writer::new(work.clone(), generation);
+    let (scan, next) = writer
+        .apply(move |account| {
+            let walk = account.client.gateway_receive_cursor(&account.target_delivery_id)?;
+            let scan = backpressure.scan_cursor(
+                &account.client,
+                walk,
+                crate::time::now_unix_timestamp(),
+            )?;
+            Ok((scan, backpressure))
+        })
+        .await?;
+    backpressure = next;
+    let Some((cursor, until)) = scan else { return Ok((false, backpressure)) };
+    let mut page = handle
+        .call(
+            move |engine| Box::pin(engine.resume_authoritative_after(cursor, 64)),
+            Instant::now() + call_timeout,
+        )
+        .await?;
+    let count = page.len();
+    page.retain(|entry| entry.inbox_seq <= until);
+    let last = page.iter().map(|entry| entry.inbox_seq).max();
+    let mut active = false;
+    for entry in page {
+        let (accepted, next) = apply_entry(
+            handle,
+            work,
+            generation,
+            ReceiveEntry { entry, retry_key: None, replay: true },
+            call_timeout,
+            backpressure,
+        )
+        .await?;
+        active |= accepted;
+        backpressure = next;
+    }
+    writer
+        .apply(move |account| {
+            backpressure.scanned(
+                &account.client,
+                last,
+                count,
+                crate::time::now_unix_timestamp(),
+            )?;
+            Ok((active, backpressure))
+        })
+        .await
+}
+
+fn entry_id(entry: &crate::GatewayInboxEntry) -> (String, u64, String) {
+    (entry.envelope.envelope_id.clone(), entry.inbox_seq, entry.envelope.payload_hash.clone())
+}
+
+async fn apply_entry(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    entry: ReceiveEntry,
+    call_timeout: std::time::Duration,
+    backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+) -> Result<ReceiveAcked, SdkError> {
+    let writer = crate::bus::couriers::writer::Writer::new(work.clone(), generation);
+    #[cfg(test)]
+    let source_started = {
+        handle.test_record_receive("source-start", std::time::Duration::ZERO);
+        std::time::Instant::now()
+    };
+    let (entry, backpressure, source) =
+        crate::bus::sync_driver::source::prepare(&writer, entry, backpressure).await?;
+    #[cfg(test)]
+    handle.test_record_receive("source", source_started.elapsed());
+    let (reply, response) = oneshot::channel();
+    work.send(AccountWork::ReceiveApply {
+        generation,
+        entry: Box::new(entry),
+        source,
+        backpressure,
+        reply,
+    })
+    .await
+    .map_err(|_| handle.pending())?;
+    let (prepared, backpressure) = response.await.map_err(|_| handle.pending())??;
+    let Some(prepared) = prepared else { return Ok((false, backpressure)) };
+    if let Some(envelope) = prepared.pair_reply {
+        let submitted = handle
+            .call(
+                move |engine| Box::pin(engine.submit_envelope(envelope)),
+                Instant::now() + call_timeout,
+            )
+            .await;
+        if let Err(error) = submitted {
+            tracing::debug!(%error, "encrypted reset acknowledgement awaits a later reset");
+        }
+    }
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    let cursor = handle
+        .call(
+            move |engine| Box::pin(async move { engine.ack(prepared.ack).await }),
+            Instant::now() + call_timeout,
+        )
+        .await;
+    #[cfg(test)]
+    handle.test_record_receive("ack-network", started.elapsed());
+    let (reply, response) = oneshot::channel();
+    work.send(AccountWork::ReceiveAck {
+        generation,
+        state: Box::new(prepared.state),
+        cursor: Box::new(cursor),
+        backpressure,
+        reply,
+    })
+    .await
+    .map_err(|_| handle.pending())?;
+    response.await.map_err(|_| handle.pending())?
+}

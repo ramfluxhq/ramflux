@@ -32,7 +32,11 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
             });
             let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
             config.custody_vault = Some(vault);
+            let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
+            let (_preempt_sender, preempt) = watch::channel(0);
+            let (connection_sender, connection_work) = mpsc::channel(2);
             let mut runtime = AccountRuntime {
+                timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
                 id: "sender".into(),
                 state: LocalBusDaemonState {
                     account_index: None,
@@ -44,6 +48,11 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                     subscribers: BTreeMap::new(),
                 },
                 receiver,
+                lifecycle,
+                preempt,
+                connection_sender,
+                connection_work,
+                transfers: crate::bus::account_runtime::uploads::Transfers::start(),
                 readers: Arc::new(Mutex::new(None)),
                 events,
                 shutdown,
@@ -97,6 +106,7 @@ async fn private_unlock(runtime: &mut AccountRuntime) -> Case {
     let (reply, response) = oneshot::channel();
     let (outbound, _) = mpsc::channel(1);
     let command = AccountCommand {
+        admission: None,
         private: Some(crate::bus::actor::PrivateCommand::NativeUnlock {
             passphrase: zeroize::Zeroizing::new("passphrase".into()),
             home_node_id: None,

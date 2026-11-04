@@ -6,6 +6,7 @@ use crate::bus::task_delivery::{Delivery as SealedDelivery, Destination};
 use crate::client::task::{Delivery, carrier::Carrier, invalid};
 use crate::prelude::*;
 use serde_json::{Value, json};
+#[cfg(test)]
 use std::future::Future;
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -25,6 +26,7 @@ pub(super) fn rotate_to_cursor<T>(rows: &mut [(String, T)], cursor: usize) {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+#[cfg(test)]
 pub(in crate::bus) enum Preparation<T> {
     Ready(T),
     Deferred,
@@ -37,6 +39,7 @@ enum AckQuarantineReason {
     UndecodableCarrier,
 }
 
+#[cfg(test)]
 pub(super) async fn await_preparation<T>(
     future: impl Future<Output = Result<T, SdkError>>,
     deferred: &'static str,
@@ -97,9 +100,9 @@ pub(crate) async fn send(
         .account_db()?
         .client_record("conversation", &c.conversation_id)?
         .ok_or_else(|| invalid("task conversation missing"))?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = prepare(account, &mut engine, c, &thread, Mode::Event).await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     let deliveries = result?;
     let response = account.client.account_db()?.write_transaction(|| {
         let timeline = crate::client::task::timeline_id(c)?;
@@ -137,6 +140,7 @@ pub(crate) async fn send(
     )?;
     Ok(response)
 }
+#[derive(Clone, Copy)]
 pub(in crate::bus) enum Mode<'a> {
     Event,
     Ack(&'a crate::client::task::control::Ack),
@@ -145,14 +149,14 @@ pub(in crate::bus) enum Mode<'a> {
 
 pub(super) async fn prepare(
     account: &LocalBusAccountState,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     c: &Carrier,
     thread: &Value,
     mode: Mode<'_>,
 ) -> Result<Vec<SealedDelivery>, SdkError> {
     let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let mut own_targets = own_targets(account, &engine.config).await?;
+    let mut own_targets = own_targets(account, engine.config()).await?;
     let mut group_plan = None;
     let mut peers = Vec::new();
     if !matches!(mode, Mode::Own) {
@@ -163,12 +167,12 @@ pub(super) async fn prepare(
                     &c.conversation_id,
                     &c.message_id,
                     group,
-                    &engine.config,
+                    engine.config(),
                 )
                 .await?,
             );
         } else {
-            peers = task_direct_targets(account, &engine.config, thread).await?;
+            peers = task_direct_targets(account, engine.config(), thread).await?;
         }
     }
     let intent = matches!(mode, Mode::Event)
@@ -302,7 +306,7 @@ fn own_payloads(
 }
 pub(in crate::bus) async fn seal(
     account: &LocalBusAccountState,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     target: &Target,
     conversation: &str,
     body: &[u8],
@@ -346,7 +350,7 @@ pub(in crate::bus) async fn seal(
         account.client.seal_routed_as(engine, &message, body, kind).await?
     };
     message.encrypted_body = serde_json::to_vec(&sealed)?;
-    let envelope = crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?;
+    let envelope = crate::dm::gateway_direct_message_envelope(engine.config(), &message, None)?;
     Ok(SealedDelivery {
         envelope,
         federation: target.federation.clone().map(|route| Destination {
@@ -472,6 +476,7 @@ async fn drain_forwards(account: &mut LocalBusAccountState, now: i64) -> Result<
     }
     Ok(sent)
 }
+#[cfg(test)]
 pub(in crate::bus) async fn send_control(
     account: &mut LocalBusAccountState,
     c: &Carrier,
@@ -488,13 +493,13 @@ pub(in crate::bus) async fn send_control(
     {
         return result;
     }
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = await_preparation(
         prepare(account, &mut engine, c, &thread, mode),
         "task confirmation preparation deferred",
     )
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     let Preparation::Ready(deliveries) = result? else {
         return Ok(Preparation::Deferred);
     };
@@ -530,6 +535,44 @@ async fn direct_targets_with_policy(
     bounded_manifest_worker: bool,
 ) -> Result<Vec<Target>, SdkError> {
     let client = &account.client;
+    let input = direct_target_input(account, thread)?;
+    let commitment = input.root.as_str();
+    let federation = input.federation;
+    let manifest = if let Some(prepared) = account.task_prepared_manifests.get(commitment) {
+        prepared.clone()
+    } else if account.task_prepared_only {
+        return Err(SdkError::TaskManifestWorkerCapacity);
+    } else if let Some(route) = &federation {
+        let url = route
+            .recipient_prekey_url
+            .as_deref()
+            .ok_or_else(|| invalid("task federated peer prekey URL missing"))?;
+        let manifest = if bounded_manifest_worker {
+            fetch_federated_manifest(url, commitment).await?
+        } else {
+            crate::client::contact::fetch_verified_device_manifest_from_url_async(
+                crate::client::contact::RemoteManifest { url, timeout: account.timeouts.http },
+                commitment,
+            )
+            .await?
+        };
+        client.persist_fetched_identity_directory(&manifest)?;
+        manifest
+    } else {
+        client.cache_verified_device_manifest(gateway, commitment, "task_peer").await?
+    };
+    direct_targets_from_manifest(account, thread, manifest)
+}
+pub(in crate::bus) struct DirectTargetInput {
+    pub root: String,
+    pub peer: String,
+    pub federation: Option<LocalBusFederationRoute>,
+}
+pub(in crate::bus) fn direct_target_input(
+    account: &LocalBusAccountState,
+    thread: &Value,
+) -> Result<DirectTargetInput, SdkError> {
+    let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let ids = thread["participants"]
         .as_array()
@@ -562,26 +605,19 @@ async fn direct_targets_with_policy(
         .as_object()
         .map(|_| serde_json::from_value(thread["direct_route"]["federation"].clone()))
         .transpose()?;
-    let manifest = if let Some(prepared) = account.task_prepared_manifests.get(commitment) {
-        prepared.clone()
-    } else if account.task_prepared_only {
-        return Err(SdkError::TaskManifestWorkerCapacity);
-    } else if let Some(route) = &federation {
-        let url = route
-            .recipient_prekey_url
-            .as_deref()
-            .ok_or_else(|| invalid("task federated peer prekey URL missing"))?;
-        let manifest = if bounded_manifest_worker {
-            fetch_federated_manifest(url, commitment).await?
-        } else {
-            crate::client::contact::fetch_verified_device_manifest_from_url(url, commitment)?
-        };
-        client.persist_fetched_identity_directory(&manifest)?;
-        manifest
-    } else {
-        client.cache_verified_device_manifest(gateway, commitment, "task_peer").await?
-    };
-    if manifest.principal_id != peers_ids[0] {
+    Ok(DirectTargetInput { root: commitment.to_owned(), peer: peers_ids[0].to_owned(), federation })
+}
+pub(in crate::bus) fn direct_targets_from_manifest(
+    account: &LocalBusAccountState,
+    thread: &Value,
+    manifest: SdkDeviceManifestResponse,
+) -> Result<Vec<Target>, SdkError> {
+    let input = direct_target_input(account, thread)?;
+    let client = &account.client;
+    if manifest.principal_commitment != input.root {
+        return Err(invalid("task peer root changed"));
+    }
+    if manifest.principal_id != input.peer {
         return Err(invalid("task peer principal changed"));
     }
     manifest
@@ -592,7 +628,7 @@ async fn direct_targets_with_policy(
                 identity: client.device_identity_for_root(&d.principal_commitment, &d.device_id)?,
                 device: d.device_id,
                 delivery: d.target_delivery_id,
-                federation: federation.clone(),
+                federation: input.federation.clone(),
                 own: false,
             })
         })
@@ -724,7 +760,6 @@ pub(super) async fn own_targets(
     gateway: &GatewaySessionConfig,
 ) -> Result<Vec<Target>, SdkError> {
     let client = &account.client;
-    let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let own = if let Some(prepared) =
         account.task_prepared_manifests.get(&account.principal_commitment)
     {
@@ -736,6 +771,14 @@ pub(super) async fn own_targets(
             .cache_verified_device_manifest(gateway, &account.principal_commitment, "task_own")
             .await?
     };
+    own_targets_from_manifest(account, own)
+}
+fn own_targets_from_manifest(
+    account: &LocalBusAccountState,
+    own: SdkDeviceManifestResponse,
+) -> Result<Vec<Target>, SdkError> {
+    let client = &account.client;
+    let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     if !own.devices.iter().any(|d| d.device_id == local.device_id) {
         return Err(invalid("task source device is not in the active manifest"));
     }
@@ -763,3 +806,5 @@ pub(in crate::bus) fn manifest_test_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
+
+pub(in crate::bus) mod prepared;

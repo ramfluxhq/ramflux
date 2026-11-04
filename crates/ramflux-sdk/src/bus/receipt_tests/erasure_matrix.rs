@@ -96,7 +96,7 @@ async fn case(own: bool, group: bool) -> TestResult {
         seed_own_pair(&source.client, &recipient.client, &a, &b)?;
     }
     let logical = "private-logical-group-message";
-    let mut sender = source.take_live_engine().await?;
+    let mut sender = source.session_client().await?;
     let message = a.message(&b, if group { logical } else { "kept-projection-id" });
     let entry = if group {
         let body = prepare_group(&source.client, &recipient.client, &a, &b)?;
@@ -120,7 +120,7 @@ async fn case(own: bool, group: bool) -> TestResult {
             )
             .await?
     };
-    let mut receiver = recipient.take_live_engine().await?;
+    let mut receiver = recipient.session_client().await?;
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
@@ -176,7 +176,7 @@ async fn case(own: bool, group: bool) -> TestResult {
 
 async fn quarantine_changed(
     recipient: &mut LocalBusAccountState,
-    receiver: &mut GatewaySessionEngine,
+    receiver: &mut impl crate::GatewaySessionAccess,
     pool: &ramflux_transport::RelayQuicPool,
     entry: &GatewayInboxEntry,
     device: &str,

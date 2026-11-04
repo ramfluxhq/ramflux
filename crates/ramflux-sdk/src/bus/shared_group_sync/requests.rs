@@ -14,7 +14,7 @@ fn active_key(id: &str) -> String {
         ramflux_protocol::hash_base64url("ramflux.group.courier.attempt.v1", id.as_bytes())
     )
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Attempt {
     id: String,
     packet: GroupControlPacket,
@@ -24,9 +24,11 @@ struct Attempt {
     federation: Option<LocalBusFederationRoute>,
     expires_at: i64,
 }
+#[cfg(test)]
 pub(in crate::bus) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     flush_with_clock(account, now_unix_timestamp).await
 }
+#[cfg(test)]
 pub(in crate::bus) async fn flush_with_clock(
     account: &mut LocalBusAccountState,
     mut clock: impl FnMut() -> i64,
@@ -73,6 +75,7 @@ pub(in crate::bus) async fn flush_with_clock(
     let Some((root, device)) = destination else { return Ok(0) };
     seal_and_send(account, &id, packet, &state, (root, device)).await
 }
+#[cfg(test)]
 async fn seal_and_send(
     account: &mut LocalBusAccountState,
     id: &str,
@@ -104,7 +107,7 @@ async fn seal_and_send(
         ttl: u32::try_from(expires_at.saturating_sub(now).clamp(1, 7 * 86400))
             .map_err(|_| SdkError::LocalBus("group courier TTL overflow".into()))?,
     };
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = async {
         let route = crate::client::routed::Route::group_control(packet.group());
         let bytes = serde_json::to_vec(&packet)?;
@@ -125,7 +128,7 @@ async fn seal_and_send(
             packet,
             root,
             device: device.device_id,
-            envelope: crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?,
+            envelope: crate::dm::gateway_direct_message_envelope(engine.config(), &message, None)?,
             federation,
             expires_at,
         };
@@ -133,9 +136,10 @@ async fn seal_and_send(
         send(&account.client, &mut engine, &attempt).await
     }
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
+#[cfg(test)]
 async fn destination(
     client: &RamfluxClient,
     gateway: &GatewaySessionConfig,
@@ -334,15 +338,17 @@ fn defer(
     }
     Ok(())
 }
+#[cfg(test)]
 async fn submit(account: &mut LocalBusAccountState, attempt: Attempt) -> Result<usize, SdkError> {
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = send(&account.client, &mut engine, &attempt).await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
+#[cfg(test)]
 async fn send(
     client: &RamfluxClient,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     attempt: &Attempt,
 ) -> Result<usize, SdkError> {
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -359,6 +365,9 @@ async fn send(
     })
     .await
     .map_err(|_| SdkError::InboundPending("group courier submit deadline".into()))??;
+    mark_sent(client, attempt)
+}
+fn mark_sent(client: &RamfluxClient, attempt: &Attempt) -> Result<usize, SdkError> {
     client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
         match &attempt.packet.body {
             GroupControlBody::Request { request, .. } => {
@@ -425,6 +434,7 @@ async fn send(
     Ok(1)
 }
 
+#[cfg(test)]
 async fn retry_allowed(
     client: &RamfluxClient,
     gateway: &GatewaySessionConfig,
@@ -467,6 +477,7 @@ async fn retry_allowed(
     }
 }
 
+#[cfg(test)]
 async fn process_incoming(account: &LocalBusAccountState, now: i64) -> Result<(), SdkError> {
     let client = &account.client;
     let own = client.owned_device_identity()?;
@@ -571,6 +582,7 @@ fn was_delivered(
     })
 }
 
+pub(super) mod background;
 #[cfg(test)]
 #[path = "request_maintenance_tests.rs"]
 mod maintenance_tests;

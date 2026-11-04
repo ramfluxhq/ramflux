@@ -38,12 +38,12 @@ async fn deliver(
     entry: &GatewayInboxEntry,
 ) -> Result<Delivery, SdkError> {
     let account = state.accounts.get_mut(who).ok_or_else(|| invalid("account"))?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = account
         .client
         .apply_routed_entry(&mut engine, &super::super::review::pool()?, entry, false)
         .await;
-    account.put_engine(engine);
+    account.install_test_session(engine);
     result
 }
 async fn message(state: &mut LocalBusDaemonState, text: &str) -> Result<(), SdkError> {
@@ -278,7 +278,7 @@ async fn contact02_first_message_drains_its_request_before_loading_the_ordinary_
     let mut state = state(&mut alice, &mut bob, &directory)?;
     {
         let source = state.accounts.get_mut("alice").ok_or_else(|| invalid("source"))?;
-        let mut engine = source.take_live_engine().await?;
+        let mut engine = source.session_client().await?;
         let config = engine.config.clone();
         source
             .client
@@ -300,7 +300,7 @@ async fn contact02_first_message_drains_its_request_before_loading_the_ordinary_
                 &mut engine,
             )
             .await?;
-        source.put_engine(engine);
+        source.install_test_session(engine);
     }
     assert!(
         frames(&directory)?.is_empty(),

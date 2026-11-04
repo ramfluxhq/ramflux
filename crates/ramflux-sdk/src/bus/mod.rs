@@ -7,12 +7,20 @@ mod actor;
 mod attachment_scheduler;
 mod backup_jobs;
 pub mod client;
+mod command_admission;
 mod connection;
+pub(crate) mod connection_manager;
 mod control_state;
 mod courier_cycle;
+pub(crate) mod couriers;
 mod creation_client;
 mod creation_confirm;
+#[cfg(test)]
+#[path = "tests/native_actor.rs"]
+pub(crate) mod native_actor;
 mod recovery;
+pub(crate) mod runtime_limits;
+mod transfer_slots;
 pub use creation_client::{
     LocalBusCreationClient, LocalBusPendingCreation, LocalBusPendingRecovery,
     LocalBusRecoveryClient,
@@ -32,6 +40,8 @@ mod journal;
 mod lifecycle;
 mod message_projection;
 mod metadata;
+mod method_table;
+mod mutation_intent;
 mod mutations;
 mod native_account;
 mod networking_events;
@@ -67,7 +77,7 @@ mod transport_security_tests;
 
 mod own_contact_backfill;
 
-mod contact_backpressure;
+pub(crate) mod contact_backpressure;
 
 #[cfg(test)]
 pub(crate) use readers::test_account_reader_request;

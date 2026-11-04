@@ -51,7 +51,10 @@ pub(crate) async fn send(
     let delivery = if failure.is_some() { "failed" } else { "submitted" };
     account.client.set_surface_outgoing_state(carrier, delivery)?;
     account.client.set_surface_delivery_devices(carrier, &devices)?;
-    let own = copy_own(account, carrier, group_epoch).await;
+    #[cfg(test)]
+    let own = copy_own_for_test(account, carrier, group_epoch).await;
+    #[cfg(not(test))]
+    let own = copy_own(account, carrier, group_epoch);
     let own_state = match own {
         Ok(state) => state,
         Err(error) => {
@@ -81,12 +84,12 @@ async fn send_direct(
     let mut devices = Vec::new();
     let mut failure = None;
     for (root, principal) in peer_commitments(account, carrier, thread)? {
-        let engine = account.take_live_engine().await?;
+        let engine = account.session_client().await?;
         let manifest = account
             .client
-            .cache_verified_device_manifest(&engine.config, &root, "surface_peer")
+            .cache_verified_device_manifest(engine.config(), &root, "surface_peer")
             .await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         let manifest = match manifest {
             Ok(manifest)
                 if !manifest.devices.is_empty()
@@ -126,7 +129,7 @@ async fn send_direct(
     }
     Ok((devices, failure))
 }
-async fn copy_own(
+fn copy_own(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,
     epoch: Option<u64>,
@@ -134,41 +137,19 @@ async fn copy_own(
     if !account.client.queue_surface_own_copy(carrier, epoch)? {
         return Ok("failed".into());
     }
-    super::super::own_device_copy::flush(account).await?;
+    if let Some(handle) = &account.connection {
+        handle.wake_couriers();
+    }
+
     super::super::own_device_copy::status(
         &account.client,
         &RamfluxClient::surface_timeline_id(carrier)?,
     )
 }
 
-pub(crate) async fn send_resync_reply(
-    account: &mut LocalBusAccountState,
-    reply: &crate::client::surface::ResyncReply,
-) -> Result<(), SdkError> {
-    account.client.validate_surface_resync_reply(reply)?;
-    let target = &reply.destination;
-    if target.expires_at <= now_unix_timestamp() {
-        return Err(invalid("surface resync reply expired"));
-    }
-    let control = account.client.surface_control_packet(
-        &reply.carrier,
-        crate::client::surface::ControlKind::Peer,
-        target.epoch,
-    )?;
-    let body = zeroize::Zeroizing::new(control.bytes()?);
-    let mut engine = account.take_live_engine().await?;
-    let result=async {
-        let request:LocalBusMessageSubmitRequest=serde_json::from_value(json!({"conversation_id":reply.carrier.conversation_id,"message_id":reply.carrier.message_id,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":engine.config.principal_id,"sender_id":engine.config.device_id,"recipient_device_id":target.device,"recipient_principal_commitment":target.root,"target_delivery_id":target.target,"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":600}))?;
-        let message=request.into_gateway_message_with_body(Vec::new());
-        submit_pair_control(&account.client,&mut engine,message,&body,target.group.as_deref()).await?;
-        Ok::<_,SdkError>(())
-    }.await;
-    account.put_engine(engine);
-    result
-}
 pub(super) async fn submit_pair_control(
     client: &RamfluxClient,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     mut message: GatewayDirectMessage,
     body: &[u8],
     group: Option<&str>,
@@ -178,7 +159,7 @@ pub(super) async fn submit_pair_control(
     let packet = client.seal_routed_as(engine, &message, body, route).await?;
     message.encrypted_body = serde_json::to_vec(&packet)?;
     engine
-        .submit_envelope(gateway_direct_message_envelope(&engine.config, &message, None)?)
+        .submit_envelope(gateway_direct_message_envelope(engine.config(), &message, None)?)
         .await?;
     Ok(())
 }
@@ -284,3 +265,17 @@ mod own_sent_message_tests;
 #[cfg(test)]
 #[path = "own_sent_availability_tests.rs"]
 mod own_sent_availability_tests;
+
+#[cfg(test)]
+async fn copy_own_for_test(
+    account: &mut LocalBusAccountState,
+    carrier: &Carrier,
+    epoch: Option<u64>,
+) -> Result<String, SdkError> {
+    copy_own(account, carrier, epoch)?;
+    super::super::own_device_copy::flush(account).await?;
+    super::super::own_device_copy::status(
+        &account.client,
+        &RamfluxClient::surface_timeline_id(carrier)?,
+    )
+}

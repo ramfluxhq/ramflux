@@ -98,17 +98,11 @@ async fn dispatch_push_route_set(
         None => PUSH_ROUTE_CLEAR_PENDING.to_owned(),
     };
     account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, &stored)?;
-    // Update the live engine before any liveness check, so it can never re-send the old route.
-    for config in std::iter::once(&mut account.gateway_config)
-        .chain(account.engine.as_mut().map(|engine| &mut engine.config))
-    {
-        config.push_route.clone_from(&body.registration);
-        config.push_route_clear_pending = cleared;
-    }
-    account.ensure_gateway_live().await?;
-    let engine = account.engine.as_mut().ok_or(SdkError::GatewaySessionNotEstablished)?;
-    // A null route sends an explicit deregistration, so the node stops waking the old token.
+    account.gateway_config.push_route.clone_from(&body.registration);
+    account.gateway_config.push_route_clear_pending = cleared;
+    let mut engine = account.session_client().await?;
     let outcome = engine.set_push_route(body.registration).await;
+    account.apply_session_metadata(engine);
     account.persist_push_route_seq();
     let expires_at = outcome?;
     if cleared {
@@ -209,8 +203,14 @@ async fn dispatch_device_activate(
     // C2 intentionally keeps gateway mesh re-join/session-resume tokens out of device activation.
     // Fresh-session-per-connect already resumes delivery through durable gateway cursors; re-join
     // tokens are a transport optimization and will be handled in a dedicated slice.
-    let engine = account.client.connect_gateway_session(gateway).await?;
-    account.put_engine(engine);
+    if let Some(previous) = account.connection.take() {
+        previous
+            .stop_with_reason(super::super::connection_manager::DisconnectReason::Restart)
+            .await;
+    }
+    account.gateway_config = gateway;
+    account.start_connection()?;
+    account.ensure_gateway_live().await?;
     update_manifest_for_activated_device(&mut manifest, &body, device_epoch, endpoint);
     write_local_bus_account_manifest(&data_root, &manifest)?;
     let devices = manifest.devices.clone();
@@ -273,7 +273,7 @@ async fn dispatch_device_sync_export(
     let account_id = request_account_id(request)?.to_owned();
     let account = local_bus_account_mut(state, &account_id)?;
     let commitment = account.principal_commitment.clone();
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let pool = account.relay_quic_pool()?;
     let response = account
         .client
@@ -287,7 +287,7 @@ async fn dispatch_device_sync_export(
             body.chunk_size.unwrap_or(64 * 1024),
         )
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     Ok(local_bus_ok(serde_json::to_value(response?)?))
 }
 
@@ -300,7 +300,7 @@ async fn dispatch_device_sync_import(
     let account = local_bus_account_mut(state, &account_id)?;
     let commitment = account.principal_commitment.clone();
     let envelope: SdkOwnDeviceSyncEnvelope = serde_json::from_value(body.envelope)?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let pool = account.relay_quic_pool()?;
     let response = account
         .client
@@ -312,7 +312,7 @@ async fn dispatch_device_sync_import(
             body.relay_service_key_base64,
         )
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     Ok(local_bus_ok(serde_json::to_value(response?)?))
 }
 

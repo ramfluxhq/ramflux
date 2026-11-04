@@ -107,7 +107,7 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
         seed_existing_message(&owner.client, logical)?;
     }
     let captured = Arc::new(Mutex::new(Vec::new()));
-    sibling.put_engine(GatewaySessionEngine::with_test_transport(
+    sibling.install_test_session(GatewaySessionEngine::with_test_transport(
         sibling_config,
         Box::new(super::fixture::RecordingGateway::new(captured.clone())),
     ));

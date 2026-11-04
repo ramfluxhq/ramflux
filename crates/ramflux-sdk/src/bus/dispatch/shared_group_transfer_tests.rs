@@ -116,8 +116,10 @@ impl Rig {
             config = config.with_account_identity(&account.client)?;
             account.gateway_config = config.clone();
             account.target_delivery_id = config.target_delivery_id.clone();
-            account
-                .put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+            account.install_test_session(GatewaySessionEngine::with_test_transport(
+                config,
+                Box::new(gateway),
+            ));
         }
         Ok(())
     }
@@ -233,7 +235,7 @@ async fn r6_shared_group_stale_laptop_gets_signed_refusal_and_reissues_without_u
     Box::pin(check_handover(true)).await
 }
 async fn check_handover(stale: bool) -> TestResult {
-    let mut rig = Rig::new().await?;
+    let mut rig = Box::pin(Rig::new()).await?;
     if stale {
         rig.phone.client.shared_group_change(
             "group",
@@ -339,7 +341,7 @@ async fn r6_stale_transfer_snapshot_returns_typed_error_and_persists_signed_refu
     Box::pin(stale_snapshot()).await
 }
 async fn stale_snapshot() -> TestResult {
-    let mut rig = Rig::new().await?;
+    let mut rig = Box::pin(Rig::new()).await?;
     let base = rig.laptop.client.account_db()?.shared_group_state("group")?.ok_or("base")?;
     // Model a stale/malicious issuer bypassing the honest SDK's freshness gate.
     let acceptance = ramflux_crypto::accept_group_transfer(
@@ -374,7 +376,7 @@ async fn stale_snapshot() -> TestResult {
         &rig.phone.target_delivery_id,
         ramflux_protocol::GroupStateChange::SetName { name: "current head".into() },
     )?;
-    let mut engine = rig.laptop.take_live_engine().await?;
+    let mut engine = rig.laptop.session_client().await?;
     let mut message = GatewayDirectMessage {
         conversation_id: "group-thread".into(),
         message_id: "stale-transfer".into(),
@@ -402,7 +404,7 @@ async fn stale_snapshot() -> TestResult {
             .await?,
     )?;
     let envelope = crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?;
-    rig.laptop.put_engine(engine);
+    rig.laptop.install_test_session(engine);
     let error = deliver(&mut rig.phone, envelope).await.err().ok_or("stale transfer accepted")?;
     let sdk = error.downcast_ref::<SdkError>().ok_or("typed SDK error missing")?;
     assert_eq!(crate::bus::io::local_bus_error_code(sdk), "transfer_requires_sync");

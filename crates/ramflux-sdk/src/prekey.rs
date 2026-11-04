@@ -7,7 +7,7 @@ use crate::prelude::*;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::ToSocketAddrs;
 
-const SDK_HTTP_TIMEOUT: Duration = Duration::from_mins(1);
+pub(crate) const SDK_HTTP_TIMEOUT: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct SdkPrekeyPublishRequest {
@@ -52,7 +52,8 @@ pub struct SdkPrekeyResponse {
 }
 
 mod manifest;
-pub(crate) use manifest::{SdkDeviceManifestEntry, SdkDeviceManifestResponse};
+pub(crate) use manifest::SdkDeviceManifestEntry;
+pub use manifest::SdkDeviceManifestResponse;
 
 pub fn identity_root_public_key_commitment(root_public_key: &str) -> Result<String, SdkError> {
     let root_public_key_bytes = ramflux_protocol::decode_base64url(root_public_key)
@@ -474,3 +475,5 @@ pub(crate) fn sdk_http_host_port(base_url: &str) -> Result<String, SdkError> {
         .ok_or_else(|| SdkError::LocalBus(format!("unsupported prekey URL: {base_url}")))?;
     Ok(rest.split('/').next().unwrap_or(rest).to_owned())
 }
+
+pub(crate) mod http_async;

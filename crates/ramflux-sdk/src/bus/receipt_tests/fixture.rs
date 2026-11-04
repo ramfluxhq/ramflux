@@ -349,7 +349,10 @@ impl GatewaySessionFrameSource for Gateway {
                     self.cursor = Some(cursor.clone());
                     GatewayServerFrame::Ack { cursor }
                 }
-                _ => GatewayServerFrame::Nack { reason: "unexpected receipt fixture frame".into() },
+                None => return std::future::pending().await,
+                Some(_) => {
+                    GatewayServerFrame::Nack { reason: "unexpected receipt fixture frame".into() }
+                }
             };
             serde_json::to_vec(&frame).map_err(|e| TransportError::Quic(e.to_string()))
         })

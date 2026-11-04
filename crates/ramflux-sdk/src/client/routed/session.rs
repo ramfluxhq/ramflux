@@ -3,7 +3,7 @@
 
 //! Durable device-pair sessions, including simultaneous bootstrap selection.
 use super::{
-    Deserialize, GatewayDirectMessage, GatewaySessionEngine, RamfluxClient, SdkDmEncryptedEnvelope,
+    Deserialize, GatewayDirectMessage, GatewaySessionAccess, RamfluxClient, SdkDmEncryptedEnvelope,
     SdkDmX3dhHeader, SdkError, Serialize, associated_data, dm_device_id_hash, invalid,
     prekey_bundle_hash,
 };
@@ -138,10 +138,10 @@ impl RamfluxClient {
     }
     pub(super) async fn send_pair_session(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
     ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>, [u8; 32]), SdkError> {
-        let local = self.local_device_identity(&engine.config.device_id)?;
+        let local = self.local_device_identity(&engine.config().device_id)?;
         self.require_pair_device_active(&local)?;
         let recipient = Self::qualified_recipient(message)?;
         let recipient = recipient.as_str();
@@ -161,7 +161,7 @@ impl RamfluxClient {
                 .is_err()
         {
             self.resolve_target_principal_commitment(
-                &engine.config,
+                engine.config(),
                 message.recipient_principal_commitment.as_deref(),
                 message
                     .recipient_device_id

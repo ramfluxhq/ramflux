@@ -24,6 +24,8 @@ struct Worker {
     path: PathBuf,
     transaction_mode: Mutex<Option<TrackedTransaction>>,
     checkpoints: std::sync::Arc<BackgroundCheckpoint>,
+    #[cfg(feature = "itest-work-budget")]
+    work_probe: Mutex<Option<crate::SqlWorkProbe>>,
     _account_writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
     sender: Option<SyncSender<Job>>,
     handle: Option<JoinHandle<()>>,
@@ -144,6 +146,8 @@ impl Connection {
                 path,
                 transaction_mode: Mutex::new(None),
                 checkpoints,
+                #[cfg(feature = "itest-work-budget")]
+                work_probe: Mutex::new(None),
                 _account_writer: writer,
                 sender: Some(sender),
                 handle: Some(worker),
@@ -183,6 +187,19 @@ impl Connection {
         }
     }
 
+    #[cfg(feature = "itest-work-budget")]
+    pub(crate) fn observe_work(&self) -> crate::SqlWorkProbe {
+        let probe = crate::SqlWorkProbe::default();
+        *self.inner.work_probe.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(probe.clone());
+        probe
+    }
+
+    #[cfg(feature = "itest-work-budget")]
+    pub(crate) fn work_probe(&self) -> Option<crate::SqlWorkProbe> {
+        self.inner.work_probe.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
     pub(crate) fn execute_batch(&self, sql: &str) -> Result<()> {
         let sql = sql.to_owned();
         self.call(move |db| db.execute_batch(&sql))
@@ -191,17 +208,30 @@ impl Connection {
     pub(crate) fn execute(&self, sql: &str, params: impl Parameters) -> Result<usize> {
         let sql = sql.to_owned();
         let values = params.values()?;
+        #[cfg(feature = "itest-work-budget")]
+        let probe = self.work_probe();
         self.call(move |db| {
             let mut statement = db.prepare_cached(&sql)?;
-            statement.execute(rusqlite::params_from_iter(values))
+            #[cfg(feature = "itest-work-budget")]
+            let committed = crate::database_work::committed_state_write(&sql, &values);
+            let result = statement.execute(rusqlite::params_from_iter(values));
+            #[cfg(feature = "itest-work-budget")]
+            if let Some(probe) = probe {
+                probe.record_write(&statement, committed, result.as_ref().copied().unwrap_or(0));
+            }
+            result
         })
     }
 
     fn rows(&self, sql: &str, params: impl Parameters) -> Result<Vec<Row>> {
         let sql = sql.to_owned();
         let values = params.values()?;
+        #[cfg(feature = "itest-work-budget")]
+        let probe = self.work_probe();
         self.call(move |db| {
             let mut statement = db.prepare(&sql)?;
+            #[cfg(feature = "itest-work-budget")]
+            let committed = crate::database_work::committed_state(&sql, &values);
             let columns = statement.column_count();
             let mut rows = statement.query(rusqlite::params_from_iter(values))?;
             let mut result = Vec::new();
@@ -209,6 +239,13 @@ impl Connection {
                 let values =
                     (0..columns).map(|index| row.get(index)).collect::<Result<Vec<Value>>>()?;
                 result.push(Row(values));
+            }
+            #[cfg(feature = "itest-work-budget")]
+            {
+                drop(rows);
+                if let Some(probe) = probe {
+                    probe.record_read(&statement, committed, result.len());
+                }
             }
             Ok(result)
         })

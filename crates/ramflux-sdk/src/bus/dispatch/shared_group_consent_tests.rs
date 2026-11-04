@@ -104,7 +104,7 @@ async fn r5_encrypted_contact_forward_and_message_preserve_consent_and_decline()
 }
 async fn seal(
     contact: &RamfluxClient,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl crate::GatewaySessionAccess,
     user: &RamfluxClient,
     body: &[u8],
     route: crate::client::routed::Route,
@@ -126,7 +126,7 @@ async fn seal(
     };
     message.encrypted_body =
         serde_json::to_vec(&contact.seal_routed_as(engine, &message, body, route).await?)?;
-    let envelope = crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?;
+    let envelope = crate::dm::gateway_direct_message_envelope(engine.config(), &message, None)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),

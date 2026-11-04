@@ -71,11 +71,11 @@ async fn forwarded_session_resume_checkpoint_clears_only_after_success()
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     engine.config.previous_session_id = Some("forwarded-session".into());
     engine.config.resume_token = Some("forwarded-resume".into());
     engine.config.last_seen_inbox_seq = 41;
-    account.retire_engine(engine)?;
+    account.retire_session(&engine)?;
     let checkpoint = LocalBusAccountState::GATEWAY_RESUME_CHECKPOINT;
     let mut config = account.gateway_config.clone();
     config.last_seen_inbox_seq = 50;

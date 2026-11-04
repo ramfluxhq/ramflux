@@ -132,14 +132,15 @@ pub use federation::{
     SdkFederatedSubmitResponse,
 };
 pub use gateway::{
-    GatewayAuthFrame, GatewayClientFrame, GatewayCursor, GatewayCustodyConfig,
+    GatewayAuthFrame, GatewayCallFuture, GatewayClientFrame, GatewayCursor, GatewayCustodyConfig,
     GatewayDirectMessage, GatewayInboxEntry, GatewayOpenFrame, GatewayOwnDeviceFanoutDelivery,
     GatewayOwnDeviceFanoutFrame, GatewayOwnDeviceFanoutResponse, GatewayPlaintextDelivery,
     GatewayPushProvider, GatewayPushRouteDeregistration, GatewayPushRouteDeregistrationFrame,
     GatewayPushRouteFrame, GatewayPushRouteRefusal, GatewayPushRouteRegistration,
-    GatewayQuicEndpointConfig, GatewayResumeFrame, GatewayServerFrame, GatewaySessionConfig,
-    GatewaySessionEngine, GatewaySessionEstablishedFrame, GatewaySessionState,
-    GatewaySessionTransportKind, GatewaySubmitFrame, GatewayTcpTlsEndpointConfig, PushRouteRetry,
+    GatewayQuicEndpointConfig, GatewayResumeFrame, GatewayServerFrame, GatewaySessionAccess,
+    GatewaySessionConfig, GatewaySessionEngine, GatewaySessionEstablishedFrame,
+    GatewaySessionState, GatewaySessionTransportKind, GatewaySubmitFrame,
+    GatewayTcpTlsEndpointConfig, PushRouteRetry,
 };
 pub use group::SdkGroupSenderKeyDistribution;
 pub use object::{OBJECT_PUT_PROTOCOL_VERSION, SdkObjectKeySlot, SdkObjectSharePackage};
@@ -162,3 +163,6 @@ pub use client::identity_authority::profile_read::VerifiedIdentityProfile;
 
 #[cfg(test)]
 mod storage_failure_fixture;
+
+pub use object::{SdkObjectRelayCapability, SdkRelayToken};
+pub use prekey::SdkDeviceManifestResponse;

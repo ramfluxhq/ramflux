@@ -9,12 +9,20 @@ use super::readers::AccountReaders;
 use crate::prelude::*;
 use std::sync::{Arc, Mutex as RoutingMutex};
 
+mod commands;
+mod connection;
+mod directory;
+pub(super) mod fetches;
+mod readers;
+pub(super) mod uploads;
+
 type ReaderSlot = Arc<RoutingMutex<Option<AccountReaders>>>;
 
 // Two five-second directory attempts plus local backfill staging.
 const BACKFILL_MINIMUM: Duration = Duration::from_secs(11);
 
 pub(super) struct Bootstrap {
+    pub timeouts: super::runtime_limits::RuntimeTimeouts,
     pub account_id: String,
     pub config: LocalBusConfig,
     pub nodes: crate::node::NodeStore,
@@ -22,22 +30,28 @@ pub(super) struct Bootstrap {
     pub events: mpsc::Sender<EventBatch>,
     pub initial: Option<AccountInitializer>,
     pub receiver: mpsc::Receiver<AccountCommand>,
+    pub lifecycle: mpsc::Receiver<AccountCommand>,
+    pub preempt: watch::Receiver<u64>,
     pub readers: ReaderSlot,
     pub shutdown: watch::Receiver<bool>,
     pub ready: std::sync::mpsc::SyncSender<()>,
 }
 
 struct AccountRuntime {
+    timeouts: super::runtime_limits::RuntimeTimeouts,
     id: String,
     state: LocalBusDaemonState,
     receiver: mpsc::Receiver<AccountCommand>,
+    lifecycle: mpsc::Receiver<AccountCommand>,
+    preempt: watch::Receiver<u64>,
     readers: ReaderSlot,
     events: mpsc::Sender<EventBatch>,
     shutdown: watch::Receiver<bool>,
     courier: Option<super::task_courier::TaskCourier>,
     courier_cycle: super::courier_cycle::Cycle,
-    networking_expiry_pending: bool,
-    networking_expiry_warned: bool,
+    transfers: uploads::Transfers,
+    connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
+    connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
     #[cfg(test)]
     courier_events: Option<mpsc::UnboundedSender<tests::CourierEvent>>,
 }
@@ -48,69 +62,89 @@ pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
         crate::custody::retry::set_thread_budget(budget);
     }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    LocalSet::new().block_on(&runtime, async move {
-        let Bootstrap {
-            account_id,
-            config,
-            nodes,
-            index,
-            events,
-            initial,
-            receiver,
-            readers,
-            shutdown,
-            ready,
-        } = bootstrap;
-        let initial = initial.map(|initialize| initialize(index.clone())).transpose()?;
-        let state = LocalBusDaemonState {
-            account_index: Some(index),
-            config,
-            nodes,
-            accounts: initial
-                .map(|account| BTreeMap::from([(account_id.clone(), account)]))
-                .unwrap_or_default(),
-            active_account_id: None,
-            attended_accounts: BTreeSet::new(),
-            subscribers: BTreeMap::new(),
-        };
-        let mut account = AccountRuntime {
-            id: account_id,
-            state,
-            receiver,
-            readers,
-            events,
-            shutdown,
-            courier: None,
-            courier_cycle: super::courier_cycle::Cycle::default(),
-            networking_expiry_pending: false,
-            networking_expiry_warned: false,
-            #[cfg(test)]
-            courier_events: None,
-        };
-        let result = Box::pin(account.serve(ready)).await;
-        account.stop_courier().await;
-        let request = LocalBusFrame::request(
-            "shutdown",
-            Some(account.id.clone()),
-            "account",
-            "account.flush",
-            serde_json::json!({}),
-        );
-        let flushed = account.publish(&request).await;
-        account.close_readers().await;
-        result.and(flushed)
-    })
+    LocalSet::new().block_on(&runtime, run_async(bootstrap))
+}
+
+pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
+    let Bootstrap {
+        timeouts,
+        account_id,
+        config,
+        nodes,
+        index,
+        events,
+        initial,
+        receiver,
+        lifecycle,
+        preempt,
+        readers,
+        shutdown,
+        ready,
+    } = bootstrap;
+    let initial = initial.map(|initialize| initialize(index.clone())).transpose()?;
+    let state = LocalBusDaemonState {
+        account_index: Some(index),
+        config,
+        nodes,
+        accounts: initial
+            .map(|account| BTreeMap::from([(account_id.clone(), account)]))
+            .unwrap_or_default(),
+        active_account_id: None,
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    };
+    let (connection_sender, connection_work) = mpsc::channel(2);
+    let mut account = AccountRuntime {
+        timeouts,
+        id: account_id,
+        state,
+        receiver,
+        lifecycle,
+        preempt,
+        readers,
+        events,
+        shutdown,
+        courier: None,
+        courier_cycle: super::courier_cycle::Cycle::default(),
+        transfers: uploads::Transfers::start(),
+        connection_sender,
+        connection_work,
+        #[cfg(test)]
+        courier_events: None,
+    };
+    let result = Box::pin(account.serve(ready)).await;
+    account.transfers.stop().await;
+    if let Some(state) = account.state.accounts.get(&account.id) {
+        let _ = state.client.recover_received_attachment_fetches();
+    }
+    account.stop_courier().await;
+    account.stop_connection().await;
+    let request = LocalBusFrame::request(
+        "shutdown",
+        Some(account.id.clone()),
+        "account",
+        "account.flush",
+        serde_json::json!({}),
+    );
+    let flushed = account.publish(&request).await;
+    account.close_readers().await;
+    result.and(flushed)
 }
 
 impl AccountRuntime {
     fn start_courier(&mut self) {
         if self.courier.is_none()
-            && let Some(account) = self.state.accounts.get_mut(&self.id)
+            && let Some(account) = self.state.accounts.get(&self.id)
             && super::task_courier_queue::networking_ready(account)
         {
-            let courier = super::task_courier::TaskCourier::start();
-            account.task_courier_wake = Some(courier.wake_sender());
+            let courier =
+                super::task_courier::TaskCourier::with_limits(self.timeouts.network_wait, 4);
             self.courier = Some(courier);
+        }
+        if let Some(courier) = &self.courier
+            && let Some(account) = self.state.accounts.get_mut(&self.id)
+        {
+            account.task_courier_wake = Some(courier.wake_sender());
         }
     }
 
@@ -123,7 +157,7 @@ impl AccountRuntime {
         }
     }
 
-    async fn apply_courier_outcome(
+    fn apply_courier_outcome(
         &mut self,
         outcome: super::task_courier::Outcome,
     ) -> Result<(), SdkError> {
@@ -160,17 +194,13 @@ impl AccountRuntime {
                 }
             }
             super::task_courier::Outcome::Item { item, preparation } => {
-                if let Some(account) = self.state.accounts.get_mut(&self.id)
-                    && self
-                        .courier_cycle
-                        .apply(&mut super::courier_cycle::Task {
-                            account,
-                            item: Some((item, preparation)),
-                        })
-                        .await?
-                    && let Some(courier) = &self.courier
+                if let Some(handle) = self
+                    .state
+                    .accounts
+                    .get(&self.id)
+                    .and_then(|account| account.connection.as_ref())
                 {
-                    courier.signal();
+                    handle.enqueue_task_delivery(item, preparation);
                 }
             }
             super::task_courier::Outcome::Finished => {}
@@ -178,62 +208,9 @@ impl AccountRuntime {
         Ok(())
     }
 
-    fn initialize_readers(&mut self) -> Result<(), SdkError> {
-        let missing = self.readers.lock().map_err(|_| stopped())?.is_none();
-        if missing && let Some(account) = self.state.accounts.get_mut(&self.id) {
-            account.client.object_store.set_cache_capacity(8);
-            super::control_state::trim(account);
-            super::read_model::initialize(account)?;
-            let db = account.client.account_db()?;
-            let path = local_bus_account_manifest_path(&self.state.config.data_root, &self.id);
-            let node_id = if account.client.born_v3_account.is_some() {
-                db.load_actor_state::<String>("account/node-id")?
-            } else {
-                super::sync_status::optional_manifest(&path).and_then(|manifest| manifest.node_id)
-            };
-            db.persist_actor_state("sync/node-id", &node_id)?;
-            let tick = db.journal_bounds()?.head_seq;
-            db.append_journal(
-                &format!("account:unlocked:{tick}"),
-                "account.state",
-                &serde_json::json!({"local_account_id":self.id,"state":"unlocked"}),
-                now_unix_timestamp(),
-                None,
-            )?;
-            let pool = AccountReaders::start(db, account.client.owned_device_identity().ok())?;
-            *self.readers.lock().map_err(|_| stopped())? = Some(pool);
-        }
-        Ok(())
-    }
-
-    async fn close_readers(&self) {
-        let pool = self.readers.lock().ok().and_then(|mut readers| readers.take());
-        if let Some(pool) = pool {
-            pool.stop().await;
-        }
-    }
-
-    async fn publish(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
-        if let Some(account) = self.state.accounts.get(&self.id) {
-            if let Some(pool) = self.readers.lock().map_err(|_| stopped())?.as_ref() {
-                pool.set_identity(account.client.owned_device_identity().ok())?;
-            }
-            // A deferred expiry retains runtime attribution when another publication retries it.
-            let expiry = self.networking_expiry_pending.then(|| self.networking_expiry_request());
-            super::events::publish(
-                &account.client,
-                &self.id,
-                request,
-                expiry.as_ref(),
-                &self.events,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         self.initialize_readers()?;
+        self.start_connection()?;
         self.start_courier();
         let _ = ready.send(());
         let restore = LocalBusFrame::request(
@@ -248,11 +225,27 @@ impl AccountRuntime {
             _ = shutdown.changed() => return Ok(()),
             result = self.publish(&restore) => result?,
         }
-        let mut schedule = super::sync_driver::Schedule::new()?;
+        let mut schedule = super::sync_driver::Schedule {
+            min: self.timeouts.receive_min,
+            max: self.timeouts.receive_max,
+            interval: self.timeouts.receive_min,
+        };
         let mut next = tokio::time::Instant::now() + schedule.min;
         loop {
+            self.reap_upload_jobs();
+            self.reap_fetch_jobs();
             let command = tokio::select! {
+                biased;
                 _ = self.shutdown.changed() => break,
+                command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
+                checkpoint=self.transfers.receive.recv()=>{if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}continue;},
+                work=self.connection_work.recv()=>{
+                    if let Some(work)=work {
+                        let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
+                        tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.apply_connection_work(work)=>result?}
+                    }
+                    continue;
+                },
                 command = self.receiver.recv() => command,
                 outcome = async {
                     match self.courier.as_mut() {
@@ -261,11 +254,12 @@ impl AccountRuntime {
                     }
                 } => {
                     if let Some(outcome) = outcome {
-                        self.apply_courier_outcome(outcome).await?;
+                        self.apply_courier_outcome(outcome)?;
                     } else {
                         tracing::warn!(account_id = %self.id, "task preparation courier stopped; restarting");
                         self.stop_courier().await;
                         tokio::time::sleep(Duration::from_millis(100)).await;
+                        self.start_connection()?;
                         self.start_courier();
                     }
                     continue;
@@ -296,56 +290,25 @@ impl AccountRuntime {
             let Some(command) = command else {
                 break;
             };
-            let sent = matches!(command.request.method.rsplit('.').next(), Some("send" | "submit"))
-                || command.request.method == "a2i.append"
-                || command.request.method.starts_with("message.receipt.");
             if Box::pin(self.apply(command)).await? {
                 break;
-            }
-            if sent {
-                next = tokio::time::Instant::now();
             }
         }
         Ok(())
     }
 
     async fn sync(&mut self) -> Result<bool, SdkError> {
-        self.refresh_networking_expiry().await;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };
-        let deadline = tokio::time::Instant::now() + super::courier_cycle::LIMIT;
-        let result = tokio::time::timeout_at(deadline, async {
-            let count = super::sync_driver::run(account).await?;
-            // Background-only discovery must not be introduced into explicit receive/read calls.
-            let backfilled = if deadline.saturating_duration_since(tokio::time::Instant::now())
-                >= BACKFILL_MINIMUM
-            {
-                match Box::pin(super::own_contact_backfill::drive(account)).await {
-                    Ok(count) => count,
-                    Err(error) => {
-                        tracing::debug!(%error, "own-device contact backfill deferred");
-                        0
-                    }
-                }
-            } else {
-                0
-            };
-            Ok::<_, SdkError>(count + backfilled)
-        })
-        .await;
-        let reason = match &result {
-            Ok(Err(error)) => Some(local_bus_error_code(error)),
-            Err(_) => Some("SyncTimeout"),
-            _ => None,
-        };
+        let result = super::sync_driver::maintain_local(account);
+        let reason = result.as_ref().err().map(local_bus_error_code);
         let (state, activity) = match result {
-            Ok(Ok(count)) => (if count == 0 { "idle" } else { "running" }, count > 0),
-            Ok(Err(error)) => {
-                tracing::debug!(%error,"account sync failed");
+            Ok(count) => (if count == 0 { "idle" } else { "running" }, count > 0),
+            Err(error) => {
+                tracing::debug!(%error,"account local maintenance failed");
                 ("error", false)
             }
-            Err(_) => ("error", false),
         };
         super::sync_status::record_with_reason(account, state, now_unix_timestamp(), reason)?;
         // Native admission may have completed on this sync pass after a local-only unlock.
@@ -359,180 +322,9 @@ impl AccountRuntime {
         );
         self.publish(&request).await?;
         // Publish message receipt before spending any transfer budget on its deferred objects.
-        let fetched = if let Some(account) = self.state.accounts.get_mut(&self.id) {
-            super::attachment_scheduler::run_next(account).await?
-        } else {
-            false
-        };
+        let fetched = self.start_next_fetch()?;
         self.publish(&request).await?;
         Ok(activity || fetched)
-    }
-
-    async fn cancel_native_unlock(&mut self) {
-        self.stop_courier().await;
-        self.close_readers().await;
-        self.state.accounts.remove(&self.id);
-    }
-
-    fn networking_expiry_request(&self) -> LocalBusFrame {
-        LocalBusFrame::request(
-            "networking-expiry",
-            Some(self.id.clone()),
-            "runtime",
-            "account.networking.expired",
-            serde_json::json!({"cause":"runtime"}),
-        )
-    }
-
-    async fn refresh_networking_expiry(&mut self) {
-        match self.publish_networking_expiry().await {
-            Ok(true) => self.networking_expiry_warned = false,
-            Ok(false) => {}
-            Err(error) => {
-                if !self.networking_expiry_warned {
-                    tracing::warn!(account_id = %self.id,
-                        error_code = local_bus_error_code(&error),
-                        "networking expiry publication deferred; account remains open");
-                    self.networking_expiry_warned = true;
-                }
-            }
-        }
-    }
-
-    async fn publish_networking_expiry(&mut self) -> Result<bool, SdkError> {
-        if let Some(account) = self.state.accounts.get(&self.id)
-            && super::networking_events::refresh_expired(account)?
-        {
-            self.networking_expiry_pending = true;
-        }
-        if !self.networking_expiry_pending {
-            return Ok(false);
-        }
-        // Project expiry before another attempt can replace the actor-state snapshot.
-        self.publish(&self.networking_expiry_request()).await?;
-        self.networking_expiry_pending = false;
-        Ok(true)
-    }
-
-    fn authorize_backup(&self, generation: i64) -> Result<(), SdkError> {
-        let account = local_bus_account(&self.state, &self.id)?;
-        if account.client.account_db()?.privacy_erasure_generation()? != generation {
-            return Err(SdkError::ObjectErased);
-        }
-        Ok(())
-    }
-
-    fn capture_backup(&self) -> Result<super::backup_jobs::CapturedAccount, SdkError> {
-        let account = local_bus_account(&self.state, &self.id)?;
-        let reader = account.client.account_db()?.open_backup_reader()?;
-        let identity = super::backup_jobs::capture_identity(
-            &account.client,
-            &self.state.config.data_root,
-            &self.id,
-        )?;
-        let erasure_generation = reader.privacy_erasure_generation()?;
-        Ok(super::backup_jobs::CapturedAccount {
-            reader,
-            identity,
-            erasure_generation,
-            actor: None,
-        })
-    }
-
-    async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
-        self.refresh_networking_expiry().await;
-        if let Some(backup) = command.private.take() {
-            match backup {
-                super::actor::PrivateCommand::NativeUnlock { passphrase, home_node_id, reply } => {
-                    if !reply.is_closed() {
-                        let result = super::native_account::unlock(
-                            &mut self.state,
-                            &self.id,
-                            passphrase,
-                            home_node_id,
-                        )
-                        .await;
-                        if reply.is_closed() {
-                            self.cancel_native_unlock().await;
-                            return Ok(false);
-                        }
-                        let result = match self.initialize_readers() {
-                            Ok(()) => result,
-                            Err(error) => Err(error),
-                        };
-                        self.start_courier();
-                        let result = match self.publish(&command.request).await {
-                            Ok(()) => result,
-                            Err(error) => Err(error),
-                        };
-                        let _ = reply.send(result);
-                    }
-                }
-                super::actor::PrivateCommand::AuthorizeBackup { generation, reply } => {
-                    let result = self.authorize_backup(generation);
-                    let _ = reply.send(result);
-                }
-                super::actor::PrivateCommand::Capture(reply) => {
-                    if !reply.is_closed() {
-                        let result = self.capture_backup();
-                        let _ = reply.send(result);
-                    }
-                }
-            }
-            return Ok(false);
-        }
-        if *self.shutdown.borrow() {
-            return Ok(true);
-        }
-        let mut reply = command.reply.take().ok_or_else(stopped)?;
-        if reply.is_closed() {
-            return Ok(false);
-        }
-        let locking = command.request.method == "account.lock";
-        let lifecycle = locking || command.request.method == "account.passphrase.rotate";
-        if lifecycle {
-            self.stop_courier().await;
-            self.close_readers().await;
-        }
-        let mut stopping = false;
-        let mut cancelled = false;
-        let result = if lifecycle {
-            super::mutations::execute(&mut self.state, &self.id, &command).await
-        } else {
-            tokio::select! {
-                biased;
-                _ = self.shutdown.changed() => { stopping = true; Err(stopped()) },
-                () = reply.closed() => { cancelled = true; Err(stopped()) },
-                result = super::mutations::execute(&mut self.state, &self.id, &command) => result,
-            }
-        };
-        if let Some(account) = self.state.accounts.get_mut(&self.id) {
-            super::control_state::trim(account);
-        }
-        if stopping {
-            return Ok(true);
-        }
-        if cancelled {
-            if let Err(error) = self.publish(&command.request).await {
-                tracing::warn!(account_id = %self.id, %error,
-                    "cancelled request publication deferred; account remains open");
-            }
-            return Ok(false);
-        }
-        let result = match self.initialize_readers() {
-            Ok(()) => result,
-            Err(error) => Err(error),
-        };
-        self.start_courier();
-        if let Some(courier) = &self.courier {
-            courier.signal();
-        }
-        let result = match self.publish(&command.request).await {
-            Ok(()) => result,
-            Err(error) => Err(error),
-        };
-        let _ = reply.send(result);
-        Ok(locking && self.state.accounts.is_empty())
     }
 }
 
@@ -543,7 +335,3 @@ fn stopped() -> SdkError {
 #[cfg(test)]
 #[path = "tests/task_courier.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "tests/networking_expiry.rs"]
-mod expiry_tests;

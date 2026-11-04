@@ -43,7 +43,7 @@ async fn held_inbound_pending_logs_one_info_line_with_sequence_kind_and_reason()
     fixture::seed_pair(&a, &b)?;
     let mail: Shared = Arc::default();
     let mut source = a.account(None, mail.clone())?;
-    let mut engine = source.take_live_engine().await?;
+    let mut engine = source.session_client().await?;
     source
         .client
         .send_plaintext_direct_message_without_franking(
@@ -53,7 +53,7 @@ async fn held_inbound_pending_logs_one_info_line_with_sequence_kind_and_reason()
             crate::client::routed::Route::direct(),
         )
         .await?;
-    source.put_engine(engine);
+    source.install_test_session(engine);
     let mut entry =
         mail.lock().map_err(|_| "mail lock")?.messages.first().cloned().ok_or("entry")?;
     entry.inbox_seq = 42;

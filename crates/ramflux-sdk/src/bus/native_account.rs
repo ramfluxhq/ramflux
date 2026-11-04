@@ -11,7 +11,7 @@ use ramflux_protocol::custody::CustodyRefusal;
 use std::{net::SocketAddr, path::PathBuf};
 use zeroize::Zeroizing;
 
-pub(super) async fn unlock(
+pub(super) fn unlock(
     state: &mut LocalBusDaemonState,
     id: &str,
     passphrase: Zeroizing<String>,
@@ -81,10 +81,8 @@ pub(super) async fn unlock(
     let mut account = LocalBusAccountState::disconnected(client, gateway, anchor);
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());
-    if let Err(error) = account.ensure_gateway_live().await {
-        let _ = error;
-        tracing::debug!("native account data unlocked; networking pending");
-    }
+    // The owning runtime starts networking after installing its bounded writer channel.
+    // This local unlock never starts an unbound manager or waits for admission.
     let result = response(&account)?;
     state.accounts.insert(id.into(), account);
     state.active_account_id = Some(id.into());
@@ -173,7 +171,7 @@ pub(super) fn status_at(
     Ok(status)
 }
 
-pub(super) async fn unlock_request(
+pub(super) fn unlock_request(
     state: &mut LocalBusDaemonState,
     id: &str,
     request: &crate::LocalBusFrame,
@@ -185,7 +183,7 @@ pub(super) async fn unlock_request(
         .and_then(|body| body.get("passphrase"))
         .and_then(serde_json::Value::as_str)
         .ok_or(SdkError::CustodySetupInvalid)?;
-    unlock(state, id, Zeroizing::new(passphrase.to_owned()), None).await
+    unlock(state, id, Zeroizing::new(passphrase.to_owned()), None)
 }
 
 pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Result<(), SdkError> {

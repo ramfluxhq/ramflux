@@ -58,9 +58,9 @@ pub(super) async fn maintain_lease(
         return claim_callee(account, next, now).await;
     }
     if next.row.state == "connecting" && next.receive_key.is_some() {
-        let mut engine = account.take_live_engine().await?;
+        let mut engine = account.session_client().await?;
         let result = engine.voice_lease(VoiceLeaseRequest::Allocate { scope: scope(next) }).await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         match result {
             Ok(VoiceLeaseResponse::Allocation { allocation }) => next.activate(allocation, now)?,
             Ok(VoiceLeaseResponse::Refused { reason }) => next.fail(reason, now)?,
@@ -73,10 +73,10 @@ pub(super) async fn maintain_lease(
         };
         #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
         super::refresh_barrier::wait().await?;
-        let mut engine = account.take_live_engine().await?;
+        let mut engine = account.session_client().await?;
         let result =
             engine.voice_lease(VoiceLeaseRequest::Renew { consent: Box::new(consent) }).await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         match result {
             Ok(VoiceLeaseResponse::Status { status }) => {
                 if let Some(allocation) = next.allocation.as_mut() {
@@ -130,10 +130,10 @@ async fn claim_callee(
     if next.row.state == "active" {
         super::refresh_barrier::wait().await?;
     }
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result =
         engine.voice_lease(VoiceLeaseRequest::Accept { consent: Box::new(consent.clone()) }).await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     match result {
         Ok(VoiceLeaseResponse::Allocation { allocation }) => {
             next.accept_lease(allocation, consent, now)?;

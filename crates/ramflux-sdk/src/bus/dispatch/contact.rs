@@ -23,18 +23,22 @@ pub(crate) async fn dispatch_contact_bus_request(
                 serde_json::from_value::<LocalBusContactFederatedRequest>(request.body.clone())
             {
                 let account = local_bus_account_mut(state, account_id)?;
-                let engine = account.take_live_engine().await?;
+                let engine = account.session_client().await?;
                 let link = account.client.establish_friend_link(
                     &body.link_id,
                     &body.requester_id,
                     &body.target_id,
                 );
-                let response = account.client.send_plaintext_federated_contact_event(
-                    &engine,
-                    "friend.accepted",
-                    &body,
-                );
-                account.put_engine(engine);
+                let response = account
+                    .client
+                    .send_plaintext_federated_contact_event_async(
+                        &engine,
+                        "friend.accepted",
+                        &body,
+                        account.timeouts.http,
+                    )
+                    .await;
+                account.apply_session_metadata(engine);
                 let link = link?;
                 let response = response?;
                 Ok(local_bus_ok(serde_json::json!({
@@ -49,13 +53,17 @@ pub(crate) async fn dispatch_contact_bus_request(
             let body: LocalBusContactFederatedRequest =
                 serde_json::from_value(request.body.clone())?;
             let account = local_bus_account_mut(state, account_id)?;
-            let engine = account.take_live_engine().await?;
-            let response = account.client.send_plaintext_federated_contact_event(
-                &engine,
-                "friend.requested",
-                &body,
-            );
-            account.put_engine(engine);
+            let engine = account.session_client().await?;
+            let response = account
+                .client
+                .send_plaintext_federated_contact_event_async(
+                    &engine,
+                    "friend.requested",
+                    &body,
+                    account.timeouts.http,
+                )
+                .await;
+            account.apply_session_metadata(engine);
             let response = response?;
             Ok(local_bus_ok(serde_json::to_value(response)?))
         }
@@ -115,12 +123,12 @@ async fn dispatch_contact_safety_number(
     }
     let body = contact_safety_request(request)?;
     let account = local_bus_account_mut(state, account_id)?;
-    let engine = account.take_live_engine().await?;
+    let engine = account.session_client().await?;
     let safety = account
         .client
         .contact_safety_number_via_gateway(&engine.config, &body.contact_identity_commitment)
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     let safety = safety?;
     Ok(local_bus_ok(serde_json::to_value(safety)?))
 }
@@ -135,12 +143,12 @@ async fn dispatch_contact_verify(
     }
     let account = local_bus_account_mut(state, account_id)?;
     let body = contact_safety_request(request)?;
-    let engine = account.take_live_engine().await?;
+    let engine = account.session_client().await?;
     let safety = account
         .client
         .contact_safety_number_via_gateway(&engine.config, &body.contact_identity_commitment)
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     let safety = safety?;
     let record = account.client.record_contact_safety_verified(
         &body.contact_identity_commitment,
@@ -164,12 +172,12 @@ async fn dispatch_contact_verification_status(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account = local_bus_account_mut(state, account_id)?;
     let body = contact_safety_request(request)?;
-    let engine = account.take_live_engine().await?;
+    let engine = account.session_client().await?;
     let safety = account
         .client
         .contact_safety_number_via_gateway(&engine.config, &body.contact_identity_commitment)
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     let safety = safety?;
     let status = account.client.contact_verification_status(&body.contact_identity_commitment)?;
     Ok(local_bus_ok(serde_json::json!({
@@ -240,7 +248,7 @@ async fn provisional_safety(
         return Err(crate::ContactReason::InvalidCard.into());
     }
     let account = local_bus_account_mut(state, id)?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let gateway = engine.config.clone();
     let result = async {
         let mut safety = account
@@ -276,6 +284,6 @@ async fn provisional_safety(
         Ok::<_, SdkError>(local_bus_ok(serde_json::to_value(safety)?))
     }
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }

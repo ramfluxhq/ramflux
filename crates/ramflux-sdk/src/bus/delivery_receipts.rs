@@ -10,6 +10,7 @@ const SCAN_CURSOR: &str = "delivery-receipt/scan-cursor";
 const ATTEMPTS: u32 = 8;
 const LIFETIME: i64 = 600;
 const GATEWAY_RETRY_AT: &str = "delivery-receipt/gateway-retry-at";
+#[cfg(test)]
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     let now = now_unix_timestamp();
     let db = account.client.account_db()?;
@@ -63,12 +64,12 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
         // Ownership stays outside the cancellable send future. A deadline cannot silently
         // drop a borrowed live engine and reconnect for every remaining queue entry.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        let result = match tokio::time::timeout_at(deadline, account.take_live_engine()).await {
+        let result = match tokio::time::timeout_at(deadline, account.session_client()).await {
             Ok(Ok(mut engine)) => {
                 let outcome =
                     tokio::time::timeout_at(deadline, send(account, &mut engine, &key, &mut work))
                         .await;
-                account.put_engine(engine);
+                account.apply_session_metadata(engine);
                 outcome
             }
             Ok(Err(error)) => Ok(Err(error)),
@@ -127,69 +128,21 @@ fn postpone(
     Ok(client.account_db()?.persist_actor_state(key, work)?)
 }
 
+#[cfg(test)]
 async fn send(
     account: &LocalBusAccountState,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     key: &str,
     work: &mut Work,
 ) -> Result<(), SdkError> {
-    let source = account.client.device_identity(&work.sender)?;
-    let receiver = account.client.owned_device_identity()?;
-    if work.receiver != receiver.storage_key() || receiver.device_id() != engine.config.device_id {
-        return Err(SdkError::InboundRejected("receipt receiving device changed".into()));
-    }
-    let device = account.client.trusted_device(&source)?;
-    if work.root.as_deref() != Some(source.root_commitment())
-        || device["principal_commitment"].as_str() != Some(source.root_commitment())
-    {
-        return Err(SdkError::InboundRejected("receipt sender root changed".into()));
-    }
+    let (mut message, body) = receipt_message(account, engine.config(), work)?;
     if work.packet.is_none() {
-        let target = device["target_delivery_id"]
-            .as_str()
-            .ok_or_else(|| SdkError::InboundPending("receipt sender route missing".into()))?;
-        let receipt =
-            crate::client::delivery_receipts::id(&work.conversation, &work.message, &receiver)?;
-        let event = SdkReceiptEventEnvelope {
-            schema: "ramflux.sdk.receipt_event.v1".into(),
-            version: 1,
-            receipt_id: receipt.clone(),
-            event_seq: u64::try_from(work.at).unwrap_or(0),
-            nonce: receipt.clone(),
-            reader_device_id: receiver.device_id().into(),
-            event: SdkReceiptEventBody::Delivered {
-                conversation_id: work.conversation.clone(),
-                message_id: work.wire_message.as_ref().unwrap_or(&work.message).clone(),
-                delivered_at: work.at,
-                receiver_device_id: receiver.device_id().into(),
-                scope: "e2ee_private".into(),
-                ttl_seconds: 300,
-            },
-        };
-        let mut message = GatewayDirectMessage {
-            conversation_id: work.conversation.clone(),
-            message_id: receipt.clone(),
-            envelope_id: format!("receipt_evt_{receipt}"),
-            source_principal_id: engine.config.principal_id.clone(),
-            sender_id: receiver.device_id().into(),
-            recipient_device_id: Some(source.device_id().into()),
-            recipient_principal_commitment: Some(source.root_commitment().into()),
-            target_delivery_id: target.into(),
-            encrypted_body: Vec::new(),
-            created_at: work.at,
-            ttl: u32::try_from(LIFETIME).unwrap_or(600),
-        };
         let sealed = account
             .client
-            .seal_routed_as(
-                engine,
-                &message,
-                &serde_json::to_vec(&event)?,
-                crate::client::routed::Route::receipt(),
-            )
+            .seal_routed_as(engine, &message, &body, crate::client::routed::Route::receipt())
             .await?;
         message.encrypted_body = serde_json::to_vec(&sealed)?;
-        work.packet = Some(gateway_direct_message_envelope(&engine.config, &message, None)?);
+        work.packet = Some(gateway_direct_message_envelope(engine.config(), &message, None)?);
         account.client.account_db()?.persist_actor_state(key, work)?;
     }
     let packet =
@@ -234,3 +187,62 @@ fn finish(client: &RamfluxClient, key: &str, work: &Work, state: &str) -> Result
 #[cfg(test)]
 #[path = "receipt_tests/mod.rs"]
 mod tests;
+
+fn receipt_message(
+    account: &LocalBusAccountState,
+    config: &GatewaySessionConfig,
+    work: &Work,
+) -> Result<(GatewayDirectMessage, Vec<u8>), SdkError> {
+    let source = account.client.device_identity(&work.sender)?;
+    let receiver = account.client.owned_device_identity()?;
+    if work.receiver != receiver.storage_key() || receiver.device_id() != config.device_id {
+        return Err(SdkError::InboundRejected("receipt receiving device changed".into()));
+    }
+    let device = account.client.trusted_device(&source)?;
+    if work.root.as_deref() != Some(source.root_commitment())
+        || device["principal_commitment"].as_str() != Some(source.root_commitment())
+    {
+        return Err(SdkError::InboundRejected("receipt sender root changed".into()));
+    }
+    let target = device["target_delivery_id"]
+        .as_str()
+        .ok_or_else(|| SdkError::InboundPending("receipt sender route missing".into()))?;
+    let receipt =
+        crate::client::delivery_receipts::id(&work.conversation, &work.message, &receiver)?;
+    let event = SdkReceiptEventEnvelope {
+        schema: "ramflux.sdk.receipt_event.v1".into(),
+        version: 1,
+        receipt_id: receipt.clone(),
+        event_seq: u64::try_from(work.at).unwrap_or(0),
+        nonce: receipt.clone(),
+        reader_device_id: receiver.device_id().into(),
+        event: SdkReceiptEventBody::Delivered {
+            conversation_id: work.conversation.clone(),
+            message_id: work.wire_message.as_ref().unwrap_or(&work.message).clone(),
+            delivered_at: work.at,
+            receiver_device_id: receiver.device_id().into(),
+            scope: "e2ee_private".into(),
+            ttl_seconds: 300,
+        },
+    };
+    let message = GatewayDirectMessage {
+        conversation_id: work.conversation.clone(),
+        message_id: receipt.clone(),
+        envelope_id: format!("receipt_evt_{receipt}"),
+        source_principal_id: config.principal_id.clone(),
+        sender_id: receiver.device_id().into(),
+        recipient_device_id: Some(source.device_id().into()),
+        recipient_principal_commitment: Some(source.root_commitment().into()),
+        target_delivery_id: target.into(),
+        encrypted_body: Vec::new(),
+        created_at: work.at,
+        ttl: u32::try_from(LIFETIME).unwrap_or(600),
+    };
+    Ok((message, serde_json::to_vec(&event)?))
+}
+
+mod background;
+pub(crate) use background::{ReceiptWork, apply as apply_background, run as run_background};
+
+#[cfg(test)]
+pub(crate) use background::test_hooks;

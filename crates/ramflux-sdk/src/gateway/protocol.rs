@@ -31,9 +31,11 @@ pub struct GatewayTcpTlsEndpointConfig {
     pub prekey_http_url: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GatewaySessionTransportKind {
     Auto,
+    #[serde(rename = "quic_quinn")]
     Quic,
     TcpTls,
 }

@@ -10,6 +10,30 @@ impl RamfluxClient {
         gateway: &GatewaySessionConfig,
         entry: &GatewayInboxEntry,
     ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+        let root = self.contact_candidate_manifest_request(entry)?;
+        let manifest =
+            crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
+        let own = self.accept_contact_candidate_manifest(entry, &manifest)?;
+        self.cache_verified_device_manifest(gateway, &own, "contact-request-self").await?;
+        Ok(manifest)
+    }
+
+    pub(crate) fn contact_candidate_manifest_request(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<String, SdkError> {
+        let root = self.contact_candidate_root(entry)?;
+        let db = self.account_db()?;
+        let now = now_unix_timestamp();
+        for (bucket, limit) in [(format!("bootstrap:{root}"), 32), (format!("inbound:{root}"), 4)] {
+            if !db.contact_request_budget_available(&bucket, limit, now)? {
+                return Err(invalid("contact requester rate limit exceeded"));
+            }
+        }
+        Ok(root)
+    }
+
+    fn contact_candidate_root(&self, entry: &GatewayInboxEntry) -> Result<String, SdkError> {
         self.maintain_contact_requests()?;
         if entry.envelope.encrypted_payload.len() > 262_144 {
             return Err(invalid("contact envelope exceeds its byte budget"));
@@ -37,24 +61,17 @@ impl RamfluxClient {
         {
             return Err(invalid("contact requests from this root are closed"));
         }
-        let now = now_unix_timestamp();
-        for (bucket, limit) in [(format!("bootstrap:{root}"), 32), (format!("inbound:{root}"), 4)] {
-            if !db.contact_request_budget_available(&bucket, limit, now)? {
-                return Err(invalid("contact requester rate limit exceeded"));
-            }
-        }
-        let manifest =
-            crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
-        let sender = manifest
-            .devices
-            .iter()
-            .find(|device| device.device_id == entry.envelope.source_device_id)
-            .ok_or_else(|| invalid("contact requester device is not current"))?;
-        crate::client::routed::verify_sender_record(
-            entry,
-            &serde_json::json!({
-            "principal_id":manifest.principal_id,"signing_public_key":sender.branch_public_key}),
-        )?;
+        Ok(root)
+    }
+
+    pub(crate) fn accept_contact_candidate_manifest(
+        &self,
+        entry: &GatewayInboxEntry,
+        manifest: &crate::prekey::SdkDeviceManifestResponse,
+    ) -> Result<String, SdkError> {
+        let root = self.contact_candidate_manifest_request(entry)?;
+        self.confirm_contact_candidate_manifest(entry, manifest)?;
+        let db = self.account_db()?;
         let now = now_unix_timestamp();
         // Global and account pressure defer before any charge, so redriving a held request never
         // spends the requester's own quota.
@@ -83,10 +100,29 @@ impl RamfluxClient {
                 "contact authentication budget exhausted".into(),
             ));
         }
-        let own = self.owned_device_identity()?;
-        self.cache_verified_device_manifest(gateway, own.root_commitment(), "contact-request-self")
-            .await?;
-        Ok(manifest)
+        Ok(self.owned_device_identity()?.root_commitment().to_owned())
+    }
+    /// Revalidate the candidate after its network phases without charging bootstrap twice.
+    pub(crate) fn confirm_contact_candidate_manifest(
+        &self,
+        entry: &GatewayInboxEntry,
+        manifest: &crate::prekey::SdkDeviceManifestResponse,
+    ) -> Result<(), SdkError> {
+        let root = self.contact_candidate_root(entry)?;
+        if manifest.principal_commitment != root {
+            return Err(invalid("contact requester manifest root mismatch"));
+        }
+        let sender = manifest
+            .devices
+            .iter()
+            .find(|device| device.device_id == entry.envelope.source_device_id)
+            .ok_or_else(|| invalid("contact requester device is not current"))?;
+        crate::client::routed::verify_sender_record(
+            entry,
+            &serde_json::json!({
+            "principal_id":manifest.principal_id,"signing_public_key":sender.branch_public_key}),
+        )?;
+        Ok(())
     }
     /// Read-only global and account-wide admission capacity. `root` adds the requester's own
     /// bucket and floor rows to the table-capacity estimate once it is authenticated.
