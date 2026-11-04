@@ -24,6 +24,7 @@ ALLOW = {
     ('account_db/backup_database.rs', 'enqueue_restore_events'): 'private restore staging database',
     ('account_db/backup_merge.rs', 'begin_message_merge'): 'private restore staging database',
     ('account_db/backup_merge.rs', 'merge_backup_mode'): 'private restore staging database',
+    ('account_db/backup_merge.rs', 'finish_merge'): 'private restore staging database',
     ('account_db/backup_merge.rs', 'archive_outbound'): 'private restore staging database',
     ('account_db/backup_native.rs', 'sanitize_native_backup'): 'private native archive snapshot',
 }
