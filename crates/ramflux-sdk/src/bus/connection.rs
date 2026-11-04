@@ -14,7 +14,7 @@ pub(super) async fn serve(
     std::fs::create_dir_all(&config.data_root)?;
     set_owner_only_dir_permissions(&config.data_root)?;
     let root_lease = super::data_root_lock::DataRootLock::acquire(&config.data_root)?;
-    crate::custody::reconcile_incomplete_markers(&config.data_root)?;
+    crate::custody::reconcile_incomplete_markers(&config.data_root, &root_lease)?;
     let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
     if let Some(parent) = config.socket_path.parent() {
         std::fs::create_dir_all(parent)?;

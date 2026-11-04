@@ -44,6 +44,8 @@ impl GroupOperation {
 pub enum SdkError {
     #[error("data root is in use by another daemon")]
     DataRootInUse,
+    #[error("custody authority is durably fork fenced")]
+    CustodyForkFenced,
     #[error("object erased")]
     ObjectErased,
     #[error("{}", ATTACHMENT_DELETED)]

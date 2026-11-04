@@ -146,7 +146,9 @@ async fn apply(
         return Err(SdkError::CustodySetupInvalid);
     }
     match request.method.as_str() {
-        "account.create" | "account.create.begin" => begin_native(request, config, ceremony).await,
+        "account.create" | "account.create.begin" => {
+            begin_native(request, config, ceremony, lease).await
+        }
         "account.custody.begin" => {
             *ceremony = None;
             let input: CreateInput = serde_json::from_value(std::mem::take(&mut request.body))
@@ -166,7 +168,15 @@ async fn apply(
             tokio::task::spawn_blocking(move || vault.preflight())
                 .await
                 .map_err(|_| SdkError::CustodyVaultUnavailable)??;
-            let pending = CreationCeremony::begin(&config.data_root, input, now()?)?;
+            let pending = CreationCeremony::begin_with_lease(
+                &config.data_root,
+                input,
+                now()?,
+                match lease {
+                    Some(lease) => lease,
+                    None => super::data_root_lock::DataRootLock::acquire(&config.data_root)?,
+                },
+            )?;
             let anchor = pending.account_anchor().into();
             let ceremony_id = pending.ceremony_id().into();
             let expires_in_ms = pending.expires_in_ms();
@@ -201,6 +211,7 @@ async fn begin_native(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
+    lease: Option<Arc<super::data_root_lock::DataRootLock>>,
 ) -> Result<ResultBody, SdkError> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -241,7 +252,7 @@ async fn begin_native(
         .await
         .map_err(|_| SdkError::CustodyVaultUnavailable)??;
     let pending = CreationCeremony::begin_account(
-        &config.data_root,
+        (&config.data_root, lease),
         display_name,
         input.principal_kind,
         input.custodian_account,

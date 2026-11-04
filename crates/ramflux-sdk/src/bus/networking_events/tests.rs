@@ -173,3 +173,51 @@ async fn custody_expired_hint_two_status_reads_log_once() -> TestResult {
     assert!(logs[0].contains("discarded_resets_at_unix"));
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn capacity_to_busy_same_hint_emits_networking_changed() -> TestResult {
+    let fixture = Fixture::new("capacity-busy-events").await?;
+    let now = crate::custody::network_now()?;
+    let mut account = LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config,
+        fixture.manifest.principal_commitment,
+    );
+    let _ = projected(&account)?;
+    let retry = ramflux_protocol::custody::RetryHint::new(
+        ramflux_protocol::custody::RetryScope::PreAuthSource,
+        300_000,
+    );
+    record_networking_at(
+        &mut account,
+        Some(&SdkError::CustodyAdmission {
+            code: ramflux_protocol::custody::CustodyRefusal::Capacity,
+            retry,
+        }),
+        now,
+    )?;
+    let capacity = projected(&account)?;
+    assert_eq!(capacity.len(), 1);
+    assert!(capacity[0]["networking_reason"]["remaining_ms"].is_number());
+    record_networking_at(
+        &mut account,
+        Some(&SdkError::CustodyAdmission {
+            code: ramflux_protocol::custody::CustodyRefusal::Busy,
+            retry,
+        }),
+        now,
+    )?;
+    let busy = projected(&account)?;
+    assert_eq!(busy.len(), 1);
+    assert!(busy[0]["networking_reason"]["remaining_ms"].is_null());
+    record_networking_at(
+        &mut account,
+        Some(&SdkError::CustodyAdmission {
+            code: ramflux_protocol::custody::CustodyRefusal::Busy,
+            retry,
+        }),
+        now,
+    )?;
+    assert_eq!(projected(&account)?, Vec::<Value>::new());
+    Ok(())
+}

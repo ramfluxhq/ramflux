@@ -87,6 +87,23 @@ pub struct BornAccount {
     authority_blocked: bool,
     networking_path: PathBuf,
 }
+pub(super) fn require_current_authority(
+    pins: &ramflux_crypto::custody::AuthorityPins,
+    record: &VerifiedRecord,
+) -> Result<(), SdkError> {
+    pins.require_current(record).map_err(|error| {
+        let body = &record.envelope().body;
+        let range = ramflux_protocol::custody::decode_epoch(body.device_set_epoch)
+            .ok()
+            .map(|epoch| epoch.0);
+        if range.is_some_and(|range| pins.conflict_evidence(&body.account_anchor, range).is_some())
+        {
+            SdkError::CustodyForkFenced
+        } else {
+            error.into()
+        }
+    })
+}
 impl BornAccount {
     pub(crate) fn group_primary(
         &self,
@@ -95,7 +112,7 @@ impl BornAccount {
         if self.branch_pending() || self.authority_blocked {
             return Err(SdkError::NetworkingPending);
         }
-        self.stored.pins.require_current(&self.verified)?;
+        require_current_authority(&self.stored.pins, &self.verified)?;
         let primary = vault.load_primary(&self.stored.primary_vault_ref)?;
         if primary.public_key()
             != self.record().body.master_certificate.body.self_signing_public_key
@@ -113,7 +130,7 @@ impl BornAccount {
         if self.branch_pending() {
             return Err(SdkError::NetworkingPending);
         }
-        self.stored.pins.require_current(&self.verified)?;
+        require_current_authority(&self.stored.pins, &self.verified)?;
         Ok(vault.load_primary(&self.stored.primary_vault_ref)?.sign_contact_card_v3(
             &self.verified,
             body,
@@ -237,7 +254,10 @@ pub(crate) fn account_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
     }
     Ok(directory(root, id)?.try_exists()?)
 }
-pub(crate) fn reconcile_incomplete_markers(root: &Path) -> Result<(), SdkError> {
+pub(crate) fn reconcile_incomplete_markers(
+    root: &Path,
+    _lease: &crate::bus::data_root_lock::DataRootLock,
+) -> Result<(), SdkError> {
     let parent = root.join("custody_accounts");
     if !parent.try_exists()? {
         return Ok(());
@@ -270,12 +290,22 @@ fn reconcile_marker(
     path: &Path,
     id: &str,
 ) -> Result<(), SdkError> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".authority-") && name.ends_with(".tmp") && entry.file_type()?.is_file()
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    fs::File::open(path)?.sync_all()?;
     match index.account(id) {
         Ok(_) => Ok(()),
         Err(ramflux_storage::StorageError::AccountNotFound(_))
             if !path.join("authority.json").try_exists()? =>
         {
-            fs::remove_dir_all(path)?;
+            fs::remove_dir(path)?;
             tracing::warn!(local_account_id=%id, reason_code="custody_orphan_marker_removed",
                 "removed custody marker without an account-index reservation");
             Ok(())
@@ -376,7 +406,7 @@ fn read_account(
         verify_record(&stored.record, now, stored.compacted_ids.as_deref(), human.as_ref())?;
     let authority_blocked = stored.pins.require_current(&verified).is_err();
     if require_current {
-        stored.pins.require_current(&verified)?;
+        require_current_authority(&stored.pins, &verified)?;
     }
     let account =
         BornAccount { stored, verified, authority_blocked, networking_path: directory(root, id)? };
@@ -403,7 +433,7 @@ fn load_human(root: &Path, id: &str, now: u64) -> Result<VerifiedRecord, SdkErro
     if stored.record.body.principal_kind != ramflux_protocol::PrincipalKind::Human {
         return Err(invalid());
     }
-    stored.pins.require_current(&verified)?;
+    require_current_authority(&stored.pins, &verified)?;
     Ok(verified)
 }
 fn require_account_binding(root: &Path, id: &str, anchor: &str) -> Result<(), SdkError> {
@@ -643,7 +673,7 @@ impl BornAccount {
         if device_id != self.local_device_id()? {
             return Err(invalid());
         }
-        self.stored.pins.require_current(&self.verified)?;
+        require_current_authority(&self.stored.pins, &self.verified)?;
         let entry = self
             .record()
             .body

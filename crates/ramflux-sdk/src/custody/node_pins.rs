@@ -203,9 +203,9 @@ impl NodePins {
         fs::rename(temp, path)?;
         fs::File::open(&self.root)?.sync_all()?;
         if matches!(outcome, PinOutcome::Fenced(_)) {
-            return Err(invalid());
+            return Err(SdkError::CustodyForkFenced);
         }
-        state.pins.require_current(verified)?;
+        super::store::require_current_authority(&state.pins, verified)?;
         Ok(())
     }
 }

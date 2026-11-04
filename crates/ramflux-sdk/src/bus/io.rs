@@ -93,6 +93,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
     }
     LocalBusErrorBody {
         details: match error {
+            SdkError::CustodyForkFenced => Some(Box::new(serde_json::json!({"retryable": false}))),
             SdkError::CustodyAdmission { retry, .. } => {
                 Some(Box::new(serde_json::json!({"retry": retry.clamped()})))
             }
@@ -155,6 +156,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     }
     match error {
         SdkError::DataRootInUse => "DataRootInUse",
+        SdkError::CustodyForkFenced => "CustodyForkFenced",
         SdkError::ObjectErased => "ObjectErased",
         SdkError::Storage(StorageError::ObjectIdentityConflict) => "ObjectIdentityConflict",
         SdkError::Storage(StorageError::ObjectOwnershipUnverified { .. }) => {

@@ -208,3 +208,38 @@ fn custody_restore_reservation_preserves_existing_index_row_and_wrapped_key() ->
     assert_eq!(vault.entry_count()?, 0);
     Ok(())
 }
+
+#[test]
+fn reconcile_reaps_stale_authority_temp_before_link() -> Result {
+    let root = Root::new()?;
+    let lease = crate::bus::data_root_lock::DataRootLock::acquire(&root.0)?;
+    let dir = reserve_account(&root.0, "interrupted", "anchor")?;
+    let stale = dir.join(".authority-crashed.tmp");
+    fs::write(&stale, b"partial authority")?;
+    fs::write(dir.join("unrelated"), b"keep")?;
+    super::super::reconcile_incomplete_markers(&root.0, &lease)?;
+    assert!(!stale.exists());
+    assert_eq!(fs::read(dir.join("unrelated"))?, b"keep");
+    assert!(!dir.join("authority.json").exists());
+    assert!(AccountIndex::open(&root.0)?.account("interrupted").is_ok());
+    Ok(())
+}
+#[test]
+fn reconcile_keeps_live_authority_and_credentials_after_link() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let (ceremony, answers) = prepared(&root.0, "published")?;
+    let account = ceremony.confirm(&answers, &vault, 100)?;
+    let dir = directory(&root.0, "published")?;
+    let bytes = fs::read(dir.join("authority.json"))?;
+    fs::hard_link(dir.join("authority.json"), dir.join(".authority-crashed.tmp"))?;
+    fs::write(dir.join("unrelated"), b"keep")?;
+    let lease = crate::bus::data_root_lock::DataRootLock::acquire(&root.0)?;
+    super::super::reconcile_incomplete_markers(&root.0, &lease)?;
+    assert!(!dir.join(".authority-crashed.tmp").exists());
+    assert_eq!(fs::read(dir.join("authority.json"))?, bytes);
+    assert_eq!(fs::read(dir.join("unrelated"))?, b"keep");
+    assert_eq!(vault.entry_count()?, 2);
+    account.credentials(&vault, "primary", 100)?;
+    Ok(())
+}

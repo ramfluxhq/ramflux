@@ -37,6 +37,7 @@ pub struct CreationCeremony {
     ceremony_id: String,
     expired: bool,
     root: PathBuf,
+    lease: std::sync::Arc<crate::bus::data_root_lock::DataRootLock>,
     input: CreateInput,
     phrase: Option<RecoveryPhrase>,
     anchor: String,
@@ -56,16 +57,30 @@ impl CreationCeremony {
     /// # Errors
     /// Rejects existing account ids, invalid names and unsupported custodians.
     pub fn begin(root: &Path, input: CreateInput, now: u64) -> Result<Self, SdkError> {
-        Self::prepare(root, input, false, None, now)
+        let lease = crate::bus::data_root_lock::DataRootLock::acquire(root)?;
+        Self::begin_with_lease(root, input, now, lease)
+    }
+    pub(crate) fn begin_with_lease(
+        root: &Path,
+        input: CreateInput,
+        now: u64,
+        lease: std::sync::Arc<crate::bus::data_root_lock::DataRootLock>,
+    ) -> Result<Self, SdkError> {
+        Self::prepare(root, input, false, None, now, lease)
     }
     pub(crate) fn begin_account(
-        root: &Path,
+        context: (&Path, Option<std::sync::Arc<crate::bus::data_root_lock::DataRootLock>>),
         display_name: String,
         kind: PrincipalKind,
         custodian_account_id: Option<String>,
         home_node_id: Option<String>,
         now: u64,
     ) -> Result<Self, SdkError> {
+        let (root, lease) = context;
+        let lease = match lease {
+            Some(lease) => lease,
+            None => crate::bus::data_root_lock::DataRootLock::acquire(root)?,
+        };
         if !matches!(kind, PrincipalKind::Human | PrincipalKind::HeadlessAi) {
             return Err(invalid());
         }
@@ -77,7 +92,7 @@ impl CreationCeremony {
             principal_kind: kind,
             custodian_account_id,
         };
-        Self::prepare(root, input, true, home_node_id, now)
+        Self::prepare(root, input, true, home_node_id, now, lease)
     }
     fn prepare(
         root: &Path,
@@ -85,6 +100,7 @@ impl CreationCeremony {
         allocate_principal: bool,
         home_node_id: Option<String>,
         now: u64,
+        lease: std::sync::Arc<crate::bus::data_root_lock::DataRootLock>,
     ) -> Result<Self, SdkError> {
         valid_id(&input.local_account_id)?;
         ramflux_protocol::validate_device_name(&input.device_id)?;
@@ -132,6 +148,7 @@ impl CreationCeremony {
             expired: false,
             commit_gate: None,
             root: root.into(),
+            lease,
             input,
             phrase: Some(phrase),
             anchor,
@@ -243,6 +260,7 @@ impl CreationCeremony {
         now: u64,
         data_secret: Option<&[u8]>,
     ) -> Result<BornAccount, SdkError> {
+        let _lease = std::sync::Arc::clone(&self.lease);
         self.live()?;
         let phrase = self.phrase.take().ok_or_else(invalid)?;
         let positions =
@@ -348,7 +366,7 @@ mod tests {
         let vault = crate::custody::tests::TestVault::default();
         let now = crate::custody::network_now()?;
         let mut pending = CreationCeremony::begin_account(
-            &root.0,
+            (&root.0, None),
             "Ordinary Human".into(),
             PrincipalKind::Human,
             None,
@@ -388,7 +406,7 @@ mod tests {
         let root = crate::custody::tests::Root::new()?;
         let vault = crate::custody::tests::TestVault::default();
         let mut pending = CreationCeremony::begin_account(
-            &root.0,
+            (&root.0, None),
             "Ordinary Human".into(),
             PrincipalKind::Human,
             None,
@@ -407,7 +425,7 @@ mod tests {
         assert!(!root.0.join("custody_accounts").join(id).exists());
         assert!(matches!(
             CreationCeremony::begin_account(
-                &root.0,
+                (&root.0, None),
                 "Machine".into(),
                 PrincipalKind::HeadlessAi,
                 None,

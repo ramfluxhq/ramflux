@@ -579,3 +579,73 @@ fn custody_persisted_reload_after_captured_reset_requires_the_output_filter() ->
     assert!(error.capacity_hint().is_none());
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn legacy_unhinted_capacity_persists_300s_shared_deadline_and_blocks_second_handle()
+-> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut first = create(&root.0, "legacy-capacity", &TestVault::default(), now)?;
+    first.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let error = SdkError::CustodyNetwork(CustodyRefusal::Capacity);
+    first.set_networking_error_at(
+        &root.0,
+        Some(AccountNetworkingReason::NodeBusy { retry_after_ms: 300_000, capacity: None }),
+        &error,
+        now,
+    )?;
+    let second = load_account(&root.0, "legacy-capacity", now)?;
+    assert_eq!(second.stored.capacity_retry_at, Some(now + 300));
+    assert_eq!(
+        second
+            .check_capacity_deadline(now + 299)
+            .err()
+            .ok_or("retry admitted early")?
+            .custody_refusal(),
+        Some(CustodyRefusal::Capacity)
+    );
+    tokio::time::advance(std::time::Duration::from_secs(300)).await;
+    load_account(&root.0, "legacy-capacity", now + 300)?.check_capacity_deadline(now + 300)?;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn daily_reset_capacity_then_busy_clears_shared_deadline() -> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut account = create(&root.0, "daily-busy", &TestVault::default(), now)?;
+    account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let hint = CapacityHint { scope: CapacityScope::PrefixDaily, resets_at_unix: now + 3600 };
+    let cause = reason(now + 3600, 300_000);
+    account.set_networking_error_at(
+        &root.0,
+        Some(cause.clone()),
+        &SdkError::CustodyCapacity { capacity: hint },
+        now,
+    )?;
+    assert_eq!(account.stored.capacity_retry_at, Some(now + 3600));
+    assert!(account.check_capacity_deadline(now).is_err());
+    let busy = SdkError::CustodyAdmission {
+        code: CustodyRefusal::Busy,
+        retry: ramflux_protocol::custody::RetryHint::new(
+            ramflux_protocol::custody::RetryScope::PreAuthSource,
+            300_000,
+        ),
+    };
+    account.set_networking_error_at(&root.0, Some(cause.clone()), &busy, now)?;
+    assert_eq!(account.stored.capacity_retry_at, None);
+    let path = directory(&root.0, "daily-busy")?.join("authority.json");
+    let bytes = fs::read(&path)?;
+    let saved: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert!(saved["capacity_retry_at"].is_null());
+    clock::begin_refusal(&account.networking_path);
+    for elapsed in [0, 1, 3601] {
+        let loaded = load_account(&root.0, "daily-busy", now + elapsed)?;
+        loaded.check_capacity_deadline(now + elapsed)?;
+        assert_eq!(loaded.networking_reason(), Some(&cause));
+        let view = loaded.networking_view(now + elapsed).ok_or("missing Busy")?;
+        assert!(view.remaining_ms.is_none());
+        assert_eq!(fs::read(&path)?, bytes);
+    }
+    Ok(())
+}

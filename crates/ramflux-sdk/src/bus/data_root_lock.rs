@@ -10,11 +10,11 @@ use std::{
     sync::Arc,
 };
 
-pub(super) struct DataRootLock {
+pub(crate) struct DataRootLock {
     _file: File,
 }
 impl DataRootLock {
-    pub(super) fn acquire(root: &Path) -> Result<Arc<Self>, SdkError> {
+    pub(crate) fn acquire(root: &Path) -> Result<Arc<Self>, SdkError> {
         // Never unlink this file: all daemon instances must lock the same inode.
         let file = OpenOptions::new()
             .read(true)
@@ -49,6 +49,47 @@ mod tests {
         assert!(DataRootLock::acquire(&root.0).is_err());
         drop(worker);
         assert!(DataRootLock::acquire(&root.0).is_ok());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ceremony_tests {
+    use super::*;
+    use crate::custody::{
+        CreationCeremony,
+        tests::{Root, TestVault, input, words},
+    };
+    #[test]
+    fn public_ceremony_refuses_while_daemon_holds_data_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = Root::new()?;
+        let daemon = DataRootLock::acquire(&root.0)?;
+        assert!(matches!(
+            CreationCeremony::begin(&root.0, input("blocked"), 100),
+            Err(SdkError::DataRootInUse)
+        ));
+        drop(daemon);
+        assert!(CreationCeremony::begin(&root.0, input("allowed"), 100).is_ok());
+        Ok(())
+    }
+    #[test]
+    fn public_ceremony_excludes_concurrent_reconciliation_until_confirmation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = Root::new()?;
+        let mut ceremony = CreationCeremony::begin(&root.0, input("creating"), 100)?;
+        let phrase = ceremony.show_once()?;
+        let answers = words(&phrase, ceremony.hidden_challenge()?)?;
+        let other_root = root.0.clone();
+        std::thread::spawn(move || {
+            assert!(matches!(DataRootLock::acquire(&other_root), Err(SdkError::DataRootInUse)));
+        })
+        .join()
+        .map_err(|_| "reconciler panicked")?;
+        ceremony.confirm(&answers, &TestVault::default(), 100)?;
+        let lease = DataRootLock::acquire(&root.0)?;
+        crate::custody::reconcile_incomplete_markers(&root.0, &lease)?;
+        assert!(crate::custody::load_account(&root.0, "creating", 100).is_ok());
         Ok(())
     }
 }

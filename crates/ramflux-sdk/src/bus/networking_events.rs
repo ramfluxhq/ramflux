@@ -35,6 +35,8 @@ fn cause_and_binding(body: &Value) -> Value {
     if key["networking_reason"]["kind"] == "node_busy"
         && let Some(cause) = key["networking_reason"].as_object_mut()
     {
+        let shared_deadline = cause.contains_key("remaining_ms");
+        cause.insert("shared_capacity_deadline".into(), Value::Bool(shared_deadline));
         // These describe the countdown at capture time; they are not a new cause.
         for field in ["retry_after_ms", "remaining_ms", "resets_at", "clamped"] {
             cause.remove(field);

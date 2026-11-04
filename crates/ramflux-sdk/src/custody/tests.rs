@@ -232,9 +232,9 @@ fn custody_preparation_does_not_persist_recovery_material() -> Result {
     let root = Root::new()?;
     let pending = CreationCeremony::begin(&root.0, input("prepared"), 100)?;
     assert!(!root.0.join("custody_accounts").exists());
-    assert_eq!(std::fs::read_dir(&root.0)?.count(), 0);
+    assert_eq!(std::fs::read_dir(&root.0)?.count(), 1);
     drop(pending);
-    assert_eq!(std::fs::read_dir(&root.0)?.count(), 0);
+    assert_eq!(std::fs::read_dir(&root.0)?.count(), 1);
     Ok(())
 }
 #[test]
@@ -246,9 +246,11 @@ fn custody_show_once_ordering_and_single_confirmation_attempt_are_enforced() -> 
     assert_eq!(phrase.split_whitespace().count(), 24);
     assert!(ceremony.show_once().is_err());
     assert!(ceremony.hidden_challenge().is_err());
+    drop(ceremony);
     let mut ceremony = CreationCeremony::begin(&root.0, input("wrong"), 100)?;
     assert!(ceremony.hidden_challenge().is_err());
     assert!(ceremony.show_once().is_err());
+    drop(ceremony);
     let mut ceremony = CreationCeremony::begin(&root.0, input("failed"), 100)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;

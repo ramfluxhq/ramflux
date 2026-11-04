@@ -44,3 +44,14 @@ or configuration failures to `InvalidArgument`.
 Repeated task-row warnings are limited to once per stable row key per hour in
 this daemon process. The warning cache has a fixed 4096-key bound; a full window
 suppresses new keys until space expires. Logging happens outside its mutex.
+
+`CustodyForkFenced` refuses durably fork-fenced custody authority. Its
+error details contain `retryable: false`, with no retry delay. Stop automatic
+retries and resolve authority through custody recovery. The C ABI maps it to
+`CustodyForkFenced` (22); existing numeric codes are unchanged.
+
+Public `CreationCeremony::begin` retains the daemon data-root lease through
+confirmation or drop and returns `DataRootInUse` while another owner holds it.
+The daemon shares its existing lease with its ceremonies. Startup reconciliation
+reaps account-local `.authority-*.tmp` regular files while holding that lease;
+live authority and vault credentials remain intact.

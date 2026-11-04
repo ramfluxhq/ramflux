@@ -46,6 +46,7 @@ pub enum RamfluxErrorCode {
     ObjectErased = 19,
     ObjectIdentityConflict = 20,
     ObjectOwnershipUnverified = 21,
+    CustodyForkFenced = 22,
 }
 
 /// Retryable account writer contention (18). Existing `StorageFailed` (8) remains
@@ -76,6 +77,7 @@ impl RamfluxErrorCode {
             Self::ObjectErased => "ObjectErased",
             Self::ObjectIdentityConflict => "ObjectIdentityConflict",
             Self::ObjectOwnershipUnverified => "ObjectOwnershipUnverified",
+            Self::CustodyForkFenced => "CustodyForkFenced",
             Self::RateLimited => "RateLimited",
             Self::Internal => "Internal",
             Self::PanicAborted => "PanicAborted",
@@ -833,6 +835,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
     let message = error.to_string();
     let code = match error {
         SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
+        SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
         SdkError::Storage(ramflux_storage::StorageError::ObjectIdentityConflict) => {
             RamfluxErrorCode::ObjectIdentityConflict
@@ -1060,4 +1063,13 @@ mod admission_tests {
             assert_eq!(map_sdk_error(&hinted).code, RamfluxErrorCode::AuthFailed);
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn custody_fork_fence_maps_to_c_abi_typed_refusal() {
+    let error = map_sdk_error(&SdkError::CustodyForkFenced);
+    assert_eq!(error.code, RamfluxErrorCode::CustodyForkFenced);
+    assert_eq!(error.code.name(), "CustodyForkFenced");
+    assert_eq!(error.code as i32, 22);
 }

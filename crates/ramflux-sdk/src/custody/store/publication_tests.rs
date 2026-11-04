@@ -198,3 +198,31 @@ async fn native_fenced_authority_preserves_data_unlock_without_granting_credenti
     assert!(reopened.identity_root.is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn durable_fork_fence_is_typed_and_not_retryable() -> TestResult {
+    let fixture = Fixture::new("typed-fence").await?;
+    let id = fixture.client.account_db()?.local_account_id.clone();
+    let mut conflict = authority(&fixture)?;
+    let primary = fixture.vault.primary_for_public_key(
+        &conflict.publication.record.body.master_certificate.body.self_signing_public_key,
+    )?;
+    let mut body = conflict.publication.record.body.clone();
+    body.profile.display_name = "Conflicting same epoch".into();
+    conflict.publication.record = primary.sign_record(body)?;
+    let now = crate::custody::network_now()?;
+    assert!(matches!(
+        accept_publication(&fixture.root.0, &id, &conflict, now)?,
+        PinOutcome::Fenced(_)
+    ));
+    let error = super::super::load_account(&fixture.root.0, &id, now)
+        .err()
+        .ok_or("fenced authority loaded")?;
+    assert!(matches!(error, SdkError::CustodyForkFenced));
+    let wire = crate::bus::io::local_bus_error_body(&error);
+    assert_eq!(wire.code, "CustodyForkFenced");
+    assert_eq!(wire.details.as_ref().ok_or("details")?["retryable"], false);
+    assert!(wire.retry_after_ms.is_none());
+    assert!(!crate::error_policy::approval_retryable(&error));
+    Ok(())
+}
