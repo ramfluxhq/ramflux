@@ -11,7 +11,6 @@ mod command_admission;
 mod connection;
 pub(crate) mod connection_manager;
 mod control_state;
-mod courier_cycle;
 pub(crate) mod couriers;
 mod creation_client;
 mod creation_confirm;
@@ -32,6 +31,7 @@ pub(crate) mod data_root_lock;
 mod delivery_receipts;
 pub mod dispatch;
 mod events;
+#[expect(dead_code, reason = "resume fence port follows in the next integration round")]
 mod gateway_resume;
 pub(crate) mod group_conversation;
 mod group_delivery;

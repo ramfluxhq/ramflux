@@ -29,6 +29,13 @@ pub(crate) struct OwnDeviceMessage {
     pub slots: Vec<OwnKeySlot>,
     pub signature: String,
     #[serde(skip)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "background context completion port follows in the next integration round"
+        )
+    )]
     pub(crate) context_delivery: Option<super::surface::OwnContextDelivery>,
 }
 impl OwnDeviceMessage {

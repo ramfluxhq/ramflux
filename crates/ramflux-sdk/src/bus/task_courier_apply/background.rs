@@ -273,11 +273,7 @@ async fn send(context: &SessionContext, writer: &Writer, mut plan: Plan) -> Resu
     };
     let deadline = context.task_deadline(plan.approval);
     for (envelope, route) in sealed {
-        tokio::time::timeout_at(deadline, federation::submit(context, envelope, route))
-            .await
-            .map_err(|_| {
-                SdkError::InboundPending("task delivery tick budget exhausted".into())
-            })??;
+        federation::submit_until(context, envelope, route, deadline, false).await?;
     }
     writer.apply(move |account| complete(account, &plan)).await
 }

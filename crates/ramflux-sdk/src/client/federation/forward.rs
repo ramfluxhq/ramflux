@@ -7,7 +7,7 @@ use super::{forward_request, *};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 
-fn slots() -> &'static Arc<Semaphore> {
+pub(super) fn slots() -> &'static Arc<Semaphore> {
     static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     SLOTS.get_or_init(|| Arc::new(Semaphore::new(4)))
 }

@@ -39,7 +39,7 @@ async fn submit(
 ) -> Result<(), SdkError> {
     let mut engine = account.session_client().await?;
     let result = if let Some(destination) = &delivery.federation {
-        match federated_envelope(&engine, delivery, destination) {
+        match federated_envelope(&engine.config, delivery, destination) {
             Ok(envelope) => {
                 tracing::info!(
                     route_decision = "remote_federation_forward",
@@ -70,7 +70,7 @@ async fn submit(
 }
 
 fn federated_envelope(
-    engine: &GatewaySessionEngine,
+    config: &GatewaySessionConfig,
     delivery: &Delivery,
     destination: &Destination,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
@@ -78,7 +78,7 @@ fn federated_envelope(
     let encrypted_body = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
         .map_err(|_| SdkError::LocalBus("invalid retained task ciphertext".into()))?;
     gateway_direct_message_envelope(
-        &engine.config,
+        config,
         &GatewayDirectMessage {
             conversation_id: destination.conversation_id.clone(),
             message_id: destination.message_id.clone(),
