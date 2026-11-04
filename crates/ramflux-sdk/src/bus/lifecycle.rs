@@ -23,8 +23,9 @@ where
 }
 
 pub(super) struct Receipt {
-    scope: String,
-    operation: String,
+    pub(super) scope: String,
+    pub(super) operation: String,
+    pub(super) fingerprint: String,
     pub cached: Option<serde_json::Value>,
 }
 
@@ -47,8 +48,7 @@ pub(super) fn handles(method: &str) -> bool {
     )
 }
 
-pub(super) async fn reserve(
-    index: AccountIndex,
+pub(super) async fn fingerprint(
     root: PathBuf,
     request: &LocalBusFrame,
 ) -> Result<Option<Receipt>, SdkError> {
@@ -89,8 +89,32 @@ pub(super) async fn reserve(
         let fingerprint = ramflux_protocol::encode_base64url(ramflux_crypto::blake3_keyed_derive(
             &vault, &intent,
         ));
-        let cached = index.reserve_supervisor_operation(&scope, &operation, &fingerprint)?;
-        Ok(Some(Receipt { scope, operation, cached }))
+        Ok(Some(Receipt { scope, operation, fingerprint, cached: None }))
+    })
+    .await
+    .map_err(|error| SdkError::LocalBus(format!("supervisor receipt worker failed: {error}")))?
+}
+
+pub(super) async fn reserve(
+    index: AccountIndex,
+    root: PathBuf,
+    request: &LocalBusFrame,
+) -> Result<Option<Receipt>, SdkError> {
+    reserve_fingerprint(index, fingerprint(root, request).await?).await
+}
+
+pub(super) async fn reserve_fingerprint(
+    index: AccountIndex,
+    receipt: Option<Receipt>,
+) -> Result<Option<Receipt>, SdkError> {
+    let Some(mut receipt) = receipt else { return Ok(None) };
+    spawn_blocking(move || {
+        receipt.cached = index.reserve_supervisor_operation(
+            &receipt.scope,
+            &receipt.operation,
+            &receipt.fingerprint,
+        )?;
+        Ok(Some(receipt))
     })
     .await
     .map_err(|error| SdkError::LocalBus(format!("supervisor receipt worker failed: {error}")))?
@@ -122,6 +146,8 @@ pub(super) async fn import_account_id(request: &LocalBusFrame) -> Result<String,
 #[derive(Default)]
 pub(crate) struct TestGate {
     pub before_creation: bool,
+    pub before_receipt: bool,
+    pub joined: tokio::sync::Notify,
     pub entered: tokio::sync::Notify,
     pub release: tokio::sync::Notify,
     pub completed: tokio::sync::Notify,
@@ -134,6 +160,7 @@ pub(super) async fn hold_claimed(config: &LocalBusConfig, command: &super::actor
     if command.request.method == "account.unlock"
         && let Some(gate) = &config.lifecycle_gate
         && !gate.before_creation
+        && !gate.before_receipt
     {
         gate.executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         gate.entered.notify_one();

@@ -41,6 +41,7 @@ pub(super) struct Supervisor {
     stop_owner: RefCell<Option<(u64, String)>>,
     lifecycle_tasks: RefCell<tokio::task::JoinSet<()>>,
     lifecycle_changed: tokio::sync::Notify,
+    lifecycle_registry: super::lifecycle_registry::Registry,
 }
 
 impl Supervisor {
@@ -71,6 +72,7 @@ impl Supervisor {
             stop_owner: RefCell::new(None),
             lifecycle_tasks: RefCell::new(tokio::task::JoinSet::new()),
             lifecycle_changed: tokio::sync::Notify::new(),
+            lifecycle_registry: super::lifecycle_registry::Registry::default(),
             events,
             event_receiver: RefCell::new(Some(event_receiver)),
             event_task: RefCell::new(None),
@@ -223,7 +225,7 @@ impl Supervisor {
 
     pub(super) async fn request(
         &self,
-        request: LocalBusFrame,
+        mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
         if !super::lifecycle::handles(&request.method) {
@@ -232,7 +234,7 @@ impl Supervisor {
         let keyed = request.operation_id.is_some()
             || request.body.get("idempotency_key").and_then(serde_json::Value::as_str).is_some();
         if !keyed {
-            return Box::pin(self.lifecycle_request(request, connection)).await;
+            return Box::pin(self.lifecycle_request(request, connection, None)).await;
         }
         self.ensure_request_allowed(&request)?;
         let owner = self
@@ -240,37 +242,59 @@ impl Supervisor {
             .borrow()
             .upgrade()
             .ok_or_else(|| SdkError::LocalBus("supervisor is stopping".to_owned()))?;
+        if request.method == "account.backup.import" {
+            request.account_id = Some(super::lifecycle::import_account_id(&request).await?);
+        }
+        let receipt = super::lifecycle::fingerprint(self.config.data_root.clone(), &request)
+            .await?
+            .ok_or_else(|| SdkError::LocalBus("missing lifecycle key".into()))?;
+        // Fingerprinting can yield; admission must be checked again before atomic ownership.
+        self.ensure_request_allowed(&request)?;
+        let (guard, receive) = match self.lifecycle_registry.admit(&receipt)? {
+            super::lifecycle_registry::Admission::Join(receive) => {
+                #[cfg(test)]
+                if let Some(gate) = &self.config.lifecycle_gate {
+                    gate.joined.notify_one();
+                }
+                let response = super::lifecycle_registry::wait(receive).await?;
+                return Ok(reply(response.body));
+            }
+            super::lifecycle_registry::Admission::Own(guard, receive) => (guard, receive),
+        };
         let connection = connection.clone();
-        let (send, receive) = oneshot::channel();
         {
             let mut tasks = self.lifecycle_tasks.borrow_mut();
             while tasks.try_join_next().is_some() {}
             tasks.spawn_local(super::command_admission::RETAIN_COMPLETION.scope((), async move {
                 let lease = owner.root_lease.borrow().clone();
                 let result = super::lifecycle::ROOT_LEASE
-                    .scope(lease, owner.lifecycle_request(request, &connection))
+                    .scope(lease, owner.lifecycle_request(request, &connection, Some(receipt)))
                     .await;
-                let _ = send.send(result);
+                guard.complete(result);
             }));
         }
         self.lifecycle_changed.notify_one();
-        receive.await.map_err(|_| SdkError::LocalBus("lifecycle task cancelled".to_owned()))?
+        super::lifecycle_registry::wait(receive).await
     }
 
     async fn lifecycle_request(
         &self,
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
+        prepared: Option<super::lifecycle::Receipt>,
     ) -> Result<ActorResponse, SdkError> {
-        if request.method == "account.backup.import" {
+        if request.method == "account.backup.import" && prepared.is_none() {
             request.account_id = Some(super::lifecycle::import_account_id(&request).await?);
         }
         if let Some(body) = super::custody_setup::guard_account(&self.config.data_root, &request)? {
             return Ok(reply(body));
         }
-        let receipt =
+        let receipt = if let Some(prepared) = prepared {
+            super::lifecycle::reserve_fingerprint(self.index.clone(), Some(prepared)).await?
+        } else {
             super::lifecycle::reserve(self.index.clone(), self.config.data_root.clone(), &request)
-                .await?;
+                .await?
+        };
         if let Some(body) = receipt.as_ref().and_then(|receipt| receipt.cached.clone()) {
             return Ok(reply(body));
         }
@@ -282,6 +306,13 @@ impl Supervisor {
         }
         let result = self.route(request, connection).await;
         if let (Some(receipt), Ok(response)) = (receipt, &result) {
+            #[cfg(test)]
+            if let Some(gate) = &self.config.lifecycle_gate
+                && gate.before_receipt
+            {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             super::lifecycle::complete(self.index.clone(), receipt, response.body.clone()).await?;
             #[cfg(test)]
             if let Some(gate) = &self.config.lifecycle_gate {

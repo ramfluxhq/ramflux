@@ -42,6 +42,8 @@ impl GroupOperation {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error(transparent)]
+    LifecycleShared(std::sync::Arc<SdkError>),
     #[error("data root is in use by another daemon")]
     DataRootInUse,
     #[error("custody authority is durably fork fenced")]

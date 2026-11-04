@@ -50,6 +50,7 @@ pub(super) struct AccountCommand {
     pub reply: Option<oneshot::Sender<Result<ActorResponse, SdkError>>>,
 }
 
+#[derive(Clone)]
 pub(super) struct ActorResponse {
     pub body: serde_json::Value,
     pub events: Vec<LocalBusFrame>,

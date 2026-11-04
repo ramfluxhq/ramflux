@@ -832,8 +832,8 @@ fn clear_optional_out_error(out_error_json: *mut *mut RamfluxBuffer) {
 }
 
 fn map_sdk_error(error: &SdkError) -> CAbiError {
-    let message = error.to_string();
     let code = match error {
+        SdkError::LifecycleShared(source) => return map_sdk_error(source),
         SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
         SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
@@ -931,7 +931,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::InboundPending(_)
         | SdkError::PairRecoveryRequired => RamfluxErrorCode::InvalidArgument,
     };
-    CAbiError::new(code, message)
+    CAbiError::new(code, error.to_string())
 }
 
 fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode {

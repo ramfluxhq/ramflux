@@ -44,6 +44,9 @@ pub(crate) fn local_bus_response(
 }
 
 pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> LocalBusFrame {
+    if let SdkError::LifecycleShared(source) = error {
+        return local_bus_error(request, source);
+    }
     LocalBusFrame {
         bus_protocol: "ramflux.local_bus.v1".to_owned(),
         frame_id: format!("frame_err_{}", request.request_id),
@@ -67,6 +70,9 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
 }
 
 pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
+    if let SdkError::LifecycleShared(source) = error {
+        return local_bus_error_body(source);
+    }
     if let SdkError::LocalBusRefused { code, message, body } = error {
         return LocalBusErrorBody {
             code: code.clone(),
@@ -149,6 +155,9 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 }
 
 pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
+    if let SdkError::LifecycleShared(source) = error {
+        return local_bus_error_code(source);
+    }
     if matches!(error,SdkError::LocalBusRefused{code,..} if code == "transfer_requires_sync") {
         return "transfer_requires_sync";
     }

@@ -1203,3 +1203,4 @@ mod native_busy;
 mod contact_verification;
 
 mod lifecycle;
+mod lifecycle_registry;
