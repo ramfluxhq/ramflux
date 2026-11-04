@@ -192,6 +192,8 @@ pub struct FederatedFriendRequestResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FederatedEnvelopeForwardRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_evidence: Option<crate::ForwardedMigrationEvidence>,
     #[serde(default = "default_federation_forward_signed_fields", flatten)]
     pub signed: ramflux_protocol::SignedFields,
     #[serde(default, skip_serializing)]

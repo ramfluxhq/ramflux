@@ -805,13 +805,15 @@ pub(crate) fn handle_s8_receive_envelope(
         source_node_id = request.source_node_id,
         target_node_id = request.target_node_id,
         local_router_endpoint_len = router.endpoint.len(),
-        path = "/mvp0/envelope",
+        path = "/mvp0/envelope/forwarded",
         envelope_id = request.envelope.envelope_id,
         target_delivery_id = request.envelope.target_delivery_id,
         "accepted federated envelope proof and delivering to local router"
     );
     let delivery: ramflux_node_core::EnvelopeSubmitResponse =
-        router_post_json(router, "/mvp0/envelope", &request.envelope)?;
+        crate::flow::post_forwarded_to_router(request, |path, body| {
+            router_post_json(router, path, body)
+        })?;
     tracing::info!(
         source_node_id = %request.source_node_id,
         target_node_id = %request.target_node_id,
@@ -821,7 +823,10 @@ pub(crate) fn handle_s8_receive_envelope(
         "delivered inbound federated envelope to local router"
     );
     Ok(ramflux_node_core::FederatedEnvelopeForwardResponse {
-        accepted: true,
+        accepted: matches!(
+            delivery.outcome.as_str(),
+            "online" | "offline_queued" | "duplicate_federated_forward"
+        ),
         source_node_id: request.source_node_id.clone(),
         target_node_id: request.target_node_id.clone(),
         delivery,

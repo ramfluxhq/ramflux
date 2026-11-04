@@ -455,8 +455,57 @@ pub(crate) fn handle_s8_receive_envelope(
         store,
         observability,
         InboundForwardTiming { now, total_started, attempt_lease_seconds },
-        || router_post_json(router, "/mvp0/envelope", &request.envelope),
+        || post_forwarded_to_router(request, |path, body| router_post_json(router, path, body)),
     )
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ForwardedRouterResponse {
+    accepted: bool,
+    retryable: bool,
+    delivery: Option<ramflux_node_core::EnvelopeSubmitResponse>,
+}
+
+pub(crate) fn post_forwarded_to_router<F>(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    post: F,
+) -> Result<ramflux_node_core::EnvelopeSubmitResponse, ramflux_node_core::NodeCoreError>
+where
+    F: FnOnce(
+        &str,
+        &ramflux_node_core::ForwardedEnvelopeRequest,
+    ) -> Result<ForwardedRouterResponse, ramflux_node_core::NodeCoreError>,
+{
+    let response = post(
+        "/mvp0/envelope/forwarded",
+        &ramflux_node_core::ForwardedEnvelopeRequest {
+            envelope: request.envelope.clone(),
+            migration_evidence: request.migration_evidence.clone(),
+        },
+    )?;
+    if response.accepted && !response.retryable {
+        return response
+            .delivery
+            .filter(|delivery| {
+                matches!(
+                    delivery.outcome.as_str(),
+                    "online" | "offline_queued" | "duplicate_federated_forward"
+                )
+            })
+            .ok_or_else(|| {
+                ramflux_node_core::NodeCoreError::ItestHttp(
+                    "forwarded router acceptance missing durable delivery".into(),
+                )
+            });
+    }
+    Ok(ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
+        outcome: if response.retryable { "forward_retryable" } else { "forward_rejected" }.into(),
+        target_delivery_id: request.envelope.target_delivery_id.clone(),
+        inbox_seq: None,
+        cursor: None,
+        nack: None,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -484,19 +533,25 @@ where
     tracing::info!(
         source_node_id = request.source_node_id,
         target_node_id = request.target_node_id,
-        path = "/mvp0/envelope",
+        path = "/mvp0/envelope/forwarded",
         envelope_id = request.envelope.envelope_id,
         target_delivery_id = request.envelope.target_delivery_id,
         "accepted federated envelope proof and delivering to local router"
     );
     let step_started = std::time::Instant::now();
-    let delivery = store.deliver_inbound_forward_once_with_lease(
-        &source,
-        request,
-        timing.now,
-        timing.attempt_lease_seconds,
-        deliver,
-    )?;
+    // Migration retries must reach the router's durable tuple receipt. A federation
+    // seen record cannot establish inbox activation or durable acceptance at B.
+    let delivery = if request.migration_evidence.is_some() {
+        Some(deliver()?)
+    } else {
+        store.deliver_inbound_forward_once_with_lease(
+            &source,
+            request,
+            timing.now,
+            timing.attempt_lease_seconds,
+            deliver,
+        )?
+    };
     let Some(delivery) = delivery else {
         tracing::info!(
             source_node_id = %request.source_node_id,
@@ -519,7 +574,10 @@ where
         "delivered inbound federated envelope to local router"
     );
     let response = ramflux_node_core::FederatedEnvelopeForwardResponse {
-        accepted: matches!(delivery.outcome.as_str(), "online" | "offline_queued"),
+        accepted: matches!(
+            delivery.outcome.as_str(),
+            "online" | "offline_queued" | "duplicate_federated_forward"
+        ),
         source_node_id: request.source_node_id.clone(),
         target_node_id: request.target_node_id.clone(),
         delivery,
@@ -834,6 +892,7 @@ mod tests {
     #[test]
     fn receive_target_node_must_match_local_node() {
         let request = ramflux_node_core::FederatedEnvelopeForwardRequest {
+            migration_evidence: None,
             signed: ramflux_node_core::default_federation_forward_signed_fields(),
             admin_token: String::new(),
             source_node_id: "node_a.example".to_owned(),
@@ -968,6 +1027,81 @@ mod tests {
         assert!(!duplicate.accepted);
         assert_eq!(duplicate.delivery.outcome, "duplicate_federated_forward");
         assert_eq!(router.resume("peer", 0, 10).len(), 1);
+        drop(store);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+    #[test]
+    fn inbound_forward_passes_signed_migration_evidence_and_never_reports_dormant_as_accepted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "rf-migration-carry-{}",
+            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+        ));
+        let store = ramflux_node_core::FederationRedbStore::open(&path)?;
+        let mut request = inbound_handler_request()?;
+        request.migration_evidence = Some(ramflux_node_core::ForwardedMigrationEvidence {
+            commit_proof: None,
+            retain_until: 1_760_000_500,
+            floors: vec![],
+        });
+        ramflux_node_core::sign_federated_envelope_forward(&mut request, [81; 32])?;
+        ramflux_node_core::verify_federated_envelope_forward(
+            &request,
+            &ramflux_crypto::public_key_base64url_from_seed([81; 32]),
+        )?;
+        let expected = serde_json::to_value(&request.migration_evidence)?;
+        for (wire, accepted, outcome) in [
+            (
+                serde_json::json!({"accepted":false,"retryable":false,"reason":"base_mismatch"}),
+                false,
+                "forward_rejected",
+            ),
+            (
+                serde_json::json!({"accepted":false,"retryable":true,"reason":"dormant_inbox"}),
+                false,
+                "forward_retryable",
+            ),
+            (
+                serde_json::json!({"accepted":true,"retryable":false,"delivery":{
+                    "outcome":"offline_queued","target_delivery_id":"peer","inbox_seq":1,
+                    "cursor":null,"nack":null
+                }}),
+                true,
+                "offline_queued",
+            ),
+            (
+                serde_json::json!({"accepted":true,"retryable":false,"delivery":{
+                    "outcome":"duplicate_federated_forward","target_delivery_id":"peer","inbox_seq":null,
+                    "cursor":null,"nack":null
+                }}),
+                true,
+                "duplicate_federated_forward",
+            ),
+        ] {
+            let result = handle_verified_s8_receive_envelope(
+                &request,
+                &store,
+                None,
+                inbound_timing(1_760_000_010),
+                || {
+                    post_forwarded_to_router(&request, |path, body| {
+                        assert_eq!(path, "/mvp0/envelope/forwarded");
+                        assert_eq!(
+                            serde_json::to_value(&body.migration_evidence).map_err(|e| {
+                                ramflux_node_core::NodeCoreError::ItestJson(e.to_string())
+                            })?,
+                            expected
+                        );
+                        assert_eq!(body.envelope, request.envelope);
+                        serde_json::from_value(wire)
+                            .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))
+                    })
+                },
+            )?;
+            assert_eq!(result.accepted, accepted);
+            assert_eq!(result.delivery.outcome, outcome);
+        }
         drop(store);
         std::fs::remove_file(path)?;
         Ok(())

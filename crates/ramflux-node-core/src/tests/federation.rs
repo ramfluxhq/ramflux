@@ -594,6 +594,7 @@ fn federation_forward_requires_pinned_true_source_key() -> Result<(), Box<dyn st
     })?;
 
     let mut forward = FederatedEnvelopeForwardRequest {
+        migration_evidence: None,
         signed: default_federation_forward_signed_fields(),
         admin_token: String::new(),
         source_node_id: "node_a.example".to_owned(),
@@ -663,6 +664,7 @@ pub(super) fn federation_forward_request(
     target_delivery_id: &str,
 ) -> FederatedEnvelopeForwardRequest {
     FederatedEnvelopeForwardRequest {
+        migration_evidence: None,
         signed: default_federation_forward_signed_fields(),
         admin_token: String::new(),
         source_node_id: "node_a.example".to_owned(),

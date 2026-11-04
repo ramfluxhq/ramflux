@@ -352,3 +352,162 @@ fn refused_forward_does_not_persist_sender_pins_before_valid_proof() -> TestResu
     assert!(s.b.store()?.foreign_custody_state(source.root_commitment())?.is_some());
     Ok(())
 }
+
+fn federation_request(
+    request: crate::ForwardedEnvelopeRequest,
+    forwarder: &str,
+) -> TestResult<crate::FederatedEnvelopeForwardRequest> {
+    let mut request = crate::FederatedEnvelopeForwardRequest {
+        signed: crate::default_federation_forward_signed_fields(),
+        admin_token: String::new(),
+        source_node_id: forwarder.into(),
+        target_node_id: "B".into(),
+        delivery_class: "opaque_event".into(),
+        required_capability: "opaque_delivery".into(),
+        envelope: request.envelope,
+        migration_evidence: request.migration_evidence,
+    };
+    crate::sign_federated_envelope_forward(&mut request, [81; 32])?;
+    Ok(request)
+}
+
+fn verified_forward(
+    request: &crate::FederatedEnvelopeForwardRequest,
+) -> TestResult<crate::ForwardedEnvelopeRequest> {
+    crate::verify_federated_envelope_forward(
+        request,
+        &ramflux_crypto::public_key_base64url_from_seed([81; 32]),
+    )?;
+    Ok(crate::ForwardedEnvelopeRequest {
+        envelope: request.envelope.clone(),
+        migration_evidence: request.migration_evidence.clone(),
+    })
+}
+
+#[test]
+fn altered_federation_migration_evidence_fails_request_signature_and_activates_nothing()
+-> TestResult {
+    let s = Scenario::prepared()?;
+    let op = s.seal()?;
+    let mut body = sender(&s.target)?;
+    body.migration_evidence = Some(crate::ForwardedMigrationEvidence {
+        commit_proof: Some(proof(&s, &op)?),
+        retain_until: i64::try_from(crate::now_unix_seconds())? + 600,
+        floors: vec![],
+    });
+    let valid = federation_request(body, "A")?;
+    let mut altered = valid.clone();
+    altered.migration_evidence.as_mut().ok_or("missing evidence")?.retain_until += 1;
+    let mut proof_altered = valid.clone();
+    proof_altered
+        .migration_evidence
+        .as_mut()
+        .ok_or("missing evidence")?
+        .commit_proof
+        .as_mut()
+        .ok_or("missing proof")?
+        .body
+        .destination_node = "C".into();
+    let mut floors_altered = valid.clone();
+    floors_altered
+        .migration_evidence
+        .as_mut()
+        .ok_or("missing evidence")?
+        .floors
+        .push(publication()?);
+    for invalid in [&altered, &proof_altered, &floors_altered] {
+        assert!(verified_forward(invalid).is_err());
+        assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
+        assert_eq!(s.b.core.resume(&s.target, 0, 10), []);
+    }
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            verified_forward(&valid)?,
+            crate::now_unix_seconds()
+        )?,
+        crate::RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn tampered_sender_signed_extension_on_forward_fails_v3_verification_at_b() -> TestResult {
+    let s = Scenario::prepared()?;
+    let op = s.seal()?;
+    let mut body = sender(&s.target)?;
+    body.migration_evidence = Some(crate::ForwardedMigrationEvidence {
+        commit_proof: Some(proof(&s, &op)?),
+        retain_until: i64::try_from(crate::now_unix_seconds())? + 600,
+        floors: vec![],
+    });
+    body.envelope.ext.ext.insert(crate::HOME_NODE_FORWARD_COUNT_EXT_KEY.into(), json!(1));
+    let mut tampered = body.clone();
+    tampered.envelope.ext.ext.insert("sender_signed_application".into(), json!("changed"));
+    let tampered = federation_request(tampered, "A")?;
+    assert!(
+        s.b.core
+            .submit_forwarded_envelope(
+                s.b.store()?,
+                Some(&s.b.node),
+                verified_forward(&tampered)?,
+                crate::now_unix_seconds()
+            )
+            .is_err()
+    );
+    assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
+    assert_eq!(s.b.core.resume(&s.target, 0, 10), []);
+    let valid = federation_request(body, "A")?;
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            verified_forward(&valid)?,
+            crate::now_unix_seconds()
+        )?,
+        crate::RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn backlog_forward_and_direct_retry_via_other_node_store_one_inbox_entry_after_restart()
+-> TestResult {
+    let mut s = Scenario::prepared()?;
+    let op = s.seal()?;
+    let mut body = sender(&s.target)?;
+    let original = serde_json::to_vec(&body.envelope)?;
+    body.migration_evidence = Some(crate::ForwardedMigrationEvidence {
+        commit_proof: Some(proof(&s, &op)?),
+        retain_until: i64::try_from(crate::now_unix_seconds())? + 600,
+        floors: vec![],
+    });
+    let backlog = federation_request(body.clone(), "A")?;
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            verified_forward(&backlog)?,
+            crate::now_unix_seconds()
+        )?,
+        crate::RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    s.b.restart()?;
+    body.migration_evidence = None;
+    let direct = federation_request(body, "C")?;
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            verified_forward(&direct)?,
+            crate::now_unix_seconds()
+        )?,
+        crate::RouterSubmitOutcome::DuplicateFederatedForward { .. }
+    ));
+    s.b.restart()?;
+    let entries = s.b.core.resume(&s.target, 0, 10);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(serde_json::to_vec(&entries[0].envelope)?, original);
+    Ok(())
+}

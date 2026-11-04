@@ -9,7 +9,7 @@ use crate::{
 use ramflux_protocol::home_migration::{CommitProof, Refusal, Signed};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardedMigrationEvidence {
     pub commit_proof: Option<Signed<CommitProof>>,

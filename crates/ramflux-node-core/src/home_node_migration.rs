@@ -55,6 +55,7 @@ impl HomeNodeMigrationForwardPlan {
         source_node_id: &str,
     ) -> crate::FederatedEnvelopeForwardRequest {
         crate::FederatedEnvelopeForwardRequest {
+            migration_evidence: None,
             signed: crate::default_federation_forward_signed_fields(),
             admin_token: String::new(),
             source_node_id: source_node_id.to_owned(),
