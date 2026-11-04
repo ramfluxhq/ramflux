@@ -510,6 +510,55 @@ fn hinted_busy_does_not_install_a_shared_capacity_deadline() -> TestResult {
     Ok(())
 }
 
+#[tokio::test(start_paused = true)]
+async fn hinted_busy_after_capacity_clears_shared_deadline_and_preserves_hint_view() -> TestResult {
+    let root = Root::new()?;
+    let now = capacity_hint::unix_now();
+    let mut account = create(&root.0, "busy-after-capacity", &TestVault::default(), now)?;
+    account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
+    let path = directory(&root.0, "busy-after-capacity")?.join("authority.json");
+    for retry_after_ms in [30_000, 300_000] {
+        let retry = ramflux_protocol::custody::RetryHint::new(
+            ramflux_protocol::custody::RetryScope::PreAuthSource,
+            retry_after_ms,
+        );
+        let cause = AccountNetworkingReason::NodeBusy {
+            retry_after_ms: u64::from(retry_after_ms),
+            capacity: None,
+        };
+        account.set_networking_error_at(
+            &root.0,
+            Some(cause.clone()),
+            &SdkError::CustodyAdmission { code: CustodyRefusal::Capacity, retry },
+            now,
+        )?;
+        assert_eq!(account.stored.capacity_retry_at, Some(now + u64::from(retry_after_ms) / 1000));
+        assert!(account.check_capacity_deadline(now).is_err());
+        // The same view shape must not hide a change from Capacity to hinted Busy.
+        account.set_networking_error_at(
+            &root.0,
+            Some(cause.clone()),
+            &SdkError::CustodyAdmission { code: CustodyRefusal::Busy, retry },
+            now,
+        )?;
+        assert_eq!(account.stored.capacity_retry_at, None);
+        let bytes = fs::read(&path)?;
+        let saved: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert!(saved.get("capacity_retry_at").is_none_or(serde_json::Value::is_null));
+        // Simulate another process, then read both before and after the old deadline.
+        clock::begin_refusal(&account.networking_path);
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        for elapsed in [0, 1, 301] {
+            let loaded = load_account(&root.0, "busy-after-capacity", now + elapsed)?;
+            loaded.check_capacity_deadline(now + elapsed)?;
+            let view = loaded.networking_view(now + elapsed).ok_or("Busy hint disappeared")?;
+            assert_eq!(serde_json::to_value(view)?, serde_json::to_value(&cause)?);
+            assert_eq!(fs::read(&path)?, bytes, "a view read rewrote the Busy hint");
+        }
+    }
+    Ok(())
+}
+
 // Mutation: drop only the final capacity.filter(reset > now) in clock::view.
 // The first read captures a valid hint; the second persisted load reuses that
 // anchor while the longer retry floor is still active after the reset.
