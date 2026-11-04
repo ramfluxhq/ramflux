@@ -40,6 +40,7 @@ pub(super) struct Supervisor {
     stop_response: watch::Sender<bool>,
     stop_owner: RefCell<Option<(u64, String)>>,
     lifecycle_tasks: RefCell<tokio::task::JoinSet<()>>,
+    lifecycle_changed: tokio::sync::Notify,
 }
 
 impl Supervisor {
@@ -69,6 +70,7 @@ impl Supervisor {
             stop_response,
             stop_owner: RefCell::new(None),
             lifecycle_tasks: RefCell::new(tokio::task::JoinSet::new()),
+            lifecycle_changed: tokio::sync::Notify::new(),
             events,
             event_receiver: RefCell::new(Some(event_receiver)),
             event_task: RefCell::new(None),
@@ -244,10 +246,14 @@ impl Supervisor {
             let mut tasks = self.lifecycle_tasks.borrow_mut();
             while tasks.try_join_next().is_some() {}
             tasks.spawn_local(super::command_admission::RETAIN_COMPLETION.scope((), async move {
-                let result = owner.lifecycle_request(request, &connection).await;
+                let lease = owner.root_lease.borrow().clone();
+                let result = super::lifecycle::ROOT_LEASE
+                    .scope(lease, owner.lifecycle_request(request, &connection))
+                    .await;
                 let _ = send.send(result);
             }));
         }
+        self.lifecycle_changed.notify_one();
         receive.await.map_err(|_| SdkError::LocalBus("lifecycle task cancelled".to_owned()))?
     }
 
@@ -365,6 +371,8 @@ impl Supervisor {
         let actor = if let Some(actor) = actor {
             actor
         } else if creating {
+            #[cfg(test)]
+            super::lifecycle::hold_before_creation(&self.config).await;
             let actor = AccountActor::start(
                 id.clone(),
                 self.config.clone(),
@@ -410,7 +418,7 @@ impl Supervisor {
         let root = self.config.data_root.clone();
         let id = id.to_owned();
         let index = self.index.clone();
-        let status = tokio::task::spawn_blocking(move || {
+        let status = super::lifecycle::spawn_blocking(move || {
             if !crate::custody::account_exists(&root, &id)? {
                 return Ok(None);
             }
@@ -452,7 +460,7 @@ impl Supervisor {
         let owner_for_export = owner.clone();
         let account_for_export = input.account.clone();
         let path_for_export = input.path.clone();
-        tokio::task::spawn_blocking(move || {
+        super::lifecycle::spawn_blocking(move || {
             crate::custody::export_agent_credentials(
                 &root,
                 &owner_for_export,
@@ -503,7 +511,7 @@ impl Supervisor {
     async fn account_list(&self) -> Result<ActorResponse, SdkError> {
         let index = self.index.clone();
         let root = self.config.data_root.clone();
-        let (active,known) = tokio::task::spawn_blocking(move || -> Result<_,SdkError> {
+        let (active,known) = super::lifecycle::spawn_blocking(move || -> Result<_,SdkError> {
             let mut known=Vec::new();
             for id in index.known_account_ids()? {
                 if crate::custody::account_exists(&root,&id)? { continue; }
@@ -591,7 +599,7 @@ impl Supervisor {
     async fn set_unlocked(&self, id: &str, unlocked: bool) -> Result<(), SdkError> {
         let index = self.index.clone();
         let id = id.to_owned();
-        tokio::task::spawn_blocking(move || index.set_account_unlocked(&id, unlocked))
+        super::lifecycle::spawn_blocking(move || index.set_account_unlocked(&id, unlocked))
             .await
             .map_err(|error| SdkError::LocalBus(format!("index writer failed: {error}")))??;
         Ok(())
@@ -600,7 +608,7 @@ impl Supervisor {
     async fn set_active(&self, id: &str) -> Result<(), SdkError> {
         let index = self.index.clone();
         let id = id.to_owned();
-        tokio::task::spawn_blocking(move || index.set_active_account(&id))
+        super::lifecycle::spawn_blocking(move || index.set_active_account(&id))
             .await
             .map_err(|error| SdkError::LocalBus(format!("index writer failed: {error}")))??;
         Ok(())
@@ -697,7 +705,45 @@ impl Supervisor {
         }
     }
 
+    pub(super) fn close_lifecycle_admission(&self) {
+        self.stop_requested.send_replace(true);
+    }
+
+    pub(super) async fn reap_lifecycle_tasks(&self) {
+        tokio::select! {
+            () = self.lifecycle_changed.notified() => {},
+            () = std::future::poll_fn(|cx| {
+                match self.lifecycle_tasks.borrow_mut().poll_join_next(cx) {
+                    std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
+                    _ => std::task::Poll::Pending,
+                }
+            }) => {},
+        }
+        while self.lifecycle_tasks.borrow_mut().try_join_next().is_some() {}
+    }
+
+    #[cfg(test)]
+    pub(super) fn lifecycle_task_count(&self) -> usize {
+        self.lifecycle_tasks.borrow().len()
+    }
+
     pub(super) async fn shutdown(&self) -> Result<(), SdkError> {
+        self.close_lifecycle_admission();
+        // Admission is closed before moving the set; no new task can escape this drain.
+        let mut tasks = std::mem::take(&mut *self.lifecycle_tasks.borrow_mut());
+        #[cfg(test)]
+        if let Some(gate) = &self.config.lifecycle_gate {
+            gate.draining.notify_one();
+        }
+        if tokio::time::timeout(Duration::from_secs(5), async {
+            while tasks.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        }
         self.backup_jobs.stop().await;
         self.start_event_router();
         // A retained stopped handle must not reclaim a replacement daemon's staging.

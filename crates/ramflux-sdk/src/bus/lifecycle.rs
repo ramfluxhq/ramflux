@@ -5,6 +5,23 @@
 
 use crate::prelude::*;
 
+tokio::task_local! {
+    pub(super) static ROOT_LEASE: Option<std::sync::Arc<super::data_root_lock::DataRootLock>>;
+}
+
+// Blocking work can outlive its cancelled async waiter and must keep daemon ownership.
+pub(super) fn spawn_blocking<F, R>(work: F) -> tokio::task::JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let lease = ROOT_LEASE.try_with(Clone::clone).ok().flatten();
+    tokio::task::spawn_blocking(move || {
+        let _lease = lease;
+        work()
+    })
+}
+
 pub(super) struct Receipt {
     scope: String,
     operation: String,
@@ -65,7 +82,7 @@ pub(super) async fn reserve(
         &request.method,
         &request.body,
     ))?;
-    tokio::task::spawn_blocking(move || {
+    spawn_blocking(move || {
         // A keyed intent fingerprint cannot become a fast offline passphrase verifier in the
         // unencrypted index. Account/domain responses are never stored here.
         let vault = FileVaultSecretSource::new(root).vault_secret("supervisor.lifecycle")?;
@@ -84,7 +101,7 @@ pub(super) async fn complete(
     receipt: Receipt,
     body: serde_json::Value,
 ) -> Result<(), SdkError> {
-    tokio::task::spawn_blocking(move || {
+    spawn_blocking(move || {
         index.complete_supervisor_operation(&receipt.scope, &receipt.operation, &body)
     })
     .await
@@ -95,18 +112,20 @@ pub(super) async fn complete(
 pub(super) async fn import_account_id(request: &LocalBusFrame) -> Result<String, SdkError> {
     let body: LocalBusAccountBackupImportRequest = serde_json::from_value(request.body.clone())
         .map_err(|_| SdkError::LocalBus("invalid account request".to_owned()))?;
-    tokio::task::spawn_blocking(move || local_bus_backup_account_id(body))
+    spawn_blocking(move || local_bus_backup_account_id(body))
         .await
         .map_err(|error| SdkError::LocalBus(format!("backup inspection failed: {error}")))?
 }
 
-/// Holds a keyed operation after actor claim and signals durable receipt completion.
+/// Holds a lifecycle operation at a selected boundary and signals durable completion.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct TestGate {
+    pub before_creation: bool,
     pub entered: tokio::sync::Notify,
     pub release: tokio::sync::Notify,
     pub completed: tokio::sync::Notify,
+    pub draining: tokio::sync::Notify,
     pub executions: std::sync::atomic::AtomicUsize,
 }
 
@@ -114,9 +133,57 @@ pub(crate) struct TestGate {
 pub(super) async fn hold_claimed(config: &LocalBusConfig, command: &super::actor::AccountCommand) {
     if command.request.method == "account.unlock"
         && let Some(gate) = &config.lifecycle_gate
+        && !gate.before_creation
     {
         gate.executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         gate.entered.notify_one();
         gate.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn hold_before_creation(config: &LocalBusConfig) {
+    if let Some(gate) = &config.lifecycle_gate
+        && gate.before_creation
+    {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_lifecycle_worker_retains_data_root_lease_until_quiescent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::custody::tests::Root::new()?;
+        let lease = super::super::data_root_lock::DataRootLock::acquire(&root.0)?;
+        let (entered, running) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let (finished, done) = tokio::sync::oneshot::channel();
+        let worker = ROOT_LEASE.sync_scope(Some(lease.clone()), || {
+            spawn_blocking(move || {
+                let _ = entered.send(());
+                let _ = held.recv();
+            })
+        });
+        tokio::time::timeout(Duration::from_secs(5), running).await??;
+        // Aborting an already-running blocking worker cannot cancel its write.
+        worker.abort();
+        drop(lease);
+        assert!(matches!(
+            super::super::data_root_lock::DataRootLock::acquire(&root.0),
+            Err(SdkError::DataRootInUse)
+        ));
+        tokio::spawn(async move {
+            let _ = worker.await;
+            let _ = finished.send(());
+        });
+        release.send(())?;
+        tokio::time::timeout(Duration::from_secs(5), done).await??;
+        assert!(super::super::data_root_lock::DataRootLock::acquire(&root.0).is_ok());
+        Ok(())
     }
 }

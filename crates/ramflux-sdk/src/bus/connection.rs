@@ -49,6 +49,7 @@ pub(super) async fn accept(
     let mut last_peer_warning = None;
     loop {
         tokio::select! {
+            () = supervisor.reap_lifecycle_tasks() => {},
             _ = stopping.changed() => break,
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() { break; }
@@ -73,11 +74,13 @@ pub(super) async fn accept(
             }
         }
     }
+    let explicit_stop = *stopping.borrow();
+    supervisor.close_lifecycle_admission();
     drop(listener);
     if let Some(socket) = &socket {
         socket.remove()?;
     }
-    if *stopping.borrow() {
+    if explicit_stop {
         let mut response = supervisor.stop_response();
         while !*response.borrow() {
             if response.changed().await.is_err() {
