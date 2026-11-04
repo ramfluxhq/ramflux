@@ -356,7 +356,7 @@ impl RouterHandle {
         runtime
             .custody
             .get()
-            .map_or(serde_json::Value::Null, ramflux_node_core::CustodyService::budget_snapshot)
+            .map_or(serde_json::Value::Null, |service| service.budget_snapshot())
     }
     pub(crate) fn custody_public_certificate(&self, hash: &str) -> bool {
         let Self::Tokio(runtime) = self;
