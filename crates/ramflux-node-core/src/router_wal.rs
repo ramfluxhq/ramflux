@@ -1538,6 +1538,64 @@ mod tests {
     use std::sync::Barrier;
 
     #[test]
+    fn wal_record_with_v2_key_replays_into_tuple_index() -> Result<(), Box<dyn std::error::Error>> {
+        let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+        let branch = ramflux_crypto::create_device_branch(
+            "alice",
+            "device_router_wal",
+            1,
+            ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+        );
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
+        let path = temp_router_wal_dir("v2-upgrade")?;
+        let db_path = path.join("db");
+        let wal_path = path.join("wal");
+        let entry = router_wal_inbox_entry("same-id", "left");
+        let key = format!(
+            "envelope/v2/{}/{}",
+            source.storage_key(),
+            ramflux_protocol::encode_base64url("same-id")
+        );
+        {
+            let wal = RouterWalStore::open(&wal_path)?;
+            wal.record_submission_classified(
+                &key,
+                1_760_000_300,
+                Some(&entry),
+                Some(RouterWalLocalDelivery {
+                    sender_root_commitment: source.root_commitment().into(),
+                    envelope_id: "same-id".into(),
+                    target_delivery_id: "left".into(),
+                }),
+            )?;
+        }
+        let store = crate::RouterRedbStore::open_with_wal(&db_path, &wal_path)?;
+        let (inbox, mut guard) = store.load_delivery_state(1_760_000_001)?;
+        assert_eq!(inbox.pending_entries().count(), 1);
+        assert!(!guard.accept_envelope_once(&source, &entry.envelope, 1_760_000_001)?);
+        assert!(guard.accept_envelope_once(
+            &source,
+            &router_wal_envelope("same-id", "right"),
+            1_760_000_001
+        )?);
+        assert!(store.has_local_delivery_envelope(
+            source.root_commitment(),
+            "same-id",
+            "left",
+            1_760_000_001
+        )?);
+        assert!(!store.has_local_delivery_envelope(
+            source.root_commitment(),
+            "same-id",
+            "right",
+            1_760_000_001
+        )?);
+        drop(store);
+        remove_router_wal_dir(path);
+        Ok(())
+    }
+
+    #[test]
     fn same_sender_envelope_id_two_targets_survive_restart_and_dedup_independently()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);

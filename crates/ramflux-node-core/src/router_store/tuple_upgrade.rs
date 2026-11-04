@@ -131,6 +131,90 @@ mod tests {
         Ok((path, db, source))
     }
     #[test]
+    fn upgraded_v2_replay_row_still_suppresses_duplicate_through_replay_guard()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (path, db, _) = fixture()?;
+        let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+        let branch = ramflux_crypto::create_device_branch(
+            "alice",
+            "device",
+            1,
+            ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+        );
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
+        let txn = db.begin_write()?;
+        {
+            let mut replay = txn.open_table(ROUTER_REPLAY_TUPLE_TABLE)?;
+            for id in ["recoverable", "unrecoverable"] {
+                let key = format!(
+                    "envelope/v2/{}/{}",
+                    source.storage_key(),
+                    ramflux_protocol::encode_base64url(id)
+                );
+                replay.insert(key.as_str(), b"200".as_slice())?;
+            }
+            let key = format!(
+                "s:{}:{}recoverable",
+                source.root_commitment().len(),
+                source.root_commitment()
+            );
+            txn.open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)?.insert(
+                key.as_str(),
+                serde_json::to_vec(&LocalDeliveryEnvelopeRecord {
+                    target_delivery_id: "target".into(),
+                    expires_at: 200,
+                })?
+                .as_slice(),
+            )?;
+        }
+        txn.commit()?;
+        upgrade(&db)?;
+        drop(db);
+        let store = super::super::RouterRedbStore::open_without_wal(&path)?;
+        let (_, mut guard) = store.load_delivery_state(100)?;
+        let mut envelope = ramflux_protocol::Envelope {
+            schema: ramflux_protocol::domain::ENVELOPE.into(),
+            version: 1,
+            domain: ramflux_protocol::domain::ENVELOPE.into(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: ramflux_protocol::SignedFields {
+                signing_key_id: "test".into(),
+                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                signature: "signature".into(),
+            },
+            envelope_id: "recoverable".into(),
+            source_principal_id: "alice".into(),
+            source_device_id: source.device_id().into(),
+            target_delivery_id: "target".into(),
+            routing_set_id: None,
+            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            priority: ramflux_protocol::Priority::Normal,
+            ttl: 100,
+            created_at: 100,
+            encrypted_payload: "ciphertext".into(),
+            payload_hash: "hash".into(),
+        };
+        assert!(!guard.accept_envelope_once(&source, &envelope, 100)?);
+        assert!(store.has_local_delivery_envelope(
+            source.root_commitment(),
+            "recoverable",
+            "target",
+            100
+        )?);
+        envelope.target_delivery_id = "other".into();
+        assert!(guard.accept_envelope_once(&source, &envelope, 100)?);
+        envelope.envelope_id = "unrecoverable".into();
+        assert!(!guard.accept_envelope_once(&source, &envelope, 100)?);
+        envelope.target_delivery_id = "target".into();
+        assert!(!guard.accept_envelope_once(&source, &envelope, 100)?);
+        envelope.envelope_id = "new".into();
+        assert!(guard.accept_envelope_once(&source, &envelope, 100)?);
+        drop(store);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
     fn v2_replay_and_local_delivery_rows_remain_readable_and_dedup_after_upgrade()
     -> Result<(), Box<dyn std::error::Error>> {
         let (path, db, source) = fixture()?;

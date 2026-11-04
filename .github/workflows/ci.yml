@@ -494,6 +494,9 @@ jobs:
         with:
           tool: nextest@0.9.150
 
+      - name: Migration release gate regressions
+        run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(release_gate_closed)'
+
       - name: Configured graceful shutdown regressions
         timeout-minutes: 13
         run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown

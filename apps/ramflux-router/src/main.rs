@@ -236,7 +236,13 @@ mod release_tests {
             if let Some(flag) = flag {
                 command.env("RAMFLUX_HOME_MIGRATION_ENABLED", flag);
             }
-            assert!(command.status()?.success());
+            let output = command.output()?;
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                "child must run exactly one test: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
         }
         Ok(())
     }

@@ -402,8 +402,11 @@ impl RouterCore {
             &body.master_certificate.body.master_public_key,
         )?;
         let mut pins = registry.custody.pins_for(anchor);
-        let outcome = pins.observe(&verified).map_err(|e| crypto(&e))?;
-        if outcome == PinOutcome::Fenced {
+        let previous = registry.custody.records.get(anchor).map(|entry| &entry.record);
+        let pruned_before = pins.pruned_evidence(anchor);
+        let outcome = pins.observe_with_previous(&verified, previous).map_err(|e| crypto(&e))?;
+        log_pruned_evidence(anchor, pruned_before, pins.pruned_evidence(anchor));
+        if let PinOutcome::Fenced(alert) = outcome {
             let accepted = registry
                 .custody
                 .records
@@ -413,7 +416,8 @@ impl RouterCore {
             let state = CustodyAccountState { publication: accepted, pins };
             store.record_custody_account(anchor, &state, false, source, now)?;
             registry.apply_custody_account(anchor.clone(), state)?;
-            return Err(reject("custody authority equivocation fenced"));
+            log_conflict(&alert);
+            return Err(NodeCoreError::CustodyConflict { alert: Box::new(alert) });
         }
         let is_new = !registry.custody.records.contains_key(anchor);
         if is_new && registry.custody.records.len() >= 65_536 {
@@ -467,8 +471,16 @@ impl RouterCore {
             ));
         }
         let mut pins = registry.custody.pins_for(&publication.record.body.account_anchor);
-        if pins.observe(&verified).map_err(|e| crypto(&e))? == PinOutcome::Fenced {
-            return Err(reject("custody authority equivocation fenced"));
+        let previous = registry
+            .custody
+            .records
+            .get(&publication.record.body.account_anchor)
+            .map(|entry| &entry.record);
+        if let PinOutcome::Fenced(alert) =
+            pins.observe_with_previous(&verified, previous).map_err(|e| crypto(&e))?
+        {
+            log_conflict(&alert);
+            return Err(NodeCoreError::CustodyConflict { alert: Box::new(alert) });
         }
         Ok(verified)
     }

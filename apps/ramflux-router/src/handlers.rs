@@ -165,6 +165,10 @@ fn handle_itest_admin_request(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/admin/custody/budgets") => {
+            let response = crate::lifecycle::handle_custody_budgets(&request.body, router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
         ("POST", "/admin/home-node-migration/apply") => {
             let response =
                 handle_home_node_migration_apply(&request.body, router.state(), router.store())?;
@@ -1257,7 +1261,13 @@ mod tests {
                 if let Some(flag) = flag {
                     command.env("RAMFLUX_HOME_MIGRATION_ENABLED", flag);
                 }
-                assert!(command.status()?.success());
+                let output = command.output()?;
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                    "child must run exactly one test: {}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
             }
             return Ok(true);
         }
@@ -1339,17 +1349,18 @@ mod tests {
             "ramflux-gateway",
         )?;
         assert_eq!(sibling.status, "200 OK");
-        assert!(handle_healthz_request(
+        assert!(handle_itest_admin_request(
             &mut stream,
             &ramflux_node_core::NodeHttpRequest {
-                method: "GET".into(),
-                path: "/healthz".into(),
-                body: Vec::new(),
+                method: "POST".into(),
+                path: "/admin/custody/budgets".into(),
+                body: br#"{"admin_token":"release-token"}"#.to_vec(),
                 keep_alive: false,
                 source_ip_hash: None,
                 pre_auth_cookie: None,
                 pre_auth_now: None,
-            }
+            },
+            &handle,
         )?);
 
         assert_eq!(before, serde_json::to_value(handle.state().mvp1_identities_snapshot())?);
