@@ -9,6 +9,7 @@ mod legacy;
 mod resources;
 mod schema;
 mod selector_admission;
+mod selector_erasure;
 use super::AccountDb;
 use crate::StorageError;
 pub use generation::PrivacyResourceRegistration;
@@ -280,3 +281,6 @@ mod review_tests;
 
 #[cfg(test)]
 mod selector_admission_tests;
+
+#[cfg(test)]
+mod selector_lifecycle_tests;
