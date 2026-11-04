@@ -227,7 +227,28 @@ fn transport(hold_child: bool, two_hops: bool, message_seeded: bool) -> Result<(
         db.retain_object("child", "child-manifest", ObjectRetention::OwnDeviceTransport)?;
         db.retire_transport_object("child", "child-manifest")?;
     } else {
+        let generation = db.privacy_erasure_generation()?;
+        db.connection.execute_batch("CREATE TEMP TRIGGER fail_transport_capture AFTER INSERT ON main.object_reference_erasure_work BEGIN SELECT RAISE(ABORT,'transport capture cut'); END;")?;
+        let Err(error) = db.retire_transport_object("wire", "manifest") else {
+            return Err(StorageError::AuthorizationRejected);
+        };
+        assert!(error.to_string().contains("transport capture cut"));
+        drop(db);
+        let db = reopen(&root)?;
+        assert_managed_original(&db, generation)?;
+        // A second fault after cleanup, immediately before the outer COMMIT,
+        // must also restore the original reference/placeholder/lookup together.
+        let rolled_back: Result<(), StorageError> = db.write_transaction(|| {
+            db.retire_transport_object("wire", "manifest")?;
+            assert_retired(&db, "private-canary")?;
+            Err(StorageError::AuthorizationRejected)
+        });
+        assert!(matches!(rolled_back, Err(StorageError::AuthorizationRejected)));
+        drop(db);
+        let db = reopen(&root)?;
+        assert_managed_original(&db, generation)?;
         db.retire_transport_object("wire", "manifest")?;
+        return finish_transport(db, &root);
     }
     drop(db);
     let db = reopen(&root)?;
@@ -252,4 +273,242 @@ fn e3_two_hop_ancestor_chain() -> Result<(), StorageError> {
 #[test]
 fn e3_message_seeded_chain() -> Result<(), StorageError> {
     transport(false, false, true)
+}
+
+#[test]
+fn e4_replacement_captures_injected_legacy_ownerless_alias() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("selector-replacement")?;
+    register(&db, "private-canary", "m1", "historical-ref")?;
+    super::tests::payload(&db)?;
+    placeholder(&db, "private-canary")?;
+    // Inject historical state that compliant registration/erasure cannot create.
+    // Keep the reference and its actors, but remove every active owner so the
+    // public replacement eligibility guard remains authoritative.
+    db.connection.execute("DELETE FROM object_message_reference", [])?;
+    let owners: i64 = db.connection.query_row(
+        "SELECT owner_count FROM object_retention_payload WHERE wire_id='wire'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(owners, 0);
+    let ciphertext = b"replacement-ciphertext";
+    let manifest =
+        ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT_MANIFEST, ciphertext);
+    db.replace_object(
+        Some("manifest"),
+        &crate::ObjectWrite {
+            object_id: "wire",
+            manifest_hash: &manifest,
+            nonce: "nonce",
+            ciphertext,
+            plaintext_hash: "new-plaintext",
+            tombstoned: false,
+            backup_excluded: false,
+            content_key: Some(&[9; 32]),
+            object: &json!({"replacement":true}),
+            updated_at: 2,
+        },
+    )?;
+    drop(db);
+    let db = reopen(&root)?;
+    assert_retired(&db, "private-canary")?;
+    assert!(matches!(
+        db.check_object_identity("wire", "manifest"),
+        Err(StorageError::ObjectErased)
+    ));
+    db.check_object_identity("wire", &manifest)?;
+    db.check_object_access("wire")?;
+    assert_eq!(
+        db.load_object::<Value>("wire")?,
+        Some((json!({"replacement":true}), Some([9; 32])))
+    );
+    let receipt: bool = db.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM object_identity_replacement WHERE commitment=?1)",
+        params![object_erasure_commitment(db.object_erasure_root(), "wire", &manifest)],
+        |r| r.get(0),
+    )?;
+    assert!(receipt);
+    verify_snapshot(&db, &root)?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn e4_legacy_maintenance_direct_guard_and_retiring_ancestor() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("selector-maintenance")?;
+    register(&db, "private-canary", "m1", "parent-ref")?;
+    db.retain_object("wire", "manifest", ObjectRetention::OwnDeviceTransport)?;
+    placeholder(&db, "private-canary")?;
+    // The direct expired transport stays protected by its reference/veto.
+    db.connection.execute("UPDATE object_retention_payload SET hold_expires_at=0", [])?;
+    db.maintain_expired_object_holds()?;
+    assert!(db.object_is_tombstoned("private-canary")?);
+    db.check_object_access("private-canary")?;
+    assert_eq!(db.object_erasure_generation()?, 0);
+    // An eligible unreferenced child reaches that same parent through closure
+    // expansion. The direct-candidate guard must not suppress ancestor capture.
+    let child = db.pre_send_object_hold("child", "child-manifest")?;
+    db.retain_transport_dependency("wire", "manifest", "child", "child-manifest")?;
+    db.connection.execute(
+        "UPDATE object_retention_payload SET hold_expires_at=0 WHERE wire_id='child'",
+        [],
+    )?;
+    let (class, owners): (String, i64) = db.connection.query_row(
+        "SELECT retention_class,owner_count FROM object_retention_payload WHERE wire_id='child'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!((class.as_str(), owners), ("pre_send", 0));
+    db.maintain_expired_object_holds()?;
+    drop(child);
+    drop(db);
+    let db = reopen(&root)?;
+    assert_retired(&db, "private-canary")?;
+    verify_snapshot(&db, &root)?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn assert_managed_original(db: &AccountDb, generation: i64) -> Result<(), StorageError> {
+    assert!(db.object_is_tombstoned("private-canary")?);
+    db.check_object_access("private-canary")?;
+    assert!(!db.message_is_deleted("m1")?);
+    assert_eq!(db.privacy_erasure_generation()?, generation);
+    for table in ["object_retention_reference", "object_message_reference"] {
+        let count: i64 =
+            db.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
+        assert_eq!(count, 1, "original graph lost in {table}");
+    }
+    let lookups: i64 =
+        db.connection.query_row("SELECT count(*) FROM object_erasure_lookup", [], |r| r.get(0))?;
+    assert_eq!(lookups, 0);
+    for table in
+        ["object_erasure_work", "object_reference_erasure_work", "object_projection_erasure_work"]
+    {
+        let count: i64 =
+            db.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
+        assert_eq!(count, 0, "uncommitted work survived in {table}");
+    }
+    Ok(())
+}
+
+#[test]
+fn e1_message_delete_cut_before_commit_rolls_back() -> Result<(), StorageError> {
+    const CHILD_ROOT: &str = "RAMFLUX_TEST_SELECTOR_DELETE_ABORT_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = std::path::PathBuf::from(root);
+        let db = reopen(&root)?;
+        let marker = root.join("capture-cut-reached");
+        db.connection.call(move |raw| {
+            raw.update_hook(Some(move |action, _database: &str, table: &str, _row| {
+                if action == rusqlite::hooks::Action::SQLITE_INSERT
+                    && table == "object_reference_erasure_work"
+                {
+                    // Exit without unwinding or dropping the writer connection.
+                    // The marker distinguishes the intended cut from a child failure.
+                    assert!(std::fs::write(&marker, b"captured").is_ok());
+                    std::process::abort();
+                }
+            }));
+            Ok(())
+        })?;
+        db.delete_direct_message("thread", "m1", "local", "delete")?;
+        return Err(StorageError::AuthorizationRejected);
+    }
+    let (root, db) = crate::tests::test_db("selector-delete-cut")?;
+    register(&db, "private-canary", "m1", "ref")?;
+    placeholder(&db, "private-canary")?;
+    let generation = db.privacy_erasure_generation()?;
+    // SQL fault at the same capture boundary: writer returns Err, then reopen.
+    db.connection.execute_batch("CREATE TEMP TRIGGER fail_selector_capture AFTER INSERT ON main.object_reference_erasure_work BEGIN SELECT RAISE(ABORT,'selector capture cut'); END;")?;
+    let Err(error) = db.delete_direct_message("thread", "m1", "local", "delete") else {
+        return Err(StorageError::AuthorizationRejected);
+    };
+    assert!(error.to_string().contains("selector capture cut"));
+    drop(db);
+    let db = reopen(&root)?;
+    assert_managed_original(&db, generation)?;
+    drop(db);
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", "account_db::object_retention::selector_lifecycle_tests::e1_message_delete_cut_before_commit_rolls_back", "--nocapture"])
+        .env(CHILD_ROOT, &root).status()?;
+    assert!(!status.success(), "child committed despite abort hook");
+    assert_eq!(std::fs::read(root.join("capture-cut-reached"))?, b"captured");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        assert_eq!(status.signal(), Some(6), "child must terminate via SIGABRT");
+    }
+    let db = reopen(&root)?;
+    assert_managed_original(&db, generation)?;
+    db.delete_direct_message("thread", "m1", "local", "delete")?;
+    assert_retired(&db, "private-canary")?;
+    assert_eq!(db.privacy_erasure_generation()?, generation + 1);
+    drop(db);
+    let db = reopen(&root)?;
+    assert_retired(&db, "private-canary")?;
+    verify_snapshot(&db, &root)?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn finish_transport(db: AccountDb, root: &std::path::Path) -> Result<(), StorageError> {
+    drop(db);
+    let db = reopen(root)?;
+    assert_retired(&db, "private-canary")?;
+    verify_snapshot(&db, root)?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn selector_projection_outbox_drain_budget() -> Result<(), StorageError> {
+    let mut baseline = None;
+    for unrelated in [0, 1_000, 10_000] {
+        let (root, db) = crate::tests::test_db("selector-outbox-budget")?;
+        db.write_transaction(|| -> Result<(), StorageError> {
+            db.connection.execute("INSERT INTO runtime_outbox(table_name,change_kind,row_id,keys_json) WITH RECURSIVE n(i) AS (SELECT 1 WHERE ?1>0 UNION ALL SELECT i+1 FROM n WHERE i<?1) SELECT 'object_index','delete',i,json_object('object_id','unrelated-'||i) FROM n", params![unrelated])?;
+            db.connection.execute("INSERT INTO runtime_outbox(table_name,change_kind,row_id,keys_json) VALUES('object_index','delete',-1,json_object('object_id','private-canary'))", [])?;
+            db.connection.execute("INSERT INTO object_projection_erasure_work VALUES('private-canary')", [])?;
+            Ok(())
+        })?;
+        let steps = db.connection.call(|raw| {
+            let steps = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let counter = Arc::clone(&steps);
+            raw.progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    false
+                }),
+            );
+            let outcome = raw.execute_batch(super::selector_erasure::DRAIN);
+            raw.progress_handler(0, None::<fn() -> bool>);
+            outcome?;
+            Ok(steps.load(std::sync::atomic::Ordering::Relaxed))
+        })?;
+        let base = *baseline.get_or_insert(steps);
+        let ceiling = (base * 105).div_ceil(100) + 64;
+        assert!(
+            steps <= ceiling,
+            "outbox drain scales with unrelated rows: N={unrelated}, steps={steps}, base={base}, ceiling={ceiling}"
+        );
+        let remaining: i64 = db.connection.query_row(
+            "SELECT count(*) FROM runtime_outbox WHERE table_name='object_index'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(remaining, unrelated);
+        db.connection.execute("DELETE FROM object_projection_erasure_work", [])?;
+        drop(db);
+        let db = reopen(&root)?;
+        verify_snapshot(&db, &root)?;
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
 }

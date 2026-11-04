@@ -7,6 +7,9 @@ use std::fmt::Write as _;
 
 pub(crate) fn install(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(SCHEMA)?;
+    // Projection retirement probes selector keys after object_index deletion;
+    // row_id can no longer resolve them, so index the retained outbox key.
+    db.execute_batch("CREATE INDEX IF NOT EXISTS runtime_outbox_object_selector ON runtime_outbox(CAST(json_extract(keys_json,'$.object_id') AS TEXT)) WHERE table_name='object_index';")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS object_key_slot_wire ON object_key_slot(object_id); CREATE INDEX IF NOT EXISTS object_transfer_wire ON object_transfer_state(object_id); CREATE INDEX IF NOT EXISTS object_tombstone_target ON object_tombstone(target_kind,target_id);")
 }
 

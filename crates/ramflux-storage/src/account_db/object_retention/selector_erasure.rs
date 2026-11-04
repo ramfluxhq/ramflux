@@ -42,6 +42,8 @@ pub(super) const PROJECT: &str = r"
 ";
 
 // Projection DELETEs also emit invalidation keys; retire those within the same transaction.
+// Drive outbox probes from the captured closure; matching TEXT affinity keeps
+// the expression index searchable rather than scanning unrelated object keys.
 pub(super) const DRAIN: &str = r"
  DELETE FROM object_payload_actor WHERE state_kind IN (
  SELECT 'attachment/reference/'||selector FROM object_projection_erasure_work
@@ -55,7 +57,10 @@ pub(super) const DRAIN: &str = r"
  SELECT 'attachment/reference/'||selector FROM object_projection_erasure_work
  UNION ALL SELECT 'directory/object/'||selector FROM object_projection_erasure_work)
  AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind=message_footprint.locator);
- DELETE FROM runtime_outbox WHERE table_name='object_index'
- AND json_extract(keys_json,'$.object_id') IN (SELECT selector FROM object_projection_erasure_work)
- AND NOT EXISTS(SELECT 1 FROM object_index o WHERE o.object_id=json_extract(runtime_outbox.keys_json,'$.object_id'));
+ DELETE FROM runtime_outbox WHERE sequence IN (
+ SELECT pending.sequence FROM object_projection_erasure_work w
+ CROSS JOIN runtime_outbox pending INDEXED BY runtime_outbox_object_selector
+ ON CAST(json_extract(pending.keys_json,'$.object_id') AS TEXT)=w.selector
+ WHERE pending.table_name='object_index'
+ AND NOT EXISTS(SELECT 1 FROM object_index o WHERE o.object_id=json_extract(pending.keys_json,'$.object_id')));
 ";
