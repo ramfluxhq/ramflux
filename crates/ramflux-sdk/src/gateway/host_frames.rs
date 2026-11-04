@@ -158,7 +158,7 @@ impl GatewaySessionEngine {
             FrameClass::Reply | FrameClass::Unexpected => {
                 self.terminal_reason = Some(DisconnectReason::UnexpectedReply);
                 tracing::warn!(?kind, ?expected, "unexpected gateway reply; retiring session");
-                Err(ramflux_transport::TransportError::ShutdownDraining.into())
+                Err(SdkError::GatewaySessionRejected(format!("unexpected gateway reply: {kind:?}")))
             }
         }
     }
@@ -167,6 +167,9 @@ impl GatewaySessionEngine {
         &mut self,
         operation: &'static str,
     ) -> Result<GatewayServerFrame, SdkError> {
+        if let Some(frame) = self.deferred_frames.pop_front() {
+            return Ok(frame);
+        }
         self.read_stream_frame(operation).await
     }
 

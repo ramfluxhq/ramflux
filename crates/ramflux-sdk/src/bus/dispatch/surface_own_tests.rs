@@ -384,6 +384,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         Box::new(gateway),
     ));
     assert_eq!(crate::bus::sync_driver::run(&mut source).await?, 1);
+    assert!(crate::bus::couriers::surface::drive_once(&mut source).await?);
     let reply = replies
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -410,8 +411,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         Vec::<String>::new()
     );
     fixture.directory.abort();
-    drop(peers);
-    drop(source);
+    drop((peers, source));
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -511,6 +511,13 @@ async fn a_backed_off_copy_allows_newer_copies_and_preserves_each_immutable_retr
         Box::new(gateway),
     ));
     for id in [first, second] {
+        let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+        gateway.own = Arc::clone(&own);
+        gateway.fail_own_ack = true;
+        source.install_test_session(GatewaySessionEngine::with_test_transport(
+            config.clone(),
+            Box::new(gateway),
+        ));
         crate::bus::own_device_copy::stage(
             &source.client,
             OwnMessageInput {

@@ -149,9 +149,8 @@ impl AccountDb {
     /// Reads the durable revocation flag without loading ciphertext or a content key.
     ///
     /// # Errors
-    /// Returns an error for a retired selector or an unreadable object index.
+    /// Returns an error for an unreadable object index.
     pub fn object_is_tombstoned(&self, object_id: &str) -> Result<bool, StorageError> {
-        self.check_object_access(object_id)?;
         Ok(self.connection.query_row("SELECT tombstoned<>0 OR object_state='tombstoned' FROM object_index WHERE object_id=?1",params![object_id],|row|row.get(0)).optional()?.unwrap_or(false))
     }
 

@@ -227,8 +227,10 @@ async fn restore_local_bus_account_impl(
     // startup sweep). Fail-closed per pair; never re-commits an object A2 already owns.
     rehydrate_object_put_spools(&mut account, &state.config.data_root, &manifest.local_account_id)?;
     state.accounts.insert(manifest.local_account_id.clone(), account);
+    let managed = state.account_index.is_some();
     let account = local_bus_account_mut(state, &manifest.local_account_id)?;
     if connect_gateway
+        && !managed
         && !account
             .client
             .account_db()?

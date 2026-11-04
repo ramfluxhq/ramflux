@@ -14,6 +14,7 @@ pub struct GatewaySessionEngine {
     request_counter: u64,
     pub(crate) pending_deliveries: VecDeque<(GatewayInboxEntry, usize)>,
     pub(crate) buffered_bytes: usize,
+    pub(crate) deferred_frames: VecDeque<GatewayServerFrame>,
     #[cfg(test)]
     pub(crate) buffer_stats: super::host_frames::BufferStats,
     pub(crate) last_frame_bytes: usize,
@@ -266,6 +267,7 @@ impl GatewaySessionEngine {
             request_counter: 1,
             pending_deliveries: VecDeque::new(),
             buffered_bytes: 0,
+            deferred_frames: VecDeque::new(),
             #[cfg(test)]
             buffer_stats: super::host_frames::BufferStats::default(),
             last_frame_bytes: 0,
@@ -299,6 +301,7 @@ impl GatewaySessionEngine {
             request_counter: 0,
             pending_deliveries: VecDeque::new(),
             buffered_bytes: 0,
+            deferred_frames: VecDeque::new(),
             #[cfg(test)]
             buffer_stats: super::host_frames::BufferStats::default(),
             last_frame_bytes: 0,

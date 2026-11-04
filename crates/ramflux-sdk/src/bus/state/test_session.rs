@@ -32,6 +32,8 @@ impl LocalBusAccountState {
                 self.gateway_config = engine.config.clone();
                 self.target_delivery_id = engine.target_delivery_id().into();
                 self.engine = Some(*engine);
+                self.persist_push_route_seq();
+                self.forget_confirmed_push_clear();
             }
             TestSession::Managed(client) => self.apply_session_metadata(*client),
         }

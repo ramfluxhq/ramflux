@@ -10,7 +10,7 @@ use crate::bus::{
     mutation_intent::MutationIntent,
 };
 use crate::prelude::{
-    SdkError, local_bus_account_manifest_path, now_unix_timestamp, read_local_bus_account_manifest,
+    SdkError, local_bus_account_manifest_path, read_local_bus_account_manifest,
     write_local_bus_account_manifest,
 };
 use tokio::time::{Instant, timeout_at};
@@ -86,16 +86,9 @@ impl AccountRuntime {
         {
             return Ok(());
         }
+        // Fetch prepares its durable failure receipt before admission.
         if command.request.method == "object.fetch" {
-            let body: crate::bus::protocol::LocalBusObjectFetchRequest =
-                serde_json::from_value(command.request.body.clone())?;
-            if account
-                .client
-                .lookup_received_attachment_operation(&body.object_id, &body.operation_id)?
-                .is_some()
-            {
-                return Ok(());
-            }
+            return Ok(());
         }
         let handle = account.connection.clone().ok_or(SdkError::NetworkingPending)?;
         let admitted_at =
@@ -194,7 +187,7 @@ impl AccountRuntime {
                 {
                     return Ok(());
                 }
-                let result = prepare_account_connection(account, &self.id, deadline).await;
+                let result = prepare_account_connection(account, deadline).await;
                 let _ = reply.send(result);
             }
             AccountWork::Connected { metadata, reply } => {
@@ -322,40 +315,13 @@ fn attempt_timeout() -> SdkError {
 
 async fn prepare_account_connection(
     account: &mut crate::bus::state::LocalBusAccountState,
-    id: &str,
     deadline: Instant,
 ) -> Result<crate::GatewaySessionConfig, SdkError> {
     timeout_at(deadline, async {
         if account.client.born_v3_account.is_some() {
             account.prepare_native_branch().await?;
         } else {
-            let root = account.client.account_index()?.root().to_path_buf();
-            let path = local_bus_account_manifest_path(&root, id);
-            if let Ok(manifest) = read_local_bus_account_manifest(&path) {
-                let refresh_due = account.client.own_proof_refresh_due(now_unix_timestamp())?;
-                if manifest.activation_pending || refresh_due {
-                    short_step(
-                        account.timeouts.network_wait,
-                        account.client.initialize_and_publish_prekey_bundle_via_gateway_request(
-                            &account.gateway_config,
-                            &manifest.principal_commitment,
-                            &manifest.device_id,
-                            &manifest.target_delivery_id,
-                            manifest.device_seed,
-                        ),
-                    )
-                    .await?;
-                    short_step(
-                        account.timeouts.network_wait,
-                        account.client.cache_verified_device_manifest(
-                            &account.gateway_config,
-                            &manifest.principal_commitment,
-                            "account.create",
-                        ),
-                    )
-                    .await?;
-                }
-            }
+            account.refresh_legacy_authorization().await?;
         }
         account.connection_config()
     })

@@ -235,9 +235,6 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
         if work.held {
             continue;
         }
-        if work.next_at > now {
-            continue;
-        }
         if let Some(message) = message_owner(&work)
             && account.client.account_db()?.message_is_deleted(message)?
         {
@@ -254,11 +251,19 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
                 finish(account, &key, &work, status)?;
                 continue;
             }
-            if !work.targets.iter().any(|target| target.due(now)) {
+            if work.next_at > now || !work.targets.iter().any(|target| target.due(now)) {
                 continue;
             }
         }
-        work.next_at = now.saturating_add(2);
+        if work.next_at > now {
+            continue;
+        }
+        if work.packet.is_none() {
+            work.attempts += 1;
+            work.next_at = now.saturating_add((1_i64 << work.attempts.min(6)).min(60));
+        } else {
+            work.next_at = now.saturating_add(2);
+        }
         account.client.account_db()?.persist_actor_state(&key, &work)?;
         if work.packet.is_none()
             && work.local_manifest
@@ -535,13 +540,29 @@ mod budget_tests {
         )?;
         let plan =
             prepare(&account)?.ok_or_else(|| SdkError::LocalBus("missing own-copy plan".into()))?;
-        assert_eq!(plan.work.attempts, 0, "prepare must not consume the target budget");
-        let mut target = Target::new("sibling".into(), plan.work.attempts, 0);
+        assert_eq!(plan.work.attempts, 1, "preparation has its own budget");
+        let mut target = Target::new("sibling".into(), 0, 0);
         for attempt in 0..10 {
             assert!(!target.finished());
             target.charge(attempt * 60);
         }
         assert!(target.finished());
+        assert_eq!(serde_json::to_value(&target)?["attempts"], 10);
+        let key = plan.key;
+        for attempts in 2..=10 {
+            let mut work: Work =
+                account.client.account_db()?.load_actor_state(&key)?.ok_or_else(stopped)?;
+            work.next_at = 0;
+            account.client.account_db()?.persist_actor_state(&key, &work)?;
+            let plan = prepare(&account)?.ok_or_else(stopped)?;
+            assert_eq!(plan.work.attempts, attempts);
+            assert!(
+                plan.work.next_at
+                    >= now_unix_timestamp().saturating_add((1_i64 << attempts.min(6)).min(60) - 1)
+            );
+        }
+        assert!(prepare(&account)?.is_none());
+        assert!(!account.client.account_db()?.actor_state_exists(&key)?);
         drop(account);
         std::fs::remove_dir_all(root)?;
         Ok(())
