@@ -80,6 +80,15 @@ impl RouterRedbStore {
         result: &ramflux_protocol::home_migration::ResolveResult,
         now: u64,
     ) -> Result<(), NodeCoreError> {
+        self.apply_forwarded_activation(node, result, now, true)
+    }
+    pub(super) fn apply_forwarded_activation(
+        &self,
+        node: &MigrationNode,
+        result: &ramflux_protocol::home_migration::ResolveResult,
+        now: u64,
+        activate: bool,
+    ) -> Result<(), NodeCoreError> {
         let HomeRecord::Committed { authorization, commit_proof } = &result.home.record else {
             return Err(refusal(Refusal::EvidenceRequired));
         };
@@ -128,11 +137,14 @@ impl RouterRedbStore {
             },
         )
         .map_err(auth_error)?;
-        if op.phase == Phase::Active {
-            return Ok(());
-        }
-        if !matches!(op.phase, Phase::Sealed | Phase::CommitPending | Phase::CommitOutcomeUnknown) {
+        if !matches!(
+            op.phase,
+            Phase::Active | Phase::Sealed | Phase::CommitPending | Phase::CommitOutcomeUnknown
+        ) {
             return Err(refusal(Refusal::BaseMismatch));
+        }
+        if !activate || op.phase == Phase::Active {
+            return Ok(());
         }
         // The destination must retain the verified prefix, not only its new head:
         // later contacts can require the original home as their pinned ancestry floor.
@@ -175,9 +187,7 @@ impl RouterRedbStore {
             .map_err(storage)?;
         write(&tx, OPS, &key, &op)?;
         commit_transition(self, tx)?;
-        if op.phase == Phase::Active {
-            self.cache_migration_root(&op.prepare.body.account_anchor, None)?;
-        }
+        self.cache_migration_root(&op.prepare.body.account_anchor, None)?;
         self.cache_migration_routes(&op.delivery_map, op.phase == Phase::Active, false)?;
         Ok(())
     }

@@ -35,6 +35,15 @@ impl RouterCore {
         now: u64,
     ) -> Result<RouterSubmitOutcome, NodeCoreError> {
         let ForwardedEnvelopeRequest { envelope, migration_evidence } = request;
+        // Verify sender bytes without persistence, then the complete sealed proof, before pins.
+        crate::DeviceAuthKeyResponse::forwarded_envelope_source(&envelope)?;
+        let proof = migration_evidence.as_ref().and_then(|e| e.commit_proof.as_ref());
+        if proof.is_some() {
+            let node = node.ok_or(NodeCoreError::HomeMigration(Refusal::PeeringUnavailable))?;
+            store.check_forwarded_target(node, &envelope.target_delivery_id, proof, now, false)?;
+        } else if !store.home_migration_target_active(&envelope.target_delivery_id)? {
+            return Err(NodeCoreError::HomeMigration(Refusal::DormantInbox));
+        }
         let floors = migration_evidence.as_ref().map_or(&[][..], |e| e.floors.as_slice());
         let native = envelope
             .ext

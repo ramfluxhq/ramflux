@@ -1478,16 +1478,6 @@ impl RouterCore {
         store: Option<&crate::RouterRedbStore>,
         origin: RouterEnvelopeOrigin,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
-        if origin == RouterEnvelopeOrigin::Federation
-            && envelope
-                .ext
-                .ext
-                .get("source_device_authority")
-                .and_then(|value| value.get("custody_authority"))
-                .is_some_and(|value| !value.is_null())
-        {
-            return self.authenticate_native_forwarded_source(envelope, store);
-        }
         let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
         let root = envelope
             .ext

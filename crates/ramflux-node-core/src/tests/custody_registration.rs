@@ -463,18 +463,22 @@ fn forwarded_unregistered_at_b_v3_sender_is_admitted_via_native_foreign_authorit
         )
         .is_err()
     );
-    let source = b.authenticated_envelope_source_from(
+    let source = b.authenticated_native_forwarded_source_with_floors(
         &message,
-        Some(&b_store),
+        &[],
+        &b_store,
         crate::RouterEnvelopeOrigin::Federation,
     )?;
     assert_eq!(source.root_commitment(), publication.record.body.account_anchor);
     assert_eq!(serde_json::to_vec(&message)?, bytes);
-    let reopened = b_store.load_router()?.ok_or("router")?;
+    drop(b_store);
+    let b_store = RouterRedbStore::open_without_wal(&b_path)?;
+    let reopened = b_store.load_router()?.unwrap_or_else(RouterCore::new);
     assert_eq!(
-        reopened.authenticated_envelope_source_from(
+        reopened.authenticated_native_forwarded_source_with_floors(
             &message,
-            Some(&b_store),
+            &[],
+            &b_store,
             crate::RouterEnvelopeOrigin::Federation
         )?,
         source
@@ -530,9 +534,13 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
         )
         .is_err()
     );
-    let reopened = b_store.load_router()?.ok_or("router")?;
+    drop(b_store);
+    let b_store = RouterRedbStore::open_without_wal(&b_path)?;
+    let reopened = b_store.load_router()?.unwrap_or_else(RouterCore::new);
     assert_eq!(
-        reopened.custody_record(&publication.record.body.account_anchor, now)?,
+        b_store
+            .foreign_custody_state(&publication.record.body.account_anchor)?
+            .map(|s| s.publication),
         Some(revoked.clone())
     );
     assert!(
@@ -553,11 +561,16 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
         ),
         Err(NodeCoreError::CustodyConflict { .. })
     ));
-    let reopened = b_store.load_router()?.ok_or("router")?;
-    assert!(reopened.custody_record(&publication.record.body.account_anchor, now).is_err());
+    drop(b_store);
+    let b_store = RouterRedbStore::open_without_wal(&b_path)?;
+    let reopened = b_store.load_router()?.unwrap_or_else(RouterCore::new);
+    let state = b_store
+        .foreign_custody_state(&publication.record.body.account_anchor)?
+        .ok_or("foreign state")?;
     assert!(
-        reopened
-            .custody_conflict_evidence(
+        state
+            .pins
+            .conflict_evidence(
                 &publication.record.body.account_anchor,
                 revoked.record.body.master_certificate.body.range_index
             )

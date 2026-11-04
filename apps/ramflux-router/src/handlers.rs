@@ -1258,6 +1258,7 @@ fn refresh_forward_authority(
 
 #[cfg(test)]
 mod tests {
+    mod forwarded_reply;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};

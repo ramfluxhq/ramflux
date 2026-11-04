@@ -20,6 +20,16 @@ impl RouterRedbStore {
         proof: Option<&Signed<CommitProof>>,
         now: u64,
     ) -> Result<(), NodeCoreError> {
+        self.check_forwarded_target(node, target, proof, now, true)
+    }
+    pub(crate) fn check_forwarded_target(
+        &self,
+        node: &MigrationNode,
+        target: &str,
+        proof: Option<&Signed<CommitProof>>,
+        now: u64,
+        activate: bool,
+    ) -> Result<(), NodeCoreError> {
         let Some(proof) = proof else {
             return if self.home_migration_target_active(target)? {
                 Ok(())
@@ -38,7 +48,7 @@ impl RouterRedbStore {
             return Err(refusal(Refusal::BaseMismatch));
         }
         let (source, key) = op.base.record.home();
-        crypto::verify_node(proof, source, key).map_err(super::auth_error)?;
+        crypto::verify_node(proof, source, key).map_err(|_| refusal(Refusal::BaseMismatch))?;
         // A committed base can carry the previous signer's descriptor. Never substitute
         // a descriptor supplied by the forwarder when the local seal lacks the current one.
         if op.base.node_record.body.node_id != source
@@ -66,6 +76,17 @@ impl RouterRedbStore {
                 commit_proof: Box::new(proof.clone()),
             },
         };
-        self.activate_home_migration(node, &ResolveResult { home, predecessors: vec![] }, now)
+        self.apply_forwarded_activation(
+            node,
+            &ResolveResult { home, predecessors: vec![] },
+            now,
+            activate,
+        )
+        .map_err(|error| match error {
+            NodeCoreError::HomeMigration(Refusal::AuthorityUpdateRequired) => {
+                refusal(Refusal::BaseMismatch)
+            }
+            error => error,
+        })
     }
 }

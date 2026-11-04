@@ -415,20 +415,42 @@ impl RouterHandle {
             Ok(outcome) => {
                 let delivery =
                     crate::router_engine::submit_response_from_outcome(self.state(), outcome);
-                let accepted = matches!(
-                    delivery.outcome.as_str(),
-                    "online" | "offline_queued" | "duplicate_federated_forward"
-                );
-                Ok(
-                    serde_json::json!({"accepted": accepted, "retryable": !accepted, "delivery": delivery}),
-                )
+                Ok(forwarded_delivery_reply(&delivery))
             }
             Err(ramflux_node_core::NodeCoreError::HomeMigration(reason)) => {
-                Ok(serde_json::json!({"accepted": false, "retryable": true, "reason": reason}))
+                Ok(forwarded_migration_reply(reason))
             }
             Err(error) => Err(error.into()),
         }
     }
+}
+
+fn forwarded_delivery_reply(
+    delivery: &ramflux_node_core::EnvelopeSubmitResponse,
+) -> serde_json::Value {
+    let accepted = matches!(
+        delivery.outcome.as_str(),
+        "online" | "offline_queued" | "duplicate_federated_forward"
+    );
+    serde_json::json!({"accepted": accepted, "retryable": !accepted && !delivery.outcome.starts_with("rejected_"), "delivery": delivery})
+}
+fn forwarded_migration_reply(
+    reason: ramflux_protocol::home_migration::Refusal,
+) -> serde_json::Value {
+    use ramflux_protocol::home_migration::Refusal;
+    let retryable = matches!(
+        reason,
+        Refusal::DormantInbox
+            | Refusal::EvidenceRequired
+            | Refusal::PeeringUnavailable
+            | Refusal::StorageUnavailable
+            | Refusal::RateLimited
+            | Refusal::CapacityRefused
+            | Refusal::AuthorityUpdateRequired
+            | Refusal::BacklogEvidenceRequired
+            | Refusal::CommitOutcomeUnknown
+    );
+    serde_json::json!({"accepted":false,"retryable":retryable,"reason":reason})
 }
 
 #[cfg(test)]
@@ -445,6 +467,34 @@ pub(crate) mod tests {
     use super::*;
 
     mod forward_hardening;
+
+    #[test]
+    fn forwarded_wire_reply_marks_permanent_refusals_and_deleted_targets_nonretryable() {
+        use ramflux_protocol::home_migration::Refusal;
+        for reason in [Refusal::BaseMismatch, Refusal::HomeFork, Refusal::ActorRevoked] {
+            let reply = forwarded_migration_reply(reason);
+            assert_eq!(reply["accepted"], false);
+            assert_eq!(reply["retryable"], false);
+        }
+        assert_eq!(forwarded_migration_reply(Refusal::DormantInbox)["retryable"], true);
+        for outcome in [
+            "rejected_deleted",
+            "rejected_deactivated",
+            "rejected_security:bad_signature",
+            "forward_in_progress",
+        ] {
+            let reply = forwarded_delivery_reply(&ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
+                outcome: outcome.into(),
+                target_delivery_id: "target".into(),
+                inbox_seq: None,
+                cursor: None,
+                nack: None,
+            });
+            assert_eq!(reply["accepted"], false);
+            assert_eq!(reply["retryable"], outcome == "forward_in_progress");
+        }
+    }
 
     fn no_forward() -> crate::router_engine::AsyncForwardContext<'static> {
         static SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =

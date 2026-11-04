@@ -89,12 +89,20 @@ fn forwarded_activation_without_proof_refuses_dormant_but_allows_active_target()
 }
 
 fn sender(target: &str) -> TestResult<crate::ForwardedEnvelopeRequest> {
+    sender_with_seed(target, 70)
+}
+fn sender_with_seed(target: &str, seed: u8) -> TestResult<crate::ForwardedEnvelopeRequest> {
     use ramflux_crypto::custody::{GenesisInput, MasterKey, RecoveryPhrase, create_genesis};
     let now = crate::now_unix_seconds();
-    let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[70; 32])?)?;
-    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([71; 32]));
-    let branch = ramflux_crypto::create_device_branch("forward-sender", "primary", 1, [72; 32]);
-    let agreement = ramflux_crypto::X25519KeyPair::from_seed([73; 32]);
+    let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[seed; 32])?)?;
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
+    let branch = ramflux_crypto::create_device_branch(
+        &format!("forward-sender-{seed}"),
+        "primary",
+        1,
+        [seed + 2; 32],
+    );
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed([seed + 3; 32]);
     let record = create_genesis(
         &master,
         &primary,
@@ -246,5 +254,101 @@ fn forwarded_entry_keeps_a_original_retain_until_at_b() -> TestResult {
     assert_eq!(b.core.inbox_snapshot().retain_until(&entry), deadline);
     assert_eq!(b.core.sweep_delivery_retention(deadline - 1), 0);
     assert_eq!(b.core.sweep_delivery_retention(deadline), 1);
+    Ok(())
+}
+
+#[test]
+fn foreign_forwarded_senders_do_not_consume_local_registration_budget_or_account_cap() -> TestResult
+{
+    let b = TestNode::with_registration("B", 9, false, false)?;
+    let now = crate::now_unix_seconds();
+    let before = serde_json::to_value(b.store()?.custody_publication_budgets()?)?;
+    let local = serde_json::to_vec(&b.core.mvp1_identities_snapshot())?;
+    for seed in 80..92 {
+        let request = sender_with_seed("recipient", seed)?;
+        let (_, source) =
+            crate::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
+        assert!(matches!(
+            b.core.submit_forwarded_envelope(b.store()?, None, request, now)?,
+            crate::RouterSubmitOutcome::OfflineQueued(_)
+        ));
+        assert_eq!(serde_json::to_value(b.store()?.custody_publication_budgets()?)?, before);
+        assert!(b.core.custody_record(source.root_commitment(), now)?.is_none());
+    }
+    assert_eq!(serde_json::to_value(b.store()?.custody_publication_budgets()?)?, before);
+    assert_eq!(serde_json::to_vec(&b.core.mvp1_identities_snapshot())?, local);
+    assert_eq!(b.store()?.custody_publication_write_count(), 0);
+    // A local enrollment still has its full budget after the foreign traffic.
+    b.core.publish_custody_record(&publication()?, NOW, b.store()?)?;
+    assert_eq!(b.store()?.custody_publication_write_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn plain_envelope_path_refuses_unregistered_foreign_sender_as_on_main() -> TestResult {
+    let b = TestNode::with_registration("B", 9, false, false)?;
+    let request = sender("recipient")?;
+    assert!(
+        b.core
+            .authenticated_envelope_source_from(
+                &request.envelope,
+                Some(b.store()?),
+                crate::RouterEnvelopeOrigin::Federation
+            )
+            .is_err()
+    );
+    assert!(matches!(
+        b.core.submit_forwarded_envelope(b.store()?, None, request, crate::now_unix_seconds())?,
+        crate::RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn refused_forward_does_not_persist_sender_pins_before_valid_proof() -> TestResult {
+    let s = Scenario::prepared()?;
+    let op = s.seal()?;
+    let valid = proof(&s, &op)?;
+    let mut request = sender(&s.target)?;
+    let (_, source) = crate::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
+    assert!(
+        s.b.core
+            .submit_forwarded_envelope(
+                s.b.store()?,
+                Some(&s.b.node),
+                request.clone(),
+                crate::now_unix_seconds()
+            )
+            .is_err()
+    );
+    assert!(s.b.store()?.foreign_custody_state(source.root_commitment())?.is_none());
+    let mut forged = valid.clone();
+    forged.body.destination_node = "C".into();
+    request.migration_evidence = Some(crate::ForwardedMigrationEvidence {
+        commit_proof: Some(forged),
+        retain_until: i64::try_from(crate::now_unix_seconds())? + 600,
+        floors: vec![],
+    });
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            request.clone(),
+            crate::now_unix_seconds()
+        ),
+        Err(NodeCoreError::HomeMigration(Refusal::BaseMismatch))
+    ));
+    assert!(s.b.store()?.foreign_custody_state(source.root_commitment())?.is_none());
+    request.migration_evidence.as_mut().ok_or("evidence")?.commit_proof = Some(valid);
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            request,
+            crate::now_unix_seconds()
+        )?,
+        crate::RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    assert!(s.b.store()?.foreign_custody_state(source.root_commitment())?.is_some());
     Ok(())
 }
