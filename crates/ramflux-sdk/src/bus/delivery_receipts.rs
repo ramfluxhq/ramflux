@@ -241,7 +241,7 @@ fn receipt_message(
     Ok((message, serde_json::to_vec(&event)?))
 }
 
-mod background;
+pub(crate) mod background;
 pub(crate) use background::{ReceiptWork, apply as apply_background, run as run_background};
 
 #[cfg(test)]

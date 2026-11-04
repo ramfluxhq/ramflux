@@ -285,3 +285,36 @@ async fn session_host_receipt_deadline_counts_from_dequeue() -> Case {
     })
     .await
 }
+
+#[tokio::test]
+async fn priority_call_cannot_await_writer_apply() -> Result<(), Box<dyn std::error::Error>> {
+    let (handle, _io) = super::fixture().await?;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let writer = crate::bus::couriers::writer::Writer::new(sender, handle.generation());
+    let context = handle.test_context();
+    let rejected = context
+        .priority_call(
+            move |_engine| {
+                Box::pin(async move {
+                    let mut checkpoint = Box::pin(writer.apply(|_| Ok(())));
+                    let rejected = std::future::poll_fn(|cx| {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            std::future::Future::poll(checkpoint.as_mut(), cx)
+                        })) {
+                            Err(_) => std::task::Poll::Ready(true),
+                            Ok(std::task::Poll::Ready(_)) => std::task::Poll::Ready(false),
+                            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+                        }
+                    })
+                    .await;
+                    Ok(rejected)
+                })
+            },
+            std::time::Duration::from_secs(1),
+        )
+        .await?;
+    assert!(rejected, "the priority closure must reject writer access before queueing");
+    assert!(receiver.try_recv().is_err());
+    handle.stop().await;
+    Ok(())
+}

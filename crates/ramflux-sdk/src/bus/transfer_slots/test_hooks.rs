@@ -3,9 +3,9 @@
 
 //! Test-owned checkpoints are held before persistence without occupying the account writer.
 
-#![expect(
-    dead_code,
-    reason = "Transfer checkpoint fixtures are exercised in the pending S2 integration round"
+#![cfg_attr(
+    not(feature = "itest-local-mint"),
+    expect(dead_code, reason = "Used by local-mint transfer fixtures")
 )]
 
 use crate::SdkError;

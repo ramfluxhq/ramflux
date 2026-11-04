@@ -95,6 +95,9 @@ pub(crate) async fn submit_until(
     submit_inner(context, envelope, route, deadline, priority, !priority).await
 }
 
+#[cfg(test)]
+tokio::task_local! { pub(super) static TEST_LIMITER: std::sync::Arc<tokio::sync::Semaphore>; }
+
 async fn submit_inner(
     context: &SessionContext,
     envelope: ramflux_protocol::Envelope,
@@ -108,12 +111,13 @@ async fn submit_inner(
         if deadline <= tokio::time::Instant::now() {
             return Err(deadline_error());
         }
+        #[cfg(test)]
+        let local_limiter = TEST_LIMITER.try_with(std::sync::Arc::clone).ok();
+        let slots = crate::client::federation::forward_slots();
+        #[cfg(test)]
+        let slots = local_limiter.as_deref().unwrap_or(slots);
         let _permit = if task_forward {
-            Some(
-                crate::client::federation::forward_slots()
-                    .try_acquire()
-                    .map_err(|_| SdkError::TaskForwardWorkerCapacity)?,
-            )
+            Some(slots.try_acquire().map_err(|_| SdkError::TaskForwardWorkerCapacity)?)
         } else {
             None
         };

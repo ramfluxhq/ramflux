@@ -4,8 +4,6 @@
 //! Actor-owned, failure-isolated submission and durable per-item retry bookkeeping.
 
 use super::dispatch::task_approval;
-#[cfg(test)]
-use super::dispatch::{task_approval_transport, task_transport};
 use super::task_courier::{Failure, Item};
 use super::task_courier::{Preparation, manifest_request_keys};
 use super::task_courier_queue::stop_class;
@@ -106,21 +104,6 @@ mod tests {
         Ok(())
     }
 }
-/// Only stop-class errors escape. Every other error charges this item and permits the next result.
-#[cfg(test)]
-#[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
-pub(super) async fn apply(
-    account: &mut LocalBusAccountState,
-    item: Item,
-    preparation: Preparation,
-) -> Result<bool, SdkError> {
-    let result = apply_item(account, &item, preparation).await;
-    account.task_prepared_manifests.clear();
-    account.task_prepared_only = false;
-    apply_result(account, &item, result)
-}
-
-#[cfg(test)]
 fn apply_result(
     account: &LocalBusAccountState,
     item: &Item,
@@ -137,90 +120,6 @@ fn apply_result(
             }
         }
     }
-}
-
-#[cfg(test)]
-#[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
-async fn apply_item(
-    account: &mut LocalBusAccountState,
-    item: &Item,
-    preparation: Preparation,
-) -> Result<bool, SdkError> {
-    let Some(live) = queue::item(account, &item.key, now_unix_timestamp())? else {
-        return Ok(false);
-    };
-    // Check the individual row and routing authority, rather than rejecting unrelated ready items.
-    if live.revision != item.revision
-        || manifest_request_keys(&live.requests) != manifest_request_keys(&item.requests)
-    {
-        account.signal_task_courier();
-        return Ok(false);
-    }
-    let (manifests, fetched_after) = match preparation {
-        Preparation::Deferred => return Ok(false),
-        Preparation::Charged(reason) => {
-            charge(account, item, reason)?;
-            return Ok(false);
-        }
-        Preparation::Ready { manifests, fetched_after } => (manifests, fetched_after),
-    };
-    account.task_prepared_only = true;
-    for manifest in manifests {
-        // Preserve the actual preparation age, rather than granting a fresh clock after queueing.
-        account.client.persist_fetched_identity_directory_at(&manifest, fetched_after)?;
-        account.task_prepared_manifests.insert(manifest.principal_commitment.clone(), manifest);
-    }
-    let Some((mut job, _)) = queue::load(account, &item.key)? else {
-        return Ok(false);
-    };
-    let now = now_unix_timestamp();
-    let result = match &job {
-        JobRow::Approval(job) => {
-            task_approval_transport::send(
-                account,
-                &job.packet.request().binding.conversation_id,
-                job.packet.recipient(),
-                &job.packet.bytes()?,
-            )
-            .await
-        }
-        JobRow::Ack(job) => {
-            let carrier = job.ack.original()?;
-            task_transport::send_control(account, &carrier, task_transport::Mode::Ack(&job.ack))
-                .await
-        }
-        JobRow::Forward(job) => {
-            let history = account.client.task_history(&job.conversation_id, &job.task_id)?;
-            let Some(last) = history.events.last() else {
-                account.client.account_db()?.delete_task_state(&item.key)?;
-                return Ok(false);
-            };
-            task_transport::send_control(account, &last.carrier, task_transport::Mode::Own).await
-        }
-    }?;
-    if matches!(result, task_transport::Preparation::Deferred) {
-        return Ok(false);
-    }
-    let db = account.client.account_db()?;
-    match &mut job {
-        JobRow::Approval(job) => {
-            task_approval::record_delivery(account, &item.key, job, true, now)?;
-        }
-        JobRow::Ack(job) => {
-            let hash = crate::client::task::certificate::carrier_hash(&job.ack.original()?)?;
-            db.write_transaction(|| {
-                db.persist_actor_state(
-                    &crate::client::task::key("ack_sent", &hash),
-                    &json!({"start":now}),
-                )?;
-                db.prune_task_diagnostics("task/ack_sent/", 1024)?;
-                db.delete_task_state(&item.key)?;
-                Ok::<_, SdkError>(())
-            })?;
-        }
-        JobRow::Forward(_) => db.delete_task_state(&item.key)?,
-    }
-    Ok(true)
 }
 
 pub(crate) mod background;

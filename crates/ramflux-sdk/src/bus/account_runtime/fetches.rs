@@ -415,7 +415,20 @@ impl AccountRuntime {
         generation: u64,
         error: Option<&SdkError>,
     ) -> Result<(), SdkError> {
-        let (account, fetch) = self.valid_fetch(id, generation)?;
+        let fetch = self.transfers.fetches.get(&id).ok_or_else(stopped)?;
+        let account = self.state.accounts.get(&self.id).ok_or_else(stopped)?;
+        if fetch.handle.generation() != generation
+            || account.connection.as_ref().is_none_or(|handle| handle.generation() != generation)
+        {
+            return Err(stopped());
+        }
+        if fetch.outcome.as_ref().is_some_and(|outcome| {
+            outcome.as_ref().is_ok_and(|response| {
+                response.body["transfer_state"] == "failed" && response.body["retryable"] == false
+            })
+        }) {
+            return Ok(());
+        }
         if error.is_none() && !fetch.slot_committed {
             return Err(SdkError::InboundPending("attachment slot is not durable".into()));
         }

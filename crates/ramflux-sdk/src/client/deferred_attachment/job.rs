@@ -116,7 +116,7 @@ impl RamfluxClient {
                 &stored.reference.manifest_hash,
             )?;
             if self.discard_deleted_attachment_chunks(&stored.reference)? {
-                return Err(SdkError::ObjectErased);
+                return Err(SdkError::AttachmentDeleted);
             }
             let slot = self
                 .received_attachment_prepared_slot(&stored.reference)?
@@ -150,11 +150,6 @@ impl RamfluxClient {
         if reference_hash(&current.reference)? != fence.reference_hash {
             return Err(SdkError::ObjectErased);
         }
-        if db.object_is_tombstoned(&fence.reference.object_id)?
-            || db.object_is_tombstoned(&fence.selector)?
-        {
-            return Err(SdkError::ObjectErased);
-        }
         let state = self
             .attachment_fetch_state(&fence.selector)?
             .ok_or_else(|| SdkError::InboundPending("attachment fetch state disappeared".into()))?;
@@ -163,6 +158,11 @@ impl RamfluxClient {
             || !matches!(state.transfer_state.as_str(), "fetching" | "retrying")
         {
             return Err(SdkError::InboundPending("attachment fetch state changed".into()));
+        }
+        if db.object_is_tombstoned(&fence.reference.object_id)?
+            || db.object_is_tombstoned(&fence.selector)?
+        {
+            return Err(SdkError::AttachmentDeleted);
         }
         Ok(())
     }
@@ -214,7 +214,27 @@ impl RamfluxClient {
         binding: &FetchBinding,
         error: Option<&SdkError>,
     ) -> Result<Value, SdkError> {
-        self.check_fetch_fence(&binding.fence)?;
+        let fence_error = match self.check_fetch_fence(&binding.fence) {
+            Ok(()) => None,
+            Err(SdkError::AttachmentDeleted) => Some(SdkError::AttachmentDeleted),
+            Err(error) => match self.attachment_error(&binding.fence.reference, error) {
+                SdkError::AttachmentDeleted => Some(SdkError::AttachmentDeleted),
+                error => return Err(error),
+            },
+        };
+        let mapped = match error {
+            Some(SdkError::Sync(ramflux_sync::SyncError::ObjectTombstoned)) => {
+                Some(SdkError::AttachmentDeleted)
+            }
+            Some(SdkError::Storage(ramflux_storage::StorageError::ObjectIdentityConflict)) => {
+                Some(self.attachment_error(
+                    &binding.fence.reference,
+                    SdkError::Storage(ramflux_storage::StorageError::ObjectIdentityConflict),
+                ))
+            }
+            _ => None,
+        };
+        let error = fence_error.as_ref().or(mapped.as_ref()).or(error);
         if error.is_none() && !self.received_attachment_is_local(&binding.fence.reference)? {
             return Err(SdkError::InboundPending("attachment content not verified".into()));
         }
@@ -231,8 +251,10 @@ impl RamfluxClient {
                 return Err(SdkError::ObjectErased);
             }
             state.transfer_state = "failed".into();
+            state.retryable = !matches!(error, SdkError::AttachmentDeleted);
             state.last_error = Some(
                 match error {
+                    SdkError::AttachmentDeleted => crate::error::ATTACHMENT_DELETED,
                     SdkError::Transport(_)
                     | SdkError::GatewaySessionNotEstablished
                     | SdkError::NetworkingPending
@@ -248,9 +270,45 @@ impl RamfluxClient {
             );
         } else {
             state.transfer_state = "available".into();
+            state.retryable = false;
             state.last_error = None;
         }
         self.persist_attachment_fetch_state(&state)?;
         Ok(public_receipt(&state))
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    #[test]
+    fn attachment_job_persists_deleted_as_nonretryable() -> Result<(), SdkError> {
+        let root = crate::bus::runtime_tests::root("attachment-job-terminal");
+        let account = crate::bus::runtime_tests::account(
+            &root,
+            "sender",
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )?;
+        let state = FetchState {
+            wire_object_id: None,
+            manifest_hash: None,
+            object_id: "deleted".into(),
+            operation_id: "fetch-deleted".into(),
+            transfer_state: "fetching".into(),
+            last_error: None,
+            attempts: 1,
+            retryable: true,
+        };
+        let receipt = account
+            .client
+            .persist_fetch_terminal(state.clone(), Some(&SdkError::AttachmentDeleted))?;
+        assert_eq!(receipt["retryable"], false);
+        assert_eq!(receipt["last_error"], crate::error::ATTACHMENT_DELETED);
+        let available = account.client.persist_fetch_terminal(state, None)?;
+        assert_eq!(available["retryable"], false);
+        drop(account);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

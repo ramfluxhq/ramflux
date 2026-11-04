@@ -72,8 +72,7 @@ async fn bad_deadline_item_does_not_abort_later_courier_work() -> Result<(), Sdk
     let mut account = staged_account(&root)?;
     let bad = "group-transfer/pending/!bad";
     account.client.account_db()?.persist_actor_state(bad, &serde_json::json!({"bad":true}))?;
-    let now = now_unix_timestamp();
-    assert_eq!(flush_with_clock(&mut account, || now).await?, 0);
+    assert!(background::prepare_for_test(&mut account)?);
     let db = account.client.account_db()?;
     assert!(db.actor_state_exists(&format!("{}{bad}", maintenance::BACKOFF))?);
     assert!(db.load_actor_state::<String>("group-courier/cursor")?.is_some());

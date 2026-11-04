@@ -14,7 +14,10 @@ pub(super) type AccountInitializer =
 
 pub(super) enum PrivateCommand {
     #[cfg(test)]
-    #[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
+    #[cfg_attr(
+        not(feature = "itest-local-mint"),
+        expect(dead_code, reason = "Used by local-mint transfer fixtures")
+    )]
     TransferCheckpoint {
         checkpoint: Box<super::account_runtime::uploads::Checkpoint>,
         applied: oneshot::Sender<()>,
@@ -294,7 +297,10 @@ impl AccountActor {
         self.backup_captures.load(std::sync::atomic::Ordering::Relaxed)
     }
     #[cfg(test)]
-    #[expect(dead_code, reason = "Retained fixture for the pending S2 integration rounds")]
+    #[cfg_attr(
+        not(feature = "itest-local-mint"),
+        expect(dead_code, reason = "Used by local-mint transfer fixtures")
+    )]
     pub(super) async fn inject_transfer_checkpoint(
         &self,
         checkpoint: super::account_runtime::uploads::Checkpoint,

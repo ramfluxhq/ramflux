@@ -14,6 +14,11 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 
+tokio::task_local! { static PRIORITY_EXCHANGE: bool; }
+pub(crate) fn priority_exchange_active() -> bool {
+    PRIORITY_EXCHANGE.try_with(|priority| *priority).unwrap_or(false)
+}
+
 pub(super) enum HostExit {
     Stop,
     Retired(DisconnectReason),
@@ -123,7 +128,8 @@ async fn exchange(
     let result;
     let mut interrupted = None;
     {
-        let operation = timeout_at(deadline, operation);
+        let operation = PRIORITY_EXCHANGE
+            .scope(call.class == super::CallClass::Priority, timeout_at(deadline, operation));
         tokio::pin!(operation);
         loop {
             expire_calls(handle, queue);

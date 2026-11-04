@@ -65,23 +65,6 @@ impl RamfluxClient {
         Ok(None)
     }
 
-    #[cfg(test)]
-    pub(super) async fn refreshed_own_copy_manifest(
-        &self,
-        gateway: &GatewaySessionConfig,
-    ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
-        if let Some(manifest) = self.prepare_own_copy_manifest_refresh()? {
-            return Ok(manifest);
-        }
-        let local = self.owned_device_identity()?;
-        self.cache_verified_device_manifest(
-            gateway,
-            local.root_commitment(),
-            "own_sent_device_set_change",
-        )
-        .await?;
-        self.local_own_copy_manifest()
-    }
     pub(crate) fn own_sent_has_siblings(&self) -> Result<bool, SdkError> {
         let local = self.owned_device_identity()?;
         let now = crate::custody::network_now()?;

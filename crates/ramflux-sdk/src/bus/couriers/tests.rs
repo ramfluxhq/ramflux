@@ -3,8 +3,8 @@
 
 //! Courier priority and task-only federation capacity regressions over real host exchanges.
 
+use crate::bus::connection_manager::ConnectionHandle;
 use crate::bus::connection_manager::tests::{config, entry, fixture, send, watchdog};
-use crate::bus::connection_manager::{CallClass, ConnectionHandle};
 use crate::{GatewayClientFrame, GatewayServerFrame};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -38,11 +38,7 @@ async fn receipt_prekey_fetch_not_starved_by_bulk() -> Case {
             let context = handle.test_context();
             let config = config()?;
             tokio::spawn(async move {
-                crate::bus::couriers::pair_material::fetch(
-                    &context, &config,
-                    crate::client::routed::SendMaterialRequest { root: None, prekey: Some("receipt-peer".into()) },
-                    CallClass::Priority,
-                ).await
+                crate::bus::delivery_receipts::background::test_fetch_material(&context, config).await
             })
         };
         wait_for_queued(&handle, crate::bus::runtime_limits::CALL_QUEUE + 1).await;
@@ -64,9 +60,10 @@ async fn receipt_prekey_fetch_not_starved_by_bulk() -> Case {
 
 #[tokio::test]
 async fn group_and_call_control_bypass_saturated_task_limiter() -> Case {
-    watchdog(async {
+    let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    super::federation::TEST_LIMITER.scope(limiter.clone(), watchdog(async move {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let capacity = crate::client::federation::forward_slots();
+        let capacity = limiter;
         let _permits = capacity.acquire_many(4).await?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
@@ -103,5 +100,5 @@ async fn group_and_call_control_bypass_saturated_task_limiter() -> Case {
         server.await??;
         handle.stop().await;
         Ok(())
-    }).await
+    })).await
 }
