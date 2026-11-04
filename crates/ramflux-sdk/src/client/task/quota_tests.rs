@@ -128,7 +128,7 @@ fn verify_independent_requester_capacity(
     Ok(other)
 }
 #[test]
-fn an_assignees_one_hundred_sixty_updates_cannot_spend_the_requesters_quota_or_prevent_cancellation()
+fn an_assignees_updates_beyond_the_signer_byte_budget_cannot_spend_the_requesters_quota_or_prevent_cancellation()
 -> TestResult {
     // The invariant does not depend on the exact production budget, only on the assignee
     // exceeding it; 512 KiB keeps the signed payload volume small. Production stays 8 MiB.
