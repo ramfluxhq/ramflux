@@ -18,7 +18,7 @@ const LOCAL_DELIVERY_EXPIRY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("router_local_delivery_expiry_v1");
 const FORMAT: TableDefinition<&str, u8> = TableDefinition::new("router_expiry_index_format_v1");
 /// Deadlines computed once for WAL records written before acceptance times were logged.
-pub(super) const LEGACY_WAL_DEADLINES: TableDefinition<&str, i64> =
+pub(crate) const LEGACY_WAL_DEADLINES: TableDefinition<&str, i64> =
     TableDefinition::new("router_legacy_wal_deadlines_v1");
 
 /// Durable mailbox row: the entry plus the deadline assigned when the router accepted it.
@@ -51,7 +51,7 @@ pub(super) fn encode_entry(
 }
 
 /// Decodes a mailbox row; rows written before deadlines were stored use the envelope expiry.
-pub(super) fn decode_entry(bytes: &[u8]) -> Result<(InboxEntry, i64), NodeCoreError> {
+pub(crate) fn decode_entry(bytes: &[u8]) -> Result<(InboxEntry, i64), NodeCoreError> {
     let stored: StoredInboxEntry = serde_json::from_slice(bytes)
         .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
     let deadline = stored.retain_until.unwrap_or_else(|| {
@@ -82,7 +82,7 @@ pub(super) fn index_inbox_row(
 }
 
 /// Removes a mailbox row and its index key; returns whether a row existed.
-pub(super) fn remove_inbox_row(
+pub(crate) fn remove_inbox_row(
     txn: &redb::WriteTransaction,
     row_key: &str,
 ) -> Result<bool, NodeCoreError> {

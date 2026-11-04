@@ -25,6 +25,8 @@ pub use source::{AttestMigration, AttestedHome, CommitMigration, FenceOutcome, M
 mod authority_evidence;
 mod courier;
 pub(crate) use courier::MigrationCourierClaim;
+pub(crate) mod drain;
+pub use drain::{MigrationDrainEntry, MigrationDrainOutcome, MigrationDrainState};
 mod fence;
 mod forward_window;
 mod forwarded;

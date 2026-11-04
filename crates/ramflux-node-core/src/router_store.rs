@@ -35,7 +35,7 @@ pub(crate) use custody_accounts::CustodyAccountWrite;
 mod custody_budget_policy;
 pub use custody_accounts::CustodyPublicationBudgetRow;
 mod custody_history;
-mod expiry_index;
+pub(crate) mod expiry_index;
 mod identity_registry;
 mod migration_barrier;
 mod retention;
@@ -60,7 +60,7 @@ pub struct RouterRedbStore {
     db: Arc<redb::Database>,
     path: PathBuf,
     commit_writer: Option<RouterCommitWriter>,
-    submission_wal: Option<RouterWalStore>,
+    pub(crate) submission_wal: Option<RouterWalStore>,
     submission_gates: submission_barrier::TargetGates,
     migration_root_gates: submission_barrier::TargetGates,
     pub(crate) inactive_migration_roots:
@@ -362,7 +362,7 @@ fn record_replay_tuple_in_txn(
 
 #[path = "router_store/mailbox_keys.rs"]
 mod mailbox_keys;
-use mailbox_keys::storage_key as inbox_entry_storage_key;
+pub(crate) use mailbox_keys::storage_key as inbox_entry_storage_key;
 
 /// Stores a mailbox row with the deadline assigned at server acceptance time.
 fn record_inbox_entry_in_txn(
@@ -977,6 +977,11 @@ impl RouterRedbStore {
         let sequence = cursor.last_acknowledged_inbox_seq.ok_or_else(|| {
             NodeCoreError::ItestHttp("ACK lacks a mailbox delivery sequence".into())
         })?;
+        crate::home_migration_store::drain::receiver_ack(
+            &write_txn,
+            &cursor.target_delivery_id,
+            sequence,
+        )?;
         for sequence in std::iter::once(sequence).chain(cursor.retired_inbox_seqs.iter().copied()) {
             let key = inbox_entry_storage_key(&cursor.target_delivery_id, sequence);
             expiry_index::remove_inbox_row(&write_txn, &key)?;

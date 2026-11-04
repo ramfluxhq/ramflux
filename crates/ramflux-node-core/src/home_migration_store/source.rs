@@ -222,6 +222,7 @@ impl RouterCore {
             }
             maintenance::require_no_live_window(&tx, &a.account_anchor, None)?;
             maintenance::reserve_budget(&tx, &a.account_anchor, false)?;
+            super::drain::capture(store, &tx, &cursors, now)?;
             let backlog_hash = schedule_backlog(&tx, &cursors)?;
             let evidence = committed_evidence(
                 node,

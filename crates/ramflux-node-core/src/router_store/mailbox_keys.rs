@@ -7,7 +7,7 @@ use redb::{ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
 const FORMAT: TableDefinition<&str, u8> = TableDefinition::new("router_mailbox_key_format_v1");
 
-pub(super) fn storage_key(target: &str, sequence: u64) -> String {
+pub(crate) fn storage_key(target: &str, sequence: u64) -> String {
     format!("delivery/v1/{}/{sequence:020}", ramflux_protocol::encode_base64url(target))
 }
 

@@ -23,8 +23,9 @@ mod home_migration_store;
 mod home_node_migration;
 pub use home_migration_store::{
     AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationAdmission,
-    MigrationBacklogCursor, MigrationEndpoints, MigrationNode, MigrationOperation, MigrationPeer,
-    MigrationRole, PrepareMigration, SealedMigration,
+    MigrationBacklogCursor, MigrationDrainEntry, MigrationDrainOutcome, MigrationDrainState,
+    MigrationEndpoints, MigrationNode, MigrationOperation, MigrationPeer, MigrationRole,
+    PrepareMigration, SealedMigration,
 };
 #[cfg(test)]
 mod http_response_tests;
