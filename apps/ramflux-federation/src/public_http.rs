@@ -49,23 +49,51 @@ pub(crate) fn serve_public_http(
                     continue;
                 }
                 Err(error) => {
-                    std::thread::sleep(backoff.failure(&error));
+                    backoff.wait_after_failure(&error);
                     continue;
                 }
             };
-            match spawn_public_connection(
-                stream,
-                context.clone(),
-                &connections,
-                limits,
-                &source_limits,
-            ) {
-                Ok(_) => backoff.success(),
-                Err(error) => std::thread::sleep(backoff.failure(&error)),
-            }
+            finish_public_accept(
+                spawn_public_connection(
+                    stream,
+                    context.clone(),
+                    &connections,
+                    limits,
+                    &source_limits,
+                ),
+                &mut backoff,
+            );
         }
     })?;
     Ok(())
+}
+
+fn finish_public_accept(
+    result: Result<bool, PublicConnectionError>,
+    backoff: &mut ramflux_node_core::ListenerAcceptBackoff,
+) {
+    match result {
+        Ok(_) => backoff.success(),
+        Err(PublicConnectionError::Peer(error)) => backoff.wait_after_failure(&error),
+        Err(PublicConnectionError::Resource(error)) => {
+            std::thread::sleep(backoff.resource_failure(&error));
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "public_accept_tests.rs"]
+mod accept_tests;
+
+pub(crate) enum PublicConnectionError {
+    Peer(std::io::Error),
+    Resource(std::io::Error),
+}
+
+impl From<std::io::Error> for PublicConnectionError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Resource(error)
+    }
 }
 
 pub(crate) fn spawn_public_connection(
@@ -74,9 +102,21 @@ pub(crate) fn spawn_public_connection(
     connections: &Arc<ramflux_node_core::ConnectionSet>,
     limits: ramflux_node_core::HttpRequestLimits,
     source_limits: &Arc<PublicSourceLimits>,
-) -> std::io::Result<bool> {
+) -> Result<bool, PublicConnectionError> {
+    let peer = stream.peer_addr();
+    spawn_public_connection_with_peer(stream, peer, context, connections, limits, source_limits)
+}
+
+fn spawn_public_connection_with_peer(
+    stream: TcpStream,
+    peer: std::io::Result<std::net::SocketAddr>,
+    context: FederationPublicHttpContext,
+    connections: &Arc<ramflux_node_core::ConnectionSet>,
+    limits: ramflux_node_core::HttpRequestLimits,
+    source_limits: &Arc<PublicSourceLimits>,
+) -> Result<bool, PublicConnectionError> {
     let accepted_at = std::time::Instant::now();
-    let source = stream.peer_addr()?.ip();
+    let source = peer.map_err(PublicConnectionError::Peer)?.ip();
     tracing::debug!(%source, "federation public connection source observed");
     if source_limits.observe_accepted_source(source) {
         tracing::warn!(
@@ -121,6 +161,7 @@ pub(crate) fn spawn_public_connection(
             );
         },
     )
+    .map_err(PublicConnectionError::Resource)
 }
 
 #[cfg(test)]
