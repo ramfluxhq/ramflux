@@ -13,22 +13,15 @@ fn migration_direct_grant_respects_listener_capacity_revocation_and_one_use_scop
     let (driver, _) = super::super::registered_direct_driver(&router, &store)?;
     let service = service(&driver, &store)?;
     let control = request(&driver, false)?;
-    let action = CustodyProofAction::HomeMigration {
-        purpose: MigrationPurpose::Read,
-        control_hash: ramflux_protocol::home_migration::message_hash(&control.control)?,
-        publication: Box::new(Publication {
-            record: driver.publication.record.clone(),
-            compacted_ids: None,
-        }),
-    };
+    let action = read_action(&driver, &control)?;
     let pool = crate::CustodyIngressLimiter::with_pools(
         1,
-        1,
-        Some(4),
+        Some(1),
+        4,
         std::time::Duration::from_secs(300),
     );
     let wall = pool.acquire("192.0.2.1".parse()?, None, std::time::Instant::now())?;
-    assert!(wall.mark_authenticated("wall"));
+    wall.mark_authenticated("wall")?;
     let permit = pool.acquire("198.51.100.1".parse()?, None, std::time::Instant::now())?;
     let context = crate::CustodyTlsContext {
         connection_id: &driver.connection,
@@ -93,29 +86,11 @@ fn migration_direct_grant_respects_listener_capacity_revocation_and_one_use_scop
     };
     assert_eq!(
         send(CustodySessionAction::Inbox { after_seq: 0, limit: 1 })?,
-        CustodyServerFrame::Refused {
-            code: CustodyRefusal::BindingRefused,
-            capacity: None,
-            retry: None
-        },
+        unhinted_refusal(CustodyRefusal::BindingRefused),
     );
     let status = CustodySessionAction::HomeMigration { request: Box::new(control) };
-    assert_ne!(
-        send(status.clone())?,
-        CustodyServerFrame::Refused {
-            code: CustodyRefusal::BindingRefused,
-            capacity: None,
-            retry: None
-        }
-    );
-    assert_eq!(
-        send(status)?,
-        CustodyServerFrame::Refused {
-            code: CustodyRefusal::SessionRequired,
-            capacity: None,
-            retry: None
-        }
-    );
+    assert_ne!(send(status.clone())?, unhinted_refusal(CustodyRefusal::BindingRefused));
+    assert_eq!(send(status)?, unhinted_refusal(CustodyRefusal::SessionRequired));
     let queued = prove()?;
     permit.revoke();
     assert_eq!(
@@ -123,4 +98,19 @@ fn migration_direct_grant_respects_listener_capacity_revocation_and_one_use_scop
         CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None, retry: None },
     );
     Ok(())
+}
+
+fn read_action(driver: &Driver, control: &Request) -> Result<CustodyProofAction> {
+    Ok(CustodyProofAction::HomeMigration {
+        purpose: MigrationPurpose::Read,
+        control_hash: ramflux_protocol::home_migration::message_hash(&control.control)?,
+        publication: Box::new(Publication {
+            record: driver.publication.record.clone(),
+            compacted_ids: None,
+        }),
+    })
+}
+
+fn unhinted_refusal(code: CustodyRefusal) -> CustodyServerFrame {
+    CustodyServerFrame::Refused { code, capacity: None, retry: None }
 }

@@ -409,7 +409,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     use ramflux_protocol::{DeliveryClass, Ext, Priority, SignatureAlg, SignedFields};
 
@@ -1319,11 +1319,11 @@ pub(crate) mod tests {
     }
 
     fn temp_store_path(test_name: &str) -> anyhow::Result<PathBuf> {
-        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let suffix = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
         Ok(std::env::temp_dir().join(format!(
             "ramflux-router-{test_name}-{}-{}.redb",
             std::process::id(),
-            elapsed.as_nanos()
+            suffix
         )))
     }
 }

@@ -240,7 +240,7 @@ fn migration_lease_precedes_real_forward_and_replay_persistence_on_both_ingress_
         listener.set_nonblocking(false)?;
         let (entered, receiver) = mpsc::channel();
         let (release, wait) = mpsc::channel();
-        let server = thread::spawn(move || successful_held_forward(listener, entered, wait));
+        let server = thread::spawn(move || successful_held_forward(&listener, &entered, &wait));
         let sender = Arc::clone(&handle);
         let message = envelope.clone();
         let submit = thread::spawn(move || {
@@ -278,23 +278,23 @@ fn migration_lease_precedes_real_forward_and_replay_persistence_on_both_ingress_
         assert!(before_replay.is_ok(), "in-flight forward is not durably accepted");
         assert_eq!(response.outcome, "forwarded_home_node_migrated");
         assert_eq!(response.inbox_seq, Some(37));
-        assert!(handle.state().resume("target_alice", 0, 10).is_empty());
+        assert_eq!(handle.state().resume("target_alice", 0, 10), []);
         let restored =
             handle.store().load_router()?.ok_or_else(|| anyhow::anyhow!("missing router"))?;
         assert!(
             restored.accept_envelope_replay(&source, envelope, now).is_err(),
             "successful forward persists replay before returning"
         );
-        assert!(restored.resume("target_alice", 0, 10).is_empty());
+        assert_eq!(restored.resume("target_alice", 0, 10), []);
         drop(handle.store().migration_submission_barrier(&map)?);
     }
     Ok(())
 }
 
 fn successful_held_forward(
-    listener: TcpListener,
-    entered: mpsc::Sender<()>,
-    wait: mpsc::Receiver<()>,
+    listener: &TcpListener,
+    entered: &mpsc::Sender<()>,
+    wait: &mpsc::Receiver<()>,
 ) -> Result<(), String> {
     let (mut stream, _) = listener.accept().map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;

@@ -13,6 +13,7 @@ const ACCOUNTS: TableDefinition<&str, &[u8]> = TableDefinition::new("custody_acc
 const BUDGETS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("custody_publication_budgets_v1");
 const MAX_ACCOUNTS: u64 = 65_536;
+#[derive(Clone, Copy)]
 pub(crate) struct CustodyAccountWrite<'a> {
     pub anchor: &'a str,
     pub state: &'a CustodyAccountState,

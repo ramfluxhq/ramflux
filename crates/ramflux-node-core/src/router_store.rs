@@ -433,47 +433,7 @@ impl RouterRedbStore {
             if create { redb::Database::create(path) } else { redb::Database::open(path) }
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?,
         );
-        let write_txn =
-            db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        {
-            let _table = write_txn
-                .open_table(ROUTER_SNAPSHOT_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_INBOX_ENTRY_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_CURSOR_STATE_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_REPLAY_TUPLE_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_SESSION_ENTRY_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_LIFECYCLE_RECORD_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_LIFECYCLE_TOMBSTONE_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_DEACTIVATED_TARGET_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_DELETED_TARGET_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _table = write_txn
-                .open_table(ROUTER_ABUSE_REPORT_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        }
-        mailbox_keys::upgrade(&write_txn)?;
-        migration_barrier::upgrade_legacy_snapshot(&write_txn)?;
-        expiry_index::upgrade(&write_txn)?;
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        Self::initialize_mailbox_schema(&db)?;
         let mut legacy_registry: IdentityRegistry =
             load_snapshot(&db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
                 .unwrap_or_default();
@@ -525,6 +485,51 @@ impl RouterRedbStore {
             #[cfg(test)]
             fail_next_migration_commit: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    fn initialize_mailbox_schema(db: &redb::Database) -> Result<(), NodeCoreError> {
+        let write_txn =
+            db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        {
+            let _table = write_txn
+                .open_table(ROUTER_SNAPSHOT_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_INBOX_ENTRY_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_CURSOR_STATE_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_REPLAY_TUPLE_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_SESSION_ENTRY_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_LIFECYCLE_RECORD_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_LIFECYCLE_TOMBSTONE_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_DEACTIVATED_TARGET_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_DELETED_TARGET_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(ROUTER_ABUSE_REPORT_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        }
+        mailbox_keys::upgrade(&write_txn)?;
+        migration_barrier::upgrade_legacy_snapshot(&write_txn)?;
+        expiry_index::upgrade(&write_txn)?;
+        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        Ok(())
     }
 
     #[must_use]
