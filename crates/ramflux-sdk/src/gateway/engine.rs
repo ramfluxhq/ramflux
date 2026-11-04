@@ -12,14 +12,20 @@ pub struct GatewaySessionEngine {
     pub(crate) stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
     pub(crate) session: GatewaySessionState,
     request_counter: u64,
-    pub(crate) pending_deliveries: VecDeque<GatewayInboxEntry>,
+    pub(crate) pending_deliveries: VecDeque<(GatewayInboxEntry, usize)>,
+    pub(crate) buffered_bytes: usize,
+    #[cfg(test)]
+    pub(crate) buffer_stats: super::host_frames::BufferStats,
+    pub(crate) last_frame_bytes: usize,
+    pub(crate) frame_timeout: Duration,
+    pub(crate) wire_writes: u64,
+    pub(crate) terminal_reason: Option<crate::bus::connection_manager::DisconnectReason>,
+    pub(crate) host: Option<super::host_frames::HostFrames>,
     pub(crate) push_route_expires_at: Option<u64>,
     pub(crate) pending_push_route: Option<super::push_route::PendingPushRoute>,
-    /// Frames read while waiting for a push route answer, returned to the next reader.
-    pub(crate) deferred_frames: VecDeque<GatewayServerFrame>,
 }
 
-enum GatewaySessionClientTransport {
+pub(crate) enum GatewaySessionClientTransport {
     #[cfg(test)]
     Injected,
     Quic {
@@ -57,6 +63,12 @@ pub struct GatewayPlaintextDelivery {
     pub attachments: Vec<SdkDmAttachmentImportResult>,
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_CONNECT_LIMITS: crate::bus::runtime_limits::RuntimeTimeouts;
+    pub(crate) static TEST_CONNECT_OPENER: std::sync::Arc<dyn super::transport_opener::TransportOpener>;
+}
+
 pub(crate) async fn gateway_session_timeout<T, F>(
     operation: &'static str,
     future: F,
@@ -64,24 +76,34 @@ pub(crate) async fn gateway_session_timeout<T, F>(
 where
     F: Future<Output = Result<T, SdkError>>,
 {
-    match tokio::time::timeout(GATEWAY_SESSION_NETWORK_TIMEOUT, future).await {
+    frame_timeout(GATEWAY_SESSION_NETWORK_TIMEOUT, operation, future).await
+}
+
+pub(crate) async fn frame_timeout<T>(
+    duration: Duration,
+    operation: &'static str,
+    future: impl Future<Output = Result<T, SdkError>>,
+) -> Result<T, SdkError> {
+    match tokio::time::timeout(duration, future).await {
         Ok(result) => result,
         Err(_elapsed) => Err(SdkError::GatewaySessionRejected(format!(
             "{operation} timed out after {}s",
-            GATEWAY_SESSION_NETWORK_TIMEOUT.as_secs()
+            duration.as_secs()
         ))),
     }
 }
 
-pub(crate) async fn gateway_connection_timeout<T, F>(
-    native: bool,
-    operation: &'static str,
-    future: F,
-) -> Result<T, SdkError>
-where
-    F: Future<Output = Result<T, SdkError>>,
-{
-    if native { future.await } else { gateway_session_timeout(operation, future).await }
+pub(crate) async fn connect_deadline<T>(
+    deadline: Option<tokio::time::Instant>,
+    future: impl Future<Output = Result<T, SdkError>>,
+) -> Result<T, SdkError> {
+    if let Some(deadline) = deadline {
+        tokio::time::timeout_at(deadline, future).await.map_err(|_| SdkError::NodeTimeout {
+            retry_after_ms: crate::node::NODE_RETRY_AFTER_MS,
+        })?
+    } else {
+        gateway_session_timeout("gateway session connect", future).await
+    }
 }
 
 /// GW-TOKEN-01-A2: build one freshly-stamped, signed gateway request.
@@ -144,18 +166,56 @@ impl GatewaySessionEngine {
         if config.custody_networking_pending {
             return Err(SdkError::NetworkingPending);
         }
-        let mut engine = gateway_connection_timeout(
-            config.custody.is_some(),
-            "gateway session connect",
-            Box::pin(Self::connect_inner(config)),
-        )
-        .await?;
-        // Outside the connect timeout and write-only: push registration never fails a connect.
+        let deadline = config
+            .custody
+            .as_ref()
+            .map(|_| tokio::time::Instant::now() + crate::bus::runtime_limits::ATTEMPT_TIMEOUT);
+        Self::connect_at(config, deadline).await
+    }
+
+    pub(crate) async fn connect_at(
+        config: GatewaySessionConfig,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Self, SdkError> {
+        #[cfg(test)]
+        let limits = TEST_CONNECT_LIMITS.try_with(Clone::clone).unwrap_or_default();
+        #[cfg(not(test))]
+        let limits = crate::bus::runtime_limits::RuntimeTimeouts::default();
+        let opener: std::sync::Arc<dyn super::transport_opener::TransportOpener> =
+            std::sync::Arc::new(super::transport_opener::ConfiguredTransport);
+        #[cfg(test)]
+        let opener = TEST_CONNECT_OPENER.try_with(Clone::clone).unwrap_or(opener);
+        Self::connect_with_opener(config, deadline, limits, opener).await
+    }
+
+    pub(crate) async fn connect_with_opener(
+        config: GatewaySessionConfig,
+        deadline: Option<tokio::time::Instant>,
+        limits: crate::bus::runtime_limits::RuntimeTimeouts,
+        opener: std::sync::Arc<dyn super::transport_opener::TransportOpener>,
+    ) -> Result<Self, SdkError> {
+        if config.custody_networking_pending {
+            return Err(SdkError::NetworkingPending);
+        }
+        let deadline = deadline.or_else(|| {
+            config
+                .custody
+                .as_ref()
+                .map(|_| tokio::time::Instant::now() + crate::bus::runtime_limits::ATTEMPT_TIMEOUT)
+        });
+        let connect = Self::connect_inner(config, &limits, opener);
+        #[cfg(test)]
+        let connect = crate::custody::retry::TEST_RETRY_BUDGET.scope(limits.retry_budget, connect);
+        let mut engine = connect_deadline(deadline, Box::pin(connect)).await?;
         engine.refresh_push_route_if_due().await;
         Ok(engine)
     }
 
-    async fn connect_inner(mut config: GatewaySessionConfig) -> Result<Self, SdkError> {
+    async fn connect_inner(
+        mut config: GatewaySessionConfig,
+        limits: &crate::bus::runtime_limits::RuntimeTimeouts,
+        opener: std::sync::Arc<dyn super::transport_opener::TransportOpener>,
+    ) -> Result<Self, SdkError> {
         config.refresh_auth_window();
         let (transport, mut stream, active_transport_kind) =
             if let Some(custody) = super::custody::prepare(&config).await? {
@@ -164,7 +224,7 @@ impl GatewaySessionEngine {
                     custody,
                     || async {
                         let (transport, stream, kind) =
-                            open_gateway_session_transport(&endpoint).await?;
+                            opener.open(endpoint.clone(), limits.transport_open).await?;
                         Ok(((transport, kind), stream))
                     },
                     &mut config,
@@ -172,7 +232,7 @@ impl GatewaySessionEngine {
                 .await?;
                 (transport, stream, kind)
             } else {
-                open_gateway_session_transport(&config).await?
+                opener.open(config.clone(), limits.transport_open).await?
             };
         config.transport_kind = active_transport_kind;
         config.refresh_auth_window();
@@ -181,7 +241,7 @@ impl GatewaySessionEngine {
             .await?;
         let auth = gateway_auth_frame(&config, &open)?;
         write_gateway_client_frame(&mut *stream, &GatewayClientFrame::Auth { auth }).await?;
-        let established = gateway_session_timeout("gateway session established", async {
+        let established = frame_timeout(limits.frame, "gateway session established", async {
             read_gateway_server_frame(&mut *stream).await
         })
         .await?;
@@ -205,9 +265,16 @@ impl GatewaySessionEngine {
             session,
             request_counter: 1,
             pending_deliveries: VecDeque::new(),
+            buffered_bytes: 0,
+            #[cfg(test)]
+            buffer_stats: super::host_frames::BufferStats::default(),
+            last_frame_bytes: 0,
+            frame_timeout: limits.frame,
+            wire_writes: 0,
+            terminal_reason: None,
+            host: None,
             push_route_expires_at: None,
             pending_push_route: None,
-            deferred_frames: VecDeque::new(),
         };
         engine.remember_session_for_resume();
         Ok(engine)
@@ -231,10 +298,22 @@ impl GatewaySessionEngine {
             },
             request_counter: 0,
             pending_deliveries: VecDeque::new(),
+            buffered_bytes: 0,
+            #[cfg(test)]
+            buffer_stats: super::host_frames::BufferStats::default(),
+            last_frame_bytes: 0,
+            frame_timeout: crate::constants::GATEWAY_SESSION_NETWORK_TIMEOUT,
+            wire_writes: 0,
+            terminal_reason: None,
+            host: None,
             push_route_expires_at: None,
             pending_push_route: None,
-            deferred_frames: VecDeque::new(),
         }
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &GatewaySessionConfig {
+        &self.config
     }
 
     #[must_use]
@@ -276,12 +355,8 @@ impl GatewaySessionEngine {
     /// # Errors
     /// Returns an error when the heartbeat cannot be written or acknowledged.
     pub async fn heartbeat(&mut self) -> Result<(), SdkError> {
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::Heartbeat { now: gateway_heartbeat_now() },
-        )
-        .await?;
-        match self.read_non_deliver_frame().await? {
+        self.write_frame(&GatewayClientFrame::Heartbeat { now: gateway_heartbeat_now() }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::Heartbeat).await? {
             GatewayServerFrame::Heartbeat { .. } => Ok(()),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
@@ -308,17 +383,16 @@ impl GatewaySessionEngine {
         let expected_envelope_id = submit.envelope.envelope_id.clone();
         let expected_target_delivery_id = submit.envelope.target_delivery_id.clone();
         let submitted_envelope = submit.envelope.clone();
-        write_gateway_client_frame(&mut *self.stream, &GatewayClientFrame::Submit { submit })
-            .await?;
+        self.write_frame(&GatewayClientFrame::Submit { submit }).await?;
         loop {
-            match self.read_gateway_frame("submit response").await? {
+            match self.read_submit_reply(&expected_envelope_id).await? {
                 GatewayServerFrame::Deliver { entry }
                     if entry.envelope.envelope_id == expected_envelope_id =>
                 {
                     return Ok(entry);
                 }
                 GatewayServerFrame::Deliver { entry } => {
-                    self.pending_deliveries.push_back(entry);
+                    self.buffer_delivery(entry);
                 }
                 GatewayServerFrame::InBandWake { .. } => {}
                 GatewayServerFrame::ForwardAck { ack }
@@ -384,16 +458,12 @@ impl GatewaySessionEngine {
             source_device_id,
             envelope,
         };
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::OwnDeviceFanout { fanout },
-        )
-        .await?;
+        self.write_frame(&GatewayClientFrame::OwnDeviceFanout { fanout }).await?;
         loop {
-            match self.read_gateway_frame("own-device fanout response").await? {
+            match self.read_reply(super::frame_dispatch::ExpectedReply::Fanout).await? {
                 GatewayServerFrame::OwnDeviceFanout { response } => return Ok(response),
                 GatewayServerFrame::Deliver { entry } => {
-                    self.pending_deliveries.push_back(entry);
+                    self.buffer_delivery(entry);
                 }
                 GatewayServerFrame::InBandWake { .. } => {}
                 GatewayServerFrame::Nack { reason } => {
@@ -430,8 +500,8 @@ impl GatewaySessionEngine {
         ack.signed = sdk_device_signed_fields(receiver.device_id(), "");
         ack.signed.signature =
             ramflux_crypto::sign_protocol_object_with_device_branch(branch.as_ref(), &ack)?;
-        write_gateway_client_frame(&mut *self.stream, &GatewayClientFrame::Ack { ack }).await?;
-        let ack_cursor = match self.read_non_deliver_frame().await? {
+        self.write_frame(&GatewayClientFrame::Ack { ack }).await?;
+        let ack_cursor = match self.read_reply(super::frame_dispatch::ExpectedReply::Ack).await? {
             GatewayServerFrame::Ack { cursor } => {
                 self.config.last_seen_inbox_seq = cursor.inbox_seq;
                 Ok(cursor)
@@ -441,7 +511,7 @@ impl GatewaySessionEngine {
                 Err(SdkError::GatewaySessionRejected(format!("expected ack cursor, got {other:?}")))
             }
         }?;
-        match self.read_non_deliver_frame().await? {
+        match self.read_reply(super::frame_dispatch::ExpectedReply::Cursor).await? {
             GatewayServerFrame::Cursor { cursor: Some(cursor) } => {
                 self.config.last_seen_inbox_seq = cursor.inbox_seq;
                 Ok(cursor)
@@ -458,12 +528,8 @@ impl GatewaySessionEngine {
     /// Returns an error when the cursor request fails.
     pub async fn cursor(&mut self) -> Result<Option<GatewayCursor>, SdkError> {
         let target_delivery_id = self.config.target_delivery_id.clone();
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::Cursor { target_delivery_id },
-        )
-        .await?;
-        match self.read_non_deliver_frame().await? {
+        self.write_frame(&GatewayClientFrame::Cursor { target_delivery_id }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::Cursor).await? {
             GatewayServerFrame::Cursor { cursor } => Ok(cursor),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
@@ -485,14 +551,14 @@ impl GatewaySessionEngine {
             limit,
             resume_token: self.session.resume_token.clone(),
         };
-        write_gateway_client_frame(&mut *self.stream, &GatewayClientFrame::Resume { resume })
-            .await?;
+        self.write_frame(&GatewayClientFrame::Resume { resume }).await?;
         let mut delivered = self.take_pending_deliveries();
         loop {
-            match self.read_gateway_frame("resume response").await? {
+            match self.read_reply(super::frame_dispatch::ExpectedReply::Resume).await? {
                 GatewayServerFrame::Deliver { entry } => delivered.push(entry),
                 GatewayServerFrame::InBandWake { .. } => {}
                 GatewayServerFrame::Resume { entries } => {
+                    delivered.extend(self.take_pending_deliveries());
                     delivered.extend(entries);
                     return Ok(dedup_gateway_entries(delivered));
                 }
@@ -508,18 +574,40 @@ impl GatewaySessionEngine {
         }
     }
 
+    /// The account receive cursor advances only through the authoritative durable inbox page.
+    /// A pushed entry can be beyond that page, so merging it would skip the intervening range.
+    pub(crate) async fn resume_authoritative_after(
+        &mut self,
+        after_inbox_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<GatewayInboxEntry>, SdkError> {
+        let resume = GatewayResumeFrame {
+            target_delivery_id: self.config.target_delivery_id.clone(),
+            after_inbox_seq,
+            limit,
+            resume_token: self.session.resume_token.clone(),
+        };
+        self.write_frame(&GatewayClientFrame::Resume { resume }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::Resume).await? {
+            GatewayServerFrame::Resume { entries } => {
+                self.take_pending_deliveries();
+                Ok(dedup_gateway_entries(entries))
+            }
+            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            other => Err(SdkError::GatewaySessionRejected(format!(
+                "expected resume frame, got {other:?}"
+            ))),
+        }
+    }
+
     /// # Errors
     /// Returns an error when the gateway rejects identity registration.
     pub(crate) async fn register_identity(
         &mut self,
         request: SdkIdentityRegisterRequest,
     ) -> Result<SdkIdentityRegistrationResponse, SdkError> {
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::IdentityRegister { request },
-        )
-        .await?;
-        match self.read_non_deliver_frame().await? {
+        self.write_frame(&GatewayClientFrame::IdentityRegister { request }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::Identity).await? {
             GatewayServerFrame::IdentityRegistered { response } => Ok(response),
             GatewayServerFrame::IdentityRegistrationRejected {
                 reason_code: ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken,
@@ -546,12 +634,8 @@ impl GatewaySessionEngine {
     ) -> Result<SdkPrekeyResponse, SdkError> {
         let request =
             SdkPrekeyPublishRequest { device_id: device_id.to_owned(), bundle: bundle.clone() };
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::PrekeyPublish { request },
-        )
-        .await?;
-        match self.read_non_deliver_frame().await? {
+        self.write_frame(&GatewayClientFrame::PrekeyPublish { request }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::PublishPrekey).await? {
             GatewayServerFrame::PrekeyPublished { response } => Ok(response),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
@@ -564,12 +648,11 @@ impl GatewaySessionEngine {
         &mut self,
         principal: &str,
     ) -> Result<Option<SdkDeviceManifestResponse>, SdkError> {
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::PrincipalManifestFetch { principal_id: principal.to_owned() },
-        )
+        self.write_frame(&GatewayClientFrame::PrincipalManifestFetch {
+            principal_id: principal.to_owned(),
+        })
         .await?;
-        match self.read_non_deliver_frame().await? {
+        match self.read_reply(super::frame_dispatch::ExpectedReply::Manifest).await? {
             GatewayServerFrame::PrincipalManifest { response } => {
                 if let Some(reason) = response.reason_code {
                     return Err(match reason {
@@ -599,12 +682,9 @@ impl GatewaySessionEngine {
         &mut self,
         device_id: &str,
     ) -> Result<SdkPrekeyResponse, SdkError> {
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::PrekeyFetch { device_id: device_id.to_owned() },
-        )
-        .await?;
-        match self.read_non_deliver_frame().await? {
+        self.write_frame(&GatewayClientFrame::PrekeyFetch { device_id: device_id.to_owned() })
+            .await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::Prekey).await? {
             GatewayServerFrame::Prekey { response } => Ok(response),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
@@ -630,12 +710,8 @@ impl GatewaySessionEngine {
             )?,
             body,
         };
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::RelayTokenIssue { request },
-        )
-        .await?;
-        match self.read_non_deliver_frame().await? {
+        self.write_frame(&GatewayClientFrame::RelayTokenIssue { request }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::RelayToken).await? {
             GatewayServerFrame::RelayTokenIssued { response } => Ok(response.relay_token),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
@@ -661,12 +737,9 @@ impl GatewaySessionEngine {
             )?,
             body,
         };
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::RelayTokenV3Issue { request: Box::new(request) },
-        )
-        .await?;
-        match self.read_non_deliver_frame().await? {
+        self.write_frame(&GatewayClientFrame::RelayTokenV3Issue { request: Box::new(request) })
+            .await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::RelayTokenV3).await? {
             GatewayServerFrame::RelayTokenV3Issued { response } => Ok(response.relay_token),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
@@ -691,79 +764,18 @@ impl GatewaySessionEngine {
             )?,
             body,
         };
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::VoiceLease { request: Box::new(request) },
-        )
-        .await?;
-        match self.read_non_deliver_frame().await? {
+        self.write_frame(&GatewayClientFrame::VoiceLease { request: Box::new(request) }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::VoiceLease).await? {
             GatewayServerFrame::VoiceLease { response } => Ok(*response),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             _ => Err(SdkError::GatewaySessionRejected("expected voice lease response".into())),
         }
     }
 
-    pub(crate) async fn read_non_deliver_frame(&mut self) -> Result<GatewayServerFrame, SdkError> {
-        loop {
-            match self.read_gateway_frame("gateway frame").await? {
-                GatewayServerFrame::Deliver { entry } => self.pending_deliveries.push_back(entry),
-                GatewayServerFrame::InBandWake { .. } => {}
-                frame => return Ok(frame),
-            }
-        }
-    }
-
-    /// Reads the next frame for a request; push route answers, which may arrive at any time,
-    /// are applied here and never returned as the reply to another request.
-    async fn read_gateway_frame(
-        &mut self,
-        operation: &'static str,
-    ) -> Result<GatewayServerFrame, SdkError> {
-        loop {
-            let frame = self.read_raw_gateway_frame(operation).await?;
-            if super::push_route::is_push_route_reply(&frame) {
-                if let Err(error) = self.apply_push_route_reply(frame) {
-                    tracing::warn!(%error, "push route registration refused");
-                }
-                continue;
-            }
-            return Ok(frame);
-        }
-    }
-
-    pub(crate) async fn read_raw_gateway_frame(
-        &mut self,
-        operation: &'static str,
-    ) -> Result<GatewayServerFrame, SdkError> {
-        if let Some(frame) = self.deferred_frames.pop_front() {
-            return Ok(frame);
-        }
-        self.read_stream_frame(operation).await
-    }
-
-    /// Reads the next frame from the transport, bypassing frames kept for later readers.
-    pub(crate) async fn read_stream_frame(
-        &mut self,
-        operation: &'static str,
-    ) -> Result<GatewayServerFrame, SdkError> {
-        gateway_session_timeout(operation, async {
-            read_gateway_server_frame(&mut *self.stream).await
-        })
-        .await
-    }
-
-    fn take_pending_deliveries(&mut self) -> Vec<GatewayInboxEntry> {
-        self.pending_deliveries.drain(..).collect()
-    }
-
     /// # Errors
     /// Returns an error when the close frame cannot be written.
     pub async fn close(&mut self, reason: &str) -> Result<(), SdkError> {
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::Close { reason: reason.to_owned() },
-        )
-        .await?;
+        self.write_frame(&GatewayClientFrame::Close { reason: reason.to_owned() }).await?;
         self.stream.finish()?;
         Ok(())
     }
@@ -810,7 +822,7 @@ impl GatewaySessionEngine {
     }
 }
 
-async fn open_gateway_session_transport(
+pub(crate) async fn open_gateway_session_transport(
     config: &GatewaySessionConfig,
 ) -> Result<
     (

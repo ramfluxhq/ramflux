@@ -7,7 +7,43 @@ use super::super::AccountDb;
 use crate::StorageError;
 use rusqlite::{OptionalExtension, params};
 
+/// Read-only disposition of an account-scoped operation key.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OperationLookup {
+    Absent,
+    Completed(serde_json::Value),
+    Pending,
+    Mismatch,
+}
+
 impl AccountDb {
+    /// Looks up a retry receipt without reserving a key or starting a write transaction.
+    ///
+    /// # Errors
+    /// Returns a storage or decoding error if the saved receipt cannot be read.
+    pub fn lookup_operation(
+        &self,
+        id: &str,
+        fingerprint: &str,
+    ) -> Result<OperationLookup, StorageError> {
+        let existing: Option<(String, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT fingerprint,response_json FROM runtime_operation WHERE operation_id=?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(match existing {
+            None => OperationLookup::Absent,
+            Some((saved, _)) if saved != fingerprint => OperationLookup::Mismatch,
+            Some((_, None)) => OperationLookup::Pending,
+            Some((_, Some(response))) => {
+                OperationLookup::Completed(serde_json::from_str(&response)?)
+            }
+        })
+    }
+
     /// Reserves a mutation key before effects. A pending receipt fails closed after a crash.
     ///
     /// # Errors
@@ -78,6 +114,42 @@ impl AccountDb {
             params![id, serde_json::to_string(response)?],
         )?;
         transaction.commit()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn lookup_operation_is_read_only_and_preserves_every_receipt_state() -> Result<(), StorageError>
+    {
+        let (root, db) = crate::tests::test_db("operation-lookup")?;
+        let reader = db.open_reader()?;
+        assert_eq!(reader.lookup_operation("new", "a")?, OperationLookup::Absent);
+        assert_eq!(db.lookup_operation("new", "b")?, OperationLookup::Absent);
+        assert_eq!(db.reserve_operation("new", "a")?, None);
+        assert_eq!(reader.lookup_operation("new", "a")?, OperationLookup::Pending);
+        assert_eq!(reader.lookup_operation("new", "b")?, OperationLookup::Mismatch);
+        assert!(matches!(db.reserve_operation("new", "a"), Err(StorageError::EventIdConflict(_))));
+        let response = json!({"value":"committed"});
+        db.complete_operation("new", &response)?;
+        assert_eq!(
+            reader.lookup_operation("new", "a")?,
+            OperationLookup::Completed(response.clone())
+        );
+        assert_eq!(db.reserve_operation("new", "a")?, Some(response));
+        db.complete_operation("new", &json!({"object_erased":true}))?;
+        assert_eq!(
+            reader.lookup_operation("new", "a")?,
+            OperationLookup::Completed(json!({"object_erased":true}))
+        );
+        assert!(matches!(db.reserve_operation("new", "a"), Err(StorageError::ObjectErased)));
+        drop(reader);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

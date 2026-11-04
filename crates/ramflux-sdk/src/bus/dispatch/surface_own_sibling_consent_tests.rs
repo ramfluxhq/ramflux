@@ -19,7 +19,10 @@ async fn sibling_acceptance_copy_does_not_block_the_authors_surface_copies() -> 
     let own_root = source.client.owned_device_identity()?.root_commitment().to_owned();
     let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
     let source_own = Arc::clone(&gateway.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway)));
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(gateway),
+    ));
     // The author's first own copy bootstraps the pair towards the sibling.
     let create = super::super::dm_tests::create_carrier(&source.client)?;
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "submitted");
@@ -34,7 +37,10 @@ async fn sibling_acceptance_copy_does_not_block_the_authors_surface_copies() -> 
     sibling.client.stage_own_contact(&manifest, "sibling-accepted")?;
     let back = fresh_sibling_gateway(&sibling.client, &source.client)?;
     let sibling_own = Arc::clone(&back.own);
-    sibling.put_engine(GatewaySessionEngine::with_test_transport(receiver.clone(), Box::new(back)));
+    sibling.install_test_session(GatewaySessionEngine::with_test_transport(
+        receiver.clone(),
+        Box::new(back),
+    ));
     assert_eq!(
         crate::bus::own_device_copy::flush(&mut sibling)
             .await

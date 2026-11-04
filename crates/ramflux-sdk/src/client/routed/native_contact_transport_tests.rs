@@ -4,6 +4,8 @@
 //! Native consent uses the production directory projection and ordinary send transport.
 use super::*;
 use crate::client::native_test_support::{Fixture as NativeFixture, TestResult};
+#[path = "native_contact_background_tests.rs"]
+mod background;
 
 fn native_card(sender: &NativeFixture) -> TestResult<String> {
     let now = crate::custody::network_now()?;
@@ -109,12 +111,12 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
         envelope,
     };
     let receiver = state.accounts.get_mut("bob").ok_or("receiver")?;
-    let mut engine = receiver.take_live_engine().await?;
+    let mut engine = receiver.session_client().await?;
     let result = receiver
         .client
         .apply_routed_entry(&mut engine, &super::super::review::pool()?, &entry, false)
         .await;
-    receiver.put_engine(engine);
+    receiver.install_test_session(engine);
     result?;
     let principal = sender.manifest.principal_id.clone();
     let root = sender.manifest.principal_commitment.clone();

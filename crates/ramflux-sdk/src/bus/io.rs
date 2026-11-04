@@ -97,6 +97,9 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
             SdkError::CustodyAdmission { retry, .. } => {
                 Some(Box::new(serde_json::json!({"retry": retry.clamped()})))
             }
+            SdkError::NetworkingPendingContext { networking, .. } => {
+                Some(Box::new(serde_json::json!({"networking":networking})))
+            }
             SdkError::CustodyCapacity { capacity } => {
                 Some(Box::new(serde_json::json!({"capacity": capacity})))
             }
@@ -127,6 +130,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
             SdkError::CustodyAdmission { retry, .. } => {
                 Some(u64::from(retry.clamped().retry_after_ms))
             }
+            SdkError::NetworkingPendingContext { retry_after_ms, .. } => *retry_after_ms,
             SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some(1_000),
             SdkError::CustodyCapacity { capacity } => {
                 Some(crate::custody::capacity_hint::retry_after_ms(
@@ -167,6 +171,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::Crypto(CryptoError::GroupLeaseUnavailable) => "GroupLeaseUnavailable",
         SdkError::ContactInput(crate::ContactReason::AnchorMismatch) => "AnchorMismatch",
         SdkError::NetworkingPending
+        | SdkError::NetworkingPendingContext { .. }
         | SdkError::NodeUnreachable { .. }
         | SdkError::NodeTimeout { .. } => "NetworkingPending",
         SdkError::RestoreSetupRequired => "restore_setup_required",

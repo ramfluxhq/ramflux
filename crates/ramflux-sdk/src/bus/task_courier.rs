@@ -71,6 +71,7 @@ pub(super) struct TaskCourier {
 }
 
 impl TaskCourier {
+    #[cfg(test)]
     pub(super) fn start() -> Self {
         Self::with_limits(Duration::from_secs(5), 4)
     }

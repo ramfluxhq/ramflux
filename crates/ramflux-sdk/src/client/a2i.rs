@@ -8,15 +8,15 @@ use crate::prelude::*;
 impl RamfluxClient {
     pub async fn send_a2i_control_event_via_gateway(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         event: &A2iControlEvent,
         target_delivery_id: Option<String>,
     ) -> Result<GatewayInboxEntry, SdkError> {
         let mut event = event.clone();
         let source = self.bind_owned_a2i_event(&mut event)?;
-        if engine.config.device_id != source.device_id()
-            || event.source_principal_id.as_deref() != Some(engine.config.principal_id.as_str())
-            || engine.config.device_branch.as_ref().is_none_or(|branch| {
+        if engine.config().device_id != source.device_id()
+            || event.source_principal_id.as_deref() != Some(engine.config().principal_id.as_str())
+            || engine.config().device_branch.as_ref().is_none_or(|branch| {
                 self.device_branch.as_ref().is_none_or(|owned| {
                     branch.signing_key.verifying_key() != owned.signing_key.verifying_key()
                 })
@@ -24,7 +24,7 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("A2I source engine mismatch".into()));
         }
-        self.resolve_target_principal_commitment(&engine.config, None, &event.target_device_id)
+        self.resolve_target_principal_commitment(engine.config(), None, &event.target_device_id)
             .await?;
         let lookup = self.root_qualified_device_lookup(&event.target_device_id)?;
         let prekey = engine.fetch_prekey_bundle(&lookup).await?;
@@ -49,7 +49,7 @@ impl RamfluxClient {
             conversation_id,
             message_id: event.event_id.clone(),
             envelope_id: format!("a2i:{}", event.event_id),
-            source_principal_id: engine.config.principal_id.clone(),
+            source_principal_id: engine.config().principal_id.clone(),
             sender_id: event.source_device_id.clone(),
             recipient_device_id: Some(event.target_device_id.clone()),
             recipient_principal_commitment: Some(root),
@@ -71,7 +71,7 @@ impl RamfluxClient {
     /// Returns an error when SDK-owned DM encryption, local projection persistence, envelope
     pub async fn receive_a2i_control_events(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         limit: usize,
     ) -> Result<Vec<A2iControlEvent>, SdkError> {
         let after_inbox_seq = self.gateway_receive_cursor(engine.target_delivery_id())?;
@@ -123,12 +123,14 @@ impl RamfluxClient {
     }
     async fn receive_bound_legacy_a2i(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<A2iControlEvent>, SdkError> {
-        let expected =
-            a2i_control_conversation_id(&entry.envelope.source_device_id, &engine.config.device_id);
-        if self.legacy_routing_binding(&engine.config.device_id, entry)?.as_deref()
+        let expected = a2i_control_conversation_id(
+            &entry.envelope.source_device_id,
+            &engine.config().device_id,
+        );
+        if self.legacy_routing_binding(&engine.config().device_id, entry)?.as_deref()
             != Some(expected.as_str())
         {
             self.account_db()?.hold_unrouted(
@@ -140,7 +142,7 @@ impl RamfluxClient {
             self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
             return Ok(None);
         }
-        self.ensure_inbound_device(&engine.config, entry).await?;
+        self.ensure_inbound_device(engine.config(), entry).await?;
         let receipt_key = format!("legacy/a2i/{}", self.authenticated_committed_key(entry)?);
         if let Some(receipt) =
             self.account_db()?.load_actor_state::<LegacyControlReceipt>(&receipt_key)?
@@ -159,8 +161,10 @@ impl RamfluxClient {
             return Ok((!event.acknowledged).then_some(event));
         }
 
-        let conversation_id =
-            a2i_control_conversation_id(&entry.envelope.source_device_id, &engine.config.device_id);
+        let conversation_id = a2i_control_conversation_id(
+            &entry.envelope.source_device_id,
+            &engine.config().device_id,
+        );
         let ciphertext_bytes = ramflux_protocol::decode_base64url(
             &entry.envelope.encrypted_payload,
         )
@@ -171,7 +175,7 @@ impl RamfluxClient {
         let body = session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
         let mut event: A2iControlEvent = serde_json::from_slice(&body)?;
         if event.source_device_id != entry.envelope.source_device_id
-            || event.target_device_id != engine.config.device_id
+            || event.target_device_id != engine.config().device_id
         {
             return Err(SdkError::InboundRejected("legacy A2I endpoint mismatch".to_owned()));
         }
@@ -203,7 +207,7 @@ impl RamfluxClient {
     }
     async fn finish_a2i_receive(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         self.ack_gateway_entry(engine, entry, now_unix_timestamp()).await?;

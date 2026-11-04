@@ -30,12 +30,17 @@ pub(super) struct Gateway {
     pub sent: Vec<ramflux_protocol::Envelope>,
     pub inbox: Vec<GatewayInboxEntry>,
     pub acked: BTreeSet<String>,
+    pub resumes: Vec<u64>,
     pub manifests: BTreeMap<String, Value>,
     pub protocol_errors: Vec<String>,
-    pub submit_hold: Option<Hold>,
+    pub ack_hold: Option<Arc<AckHold>>,
+    pub prekey_hold: Option<Arc<GatewayHold>>,
+    pub submit_hold: Option<Arc<GatewayHold>>,
+    pub priority_submit_hold: Option<Hold>,
     pub receipt_bypass: bool,
     pub resume_hold: Option<Hold>,
     pub manifest_requests: Vec<String>,
+    pub manifest_hold: Option<(String, Arc<GatewayHold>)>,
 }
 
 impl Gateway {
@@ -46,6 +51,13 @@ impl Gateway {
         json!({"status":if body.is_null(){404}else{200},"body":body})
     }
 }
+
+#[derive(Default)]
+pub(super) struct GatewayHold {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+pub(super) type AckHold = GatewayHold;
 
 pub(super) struct Fixture {
     pub root: PathBuf,
@@ -153,7 +165,7 @@ impl Fixture {
                 });
             }
         });
-        let config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
+        let mut config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
             bind_addr: "127.0.0.1:0".parse()?,
             gateway_addr: address,
             server_name: "test-gateway".into(),
@@ -164,8 +176,10 @@ impl Fixture {
             prekey_http_url: None,
         })
         .with_account_identity(&source.client)?;
+        config.timeout = Duration::from_secs(600);
+        config.quic_fallback_timeout = Duration::from_secs(600);
         source.engine = None;
-        source.put_engine(GatewaySessionEngine::connect(config).await?);
+        source.install_test_session(GatewaySessionEngine::connect(config).await?);
         Ok(Self { root, source, peer, sibling, gateway, _server: server })
     }
 
@@ -178,7 +192,7 @@ impl Fixture {
             federation: None,
             own: false,
         };
-        let mut engine = self.peer.take_live_engine().await?;
+        let mut engine = self.peer.session_client().await?;
         let dm = seal(
             &self.peer,
             &mut engine,
@@ -209,7 +223,7 @@ impl Fixture {
             crate::client::routed::Route::control(),
         )
         .await?;
-        self.peer.put_engine(engine);
+        self.peer.install_test_session(engine);
         let mut gateway = self.gateway.lock().map_err(|_| "gateway")?;
         for (index, delivery) in [dm, call].into_iter().enumerate() {
             gateway.inbox.push(GatewayInboxEntry {
@@ -236,7 +250,7 @@ async fn serve(
         stream.read_exact(&mut bytes).await?;
         let value: Value = serde_json::from_slice(&bytes)?;
         let response = if let Some(path) = value["path"].as_str() {
-            shared.lock().map_err(|_| "gateway")?.manifest_response(path)
+            public_lookup(path, shared).await?
         } else {
             let frame: GatewayClientFrame = serde_json::from_value(value)?;
             let response = match frame {
@@ -259,20 +273,31 @@ async fn serve(
                     },
                 },
                 GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
-                GatewayClientFrame::Resume { .. } => {
+                GatewayClientFrame::Resume { resume } => {
                     let hold = shared.lock().map_err(|_| "gateway")?.resume_hold.take();
                     if let Some(hold) = hold {
-                        hold.wait().await;
+                        hold.entered.notify_one();
+                        hold.release.notified().await;
                     }
-                    let gateway = shared.lock().map_err(|_| "gateway")?;
+                    let mut gateway = shared.lock().map_err(|_| "gateway")?;
+                    gateway.resumes.push(resume.after_inbox_seq);
                     GatewayServerFrame::Resume {
                         entries: gateway
                             .inbox
                             .iter()
-                            .filter(|e| !gateway.acked.contains(&e.envelope.envelope_id))
+                            .filter(|e| {
+                                e.inbox_seq > resume.after_inbox_seq
+                                    && !gateway.acked.contains(&e.envelope.envelope_id)
+                            })
+                            .take(resume.limit)
                             .cloned()
                             .collect(),
                     }
+                }
+                GatewayClientFrame::PrekeyFetch { device_id } => {
+                    let hold = { shared.lock().map_err(|_| "gateway")?.prekey_hold.take() };
+                    wait_at(hold).await;
+                    GatewayServerFrame::Prekey { response: prekey(shared, &device_id)? }
                 }
                 GatewayClientFrame::Submit { submit } => {
                     let hold = {
@@ -283,6 +308,17 @@ async fn serve(
                             None
                         } else {
                             gateway.submit_hold.clone()
+                        }
+                    };
+                    wait_at(hold).await;
+                    let hold = {
+                        let gateway = shared.lock().map_err(|_| "gateway")?;
+                        if gateway.receipt_bypass
+                            && submit.envelope.envelope_id.starts_with("receipt_evt_")
+                        {
+                            None
+                        } else {
+                            gateway.priority_submit_hold.clone()
                         }
                     };
                     if let Some(hold) = hold {
@@ -301,6 +337,11 @@ async fn serve(
                 GatewayClientFrame::OwnDeviceFanout { fanout } => own_copy_response(fanout)?,
                 GatewayClientFrame::Close { .. } => return Ok(()),
                 GatewayClientFrame::Ack { ack } => {
+                    let hold = { shared.lock().map_err(|_| "gateway")?.ack_hold.take() };
+                    if let Some(hold) = hold {
+                        hold.entered.notify_one();
+                        hold.release.notified().await;
+                    }
                     let cursor = acknowledged_cursor(shared, ack)?;
                     let response =
                         serde_json::to_vec(&GatewayServerFrame::Ack { cursor: cursor.clone() })?;
@@ -325,7 +366,52 @@ async fn serve(
     }
 }
 
-fn own_copy_response(
+async fn wait_at(hold: Option<Arc<GatewayHold>>) {
+    if let Some(hold) = hold {
+        hold.entered.notify_one();
+        hold.release.notified().await;
+    }
+}
+fn prekey(shared: &Arc<Mutex<Gateway>>, selector: &str) -> Case<crate::prekey::SdkPrekeyResponse> {
+    let qualified = ramflux_protocol::parse_qualified_device_id(selector)?;
+    let gateway = shared.lock().map_err(|_| "gateway")?;
+    for value in gateway.manifests.values() {
+        let manifest: crate::SdkDeviceManifestResponse = serde_json::from_value(value.clone())?;
+        for device in manifest.devices {
+            let matches = qualified.as_ref().map_or(device.device_id == selector, |(root, raw)| {
+                *root == manifest.principal_commitment && *raw == device.device_id
+            });
+            if matches {
+                return Ok(crate::prekey::SdkPrekeyResponse {
+                    device_id: selector.into(),
+                    bundle: Some(device.prekey_bundle),
+                    principal_commitment: manifest.principal_commitment,
+                    target_delivery_id: Some(device.target_delivery_id),
+                });
+            }
+        }
+    }
+    Err("unknown prekey selector".into())
+}
+
+async fn public_lookup(path: &str, shared: &Arc<Mutex<Gateway>>) -> Case<Value> {
+    let commitment = path.strip_prefix("/mvp1/device-manifest/").unwrap_or("");
+    let hold = {
+        let mut gateway = shared.lock().map_err(|_| "gateway")?;
+        if gateway.manifest_hold.as_ref().is_some_and(|(root, _)| root == commitment) {
+            gateway.manifest_hold.take().map(|(_, hold)| hold)
+        } else {
+            None
+        }
+    };
+    if let Some(hold) = hold {
+        hold.entered.notify_one();
+        hold.release.notified().await;
+    }
+    Ok(shared.lock().map_err(|_| "gateway")?.manifest_response(path))
+}
+
+pub(super) fn own_copy_response(
     fanout: crate::gateway::GatewayOwnDeviceFanoutFrame,
 ) -> Case<GatewayServerFrame> {
     let bytes = ramflux_protocol::decode_base64url(&fanout.envelope.encrypted_payload)?;

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Authenticated fresh-X3DH recovery; a reset never travels outside the encrypted route.
-use super::{GatewayInboxEntry, GatewaySessionEngine, RamfluxClient, SdkError, now_unix_timestamp};
+use super::{GatewayInboxEntry, GatewaySessionAccess, RamfluxClient, SdkError, now_unix_timestamp};
 impl RamfluxClient {
     pub(crate) fn finish_pair_retirement(&self) -> Result<(), SdkError> {
         self.account_db()?.finish_secret_retirement_if_committed()?;
@@ -10,11 +10,11 @@ impl RamfluxClient {
     }
     pub(super) async fn open_routed_with_recovery(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         entry: &GatewayInboxEntry,
     ) -> Result<super::Opened, SdkError> {
-        self.require_pair_device_active(&self.local_device_identity(&engine.config.device_id)?)?;
-        match self.open_routed(entry, &engine.config.device_id) {
+        self.require_pair_device_active(&self.local_device_identity(&engine.config().device_id)?)?;
+        match self.open_routed(entry, &engine.config().device_id) {
             Ok(opened) => Ok(opened),
             Err(error) => {
                 if matches!(
@@ -62,13 +62,13 @@ impl RamfluxClient {
     }
     pub(super) async fn request_pair_recovery(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         // The triggering packet must have a valid signature from the pinned device. A stranger
         // cannot induce key churn, prekey requests or outgoing traffic.
         self.authenticated_envelope_sender(entry)?;
-        let local = self.local_device_identity(&engine.config.device_id)?;
+        let local = self.local_device_identity(&engine.config().device_id)?;
         let remote = self.authenticated_device_identity(entry)?;
         if !self.pair_recovery_allowed(&local, &remote)? {
             return Ok(());

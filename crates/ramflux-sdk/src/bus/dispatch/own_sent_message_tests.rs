@@ -48,8 +48,8 @@ async fn sent_dm_arrives_on_an_active_sibling_as_one_outgoing_row_despite_retrie
         .client
         .send_plaintext_direct_message_via_gateway(&mut engine, message, b"sent to peer")
         .await?;
-    source.put_engine(engine);
-    crate::bus::own_device_copy::flush(&mut source).await?;
+    source.install_test_session(engine);
+    assert!(crate::bus::own_device_copy::drive_once(&mut source).await?);
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     assert!(!envelope.encrypted_payload.contains("sent to peer"));
     let entry = GatewayInboxEntry {
@@ -109,7 +109,8 @@ async fn sent_group_message_creates_an_outgoing_sibling_row_without_history_impo
     source.client.create_group("own-group", "device-sender")?;
     let gateway = super::fixture::RecordingGateway::new(Arc::default());
     let own = Arc::clone(&gateway.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let request = LocalBusFrame::request(
         "group",
         Some("sender".into()),
@@ -202,7 +203,7 @@ async fn an_original_self_dm_and_its_pair_encrypted_copy_produce_one_outgoing_ro
             b"self pair text",
         )
         .await?;
-    source.put_engine(engine);
+    source.install_test_session(engine);
     crate::bus::own_device_copy::flush(&mut source).await?;
     let copy = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     let copy = GatewayInboxEntry {

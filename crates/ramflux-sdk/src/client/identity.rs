@@ -113,7 +113,7 @@ impl RamfluxClient {
     /// authenticated production gateway session.
     pub async fn initialize_and_publish_prekey_bundle_via_gateway(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         principal_commitment: &str,
         device_id: &str,
         target_delivery_id: &str,

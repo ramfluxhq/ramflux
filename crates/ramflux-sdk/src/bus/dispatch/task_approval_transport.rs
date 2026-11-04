@@ -2,11 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Private pair controls for task approvals, independent of compacted signed event histories.
-use super::task_transport::{Preparation, Target, await_preparation, own_targets, seal};
+use super::task_transport::Target;
+#[cfg(test)]
+use super::task_transport::{Preparation, await_preparation, own_targets, seal};
+#[cfg(test)]
 use crate::bus::task_delivery::Delivery;
 use crate::client::task::invalid;
 use crate::prelude::*;
 
+#[cfg(test)]
 pub(in crate::bus) async fn send(
     account: &mut LocalBusAccountState,
     conversation: &str,
@@ -28,13 +32,13 @@ pub(in crate::bus) async fn send(
             return result;
         }
     }
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = await_preparation(
         prepare(account, &mut engine, conversation, recipient, body),
         "task approval preparation deferred",
     )
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     let Preparation::Ready(deliveries) = result? else {
         return Ok(Preparation::Deferred);
     };
@@ -47,9 +51,10 @@ pub(in crate::bus) async fn send(
     Ok(Preparation::Ready(()))
 }
 
+#[cfg(test)]
 async fn prepare(
     account: &LocalBusAccountState,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     conversation: &str,
     recipient: &str,
     body: &[u8],
@@ -61,7 +66,7 @@ async fn prepare(
         .ok_or_else(|| invalid("task approval conversation missing"))?;
     let group = thread["group_id"].as_str();
     diagnostic(account, "own_targets begin");
-    let mut targets = own_targets(account, &engine.config).await?;
+    let mut targets = own_targets(account, engine.config()).await?;
     diagnostic(account, "own_targets complete");
     diagnostic(account, "peer_targets begin");
     let candidates = if let Some(group) = group {
@@ -70,12 +75,12 @@ async fn prepare(
             conversation,
             &crate::new_surface_message_id()?,
             group,
-            &engine.config,
+            engine.config(),
         )
         .await?
         .targets
     } else {
-        super::task_transport::task_direct_targets(account, &engine.config, &thread).await?
+        super::task_transport::task_direct_targets(account, engine.config(), &thread).await?
     };
     diagnostic(account, "peer_targets complete");
     let peers = endpoint_targets(client, candidates, recipient)?;
@@ -102,6 +107,7 @@ async fn prepare(
     diagnostic(account, "seal complete");
     Ok(deliveries)
 }
+#[cfg(test)]
 fn diagnostic(account: &LocalBusAccountState, stage: &str) {
     tracing::debug!(device = %account.gateway_config.device_id, stage, "task approval preparation");
 }
@@ -119,6 +125,46 @@ fn endpoint_targets(
         }
     }
     Ok(result)
+}
+
+pub(in crate::bus) fn prepared_drafts(
+    account: &LocalBusAccountState,
+    conversation: &str,
+    recipient: &str,
+    body: &[u8],
+) -> Result<Vec<super::task_transport::prepared::Draft>, SdkError> {
+    use super::task_transport::prepared::{self, Draft};
+    crate::client::task::check_delivery_size(body.len())?;
+    let thread = account
+        .client
+        .account_db()?
+        .client_record("conversation", conversation)?
+        .ok_or_else(|| invalid("task approval conversation missing"))?;
+    let mut targets = prepared::own_targets(account)?;
+    let peers = endpoint_targets(
+        &account.client,
+        prepared::peers(account, conversation, &crate::new_surface_message_id()?, &thread)?,
+        recipient,
+    )?;
+    let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    if peers.is_empty() && recipient != local.principal_id {
+        return Err(invalid("task approval endpoint has no active route"));
+    }
+    targets.extend(peers);
+    if body.len().saturating_add(4096).saturating_mul(targets.len()).saturating_mul(32)
+        > 32 * 1024 * 1024
+    {
+        return Err(invalid("task approval fanout byte budget exceeded"));
+    }
+    let route = crate::client::routed::Route {
+        kind: crate::client::routed::Kind::Control,
+        group_id: thread["group_id"].as_str().map(str::to_owned),
+        attachments: false,
+    };
+    targets
+        .into_iter()
+        .map(|target| Draft::new(account, target, conversation, body, route.clone()))
+        .collect()
 }
 
 #[cfg(test)]

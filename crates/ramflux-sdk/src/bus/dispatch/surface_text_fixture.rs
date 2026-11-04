@@ -113,11 +113,6 @@ impl GatewaySessionFrameSink for RecordingGateway {
             }) {
                 return Err(TransportError::Quic("injected submit failure".into()));
             }
-            if let Ok(GatewayClientFrame::Submit { submit }) = serde_json::from_slice(bytes)
-                && self.fail_target.as_ref() == Some(&submit.envelope.target_delivery_id)
-            {
-                return Err(TransportError::Quic("injected target failure".into()));
-            }
             self.frame_lengths
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -141,6 +136,10 @@ impl GatewaySessionFrameSink for RecordingGateway {
     }
 }
 impl GatewaySessionFrameSource for RecordingGateway {
+    fn recv_idle_frame(&mut self) -> FrameFuture<'_, Vec<u8>> {
+        // This fixture has no unsolicited frames; request replies are emitted by recv_frame.
+        Box::pin(std::future::pending())
+    }
     fn recv_frame(&mut self) -> FrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
             if self.last.is_none()
@@ -150,6 +149,13 @@ impl GatewaySessionFrameSource for RecordingGateway {
                     .map_err(|e| TransportError::Quic(e.to_string()));
             }
             let response = match self.last.take() {
+                Some(GatewayClientFrame::Submit { submit })
+                    if self.fail_target.as_ref() == Some(&submit.envelope.target_delivery_id) =>
+                {
+                    // Recipient refusal leaves the stream usable. A transport write failure
+                    // instead retires the resident session and cannot model one failed device.
+                    GatewayServerFrame::Nack { reason: "injected target failure".into() }
+                }
                 Some(GatewayClientFrame::Submit { submit }) => {
                     self.delivered
                         .lock()

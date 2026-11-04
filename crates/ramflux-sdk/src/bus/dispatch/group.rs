@@ -307,31 +307,36 @@ async fn resolve_group_member_principal_commitment(
         return Ok(None);
     }
     if let Some(federation) = body.federation.as_ref() {
-        return Ok(Some(resolve_federated_group_member_principal_commitment(
-            &account.client,
-            federation,
-            body.member_principal_commitment.as_deref(),
-            &body.member_id,
-        )?));
+        return Ok(Some(
+            resolve_federated_group_member_principal_commitment(
+                &account.client,
+                federation,
+                body.member_principal_commitment.as_deref(),
+                &body.member_id,
+                account.timeouts.http,
+            )
+            .await?,
+        ));
     }
-    let engine = account.take_live_engine().await?;
+    let engine = account.session_client().await?;
     let commitment = account
         .client
         .resolve_target_principal_commitment(
-            &engine.config,
+            engine.config(),
             body.member_principal_commitment.as_deref(),
             &body.member_id,
         )
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     Ok(Some(commitment?))
 }
 
-fn resolve_federated_group_member_principal_commitment(
+async fn resolve_federated_group_member_principal_commitment(
     client: &RamfluxClient,
     federation: &LocalBusFederationRoute,
     member_principal_commitment: Option<&str>,
     member_id: &str,
+    timeout: Duration,
 ) -> Result<String, SdkError> {
     let manifest_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
         SdkError::LocalBus(
@@ -339,11 +344,13 @@ fn resolve_federated_group_member_principal_commitment(
                 .to_owned(),
         )
     })?;
-    client.resolve_federated_target_principal_commitment(
-        manifest_url,
-        member_principal_commitment,
-        member_id,
-    )
+    client
+        .resolve_federated_target_principal_commitment_async(
+            crate::client::contact::RemoteManifest { url: manifest_url, timeout },
+            member_principal_commitment,
+            member_id,
+        )
+        .await
 }
 
 async fn dispatch_group_role_set_request(
@@ -619,7 +626,7 @@ async fn dispatch_group_control_delivery(
     account: &mut LocalBusAccountState,
     delivery: GroupControlDelivery<'_>,
 ) -> Result<serde_json::Value, SdkError> {
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = async {
         let conversation_id = group_sender_key_distribution_conversation_id(
             delivery.group_id,
@@ -635,7 +642,7 @@ async fn dispatch_group_control_delivery(
             conversation_id,
             message_id: delivery_message_id.clone(),
             envelope_id: delivery_message_id,
-            source_principal_id: engine.config.principal_id.clone(),
+            source_principal_id: engine.config().principal_id.clone(),
             sender_id: delivery.actor_id.to_owned(),
             recipient_device_id: Some(delivery.route.member_id.clone()),
             recipient_principal_commitment: delivery.route.member_principal_commitment.clone(),
@@ -645,14 +652,20 @@ async fn dispatch_group_control_delivery(
             ttl: 3_600,
         };
         if let Some(federation) = delivery.route.federation.as_ref() {
-            let response =
-                account.client.send_plaintext_federated_direct_message_without_franking(
+            let response = account
+                .client
+                .send_plaintext_federated_message_async(
                     &engine,
-                    message,
-                    delivery.payload_bytes,
-                    federation,
-                    crate::client::routed::Route::group_control(delivery.group_id),
-                )?;
+                    crate::client::federation::PlaintextForward {
+                        message,
+                        plaintext: delivery.payload_bytes,
+                        federation,
+                        route: crate::client::routed::Route::group_control(delivery.group_id),
+                        franking: false,
+                        timeout: account.timeouts.http,
+                    },
+                )
+                .await?;
             let mut value = serde_json::to_value(response)?;
             value["federated"] = serde_json::Value::Bool(true);
             Ok(value)
@@ -672,7 +685,7 @@ async fn dispatch_group_control_delivery(
         }
     }
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 
@@ -749,21 +762,22 @@ pub(crate) async fn dispatch_group_send_request(
         }
     }
     if let Some(routes) = &fanout_routes {
-        let engine = account.take_live_engine().await?;
+        let engine = account.session_client().await?;
         let checked = async {
             for route in routes {
                 resolve_group_route_principal_commitment(
                     &account.client,
-                    &engine.config,
+                    engine.config(),
                     route,
                     &route.member_id,
+                    account.timeouts.http,
                 )
                 .await?;
             }
             Ok::<_, SdkError>(())
         }
         .await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         checked?;
     }
     let surface = crate::client::surface::Carrier::decode(&plaintext_body)?;
@@ -973,21 +987,35 @@ pub(crate) async fn dispatch_group_send_request(
                 ttl: body.ttl.unwrap_or(3_600),
             };
             if let Some(federation) = body.federation.as_ref() {
-                let engine = account.take_live_engine().await?;
-                message.encrypted_body =
-                    serde_json::to_vec(&account.client.seal_routed_federated_as(
+                let engine = account.session_client().await?;
+                message.encrypted_body = serde_json::to_vec(
+                    &account
+                        .client
+                        .seal_federated_message_async(
+                            &engine,
+                            crate::client::federation::SealForward {
+                                message: &message,
+                                plaintext: &encrypted_body,
+                                federation,
+                                route: crate::client::routed::Route::group_message(&body.group_id),
+                                timeout: account.timeouts.http,
+                            },
+                        )
+                        .await?,
+                )?;
+                let forwarded = account
+                    .client
+                    .forward_federated_gateway_message_async(
                         &engine,
                         &message,
-                        &encrypted_body,
-                        federation.recipient_prekey_url.as_deref(),
-                        crate::client::routed::Route::group_message(&body.group_id),
-                    )?)?;
-                let forwarded =
-                    account.client.forward_federated_gateway_message(&engine, &message, federation);
-                account.put_engine(engine);
+                        federation,
+                        account.timeouts.http,
+                    )
+                    .await;
+                account.apply_session_metadata(engine);
                 response["federated_submitted"] = serde_json::to_value(forwarded?)?;
             } else {
-                let mut engine = account.take_live_engine().await?;
+                let mut engine = account.session_client().await?;
                 let entry = async {
                     message.encrypted_body = serde_json::to_vec(
                         &account
@@ -1002,14 +1030,14 @@ pub(crate) async fn dispatch_group_send_request(
                     )?;
                     engine
                         .submit_envelope(gateway_direct_message_envelope(
-                            &engine.config,
+                            engine.config(),
                             &message,
                             None,
                         )?)
                         .await
                 }
                 .await;
-                account.put_engine(engine);
+                account.apply_session_metadata(engine);
                 response["submitted"] = serde_json::to_value(entry?)?;
             }
         } else {
@@ -1050,24 +1078,36 @@ pub(crate) async fn dispatch_group_send_request(
                     ttl: body.ttl.unwrap_or(3_600),
                 };
                 if let Some(federation) = route.federation.as_ref() {
-                    let engine = account.take_live_engine().await?;
-                    let sealed = account.client.seal_routed_federated_as(
-                        &engine,
-                        &message,
-                        &message.encrypted_body,
-                        federation.recipient_prekey_url.as_deref(),
-                        crate::client::routed::Route::group_message(&body.group_id),
-                    );
-                    account.put_engine(engine);
+                    let engine = account.session_client().await?;
+                    let sealed = account
+                        .client
+                        .seal_federated_message_async(
+                            &engine,
+                            crate::client::federation::SealForward {
+                                message: &message,
+                                plaintext: &message.encrypted_body,
+                                federation,
+                                route: crate::client::routed::Route::group_message(&body.group_id),
+                                timeout: account.timeouts.http,
+                            },
+                        )
+                        .await;
+                    account.apply_session_metadata(engine);
                     message.encrypted_body = serde_json::to_vec(&sealed?)?;
-                    let engine = account.take_live_engine().await?;
+                    let engine = account.session_client().await?;
                     let forwarded = account
                         .client
-                        .forward_federated_gateway_message(&engine, &message, federation);
-                    account.put_engine(engine);
+                        .forward_federated_gateway_message_async(
+                            &engine,
+                            &message,
+                            federation,
+                            account.timeouts.http,
+                        )
+                        .await;
+                    account.apply_session_metadata(engine);
                     federated.push(serde_json::to_value(forwarded?)?);
                 } else {
-                    let mut engine = account.take_live_engine().await?;
+                    let mut engine = account.session_client().await?;
                     let sealed = account
                         .client
                         .seal_routed_as(
@@ -1082,7 +1122,7 @@ pub(crate) async fn dispatch_group_send_request(
                             message.encrypted_body = serde_json::to_vec(&sealed)?;
                             engine
                                 .submit_envelope(gateway_direct_message_envelope(
-                                    &engine.config,
+                                    engine.config(),
                                     &message,
                                     None,
                                 )?)
@@ -1090,7 +1130,7 @@ pub(crate) async fn dispatch_group_send_request(
                         }
                         Err(error) => Err(error),
                     };
-                    account.put_engine(engine);
+                    account.apply_session_metadata(engine);
                     local.push(serde_json::to_value(entry?)?);
                 }
             }
@@ -1136,9 +1176,9 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
     route: LocalBusGroupMemberRoute,
     membership_event: Option<&ramflux_protocol::GroupEvent>,
 ) -> Result<Option<serde_json::Value>, SdkError> {
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = async {
-        let sender_id = engine.config.device_id.clone();
+        let sender_id = engine.config().device_id.clone();
         let recipient_device_id = route.member_id.as_str();
         if sender_id == recipient_device_id
             && route.member_principal_commitment.as_deref() == Some(&account.principal_commitment) {
@@ -1146,9 +1186,10 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
         }
         let member_principal_commitment = resolve_group_route_principal_commitment(
             &account.client,
-            &engine.config,
+            engine.config(),
             &route,
             recipient_device_id,
+            account.timeouts.http,
         )
         .await?;
         let distribution =
@@ -1174,7 +1215,9 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
                         .to_owned(),
                 )
             })?;
-            sdk_fetch_prekey_bundle(prekey_url, &qualified)?
+            crate::prekey::http_async::get::<crate::prekey::SdkPrekeyResponse>(
+                prekey_url, &format!("/mvp1/prekey/{qualified}"), account.timeouts.http,
+            ).await?
         } else {
             engine.fetch_prekey_bundle(&qualified).await?
         };
@@ -1207,7 +1250,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             conversation_id,
             message_id: envelope_id.clone(),
             envelope_id,
-            source_principal_id: engine.config.principal_id.clone(),
+            source_principal_id: engine.config().principal_id.clone(),
             sender_id: sender_id.clone(),
             recipient_device_id: Some(recipient_device_id.to_owned()),
             recipient_principal_commitment: Some(member_principal_commitment.clone()),
@@ -1217,20 +1260,18 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             ttl: 3_600,
         };
         let payload_bytes = group_distribution_payload(
-            &account.client, &engine.config, group_id, &payload)?;
+            &account.client, engine.config(), group_id, &payload)?;
         let value = send_group_sender_key_distribution_message(
             &account.client,
             &mut engine,
             &route,
-            message,
-            &payload_bytes,
-            group_id,
+            DistributionMessage { message, payload: &payload_bytes, group_id, timeout: account.timeouts.http },
         )
         .await?;
         Ok(Some(value))
     }
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 
@@ -1283,19 +1324,34 @@ fn group_distribution_payload(
     }
 }
 
+struct DistributionMessage<'a> {
+    message: GatewayDirectMessage,
+    payload: &'a [u8],
+    group_id: &'a str,
+    timeout: Duration,
+}
 async fn send_group_sender_key_distribution_message(
     client: &RamfluxClient,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     route: &LocalBusGroupMemberRoute,
-    message: GatewayDirectMessage,
-    payload: &[u8],
-    group_id: &str,
+    request: DistributionMessage<'_>,
 ) -> Result<serde_json::Value, SdkError> {
+    let DistributionMessage { message, payload, group_id, timeout } = request;
     let kind = crate::client::routed::Route::group_control(group_id);
     if let Some(federation) = route.federation.as_ref() {
-        let response = client.send_plaintext_federated_direct_message_without_franking(
-            engine, message, payload, federation, kind,
-        )?;
+        let response = client
+            .send_plaintext_federated_message_async(
+                engine,
+                crate::client::federation::PlaintextForward {
+                    message,
+                    plaintext: payload,
+                    federation,
+                    route: kind,
+                    franking: false,
+                    timeout,
+                },
+            )
+            .await?;
         return Ok(serde_json::to_value(response)?);
     }
     let entry = client
@@ -1309,6 +1365,7 @@ pub(super) async fn resolve_group_route_principal_commitment(
     gateway: &GatewaySessionConfig,
     route: &LocalBusGroupMemberRoute,
     recipient_device_id: &str,
+    timeout: Duration,
 ) -> Result<String, SdkError> {
     if let Some(federation) = route.federation.as_ref() {
         return resolve_federated_group_member_principal_commitment(
@@ -1316,7 +1373,9 @@ pub(super) async fn resolve_group_route_principal_commitment(
             federation,
             route.member_principal_commitment.as_deref(),
             recipient_device_id,
-        );
+            timeout,
+        )
+        .await;
     }
     client
         .resolve_target_principal_commitment(
@@ -1339,7 +1398,7 @@ pub(crate) async fn dispatch_group_receive_request(
         &body.group_id,
         &body.conversation_id,
     )?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let receive_result = async {
         let mut entries = Vec::<GatewayInboxEntry>::new();
         let mut seen = BTreeSet::new();
@@ -1392,21 +1451,18 @@ pub(crate) async fn dispatch_group_receive_request(
                 continue;
             }
             let message_id = entry.envelope.envelope_id.clone();
-            let delivery = match legacy_receive::apply(
-                &account.client,
-                &engine.config,
-                &body,
-                &entry,
-            )
-            .await?
-            {
-                crate::client::group_quarantine::LegacyGroupDelivery::Applied(delivery) => delivery,
-                crate::client::group_quarantine::LegacyGroupDelivery::Held => continue,
-                crate::client::group_quarantine::LegacyGroupDelivery::Rejected => {
-                    gateway_entries.push(entry);
-                    continue;
-                }
-            };
+            let delivery =
+                match legacy_receive::apply(&account.client, engine.config(), &body, &entry).await?
+                {
+                    crate::client::group_quarantine::LegacyGroupDelivery::Applied(delivery) => {
+                        delivery
+                    }
+                    crate::client::group_quarantine::LegacyGroupDelivery::Held => continue,
+                    crate::client::group_quarantine::LegacyGroupDelivery::Rejected => {
+                        gateway_entries.push(entry);
+                        continue;
+                    }
+                };
             match delivery {
                 GroupGatewayDeliveryResult::SenderKeyDistribution(distribution) => {
                     account.client.persist_gateway_receive_cursor(
@@ -1438,21 +1494,18 @@ pub(crate) async fn dispatch_group_receive_request(
         }
         for entry in message_entries {
             let message_id = entry.envelope.envelope_id.clone();
-            let delivery = match legacy_receive::apply(
-                &account.client,
-                &engine.config,
-                &body,
-                &entry,
-            )
-            .await?
-            {
-                crate::client::group_quarantine::LegacyGroupDelivery::Applied(delivery) => delivery,
-                crate::client::group_quarantine::LegacyGroupDelivery::Held => continue,
-                crate::client::group_quarantine::LegacyGroupDelivery::Rejected => {
-                    gateway_entries.push(entry);
-                    continue;
-                }
-            };
+            let delivery =
+                match legacy_receive::apply(&account.client, engine.config(), &body, &entry).await?
+                {
+                    crate::client::group_quarantine::LegacyGroupDelivery::Applied(delivery) => {
+                        delivery
+                    }
+                    crate::client::group_quarantine::LegacyGroupDelivery::Held => continue,
+                    crate::client::group_quarantine::LegacyGroupDelivery::Rejected => {
+                        gateway_entries.push(entry);
+                        continue;
+                    }
+                };
             if let GroupGatewayDeliveryResult::Message(plaintext) = delivery {
                 account
                     .client
@@ -1495,7 +1548,7 @@ pub(crate) async fn dispatch_group_receive_request(
         Ok::<_, SdkError>((gateway_entries, decrypted, sender_key_distributions))
     }
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     let (gateway_entries, decrypted, sender_key_distributions) =
         group_receive_compat(account, &body, receive_result?)?;
     Ok(local_bus_ok(serde_json::json!({
@@ -1763,8 +1816,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn federated_group_member_resolve_requires_remote_manifest_base() -> Result<(), SdkError> {
+    #[tokio::test]
+    async fn federated_group_member_resolve_requires_remote_manifest_base() -> Result<(), SdkError>
+    {
         let account = account_state(
             "alice_federated_missing_manifest_base",
             "alice_account",
@@ -1777,7 +1831,10 @@ mod tests {
             &federation_route(None),
             Some("bob_commitment"),
             "bob_device",
-        ) else {
+            Duration::from_secs(600),
+        )
+        .await
+        else {
             return Err(SdkError::LocalBus(
                 "missing recipient_prekey_url should fail before local gateway resolve".to_owned(),
             ));

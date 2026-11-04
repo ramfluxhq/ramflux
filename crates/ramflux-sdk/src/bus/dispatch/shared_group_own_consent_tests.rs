@@ -36,7 +36,8 @@ async fn check_group_decision(accept: bool) -> TestResult {
     source.client.decide_group_invitation("group", accept, &config.target_delivery_id)?;
     let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
     let captured = Arc::clone(&gateway.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
     let envelope = captured
         .lock()

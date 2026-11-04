@@ -38,7 +38,7 @@ impl RamfluxClient {
 
     pub(crate) async fn load_or_create_send_dm_session(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
     ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>), SdkError> {
         let recipient_device_id = message.recipient_device_id.as_deref().ok_or_else(|| {
@@ -57,7 +57,7 @@ impl RamfluxClient {
             message,
             recipient_device_id,
             recipient_bundle,
-            &engine.config.device_id,
+            &engine.config().device_id,
         )
     }
 

@@ -168,6 +168,10 @@ impl ramflux_transport::GatewaySessionFrameSink for NativeSessionStream {
     }
 }
 impl ramflux_transport::GatewaySessionFrameSource for NativeSessionStream {
+    fn recv_idle_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
+        self.0.recv_idle_custody_frame()
+    }
+
     fn recv_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
         self.0.recv_custody_frame()
     }

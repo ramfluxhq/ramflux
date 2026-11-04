@@ -87,6 +87,11 @@ impl Supervisor {
     }
 
     #[cfg(test)]
+    pub(super) fn install_test_actor(&self, id: String, actor: AccountActor) {
+        assert!(self.accounts.borrow_mut().insert(id, actor).is_none());
+    }
+
+    #[cfg(test)]
     pub(super) fn from_initializers(
         config: &LocalBusConfig,
         accounts: Vec<(String, super::actor::AccountInitializer)>,
@@ -778,6 +783,7 @@ impl Drop for Supervisor {
 fn command(request: LocalBusFrame, connection: &LocalBusConnectionState) -> AccountCommand {
     let (reply, _) = oneshot::channel();
     AccountCommand {
+        admission: None,
         private: None,
         request,
         connection_id: connection.connection_id,

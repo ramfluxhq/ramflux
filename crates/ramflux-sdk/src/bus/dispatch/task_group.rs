@@ -99,7 +99,7 @@ pub(super) async fn plan(
 }
 pub(super) async fn prepare(
     account: &LocalBusAccountState,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     c: &Carrier,
     plan: Plan,
 ) -> Result<Vec<Delivery>, SdkError> {
@@ -140,4 +140,50 @@ pub(super) async fn prepare(
         );
     }
     Ok(deliveries)
+}
+
+pub(in crate::bus) fn prepared_plan(
+    account: &LocalBusAccountState,
+    conversation: &str,
+    message: &str,
+    group: &str,
+) -> Result<Plan, SdkError> {
+    let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    account.client.pin_local_group_member(group)?;
+    let body: LocalBusGroupSendRequest = serde_json::from_value(
+        json!({"group_id":group,"conversation_id":conversation,"message_id":message,"sender_id":local.device_id,"encrypted_body_base64":""}),
+    )?;
+    let mut targets = Vec::new();
+    for route in super::super::group_delivery::resolve(account, &body)? {
+        let root = route
+            .member_principal_commitment
+            .as_deref()
+            .ok_or_else(|| invalid("task group member root missing"))?;
+        if root == account.principal_commitment {
+            account.client.require_group_sender_pin(
+                group,
+                &local.principal_id,
+                &account.client.device_identity_for_root(root, &route.member_id)?,
+            )?;
+            continue;
+        }
+        let manifest = account
+            .task_prepared_manifests
+            .get(root)
+            .ok_or(SdkError::TaskManifestWorkerCapacity)?;
+        let verified =
+            manifest.devices.iter().find(|device| device.device_id == route.member_id).ok_or_else(
+                || invalid("task group member is not active in the verified manifest"),
+            )?;
+        let identity = account.client.device_identity_for_root(root, &verified.device_id)?;
+        account.client.require_group_sender_pin(group, &verified.principal_id, &identity)?;
+        targets.push(Target {
+            identity,
+            device: verified.device_id.clone(),
+            delivery: verified.target_delivery_id.clone(),
+            federation: route.federation,
+            own: false,
+        });
+    }
+    Ok(Plan { group: group.into(), targets })
 }

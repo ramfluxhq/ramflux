@@ -6,6 +6,40 @@ unlocked account after its data actor opens, with networking either `live` or
 `networking_pending`. Its passphrase unlocks data independently of primary
 custody. A selected trusted node can be configured later for a pending account.
 
+The daemon keeps local reads independent of admission and relay transfers. Account,
+contact, message, conversation, group, grant, object and device listings use bounded
+reader queues opened with the account; a saturated queue returns a retryable refusal.
+Networking continues in the background. A command that requires a session returns
+`NetworkingPending` within five seconds of admission when no session is live;
+ordinary queued requests share that five-second residence bound, and a command
+already claimed finishes or fails within 25 seconds of admission, including its
+session-call queue wait. Status retains the `networking` string and adds the current
+attempt, retry and selected transport in `networking_snapshot`. Cached attachment
+GETs remain available offline, including with a saved relay profile; only a GET
+that actually needs relay I/O checks for Live after its local lookup. PUT and PUT
+finish select their network requirement from request, account and saved upload
+options. Object deletion is also conditional: a local tombstone works offline,
+while a selected relay requires Live before an operation receipt is reserved.
+Lock and daemon shutdown cancel background work before returning.
+
+A native connection attempt has one 120-second outer deadline. Its admission
+retry budget is 90 seconds, and each open or frame read retains its 15-second
+bound. An ordinary live session call has a 20-second budget. These are separate
+from the five-second command admission wait; polling status does not renew an
+attempt or a saved retry deadline. A timed-out call that has written to the
+uncorrelated session stream retires that session before another call can use it.
+
+The account has two local reader workers with 64 queued requests each; a request
+tries both queues before refusing. The ordinary actor mailbox has 64 places and
+lifecycle work has four reserved places. The resident session admits 32 waiting
+calls and one exchange, with bounded subscriptions. Unsolicited deliveries are
+buffered up to 256 entries or 8 MiB. Overflow is left unacknowledged and triggers
+receive from the durable cursor. Attachment work has two running transfer slots
+and 16 waiting places. Upload bitmap and received-chunk checkpoints are durable
+before the next network step; received objects are verified and committed before
+relay acknowledgement. Cancellation retains durable resumable progress and
+removes the request's spool files.
+
 Ordinary native sessions use `GatewaySessionEngine` with
 `GatewaySessionConfig::with_native_custody` and `with_account_identity`. The
 configuration binds the account directory/id, certified device, gateway address,

@@ -233,39 +233,13 @@ pub(crate) async fn dispatch_object_bus_request(
             // failed can resume from the durable offset instead of re-uploading from zero.
             let body: LocalBusObjectPutStatusRequest =
                 serde_json::from_value(request.body.clone())?;
-            let record = account.client.object_operation(&body.object_id)?;
-            let session_written =
+            let written =
                 account.object_put_spools.get(&body.operation_id).map(|session| session.written);
-            let (state, terminal, resume_offset) = match record {
-                Some(record) if record.operation_id == body.operation_id => {
-                    match record.state.as_str() {
-                        OBJECT_OPERATION_COMMITTED => {
-                            (OBJECT_OPERATION_COMMITTED.to_owned(), record.terminal_result, None)
-                        }
-                        OBJECT_OPERATION_FAILED => (OBJECT_OPERATION_FAILED.to_owned(), None, None),
-                        // pending / local_committed: the finish/commit phase. Keep the raw state so the
-                        // A2 finish reconcile is unchanged; expose an offset only if a session survives.
-                        _ => (record.state, None, session_written),
-                    }
-                }
-                // No matching durable record: a live/rehydrated chunk-phase spool is `resumable`.
-                _ => match session_written {
-                    Some(written) => (OBJECT_PUT_STATE_RESUMABLE.to_owned(), None, Some(written)),
-                    None => (OBJECT_OPERATION_UNKNOWN.to_owned(), None, None),
-                },
-            };
-            let mut response = serde_json::json!({
-                "object_id": body.object_id,
-                "operation_id": body.operation_id,
-                "state": state,
-                "terminal": terminal,
-            });
-            if let Some(offset) = resume_offset
-                && let Some(map) = response.as_object_mut()
-            {
-                map.insert("resume_offset".to_owned(), serde_json::json!(offset));
-            }
-            Ok(local_bus_ok(response))
+            Ok(local_bus_ok(super::object_status::upload_status(
+                &account.client,
+                request,
+                written,
+            )?))
         }
         "object.put" => {
             let body: LocalBusObjectPutRequest = serde_json::from_value(request.body.clone())?;
@@ -320,6 +294,7 @@ pub(crate) async fn dispatch_object_bus_request(
                 body.relay_interrupt_after_chunks,
             )?;
             let plaintext = if let Some(options) = relay_options.as_ref() {
+                crate::bus::method_table::require_local_first_relay(&request.method, account)?;
                 dispatch_object_download_from_relay(
                     account,
                     &body.object_id,
@@ -415,7 +390,7 @@ pub(crate) async fn dispatch_object_bus_request(
             let target_delivery_id = body.target_delivery_id.clone().ok_or_else(|| {
                 SdkError::LocalBus("object.share requires target_delivery_id".to_owned())
             })?;
-            let mut engine = account.take_live_engine().await?;
+            let mut engine = account.session_client().await?;
             let recipient_principal_commitment = account
                 .client
                 .resolve_target_principal_commitment(
@@ -441,7 +416,7 @@ pub(crate) async fn dispatch_object_bus_request(
             )?;
             let package =
                 account.client.share_object_key_with_dm_recipient(&mut engine, body).await;
-            account.put_engine(engine);
+            account.apply_session_metadata(engine);
             let package = package?;
             account.client.account_db()?.record_object_share_grant(&ObjectShareGrantWrite {
                 object_id: &package.object.object_id,
@@ -476,7 +451,7 @@ pub(crate) async fn dispatch_object_bus_request(
                 None,
             )?;
             if let Some(options) = relay_options.as_ref() {
-                let mut engine = account.take_live_engine().await?;
+                let mut engine = account.session_client().await?;
                 let pool = account.relay_quic_pool()?;
                 let result = account
                     .client
@@ -487,7 +462,7 @@ pub(crate) async fn dispatch_object_bus_request(
                         options,
                     )
                     .await;
-                account.put_engine(engine);
+                account.apply_session_metadata(engine);
                 result?;
             } else {
                 account.client.tombstone_object(&body.object_id)?;
@@ -528,13 +503,29 @@ async fn dispatch_object_put_reconciled(
     dispatch_object_put_reconciled_core(account, &body, plaintext, operation_id).await
 }
 
+pub(in crate::bus) struct PutBinding {
+    pub object: std::sync::Arc<EncryptedObject>,
+    pub operation_id: String,
+    pub request_hash: String,
+    pub plaintext_hash: String,
+    pub options: Option<RelayTransferOptions>,
+    pub chunk_size: usize,
+    pub created_at: i64,
+    pub reconciled: bool,
+}
+
+pub(in crate::bus) enum PreparedPut {
+    Complete(LocalBusDispatchResult),
+    Ready(PutBinding),
+}
+
 #[allow(clippy::too_many_lines)]
-async fn dispatch_object_put_reconciled_core(
+async fn prepare_put_core(
     account: &mut LocalBusAccountState,
     body: &LocalBusObjectPutRequest,
     plaintext: Vec<u8>,
     operation_id: String,
-) -> Result<LocalBusDispatchResult, SdkError> {
+) -> Result<PreparedPut, SdkError> {
     let relay_options = account.client.relay_transfer_options(
         body.relay_endpoint.clone(),
         body.relay_service_key_base64.clone(),
@@ -554,7 +545,7 @@ async fn dispatch_object_put_reconciled_core(
                 let terminal = record.terminal_result.clone().unwrap_or_else(
                     || serde_json::json!({ "object_id": body.object_id, "committed": true }),
                 );
-                return Ok(local_bus_ok(with_reconciled(terminal, true)));
+                return Ok(PreparedPut::Complete(local_bus_ok(with_reconciled(terminal, true))));
             }
             OBJECT_OPERATION_FAILED => {
                 return Err(SdkError::LocalBus(format!(
@@ -673,6 +664,39 @@ async fn dispatch_object_put_reconciled_core(
         }
     }
 
+    let object = account.client.object_store_object(&body.object_id)?.ok_or_else(|| {
+        SdkError::LocalBus("object missing from the store after local commit".into())
+    })?;
+    Ok(PreparedPut::Ready(PutBinding {
+        object: std::sync::Arc::new(object),
+        operation_id,
+        request_hash,
+        plaintext_hash,
+        options: relay_options,
+        chunk_size: body.chunk_size,
+        created_at: now,
+        reconciled,
+    }))
+}
+
+#[allow(clippy::too_many_lines)]
+async fn dispatch_object_put_reconciled_core(
+    account: &mut LocalBusAccountState,
+    body: &LocalBusObjectPutRequest,
+    plaintext: Vec<u8>,
+    operation_id: String,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let prepared = prepare_put_core(account, body, plaintext, operation_id).await?;
+    let binding = match prepared {
+        PreparedPut::Complete(response) => return Ok(response),
+        PreparedPut::Ready(binding) => binding,
+    };
+    let operation_id = binding.operation_id;
+    let request_hash = binding.request_hash;
+    let plaintext_hash = binding.plaintext_hash;
+    let relay_options = binding.options;
+    let now = binding.created_at;
+    let reconciled = binding.reconciled;
     // W2: after LocalCommitted, before relay.
     #[cfg(feature = "itest-rfd-fault")]
     crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::PutAfterLocalCommitted).await?;
@@ -757,7 +781,6 @@ pub(crate) fn object_put_spool_dir(data_root: &Path) -> PathBuf {
 
 /// T25-A5 (OBJ-IPC-01): `object.put.status` state for a live/rehydrated chunk-phase spool that has no
 /// durable A2 record yet — the CLI resumes chunks from the reported `resume_offset`.
-const OBJECT_PUT_STATE_RESUMABLE: &str = "resumable";
 /// T25-A5 (OBJ-IPC-01): the BLAKE3 domain framing the durable-prefix journal hash. Distinct from the
 /// object plaintext hash domain so the two never collide.
 const OBJECT_PUT_JOURNAL_PREFIX_DOMAIN: &str = "ramflux.object_put_journal.prefix.v1";
@@ -1070,11 +1093,10 @@ async fn object_put_finish(
     result
 }
 
-async fn object_put_finish_inner(
-    account: &mut LocalBusAccountState,
+fn verify_finish_spool(
     body: &LocalBusObjectPutFinishRequest,
     session: &mut ObjectPutSpoolSession,
-) -> Result<LocalBusDispatchResult, SdkError> {
+) -> Result<(LocalBusObjectPutRequest, Vec<u8>), SdkError> {
     if body.object_id != session.object_id {
         return Err(SdkError::LocalBus(format!(
             "object.put.finish object_id mismatch: begin={} finish={}",
@@ -1123,7 +1145,160 @@ async fn object_put_finish_inner(
         relay_interrupt_after_chunks: session.relay_interrupt_after_chunks,
         operation_id: Some(body.operation_id.clone()),
     };
+    Ok((put, plaintext))
+}
+
+async fn object_put_finish_inner(
+    account: &mut LocalBusAccountState,
+    body: &LocalBusObjectPutFinishRequest,
+    session: &mut ObjectPutSpoolSession,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let (put, plaintext) = verify_finish_spool(body, session)?;
     dispatch_object_put_reconciled_core(account, &put, plaintext, body.operation_id.clone()).await
+}
+
+/// Resolve the handler's local availability before a generic operation can be reserved.
+/// The handler repeats the same local selection at its actual relay boundary.
+pub(in crate::bus) fn prepare_local_first_network(
+    account: &LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<(), SdkError> {
+    if request.method == "object.get.begin" {
+        let body: LocalBusObjectGetBeginRequest = serde_json::from_value(request.body.clone())?;
+        if body.protocol_version != OBJECT_PUT_PROTOCOL_VERSION {
+            return Err(SdkError::LocalBus(format!(
+                "object.get.begin unsupported protocol_version {} (expected {OBJECT_PUT_PROTOCOL_VERSION})",
+                body.protocol_version
+            )));
+        }
+    }
+    let body: LocalBusObjectGetRequest = serde_json::from_value(request.body.clone())?;
+    if super::deferred_attachment::read_relay_options(
+        account,
+        &body.object_id,
+        body.relay_endpoint,
+        body.relay_service_key_base64,
+        body.relay_interrupt_after_chunks,
+    )?
+    .is_some()
+    {
+        crate::bus::method_table::require_local_first_relay(&request.method, account)?;
+    }
+    Ok(())
+}
+
+pub(in crate::bus) struct FinishSpool(Option<ObjectPutSpoolSession>);
+impl Drop for FinishSpool {
+    fn drop(&mut self) {
+        if let Some(session) = self.0.take() {
+            let path = session.path.clone();
+            let journal = session.journal_path.clone();
+            drop(session);
+            discard_object_put_files(&path, &journal);
+        }
+    }
+}
+
+pub(in crate::bus) fn lookup_finish_receipt(
+    account: &LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<Option<serde_json::Value>, SdkError> {
+    let body: LocalBusObjectPutFinishRequest = serde_json::from_value(request.body.clone())?;
+    account.client.account_db()?.check_object_access(&body.object_id)?;
+    let Some(record) = account.client.object_operation(&body.object_id)? else {
+        return Ok(None);
+    };
+    if record.operation_id != body.operation_id || record.state != OBJECT_OPERATION_COMMITTED {
+        return Ok(None);
+    }
+    Ok(Some(with_reconciled(
+        record
+            .terminal_result
+            .unwrap_or_else(|| serde_json::json!({"object_id":body.object_id,"committed":true})),
+        true,
+    )))
+}
+
+pub(in crate::bus) fn discard_finish_job_spool(
+    account: &mut LocalBusAccountState,
+    request: &LocalBusFrame,
+) {
+    if let Ok(body) = serde_json::from_value::<LocalBusObjectPutFinishRequest>(request.body.clone())
+    {
+        drop(FinishSpool(account.object_put_spools.remove(&body.operation_id)));
+    }
+}
+
+pub(in crate::bus) async fn prepare_finish_job(
+    account: &mut LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<(PreparedPut, FinishSpool), SdkError> {
+    let body: LocalBusObjectPutFinishRequest = serde_json::from_value(request.body.clone())?;
+    account.client.account_db()?.check_object_access(&body.object_id)?;
+    if let Some(record) = account.client.object_operation(&body.object_id)?
+        && record.operation_id == body.operation_id
+        && record.state == OBJECT_OPERATION_COMMITTED
+    {
+        let terminal = record
+            .terminal_result
+            .unwrap_or_else(|| serde_json::json!({"object_id":body.object_id,"committed":true}));
+        return Ok((
+            PreparedPut::Complete(local_bus_ok(with_reconciled(terminal, true))),
+            FinishSpool(None),
+        ));
+    }
+    let session = account.object_put_spools.remove(&body.operation_id).ok_or_else(|| {
+        SdkError::LocalBus(format!(
+            "object.put.finish: unknown or closed upload session {}",
+            body.operation_id
+        ))
+    })?;
+    let mut spool = FinishSpool(Some(session));
+    let session =
+        spool.0.as_mut().ok_or_else(|| SdkError::LocalBus("upload spool already closed".into()))?;
+    let (put, plaintext) = verify_finish_spool(&body, session)?;
+    let prepared = prepare_put_core(account, &put, plaintext, body.operation_id).await?;
+    Ok((prepared, spool))
+}
+
+pub(in crate::bus) fn apply_put_job(
+    account: &LocalBusAccountState,
+    binding: &PutBinding,
+    transfer: Option<&SdkObjectTransferStatus>,
+    failure: Option<&SdkError>,
+) -> Result<serde_json::Value, SdkError> {
+    let db = account.client.account_db()?;
+    db.check_object_identity(&binding.object.object_id, &binding.object.manifest_hash)?;
+    let record = account
+        .client
+        .object_operation(&binding.object.object_id)?
+        .ok_or_else(|| SdkError::LocalBus("upload operation disappeared".into()))?;
+    if record.operation_id != binding.operation_id
+        || record.request_hash != binding.request_hash
+        || record.state != OBJECT_OPERATION_LOCAL_COMMITTED
+    {
+        return Err(SdkError::LocalBus("upload operation changed before completion".into()));
+    }
+    let terminal = serde_json::json!({"object_id":binding.object.object_id,"manifest_hash":binding.object.manifest_hash,"plaintext_hash":binding.plaintext_hash,"committed":true,"transfer_id":transfer.as_ref().map(|status|&status.transfer_id),"transfer":transfer,"operation_id":binding.operation_id});
+    let bytes = serde_json::to_vec(&terminal)?;
+    let error = failure.map(ToString::to_string);
+    account.client.upsert_object_operation(&ObjectOperationWrite {
+        object_id: &binding.object.object_id,
+        operation_id: &binding.operation_id,
+        state: if failure.is_some() {
+            OBJECT_OPERATION_LOCAL_COMMITTED
+        } else {
+            OBJECT_OPERATION_COMMITTED
+        },
+        request_hash: &binding.request_hash,
+        manifest_hash: Some(&binding.object.manifest_hash),
+        plaintext_hash: Some(&binding.plaintext_hash),
+        terminal_result: if failure.is_some() { None } else { Some(&bytes) },
+        last_error: error.as_deref(),
+        created_at: record.created_at,
+        updated_at: now_unix_timestamp(),
+    })?;
+    Ok(with_reconciled(terminal, binding.reconciled))
 }
 
 // ---- T25-A4 (CTRL-104 / OBJ-IPC-01): bounded local-bus DOWNLOAD spool (begin / read / finish) ----
@@ -1178,10 +1353,6 @@ async fn object_get_begin(
             body.protocol_version
         )));
     }
-    // Idempotent re-begin (a retry/restart with the same operation_id): drop any prior in-flight
-    // session + file so we always start from a clean, freshly decrypted spool.
-    object_get_spool_discard(account, &body.operation_id);
-
     let relay_options = super::deferred_attachment::read_relay_options(
         account,
         &body.object_id,
@@ -1189,6 +1360,13 @@ async fn object_get_begin(
         body.relay_service_key_base64.clone(),
         body.relay_interrupt_after_chunks,
     )?;
+    if relay_options.is_some() {
+        crate::bus::method_table::require_local_first_relay(&request.method, account)?;
+    }
+    // Idempotent re-begin (a retry/restart with the same operation_id): drop any prior in-flight
+    // session + file so we always start from a clean, freshly decrypted spool.
+    object_get_spool_discard(account, &body.operation_id);
+
     // A4 accepts an O(16 MiB) resident plaintext at the decrypt boundary (A5 will optimize); the
     // whole-object AEAD / relay wire is UNCHANGED — this is the same decrypt the one-shot GET used.
     let plaintext = zeroize::Zeroizing::new(if let Some(options) = relay_options.as_ref() {
@@ -1377,7 +1555,7 @@ fn object_get_status(
 /// for same-operation request-hash changes and adoption hash mismatches (never to clobber a
 /// legitimate different in-flight operation).
 #[allow(clippy::too_many_arguments)]
-fn fail_closed(
+fn fail_closed<T>(
     account: &LocalBusAccountState,
     object_id: &str,
     operation_id: &str,
@@ -1386,7 +1564,7 @@ fn fail_closed(
     plaintext_hash: Option<&str>,
     now: i64,
     message: &str,
-) -> Result<LocalBusDispatchResult, SdkError> {
+) -> Result<T, SdkError> {
     account.client.upsert_object_operation(&ObjectOperationWrite {
         object_id,
         operation_id,
@@ -1404,7 +1582,7 @@ fn fail_closed(
 
 /// Binds the content-and-intent of a PUT: `object_id` + `plaintext_hash` + `chunk_size` +
 /// normalized relay endpoint + `operation_id` + protocol version. Contains NO secret.
-fn object_put_request_hash(
+pub(in crate::bus) fn object_put_request_hash(
     body: &LocalBusObjectPutRequest,
     operation_id: &str,
     plaintext_hash: &str,
@@ -1445,13 +1623,13 @@ async fn dispatch_object_upload_to_relay(
     chunk_size: usize,
     options: &RelayTransferOptions,
 ) -> Result<SdkObjectTransferStatus, SdkError> {
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let pool = account.relay_quic_pool()?;
     let result = account
         .client
         .upload_object_to_relay_via_gateway(&mut engine, &pool, object_id, chunk_size, options)
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 
@@ -1465,13 +1643,13 @@ async fn dispatch_object_upload_to_relay(
     if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
         return account.client.upload_object_to_relay(object_id, chunk_size, options);
     }
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let pool = account.relay_quic_pool()?;
     let result = account
         .client
         .upload_object_to_relay_via_gateway(&mut engine, &pool, object_id, chunk_size, options)
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 
@@ -1482,13 +1660,13 @@ async fn dispatch_object_download_from_relay(
     options: &RelayTransferOptions,
     ack: bool,
 ) -> Result<Vec<u8>, SdkError> {
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let pool = account.relay_quic_pool()?;
     let result = account
         .client
         .download_object_from_relay_via_gateway(&mut engine, &pool, object_id, options, ack)
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 
@@ -1502,13 +1680,13 @@ async fn dispatch_object_download_from_relay(
     if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
         return account.client.download_object_from_relay(object_id, options, ack);
     }
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let pool = account.relay_quic_pool()?;
     let result = account
         .client
         .download_object_from_relay_via_gateway(&mut engine, &pool, object_id, options, ack)
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 
@@ -1583,11 +1761,11 @@ mod spool_tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
 
-    const ACCOUNT: &str = "acct";
-    const OPERATION: &str = "op-spool-1";
-    const OBJECT_ID: &str = "object_spool_1";
+    pub(super) const ACCOUNT: &str = "acct";
+    pub(super) const OPERATION: &str = "op-spool-1";
+    pub(super) const OBJECT_ID: &str = "object_spool_1";
 
-    fn temp_data_root(test: &str) -> PathBuf {
+    pub(super) fn temp_data_root(test: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -1595,7 +1773,7 @@ mod spool_tests {
         std::env::temp_dir().join(format!("ramflux-spool-{test}-{}-{nanos}", std::process::id()))
     }
 
-    fn make_state(data_root: PathBuf) -> LocalBusDaemonState {
+    pub(super) fn make_state(data_root: PathBuf) -> LocalBusDaemonState {
         let mut client = RamfluxClient::new();
         client.create_identity_root("principal_spool_test", [0x51; 32]);
         client.create_device_branch("principal_spool_test", "device_spool_test", 1, [0x52; 32]);
@@ -1640,7 +1818,7 @@ mod spool_tests {
         Ok(dispatch_object_bus_request(&frame, state).await?.response_body)
     }
 
-    fn begin_body(total_len: usize, plaintext_hash: &str) -> serde_json::Value {
+    pub(super) fn begin_body(total_len: usize, plaintext_hash: &str) -> serde_json::Value {
         serde_json::to_value(LocalBusObjectPutBeginRequest {
             object_id: OBJECT_ID.to_owned(),
             operation_id: OPERATION.to_owned(),
@@ -1655,7 +1833,7 @@ mod spool_tests {
         .expect("begin body")
     }
 
-    fn chunk_body(offset: usize, data: &[u8]) -> serde_json::Value {
+    pub(super) fn chunk_body(offset: usize, data: &[u8]) -> serde_json::Value {
         serde_json::to_value(LocalBusObjectPutChunkRequest {
             operation_id: OPERATION.to_owned(),
             offset,
@@ -1664,7 +1842,7 @@ mod spool_tests {
         .expect("chunk body")
     }
 
-    fn finish_body() -> serde_json::Value {
+    pub(super) fn finish_body() -> serde_json::Value {
         serde_json::to_value(LocalBusObjectPutFinishRequest {
             object_id: OBJECT_ID.to_owned(),
             operation_id: OPERATION.to_owned(),
@@ -1672,7 +1850,7 @@ mod spool_tests {
         .expect("finish body")
     }
 
-    fn plaintext_hash(bytes: &[u8]) -> String {
+    pub(super) fn plaintext_hash(bytes: &[u8]) -> String {
         ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, bytes)
     }
 
@@ -2249,6 +2427,10 @@ mod spool_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 }
+
+#[cfg(test)]
+#[path = "object_put_gate_tests.rs"]
+mod put_gate_tests;
 
 // Keep the legacy full-object response unchanged when it fits. Large objects must use the
 // existing paginated metadata API rather than letting the socket writer close mid-request.

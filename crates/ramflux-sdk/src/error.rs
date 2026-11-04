@@ -63,6 +63,8 @@ pub enum SdkError {
     },
     #[error("born-v3 network registration is pending; legacy proofs are forbidden")]
     NetworkingPending,
+    #[error("account networking is pending")]
+    NetworkingPendingContext { networking: Box<serde_json::Value>, retry_after_ms: Option<u64> },
     #[error(
         "restore_setup_required: fresh restore requires an independent local data passphrase via --new-passphrase-env"
     )]

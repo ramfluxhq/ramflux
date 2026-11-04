@@ -21,7 +21,7 @@ itest-identity-proof = []
 c-abi = []
 # Read-only introspection for realnet integration tests (T21-A2a / CTRL-028). Never enabled by
 # production binaries; exposes recv-commit checkpoints/cursor as evidence, no control or mutation.
-itest-fingerprint = []
+itest-fingerprint = ["ramflux-transport/itest-fingerprint"]
 # T22-A1 / RQ-04: legacy v2 shared-HMAC relay-token local minting. Compile-time gate for the itest
 # LocalMint compatibility path; still requires the runtime opt-in env to activate (double gate).
 # Never enabled by production binaries — default SDK/rf carry no HMAC mint code, service-key env, or
@@ -80,7 +80,7 @@ tracing = "0.1"
 zeroize = { version = "1.8", features = ["serde"] }
 
 [dev-dependencies]
-ramflux-storage = { workspace = true, features = ["test-instrumentation"] }
+ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
 ed25519-dalek.workspace = true
 rusqlite = { workspace = true }
 ramflux-node-core = { workspace = true }

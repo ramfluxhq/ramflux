@@ -37,19 +37,7 @@ async fn submit(
     delivery: &Delivery,
     deadline: tokio::time::Instant,
 ) -> Result<(), SdkError> {
-    let resume = super::gateway_resume::Snapshot::capture(account);
-    let mut engine =
-        if let Ok(result) = tokio::time::timeout_at(deadline, account.take_live_engine()).await {
-            result?
-        } else {
-            resume.retire(account)?;
-            return Err(if delivery.federation.is_some() {
-                SdkError::TaskDeliveryTimeout
-            } else {
-                SdkError::InboundPending("task delivery tick budget exhausted".into())
-            });
-        };
-    drop(resume);
+    let mut engine = account.session_client().await?;
     let result = if let Some(destination) = &delivery.federation {
         match federated_envelope(&engine, delivery, destination) {
             Ok(envelope) => {
@@ -74,10 +62,10 @@ async fn submit(
     {
         result.map(|_| ())
     } else {
-        account.retire_engine(engine)?;
+        account.retire_session(&engine)?;
         return Err(SdkError::InboundPending("task delivery tick budget exhausted".into()));
     };
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 
@@ -324,12 +312,12 @@ mod tests {
             None,
             Arc::new(AtomicBool::new(false)),
         )?;
-        let live = account.take_live_engine().await?;
+        let live = account.session_client().await?;
         let mut config = live.config.clone();
         config.previous_session_id = Some("resume-session-before-timeout".to_owned());
         config.resume_token = Some("resume-token-before-timeout".to_owned());
         config.last_seen_inbox_seq = 41;
-        account.put_engine(GatewaySessionEngine::with_test_transport(
+        account.install_test_session(GatewaySessionEngine::with_test_transport(
             config,
             Box::new(HangingLegacyGateway { last: None, stall_heartbeat: false }),
         ));

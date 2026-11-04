@@ -8,6 +8,7 @@ struct PublicationFault {
     inner: Gateway,
     root: PathBuf,
     entered: Option<oneshot::Sender<()>>,
+    injected: Option<oneshot::Sender<()>>,
     release: Arc<tokio::sync::Notify>,
 }
 fn fault_client(root: &Path) -> Result<RamfluxClient, SdkError> {
@@ -28,6 +29,10 @@ impl GatewaySessionFrameSink for PublicationFault {
     }
 }
 impl GatewaySessionFrameSource for PublicationFault {
+    fn recv_idle_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
+        ramflux_transport::GatewaySessionFrameSource::recv_idle_frame(&mut self.inner)
+    }
+
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
             if matches!(self.inner.last, Some(GatewayClientFrame::Resume { .. }))
@@ -54,6 +59,9 @@ impl GatewaySessionFrameSource for PublicationFault {
                         Ok(())
                     })
                     .map_err(|error| TransportError::Quic(error.to_string()))?;
+                if let Some(injected) = self.injected.take() {
+                    let _ = injected.send(());
+                }
             }
             self.inner.recv_frame().await
         })
@@ -65,6 +73,7 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
     LocalSet::new().run_until(async {
         let root = root("group-actor-error");
         let (entered, receiving) = oneshot::channel();
+        let (injected, faulted) = oneshot::channel();
         let release = Arc::new(tokio::sync::Notify::new());
         let fixture_root = root.clone();
         let fixture_release = release.clone();
@@ -72,12 +81,12 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
             let mut account = account_with_counter(&fixture_root,"alice",None,
                 Arc::new(AtomicBool::new(false)),Arc::new(AtomicUsize::new(0)),Some(index))?;
             let config = account.gateway_config.clone();
-            account.put_engine(GatewaySessionEngine::with_test_transport(config,
+            account.install_test_session(GatewaySessionEngine::with_test_transport(config,
                 Box::new(PublicationFault {
                     inner:Gateway {last:None,pending_cursor:None,blocked:None,
                         cancelled:Arc::new(AtomicBool::new(false)),submits:Arc::new(AtomicUsize::new(0)),
                         cancelled_notice:None},
-                    root:fixture_root,entered:Some(entered),release:fixture_release,
+                    root:fixture_root,entered:Some(entered),injected:Some(injected),release:fixture_release,
                 })));
             Ok(account)
         });
@@ -85,7 +94,7 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
         let (bus,server) = client(Rc::clone(&supervisor),1).await?;
         bus.request_frame(request("create","alice","group.create",serde_json::json!({
             "group_id":"group","conversation_id":"group-thread","creator_id":"device-alice","name":"Checklist"
-        }))).await?;
+        }))).await.map_err(|error|failure(&format!("initial group create: {error}")))?;
         tokio::time::timeout(Duration::from_secs(5),receiving).await
             .map_err(|_|failure("background group receive did not start"))?
             .map_err(|_|failure("receive fixture stopped"))?;
@@ -102,10 +111,22 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
         let error=result.err().ok_or_else(||failure("invalid group add succeeded"))?;
         assert!(matches!(&error,SdkError::LocalBusRefused {code,..} if code=="ValidationFailed"),"{error}");
         assert!(!error.to_string().contains("account actor stopped"),"{error}");
+        tokio::time::timeout(Duration::from_secs(5),faulted).await
+            .map_err(|_|failure("receive fault was not inserted"))?
+            .map_err(|_|failure("receive fault injection stopped"))?;
+        // The queued invalid command may finish before receive is released. This valid
+        // mutation proves the injected publication error has actually been observed.
+        let publication=bus.request_frame_structured(request("fault-observed","alice","group.name.set",
+            serde_json::json!({"group_id":"group","name":"Publication fault"}))).await;
+        let error=publication.err().ok_or_else(||failure("injected publication unexpectedly succeeded"))?;
+        assert!(matches!(&error,SdkError::LocalBusRefused {code,..} if code=="ValidationFailed"),"{error}");
+        assert!(!error.to_string().contains("account actor stopped"),"{error}");
         assert!(supervisor.account_actor("alice").is_some_and(|actor|!actor.has_stopped()));
-        fault_client(&root)?.account_db()?.remove_actor_state("routed/message-metadata/corrupt-group-msg")?;
+        fault_client(&root)?.account_db()?.remove_actor_state("routed/message-metadata/corrupt-group-msg")
+            .map_err(|error|failure(&format!("remove injected metadata: {error}")))?;
         let renamed=bus.request_frame(request("rename","alice","group.name.set",
-            serde_json::json!({"group_id":"group","name":"Still alive"}))).await?;
+            serde_json::json!({"group_id":"group","name":"Still alive"}))).await
+            .map_err(|error|failure(&format!("rename after clearing injection: {error}")))?;
         assert_eq!(renamed["name"],"Still alive");
         drop(bus);
         server.await.map_err(|_|failure("connection panicked"))??;

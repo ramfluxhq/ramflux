@@ -120,6 +120,23 @@ struct DirectorySession {
     responses: VecDeque<Vec<u8>>,
 }
 impl DirectorySession {
+    fn reply(
+        &mut self,
+        response: &GatewayServerFrame,
+    ) -> Result<(), ramflux_transport::TransportError> {
+        let cursor = match response {
+            GatewayServerFrame::Ack { cursor } => Some(cursor.clone()),
+            _ => None,
+        };
+        self.responses.push_back(serde_json::to_vec(response)?);
+        if let Some(cursor) = cursor {
+            self.responses.push_back(serde_json::to_vec(&GatewayServerFrame::Cursor {
+                cursor: Some(cursor),
+            })?);
+        }
+        Ok(())
+    }
+
     fn prekey_response(
         &self,
         device_id: &str,
@@ -250,8 +267,7 @@ impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
                     ));
                 }
             };
-            self.responses.push_back(serde_json::to_vec(&response)?);
-            Ok(())
+            self.reply(&response)
         })
     }
 }
@@ -265,6 +281,11 @@ fn delivered_entry(envelope: ramflux_protocol::Envelope) -> GatewayInboxEntry {
     }
 }
 impl ramflux_transport::GatewaySessionFrameSource for DirectorySession {
+    fn recv_idle_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
+        // Replies are queued only after a request; this fixture has no unsolicited traffic.
+        Box::pin(std::future::pending())
+    }
+
     fn recv_frame(
         &mut self,
     ) -> std::pin::Pin<

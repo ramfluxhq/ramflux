@@ -856,6 +856,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         },
         SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
         | SdkError::NetworkingPending
+        | SdkError::NetworkingPendingContext { .. }
         | SdkError::CustodyModeDowngrade => RamfluxErrorCode::UnsupportedVersion,
         SdkError::CustodyRandomUnavailable => RamfluxErrorCode::CryptoFailed,
         SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)

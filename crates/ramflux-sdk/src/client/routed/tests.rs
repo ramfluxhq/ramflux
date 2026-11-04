@@ -568,6 +568,11 @@ impl ramflux_transport::GatewaySessionFrameSink for ReceivingGateway {
     }
 }
 impl ramflux_transport::GatewaySessionFrameSource for ReceivingGateway {
+    fn recv_idle_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
+        // This fixture emits solicited replies only; an idle reader waits for a request.
+        Box::pin(std::future::pending())
+    }
+
     fn recv_frame(
         &mut self,
     ) -> std::pin::Pin<

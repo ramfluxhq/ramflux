@@ -24,7 +24,7 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
     let peers = members(&root, &source, 99)?;
     let (config, directory) = directory_config(&root, &mut source, &peers).await?;
     let captured = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
         Box::new(super::fixture::RecordingGateway::new(captured.clone())),
     ));
@@ -351,7 +351,8 @@ async fn maximal_create_and_full_resync_with_all_finality_seal_under_shared_fram
     let captured = Arc::new(Mutex::new(Vec::new()));
     let gateway = super::fixture::RecordingGateway::new(captured.clone());
     let frame_lengths = gateway.frame_lengths.clone();
-    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     source.client.account_db()?.persist_client_record(
         "conversation",
         "thread",

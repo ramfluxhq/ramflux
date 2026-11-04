@@ -9,6 +9,7 @@ mod compio_gateway;
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
 mod compio_mesh;
 mod error;
+mod gateway_frame_reader;
 mod loopback;
 mod mesh_http;
 mod mesh_quic;

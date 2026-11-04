@@ -8,10 +8,14 @@ mod outbox;
 mod recovery;
 mod requests;
 use crate::prelude::*;
+pub(crate) use outbox::background::pass as deliver_pass;
 pub(crate) use outbox::enqueue;
+#[cfg(test)]
 pub(super) use outbox::flush;
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateChange};
 pub(super) use recovery::stage;
+pub(crate) use requests::background::pass as request_pass;
+#[cfg(test)]
 pub(super) use requests::flush as flush_requests;
 #[cfg(test)]
 pub(in crate::bus) use requests::flush_with_clock as flush_requests_with_clock;
@@ -285,9 +289,13 @@ async fn verified_member(
         let url = federation.recipient_prekey_url.ok_or_else(|| {
             SdkError::LocalBus("federated group member requires recipient_prekey_url".into())
         })?;
-        let root =
-            account.client.resolve_federated_target_principal_commitment(&url, expected, device)?;
-        crate::client::contact::fetch_verified_device_manifest_from_url(&url, &root)?
+        let remote =
+            crate::client::contact::RemoteManifest { url: &url, timeout: account.timeouts.http };
+        let root = account
+            .client
+            .resolve_federated_target_principal_commitment_async(remote, expected, device)
+            .await?;
+        crate::client::contact::fetch_verified_device_manifest_from_url_async(remote, &root).await?
     } else {
         let root =
             account.client.resolve_target_principal_commitment(gateway, expected, device).await?;

@@ -84,6 +84,14 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
     }
 }
 impl ramflux_transport::GatewaySessionFrameSource for Wire {
+    fn recv_idle_frame(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<Vec<u8>, ramflux_transport::TransportError>> + Send + '_>,
+    > {
+        // This scripted transport queues solicited replies only and has no idle server pushes.
+        Box::pin(std::future::pending())
+    }
     fn recv_frame(
         &mut self,
     ) -> std::pin::Pin<

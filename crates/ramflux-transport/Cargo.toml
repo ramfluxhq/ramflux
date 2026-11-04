@@ -8,6 +8,8 @@ repository = "https://github.com/ramflux/ramflux-transport"
 
 [features]
 default = []
+# Read-only framing progress for deterministic integration fixtures.
+itest-fingerprint = []
 # PERF-D1-1: default-off transport QUIC capacity microbench. Gates the relay_quic_bench example
 # only; never enters the default/release dependency graph or any normal artifact (marker=0).
 perf-bench = []
@@ -60,7 +62,7 @@ tracing = "0.1"
 x509-parser = "0.17"
 
 [dev-dependencies]
-tokio = { version = "1.42", features = ["macros", "rt"] }
+tokio = { version = "1.42", features = ["macros", "rt", "test-util"] }
 rcgen = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 

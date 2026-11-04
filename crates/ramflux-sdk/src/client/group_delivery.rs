@@ -212,38 +212,29 @@ impl RamfluxClient {
         recipient_device_id: &str,
         wrapper: &SdkGroupSenderKeyDistributionEnvelope,
     ) -> Result<Option<(ramflux_protocol::GroupEvent, String)>, SdkError> {
-        let Some(event_base64) = wrapper.membership_event_base64.as_deref() else {
+        let Some(event) = Self::sender_key_membership_event(recipient_device_id, wrapper)? else {
             return Ok(None);
         };
-        let event_bytes = ramflux_protocol::decode_base64url(event_base64).map_err(|error| {
-            SdkError::LocalBus(format!("invalid group membership event: {error}"))
-        })?;
-        let event: ramflux_protocol::GroupEvent = serde_json::from_slice(&event_bytes)?;
-        let ramflux_protocol::GroupEventBody::MemberJoined {
-            actor_principal_commitment,
-            actor_device_signing_public_key,
-            joined_identity,
-            ..
-        } = &event.body
+        let ramflux_protocol::GroupEventBody::MemberJoined { actor_principal_commitment, .. } =
+            &event.body
         else {
-            return Err(SdkError::LocalBus(
-                "group sender-key membership event must be member_joined".to_owned(),
+            return Err(SdkError::InboundRejected(
+                "group membership requires member_joined".into(),
             ));
         };
-        if joined_identity != recipient_device_id {
-            return Err(SdkError::LocalBus(format!(
-                "group membership event joined identity {joined_identity} does not match local device {recipient_device_id}"
-            )));
-        }
         let actor_device = if let Some(manifest_url) =
             wrapper.actor_manifest_url.as_deref().filter(|url| !url.is_empty())
         {
-            self.assert_manifest_active_device_from_url(
-                manifest_url,
+            self.assert_manifest_active_device_from_url_async(
+                super::contact::RemoteManifest {
+                    url: manifest_url,
+                    timeout: crate::prekey::SDK_HTTP_TIMEOUT,
+                },
                 actor_principal_commitment,
                 &event.actor_device_id,
                 "group.member_joined.bootstrap.federation",
             )
+            .await
         } else {
             self.assert_manifest_active_device_cached(
                 gateway,
@@ -259,6 +250,46 @@ impl RamfluxClient {
                 "group bootstrap manifest verification is incomplete",
             )
         })?;
+        Self::verify_sender_key_membership_actor(event, &actor_device).map(Some)
+    }
+
+    pub(crate) fn sender_key_membership_event(
+        recipient_device_id: &str,
+        wrapper: &SdkGroupSenderKeyDistributionEnvelope,
+    ) -> Result<Option<ramflux_protocol::GroupEvent>, SdkError> {
+        let Some(event_base64) = wrapper.membership_event_base64.as_deref() else {
+            return Ok(None);
+        };
+        let event_bytes = ramflux_protocol::decode_base64url(event_base64).map_err(|error| {
+            SdkError::LocalBus(format!("invalid group membership event: {error}"))
+        })?;
+        let event: ramflux_protocol::GroupEvent = serde_json::from_slice(&event_bytes)?;
+        let ramflux_protocol::GroupEventBody::MemberJoined { joined_identity, .. } = &event.body
+        else {
+            return Err(SdkError::LocalBus(
+                "group sender-key membership event must be member_joined".to_owned(),
+            ));
+        };
+        if joined_identity != recipient_device_id {
+            return Err(SdkError::LocalBus(format!(
+                "group membership event joined identity {joined_identity} does not match local device {recipient_device_id}"
+            )));
+        }
+        Ok(Some(event))
+    }
+
+    pub(crate) fn verify_sender_key_membership_actor(
+        event: ramflux_protocol::GroupEvent,
+        actor_device: &crate::prekey::SdkDeviceManifestEntry,
+    ) -> Result<(ramflux_protocol::GroupEvent, String), SdkError> {
+        let ramflux_protocol::GroupEventBody::MemberJoined {
+            actor_device_signing_public_key, ..
+        } = &event.body
+        else {
+            return Err(SdkError::InboundRejected(
+                "group membership requires member_joined".into(),
+            ));
+        };
         if actor_device.principal_id != event.actor_principal_id
             || actor_device.branch_public_key != *actor_device_signing_public_key
         {
@@ -266,7 +297,7 @@ impl RamfluxClient {
                 "group membership event actor key does not match verified manifest".to_owned(),
             ));
         }
-        Ok(Some((event, actor_device.branch_public_key)))
+        Ok((event, actor_device.branch_public_key.clone()))
     }
 
     pub(crate) fn append_or_pending_group_message(

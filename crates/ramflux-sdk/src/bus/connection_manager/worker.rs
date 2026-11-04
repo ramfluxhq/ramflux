@@ -1,0 +1,432 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! One bounded native attempt and one resident session per account generation.
+
+use super::ConnectionPhase;
+use super::{
+    Call, Child, ConnectionEvent, ConnectionHandle, DisconnectReason, NetworkingSnapshot,
+    NetworkingState, RuntimeTimeouts, SessionConnector, SessionContext, SessionHub,
+    SessionMetadata, new_generation,
+};
+use crate::custody::retry::AdmissionRetry;
+use crate::gateway::host_frames::HostFrames;
+use crate::{GatewaySessionConfig, GatewaySessionEngine, GatewaySessionState, SdkError};
+use std::{collections::BTreeMap, sync::Arc};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+    time::{Instant, timeout_at},
+};
+
+#[derive(Default)]
+pub(super) struct Children {
+    factories: BTreeMap<&'static str, super::ChildFactory>,
+    running: BTreeMap<&'static str, JoinHandle<()>>,
+    cancel: Option<watch::Sender<bool>>,
+}
+
+impl Children {
+    pub(super) async fn register(
+        &mut self,
+        child: Child,
+        handle: &ConnectionHandle,
+        session: &GatewaySessionState,
+    ) {
+        if let Some(running) = self.running.remove(child.name) {
+            running.abort();
+            let _ = running.await;
+        }
+        self.factories.insert(child.name, Arc::clone(&child.factory));
+        self.spawn(child.name, &child.factory, handle, session);
+    }
+    fn spawn(
+        &mut self,
+        name: &'static str,
+        factory: &super::ChildFactory,
+        handle: &ConnectionHandle,
+        session: &GatewaySessionState,
+    ) {
+        let cancel = self.cancel.get_or_insert_with(|| watch::channel(false).0).subscribe();
+        let context = SessionContext {
+            session_id: session.session_id.clone(),
+            generation: handle.generation(),
+            cancel,
+            connection: handle.clone(),
+        };
+        self.running.insert(name, tokio::spawn(factory(context)));
+    }
+    fn start(&mut self, handle: &ConnectionHandle, session: &GatewaySessionState) {
+        let factories = self
+            .factories
+            .iter()
+            .map(|(name, factory)| (*name, Arc::clone(factory)))
+            .collect::<Vec<_>>();
+        for (name, factory) in factories {
+            self.spawn(name, &factory, handle, session);
+        }
+    }
+    async fn stop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.send_replace(true);
+        }
+        let running = std::mem::take(&mut self.running);
+        for task in running.values() {
+            task.abort();
+        }
+        for (_, task) in running {
+            let _ = task.await;
+        }
+    }
+}
+
+pub(super) struct Bootstrap {
+    pub handle: ConnectionHandle,
+    pub config: GatewaySessionConfig,
+    pub engine: Option<GatewaySessionEngine>,
+    pub connector: Arc<dyn SessionConnector>,
+    pub timeouts: RuntimeTimeouts,
+    pub calls: mpsc::Receiver<Call>,
+    pub registrations: mpsc::Receiver<Child>,
+    pub stopping: watch::Receiver<bool>,
+}
+
+pub(super) async fn run(bootstrap: Bootstrap) {
+    let Bootstrap {
+        handle,
+        mut config,
+        mut engine,
+        connector,
+        timeouts,
+        mut calls,
+        mut registrations,
+        mut stopping,
+    } = bootstrap;
+    let mut retry = AdmissionRetry::default();
+    let mut children = Children::default();
+    loop {
+        let attempt = supervise(run_account(
+            &handle,
+            AccountLoop {
+                config: &mut config,
+                engine: &mut engine,
+                connector: &connector,
+                retry: &mut retry,
+                children: &mut children,
+            },
+            &timeouts,
+            &mut calls,
+            &mut registrations,
+            &mut stopping,
+        ))
+        .await;
+        if attempt.is_ok() {
+            break;
+        }
+        // Drop the panicked exchange and join every generation-owned task before retrying.
+        children.stop().await;
+        handle
+            .shared
+            .hub
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .disconnect(DisconnectReason::Restart);
+        update(&handle, |snapshot| {
+            snapshot.state = NetworkingState::NetworkingPending;
+            snapshot.generation = new_generation();
+            snapshot.session_id = None;
+            snapshot.active_transport_kind = None;
+        });
+        let _ = handle.shared.events.send(ConnectionEvent::Disconnected {
+            reason: DisconnectReason::Restart,
+            generation: handle.generation(),
+        });
+        let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
+        retry.record(&error, Instant::now());
+        failed(&handle, &retry, &error);
+    }
+    children.stop().await;
+    while let Ok(call) = calls.try_recv() {
+        let _ = call.reply.send(Err(handle.pending()));
+    }
+    // Retired-session configuration remains available for checkpointing while retrying,
+    // but a stopped account must retain no established-session capability metadata.
+    *handle.shared.metadata.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    update(&handle, |snapshot| {
+        snapshot.state = NetworkingState::NetworkingPending;
+        snapshot.active_transport_kind = None;
+        snapshot.session_id = None;
+        snapshot.generation = new_generation();
+        snapshot.phase = ConnectionPhase::Stopped;
+    });
+}
+
+// Catch a poll panic without moving the receivers or retry policy into a disposable task.
+async fn supervise(future: impl std::future::Future<Output = ()>) -> Result<(), ()> {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(move |context| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future.as_mut().poll(context)
+        })) {
+            Ok(std::task::Poll::Ready(())) => std::task::Poll::Ready(Ok(())),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(Err(())),
+        }
+    })
+    .await
+}
+
+struct AccountLoop<'a> {
+    config: &'a mut GatewaySessionConfig,
+    engine: &'a mut Option<GatewaySessionEngine>,
+    connector: &'a Arc<dyn SessionConnector>,
+    retry: &'a mut AdmissionRetry,
+    children: &'a mut Children,
+}
+
+async fn run_account(
+    handle: &ConnectionHandle,
+    state: AccountLoop<'_>,
+    timeouts: &RuntimeTimeouts,
+    calls: &mut mpsc::Receiver<Call>,
+    registrations: &mut mpsc::Receiver<Child>,
+    stopping: &mut watch::Receiver<bool>,
+) {
+    let AccountLoop { config, engine, connector, retry, children } = state;
+    loop {
+        if *stopping.borrow() {
+            break;
+        }
+        if engine.is_none() {
+            while let Some(not_before) = retry.not_before().filter(|until| *until > Instant::now())
+            {
+                tokio::select! {
+                    biased;
+                    _=stopping.changed()=>break,
+                    ()=tokio::time::sleep_until(not_before)=>{},
+                    call=calls.recv()=>{if let Some(call)=call {let _=call.reply.send(Err(handle.pending()));}}
+                    child=registrations.recv()=>{if let Some(child)=child {children.factories.insert(child.name,child.factory);}}
+                }
+                if *stopping.borrow() {
+                    break;
+                }
+            }
+            if *stopping.borrow() {
+                break;
+            }
+            let Some(result) =
+                connect_attempt(handle, config, connector, timeouts, stopping, retry).await
+            else {
+                break;
+            };
+            match result {
+                Ok(connected) => *engine = Some(connected),
+                Err(error) => {
+                    retry.record(&error, Instant::now());
+                    failed(handle, retry, &error);
+                    if let Some(work) = &handle.shared.account_work {
+                        let failed =
+                            super::AccountWork::Failed { generation: handle.generation(), error };
+                        tokio::select! {biased;_=stopping.changed()=>break,_=work.send(failed)=>{}}
+                    }
+                    continue;
+                }
+            }
+        }
+        let Some(mut resident) = engine.take() else {
+            continue;
+        };
+        let generation = handle.generation();
+        let session = announce_live(handle, &mut resident, config.previous_session_id.is_some());
+        children.start(handle, &session);
+        let exit = super::session_host::run(
+            handle,
+            &mut resident,
+            super::session_host::HostIo { calls, registrations, children, stopping },
+            timeouts,
+        )
+        .await;
+        children.stop().await;
+        *config = resident.config.clone();
+        publish_metadata(handle, &resident);
+        let reason = match exit {
+            super::session_host::HostExit::Stop => handle
+                .shared
+                .stop_reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or(DisconnectReason::Stop),
+            super::session_host::HostExit::Retired(reason) => reason,
+        };
+        if let Some(host) = &resident.host {
+            host.hub.disconnect(reason);
+        }
+        update(handle, |snapshot| {
+            snapshot.state = NetworkingState::NetworkingPending;
+            snapshot.active_transport_kind = None;
+            snapshot.session_id = None;
+            snapshot.last_reason = Some(format!("{reason:?}"));
+        });
+        let _ = handle.shared.events.send(ConnectionEvent::Disconnected { reason, generation });
+        drop(resident);
+        if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
+            break;
+        }
+        let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
+        retry.record(&error, Instant::now());
+        failed(handle, retry, &error);
+    }
+}
+
+fn update(handle: &ConnectionHandle, change: impl FnOnce(&mut NetworkingSnapshot)) {
+    let generation = {
+        let mut snapshot =
+            handle.shared.snapshot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        change(&mut snapshot);
+        snapshot.generation
+    };
+    handle.shared.changed.send_replace(generation);
+}
+pub(super) fn publish_metadata(handle: &ConnectionHandle, engine: &GatewaySessionEngine) {
+    *handle.shared.metadata.write().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(SessionMetadata {
+            config: engine.config.clone(),
+            session: engine.session().clone(),
+            generation: handle.generation(),
+        });
+}
+fn failed(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) {
+    let delay = retry.not_before().map(|until| {
+        u64::try_from(until.saturating_duration_since(Instant::now()).as_millis())
+            .unwrap_or(u64::MAX)
+    });
+    tracing::warn!(%error, retry_after_ms = ?delay, "account connection attempt deferred");
+    update(handle, |snapshot| {
+        snapshot.phase = ConnectionPhase::Backoff;
+        snapshot.cause = super::super::native_account::networking_reason(error);
+        snapshot.last_reason = Some(if matches!(error, SdkError::NodeTimeout { .. }) {
+            "AttemptTimeout".into()
+        } else {
+            error.to_string()
+        });
+        snapshot.retry_after_ms = delay;
+        snapshot.next_retry_at_ms = delay.map(|delay| wall_ms().saturating_add(delay));
+    });
+    let _ = handle.shared.events.send(ConnectionEvent::AttemptFailed {
+        reason: error.to_string(),
+        retry_after_ms: delay,
+        generation: handle.generation(),
+    });
+}
+fn wall_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+async fn prepare(
+    handle: &ConnectionHandle,
+    config: GatewaySessionConfig,
+    deadline: Instant,
+) -> Result<GatewaySessionConfig, SdkError> {
+    let Some(work) = &handle.shared.account_work else {
+        return Ok(config);
+    };
+    let (reply, response) = tokio::sync::oneshot::channel();
+    work.send(super::AccountWork::Prepare { generation: handle.generation(), deadline, reply })
+        .await
+        .map_err(|_| handle.pending())?;
+    response.await.map_err(|_| handle.pending())?
+}
+async fn install(handle: &ConnectionHandle, metadata: SessionMetadata) -> Result<(), SdkError> {
+    let Some(work) = &handle.shared.account_work else {
+        return Ok(());
+    };
+    let (reply, response) = tokio::sync::oneshot::channel();
+    work.send(super::AccountWork::Connected { metadata: Box::new(metadata), reply })
+        .await
+        .map_err(|_| handle.pending())?;
+    response.await.map_err(|_| handle.pending())?
+}
+
+async fn connect_attempt(
+    handle: &ConnectionHandle,
+    config: &GatewaySessionConfig,
+    connector: &Arc<dyn SessionConnector>,
+    timeouts: &RuntimeTimeouts,
+    stopping: &mut watch::Receiver<bool>,
+    retry: &mut AdmissionRetry,
+) -> Option<Result<GatewaySessionEngine, SdkError>> {
+    let now = Instant::now();
+    let generation = new_generation();
+    update(handle, |snapshot| {
+        snapshot.generation = generation;
+        snapshot.attempt += 1;
+        snapshot.attempt_started = Some(now);
+        snapshot.attempt_started_at_ms = Some(wall_ms());
+        snapshot.next_retry_at_ms = None;
+        snapshot.retry_after_ms = None;
+        snapshot.last_reason = Some("Connecting".into());
+        snapshot.phase = ConnectionPhase::Connecting;
+    });
+    // This adapter is replaced by S1's policy at integration. Keep one policy
+    // across attempts, and do not let readers advance its not_before value.
+    let mut budget = retry.begin_attempt().await;
+    let prepared = budget.attempt(async { Ok(()) }).await;
+    let deadline = now + timeouts.attempt;
+    let result = tokio::select! {
+        biased;
+        _=stopping.changed()=>return None,
+        result=timeout_at(deadline,async {
+            prepared?;
+            let prepared_config=prepare(handle,config.clone(),deadline).await?;
+            let connected=connector.connect(prepared_config,deadline).await?;
+            install(handle,SessionMetadata {config:connected.config.clone(),session:connected.session().clone(),generation:handle.generation()}).await?;
+            Ok(connected)
+        })=>match result {
+            Ok(result)=>result,
+            Err(_)=>Err(SdkError::NodeTimeout {retry_after_ms:crate::node::NODE_RETRY_AFTER_MS}),
+        },
+    };
+    Some(result)
+}
+
+fn announce_live(
+    handle: &ConnectionHandle,
+    resident: &mut GatewaySessionEngine,
+    resumed: bool,
+) -> GatewaySessionState {
+    let generation = handle.generation();
+    let hub = Arc::new(SessionHub::new(generation));
+    *handle.shared.hub.write().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Arc::clone(&hub);
+    resident.host = Some(HostFrames {
+        hub,
+        resync_needed: Arc::clone(&handle.shared.resync_needed),
+        #[cfg(test)]
+        buffer_stats: Arc::clone(&handle.shared.buffer_stats),
+    });
+    publish_metadata(handle, resident);
+    update(handle, |snapshot| {
+        snapshot.state = NetworkingState::Live;
+        snapshot.phase = ConnectionPhase::Live;
+        snapshot.last_reason = None;
+        snapshot.cause = None;
+        snapshot.retry_after_ms = None;
+        snapshot.next_retry_at_ms = None;
+        snapshot.active_transport_kind = Some(resident.active_transport_kind());
+        snapshot.session_id = Some(resident.session().session_id.clone());
+    });
+    let session = resident.session().clone();
+    let _ = handle.shared.events.send(ConnectionEvent::Connected {
+        session_id: session.session_id.clone(),
+        resumed,
+        generation,
+    });
+    handle.shared.receive_wake.notify_one();
+    session
+}

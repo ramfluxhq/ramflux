@@ -53,6 +53,10 @@ pub(crate) async fn dispatch(
         .write_transaction(|| account.client.persist_call_row(&next.row))?;
     let row = next.row.clone();
     account.client.voice_calls.insert(id.into(), next);
+    if let Some(handle) = &account.connection {
+        handle.wake_couriers();
+    }
+    #[cfg(test)]
     if drive(account).await.is_err() {
         tracing::warn!("call signaling queued for retry");
     }
@@ -145,6 +149,10 @@ async fn invite(
         .write_transaction(|| account.client.persist_call_row(&call.row))?;
     let row = call.row.clone();
     account.client.voice_calls.insert(id, call);
+    if let Some(handle) = &account.connection {
+        handle.wake_couriers();
+    }
+    #[cfg(test)]
     if drive(account).await.is_err() {
         tracing::warn!("call signaling queued for retry");
     }
@@ -185,7 +193,10 @@ fn media(account: &mut LocalBusAccountState, id: &str) -> Result<LocalBusDispatc
 }
 #[path = "call_driver.rs"]
 mod driver;
-pub(crate) use driver::{drive, expire_due};
+pub(crate) use driver::background::pass as signaling_pass;
+#[cfg(test)]
+pub(crate) use driver::drive;
+pub(crate) use driver::expire_due;
 
 pub(crate) fn list(client: &RamfluxClient) -> Result<Value, SdkError> {
     let mut rows = client.account_db()?.voice_call_rows(false)?;

@@ -90,10 +90,20 @@ impl RamfluxClient {
     }
     pub(crate) async fn prepare_shared_group_receive(
         &self,
-        engine: &GatewaySessionEngine,
+        engine: &impl GatewaySessionAccess,
         opened: &crate::client::routed::Opened,
         entry: &GatewayInboxEntry,
         body: &[u8],
+    ) -> Result<Option<PreparedSharedGroup>, SdkError> {
+        self.prepare_shared_group_receive_with_directory(engine, opened, entry, body, None).await
+    }
+    pub(crate) async fn prepare_shared_group_receive_with_directory(
+        &self,
+        engine: &impl GatewaySessionAccess,
+        opened: &crate::client::routed::Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+        directory: Option<&super::GroupDirectoryEvidence>,
     ) -> Result<Option<PreparedSharedGroup>, SdkError> {
         if opened.routing.kind != crate::client::routed::Kind::GroupControl {
             return Ok(None);
@@ -105,7 +115,18 @@ impl RamfluxClient {
                 return Err(invalid("group control byte budget exceeded"));
             }
             let packet: super::GroupControlPacket = ramflux_protocol::parse_i_json(body)?;
-            self.prepare_group_control(engine, entry, &opened.routing, &packet).await?;
+            if directory.is_some() {
+                self.prepare_group_control_with_directory(
+                    engine,
+                    entry,
+                    &opened.routing,
+                    &packet,
+                    directory,
+                )
+                .await?;
+            } else {
+                self.prepare_group_control(engine, entry, &opened.routing, &packet).await?;
+            }
             return Ok(Some(PreparedSharedGroup::Control(packet)));
         }
         let Some(state) = decode_packet(body)? else { return Ok(None) };
@@ -121,12 +142,12 @@ impl RamfluxClient {
                 ramflux_protocol::ProtocolError::GroupTransferRequiresSync
             )))
         ) {
-            self.verify_shared_group_source(&engine.config, &state, entry).await?;
-            self.stage_stale_transfer_refusal(&state, &engine.config.target_delivery_id)?;
+            self.verify_shared_group_directory(engine.config(), &state, entry, directory).await?;
+            self.stage_stale_transfer_refusal(&state, &engine.config().target_delivery_id)?;
             return Err(super::transfer::requires_sync());
         }
         let needs_consent = consent?;
-        self.verify_shared_group_source(&engine.config, &state, entry).await?;
+        self.verify_shared_group_directory(engine.config(), &state, entry, directory).await?;
         match self.account_db()?.validate_shared_group_removal_continuity(&state) {
             Ok(()) => {}
             Err(StorageError::Protocol(
@@ -135,7 +156,7 @@ impl RamfluxClient {
             Err(StorageError::Protocol(
                 ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
             )) => {
-                self.stage_stale_transfer_refusal(&state, &engine.config.target_delivery_id)?;
+                self.stage_stale_transfer_refusal(&state, &engine.config().target_delivery_id)?;
                 return Err(super::transfer::requires_sync());
             }
             Err(error) => return Err(error.into()),

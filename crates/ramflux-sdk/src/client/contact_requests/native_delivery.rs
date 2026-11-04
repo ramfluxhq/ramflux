@@ -15,19 +15,82 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Deserialize, Serialize)]
-pub(super) struct Approved {
+pub(crate) struct Approved {
     consent: Envelope<ContactConsentV2>,
     epoch: u64,
     signing_key: String,
     agreement_key: String,
 }
 
+pub(super) struct ApprovalRequest {
+    root: std::path::PathBuf,
+    id: String,
+    vault: std::sync::Arc<dyn crate::custody::PrimaryVault>,
+    current: ramflux_crypto::custody::VerifiedRecord,
+    body: ContactConsentV2,
+    now: u64,
+    epoch: u64,
+    signing_key: String,
+    agreement_key: String,
+}
+pub(super) enum ApprovalPlan {
+    Ready(Box<Approved>),
+    Sign(Box<ApprovalRequest>),
+}
+impl ApprovalPlan {
+    pub(super) async fn execute(self) -> Result<Approved, SdkError> {
+        match self {
+            Self::Ready(approved) => Ok(*approved),
+            Self::Sign(request) => tokio::task::spawn_blocking(move || {
+                let request = *request;
+                let account =
+                    crate::custody::load_account(&request.root, &request.id, request.now)?;
+                let consent = account.sign_contact_consent(
+                    request.vault.as_ref(),
+                    &request.current,
+                    request.body,
+                    request.now,
+                )?;
+                Ok(Approved {
+                    consent,
+                    epoch: request.epoch,
+                    signing_key: request.signing_key,
+                    agreement_key: request.agreement_key,
+                })
+            })
+            .await
+            .map_err(|_| SdkError::CustodyVaultUnavailable)?,
+        }
+    }
+}
+pub(super) fn approval_bytes(approved: &Approved) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+    Ok(Zeroizing::new(serde_json::to_vec(&approved.consent)?))
+}
+pub(super) fn save_approval(
+    client: &RamfluxClient,
+    intent: &mut Intent,
+    approved: Approved,
+) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+    let bytes = approval_bytes(&approved)?;
+    intent.native_approval = Some(approved);
+    client.account_db()?.persist_actor_state(&key(intent), intent)?;
+    Ok(bytes)
+}
 pub(super) async fn approve(
     client: &RamfluxClient,
     config: &GatewaySessionConfig,
     intent: &mut Intent,
     manifest: &SdkDeviceManifestResponse,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+    let approved = prepare_approval(client, config, intent, manifest)?.execute().await?;
+    save_approval(client, intent, approved)
+}
+pub(super) fn prepare_approval(
+    client: &RamfluxClient,
+    config: &GatewaySessionConfig,
+    intent: &Intent,
+    manifest: &SdkDeviceManifestResponse,
+) -> Result<ApprovalPlan, SdkError> {
     let now = crate::custody::network_now()?;
     let native =
         manifest.custody.as_deref().ok_or_else(|| invalid("native consent authority absent"))?;
@@ -81,7 +144,7 @@ pub(super) async fn approve(
             &approved.consent.signature,
             &current.envelope().body.master_certificate.body.self_signing_public_key,
         )?;
-        return Ok(Zeroizing::new(serde_json::to_vec(&approved.consent)?));
+        return Ok(ApprovalPlan::Ready(Box::new(approved.clone())));
     }
     let issued_at = u64::try_from(intent.issued_at)
         .map_err(|_| invalid("invalid native intent time"))?
@@ -114,16 +177,16 @@ pub(super) async fn approve(
     let signing_key = cert.branch_signing_public_key.clone();
     let agreement_key = cert.agreement_identity_public_key.clone();
     let epoch = current.envelope().body.device_set_epoch;
-    // Missing primary custody leaves the durable delivery intent pending. Data unlock and
-    // branch possession never manufacture consent or fall back to a root-proof signer.
-    let consent = tokio::task::spawn_blocking(move || {
-        let account = crate::custody::load_account(&root, &id, now)?;
-        account.sign_contact_consent(vault.as_ref(), &current, body, now)
-    })
-    .await
-    .map_err(|_| SdkError::CustodyVaultUnavailable)??;
-    let bytes = Zeroizing::new(serde_json::to_vec(&consent)?);
-    intent.native_approval = Some(Approved { consent, epoch, signing_key, agreement_key });
-    client.account_db()?.persist_actor_state(&key(intent), intent)?;
-    Ok(bytes)
+    // Data unlock and branch possession never manufacture primary consent.
+    Ok(ApprovalPlan::Sign(Box::new(ApprovalRequest {
+        root,
+        id,
+        vault,
+        current,
+        body,
+        now,
+        epoch,
+        signing_key,
+        agreement_key,
+    })))
 }

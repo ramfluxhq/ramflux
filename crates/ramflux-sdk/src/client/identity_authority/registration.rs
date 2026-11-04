@@ -148,13 +148,13 @@ impl RamfluxClient {
     }
     pub(crate) async fn register_owned_via_session(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         target: RegistrationTarget<'_>,
     ) -> Result<(), SdkError> {
         let mut last = None;
         for _ in 0..3 {
             let record: SignedDeviceSetRecord =
-                self.prepare_owned_authority_via_gateway(&engine.config).await?;
+                self.prepare_owned_authority_via_gateway(engine.config()).await?;
             self.account_db()?.persist_actor_state("identity/registration_set", &record)?;
             let request = self.mvp1_identity_registration_request(
                 target.device,

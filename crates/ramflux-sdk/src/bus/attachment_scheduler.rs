@@ -10,32 +10,19 @@ struct Attempt {
     next_at: i64,
 }
 
-pub(super) async fn run_next(account: &mut LocalBusAccountState) -> Result<bool, SdkError> {
+pub(super) fn next(account: &LocalBusAccountState) -> Result<Option<String>, SdkError> {
     if std::env::var("RAMFLUX_SYNC_ATTACHMENT_PREFETCH").as_deref() == Ok("0") {
-        return Ok(false);
+        return Ok(None);
     }
-    let now = now_unix_timestamp();
-    let Some(id) = account.client.account_db()?.pending_received_attachment_ids(now, 1)?.pop()
-    else {
-        return Ok(false);
-    };
+    Ok(account.client.account_db()?.pending_received_attachment_ids(now_unix_timestamp(), 1)?.pop())
+}
+pub(super) fn started(account: &LocalBusAccountState, id: &str) -> Result<(), SdkError> {
     let key = format!("sync/attachment/{id}");
     let mut attempt =
         account.client.account_db()?.load_actor_state::<Attempt>(&key)?.unwrap_or_default();
-    attempt.attempts += 1;
-    attempt.next_at = now.saturating_add(2_i64.pow(attempt.attempts));
-    account.client.account_db()?.persist_actor_state(&key, &attempt)?;
-    if let Err(error) = fetch(account, &id).await {
-        crate::client::attachment_diagnostics::context(&id, "background_fetch", &error);
-    }
-    Ok(true)
-}
-
-pub(super) async fn fetch(
-    account: &mut LocalBusAccountState,
-    id: &str,
-) -> Result<serde_json::Value, SdkError> {
-    fetch_until(account, id, tokio::time::Instant::now() + Duration::from_secs(20)).await
+    attempt.attempts = attempt.attempts.saturating_add(1);
+    attempt.next_at = now_unix_timestamp().saturating_add(2_i64.saturating_pow(attempt.attempts));
+    Ok(account.client.account_db()?.persist_actor_state(&key, &attempt)?)
 }
 
 async fn fetch_until(
@@ -79,7 +66,8 @@ pub(super) async fn fetch_for_page(
         selected += 1;
         ids.extend(account.client.account_db()?.client_message_object_ids(&message)?);
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let deadline =
+        tokio::time::Instant::now() + super::runtime_limits::RuntimeTimeouts::default().fetch;
     for id in ids {
         let result = fetch_until(account, &id, deadline).await?;
         ensure_page_attachment_available(&result)?;

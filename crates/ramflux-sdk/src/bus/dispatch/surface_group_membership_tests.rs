@@ -40,7 +40,7 @@ async fn group_surface_reaches_a_peer_sibling_only_after_its_device_joins()
         &json!({"kind":"group","group_id":"group"}),
     )?;
     let captured = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         peer.config,
         Box::new(super::fixture::RecordingGateway::new(captured.clone())),
     ));

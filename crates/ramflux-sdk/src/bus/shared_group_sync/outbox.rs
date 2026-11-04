@@ -7,7 +7,10 @@ use ramflux_crypto::VerifiedGroupState;
 use ramflux_protocol::group_state::GroupStateSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+pub(super) mod background;
+#[cfg(test)]
 mod delivery;
+mod recipients;
 
 const PREFIX: &str = "group-state/send/";
 const MAX_GROUPS: usize = 32;
@@ -309,6 +312,7 @@ fn enqueue_kind(
     db.persist_actor_state(&id, &intent)?;
     Ok(())
 }
+#[cfg(test)]
 pub(in crate::bus) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     let db = account.client.account_db()?;
     let after = db.load_actor_state::<String>(DRIVER_PROGRESS)?.unwrap_or_default();
@@ -318,6 +322,7 @@ pub(in crate::bus) async fn flush(account: &mut LocalBusAccountState) -> Result<
     };
     drive_one(account, intent).await
 }
+#[cfg(test)]
 async fn drive_one(
     account: &mut LocalBusAccountState,
     mut intent: Intent,
@@ -362,9 +367,9 @@ async fn drive_one(
             return Ok(0);
         }
     };
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let outcome = delivery::deliver(&account.client, &mut engine, &mut intent, &state).await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     match outcome {
         Ok((count, progress)) => {
             delivered += count;
@@ -427,6 +432,7 @@ fn prepare_intent(
     persist_intent(client, intent)?;
     Ok(Some(state))
 }
+#[cfg(test)]
 enum DeliveryProgress {
     Complete,
     Continue,
@@ -442,9 +448,10 @@ fn persist_intent(client: &RamfluxClient, intent: &Intent) -> Result<(), SdkErro
     db.persist_actor_state(&key(&intent.snapshot.group_id), intent)?;
     Ok(())
 }
+#[cfg(test)]
 async fn submit_staged(
     client: &RamfluxClient,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     intent: &mut Intent,
 ) -> Result<(), SdkError> {
     if let Some(staged) = &intent.active {

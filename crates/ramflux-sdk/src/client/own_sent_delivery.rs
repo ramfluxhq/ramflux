@@ -34,12 +34,11 @@ impl RamfluxClient {
         }
         Ok(manifest)
     }
-    pub(super) async fn refreshed_own_copy_manifest(
+    pub(crate) fn prepare_own_copy_manifest_refresh(
         &self,
-        gateway: &GatewaySessionConfig,
-    ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+    ) -> Result<Option<crate::prekey::SdkDeviceManifestResponse>, SdkError> {
         if let Ok(manifest) = self.local_own_copy_manifest() {
-            return Ok(manifest);
+            return Ok(Some(manifest));
         }
         let local = self.owned_device_identity()?;
         let epoch = if let Some(current) =
@@ -63,6 +62,18 @@ impl RamfluxClient {
             "own-device/manifest-refresh",
             &json!({"epoch":epoch,"next_at":now.saturating_add(60)}),
         )?;
+        Ok(None)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn refreshed_own_copy_manifest(
+        &self,
+        gateway: &GatewaySessionConfig,
+    ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+        if let Some(manifest) = self.prepare_own_copy_manifest_refresh()? {
+            return Ok(manifest);
+        }
+        let local = self.owned_device_identity()?;
         self.cache_verified_device_manifest(
             gateway,
             local.root_commitment(),
@@ -71,7 +82,7 @@ impl RamfluxClient {
         .await?;
         self.local_own_copy_manifest()
     }
-    pub(super) fn own_sent_has_siblings(&self) -> Result<bool, SdkError> {
+    pub(crate) fn own_sent_has_siblings(&self) -> Result<bool, SdkError> {
         let local = self.owned_device_identity()?;
         let now = crate::custody::network_now()?;
         if let Some(current) = self.current_custody_authority(local.root_commitment(), now)? {

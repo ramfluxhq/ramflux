@@ -54,6 +54,7 @@ impl BackupJobs {
             // next reference. The final snapshot independently enumerates what is missing.
             let _ = actor
                 .request(AccountCommand {
+                    admission: None,
                     private: None,
                     request,
                     connection_id: 0,

@@ -54,6 +54,12 @@ impl GatewaySessionFrameSink for Gateway {
     }
 }
 impl GatewaySessionFrameSource for Gateway {
+    fn recv_idle_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+        // This request/reply fixture has no unsolicited frames. Idle silence must
+        // not manufacture a Nack or consume a request-specific hold barrier.
+        Box::pin(std::future::pending())
+    }
+
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
             let block = self
@@ -232,7 +238,7 @@ fn account_with_setup(
     );
     Ok(LocalBusAccountState::new(client, engine, commitment))
 }
-fn actor_account(
+pub(super) fn actor_account(
     root: &Path,
     id: &str,
     blocked: Option<oneshot::Sender<()>>,
@@ -1112,7 +1118,7 @@ async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), S
         .persist_actor_state("surface/forward_job/corrupt", &serde_json::json!({"corrupt":true}))?;
     // Obsolete surface-specific queues are never decoded or scheduled.
     assert_eq!(super::sync_driver::run(&mut account).await?, 0);
-    assert!(account.take_live_engine().await.is_ok());
+    assert!(account.session_client().await.is_ok());
     drop(account);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -1142,3 +1148,8 @@ mod group_legacy;
 mod status_snapshot;
 
 mod group_actor;
+
+#[path = "runtime_tests/native_busy.rs"]
+mod native_busy;
+
+mod contact_verification;

@@ -3,25 +3,62 @@
 
 //! Object keys consume the same pair ratchet; deferred fetch never restores an older snapshot.
 use super::{
-    GatewayDirectMessage, GatewaySessionEngine, RamfluxClient, SdkDmEncryptedEnvelope, SdkError,
+    GatewayDirectMessage, GatewaySessionAccess, RamfluxClient, SdkDmEncryptedEnvelope, SdkError,
     SdkObjectKeySlot, dm_device_id_hash, invalid,
 };
 use crate::client::object::DeferredObjectKeySlot;
+#[derive(Clone, Copy)]
+pub(crate) struct PairObjectSlotRequest<'a> {
+    pub config: &'a crate::GatewaySessionConfig,
+    pub message: &'a GatewayDirectMessage,
+    pub object_id: &'a str,
+    pub key: &'a [u8; 32],
+    pub conversation: &'a str,
+}
+
 impl RamfluxClient {
     pub(crate) async fn make_pair_object_slot(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
         object_id: &str,
         key: &[u8; 32],
         conversation: &str,
     ) -> Result<SdkObjectKeySlot, SdkError> {
+        let pair = self.send_pair_session(engine, message).await?;
+        self.seal_pair_object_slot(
+            PairObjectSlotRequest {
+                config: engine.config(),
+                message,
+                object_id,
+                key,
+                conversation,
+            },
+            pair,
+        )
+    }
+
+    pub(crate) fn make_prepared_pair_object_slot(
+        &self,
+        request: PairObjectSlotRequest<'_>,
+        material: super::SendMaterial,
+    ) -> Result<SdkObjectKeySlot, SdkError> {
+        let pair = self.prepared_send_pair(request.config, request.message, material)?;
+        self.seal_pair_object_slot(request, pair)
+    }
+
+    fn seal_pair_object_slot(
+        &self,
+        request: PairObjectSlotRequest<'_>,
+        pair: super::send_candidate::SendPair,
+    ) -> Result<SdkObjectKeySlot, SdkError> {
+        let PairObjectSlotRequest { config, message, object_id, key, conversation } = request;
         let remote = message
             .recipient_device_id
             .as_deref()
             .ok_or_else(|| invalid("object recipient missing"))?;
-        let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
-        let local = &engine.config.device_id;
+        let (mut session, header, bundle) = pair;
+        let local = &config.device_id;
         let aad = slot_aad(object_id, local, remote, &bundle)?;
         let ciphertext = session.encrypt(key, &aad)?;
         if header

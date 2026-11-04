@@ -3,7 +3,9 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
-use crate::gateway::engine::gateway_connection_timeout;
+use super::connection_manager::{ConnectionHandle, SessionClient};
+#[cfg(test)]
+mod test_session;
 use crate::prelude::*;
 
 pub(crate) struct LocalBusDaemonState {
@@ -75,10 +77,19 @@ impl Drop for ObjectGetSpoolSession {
 }
 
 pub(crate) struct LocalBusAccountState {
+    pub(crate) timeouts: super::runtime_limits::RuntimeTimeouts,
     pub(crate) native_setup: Option<LocalBusConfig>,
     pub(crate) activation_pending: bool,
     pub(crate) client: RamfluxClient,
     pub(crate) engine: Option<GatewaySessionEngine>,
+    pub(crate) connection: Option<ConnectionHandle>,
+    pub(crate) connection_work: Option<mpsc::Sender<super::connection_manager::AccountWork>>,
+    pub(crate) transfer_slots: Option<super::transfer_slots::TransferSlots>,
+    #[cfg(test)]
+    pub(crate) test_connector:
+        Option<std::sync::Arc<dyn super::connection_manager::SessionConnector>>,
+    #[cfg(test)]
+    pub(crate) test_transfer_hook: Option<std::sync::Arc<super::transfer_slots::test_hooks::Hook>>,
     /// Per-account relay QUIC connection pool (T24-A2), shared via `Arc`. Lazily built on first
     /// relay transfer and then owned by the account for its whole lifetime; each relay request
     /// takes only an `Arc::clone` (never moving the instance out), so a cancelled or failing
@@ -140,10 +151,18 @@ impl LocalBusAccountState {
         let gateway_config = engine.config.clone();
         let target_delivery_id = engine.target_delivery_id().to_owned();
         Self {
+            timeouts: super::runtime_limits::RuntimeTimeouts::default(),
             native_setup: None,
             activation_pending: false,
             client,
             engine: Some(engine),
+            connection: None,
+            connection_work: None,
+            transfer_slots: None,
+            #[cfg(test)]
+            test_connector: None,
+            #[cfg(test)]
+            test_transfer_hook: None,
             relay_quic_pool: None,
             gateway_config,
             principal_commitment,
@@ -180,10 +199,18 @@ impl LocalBusAccountState {
     ) -> Self {
         let target_delivery_id = gateway_config.target_delivery_id.clone();
         Self {
+            timeouts: super::runtime_limits::RuntimeTimeouts::default(),
             native_setup: None,
             activation_pending: false,
             client,
             engine: None,
+            connection: None,
+            connection_work: None,
+            transfer_slots: None,
+            #[cfg(test)]
+            test_connector: None,
+            #[cfg(test)]
+            test_transfer_hook: None,
             relay_quic_pool: None,
             gateway_config,
             principal_commitment,
@@ -266,17 +293,68 @@ impl LocalBusAccountState {
         Ok(())
     }
 
-    async fn prepare_native_branch(&mut self) -> Result<(), SdkError> {
-        super::native_account::configure_pending(self).await?;
-        super::native_account::refresh_public_authority(self).await?;
+    pub(crate) async fn prepare_native_branch(&mut self) -> Result<(), SdkError> {
+        tokio::time::timeout(
+            self.timeouts.network_wait,
+            super::native_account::configure_pending(self),
+        )
+        .await
+        .map_err(|_| SdkError::NodeTimeout {
+            retry_after_ms: crate::node::NODE_RETRY_AFTER_MS,
+        })??;
+        tokio::time::timeout(
+            self.timeouts.network_wait,
+            super::native_account::refresh_public_authority(self),
+        )
+        .await
+        .map_err(|_| SdkError::NodeTimeout {
+            retry_after_ms: crate::node::NODE_RETRY_AFTER_MS,
+        })??;
         let custody = self.gateway_config.custody.as_ref().ok_or(SdkError::NetworkingPending)?;
         if self.client.device_branch.is_none() {
-            self.client
-                .initialize_born_v3_branch(
+            tokio::time::timeout(
+                self.timeouts.network_wait,
+                self.client.initialize_born_v3_branch(
                     &self.gateway_config.device_id,
                     std::sync::Arc::clone(&custody.vault),
-                )
-                .await?;
+                ),
+            )
+            .await
+            .map_err(|_| SdkError::NodeTimeout {
+                retry_after_ms: crate::node::NODE_RETRY_AFTER_MS,
+            })??;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn connection_config(&self) -> Result<GatewaySessionConfig, SdkError> {
+        let mut config = self.gateway_config.clone();
+        let target = self.target_delivery_id.clone();
+        config.last_seen_inbox_seq =
+            self.client.gateway_cursor(&target)?.max(self.client.gateway_receive_cursor(&target)?);
+        self.restore_gateway_resume_checkpoint(&mut config)?;
+        if config.device_branch.is_none() {
+            config.device_branch = self.client.device_branch.clone().map(std::sync::Arc::new);
+        }
+        Ok(config)
+    }
+
+    pub(crate) fn start_connection(&mut self) -> Result<(), SdkError> {
+        if self.connection.is_none() {
+            let config = self.connection_config()?;
+            let connector: std::sync::Arc<dyn super::connection_manager::SessionConnector> =
+                std::sync::Arc::new(super::connection_manager::GatewayConnector {
+                    timeouts: self.timeouts.clone(),
+                });
+            #[cfg(test)]
+            let connector = self.test_connector.clone().unwrap_or(connector);
+            self.connection = Some(ConnectionHandle::start_with(
+                config,
+                self.engine.take(),
+                self.timeouts.clone(),
+                connector,
+                self.connection_work.clone(),
+            ));
         }
         Ok(())
     }
@@ -285,127 +363,43 @@ impl LocalBusAccountState {
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SdkError>> + '_>> {
         Box::pin(async move {
-            let native = self.client.born_v3_account.is_some();
-            let result = self.ensure_gateway_live_inner(native).await;
-            if native {
-                let recorded =
-                    super::native_account::record_networking(self, result.as_ref().err());
-                if result.is_ok() {
-                    recorded?;
-                } else if recorded.is_err() {
-                    tracing::debug!("native networking state persistence failed");
-                }
+            self.start_connection()?;
+            let handle = self.connection.as_ref().ok_or(SdkError::GatewaySessionNotEstablished)?;
+            handle.require_live(self.timeouts.network_wait).await?;
+            if let Some(metadata) = handle.metadata() {
+                self.gateway_config = metadata.config;
+                self.target_delivery_id.clone_from(&self.gateway_config.target_delivery_id);
             }
-            result
+            Ok(())
         })
     }
 
-    async fn ensure_gateway_live_inner(&mut self, native: bool) -> Result<(), SdkError> {
-        let root = self.client.account_index()?.root().to_path_buf();
-        let id = self.client.account_db()?.local_account_id.clone();
-        if native {
-            self.prepare_native_branch().await?;
-        }
-        let path = local_bus_account_manifest_path(&root, &id);
-        let mut pending = if !native && super::daemon::account_manifest_available(&path) {
-            Some(read_local_bus_account_manifest(&path)?)
-        } else {
-            None
-        };
-        let refresh_due = !native && self.client.own_proof_refresh_due(now_unix_timestamp())?;
-        if let Some(manifest) =
-            pending.as_ref().filter(|manifest| manifest.activation_pending || refresh_due)
-        {
-            self.client
-                .initialize_and_publish_prekey_bundle_via_gateway_request(
-                    &self.gateway_config,
-                    &manifest.principal_commitment,
-                    &manifest.device_id,
-                    &manifest.target_delivery_id,
-                    manifest.device_seed,
-                )
-                .await
-                .map_err(|error| {
-                    if refresh_due && !manifest.activation_pending {
-                        SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
-                    } else {
-                        error
-                    }
-                })?;
-            self.client
-                .cache_verified_device_manifest(
-                    &self.gateway_config,
-                    &manifest.principal_commitment,
-                    "account.create",
-                )
-                .await
-                .map_err(|error| {
-                    if refresh_due && !manifest.activation_pending {
-                        SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
-                    } else {
-                        error
-                    }
-                })?;
-        }
-        let target_delivery_id = self.target_delivery_id.clone();
-        let last_seen_inbox_seq = self
-            .client
-            .gateway_cursor(&target_delivery_id)?
-            .max(self.client.gateway_receive_cursor(&target_delivery_id)?);
-        let mut restored_resume_checkpoint = false;
-        let connected = if let Some(engine) = self.engine.as_mut() {
-            let ensure = Box::pin(engine.ensure_live(last_seen_inbox_seq));
-            gateway_connection_timeout(native, "gateway ensure live", ensure).await
-        } else {
-            let mut config = self.gateway_config.clone();
-            config.last_seen_inbox_seq = last_seen_inbox_seq;
-            restored_resume_checkpoint = self.restore_gateway_resume_checkpoint(&mut config)?;
-            if config.device_branch.is_none()
-                && let Some(branch) = self.client.device_branch.as_ref()
-                && branch.principal_id == config.principal_id
-                && branch.device_id == config.device_id
-                && branch.device_epoch == config.device_epoch
-            {
-                config.device_branch = Some(std::sync::Arc::new(branch.clone()));
-            }
-            self.engine = Some(
-                gateway_connection_timeout(
-                    native,
-                    "gateway connect",
-                    Box::pin(GatewaySessionEngine::connect(config)),
-                )
-                .await?,
-            );
-            Ok(())
-        };
-        connected?;
-        self.finish_restored_resume_checkpoint(restored_resume_checkpoint)?;
-        if native {
-            super::native_account::finish_connection(self).await?;
-        }
-        self.persist_push_route_seq();
-        if self.gateway_config.push_route_clear_pending {
-            self.forget_confirmed_push_clear();
-        }
-        self.client.complete_backup_activation()?;
-        if let Some(manifest) = pending.as_mut().filter(|manifest| manifest.activation_pending) {
-            manifest.activation_pending = false;
-            write_local_bus_account_manifest(&root, manifest)?;
-            self.activation_pending = false;
-        }
-        Ok(())
+    pub(crate) async fn session_client(&mut self) -> Result<SessionClient, SdkError> {
+        self.ensure_gateway_live().await?;
+        self.live_session_client()
     }
 
-    fn finish_restored_resume_checkpoint(&self, restored: bool) -> Result<(), SdkError> {
+    /// Capture the current capability for a local writer step without waiting for a connection.
+    pub(crate) fn live_session_client(&self) -> Result<SessionClient, SdkError> {
+        let handle = self.connection.clone().ok_or(SdkError::GatewaySessionNotEstablished)?;
+        let snapshot = handle.snapshot();
+        if snapshot.state != super::connection_manager::NetworkingState::Live {
+            return Err(handle.pending());
+        }
+        let metadata = handle.metadata().ok_or(SdkError::GatewaySessionNotEstablished)?;
+        if metadata.generation != snapshot.generation {
+            return Err(handle.pending());
+        }
+        let deadline = super::command_admission::current_deadline()
+            .unwrap_or_else(|| tokio::time::Instant::now() + self.timeouts.call);
+        Ok(SessionClient::new(handle, metadata, deadline))
+    }
+
+    pub(crate) fn finish_restored_resume_checkpoint(&self, restored: bool) -> Result<(), SdkError> {
         if restored {
             self.client.set_projection_checkpoint(Self::GATEWAY_RESUME_CHECKPOINT, "")?;
         }
         Ok(())
-    }
-
-    pub(crate) async fn take_live_engine(&mut self) -> Result<GatewaySessionEngine, SdkError> {
-        self.ensure_gateway_live().await?;
-        self.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)
     }
 
     fn restore_gateway_resume_checkpoint(
@@ -427,29 +421,25 @@ impl LocalBusAccountState {
         Ok(true)
     }
 
-    pub(crate) fn put_engine(&mut self, engine: GatewaySessionEngine) {
-        let was_pending = self.gateway_config.push_route_clear_pending;
-        let saved_seq = self.gateway_config.push_route_last_seq;
-        self.gateway_config = engine.config.clone();
-        engine.target_delivery_id().clone_into(&mut self.target_delivery_id);
-        self.engine = Some(engine);
-        self.gateway_config.push_route_last_seq = saved_seq;
-        self.persist_push_route_seq();
-        if was_pending {
-            self.forget_confirmed_push_clear();
+    pub(crate) fn apply_session_metadata(&mut self, client: SessionClient) {
+        if self.connection.as_ref().is_some_and(|handle| handle.generation() == client.generation())
+        {
+            self.gateway_config = client.config;
+            self.target_delivery_id.clone_from(&self.gateway_config.target_delivery_id);
         }
     }
 
-    pub(crate) fn retire_engine(&mut self, engine: GatewaySessionEngine) -> Result<(), SdkError> {
-        self.gateway_config = engine.config.clone();
-        engine.target_delivery_id().clone_into(&mut self.target_delivery_id);
-        self.checkpoint_gateway_resume()?;
-        self.engine = None;
-        drop(engine);
-        Ok(())
-    }
-
-    pub(super) fn checkpoint_gateway_resume(&self) -> Result<(), SdkError> {
+    pub(crate) fn retire_session(&mut self, client: &SessionClient) -> Result<(), SdkError> {
+        let Some(metadata) = self.connection.as_ref().and_then(ConnectionHandle::metadata) else {
+            return Ok(());
+        };
+        self.gateway_config = metadata.config;
+        if let Some(connection) = &self.connection {
+            connection.request_retirement(
+                client.generation(),
+                super::connection_manager::DisconnectReason::CallTimeout,
+            );
+        }
         self.checkpoint_gateway_resume_from(&self.gateway_config)
     }
 
@@ -472,18 +462,35 @@ impl LocalBusAccountState {
     #[cfg(test)]
     pub(crate) fn has_pooled_engine(&self) -> bool {
         self.engine.is_some()
+            || self.connection.as_ref().is_some_and(|handle| {
+                handle.snapshot().state == super::connection_manager::NetworkingState::Live
+                    && !handle.retirement_requested()
+            })
     }
 
     /// Saves the engine's push route control sequence when it advanced, so the next
     /// sequence after a restart is `max(saved + 1, now_ms)`.
     pub(crate) fn persist_push_route_seq(&mut self) {
-        let Some(seq) = self.engine.as_ref().map(|engine| engine.config.push_route_last_seq) else {
+        let Some(seq) = self
+            .connection
+            .as_ref()
+            .and_then(ConnectionHandle::metadata)
+            .map(|metadata| metadata.config.push_route_last_seq)
+            .or_else(|| self.engine.as_ref().map(|engine| engine.config.push_route_last_seq))
+        else {
             return;
         };
-        if seq <= self.gateway_config.push_route_last_seq {
+        let checkpoint = crate::bus::dispatch::device::PUSH_ROUTE_SEQ_CHECKPOINT;
+        let saved = self
+            .client
+            .projection_checkpoint(checkpoint)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if seq <= saved {
             return;
         }
-        let checkpoint = crate::bus::dispatch::device::PUSH_ROUTE_SEQ_CHECKPOINT;
         match self.client.set_projection_checkpoint(checkpoint, &seq.to_string()) {
             Ok(()) => self.gateway_config.push_route_last_seq = seq,
             Err(error) => tracing::warn!(%error, "push route sequence not persisted"),
@@ -493,9 +500,10 @@ impl LocalBusAccountState {
     /// Once the engine has confirmed a background deregistration, drop the persisted
     /// pending marker so later starts do not deregister again.
     pub(crate) fn forget_confirmed_push_clear(&mut self) {
-        let confirmed = self.engine.as_ref().is_some_and(|engine| {
-            engine.config.push_route.is_none() && !engine.config.push_route_clear_pending
-        });
+        let confirmed =
+            self.connection.as_ref().and_then(ConnectionHandle::metadata).is_some_and(|metadata| {
+                metadata.config.push_route.is_none() && !metadata.config.push_route_clear_pending
+            });
         if !confirmed {
             return;
         }

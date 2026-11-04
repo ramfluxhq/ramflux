@@ -108,7 +108,7 @@ async fn a_full_copy_queue_does_not_fail_the_real_dm_or_group_send() -> TestResu
         Some(b"primary body".to_vec())
     );
     f.assert_failed_copy("primary")?;
-    f.source.put_engine(engine);
+    f.source.install_test_session(engine);
     f.source.client.create_group("group", "device-sender")?;
     let request = LocalBusFrame::request(
         "group",
@@ -270,8 +270,10 @@ async fn held_copies_are_never_couriered_before_confirmation_and_failed_submissi
     let mut f = Fixture::new("own-copy-held").await?;
     let gateway = super::fixture::RecordingGateway::new(Arc::default());
     let own = Arc::clone(&gateway.own);
-    f.source
-        .put_engine(GatewaySessionEngine::with_test_transport(f.config.clone(), Box::new(gateway)));
+    f.source.install_test_session(GatewaySessionEngine::with_test_transport(
+        f.config.clone(),
+        Box::new(gateway),
+    ));
     for (id, confirmed) in [("discard", false), ("release", true)] {
         f.source.client.send_direct_message("thread", id, "device-sender", b"cipher")?;
         f.source.client.stage_own_sent_message(crate::client::own_sent_message::OwnSentInput {
@@ -316,7 +318,7 @@ async fn a_rejected_primary_dm_discards_its_staged_copy() -> TestResult {
         .await;
     assert!(result.is_err());
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
-    f.source.put_engine(engine);
+    f.source.install_test_session(engine);
     assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
     assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 0);
     f.cleanup()
@@ -343,8 +345,10 @@ async fn a_rejected_primary_group_discards_its_staged_copy() -> TestResult {
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
     gateway.fail_after = Some(0);
     let own = Arc::clone(&gateway.own);
-    f.source
-        .put_engine(GatewaySessionEngine::with_test_transport(f.config.clone(), Box::new(gateway)));
+    f.source.install_test_session(GatewaySessionEngine::with_test_transport(
+        f.config.clone(),
+        Box::new(gateway),
+    ));
     let request = LocalBusFrame::request(
         "reject-group",
         Some("sender".into()),
@@ -391,7 +395,7 @@ async fn offline_authored_dates_do_not_expire_freshly_staged_live_copies() -> Te
         .client
         .send_plaintext_direct_message_via_gateway(&mut engine, message, b"composed offline")
         .await?;
-    f.source.put_engine(engine);
+    f.source.install_test_session(engine);
     crate::bus::own_device_copy::flush(&mut f.source).await?;
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     f.sibling
@@ -424,7 +428,7 @@ async fn multiple_plain_copies_reuse_local_membership_without_gateway_manifest_r
             .send_plaintext_direct_message_via_gateway(&mut engine, f.message(id)?, b"cached copy")
             .await?;
     }
-    f.source.put_engine(engine);
+    f.source.install_test_session(engine);
     f.directory.abort();
     let _ = (&mut f.directory).await;
     for _ in 0..2 {
@@ -491,7 +495,7 @@ async fn a_single_active_device_sends_without_any_copy_state_writes_or_manifest_
             )
             .await?;
     }
-    f.source.put_engine(engine);
+    f.source.install_test_session(engine);
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/")?, before);
     assert!(f.source.client.account_db()?.client_record("message", "single-one")?.is_none());
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
@@ -515,7 +519,7 @@ async fn a_device_set_change_invalidates_membership_before_preparing_queued_copi
             b"queued",
         )
         .await?;
-    f.source.put_engine(engine);
+    f.source.install_test_session(engine);
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
     revoke_sibling(&f)?;
     f.directory.abort();
@@ -541,7 +545,7 @@ async fn a_missing_local_manifest_backs_off_refresh_across_copy_retries() -> Tes
             b"already submitted",
         )
         .await?;
-    f.source.put_engine(engine);
+    f.source.install_test_session(engine);
     f.source
         .client
         .account_db()?
@@ -600,8 +604,10 @@ async fn legacy_plain_copy_intents_without_submission_confirmation_are_not_assum
     db.persist_actor_state(&key, &work)?;
     let gateway = super::fixture::RecordingGateway::new(Arc::default());
     let own = Arc::clone(&gateway.own);
-    f.source
-        .put_engine(GatewaySessionEngine::with_test_transport(f.config.clone(), Box::new(gateway)));
+    f.source.install_test_session(GatewaySessionEngine::with_test_transport(
+        f.config.clone(),
+        Box::new(gateway),
+    ));
     assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
     assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 0);
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
@@ -615,7 +621,7 @@ async fn deleting_a_sent_message_erases_held_and_prepared_copy_work() -> TestRes
         let mut f = Fixture::new("own-copy-delete-work").await?;
         let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
         gateway.fail_own_ack = true;
-        f.source.put_engine(GatewaySessionEngine::with_test_transport(
+        f.source.install_test_session(GatewaySessionEngine::with_test_transport(
             f.config.clone(),
             Box::new(gateway),
         ));

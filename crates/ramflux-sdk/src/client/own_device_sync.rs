@@ -5,11 +5,13 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+pub(crate) mod receive_job;
+
 impl RamfluxClient {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(crate) async fn export_own_device_sync(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         principal_commitment: &str,
         target_device_id: &str,
@@ -18,7 +20,7 @@ impl RamfluxClient {
         chunk_size: usize,
     ) -> Result<SdkOwnDeviceSyncExportResponse, SdkError> {
         self.cache_verified_device_manifest(
-            &engine.config,
+            engine.config(),
             principal_commitment,
             "own_device_sync",
         )
@@ -27,7 +29,7 @@ impl RamfluxClient {
         let source_device_id = source_branch.device_id.clone();
         let manifest = self
             .cache_verified_device_manifest(
-                &engine.config,
+                engine.config(),
                 principal_commitment,
                 "own_device_sync_export",
             )
@@ -85,7 +87,7 @@ impl RamfluxClient {
     }
     async fn export_own_history_page(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         bundle: SdkOwnDeviceHistoryBundle,
         options: super::own_device_history_pages::UploadOptions<'_>,
@@ -99,7 +101,7 @@ impl RamfluxClient {
         let snapshot_id = bundle.snapshot_id.clone();
         let manifest = self
             .cache_verified_device_manifest(
-                &engine.config,
+                engine.config(),
                 principal_commitment,
                 "own_history_page",
             )
@@ -129,7 +131,7 @@ impl RamfluxClient {
             conversation_id: slot_conversation_id.clone(),
             message_id: format!("own-device.sync.slot:{snapshot_id}"),
             envelope_id: format!("own-device.sync.slot:{snapshot_id}"),
-            source_principal_id: engine.config.principal_id.clone(),
+            source_principal_id: engine.config().principal_id.clone(),
             sender_id: source_device_id.clone(),
             recipient_device_id: Some(target_device_id.to_owned()),
             recipient_principal_commitment: Some(principal_commitment.into()),
@@ -216,7 +218,7 @@ impl RamfluxClient {
     }
     pub(crate) async fn import_own_device_sync(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         expected_principal_commitment: &str,
         envelope: &SdkOwnDeviceSyncEnvelope,
@@ -259,7 +261,7 @@ impl RamfluxClient {
     }
     async fn import_own_history_page(
         &mut self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         expected_principal_commitment: &str,
         envelope: &SdkOwnDeviceSyncEnvelope,
@@ -267,7 +269,7 @@ impl RamfluxClient {
     ) -> Result<(SdkOwnDeviceSyncImportResponse, Option<Box<SdkOwnDeviceSyncEnvelope>>), SdkError>
     {
         self.verify_own_device_sync_envelope(
-            &engine.config,
+            engine.config(),
             expected_principal_commitment,
             envelope,
         )
@@ -304,13 +306,23 @@ impl RamfluxClient {
             decoded?
         };
         let plaintext = zeroize::Zeroizing::new(plaintext);
-        let bundle: SdkOwnDeviceHistoryBundle = serde_json::from_slice(&plaintext)?;
+        self.apply_own_history_plaintext(envelope, &plaintext)
+    }
+
+    pub(crate) fn apply_own_history_plaintext(
+        &self,
+        envelope: &SdkOwnDeviceSyncEnvelope,
+        plaintext: &[u8],
+    ) -> Result<(SdkOwnDeviceSyncImportResponse, Option<Box<SdkOwnDeviceSyncEnvelope>>), SdkError>
+    {
+        let receipt = Self::own_sync_receipt_key(envelope)?;
+        let bundle: SdkOwnDeviceHistoryBundle = serde_json::from_slice(plaintext)?;
         self.account_db()?.write_transaction(|| {
             let result = self.import_own_device_history_bundle(envelope, &bundle)?;
             let retired = self.bind_history_transport_owners(
                 &envelope.history_ref.object_id,
                 &envelope.history_ref.manifest_hash,
-                &plaintext,
+                plaintext,
                 &bundle.messages,
                 true,
             )?;
@@ -585,6 +597,22 @@ impl RamfluxClient {
         expected_principal_commitment: &str,
         envelope: &SdkOwnDeviceSyncEnvelope,
     ) -> Result<(), SdkError> {
+        self.validate_own_sync_header(expected_principal_commitment, envelope)?;
+        let manifest = self
+            .cache_verified_device_manifest(
+                gateway,
+                &envelope.principal_commitment,
+                "own_device_sync_import",
+            )
+            .await?;
+        self.verify_own_sync_devices(envelope, &manifest)
+    }
+
+    pub(crate) fn validate_own_sync_header(
+        &self,
+        expected_principal_commitment: &str,
+        envelope: &SdkOwnDeviceSyncEnvelope,
+    ) -> Result<(), SdkError> {
         if envelope.schema != "ramflux.sdk.own_device_sync.v1" {
             return Err(SdkError::LocalBus(format!(
                 "unsupported own-device sync schema: {}",
@@ -618,13 +646,14 @@ impl RamfluxClient {
                 "own-device sync key slot conversation mismatch".to_owned(),
             ));
         }
-        let manifest = self
-            .cache_verified_device_manifest(
-                gateway,
-                &envelope.principal_commitment,
-                "own_device_sync_import",
-            )
-            .await?;
+        Ok(())
+    }
+
+    pub(crate) fn verify_own_sync_devices(
+        &self,
+        envelope: &SdkOwnDeviceSyncEnvelope,
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<(), SdkError> {
         let source = manifest
             .devices
             .iter()

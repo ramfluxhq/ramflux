@@ -86,7 +86,7 @@ pub(super) async fn add(
         None => crate::client::contact_roots::contact_link_id(&own.principal_id, &selector)?,
     };
     let account = local_bus_account_mut(state, account_id)?;
-    let mut engine = account.take_live_engine().await.map_err(lookup_failure)?;
+    let mut engine = account.session_client().await.map_err(lookup_failure)?;
     let result = account
         .client
         .resolve_contact(
@@ -107,11 +107,16 @@ pub(super) async fn add(
             &mut engine,
         )
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     let contact = result?;
+    #[cfg(test)]
     if let Err(error) = Box::pin(crate::client::contact_requests::flush(account)).await {
         tracing::debug!(%error,"contact request queued for retry");
     }
+    if let Some(handle) = &account.connection {
+        handle.wake_couriers();
+    }
+    #[cfg(test)]
     if let Err(error) = super::super::own_device_copy::flush(account).await {
         tracing::warn!(%error, "accepted contact copy deferred to account sync");
     }

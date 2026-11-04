@@ -36,7 +36,7 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
     let distribution = source.export_group_sender_key_distribution("group", &a.device)?;
     let raw = source.encrypt_group_message("group", &a.device, b"held group body")?;
     let mut account = a.account(None, mail)?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let mut message = a.message(&b, "held");
     message.envelope_id = "held:device-bob".into();
     let sealed = source
@@ -57,7 +57,7 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
     drop(engine);
     drop(account);
     let pool = receiver.relay_quic_pool()?;
-    let mut engine = receiver.take_live_engine().await?;
+    let mut engine = receiver.session_client().await?;
     receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
     let sender = a.identity()?;
     let logical = ramflux_protocol::group_message_id(

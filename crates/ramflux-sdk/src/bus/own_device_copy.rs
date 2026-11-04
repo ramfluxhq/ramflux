@@ -2,17 +2,20 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded durable per-message `OwnDeviceFanout` retries, independent of peer delivery status.
-use crate::client::own_device_copy::{OwnDeviceMessage, OwnMessageInput};
+#[cfg(test)]
+use crate::client::own_device_copy::OwnDeviceMessage;
+use crate::client::own_device_copy::OwnMessageInput;
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(test)]
 use zeroize::Zeroize;
 mod targets;
 use targets::Target;
 const PREFIX: &str = "own-device/send/";
 const MAX_PENDING: u32 = 256;
 const MAX_PENDING_BYTES: u64 = 8 * 1024 * 1024;
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Intent {
     copy_id: String,
     #[serde(default)]
@@ -24,7 +27,7 @@ struct Intent {
     created_at: i64,
     owner_record: Option<(String, String)>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Work {
     intent: Intent,
     packet: Option<serde_json::Value>,
@@ -241,6 +244,7 @@ fn finish_attempt(
     Ok(completed)
 }
 
+#[cfg(test)]
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     let now = now_unix_timestamp();
     let started = std::time::Instant::now();
@@ -330,6 +334,7 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
     }
     Ok(sent)
 }
+#[cfg(test)]
 async fn prepare(
     account: &mut LocalBusAccountState,
     intent: &Intent,
@@ -339,7 +344,7 @@ async fn prepare(
         ramflux_protocol::decode_base64url(&intent.body)
             .map_err(|_| SdkError::LocalBus("own-device intent encoding".into()))?,
     );
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let prepared = account
         .client
         .prepare_own_device_message_with_source(
@@ -354,14 +359,15 @@ async fn prepare(
             local_manifest,
         )
         .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     prepared
 }
+#[cfg(test)]
 async fn send(
     account: &mut LocalBusAccountState,
     packet: &OwnDeviceMessage,
 ) -> Result<Vec<String>, SdkError> {
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = async {
         // Fresh outer ids allow lost-ACK retries through the router's replay guard.
         // The immutable logical packet and sibling receipts prevent duplicate projection.
@@ -386,8 +392,8 @@ async fn send(
         )?;
         let response = engine
             .own_device_fanout(
-                &engine.config.principal_id.clone(),
-                &engine.config.device_id.clone(),
+                engine.config.principal_id.clone(),
+                engine.config.device_id.clone(),
                 envelope,
             )
             .await?;
@@ -407,7 +413,7 @@ async fn send(
             .collect())
     }
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Result<(), SdkError> {
@@ -478,3 +484,9 @@ pub(crate) fn finish_held(
         Ok(())
     })
 }
+
+mod background;
+pub(crate) use background::{OwnCopyWork, apply as apply_background, run as run_background};
+
+#[cfg(test)]
+pub(crate) use background::drive_once;

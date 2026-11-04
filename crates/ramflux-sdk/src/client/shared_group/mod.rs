@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 
 mod bootstrap;
 mod controls;
+mod receive_directory;
+pub(crate) use receive_directory::GroupDirectoryEvidence;
 mod creator_conflicts;
 mod devices;
 mod federation;
@@ -235,14 +237,19 @@ impl RamfluxClient {
         issuer: &GroupStateActor,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
+        let root = self.group_actor_manifest_request(issuer, entry)?;
+        let manifest =
+            crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
+        self.accept_group_actor_manifest(issuer, entry, &manifest)
+    }
+
+    pub(crate) fn group_actor_manifest_request(
+        &self,
+        issuer: &GroupStateActor,
+        entry: &GatewayInboxEntry,
+    ) -> Result<String, SdkError> {
+        self.confirm_group_actor_transport(issuer, entry)?;
         let source = self.authenticated_device_identity(entry)?;
-        if issuer.identity.root_commitment != source.root_commitment()
-            || issuer.identity.device_id != source.device_id()
-            || issuer.identity.principal_id != entry.envelope.source_principal_id
-            || issuer.identity.device_id != entry.envelope.source_device_id
-        {
-            return Err(invalid("group state issuer differs from authenticated transport"));
-        }
         if !self.account_db()?.charge_contact_request(
             &format!("group-control:{}", source.root_commitment()),
             32,
@@ -251,13 +258,35 @@ impl RamfluxClient {
         )? {
             return Err(SdkError::InboundPending("group control source rate exceeded".into()));
         }
-        let manifest = crate::client::contact::fetch_verified_device_manifest(
-            gateway,
-            &issuer.identity.root_commitment,
-        )
-        .await?;
+        Ok(issuer.identity.root_commitment.clone())
+    }
+
+    fn confirm_group_actor_transport(
+        &self,
+        issuer: &GroupStateActor,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        let source = self.authenticated_device_identity(entry)?;
+        if issuer.identity.root_commitment != source.root_commitment()
+            || issuer.identity.device_id != source.device_id()
+            || issuer.identity.principal_id != entry.envelope.source_principal_id
+            || issuer.identity.device_id != entry.envelope.source_device_id
+        {
+            return Err(invalid("group state issuer differs from authenticated transport"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn accept_group_actor_manifest(
+        &self,
+        issuer: &GroupStateActor,
+        entry: &GatewayInboxEntry,
+        manifest: &crate::SdkDeviceManifestResponse,
+    ) -> Result<(), SdkError> {
+        self.confirm_group_actor_transport(issuer, entry)?;
+        super::contact::verify_device_manifest(manifest, &issuer.identity.root_commitment)?;
         if manifest.principal_id != issuer.identity.principal_id
-            || !group_actor_matches_manifest(&manifest, issuer)
+            || !group_actor_matches_manifest(manifest, issuer)
             || !manifest.devices.iter().any(|device| {
                 device.device_id == issuer.identity.device_id
                     && device.branch_public_key == issuer.identity.signing_public_key
@@ -266,7 +295,7 @@ impl RamfluxClient {
         {
             return Err(invalid("group state issuer is absent from its verified manifest"));
         }
-        self.persist_identity_directory(&manifest)?;
+        self.persist_identity_directory(manifest)?;
         Ok(())
     }
     /// A public display view retains literal names; authority and pins use verified root-qualified ids.
@@ -329,3 +358,5 @@ fn group_actor_matches_manifest(
 mod native_tests;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use requests::RequestRecord;

@@ -140,7 +140,7 @@ async fn shared_group_member_add_keeps_federation_hints_and_forwards_state_to_cu
         .ok_or(StorageError::GroupPermissionDenied)?;
     let federation = Federation::new(remote)?;
     let local = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
         Box::new(super::fixture::RecordingGateway::new(local.clone())),
     ));

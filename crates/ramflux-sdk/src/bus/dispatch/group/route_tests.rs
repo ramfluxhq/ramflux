@@ -48,7 +48,7 @@ async fn sender_key_snapshot_uses_signed_group_conversation_instead_of_legacy_co
         .find(|route| route.member_id == "device-peer")
         .ok_or("peer route")?;
     let captured = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
         config.clone(),
         Box::new(crate::bus::dispatch::surface_transport::fixture::RecordingGateway::new(
             captured.clone(),

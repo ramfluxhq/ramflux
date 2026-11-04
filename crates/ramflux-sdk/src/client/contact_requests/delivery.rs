@@ -92,7 +92,7 @@ fn material_hash(
 impl RamfluxClient {
     pub(crate) async fn ensure_contact_request_before_direct(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
     ) -> Result<(), SdkError> {
         let reference = Self::qualified_recipient(message)?;
@@ -119,7 +119,7 @@ impl RamfluxClient {
         // Resolve current key material before loading the ordinary send ratchet. Sending the
         // request below advances that pair, so no caller may retain a stale pre-request session.
         self.cache_verified_device_manifest(
-            &engine.config,
+            engine.config(),
             &root,
             "contact-request-before-message",
         )
@@ -370,6 +370,7 @@ impl RamfluxClient {
         }
     }
 }
+#[cfg(test)]
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     account.client.maintain_contact_requests()?;
     let db = account.client.account_db()?;
@@ -429,9 +430,9 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
         intent.attempts += 1;
         intent.next_at = now.saturating_add((1_i64 << intent.attempts).min(60));
         account.client.account_db()?.persist_actor_state(&id, &intent)?;
-        let mut engine = account.take_live_engine().await?;
+        let mut engine = account.session_client().await?;
         let outcome = deliver(&account.client, &mut engine, &mut intent).await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         match outcome {
             Ok((count, complete)) => {
                 sent += count;
@@ -446,22 +447,22 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
 }
 pub(in crate::client) async fn deliver(
     client: &RamfluxClient,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     intent: &mut Intent,
 ) -> Result<(usize, bool), SdkError> {
     let own = client.owned_device_identity()?;
     let own_manifest = crate::client::contact::fetch_verified_device_manifest(
-        &engine.config,
+        engine.config(),
         own.root_commitment(),
     )
     .await?;
     let peer =
-        crate::client::contact::fetch_verified_device_manifest(&engine.config, &intent.peer_root)
+        crate::client::contact::fetch_verified_device_manifest(engine.config(), &intent.peer_root)
             .await?;
     client.persist_fetched_identity_directory(&own_manifest)?;
     client.persist_fetched_identity_directory(&peer)?;
     let bytes = if own_manifest.custody.is_some() {
-        super::native_delivery::approve(client, &engine.config, intent, &own_manifest).await?
+        super::native_delivery::approve(client, engine.config(), intent, &own_manifest).await?
     } else {
         let control = super::wire::sign(
             client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
@@ -526,7 +527,7 @@ pub(in crate::client) async fn deliver(
 }
 async fn send_one(
     client: &RamfluxClient,
-    engine: &mut GatewaySessionEngine,
+    engine: &mut impl GatewaySessionAccess,
     intent: &Intent,
     device: &crate::prekey::SdkDeviceManifestEntry,
     body: &[u8],
@@ -537,8 +538,8 @@ async fn send_one(
         conversation_id: conversation(&intent.requester_root, &intent.target_root)?,
         message_id: id.clone(),
         envelope_id: id,
-        source_principal_id: engine.config.principal_id.clone(),
-        sender_id: engine.config.device_id.clone(),
+        source_principal_id: engine.config().principal_id.clone(),
+        sender_id: engine.config().device_id.clone(),
         recipient_device_id: Some(device.device_id.clone()),
         recipient_principal_commitment: Some(intent.peer_root.clone()),
         target_delivery_id: device.target_delivery_id.clone(),
@@ -556,7 +557,7 @@ async fn send_one(
     message.encrypted_body = serde_json::to_vec(&packet)?;
     engine
         .submit_envelope(crate::dm::gateway_direct_message_envelope(
-            &engine.config,
+            engine.config(),
             &message,
             None,
         )?)
@@ -581,3 +582,5 @@ fn request_storage_error(error: StorageError) -> SdkError {
         other => other.into(),
     }
 }
+
+pub(super) mod background;

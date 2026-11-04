@@ -8,12 +8,55 @@ use super::{
 };
 use serde_json::Value;
 
+pub(crate) type InboundManifest =
+    Result<Option<crate::prekey::SdkDeviceManifestResponse>, SdkError>;
+
+pub(crate) struct PreparedInbound {
+    pub manifest: Option<crate::prekey::SdkDeviceManifestResponse>,
+    pub native_prepared: bool,
+    pub history: Option<crate::client::own_device_sync::receive_job::HistoryCompletion>,
+    pub group_directory: Option<super::ReceiveGroupDirectory>,
+    pub candidate: Option<crate::prekey::SdkDeviceManifestResponse>,
+    pub own_copy_manifest: Option<crate::prekey::SdkDeviceManifestResponse>,
+}
+
+#[derive(Clone, Copy)]
+enum Observation {
+    Preview,
+    Commit,
+}
+
 impl RamfluxClient {
+    pub(super) async fn ensure_prepared_inbound_device(
+        &self,
+        gateway: &GatewaySessionConfig,
+        entry: &GatewayInboxEntry,
+        prepared: Option<InboundManifest>,
+    ) -> Result<(), SdkError> {
+        match prepared {
+            Some(result) => self.apply_inbound_device_manifest(entry, result?.as_ref()),
+            None => self.ensure_inbound_device(gateway, entry).await,
+        }
+    }
+
     pub(crate) async fn ensure_inbound_device(
         &self,
         gateway: &GatewaySessionConfig,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
+        let request = self.inbound_device_manifest_request(entry)?;
+        let manifest = if let Some(root) = request {
+            Some(crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?)
+        } else {
+            None
+        };
+        self.apply_inbound_device_manifest(entry, manifest.as_ref())
+    }
+
+    pub(crate) fn inbound_device_manifest_request(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Option<String>, SdkError> {
         let remote = &entry.envelope.source_device_id;
         let reference = self.inbound_device_reference(entry)?;
         let (commitment, _) = ramflux_protocol::parse_qualified_device_id(&reference)?
@@ -29,18 +72,51 @@ impl RamfluxClient {
         if self
             .device_identity(&reference)
             .and_then(|identity| self.require_cached_root_authority(&identity))
-            .is_err()
+            .is_ok()
         {
-            if !self.inbound_relationship_names_root(
-                &entry.envelope.source_principal_id,
-                &commitment,
-                remote,
-            )? {
-                return Err(invalid("unsolicited sender root has no accepted relationship"));
-            }
-            let manifest =
-                crate::client::contact::fetch_verified_device_manifest(gateway, &commitment)
-                    .await?;
+            return Ok(None);
+        }
+        if !self.inbound_relationship_names_root(
+            &entry.envelope.source_principal_id,
+            &commitment,
+            remote,
+        )? {
+            return Err(invalid("unsolicited sender root has no accepted relationship"));
+        }
+        Ok(Some(commitment))
+    }
+
+    pub(crate) fn apply_inbound_device_manifest(
+        &self,
+        entry: &GatewayInboxEntry,
+        manifest: Option<&crate::prekey::SdkDeviceManifestResponse>,
+    ) -> Result<(), SdkError> {
+        self.validate_inbound_device_manifest(entry, manifest, Observation::Commit)
+    }
+
+    /// Prepare verified authority and lazy group pins without recording a second receive observation.
+    /// Final application repeats the checks and records its own current timestamp.
+    pub(crate) fn prepare_inbound_device_manifest(
+        &self,
+        entry: &GatewayInboxEntry,
+        manifest: Option<&crate::prekey::SdkDeviceManifestResponse>,
+    ) -> Result<(), SdkError> {
+        self.validate_inbound_device_manifest(entry, manifest, Observation::Preview)
+    }
+
+    fn validate_inbound_device_manifest(
+        &self,
+        entry: &GatewayInboxEntry,
+        manifest: Option<&crate::prekey::SdkDeviceManifestResponse>,
+        observation: Observation,
+    ) -> Result<(), SdkError> {
+        let remote = &entry.envelope.source_device_id;
+        if let Some(commitment) = self.inbound_device_manifest_request(entry)? {
+            let manifest = manifest
+                .filter(|manifest| manifest.principal_commitment == commitment)
+                .ok_or_else(|| {
+                    SdkError::InboundPending("sender manifest must be prepared".into())
+                })?;
             let device = manifest
                 .devices
                 .iter()
@@ -54,17 +130,21 @@ impl RamfluxClient {
             {
                 return Err(invalid("X3DH initiator differs from verified device identity"));
             }
-            // Both the signature chain and the accepted root relationship precede persistence.
-            self.persist_fetched_identity_directory(&manifest)?;
+            // Relationship, signature and X3DH identity are rechecked at the writer checkpoint.
+            self.persist_fetched_identity_directory(manifest)?;
         }
+        let reference = self.inbound_device_reference(entry)?;
+        let (commitment, _) = ramflux_protocol::parse_qualified_device_id(&reference)?
+            .ok_or_else(|| invalid("sender root address required"))?;
         self.authenticated_envelope_sender(entry)?;
-        // A verified cached manifest must populate the same storage identity directory as a fetch.
-        self.account_db()?.upsert_device_directory_entry(
-            remote,
-            &commitment,
-            "inbound_signature",
-            now_unix_timestamp(),
-        )?;
+        if matches!(observation, Observation::Commit) {
+            self.account_db()?.upsert_device_directory_entry(
+                remote,
+                &commitment,
+                "inbound_signature",
+                now_unix_timestamp(),
+            )?;
+        }
         self.finish_lazy_own_group_pins(&entry.envelope.source_principal_id, &commitment, remote)?;
         Ok(())
     }

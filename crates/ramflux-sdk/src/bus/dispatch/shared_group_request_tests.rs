@@ -59,11 +59,11 @@ async fn check_request_round_trip(step_clock: bool, poisoned_deadline: Option<&s
         poison_deadlines(&[&owner.client, &admin.client], prefix)?;
     }
     let outgoing = Arc::new(Mutex::new(Vec::new()));
-    admin.put_engine(GatewaySessionEngine::with_test_transport(
+    admin.install_test_session(GatewaySessionEngine::with_test_transport(
         admin_config.clone(),
         Box::new(super::fixture::RecordingGateway::new(outgoing.clone())),
     ));
-    assert_eq!(crate::bus::shared_group_sync::flush_requests(&mut admin).await?, 1);
+    send_admin_request(&mut admin, step_clock).await?;
     let request = outgoing.lock().map_err(|_| "capture lock")?[0].clone();
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
@@ -75,7 +75,7 @@ async fn check_request_round_trip(step_clock: bool, poisoned_deadline: Option<&s
         "admission alone is not a group mutation"
     );
     let replies = Arc::new(Mutex::new(Vec::new()));
-    owner.put_engine(GatewaySessionEngine::with_test_transport(
+    owner.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
         Box::new(super::fixture::RecordingGateway::new(replies.clone())),
     ));
@@ -150,7 +150,12 @@ async fn flush_owner_requests(
     step_clock: bool,
 ) -> Result<usize, SdkError> {
     if !step_clock {
-        return crate::bus::shared_group_sync::flush_requests(owner).await;
+        return crate::bus::couriers::test_pass::drive(
+            owner,
+            crate::bus::shared_group_sync::request_pass,
+        )
+        .await
+        .map(usize::from);
     }
     let at = now_unix_timestamp();
     let mut phase = 0;
@@ -282,5 +287,21 @@ fn assert_result_did_not_replace_snapshot(client: &RamfluxClient) -> TestResult 
         2,
         "result cannot substitute for a creator snapshot"
     );
+    Ok(())
+}
+
+async fn send_admin_request(admin: &mut LocalBusAccountState, step_clock: bool) -> TestResult {
+    if step_clock {
+        assert_eq!(crate::bus::shared_group_sync::flush_requests(admin).await?, 1);
+    } else {
+        assert!(
+            crate::bus::couriers::test_pass::drive(
+                admin,
+                crate::bus::shared_group_sync::request_pass
+            )
+            .await?
+        );
+    }
+
     Ok(())
 }

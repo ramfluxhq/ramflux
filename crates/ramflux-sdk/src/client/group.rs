@@ -447,6 +447,16 @@ impl RamfluxClient {
         gateway: &GatewaySessionConfig,
         event: &ramflux_protocol::GroupEvent,
     ) -> Result<(), SdkError> {
+        if let Some((root, raw)) = self.group_join_identity_request(event)? {
+            self.resolve_target_principal_commitment(gateway, Some(&root), &raw).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn group_join_identity_request(
+        &self,
+        event: &ramflux_protocol::GroupEvent,
+    ) -> Result<Option<(String, String)>, SdkError> {
         if let ramflux_protocol::GroupEventBody::MemberJoined {
             group_id, joined_identity, ..
         } = &event.body
@@ -468,10 +478,10 @@ impl RamfluxClient {
             if self.account_db()?.client_record("device", &reference)?.is_none()
                 && self.device_branch.as_ref().is_none_or(|own| own.device_id != *joined_identity)
             {
-                self.resolve_target_principal_commitment(gateway, Some(&root), &raw).await?;
+                return Ok(Some((root, raw)));
             }
         }
-        Ok(())
+        Ok(None)
     }
     #[allow(clippy::too_many_arguments)]
     fn apply_verified_group_role_change(

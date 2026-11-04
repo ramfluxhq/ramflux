@@ -28,12 +28,12 @@ pub(crate) async fn dispatch_message_bus_request(
                     "ACK receiver differs from owned account".into(),
                 ));
             }
-            let mut engine = account.take_live_engine().await?;
+            let mut engine = account.session_client().await?;
             let result = account
                 .client
                 .ack_gateway_delivery(&mut engine, &body.envelope_id, &receiver, body.received_at)
                 .await;
-            account.put_engine(engine);
+            account.apply_session_metadata(engine);
             let cursor = result?;
             account.mark_acked(&body.envelope_id)?;
             Ok(local_bus_ok(serde_json::to_value(cursor)?))
@@ -132,7 +132,7 @@ pub(super) async fn submit_message(
                     "DM attachments over federation are not supported in this release".to_owned(),
                 ));
             }
-            let mut engine = account.take_live_engine().await?;
+            let mut engine = account.session_client().await?;
             let recipient = resolve_local_message_recipient_principal_commitment(
                 account,
                 &engine.config,
@@ -155,30 +155,12 @@ pub(super) async fn submit_message(
                     &body.attachments,
                 )
                 .await;
-            account.put_engine(engine);
+            account.apply_session_metadata(engine);
             result?
         } else if let Some(federation) = body.federation.clone() {
-            let recipient_principal_commitment = body.recipient_principal_commitment.clone();
-            let message = body.into_gateway_message_with_body(Vec::new());
-            let engine = account.take_live_engine().await?;
-            let recipient = resolve_federated_message_recipient_principal_commitment(
-                &account.client,
-                &federation,
-                recipient_principal_commitment.as_deref(),
-                message.recipient_device_id.as_deref(),
-            )?;
-            require_message_submit_friend_link_accepted(account, &recipient)?;
-            let response = account.client.send_plaintext_federated_direct_message(
-                &engine,
-                message,
-                &plaintext,
-                &federation,
-            );
-            account.put_engine(engine);
-            let response = response?;
-            return Ok(local_bus_ok(serde_json::to_value(response)?));
+            return submit_federated(account, body, &plaintext, &federation).await;
         } else {
-            let mut engine = account.take_live_engine().await?;
+            let mut engine = account.session_client().await?;
             let recipient = resolve_local_message_recipient_principal_commitment(
                 account,
                 &engine.config,
@@ -195,13 +177,13 @@ pub(super) async fn submit_message(
                     &plaintext,
                 )
                 .await;
-            account.put_engine(engine);
+            account.apply_session_metadata(engine);
             result?
         }
     } else {
         let recipient_principal_commitment = body.recipient_principal_commitment.clone();
         let message = body.into_gateway_message()?;
-        let mut engine = account.take_live_engine().await?;
+        let mut engine = account.session_client().await?;
         let recipient = resolve_local_message_recipient_principal_commitment(
             account,
             &engine.config,
@@ -211,7 +193,7 @@ pub(super) async fn submit_message(
         .await?;
         require_message_submit_friend_link_accepted(account, &recipient)?;
         let result = account.client.send_direct_message_via_gateway(&mut engine, message).await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         result?
     };
     Ok(local_bus_ok(serde_json::to_value(entry)?))
@@ -278,11 +260,49 @@ async fn resolve_local_message_recipient_principal_commitment(
         })
 }
 
-fn resolve_federated_message_recipient_principal_commitment(
+async fn submit_federated(
+    account: &mut LocalBusAccountState,
+    body: LocalBusMessageSubmitRequest,
+    plaintext: &[u8],
+    federation: &LocalBusFederationRoute,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let recipient_principal_commitment = body.recipient_principal_commitment.clone();
+    let message = body.into_gateway_message_with_body(Vec::new());
+    let engine = account.session_client().await?;
+    let recipient = resolve_federated_message_recipient_principal_commitment(
+        &account.client,
+        federation,
+        recipient_principal_commitment.as_deref(),
+        message.recipient_device_id.as_deref(),
+        account.timeouts.http,
+    )
+    .await?;
+    require_message_submit_friend_link_accepted(account, &recipient)?;
+    let response = account
+        .client
+        .send_plaintext_federated_message_async(
+            &engine,
+            crate::client::federation::PlaintextForward {
+                message,
+                plaintext,
+                federation,
+                route: crate::client::routed::Route::direct(),
+                franking: true,
+                timeout: account.timeouts.http,
+            },
+        )
+        .await;
+    account.apply_session_metadata(engine);
+    let response = response?;
+    Ok(local_bus_ok(serde_json::to_value(response)?))
+}
+
+async fn resolve_federated_message_recipient_principal_commitment(
     client: &RamfluxClient,
     federation: &LocalBusFederationRoute,
     recipient_principal_commitment: Option<&str>,
     recipient_device_id: Option<&str>,
+    timeout: Duration,
 ) -> Result<ResolvedMessageRecipient, SdkError> {
     if let Some(device_id) = recipient_device_id {
         return federated_manifest_gate(
@@ -290,7 +310,9 @@ fn resolve_federated_message_recipient_principal_commitment(
             federation,
             recipient_principal_commitment,
             device_id,
-        );
+            timeout,
+        )
+        .await;
     }
     recipient_principal_commitment
         .filter(|commitment| !commitment.is_empty())
@@ -324,11 +346,12 @@ fn require_message_submit_friend_link_accepted(
 /// surface — the same base the federated send already uses for the recipient prekey fetch. The
 /// manifest is self-authenticating against the expected commitment, so a lying remote node can only
 /// fail closed. The gate runs before send, fail-closed.
-fn federated_manifest_gate(
+async fn federated_manifest_gate(
     client: &RamfluxClient,
     federation: &LocalBusFederationRoute,
     recipient_principal_commitment: Option<&str>,
     device_id: &str,
+    timeout: Duration,
 ) -> Result<ResolvedMessageRecipient, SdkError> {
     let manifest_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
         SdkError::LocalBus(
@@ -336,17 +359,21 @@ fn federated_manifest_gate(
                 .to_owned(),
         )
     })?;
-    let principal_commitment = client.resolve_federated_target_principal_commitment(
-        manifest_url,
-        recipient_principal_commitment,
-        device_id,
-    )?;
-    let device = client.assert_manifest_active_device_from_url(
-        manifest_url,
-        &principal_commitment,
-        device_id,
-        "message_submit_friend_gate",
-    )?;
+    let principal_commitment = client
+        .resolve_federated_target_principal_commitment_async(
+            crate::client::contact::RemoteManifest { url: manifest_url, timeout },
+            recipient_principal_commitment,
+            device_id,
+        )
+        .await?;
+    let device = client
+        .assert_manifest_active_device_from_url_async(
+            crate::client::contact::RemoteManifest { url: manifest_url, timeout },
+            &principal_commitment,
+            device_id,
+            "message_submit_friend_gate",
+        )
+        .await?;
     Ok(ResolvedMessageRecipient { principal_id: Some(device.principal_id), principal_commitment })
 }
 
@@ -425,7 +452,7 @@ async fn dispatch_message_receipt_delivered(
     if let (Some(recipient_device_id), Some(target_delivery_id)) =
         (body.recipient_device_id, body.target_delivery_id)
     {
-        let mut engine = account.take_live_engine().await?;
+        let mut engine = account.session_client().await?;
         let receipt_id = format!(
             "receipt:delivered:{}:{}:{}",
             body.conversation_id, body.message_id, body.receiver_device_id
@@ -456,7 +483,7 @@ async fn dispatch_message_receipt_delivered(
         )?;
         let entry =
             account.client.send_receipt_event_via_gateway(&mut engine, message, event).await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         response["scope"] = serde_json::Value::String("network_e2ee".to_owned());
         response["entry"] = serde_json::to_value(entry?)?;
     }
@@ -487,7 +514,7 @@ async fn dispatch_message_receipt_read(
     if let (Some(recipient_device_id), Some(target_delivery_id)) =
         (body.recipient_device_id.clone(), body.target_delivery_id.clone())
     {
-        let mut engine = account.take_live_engine().await?;
+        let mut engine = account.session_client().await?;
         let receipt_id =
             format!("receipt:read:{}:{}:{}", body.conversation_id, body.message_id, body.reader_id);
         let event = SdkReceiptEventEnvelope {
@@ -515,7 +542,7 @@ async fn dispatch_message_receipt_read(
         )?;
         let entry =
             account.client.send_receipt_event_via_gateway(&mut engine, message, event).await;
-        account.put_engine(engine);
+        account.apply_session_metadata(engine);
         response["scope"] = serde_json::Value::String("network_e2ee".to_owned());
         response["entry"] = serde_json::to_value(entry?)?;
     }
@@ -820,7 +847,7 @@ async fn receive_bound_legacy(
         return Ok(());
     }
     let pool = account.relay_quic_pool()?;
-    let mut engine = account.take_live_engine().await?;
+    let mut engine = account.session_client().await?;
     let result = async {
         for entry in held {
             if account.client.legacy_routing_binding(&engine.config.device_id, &entry)?.as_deref()
@@ -852,7 +879,7 @@ async fn receive_bound_legacy(
         Ok::<(), SdkError>(())
     }
     .await;
-    account.put_engine(engine);
+    account.apply_session_metadata(engine);
     result
 }
 

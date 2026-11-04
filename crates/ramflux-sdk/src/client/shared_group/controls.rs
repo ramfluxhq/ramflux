@@ -74,7 +74,7 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
-    fn admit_group_control(
+    pub(super) fn admit_group_control(
         &self,
         state: &ramflux_crypto::VerifiedGroupState,
         entry: &GatewayInboxEntry,
@@ -137,10 +137,24 @@ impl RamfluxClient {
     }
     pub(crate) async fn prepare_group_control(
         &self,
-        engine: &GatewaySessionEngine,
+        engine: &impl GatewaySessionAccess,
         entry: &GatewayInboxEntry,
         routing: &crate::client::routed::Routing,
         packet: &GroupControlPacket,
+    ) -> Result<(), SdkError> {
+        if packet.schema != CONTROL_SCHEMA || routing.group_id.as_deref() != Some(packet.group()) {
+            return Err(super::invalid("group control routing mismatch"));
+        }
+        self.prepare_group_control_with_directory(engine, entry, routing, packet, None).await
+    }
+
+    pub(super) async fn prepare_group_control_with_directory(
+        &self,
+        engine: &impl GatewaySessionAccess,
+        entry: &GatewayInboxEntry,
+        routing: &crate::client::routed::Routing,
+        packet: &GroupControlPacket,
+        directory: Option<&super::GroupDirectoryEvidence>,
     ) -> Result<(), SdkError> {
         if packet.schema != CONTROL_SCHEMA || routing.group_id.as_deref() != Some(packet.group()) {
             return Err(super::invalid("group control routing mismatch"));
@@ -150,7 +164,8 @@ impl RamfluxClient {
             return Err(super::invalid("group control conversation mismatch"));
         }
         self.admit_group_control(&state, entry, packet)?;
-        self.verify_group_actor_source(&engine.config, packet.actor(), entry).await?;
+        self.verify_group_actor_directory(engine.config(), packet.actor(), entry, directory)
+            .await?;
         match &packet.body {
             GroupControlBody::Transfer { .. } => {}
             GroupControlBody::Request { request, federation } => {
@@ -170,25 +185,19 @@ impl RamfluxClient {
                     )
                     .is_ok()
                 {
-                    let manifest = if let Some(federation) = federation {
-                        let url = federation.recipient_prekey_url.clone().ok_or_else(|| {
-                            super::invalid("federated addition requires prekey directory")
-                        })?;
-                        let root = member.root_commitment.clone();
-                        tokio::task::spawn_blocking(move || {
-                            crate::client::contact::fetch_verified_device_manifest_from_url(
-                                &url, &root,
-                            )
-                        })
-                        .await
-                        .map_err(|error| {
-                            SdkError::InboundPending(format!("federation manifest worker: {error}"))
-                        })??
-                    } else {
-                        self.shared_group_manifest(
-                            &engine.config,
+                    let manifest = if let Some(directory) = directory {
+                        let lookup = self.group_addition_directory_request(
                             packet.group(),
                             &member.root_commitment,
+                            federation.as_ref(),
+                        )?;
+                        Self::prepared_group_addition_manifest(&lookup, directory)?
+                    } else {
+                        self.fetch_group_addition_manifest(
+                            engine.config(),
+                            packet.group(),
+                            &member.root_commitment,
+                            federation.as_ref(),
                         )
                         .await?
                     };
@@ -260,7 +269,7 @@ impl RamfluxClient {
 }
 
 impl RamfluxClient {
-    fn group_control_base(
+    pub(super) fn group_control_base(
         &self,
         packet: &GroupControlPacket,
     ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {

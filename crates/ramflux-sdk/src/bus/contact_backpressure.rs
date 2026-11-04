@@ -6,7 +6,7 @@ use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 const KEY: &str = "contact-admission/backpressure";
 #[derive(Default, Deserialize, Serialize)]
-pub(super) struct Backpressure {
+pub(crate) struct Backpressure {
     floor: Option<u64>,
     next_at: i64,
     expires_at: i64,

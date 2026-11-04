@@ -10,7 +10,7 @@
 //! written outside the connect timeout and its answer is matched by request id whenever it
 //! arrives. Clearing the route deregisters it; revoking the device deletes it on the node.
 #![allow(clippy::wildcard_imports)]
-use super::{GatewaySessionEngine, write_gateway_client_frame};
+use super::GatewaySessionEngine;
 use crate::prelude::*;
 
 /// Gateway path the registration request is signed for.
@@ -89,9 +89,6 @@ pub enum GatewayPushRouteRefusal {
     #[serde(other)]
     Unknown,
 }
-
-/// Frames other than push answers that a waiting `set_push_route` keeps for later readers.
-const PUSH_ROUTE_STASH_LIMIT: usize = 64;
 
 /// Whether a route that expires at `expires_at` must be registered again at `now`.
 #[must_use]
@@ -210,9 +207,13 @@ impl GatewaySessionEngine {
             .await
         {
             Ok(result) => result,
-            Err(_elapsed) => Err(SdkError::GatewaySessionRejected(
-                "push route answer pending; it will be applied when it arrives".to_owned(),
-            )),
+            Err(_elapsed) => {
+                self.terminal_reason =
+                    Some(crate::bus::connection_manager::DisconnectReason::CallTimeout);
+                Err(SdkError::GatewaySessionRejected(
+                    "push route answer pending; retry on the next session".into(),
+                ))
+            }
         }
     }
 
@@ -290,56 +291,31 @@ impl GatewaySessionEngine {
     }
 
     async fn write_push_route_frame(&mut self, frame: GatewayClientFrame) -> Result<(), SdkError> {
-        tokio::time::timeout(
-            PUSH_ROUTE_SEND_TIMEOUT,
-            write_gateway_client_frame(&mut *self.stream, &frame),
-        )
-        .await
-        .map_err(|_| SdkError::GatewaySessionRejected("push route send timed out".to_owned()))?
+        tokio::time::timeout(PUSH_ROUTE_SEND_TIMEOUT, self.write_frame(&frame))
+            .await
+            .map_err(|_| SdkError::GatewaySessionRejected("push route send timed out".to_owned()))?
     }
 
     /// Reads frames until the answer to `request_id`, buffering deliveries meanwhile. Any other
-    /// frame is kept for the next reader; a drain or close also ends the wait.
+    /// unrelated push is dispatched immediately; a drain or close ends the wait.
     async fn await_push_reply(&mut self, request_id: &str) -> Result<Option<u64>, SdkError> {
-        // Read the stream, never the deferred queue: a stashed frame is not seen again here,
-        // so every iteration awaits I/O and the caller's timeout can always fire.
-        let mut stash = Vec::new();
-        let outcome = self.await_push_reply_into(request_id, &mut stash).await;
-        self.deferred_frames.extend(stash);
-        outcome
-    }
-
-    async fn await_push_reply_into(
-        &mut self,
-        request_id: &str,
-        stash: &mut Vec<GatewayServerFrame>,
-    ) -> Result<Option<u64>, SdkError> {
         loop {
             let frame = self.read_stream_frame("push route answer").await?;
-            match frame {
-                GatewayServerFrame::Deliver { entry } => self.pending_deliveries.push_back(entry),
-                frame if is_push_route_reply(&frame) => {
-                    let matched = push_route_reply_id(&frame) == Some(request_id);
-                    let outcome = self.apply_push_route_reply(frame);
-                    if matched {
-                        return outcome;
-                    }
+            let matched = push_route_reply_id(&frame) == Some(request_id);
+            // Apply even superseded registrations before delivering their notification.
+            let admitted = self.dispatch_frame_for_request(
+                &frame,
+                Some(super::frame_dispatch::ExpectedReply::PushRoute),
+                Some(request_id),
+            )?;
+            if let GatewayServerFrame::Nack { reason } = &frame {
+                return Err(SdkError::GatewaySessionRejected(reason.clone()));
+            }
+            if admitted && matched {
+                if let GatewayServerFrame::PushRouteRefused { reason, .. } = frame {
+                    return Err(SdkError::GatewaySessionRejected(reason));
                 }
-                frame @ (GatewayServerFrame::Drain { .. } | GatewayServerFrame::Close { .. }) => {
-                    stash.push(frame);
-                    return Err(SdkError::GatewaySessionRejected(
-                        "gateway session is ending; push route answer pending".to_owned(),
-                    ));
-                }
-                frame => {
-                    stash.push(frame);
-                    if stash.len() >= PUSH_ROUTE_STASH_LIMIT {
-                        return Err(SdkError::GatewaySessionRejected(
-                            "too many unrelated frames while waiting for a push route answer"
-                                .to_owned(),
-                        ));
-                    }
-                }
+                return Ok(self.push_route_expires_at);
             }
         }
     }
@@ -429,16 +405,7 @@ impl GatewaySessionEngine {
 
 /// Whether a server frame answers push route control (registration or deregistration).
 #[must_use]
-pub(crate) const fn is_push_route_reply(frame: &GatewayServerFrame) -> bool {
-    matches!(
-        frame,
-        GatewayServerFrame::PushRouteRegistered { .. }
-            | GatewayServerFrame::PushRouteRefused { .. }
-            | GatewayServerFrame::PushRouteDeregistered { .. }
-    )
-}
-
-fn push_route_reply_id(frame: &GatewayServerFrame) -> Option<&str> {
+pub(super) fn push_route_reply_id(frame: &GatewayServerFrame) -> Option<&str> {
     match frame {
         GatewayServerFrame::PushRouteRegistered { request_id, .. } => request_id.as_deref(),
         GatewayServerFrame::PushRouteRefused { request_id, .. }

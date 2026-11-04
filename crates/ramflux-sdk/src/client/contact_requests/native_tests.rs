@@ -15,6 +15,9 @@ use ramflux_protocol::custody::{CustodyAuthority, object_hash};
 use std::{collections::BTreeSet, sync::Arc};
 
 fn intent(sender: &Fixture, target: &Fixture) -> TestResult<Intent> {
+    intent_for(sender, &target.manifest.principal_commitment)
+}
+fn intent_for(sender: &Fixture, target: &str) -> TestResult<Intent> {
     let root = sender.manifest.principal_commitment.clone();
     let nonce = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
     let now = crate::time::now_unix_timestamp();
@@ -22,8 +25,8 @@ fn intent(sender: &Fixture, target: &Fixture) -> TestResult<Intent> {
         kind: Decision::Request,
         request_id: super::wire::request_id(&root, &nonce)?,
         requester_root: root,
-        target_root: target.manifest.principal_commitment.clone(),
-        peer_root: target.manifest.principal_commitment.clone(),
+        target_root: target.to_owned(),
+        peer_root: target.to_owned(),
         note: Some("Hello from native authority".into()),
         expires_at: now + super::TTL,
         issued_at: now,
@@ -32,6 +35,56 @@ fn intent(sender: &Fixture, target: &Fixture) -> TestResult<Intent> {
         next_at: now,
         delivered: BTreeSet::new(),
         native_approval: None,
+    })
+}
+
+pub(crate) async fn request_entry(
+    sender: &Fixture,
+    target: &crate::prekey::SdkDeviceManifestResponse,
+) -> TestResult<GatewayInboxEntry> {
+    sender.client.persist_fetched_identity_directory(target)?;
+    let mut intent = intent_for(sender, &target.principal_commitment)?;
+    let body = super::native_delivery::approve(
+        &sender.client,
+        &sender.config,
+        &mut intent,
+        &sender.manifest,
+    )
+    .await?;
+    let device = target.devices.first().ok_or("target device")?;
+    let mut message = GatewayDirectMessage {
+        conversation_id: super::conversation(
+            &sender.manifest.principal_commitment,
+            &target.principal_commitment,
+        )?,
+        message_id: "autonomous-contact".into(),
+        envelope_id: "autonomous-contact".into(),
+        source_principal_id: sender.config.principal_id.clone(),
+        sender_id: sender.config.device_id.clone(),
+        recipient_device_id: Some(device.device_id.clone()),
+        recipient_principal_commitment: Some(target.principal_commitment.clone()),
+        target_delivery_id: device.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: crate::time::now_unix_timestamp(),
+        ttl: 3600,
+    };
+    let mut packet = sender.client.seal_routed_prepared(
+        &sender.config,
+        &message,
+        &body,
+        crate::client::routed::Route::control(),
+        crate::client::routed::SendMaterial {
+            manifest: None,
+            bundle: Some(device.prekey_bundle.clone()),
+        },
+    )?;
+    packet.schema = super::ENVELOPE_SCHEMA.into();
+    message.encrypted_body = serde_json::to_vec(&packet)?;
+    Ok(GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: message.target_delivery_id.clone(),
+        envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
     })
 }
 
