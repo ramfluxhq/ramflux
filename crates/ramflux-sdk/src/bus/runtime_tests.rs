@@ -1204,3 +1204,5 @@ mod contact_verification;
 
 mod lifecycle;
 mod lifecycle_registry;
+
+mod lifecycle_takeover;

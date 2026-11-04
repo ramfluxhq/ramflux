@@ -1,5 +1,12 @@
 # Changelog
 
+- Unlock, creation confirmation and recovery promotion now open locally before
+  background admission; networking outcomes publish immediately. Keyed lifecycle
+  work survives client deadlines and disconnects, shares in-flight retries and
+  permits lost-holder takeover only for unlock, lock and switch. Other pending
+  lifecycle receipts return `OperationReconciliationRequired`.
+
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

@@ -605,3 +605,17 @@ spelling saved. Historical snapshots retain their own frozen Compose/runtime
 files, and maintenance can read their old `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT`
 key. Rollback and recovery inspect the target snapshot's selection and refuse an
 invalid, conflicting, or occupied router admin port before restoring any files.
+
+### Local-first unlock and lifecycle retries
+
+Account unlock, creation confirmation and recovery promotion reply after local data,
+vault and readers are ready. Admission continues asynchronously: observe
+`account.networking.changed` for Live or a typed networking refusal. A client
+deadline or closed connection ends only the wait for a keyed lifecycle operation.
+Retrying the same key and intent joins its live execution or returns its saved
+response. If the holder was lost with a pending receipt, only `account.unlock`,
+`account.lock` and `account.switch` re-execute. Other lifecycle methods return
+`OperationReconciliationRequired` (message: "operation requires reconciliation");
+retry with a fresh key. This can repeat an earlier effect whose result was lost.
+Changed intent under the same key remains a conflict. Startup restore is unkeyed
+and does not adopt pending receipts. Account mutation receipts remain fail-closed.

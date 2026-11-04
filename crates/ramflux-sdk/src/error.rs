@@ -44,6 +44,8 @@ impl GroupOperation {
 pub enum SdkError {
     #[error(transparent)]
     LifecycleShared(std::sync::Arc<SdkError>),
+    #[error("operation requires reconciliation: {0}")]
+    OperationReconciliationRequired(String),
     #[error("data root is in use by another daemon")]
     DataRootInUse,
     #[error("custody authority is durably fork fenced")]

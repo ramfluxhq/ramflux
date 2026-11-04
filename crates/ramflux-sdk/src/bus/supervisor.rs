@@ -248,6 +248,12 @@ impl Supervisor {
         let receipt = super::lifecycle::fingerprint(self.config.data_root.clone(), &request)
             .await?
             .ok_or_else(|| SdkError::LocalBus("missing lifecycle key".into()))?;
+        #[cfg(test)]
+        if let Some(barrier) =
+            self.config.lifecycle_gate.as_ref().and_then(|gate| gate.fingerprint_barrier.as_ref())
+        {
+            barrier.wait().await;
+        }
         // Fingerprinting can yield; admission must be checked again before atomic ownership.
         self.ensure_request_allowed(&request)?;
         let (guard, receive) = match self.lifecycle_registry.admit(&receipt)? {
@@ -290,7 +296,12 @@ impl Supervisor {
             return Ok(reply(body));
         }
         let receipt = if let Some(prepared) = prepared {
-            super::lifecycle::reserve_fingerprint(self.index.clone(), Some(prepared)).await?
+            super::lifecycle::reserve_fingerprint(
+                self.index.clone(),
+                Some(prepared),
+                Some(&request.method),
+            )
+            .await?
         } else {
             super::lifecycle::reserve(self.index.clone(), self.config.data_root.clone(), &request)
                 .await?

@@ -832,8 +832,12 @@ fn clear_optional_out_error(out_error_json: *mut *mut RamfluxBuffer) {
 }
 
 fn map_sdk_error(error: &SdkError) -> CAbiError {
-    let code = match error {
-        SdkError::LifecycleShared(source) => return map_sdk_error(source),
+    CAbiError::new(sdk_error_code(error), error.to_string())
+}
+
+fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
+    match error {
+        SdkError::LifecycleShared(source) => sdk_error_code(source),
         SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
         SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
@@ -908,7 +912,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::CallControlReceiptCapacity { .. }
         | SdkError::TaskManifestWorkerCapacity
         | SdkError::TaskForwardWorkerCapacity => RamfluxErrorCode::RateLimited,
-        SdkError::RestoreSetupRequired
+        SdkError::OperationReconciliationRequired(_)
+        | SdkError::RestoreSetupRequired
         | SdkError::CustodySetupInvalid
         | SdkError::CustodyExpired
         | SdkError::CustodyAccountConflict
@@ -930,8 +935,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::ReplayMismatch
         | SdkError::InboundPending(_)
         | SdkError::PairRecoveryRequired => RamfluxErrorCode::InvalidArgument,
-    };
-    CAbiError::new(code, error.to_string())
+    }
 }
 
 fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode {

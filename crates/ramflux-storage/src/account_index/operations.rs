@@ -18,6 +18,52 @@ impl AccountIndex {
         Ok(())
     }
 
+    /// Looks up a lifecycle receipt without reserving or modifying it.
+    ///
+    /// # Errors
+    /// Returns database or response decoding errors.
+    pub fn lookup_supervisor_operation(
+        &self,
+        scope: &str,
+        operation: &str,
+        fingerprint: &str,
+    ) -> Result<crate::OperationLookup, StorageError> {
+        let saved: Option<(String, Option<String>)> = self.connection.query_row(
+            "SELECT fingerprint,response_json FROM supervisor_operation WHERE account_scope=?1 AND operation_id=?2",
+            params![scope,operation], |row| Ok((row.get(0)?,row.get(1)?))
+        ).optional()?;
+        Ok(match saved {
+            None => crate::OperationLookup::Absent,
+            Some((saved, _)) if saved != fingerprint => crate::OperationLookup::Mismatch,
+            Some((_, None)) => crate::OperationLookup::Pending,
+            Some((_, Some(response))) => {
+                crate::OperationLookup::Completed(serde_json::from_str(&response)?)
+            }
+        })
+    }
+
+    /// Validates a pending receipt for takeover by the supervisor's exclusive live holder.
+    /// No row rewrite or schema upgrade is needed: the in-memory registry owns execution.
+    ///
+    /// # Errors
+    /// Rejects absent, completed or mismatched receipts, and database failures.
+    pub fn take_over_supervisor_operation(
+        &self,
+        scope: &str,
+        operation: &str,
+        fingerprint: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self.connection.immediate_transaction()?;
+        if !matches!(
+            self.lookup_supervisor_operation(scope, operation, fingerprint)?,
+            crate::OperationLookup::Pending
+        ) {
+            return Err(StorageError::EventIdConflict(operation.to_owned()));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// # Errors
     /// Rejects changed intent and incomplete operations that require reconciliation.
     pub fn reserve_supervisor_operation(
@@ -85,5 +131,71 @@ impl AccountIndex {
             .connection
             .prepare("SELECT local_account_id FROM local_account ORDER BY local_account_id")?;
         Ok(statement.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::OperationLookup;
+    type Case = Result<(), Box<dyn std::error::Error>>;
+    fn root() -> Result<std::path::PathBuf, std::time::SystemTimeError> {
+        Ok(std::env::temp_dir().join(format!(
+            "supervisor-lookup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        )))
+    }
+    #[test]
+    fn typed_lookup_reports_absent_completed_pending_mismatch() -> Case {
+        let root = root()?;
+        let index = AccountIndex::open(&root)?;
+        assert!(matches!(
+            index.lookup_supervisor_operation("alice", "key", "fp")?,
+            OperationLookup::Absent
+        ));
+        assert!(index.reserve_supervisor_operation("alice", "key", "fp")?.is_none());
+        assert!(matches!(
+            index.lookup_supervisor_operation("alice", "key", "fp")?,
+            OperationLookup::Pending
+        ));
+        assert!(matches!(
+            index.lookup_supervisor_operation("alice", "key", "other")?,
+            OperationLookup::Mismatch
+        ));
+        index.take_over_supervisor_operation("alice", "key", "fp")?;
+        let body = serde_json::json!({"state":"unlocked"});
+        index.complete_supervisor_operation("alice", "key", &body)?;
+        assert!(
+            matches!(index.lookup_supervisor_operation("alice", "key", "fp")?, OperationLookup::Completed(saved) if saved == body)
+        );
+        assert!(index.take_over_supervisor_operation("alice", "key", "fp").is_err());
+        assert!(index.take_over_supervisor_operation("alice", "missing", "fp").is_err());
+        drop(index);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn takeover_with_a_different_fingerprint_is_refused() -> Case {
+        let root = root()?;
+        let index = AccountIndex::open(&root)?;
+        index.reserve_supervisor_operation("alice", "key", "fp")?;
+        assert!(matches!(
+            index.take_over_supervisor_operation("alice", "key", "other"),
+            Err(StorageError::EventIdConflict(_))
+        ));
+        assert!(matches!(
+            index.lookup_supervisor_operation("alice", "key", "fp")?,
+            OperationLookup::Pending
+        ));
+        assert!(matches!(
+            index.lookup_supervisor_operation("alice", "key", "other")?,
+            OperationLookup::Mismatch
+        ));
+        // Existing reserve remains fail-closed for pending receipts.
+        assert!(index.reserve_supervisor_operation("alice", "key", "fp").is_err());
+        drop(index);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

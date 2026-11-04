@@ -119,13 +119,13 @@ async fn failed_unlock_clears_in_flight_and_fresh_key_unlocks() -> Case {
                 request("bad", "alice", "account.unlock", json!({"passphrase":"wrong"}));
             unlock.operation_id = Some("failed-key".into());
             assert!(supervisor.request(unlock.clone(), &connection).await.is_err());
-            // A released entry reaches the pending durable receipt, rather than joining the error.
+            // A released entry re-executes the pending unlock, rather than joining the old error.
             let error = supervisor
                 .request(unlock.clone(), &connection)
                 .await
                 .err()
-                .ok_or("pending replay accepted")?;
-            assert!(error.to_string().contains("requires reconciliation"));
+                .ok_or("wrong passphrase accepted")?;
+            assert!(!error.to_string().contains("requires reconciliation"));
             unlock.body["passphrase"] = json!("actor-test-secret");
             unlock.operation_id = Some("fresh-key".into());
             assert_eq!(

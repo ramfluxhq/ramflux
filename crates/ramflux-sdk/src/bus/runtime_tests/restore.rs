@@ -19,7 +19,7 @@ fn persisted_account_with_stored_secret(root: &Path, secret: &str) -> Result<(),
     write_local_bus_account_manifest(root, &manifest)
 }
 
-fn subscribe_restore(supervisor: &Supervisor) -> mpsc::Receiver<LocalBusFrame> {
+pub(super) fn subscribe_restore(supervisor: &Supervisor) -> mpsc::Receiver<LocalBusFrame> {
     let (outbound, receiver) = mpsc::channel(8);
     let mut connection = LocalBusConnectionState::new(99, outbound);
     connection.topics.insert("account.restore.finished".to_owned());
@@ -27,7 +27,7 @@ fn subscribe_restore(supervisor: &Supervisor) -> mpsc::Receiver<LocalBusFrame> {
     receiver
 }
 
-async fn restore_event(
+pub(super) async fn restore_event(
     receiver: &mut mpsc::Receiver<LocalBusFrame>,
 ) -> Result<LocalBusFrame, SdkError> {
     tokio::time::timeout(Duration::from_secs(5), receiver.recv())

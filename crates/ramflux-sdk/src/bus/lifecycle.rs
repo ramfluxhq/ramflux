@@ -95,20 +95,47 @@ pub(super) async fn fingerprint(
     .map_err(|error| SdkError::LocalBus(format!("supervisor receipt worker failed: {error}")))?
 }
 
+pub(super) fn takeover_eligible(method: &str) -> bool {
+    matches!(method, "account.unlock" | "account.lock" | "account.switch")
+}
+
 pub(super) async fn reserve(
     index: AccountIndex,
     root: PathBuf,
     request: &LocalBusFrame,
 ) -> Result<Option<Receipt>, SdkError> {
-    reserve_fingerprint(index, fingerprint(root, request).await?).await
+    reserve_fingerprint(index, fingerprint(root, request).await?, None).await
 }
 
 pub(super) async fn reserve_fingerprint(
     index: AccountIndex,
     receipt: Option<Receipt>,
+    method: Option<&str>,
 ) -> Result<Option<Receipt>, SdkError> {
     let Some(mut receipt) = receipt else { return Ok(None) };
+    let takeover = method.is_some_and(takeover_eligible);
+    let typed = method.is_some();
     spawn_blocking(move || {
+        if typed {
+            match index.lookup_supervisor_operation(
+                &receipt.scope,
+                &receipt.operation,
+                &receipt.fingerprint,
+            )? {
+                ramflux_storage::OperationLookup::Pending if takeover => {
+                    index.take_over_supervisor_operation(
+                        &receipt.scope,
+                        &receipt.operation,
+                        &receipt.fingerprint,
+                    )?;
+                    return Ok(Some(receipt));
+                }
+                ramflux_storage::OperationLookup::Pending => {
+                    return Err(SdkError::OperationReconciliationRequired(receipt.operation));
+                }
+                _ => {}
+            }
+        }
         receipt.cached = index.reserve_supervisor_operation(
             &receipt.scope,
             &receipt.operation,
@@ -146,6 +173,7 @@ pub(super) async fn import_account_id(request: &LocalBusFrame) -> Result<String,
 #[derive(Default)]
 pub(crate) struct TestGate {
     pub before_creation: bool,
+    pub fingerprint_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
     pub before_receipt: bool,
     pub joined: tokio::sync::Notify,
     pub entered: tokio::sync::Notify,

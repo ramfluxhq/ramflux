@@ -55,3 +55,8 @@ confirmation or drop and returns `DataRootInUse` while another owner holds it.
 The daemon shares its existing lease with its ceremonies. Startup reconciliation
 reaps account-local `.authority-*.tmp` regular files while holding that lease;
 live authority and vault credentials remain intact.
+
+`OperationReconciliationRequired`: a non-idempotent lifecycle operation has a
+pending receipt with no live holder. The message retains "operation requires
+reconciliation". Retry with a fresh key; the previous effect may have occurred.
+Only unlock, lock and switch permit same-key lost-holder takeover.

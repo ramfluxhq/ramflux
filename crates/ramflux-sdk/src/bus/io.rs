@@ -168,6 +168,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         return code;
     }
     match error {
+        SdkError::OperationReconciliationRequired(_) => "OperationReconciliationRequired",
         SdkError::DataRootInUse => "DataRootInUse",
         SdkError::CustodyForkFenced => "CustodyForkFenced",
         SdkError::ObjectErased => "ObjectErased",
