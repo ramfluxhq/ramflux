@@ -456,20 +456,20 @@ impl FederationRedbStore {
         }
         let seen_key = federated_forward_replay_key(source, request);
         let expired_keys = self.expired_inbound_forward_keys(now)?;
-        let record = authority
-            .signed_device_set
-            .as_ref()
-            .ok_or_else(|| NodeCoreError::ItestHttp("forwarded set missing".into()))?;
-        let observation = crate::foreign_device_store::observe_for_peer(
-            &self.db,
-            record,
-            &request.source_node_id,
-            now,
-        )?;
-        if observation.changed() {
-            self.foreign_authority_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Native authority is already signature-verified above; the router owns its
+        // live custody floors. Legacy senders retain their signed-set floor check.
+        if let Some(record) = authority.signed_device_set.as_ref() {
+            let observation = crate::foreign_device_store::observe_for_peer(
+                &self.db,
+                record,
+                &request.source_node_id,
+                now,
+            )?;
+            if observation.changed() {
+                self.foreign_authority_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            observation.admitted()?;
         }
-        observation.admitted()?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
 

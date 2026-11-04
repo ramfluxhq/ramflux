@@ -3,6 +3,18 @@
 
 use std::time::Instant;
 
+#[cfg(test)]
+thread_local! {
+    static SUBMISSION_TIME: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+fn submission_now() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = SUBMISSION_TIME.get() {
+        return now;
+    }
+    ramflux_node_core::now_unix_seconds()
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct AsyncForwardContext<'a> {
     pub(crate) client: Option<&'a crate::router_runtime::LocalFederationForwardClient>,
@@ -19,22 +31,18 @@ pub(crate) fn submit_envelope(
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     record_decoded(&envelope);
-    let source = match state.authenticated_envelope_source_from(&envelope, Some(store), origin) {
-        Ok(source) => source,
-        Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
-            return Ok(ramflux_node_core::EnvelopeSubmitResponse {
-                migration_refusal: None,
-                outcome: "rejected_capacity".into(),
-                target_delivery_id: envelope.target_delivery_id,
-                inbox_seq: None,
-                cursor: None,
-                nack: None,
-            });
-        }
-        Err(error) => return Err(error.into()),
+    let (source, mut source_lease) = match authenticate_submission(state, store, &envelope, origin)?
+    {
+        SourceAdmission::Admitted(source, lease) => (source, lease),
+        SourceAdmission::Refused(response) => return Ok(*response),
     };
     let submission = match store.acquire_submission(&envelope.target_delivery_id) {
-        Ok(lease) => lease,
+        Ok(mut lease) => {
+            if let Some(source) = source_lease.take() {
+                lease.retain_home_operation(source);
+            }
+            lease
+        }
         Err(ramflux_node_core::NodeCoreError::HomeMigration(
             ramflux_protocol::home_migration::Refusal::HomeMigrated,
         )) if forward.client.is_some() => {
@@ -56,7 +64,7 @@ pub(crate) fn submit_envelope(
         .ok_or_else(|| anyhow::anyhow!("envelope ttl overflows replay expiry"))?;
     ramflux_node_core::record_router_submit_lock_wait_us(0);
     let dispatch_started = Instant::now();
-    let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    let now_unix_seconds = i64::try_from(submission_now()).unwrap_or(i64::MAX);
     if let Some(response) = persistent_local_replay_response(PersistentReplayQuery {
         store,
         origin,
@@ -113,6 +121,57 @@ pub(crate) fn submit_envelope(
     Ok(response)
 }
 
+enum SourceAdmission {
+    Admitted(ramflux_crypto::RootQualifiedDeviceRef, Option<ramflux_node_core::SubmissionLease>),
+    Refused(Box<ramflux_node_core::EnvelopeSubmitResponse>),
+}
+
+fn authenticate_submission(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    envelope: &ramflux_protocol::Envelope,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+) -> anyhow::Result<SourceAdmission> {
+    let source = match state.authenticated_envelope_source_from(envelope, Some(store), origin) {
+        Ok(source) => source,
+        Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
+            return Ok(SourceAdmission::Refused(Box::new(
+                ramflux_node_core::EnvelopeSubmitResponse {
+                    migration_refusal: None,
+                    outcome: "rejected_capacity".into(),
+                    target_delivery_id: envelope.target_delivery_id.clone(),
+                    inbox_seq: None,
+                    cursor: None,
+                    nack: None,
+                },
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    // Hold local source admission through durable acceptance and any outbound call.
+    // Federation retries already accepted elsewhere do not reacquire client admission.
+    let source_lease = if origin == ramflux_node_core::RouterEnvelopeOrigin::Gateway {
+        match store.acquire_home_operation(source.root_commitment()) {
+            Ok(lease) => Some(lease),
+            Err(ramflux_node_core::NodeCoreError::HomeMigration(reason)) => {
+                return Ok(SourceAdmission::Refused(Box::new(
+                    state.migration_source_submission_refusal(
+                        store,
+                        envelope,
+                        source.root_commitment(),
+                        reason,
+                        submission_now(),
+                    )?,
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
+    Ok(SourceAdmission::Admitted(source, source_lease))
+}
+
 fn complete_sync_forward(
     state: &ramflux_node_core::RouterCore,
     forward: AsyncForwardContext<'_>,
@@ -128,6 +187,21 @@ fn complete_sync_forward(
                     let plan = reservation
                         .plan()
                         .ok_or_else(|| anyhow::anyhow!("missing forward plan"))?;
+                    let peer_permit = if plan.migration_evidence.is_some() {
+                        match crate::migration_forward_limits::acquire(&plan.new_home_node) {
+                            Ok(permit) => Some(permit),
+                            Err(_) => {
+                                return Ok(
+                                    ramflux_node_core::RouterSubmitOutcome::ForwardInProgress {
+                                        target_delivery_id: reservation.target_delivery_id().into(),
+                                    },
+                                );
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let _peer_permit = peer_permit;
                     let response = client.forward(plan, forward.timeout);
                     state.complete_home_node_forward(reservation, response)
                 }
@@ -150,22 +224,18 @@ pub(crate) async fn submit_envelope_async(
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     record_decoded(&envelope);
-    let source = match state.authenticated_envelope_source_from(&envelope, Some(store), origin) {
-        Ok(source) => source,
-        Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
-            return Ok(ramflux_node_core::EnvelopeSubmitResponse {
-                migration_refusal: None,
-                outcome: "rejected_capacity".into(),
-                target_delivery_id: envelope.target_delivery_id,
-                inbox_seq: None,
-                cursor: None,
-                nack: None,
-            });
-        }
-        Err(error) => return Err(error.into()),
+    let (source, mut source_lease) = match authenticate_submission(state, store, &envelope, origin)?
+    {
+        SourceAdmission::Admitted(source, lease) => (source, lease),
+        SourceAdmission::Refused(response) => return Ok(*response),
     };
     let submission = match store.acquire_submission(&envelope.target_delivery_id) {
-        Ok(lease) => lease,
+        Ok(mut lease) => {
+            if let Some(source) = source_lease.take() {
+                lease.retain_home_operation(source);
+            }
+            lease
+        }
         Err(ramflux_node_core::NodeCoreError::HomeMigration(
             ramflux_protocol::home_migration::Refusal::HomeMigrated,
         )) if forward.client.is_some() => {
@@ -187,7 +257,7 @@ pub(crate) async fn submit_envelope_async(
         .ok_or_else(|| anyhow::anyhow!("envelope ttl overflows replay expiry"))?;
     ramflux_node_core::record_router_submit_lock_wait_us(0);
     let dispatch_started = Instant::now();
-    let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    let now_unix_seconds = i64::try_from(submission_now()).unwrap_or(i64::MAX);
     if let Some(response) = persistent_local_replay_response(PersistentReplayQuery {
         store,
         origin,
@@ -269,13 +339,37 @@ fn committed_preparation(
             store,
             source,
             envelope,
-            ramflux_node_core::now_unix_seconds(),
+            submission_now(),
             timeout.as_secs().max(1),
         )
-        .unwrap_or_else(|_| {
-            ramflux_node_core::RouterForwardPreparation::Complete(Box::new(
-                ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id },
-            ))
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, %target_delivery_id, "committed forward preparation refused");
+            let outcome = match error {
+                ramflux_node_core::NodeCoreError::HomeMigration(reason)
+                    if !matches!(
+                        reason,
+                        ramflux_protocol::home_migration::Refusal::StorageUnavailable
+                            | ramflux_protocol::home_migration::Refusal::EvidenceRequired
+                            | ramflux_protocol::home_migration::Refusal::PeeringUnavailable
+                            | ramflux_protocol::home_migration::Refusal::MigrationInProgress
+                    ) =>
+                {
+                    ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
+                        target_delivery_id,
+                        reason: format!("committed_forward:{reason:?}"),
+                    }
+                }
+                ramflux_node_core::NodeCoreError::Unauthorized(reason) => {
+                    ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
+                        target_delivery_id,
+                        reason,
+                    }
+                }
+                _ => {
+                    ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id }
+                }
+            };
+            ramflux_node_core::RouterForwardPreparation::Complete(Box::new(outcome))
         })
 }
 
@@ -289,20 +383,12 @@ fn submission_refusal(
         ramflux_node_core::NodeCoreError::HomeMigration(mut reason) => {
             if reason == ramflux_protocol::home_migration::Refusal::HomeMigrated
                 && store
-                    .migration_forward_window(
-                        &envelope.target_delivery_id,
-                        ramflux_node_core::now_unix_seconds(),
-                    )
+                    .migration_forward_window(&envelope.target_delivery_id, submission_now())
                     .is_err()
             {
                 reason = ramflux_protocol::home_migration::Refusal::StorageUnavailable;
             }
-            Ok(state.migration_submission_refusal(
-                store,
-                envelope,
-                reason,
-                ramflux_node_core::now_unix_seconds(),
-            )?)
+            Ok(state.migration_submission_refusal(store, envelope, reason, submission_now())?)
         }
         error => Err(error.into()),
     }
@@ -331,8 +417,23 @@ async fn complete_async_forward(
                             "forward reservation did not contain a forward client"
                         ));
                     };
+                    let peer_permit = if plan.migration_evidence.is_some() {
+                        match crate::migration_forward_limits::acquire(&plan.new_home_node) {
+                            Ok(permit) => Some(permit),
+                            Err(_) => {
+                                return Ok(
+                                    ramflux_node_core::RouterSubmitOutcome::ForwardInProgress {
+                                        target_delivery_id,
+                                    },
+                                );
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let timeout = forward.timeout;
                     let worker = tokio::task::spawn_blocking(move || {
+                        let _peer_permit = peer_permit;
                         let _permit = permit;
                         client.forward(&plan, timeout)
                     });
@@ -436,7 +537,7 @@ pub(crate) fn own_device_fanout(
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
 ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
-    let now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    let now = i64::try_from(submission_now()).unwrap_or(i64::MAX);
     let (plan, leases) = state.accept_leased_fanout(request.clone(), store, now)?;
     let response = ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse {
         principal_id: plan.principal_id,
@@ -704,3 +805,7 @@ mod tests {
 #[cfg(test)]
 #[path = "router_engine_migration_tests.rs"]
 mod migration_tests;
+
+#[cfg(test)]
+#[path = "router_engine_window_tests.rs"]
+mod window_tests;

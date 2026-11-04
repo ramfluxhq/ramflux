@@ -10,6 +10,7 @@ const META: TableDefinition<&str, &[u8]> = TableDefinition::new("foreign_pin_met
 const MAX_ANCHORS: usize = 4096;
 const MAX_PEER: usize = 256;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ROW_BYTES: usize = 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 struct Meta {
     peer: String,
@@ -63,7 +64,7 @@ fn insert_bounded(
     max_peer: usize,
     max_bytes: usize,
 ) -> Result<(), NodeCoreError> {
-    if peer.len() > 256 || bytes.len() > max_bytes {
+    if peer.len() > 256 || bytes.len() > max_bytes.min(MAX_ROW_BYTES) {
         return Err(capacity());
     }
     let mut rows = Vec::new();
@@ -86,20 +87,38 @@ fn insert_bounded(
         .find(|(k, _, _)| k == anchor)
         .map_or(peer, |(_, _, m)| m.peer.as_str())
         .to_owned();
+    let peers = rows
+        .iter()
+        .map(|(_, _, m)| m.peer.as_str())
+        .chain(std::iter::once(owner.as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    // Protected pins count toward their owner's share; protection only prevents eviction.
+    let peer_bytes = (max_bytes / peers.max(16)).max(256 * 1024).min(max_bytes);
     let mut removals = Vec::new();
     loop {
         let others: Vec<_> =
             rows.iter().filter(|(k, _, _)| k != anchor && !removals.contains(k)).collect();
         let peer_full = others.iter().filter(|(_, _, m)| m.peer == owner).count() >= max_peer;
+        let peer_bytes_full = others
+            .iter()
+            .filter(|(_, _, m)| m.peer == owner)
+            .map(|(_, v, _)| v.len())
+            .sum::<usize>()
+            .saturating_add(bytes.len())
+            > peer_bytes;
         if others.len() < max_anchors
             && !peer_full
+            && !peer_bytes_full
             && others.iter().map(|(_, v, _)| v.len()).sum::<usize>().saturating_add(bytes.len())
                 <= max_bytes
         {
             break;
         }
-        let mut candidates: Vec<_> =
-            others.into_iter().filter(|(_, _, m)| !peer_full || m.peer == owner).collect();
+        let mut candidates: Vec<_> = others
+            .into_iter()
+            .filter(|(_, _, m)| !(peer_full || peer_bytes_full) || m.peer == owner)
+            .collect();
         candidates.sort_by_key(|(_, _, m)| m.touched);
         let mut victim = None;
         for (key, value, _) in candidates {

@@ -145,6 +145,89 @@ fn completed_source_can_admit_and_seal_a_return_move_after_window() -> TestResul
     Ok(())
 }
 #[test]
+fn higher_epoch_return_head_permits_registration_at_former_home() -> TestResult {
+    let s = Scenario::prepared()?;
+    let sealed = s.seal()?;
+    let committed = s.commit(&sealed)?;
+    let base = s.verify(committed.clone())?;
+    assert!(s.a.store()?.acquire_home_operation(&s.anchor).is_err());
+    s.b.store()?.activate_home_migration(
+        &s.b.node,
+        &ResolveResult { home: committed, predecessors: vec![] },
+        NOW + 2,
+    )?;
+    let now = NOW + FORWARD_SECONDS + 3;
+    let record = publication()?.record;
+    let authority = verify_record(&record, now, None, None)?;
+    let branch = ramflux_crypto::create_device_branch("vector.example", "primary", 1, [3; 32]);
+    let mut prepare = sealed.prepare.body.clone();
+    prepare.migration_id = hash(70);
+    prepare.old_node = "B".into();
+    prepare.destination_node = "A".into();
+    prepare.destination_key = public(8);
+    prepare.previous_home_hash = base.hash().into();
+    prepare.previous_home_epoch = 1;
+    prepare.nonce = hash(71);
+    prepare.issued_at = now;
+    prepare.expires_at = now + 300;
+    let prepare = crypto::sign_actor(prepare, &branch, &authority, now)?;
+    let mut attest = sealed.attestation.body.clone();
+    attest.audience_node = "A".into();
+    attest.previous_home_hash = base.hash().into();
+    attest.nonce = prepare.body.nonce.clone();
+    attest.issued_at = now;
+    attest.expires_at = now + 60;
+    let attest = crypto::sign_node(attest, "B", &signing(9))?;
+    let offer = s.a.core.prepare_home_migration(
+        s.a.store()?,
+        &s.a.node,
+        PrepareMigration {
+            prepare: &prepare,
+            attestation: &attest,
+            base: &base,
+            delivery_map: &sealed.delivery_map,
+        },
+        now,
+    )?;
+    let mut auth = s.authorization.body.clone();
+    auth.migration_id = prepare.body.migration_id.clone();
+    auth.old_node = "B".into();
+    auth.destination_node = "A".into();
+    auth.destination_key = public(8);
+    auth.previous_home_hash = base.hash().into();
+    auth.next_home_epoch = 2;
+    auth.offer_hash = message_hash(&offer)?;
+    auth.issued_at = now;
+    auth.seal_until = offer.body.accept_until;
+    auth.nonce = prepare.body.nonce;
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([2; 32]));
+    let auth = primary.sign_home_authorization(auth, &branch, &authority, now)?;
+    s.a.core.seal_home_migration(s.a.store()?, &s.a.node, &auth, now)?;
+    assert!(s.a.store()?.acquire_home_operation(&s.anchor).is_err());
+    let returning =
+        s.a.store()?
+            .migration_operation(&s.anchor, &auth.body.migration_id, MigrationRole::Destination)?
+            .ok_or("return seal")?;
+    let head = s.b.core.commit_home_migration(
+        s.b.store()?,
+        &s.b.node,
+        CommitMigration {
+            sealed: &returning.sealed_evidence()?,
+            peer: MigrationPeer { node_id: "A", node_key: &public(8) },
+        },
+        now,
+    )?;
+    s.a.store()?.activate_home_migration(
+        &s.a.node,
+        &ResolveResult { home: head, predecessors: vec![] },
+        now,
+    )?;
+    assert_eq!(s.a.store()?.migration_home(&s.anchor)?.ok_or("returned head")?.record.epoch(), 2);
+    drop(s.a.store()?.acquire_home_operation(&s.anchor)?);
+    drop(s.a.store()?.acquire_submission(&s.target)?);
+    Ok(())
+}
+#[test]
 fn second_unsealed_reservation_for_one_root_is_refused_without_charging_budget() -> TestResult {
     let s = Scenario::prepared()?;
     let mut prepare =

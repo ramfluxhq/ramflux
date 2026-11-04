@@ -8,6 +8,7 @@ mod home_migration;
 mod identity_authority;
 mod lifecycle;
 mod migration_courier;
+mod migration_forward_limits;
 mod operator;
 mod retention;
 mod router_engine;

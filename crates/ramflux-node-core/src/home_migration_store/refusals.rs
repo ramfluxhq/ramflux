@@ -55,6 +55,36 @@ impl RouterCore {
         )?);
         Ok(response)
     }
+    /// Refuse a new submission from a local sender whose home moved away.
+    /// # Errors
+    /// Fails closed when the committed source evidence or its signer is unavailable.
+    pub fn migration_source_submission_refusal(
+        &self,
+        store: &RouterRedbStore,
+        envelope: &ramflux_protocol::Envelope,
+        anchor: &str,
+        reason: Refusal,
+        now: u64,
+    ) -> Result<crate::EnvelopeSubmitResponse, NodeCoreError> {
+        Ok(crate::EnvelopeSubmitResponse {
+            migration_refusal: Some(reason),
+            outcome: "rejected_home_migration".into(),
+            target_delivery_id: envelope.target_delivery_id.clone(),
+            inbox_seq: None,
+            cursor: None,
+            nack: if reason == Refusal::HomeMigrated {
+                Some(self.migration_nack(
+                    store,
+                    anchor,
+                    &envelope.target_delivery_id,
+                    &envelope.envelope_id,
+                    now,
+                )?)
+            } else {
+                None
+            },
+        })
+    }
     /// Bind an ordinary-client refusal to the authenticated challenge/request nonce.
     pub(crate) fn migration_owner_refusal(
         &self,
@@ -91,11 +121,13 @@ impl RouterCore {
         let head = store
             .migration_home(anchor)?
             .ok_or_else(|| storage("migrated root home evidence unavailable"))?;
-        let signer = self
-            .node_service_signer()
-            .ok_or_else(|| storage("migration refusal requires node signer"))?;
+        let signer = self.node_service_signer().ok_or_else(|| {
+            NodeCoreError::Unauthorized("migration refusal requires node signer".into())
+        })?;
         if signer.public_key_base64url() != head.node_record.body.node_signing_public_key {
-            return Err(storage("migration refusal node signer does not match committed source"));
+            return Err(NodeCoreError::Unauthorized(
+                "migration refusal node signer does not match committed source".into(),
+            ));
         }
         let mut nack = ramflux_protocol::Nack {
             schema: "ramflux.nack.v1".into(),

@@ -3,6 +3,7 @@
 
 //! Forwarded proof reconstruction uses the sealed destination state, including after restart.
 use super::*;
+use crate::RouterSubmitOutcome;
 
 fn proof(s: &Scenario, op: &MigrationOperation) -> TestResult<Signed<CommitProof>> {
     let HomeRecord::Committed { commit_proof, .. } = s.commit(op)?.record else {
@@ -535,5 +536,68 @@ fn local_forwarded_sender_does_not_copy_local_custody_into_foreign_pins() -> Tes
         crate::RouterSubmitOutcome::OfflineQueued(_)
     ));
     assert!(b.store()?.foreign_custody_state(source.root_commitment())?.is_none());
+    Ok(())
+}
+
+#[test]
+fn one_peer_cannot_exhaust_foreign_pin_bytes_for_others_via_protected_pins() -> TestResult {
+    let s = Scenario::prepared()?;
+    let commit = proof(&s, &s.seal()?)?;
+    let mut request = sender_with_seed(&s.target, 170)?;
+    request.peer_node_id = "peer-A".into();
+    request.migration_evidence = Some(crate::ForwardedMigrationEvidence {
+        commit_proof: Some(commit),
+        retain_until: i64::try_from(crate::now_unix_seconds() + 3600)?,
+        floors: vec![],
+    });
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            request.clone(),
+            crate::now_unix_seconds()
+        )?,
+        RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    let (_, source) = crate::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
+    // Keep a real, durably referenced pin just below the per-row cap. JSON whitespace
+    // preserves its authenticated state and permits a bounded byte-quota fixture.
+    {
+        let tx = s.b.store()?.migration_db().begin_write()?;
+        let table = redb::TableDefinition::<&str, &[u8]>::new("foreign_custody_pins_v1");
+        let mut pins = tx.open_table(table)?;
+        let mut bytes = pins.get(source.root_commitment())?.ok_or("accepted pin")?.value().to_vec();
+        bytes.resize(1024 * 1024 - 1, b' ');
+        pins.insert(source.root_commitment(), bytes.as_slice())?;
+        drop(pins);
+        tx.commit()?;
+    }
+    let mut next = sender_with_seed(&s.target, 180)?;
+    next.peer_node_id = "peer-A".into();
+    next.migration_evidence = Some(crate::ForwardedMigrationEvidence {
+        commit_proof: None,
+        retain_until: i64::try_from(crate::now_unix_seconds() + 3600)?,
+        floors: vec![],
+    });
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            next.clone(),
+            crate::now_unix_seconds()
+        ),
+        Err(NodeCoreError::Capacity { .. })
+    ));
+    next.peer_node_id = "peer-B".into();
+    assert!(matches!(
+        s.b.core.submit_forwarded_envelope(
+            s.b.store()?,
+            Some(&s.b.node),
+            next,
+            crate::now_unix_seconds()
+        )?,
+        RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    assert!(s.b.store()?.foreign_custody_state(source.root_commitment())?.is_some());
     Ok(())
 }

@@ -93,7 +93,8 @@ fn forwarded_envelope_is_never_forwarded_a_second_hop() -> TestResult {
     envelope.ext.ext.insert(crate::HOME_NODE_FORWARD_COUNT_EXT_KEY.into(), json!(1));
     assert!(matches!(
         s.a.core.prepare_committed_home_forward(s.a.store()?, &source, envelope, NOW + 3, 5)?,
-        RouterForwardPreparation::Complete(_)
+        RouterForwardPreparation::Complete(outcome) if matches!(*outcome,
+            RouterSubmitOutcome::RejectedSecurity { .. })
     ));
     assert!(matches!(prepare(&s, NOW + 3)?, RouterForwardPreparation::Forward(_)));
     Ok(())

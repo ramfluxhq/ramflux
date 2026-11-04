@@ -574,7 +574,7 @@ where
         ramflux_node_core::NodeCoreError,
     >,
 {
-    let (authority, source) =
+    let (_, source) =
         ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
     tracing::info!(
         source_node_id = request.source_node_id,
@@ -587,8 +587,7 @@ where
     let step_started = std::time::Instant::now();
     // Migration retries must reach the router's durable tuple receipt. A federation
     // seen record cannot establish inbox activation or durable acceptance at B.
-    let delivery = if request.migration_evidence.is_some() || authority.custody_authority.is_some()
-    {
+    let delivery = if request.migration_evidence.is_some() {
         Some(deliver()?)
     } else {
         store.deliver_inbound_forward_once_with_lease(
@@ -1237,6 +1236,37 @@ mod tests {
             },
         )?;
         assert!(!result.accepted);
+        // A native plain-path durable acceptance uses the federation seen key too.
+        let once = handle_verified_s8_receive_envelope(
+            &request,
+            &federation_store,
+            None,
+            inbound_timing(now),
+            || {
+                Ok(ramflux_node_core::EnvelopeSubmitResponse {
+                    migration_refusal: None,
+                    outcome: "offline_queued".into(),
+                    target_delivery_id: request.envelope.target_delivery_id.clone(),
+                    inbox_seq: Some(1),
+                    cursor: None,
+                    nack: None,
+                })
+            },
+        )?;
+        assert!(once.accepted);
+        let replay = handle_verified_s8_receive_envelope(
+            &request,
+            &federation_store,
+            None,
+            inbound_timing(now),
+            || {
+                Err(ramflux_node_core::NodeCoreError::ItestHttp(
+                    "plain native replay reached router".into(),
+                ))
+            },
+        )?;
+        assert!(!replay.accepted);
+        assert_eq!(replay.delivery.outcome, "duplicate_federated_forward");
         // Positive arm uses the same sender through explicitly enabled migration ingress.
         request.migration_evidence = Some(ramflux_node_core::ForwardedMigrationEvidence {
             commit_proof: None,

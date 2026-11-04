@@ -12,13 +12,13 @@ use std::{
     sync::Arc,
 };
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-struct Directory(std::path::PathBuf);
+pub(super) struct Directory(pub(super) std::path::PathBuf);
 impl Drop for Directory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn envelope(
+pub(super) fn envelope(
     target: &str,
     id: &str,
 ) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
@@ -91,7 +91,7 @@ fn envelope(
     envelope.ext.ext.insert("source_device_authority".into(), serde_json::to_value(authority)?);
     Ok(envelope)
 }
-fn directory() -> Result<Directory, Box<dyn std::error::Error>> {
+pub(super) fn directory() -> Result<Directory, Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join(format!(
         "rf-cutover-{}",
         ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
@@ -233,5 +233,99 @@ fn repeated_remote_submits_to_committed_home_return_signed_refusal_without_abort
         )?;
     }
     assert_eq!(state.resume("moving", 0, 10).len(), 0);
+    Ok(())
+}
+
+#[test]
+fn new_source_submission_after_commit_is_forwarded_or_refused_never_spooled() -> TestResult {
+    use crate::router_runtime::tests::{current_envelope, test_router};
+    let (state, store, path) = test_router("source-cutover")?;
+    let message = current_envelope("source-cutover", "remote-target")?;
+    let source = state.authenticated_envelope_source_durable(&message, &store)?;
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+    let forward = AsyncForwardContext {
+        client: None,
+        semaphore: &semaphore,
+        timeout: std::time::Duration::from_secs(1),
+    };
+    // Positive arm: an active source can submit to this same unrelated target.
+    assert_eq!(
+        submit_envelope(
+            &state,
+            &store,
+            forward,
+            message.clone(),
+            Instant::now(),
+            RouterEnvelopeOrigin::Gateway
+        )?
+        .outcome,
+        "offline_queued"
+    );
+    drop(store);
+    // Install the durable source gate and retained proof independently of target routing.
+    let home: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../crates/ramflux-crypto/tests/fixtures/home_migration_v1.json"
+    ))?;
+    {
+        let db = redb::Database::create(&path)?;
+        let tx = db.begin_write()?;
+        tx.open_table(redb::TableDefinition::<&str, &[u8]>::new("home_root_gates_v1"))?.insert(
+            source.root_commitment(),
+            serde_json::to_vec(&Refusal::HomeMigrated)?.as_slice(),
+        )?;
+        tx.open_table(redb::TableDefinition::<&str, &[u8]>::new("home_head_v1"))?.insert(
+            source.root_commitment(),
+            serde_json::to_vec(&home["committed_home"])?.as_slice(),
+        )?;
+        tx.commit()?;
+    }
+    let store = RouterRedbStore::open(&path)?;
+    state.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([8; 32])));
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let client = crate::router_runtime::LocalFederationForwardClient {
+        url: "http://127.0.0.1:1/forward".into(),
+        admin_token: None,
+        source_node_id: "A".into(),
+    };
+    for asynchronous in [false, true] {
+        for client in [None, Some(&client)] {
+            let forward = AsyncForwardContext { client, ..forward };
+            let response = if asynchronous {
+                runtime.block_on(submit_envelope_async(
+                    &state,
+                    &store,
+                    forward,
+                    current_envelope("after-source-commit", "remote-target")?,
+                    Instant::now(),
+                    RouterEnvelopeOrigin::Gateway,
+                ))?
+            } else {
+                submit_envelope(
+                    &state,
+                    &store,
+                    forward,
+                    current_envelope("after-source-commit", "remote-target")?,
+                    Instant::now(),
+                    RouterEnvelopeOrigin::Gateway,
+                )?
+            };
+            assert_eq!(response.migration_refusal, Some(Refusal::HomeMigrated));
+            assert_eq!(response.inbox_seq, None);
+            let nack = response.nack.ok_or("signed source refusal")?;
+            ramflux_crypto::verify_canonical_signature(
+                &ramflux_protocol::signed_bytes(&nack)?,
+                &nack.signed.signature,
+                home["committed_home"]["node_record"]["body"]["node_signing_public_key"]
+                    .as_str()
+                    .ok_or("source key")?,
+            )?;
+        }
+    }
+    assert_eq!(
+        state.resume("remote-target", 0, 10).len(),
+        1,
+        "refused submissions allocate no new inbox entries"
+    );
+    assert_eq!(semaphore.available_permits(), 1);
     Ok(())
 }

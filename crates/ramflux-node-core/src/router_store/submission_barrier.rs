@@ -36,6 +36,11 @@ pub struct SubmissionLease {
     root: Option<Box<SubmissionLease>>,
 }
 impl SubmissionLease {
+    /// Retain source admission when a submission transfers to the durable writer.
+    pub fn retain_home_operation(&mut self, mut source: Self) {
+        source.root = self.root.take();
+        self.root = Some(Box::new(source));
+    }
     pub(super) fn target(&self) -> &str {
         &self.target
     }

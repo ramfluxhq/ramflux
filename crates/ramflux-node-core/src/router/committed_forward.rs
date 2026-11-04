@@ -25,8 +25,9 @@ impl RouterCore {
             return closed_preparation(self, store, &envelope, now);
         };
         if envelope_home_node_forward_count(&envelope) > 0 {
-            return Ok(complete_forward_preparation(RouterSubmitOutcome::ForwardInProgress {
+            return Ok(complete_forward_preparation(RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
+                reason: "migration_second_hop".into(),
             }));
         }
         let ramflux_protocol::home_migration::HomeRecord::Committed {
@@ -154,7 +155,9 @@ fn committed_route(
                 &authorization.body.migration_id,
                 crate::MigrationRole::Source,
             )?
-            .ok_or_else(|| NodeCoreError::Redb("source operation unavailable".into()))?
+            .ok_or(NodeCoreError::HomeMigration(
+                ramflux_protocol::home_migration::Refusal::BaseMismatch,
+            ))?
             .offer
             .body
             .federation_endpoint,
