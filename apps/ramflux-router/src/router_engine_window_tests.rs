@@ -6,8 +6,11 @@ use super::*;
 use ramflux_node_core::{NodeServiceSigningKey, RouterCore, RouterEnvelopeOrigin, RouterRedbStore};
 use ramflux_protocol::home_migration::{HomeRecord, Refusal};
 use std::sync::Arc;
+pub(super) static FORWARD_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-fn fixture(path: &std::path::Path) -> Result<ramflux_protocol::home_migration::RecordEvidence> {
+pub(super) fn fixture(
+    path: &std::path::Path,
+) -> Result<ramflux_protocol::home_migration::RecordEvidence> {
     let f: serde_json::Value = serde_json::from_str(include_str!(
         "../../../crates/ramflux-crypto/tests/fixtures/home_migration_v1.json"
     ))?;
@@ -44,7 +47,7 @@ fn fixture(path: &std::path::Path) -> Result<ramflux_protocol::home_migration::R
     tx.commit()?;
     Ok(head)
 }
-fn at<T>(now: u64, run: impl FnOnce() -> T) -> T {
+pub(super) fn at<T>(now: u64, run: impl FnOnce() -> T) -> T {
     struct Reset(Option<u64>);
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -60,6 +63,7 @@ fn at<T>(now: u64, run: impl FnOnce() -> T) -> T {
     reason = "closure, restart, both ingress paths and real IO positive arm share one fixture"
 )]
 fn clock_rollback_after_observed_closure_never_reopens_forwarding_after_restart() -> Result {
+    let _guard = FORWARD_IO.lock().map_err(|_| "forward IO fixture lock")?;
     let dir = super::migration_tests::directory()?;
     let path = dir.0.join("window.redb");
     let head = fixture(&path)?;
@@ -175,6 +179,7 @@ fn clock_rollback_after_observed_closure_never_reopens_forwarding_after_restart(
 
 #[test]
 fn committed_forward_missing_source_operation_is_permanent_and_never_connects() -> Result {
+    let _guard = FORWARD_IO.lock().map_err(|_| "forward IO fixture lock")?;
     let dir = super::migration_tests::directory()?;
     let path = dir.0.join("missing-op.redb");
     let head = fixture(&path)?;
@@ -214,5 +219,126 @@ fn committed_forward_missing_source_operation_is_permanent_and_never_connects() 
     })?;
     assert_eq!(response.outcome, "rejected_security:committed_forward:BaseMismatch");
     assert_eq!(listener.accept().err().map(|e| e.kind()), Some(std::io::ErrorKind::WouldBlock));
+    Ok(())
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "sync/async storage failures and repaired positive arm share the same fixture"
+)]
+fn window_latch_persist_failure_fails_closed_without_forwarding() -> Result {
+    let _guard = FORWARD_IO.lock().map_err(|_| "forward IO fixture lock")?;
+    let dir = super::migration_tests::directory()?;
+    let path = dir.0.join("unwritable-window.redb");
+    let head = fixture(&path)?;
+    let HomeRecord::Committed { commit_proof, .. } = &head.record else {
+        return Err("commit".into());
+    };
+    // A real redb schema error prevents the window transaction from persisting.
+    // Unlike a core-only failpoint, this reaches both production submit engines.
+    {
+        let db = redb::Database::create(&path)?;
+        let tx = db.begin_write()?;
+        tx.open_table(redb::TableDefinition::<&str, &str>::new("migration_window_closed_v1"))?
+            .insert("unwritable", "wrong value type")?;
+        tx.commit()?;
+    }
+    let store = RouterRedbStore::open(&path)?;
+    let state = Arc::new(RouterCore::new());
+    state.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([8; 32])));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let client = crate::router_runtime::LocalFederationForwardClient {
+        url: format!("http://{}/forward", listener.local_addr()?),
+        admin_token: None,
+        source_node_id: "A".into(),
+    };
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    for now in [commit_proof.body.forward_until - 100, commit_proof.body.forward_until] {
+        for asynchronous in [false, true] {
+            for client in [Some(&client), None] {
+                let forward = AsyncForwardContext {
+                    client,
+                    semaphore: &semaphore,
+                    timeout: std::time::Duration::from_millis(100),
+                };
+                let response = at(now, || {
+                    let envelope = super::migration_tests::envelope("moving", "storage-failure")
+                        .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+                    if asynchronous {
+                        runtime.block_on(submit_envelope_async(
+                            &state,
+                            &store,
+                            forward,
+                            envelope,
+                            Instant::now(),
+                            RouterEnvelopeOrigin::Federation,
+                        ))
+                    } else {
+                        submit_envelope(
+                            &state,
+                            &store,
+                            forward,
+                            envelope,
+                            Instant::now(),
+                            RouterEnvelopeOrigin::Federation,
+                        )
+                    }
+                })?;
+                if client.is_some() {
+                    assert_eq!(response.outcome, "forward_in_progress");
+                } else {
+                    assert_eq!(response.migration_refusal, Some(Refusal::StorageUnavailable));
+                }
+                assert_eq!(response.inbox_seq, None);
+                assert_eq!(semaphore.available_permits(), 8);
+                assert_eq!(
+                    listener.accept().err().map(|e| e.kind()),
+                    Some(std::io::ErrorKind::WouldBlock)
+                );
+            }
+        }
+    }
+    assert_eq!(state.resume("moving", 0, 10), []);
+    drop(store);
+    // Repair only the failed table. The same request can now reach federation,
+    // proving that the negative arm did not poison the tuple reservation.
+    {
+        let db = redb::Database::create(&path)?;
+        let tx = db.begin_write()?;
+        tx.delete_table(redb::TableDefinition::<&str, &str>::new("migration_window_closed_v1"))?;
+        tx.commit()?;
+    }
+    let store = RouterRedbStore::open(&path)?;
+    let server = std::thread::spawn(move || -> std::io::Result<()> {
+        let until = Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match listener.accept() {
+                Ok(_) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    });
+    at(commit_proof.body.forward_until - 100, || {
+        submit_envelope(
+            &state,
+            &store,
+            AsyncForwardContext {
+                client: Some(&client),
+                semaphore: &semaphore,
+                timeout: std::time::Duration::from_millis(100),
+            },
+            super::migration_tests::envelope("moving", "storage-failure")
+                .map_err(|e| anyhow::Error::msg(e.to_string()))?,
+            Instant::now(),
+            RouterEnvelopeOrigin::Federation,
+        )
+    })?;
+    server.join().map_err(|_| "forward server")??;
     Ok(())
 }

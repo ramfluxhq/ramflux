@@ -715,6 +715,8 @@ pub(crate) fn ensure_receive_target_node(
 mod tests {
     use super::*;
 
+    mod outbound_migration;
+
     fn inbound_timing(now: u64) -> InboundForwardTiming {
         InboundForwardTiming {
             now,
