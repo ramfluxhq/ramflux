@@ -8,15 +8,15 @@ use super::*;
 async fn periodic_schedule_keeps_grid_after_unequal_wake_delays() -> TestResult {
     let origin = tokio::time::Instant::now();
     let mut next = origin + REFRESH_INTERVAL;
-    assert!(advance_sweep(&mut next, true, origin + Duration::from_secs(155)));
+    assert!(advance_sweep(&mut next, origin + Duration::from_secs(155)));
     assert_eq!(
         next,
         origin + Duration::from_secs(300),
         "wake latency must not shift the interval grid"
     );
-    assert!(advance_sweep(&mut next, true, origin + Duration::from_secs(301)));
+    assert!(advance_sweep(&mut next, origin + Duration::from_secs(301)));
     assert_eq!(next, origin + Duration::from_secs(450));
-    assert!(!advance_sweep(&mut next, false, origin + Duration::from_secs(449)));
+    assert!(!advance_sweep(&mut next, origin + Duration::from_secs(449)));
     let (mut account, native, _io) = account().await?;
     account.head_refresh.pending.clear();
     let old = Instant::now().checked_sub(Duration::from_secs(121)).ok_or("clock")?;
