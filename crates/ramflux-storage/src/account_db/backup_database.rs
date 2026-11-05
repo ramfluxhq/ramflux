@@ -43,6 +43,7 @@ pub struct BackupInputObservation {
 enum MarkerAuthoritySource {
     LiveAccountKey,
     ArchiveInput,
+    FreshArchiveInput,
 }
 
 pub struct BackupDatabase {
@@ -97,6 +98,19 @@ impl BackupDatabase {
         Self::open_with_source(path, key, mode, MarkerAuthoritySource::ArchiveInput)
     }
 
+    /// Opens a newly unpacked private archive, ignoring archive-supplied staging metadata.
+    /// Later private reopens use the retained origin instead.
+    /// # Errors
+    /// Returns authentication, schema or storage errors.
+    #[doc(hidden)]
+    pub fn open_original_restore_input(
+        path: &Path,
+        key: &AccountDbKey,
+        mode: BackupOpenMode,
+    ) -> Result<Self, StorageError> {
+        Self::open_with_source(path, key, mode, MarkerAuthoritySource::FreshArchiveInput)
+    }
+
     fn open_with_source(
         path: &Path,
         key: &AccountDbKey,
@@ -123,10 +137,16 @@ impl BackupDatabase {
         crate::schema_object_erasure::validate(&db)?;
         // P1's schema-only private upgrade never omits rows. Capture before any
         // candidate normalization and retain the input's original version.
+        if matches!(source, MarkerAuthoritySource::FreshArchiveInput) {
+            db.execute_batch("DROP TABLE IF EXISTS main.backup_input_origin;")?;
+        }
         let original_input = observation::capture(
             &db,
             mode == BackupOpenMode::PreNormalization
-                && matches!(source, MarkerAuthoritySource::ArchiveInput),
+                && matches!(
+                    source,
+                    MarkerAuthoritySource::ArchiveInput | MarkerAuthoritySource::FreshArchiveInput
+                ),
         )?;
         if input_version < crate::schema_object_erasure::VERSION {
             let writer = crate::database::Connection::open(path)?;
@@ -145,7 +165,7 @@ impl BackupDatabase {
         // An archive's enclosing key is never MAC authority. Record old keyed
         // markers as unmatched before minting fresh-install authority.
         match source {
-            MarkerAuthoritySource::ArchiveInput => {
+            MarkerAuthoritySource::ArchiveInput | MarkerAuthoritySource::FreshArchiveInput => {
                 super::mac_subkeys::initialize_archive(&mut db, key)?;
             }
             MarkerAuthoritySource::LiveAccountKey => {

@@ -132,3 +132,30 @@ fn checked_pre_bundle_input_can_be_restored_twice_without_foreign_authority()
     assert_eq!(std::fs::read(&archive_path)?, original);
     Ok(())
 }
+
+#[test]
+fn initial_archive_observation_ignores_archive_supplied_private_origin()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let index = AccountIndex::open(root.path())?;
+    index.create_account("account", "principal")?;
+    let key = AccountDbKey::generate()?;
+    let db = AccountDb::open(&index, "account", &key)?;
+    for (n, mode) in
+        [BackupOpenMode::PreNormalization, BackupOpenMode::Normalized].into_iter().enumerate()
+    {
+        let path = root.path().join(format!("input-{n}.db"));
+        let saved = db.write_backup_snapshot(&path)?;
+        let raw = raw_snapshot(&path, &saved.key)?;
+        let physical: i64 =
+            raw.query_row("SELECT MAX(schema_version) FROM schema_migration", [], |r| r.get(0))?;
+        raw.execute_batch("CREATE TABLE backup_input_origin(singleton INTEGER PRIMARY KEY,schema_version INTEGER NOT NULL); INSERT INTO backup_input_origin VALUES(1,12);")?;
+        drop(raw);
+        let input = open_checked_input(&path, &saved.key, &saved.counts, mode)
+            .map_err(|e| format!("initial archive: {e:?}"))?;
+        assert_eq!(input.original_input().schema_version, physical);
+        let reopened = BackupDatabase::open_restore_input(&path, &saved.key, mode)?;
+        assert_eq!(reopened.original_input().schema_version, physical);
+    }
+    Ok(())
+}

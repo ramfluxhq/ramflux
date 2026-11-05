@@ -677,7 +677,7 @@ pub(super) fn open_checked_input(
 ) -> Result<BackupDatabase, BackupFailure> {
     #[cfg(test)]
     super::tests::selector_normalization_tests::record_open("worker-input");
-    let db = BackupDatabase::open_restore_input(path, key, mode)
+    let db = BackupDatabase::open_original_restore_input(path, key, mode)
         .map_err(|error| storage_error(&error))?;
     if &db.original_input().counts != authenticated_counts {
         return Err(failure(BackupFailureCode::Tampered));
