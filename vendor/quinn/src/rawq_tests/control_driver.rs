@@ -304,7 +304,11 @@ async fn full_directions_pause_raw_duplicate_retransmit_and_concurrent_timer() {
     assert_eq!(parked[6], before[6] + 4);
     assert_eq!(parked[7], 0, "parked packet never ACKed");
     inject(&h.incoming, pending.clone());
-    inject(&h.incoming, packet(103, first + 3, 1));
+    inject(
+        &h.incoming,
+        h.client_conn
+            .control_test(|p| p.control_test_packet(104, false, &[0x01])),
+    );
     until(|| h.server.rawq_pool().snapshot().0.items >= 3).await;
     for _ in 0..3 {
         tokio::task::yield_now().await;
@@ -332,27 +336,49 @@ async fn full_directions_pause_raw_duplicate_retransmit_and_concurrent_timer() {
     until(|| {
         probe(&h.server_conn, 102)[5] == u64::MAX
             && probe(&h.server_conn, 102)[9] == 0
-            && probe(&h.server_conn, 102)[6] >= before[6] + 6
+            && probe(&h.server_conn, 102)[6] >= before[6] + 5
+            && probe(&h.server_conn, 102)[0] == 0
+            && probe(&h.server_conn, 102)[1] == 0
+            && h.server_conn.control_test_counts().1 >= counts.1 + 2
     })
     .await;
     let done = probe(&h.server_conn, 102);
     ceilings(done);
     assert_eq!(
         done[6],
-        before[6] + 6,
-        "pending producer once, duplicate zero, later packet once"
+        before[6] + 5,
+        "pending producer once and duplicate zero"
     );
     assert!(done[3] > parked[3]);
     assert!(
         h.server_conn.control_test_counts().0 > counts.0,
         "real credit waker ran"
     );
+    let issued = h.server_conn.control_test(|p| p.control_test_cids());
+    inject(&h.incoming, packet(103, first + 3, 1));
+    until(|| {
+        probe(&h.server_conn, 103)[6] == done[6] + 1
+            && probe(&h.server_conn, 103)[0] == 0
+            && probe(&h.server_conn, 103)[1] == 0
+    })
+    .await;
+    assert_eq!(
+        h.server_conn.control_test(|p| p.control_test_cids()),
+        issued,
+        "later RETIRE retransmission must not issue another local CID"
+    );
+    let retransmitted = probe(&h.server_conn, 103);
     inject(&h.incoming, pending);
-    until(|| h.server_conn.control_test_counts().1 >= counts.1 + 3).await;
+    until(|| h.server_conn.control_test_counts().1 >= counts.1 + 4).await;
     assert_eq!(
         probe(&h.server_conn, 102)[6],
-        done[6],
+        retransmitted[6],
         "valid duplicate cannot replay effects"
+    );
+    assert_eq!(
+        h.server_conn.control_test(|p| p.control_test_cids()),
+        issued,
+        "duplicate RETIRE must not issue another local CID"
     );
     h.server.close(0u32.into(), b"done");
     timeout(Duration::from_secs(5), h.server.wait_idle())
