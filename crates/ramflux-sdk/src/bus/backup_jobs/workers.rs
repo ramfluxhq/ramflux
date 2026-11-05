@@ -112,7 +112,7 @@ pub(super) fn require_archive_generation(context: &BackupContext) -> Result<(), 
     Ok(())
 }
 
-fn archive_totals(
+pub(super) fn archive_totals(
     counts: &BackupCounts,
     size: u64,
     missing_count: u64,
@@ -141,21 +141,35 @@ impl BackupJobs {
         cancel: &Arc<std::sync::atomic::AtomicBool>,
         counts: &BackupCounts,
     ) -> Result<BackupAttachmentChecks, BackupFailure> {
-        let checks = db
-            .verify_attachments(|items, bytes| {
-                if cancel.load(Ordering::Acquire) {
-                    return Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted).into());
-                }
-                self.progress(
-                    &job.job_id,
-                    BackupCategory::Attachments,
-                    items,
-                    bytes,
-                    Some(counts.attachment_bytes),
-                );
-                Ok(())
-            })
-            .map_err(|error| storage_error(&error))?;
+        self.verify_files_mode(job, db, cancel, counts, false)
+    }
+    fn verify_files_mode(
+        &self,
+        job: &BackupJob,
+        db: &BackupDatabase,
+        cancel: &Arc<std::sync::atomic::AtomicBool>,
+        counts: &BackupCounts,
+        candidate: bool,
+    ) -> Result<BackupAttachmentChecks, BackupFailure> {
+        let progress = |items, bytes| {
+            if cancel.load(Ordering::Acquire) {
+                return Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted).into());
+            }
+            self.progress(
+                &job.job_id,
+                BackupCategory::Attachments,
+                items,
+                bytes,
+                Some(counts.attachment_bytes),
+            );
+            Ok(())
+        };
+        let checks = if candidate {
+            db.verify_candidate_input_attachments(progress)
+        } else {
+            db.verify_attachments(progress)
+        }
+        .map_err(|error| storage_error(&error))?;
         let checks = BackupAttachmentChecks {
             verified: checks.verified,
             mismatched: checks.mismatched,
@@ -365,6 +379,14 @@ impl BackupJobs {
         job: &BackupJob,
         secret: Zeroizing<String>,
     ) -> Result<(), BackupFailure> {
+        self.verify_archive_mode(job, secret, false)
+    }
+    pub(super) fn verify_archive_mode(
+        &self,
+        job: &BackupJob,
+        secret: Zeroizing<String>,
+        candidate: bool,
+    ) -> Result<(), BackupFailure> {
         let cancel =
             self.cancellation(&job.job_id).map_err(|_| failure(BackupFailureCode::Interrupted))?;
         let file =
@@ -414,13 +436,7 @@ impl BackupJobs {
         decoder.decrypt(&mut input, &mut unpack).map_err(|error| stream_error(error, false))?;
         let mut metadata =
             unpack.inner.finish().map_err(|_| failure(BackupFailureCode::Truncated))?;
-        if context.totals.get("database_bytes").copied()
-            != Some(
-                std::fs::metadata(&path).map_err(|_| failure(BackupFailureCode::Unreadable))?.len(),
-            )
-        {
-            return Err(failure(BackupFailureCode::Tampered));
-        }
+        check_database_size(&path, &context)?;
         metadata
             .validate(&context.account_id)
             .map_err(|_| failure(BackupFailureCode::RootConflict))?;
@@ -429,7 +445,7 @@ impl BackupJobs {
             &path,
             &AccountDbKey::from_bytes(metadata.database_key),
             &counts,
-            ramflux_storage::BackupOpenMode::Normalized,
+            input_mode(candidate),
         )?;
         db.check_integrity().map_err(|error| storage_error(&error))?;
         db.rekey(&key).map_err(|error| storage_error(&error))?;
@@ -439,10 +455,19 @@ impl BackupJobs {
         {
             return Err(failure(BackupFailureCode::Tampered));
         }
-        let checks = self.verify_files(job, &db, &cancel, &counts)?;
+        let checks = self.verify_files_mode(job, &db, &cancel, &counts, candidate)?;
         drop(db);
-        let preview =
-            self.archive_preview(&metadata, &path, &key, context.created_at, &job.job_id)?;
+        let preview = if candidate {
+            self.archive_preview_mode(
+                &metadata,
+                &path,
+                &key,
+                (context.created_at, &job.job_id),
+                true,
+            )?
+        } else {
+            self.archive_preview(&metadata, &path, &key, context.created_at, &job.job_id)?
+        };
         format::save_metadata(&directory.join("identity.sealed"), &master, &metadata)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         std::fs::File::open(&directory)
@@ -469,6 +494,17 @@ impl BackupJobs {
         created_at: u64,
         job_id: &str,
     ) -> Result<BackupArchivePreview, BackupFailure> {
+        self.archive_preview_mode(metadata, incoming, key, (created_at, job_id), false)
+    }
+    fn archive_preview_mode(
+        &self,
+        metadata: &Metadata,
+        incoming: &std::path::Path,
+        key: &AccountDbKey,
+        origin: (u64, &str),
+        candidate: bool,
+    ) -> Result<BackupArchivePreview, BackupFailure> {
+        let (created_at, job_id) = origin;
         let (id, merge) = if let format::Identity::Native { native } = &metadata.identity {
             let target = self.check_existing_native_identity(native)?;
             let merge = target.is_some();
@@ -487,7 +523,11 @@ impl BackupJobs {
         } else {
             (
                 metadata.identity.account_id().to_owned(),
-                self.check_existing_identity(metadata, incoming, key)?,
+                if candidate {
+                    self.check_existing_identity_mode(metadata, incoming, key, true)?
+                } else {
+                    self.check_existing_identity(metadata, incoming, key)?
+                },
             )
         };
         Ok(BackupArchivePreview {
@@ -621,18 +661,40 @@ fn archive_metadata(
 }
 
 /// Candidate mode is selected only by internal callers until restore normalization is complete.
-fn open_checked_input(
+pub(super) fn open_checked_input(
     path: &std::path::Path,
     key: &AccountDbKey,
     authenticated_counts: &BackupCounts,
     mode: ramflux_storage::BackupOpenMode,
 ) -> Result<BackupDatabase, BackupFailure> {
+    #[cfg(test)]
+    super::tests::selector_normalization_tests::record_open("worker-input");
     let db = BackupDatabase::open_restore_input(path, key, mode)
         .map_err(|error| storage_error(&error))?;
     if &db.original_input().counts != authenticated_counts {
         return Err(failure(BackupFailureCode::Tampered));
     }
     Ok(db)
+}
+
+fn input_mode(candidate: bool) -> ramflux_storage::BackupOpenMode {
+    if candidate {
+        ramflux_storage::BackupOpenMode::PreNormalization
+    } else {
+        ramflux_storage::BackupOpenMode::Normalized
+    }
+}
+
+fn check_database_size(
+    path: &std::path::Path,
+    context: &BackupContext,
+) -> Result<(), BackupFailure> {
+    if context.totals.get("database_bytes").copied()
+        != Some(std::fs::metadata(path).map_err(|_| failure(BackupFailureCode::Unreadable))?.len())
+    {
+        return Err(failure(BackupFailureCode::Tampered));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

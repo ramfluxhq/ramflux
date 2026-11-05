@@ -22,7 +22,7 @@ fn legacy_input(db: &AccountDb) -> Result<(), StorageError> {
         object: &json!({}),
         updated_at: 1,
     })?;
-    db.connection.execute("UPDATE object_index SET manifest_hash=zeroblob(32),chunk_manifest_hash=zeroblob(32) WHERE object_id='legacy'", [])?;
+    db.connection.execute("UPDATE object_index SET chunk_count=0,manifest_hash=zeroblob(32),chunk_manifest_hash=zeroblob(32) WHERE object_id='legacy'", [])?;
     db.persist_actor_state("attachment/reference/legacy", &json!({"legacy":true}))?;
     db.connection.execute_batch("DROP TABLE IF EXISTS account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14; DELETE FROM schema_migration WHERE schema_version=13; DROP INDEX IF EXISTS runtime_outbox_object_selector;")?;
     db.connection.execute(
@@ -106,6 +106,45 @@ fn pre_normalization_keeps_authentication_and_schema_refusals() -> TestResult {
         Err(StorageError::MigrationChecksumMismatch { .. })
     ));
     drop(input);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+thread_local! { static FAIL_UPGRADE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+pub(super) fn after_upgrade() -> Result<(), StorageError> {
+    if FAIL_UPGRADE.get() {
+        return Err(StorageError::AuthorizationRejected);
+    }
+    Ok(())
+}
+
+#[test]
+fn e14_staged_v12_upgrade_rollback() -> TestResult {
+    let (root, db) = crate::tests::test_db("upgrade-recovery")?;
+    legacy_input(&db)?;
+    let source = db.path.clone();
+    drop(db);
+    let original = std::fs::read(&source)?;
+    let key = AccountDbKey::derive("acct", b"storage-test-secret");
+    let stage = root.join("failed.db");
+    std::fs::copy(&source, &stage)?;
+    FAIL_UPGRADE.set(true);
+    let result = BackupDatabase::open_restore_input(&stage, &key, BackupOpenMode::PreNormalization);
+    FAIL_UPGRADE.set(false);
+    assert!(matches!(result, Err(StorageError::AuthorizationRejected)));
+    std::fs::remove_file(&stage)?;
+    assert_eq!(std::fs::read(&source)?, original);
+    std::fs::copy(&source, &stage)?;
+    let mut retry =
+        BackupDatabase::open_restore_input(&stage, &key, BackupOpenMode::PreNormalization)?;
+    assert_eq!(retry.original_input().schema_version, 12);
+    assert_eq!(retry.original_input().counts.attachments, 1);
+    retry.normalize_backup_candidate()?;
+    drop(retry);
+    let strict = BackupDatabase::open(&stage, &key)?;
+    assert_eq!(strict.counts()?.attachments, 0);
+    assert_eq!(std::fs::read(&source)?, original);
+    drop(strict);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

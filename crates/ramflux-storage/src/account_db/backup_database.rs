@@ -118,6 +118,17 @@ impl BackupDatabase {
             |r| r.get(0),
         )?;
         crate::schema_object_erasure::validate(&db)?;
+        // P1's schema-only private upgrade never omits rows. Capture before any
+        // candidate normalization and retain the input's original version.
+        let original_input = BackupInputObservation {
+            counts: super::backup::read_counts(&db)?,
+            unowned_legacy_actor_count: db.query_row(
+                "SELECT count(*) FROM runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22))",
+                [],
+                |row| row.get(0),
+            )?,
+            schema_version: input_version,
+        };
         if input_version < crate::schema_object_erasure::VERSION {
             let writer = crate::database::Connection::open(path)?;
             crate::encryption::apply_key(&writer, key)?;
@@ -130,6 +141,8 @@ impl BackupDatabase {
             crate::encryption::apply_key(&writer, key)?;
             crate::schema::ensure_object_transfer_state_columns(&writer)?;
         }
+        #[cfg(test)]
+        tests::after_upgrade()?;
         // An archive's enclosing key is never MAC authority. Record old keyed
         // markers as unmatched before minting fresh-install authority.
         match source {
@@ -142,17 +155,6 @@ impl BackupDatabase {
         }
         db.execute_batch(super::event_counter::SCHEMA)?;
         super::message_footprint::install(&db)?;
-        // P1's schema-only private upgrade never omits rows. Capture before any
-        // candidate normalization and retain the input's original version.
-        let original_input = BackupInputObservation {
-            counts: super::backup::read_counts(&db)?,
-            unowned_legacy_actor_count: db.query_row(
-                "SELECT count(*) FROM runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22))",
-                [],
-                |row| row.get(0),
-            )?,
-            schema_version: input_version,
-        };
         if mode == BackupOpenMode::Normalized && original_input.unowned_legacy_actor_count > 0 {
             return Err(StorageError::ObjectOwnershipUnverified { schema_version: input_version });
         }
@@ -272,6 +274,22 @@ impl BackupDatabase {
     /// Returns SQL errors; counts have no row limit.
     pub fn counts(&self) -> Result<BackupCounts, StorageError> {
         Ok(super::backup::read_counts(&self.db)?)
+    }
+    /// Checks payloads and payload-free legacy placeholder records before normalization.
+    /// Placeholder metadata counts as a checked record, never a verified payload.
+    /// # Errors
+    /// Returns the attachment verifier's storage and cancellation errors.
+    #[doc(hidden)]
+    pub fn verify_candidate_input_attachments(
+        &self,
+        progress: impl FnMut(u64, u64) -> Result<(), StorageError>,
+    ) -> Result<BackupAttachmentVerification, StorageError> {
+        let mut checks = self.verify_attachments(progress)?;
+        let placeholders: u64 = self.db.query_row(
+            "SELECT count(*) FROM object_index WHERE backup_excluded=0 AND tombstoned=1 AND length(ciphertext)=0 AND chunk_count=0",
+            [], |r|r.get(0))?;
+        checks.verified += placeholders;
+        Ok(checks)
     }
     /// Authenticates every attachment and both hashes, streaming BLOBs in bounded buffers.
     /// # Errors

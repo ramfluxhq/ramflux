@@ -12,7 +12,7 @@ use crate::{
     RamfluxClient, SdkError,
     backup::{BackupJob, VerifiedBackupStaging},
 };
-use ramflux_storage::{AccountDbKey, BackupCounts, BackupDatabase, BackupIndexInstall};
+use ramflux_storage::{AccountDbKey, BackupCounts, BackupIndexInstall};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -231,8 +231,9 @@ impl BackupJobs {
         let target = generation.join("account.db");
         // Retain the independently wrapped live data key; no archive passphrase is used.
         install_step("copy", source.copy_to(&target, &local_key))?;
-        drop(source);
-        let mut merged = BackupDatabase::open_restore_input(
+        #[cfg(test)]
+        super::tests::selector_normalization_tests::record_open("stage");
+        let mut merged = source.reopen_restore_input(
             &target,
             &local_key,
             if candidate {
@@ -250,8 +251,7 @@ impl BackupJobs {
             },
         )?;
         if candidate {
-            drop(merged);
-            merged = BackupDatabase::open(&target, &local_key)?;
+            merged = strict_candidate(&merged, &target, &local_key)?;
         }
         install_step("integrity", merged.check_integrity())?;
         install_step("events", merged.enqueue_restore_events(id, &job.job_id))?;
@@ -298,6 +298,19 @@ impl BackupJobs {
 #[cfg(test)]
 #[path = "native_writer_tests.rs"]
 mod writer_tests;
+
+fn strict_candidate(
+    db: &ramflux_storage::BackupDatabase,
+    path: &Path,
+    key: &AccountDbKey,
+) -> Result<ramflux_storage::BackupDatabase, SdkError> {
+    #[cfg(test)]
+    {
+        super::tests::selector_normalization_tests::record_open("normalized");
+        super::tests::selector_normalization_tests::record_open("strict");
+    }
+    Ok(db.reopen_restore_input(path, key, ramflux_storage::BackupOpenMode::Normalized)?)
+}
 
 #[cfg(test)]
 mod tests {

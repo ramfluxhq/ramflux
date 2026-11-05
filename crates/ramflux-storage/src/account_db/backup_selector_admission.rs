@@ -201,3 +201,6 @@ mod final_deletion_tests;
 
 #[cfg(test)]
 mod history_tests;
+
+#[cfg(test)]
+pub(super) mod staging_tests;

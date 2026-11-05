@@ -149,12 +149,18 @@ impl BackupJobs {
             )?;
             let key =
                 existing_key(&self.index, &self.data_root, &id, local.account_secret.as_bytes())?;
-            open_live_stage(&self.data_root.join(&record.db_relative_path), &key, candidate)?
-                .copy_to(&target, &installed_key)?;
-            let mut merged = open_stage(&target, &installed_key, candidate)?;
+            let mut merged = copy_live_stage(
+                &self.data_root.join(&record.db_relative_path),
+                &key,
+                &target,
+                &installed_key,
+                candidate,
+            )?;
             let report =
                 merge_shared_backup(&mut merged, &incoming, &incoming_key, &local, candidate)?;
             metadata.identity = format::Identity::Legacy { manifest: Box::new(local) };
+            #[cfg(test)]
+            super::tests::selector_normalization_tests::record_open("normalized");
             (report.restored, report.kept_newer)
         } else {
             prepare_fresh_restore(
@@ -166,6 +172,8 @@ impl BackupJobs {
                 candidate,
             )?
         };
+        #[cfg(test)]
+        super::tests::selector_normalization_tests::record_open("strict");
         let db = BackupDatabase::open(&target, &installed_key)?;
         db.check_integrity()?;
         db.enqueue_restore_events(&id, &job.job_id)?;
@@ -254,9 +262,21 @@ fn prepare_fresh_restore(
 ) -> Result<(BackupCounts, BackupCounts), SdkError> {
     let source = open_stage(incoming, incoming_key, candidate)?;
     source.copy_to(target, installed_key)?;
-    let mut db = open_stage(target, installed_key, candidate)?;
+    #[cfg(test)]
+    super::tests::selector_normalization_tests::record_open("stage");
+    let mut db = source.reopen_restore_input(
+        target,
+        installed_key,
+        if candidate {
+            ramflux_storage::BackupOpenMode::PreNormalization
+        } else {
+            ramflux_storage::BackupOpenMode::Normalized
+        },
+    )?;
     if candidate {
         db.normalize_backup_candidate()?;
+        #[cfg(test)]
+        super::tests::selector_normalization_tests::record_open("normalized");
     }
     db.archive_outbound()?;
     db.put_state("backup/reestablishing", &true)?;
@@ -360,9 +380,33 @@ fn open_stage(
     key: &AccountDbKey,
     candidate: bool,
 ) -> Result<BackupDatabase, ramflux_storage::StorageError> {
+    #[cfg(test)]
+    super::tests::selector_normalization_tests::record_open("stage");
     BackupDatabase::open_restore_input(
         path,
         key,
+        if candidate {
+            ramflux_storage::BackupOpenMode::PreNormalization
+        } else {
+            ramflux_storage::BackupOpenMode::Normalized
+        },
+    )
+}
+
+fn copy_live_stage(
+    path: &Path,
+    key: &AccountDbKey,
+    target: &Path,
+    installed_key: &AccountDbKey,
+    candidate: bool,
+) -> Result<BackupDatabase, ramflux_storage::StorageError> {
+    let source = open_live_stage(path, key, candidate)?;
+    source.copy_to(target, installed_key)?;
+    #[cfg(test)]
+    super::tests::selector_normalization_tests::record_open("stage");
+    source.reopen_restore_input(
+        target,
+        installed_key,
         if candidate {
             ramflux_storage::BackupOpenMode::PreNormalization
         } else {
@@ -387,6 +431,8 @@ pub(super) fn open_live_stage(
     key: &AccountDbKey,
     candidate: bool,
 ) -> Result<BackupDatabase, ramflux_storage::StorageError> {
+    #[cfg(test)]
+    super::tests::selector_normalization_tests::record_open("stage");
     if candidate {
         BackupDatabase::open_live_restore_input(path, key)
     } else {

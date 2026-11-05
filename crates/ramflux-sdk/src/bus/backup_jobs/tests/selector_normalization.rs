@@ -70,6 +70,7 @@ fn run(
     fault: Option<InstallPoint>,
     invalid: Option<&str>,
 ) -> TestResult {
+    OPEN_LOG.with(|log| log.borrow_mut().clear());
     let source_root = tempfile::tempdir()?;
     let target_root = tempfile::tempdir()?;
     let source_index = AccountIndex::open(source_root.path())?;
@@ -97,14 +98,19 @@ fn run(
     let target_index = AccountIndex::open(target_root.path())?;
     if matches!(kind, PathKind::Full) {
         initialize_local(target_root.path(), &target_index)?;
+        prepare_local_inherited(version, target_root.path(), &target_index)?;
     }
     let jobs = BackupJobs::new(target_root.path(), target_index.clone())?;
-    let job = jobs.start(crate::backup::BackupJobKind::Restore, "archive.rfb".into())?;
+    let job = jobs.start(
+        crate::backup::BackupJobKind::Restore,
+        target_root.path().join("archive.rfb").to_string_lossy().into_owned(),
+    )?;
     let dir = jobs.directory(&job.job_id)?;
     let path = dir.join("account.db");
     let saved = state.client.account_db()?.write_backup_snapshot(&path)?;
     drop(state);
     prepare_input(&path, &saved.key, version, unwrapped, invalid)?;
+    check_input(&path, &saved.key)?;
     let before = std::fs::read(&path)?;
     let source_copy = source_root.path().join("unchanged.db");
     std::fs::write(&source_copy, &before)?;
@@ -114,16 +120,12 @@ fn run(
         database_key: *saved.key.bytes(),
         ca_pem: b"test-ca".to_vec(),
     };
-    let master = [8; 32];
-    format::save_metadata(&dir.join("identity.sealed"), &master, &metadata)?;
-    let staging = crate::backup::VerifiedBackupStaging::new(
-        dir,
-        master,
-        crate::bus::backup_jobs::service::now(),
-    )?;
+    let staging = worker_staging(&jobs, &job, &dir, &metadata)?;
+    let archive_before = std::fs::read(&job.path)?;
     let previous = target_index.account(id).ok().map(|r| r.db_relative_path);
     let seen = install_hook(&jobs, &target_index, id, fault)?;
     let result = jobs.install_generation_mode(&job, staging, None, None, true);
+    assert_eq!(std::fs::read(&job.path)?, archive_before);
     if invalid.is_some() {
         assert!(matches!(
             result,
@@ -142,18 +144,8 @@ fn run(
     if fault == Some(InstallPoint::BeforeCommit) || invalid.is_some() {
         assert_eq!(selected, previous);
     } else {
-        let relative = selected.ok_or("selected generation")?;
-        let key = crate::bus::backup_jobs::install::existing_key(
-            &target_index,
-            target_root.path(),
-            id,
-            b"account-test-secret",
-        )?;
-        let installed = BackupDatabase::open(&target_root.path().join(relative), &key)?;
-        installed.check_integrity()?;
-        let db = raw(&target_root.path().join(target_index.account(id)?.db_relative_path), &key)?;
-        assert_clean(&db)?;
-        assert_eq!(db.query_row("SELECT count(*) FROM object_retention_reference WHERE selector IN ('history-owned','attachment-owned')",[],|r|r.get::<_,u64>(0))?,2);
+        assert!(selected.is_some());
+        assert_installed(&target_index, target_root.path(), id, b"account-test-secret")?;
     }
     if invalid.is_none() {
         let seen = seen.lock().map_err(|_| "seen")?;
@@ -178,6 +170,12 @@ fn corrupt(db: &rusqlite::Connection, what: &str) -> TestResult {
     Ok(())
 }
 fn assert_clean(db: &rusqlite::Connection) -> TestResult {
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM object_index WHERE object_id='unowned'", [], |r| r
+            .get::<_, u64>(0))?,
+        0,
+        "omit unresolved placeholder"
+    );
     assert_eq!(db.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind='attachment/reference/unowned'",[],|r|r.get::<_,u64>(0))?,0,"fresh normalization must omit inherited actor");
     assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('backup_reference_admission','backup_selector_admission','backup_lookup_origin','backup_target_delete')",[],|r|r.get::<_,u64>(0))?,0);
     assert_eq!(db.query_row("SELECT count(*) FROM object_message_reference m JOIN object_retention_reference r USING(reference_hash) WHERE m.message_id='owner' AND r.selector IN ('history-owned','attachment-owned')",[],|r|r.get::<_,u64>(0))?,2);
@@ -269,24 +267,24 @@ fn run_native(
     let (version, unwrapped, fault, invalid) = case;
     let index = client.account_index()?.clone();
     let jobs = BackupJobs::new(root, index.clone())?;
-    let job = jobs.start(crate::backup::BackupJobKind::Restore, "native.rfb".into())?;
+    let job = jobs.start(
+        crate::backup::BackupJobKind::Restore,
+        root.join("archive.rfb").to_string_lossy().into_owned(),
+    )?;
     let dir = jobs.directory(&job.job_id)?;
     let before = std::fs::read(snapshot)?;
     std::fs::copy(snapshot, dir.join("account.db"))?;
     prepare_input(&dir.join("account.db"), &saved.key, version, unwrapped, invalid)?;
+    check_input(&dir.join("account.db"), &saved.key)?;
     let metadata =
         format::Metadata { identity, database_key: *saved.key.bytes(), ca_pem: Vec::new() };
-    let master = [8; 32];
-    format::save_metadata(&dir.join("identity.sealed"), &master, &metadata)?;
-    let staging = crate::backup::VerifiedBackupStaging::new(
-        dir,
-        master,
-        crate::bus::backup_jobs::service::now(),
-    )?;
+    let staging = worker_staging(&jobs, &job, &dir, &metadata)?;
+    let archive_before = std::fs::read(&job.path)?;
     let previous = index.account("account")?.db_relative_path;
     drop(client);
     let seen = install_hook(&jobs, &index, "account", fault)?;
     let result = jobs.install_generation_mode(&job, staging, key, None, true);
+    assert_eq!(std::fs::read(&job.path)?, archive_before);
     assert_eq!(std::fs::read(snapshot)?, before);
     if invalid.is_some() {
         assert!(matches!(
@@ -304,16 +302,7 @@ fn run_native(
     if fault == Some(InstallPoint::BeforeCommit) || invalid.is_some() {
         assert_eq!(index.account("account")?.db_relative_path, previous);
     } else {
-        let key = crate::bus::backup_jobs::install::existing_key(
-            &index,
-            root,
-            "account",
-            b"local-secret",
-        )?;
-        let path = root.join(index.account("account")?.db_relative_path);
-        let db = BackupDatabase::open(&path, &key)?;
-        db.check_integrity()?;
-        assert_clean(&raw(&path, &key)?)?;
+        assert_installed(&index, root, "account", b"local-secret")?;
     }
     if invalid.is_none() {
         assert!(seen.lock().map_err(|_| "seen")?.contains(&InstallPoint::BeforeCommit));
@@ -412,6 +401,10 @@ fn native_case(
     let snapshot = source_root.join("native-source.db");
     let saved = client.account_db()?.write_backup_snapshot(&snapshot)?;
     BackupDatabase::open(&snapshot, &saved.key)?.sanitize_native_backup()?;
+    if version == 13 {
+        let path = target_root.join(client.account_index()?.account("account")?.db_relative_path);
+        prepare_input(&path, &native_key.as_ref().ok_or("key")?.key, 13, false, None)?;
+    }
     run_native(
         client,
         identity,
@@ -429,7 +422,7 @@ fn prepare_input(
     invalid: Option<&str>,
 ) -> TestResult {
     let db = raw(path, key)?;
-    if version == 12 {
+    if version <= 13 {
         // Same pre-v13 ledger reconstruction as storage's selector_upgrade_tests:
         // v13 has no table/column changes; remove its candidate index and v14 bundle.
         db.execute_batch("DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version>12; DROP INDEX IF EXISTS runtime_outbox_object_selector; UPDATE schema_migration SET checksum='2026-06-14-account-core-v1;writer-floor=12;object-erasure-v1' WHERE schema_version=1;")?;
@@ -460,9 +453,10 @@ fn prepare_input(
     )?;
     db.execute("INSERT INTO object_index(object_id,chunk_manifest_hash,object_state,total_cipher_size,chunk_count,created_at,updated_at,manifest_hash,nonce,ciphertext,tombstoned) VALUES('unowned',zeroblob(32),'revoked',0,0,1,1,zeroblob(32),'',x'',1)",[])?;
     drop(db);
-    let opened = BackupDatabase::open_restore_input(path, key, BackupOpenMode::PreNormalization)?;
-    assert_eq!(opened.original_input().unowned_legacy_actor_count, 1);
-    drop(opened);
+    assert_eq!(db_count_unowned(path, key)?, 1);
+    if version == 13 {
+        drop(BackupDatabase::open_live_restore_input(path, key)?);
+    }
     Ok(())
 }
 
@@ -502,6 +496,175 @@ fn fresh_restrictions(client: &mut RamfluxClient) -> TestResult {
             "attachment/upload/fenced",
             &json!({"wire_object_id":"fenced-history","manifest_hash":fenced.manifest_hash,"content_key":"normalization-only-canary"}),
         )?;
+    Ok(())
+}
+
+fn db_count_unowned(path: &Path, key: &ramflux_storage::AccountDbKey) -> TestResult<u64> {
+    Ok(raw(path, key)?.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind='attachment/reference/unowned'",
+        [],
+        |r| r.get(0),
+    )?)
+}
+fn check_input(path: &Path, key: &ramflux_storage::AccountDbKey) -> TestResult {
+    let db = raw(path, key)?;
+    let version: i64 =
+        db.query_row("SELECT max(schema_version) FROM schema_migration", [], |r| r.get(0))?;
+    drop(db);
+    // Snapshot expected counts before the worker's private schema advance.
+    let copy = path.with_extension("original.db");
+    std::fs::copy(path, &copy)?;
+    let input = BackupDatabase::open_restore_input(&copy, key, BackupOpenMode::PreNormalization)?;
+    let counts = input.original_input().counts.clone();
+    drop(input);
+    std::fs::remove_file(&copy)?;
+    std::fs::copy(path, &copy)?;
+    let checked = crate::bus::backup_jobs::workers::open_checked_input(
+        &copy,
+        key,
+        &counts,
+        BackupOpenMode::PreNormalization,
+    )
+    .map_err(|e| format!("check worker: {e:?}"))?;
+    assert_eq!(checked.original_input().schema_version, version);
+    assert_eq!(checked.original_input().unowned_legacy_actor_count, 1);
+    assert_eq!(checked.counts()?, counts);
+    let copy = path.with_extension("reopen.db");
+    checked.copy_to(&copy, key)?;
+    let reopened = checked.reopen_restore_input(&copy, key, BackupOpenMode::PreNormalization)?;
+    assert_eq!(reopened.original_input(), checked.original_input());
+    assert!(reopened.reopen_restore_input(&copy, key, BackupOpenMode::Normalized).is_err());
+    drop(reopened);
+    std::fs::remove_file(copy)?;
+    Ok(())
+}
+
+#[test]
+fn e14_v12_unowned_actor_with_placeholder_check_and_install_omits() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        run(k, 12, false, None, None)?;
+    }
+    Ok(())
+}
+#[test]
+fn e14_p1_upgraded_target_inherited_unowned_state_restores() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        run(k, 13, false, None, None)?;
+    }
+    Ok(())
+}
+#[test]
+fn e14_every_intermediate_reopen_reaches_normalization_before_strict_validation() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        run(k, 12, false, None, None)?;
+    }
+    Ok(())
+}
+#[test]
+fn e14_malformed_authenticated_graph_still_refuses_atomically() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        run(k, 12, false, None, Some("hash"))?;
+    }
+    Ok(())
+}
+#[test]
+fn e14_source_archive_hash_unchanged() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        run(k, 12, false, Some(InstallPoint::BeforeCommit), None)?;
+        run(k, 12, false, None, None)?;
+    }
+    Ok(())
+}
+
+thread_local! { static OPEN_LOG: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) }; }
+pub(in crate::bus::backup_jobs) fn record_open(event: &'static str) {
+    OPEN_LOG.with(|log| log.borrow_mut().push(event));
+}
+fn assert_open_order() {
+    OPEN_LOG.with(|log| {
+        let log = log.borrow();
+        assert_eq!(log.first(), Some(&"worker-input"));
+        let normalized = log.iter().position(|e| *e == "normalized").unwrap_or(usize::MAX);
+        assert!(normalized < log.len(), "normalization boundary: {log:?}");
+        let strict = log.iter().position(|e| *e == "strict").unwrap_or(usize::MAX);
+        assert!(strict < log.len(), "strict reopen: {log:?}");
+        assert!(normalized < strict, "{log:?}");
+        assert!(log[..normalized].contains(&"stage"), "{log:?}");
+        assert!(!log[..normalized].contains(&"strict"), "{log:?}");
+    });
+}
+
+fn worker_staging(
+    jobs: &BackupJobs,
+    job: &BackupJob,
+    dir: &Path,
+    metadata: &format::Metadata,
+) -> TestResult<crate::backup::VerifiedBackupStaging> {
+    use ramflux_crypto::backup_stream::{BackupContext, encrypt_backup_stream};
+    let path = dir.join("account.db");
+    let key = ramflux_storage::AccountDbKey::from_bytes(metadata.database_key);
+    let count_path = dir.join("count-copy.db");
+    std::fs::copy(&path, &count_path)?;
+    let counts =
+        BackupDatabase::open_restore_input(&count_path, &key, BackupOpenMode::PreNormalization)?
+            .counts()?;
+    std::fs::remove_file(count_path)?;
+    let totals = crate::bus::backup_jobs::workers::archive_totals(
+        &counts,
+        std::fs::metadata(&path)?.len(),
+        0,
+    )
+    .map_err(|e| format!("totals: {e:?}"))?;
+    let context = BackupContext {
+        account_id: metadata.identity.account_id().into(),
+        created_at: crate::bus::backup_jobs::service::now(),
+        totals,
+    };
+    let secret = "staged-upgrade-recovery-secret";
+    let mut output = std::fs::File::create(&job.path)?;
+    encrypt_backup_stream(
+        &mut format::payload(metadata, &path)?,
+        &mut output,
+        secret.as_bytes(),
+        context,
+    )?;
+    drop(output);
+    let original = std::fs::read(&job.path)?;
+    std::fs::remove_dir_all(dir)?;
+    jobs.verify_archive_mode(job, zeroize::Zeroizing::new(secret.into()), true)
+        .map_err(|e| format!("real check worker: {e:?}"))?;
+    assert_eq!(std::fs::read(&job.path)?, original);
+    let (_, staging) = jobs.begin_install(&job.job_id)?;
+    Ok(staging)
+}
+
+fn prepare_local_inherited(version: i64, root: &Path, index: &AccountIndex) -> TestResult {
+    if version == 13 {
+        let key = crate::bus::backup_jobs::install::existing_key(
+            index,
+            root,
+            "alice",
+            b"account-test-secret",
+        )?;
+        prepare_input(&root.join(index.account("alice")?.db_relative_path), &key, 13, false, None)?;
+    }
+    Ok(())
+}
+
+fn assert_installed(index: &AccountIndex, root: &Path, id: &str, secret: &[u8]) -> TestResult {
+    let key = crate::bus::backup_jobs::install::existing_key(index, root, id, secret)?;
+    let path = root.join(index.account(id)?.db_relative_path);
+    let strict = BackupDatabase::open(&path, &key)?;
+    strict.check_integrity()?;
+    assert_clean(&raw(&path, &key)?)?;
+    assert_open_order();
+    drop(strict);
+    let live = ramflux_storage::AccountDb::open(index, id, &key)?;
+    live.checkpoint_retired_secrets()?;
+    let snapshot_path = root.join("post-normalization-snapshot.db");
+    let saved = live.write_backup_snapshot(&snapshot_path)?;
+    BackupDatabase::open(&snapshot_path, &saved.key)?.check_integrity()?;
+    assert_clean(&raw(&snapshot_path, &saved.key)?)?;
     Ok(())
 }
 

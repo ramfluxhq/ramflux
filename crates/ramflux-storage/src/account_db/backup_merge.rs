@@ -345,6 +345,8 @@ impl BackupDatabase {
             super::backup_selector_admission::final_deletion::verify(&self.db)?;
         }
         super::backup_selector_admission::drop_scratch(&self.db)?;
+        #[cfg(test)]
+        super::backup_selector_admission::staging_tests::before_commit(&self.db)?;
         self.db.execute_batch("DROP TABLE backup_local_message_own; DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; DROP TABLE backup_local_consent; DROP TABLE backup_source_consent; DROP TABLE backup_local_link_consent; DROP TABLE backup_source_link_consent; COMMIT;")?;
         Ok(())
     }
