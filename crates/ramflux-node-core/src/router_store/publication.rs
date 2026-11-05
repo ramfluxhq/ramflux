@@ -19,7 +19,7 @@ mod resource_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
-mod view_tests;
+pub(crate) mod view_tests;
 
 use super::incarnation::error;
 use crate::NodeCoreError;
@@ -104,6 +104,7 @@ struct Inbox {
     identity_durable: bool,
     allocated: u64,
     published: u64,
+    committed_settled: u64,
     in_flight: BTreeMap<u64, Arc<Descriptor>>,
     accepted: BTreeMap<u64, Vec<String>>,
     aborted: BTreeMap<u64, u64>,
@@ -392,6 +393,35 @@ impl PublicationCore {
                         .collect(),
                 )
             })
+    }
+
+    /// Published issued and settled floors observed under the same publication lock.
+    #[must_use]
+    pub fn settled_view(&self, target: &str, incarnation: &str) -> (u64, u64) {
+        let registry = lock(&self.shared);
+        registry
+            .inboxes
+            .get(&Key { target: target.into(), incarnation: incarnation.into() })
+            .map_or((0, 0), |inbox| (inbox.published, inbox.committed_settled.min(inbox.published)))
+    }
+
+    // Inbox mutation holds a shard lock. Never wait for the registry here: snapshots
+    // take registry -> shard. Contention preserves the old candidate, not raw A.
+    pub(crate) fn try_settlement_limit(&self, target: &str, incarnation: &str) -> Option<u64> {
+        let registry = self.shared.registry.try_lock().ok()?;
+        registry
+            .inboxes
+            .get(&Key { target: target.into(), incarnation: incarnation.into() })
+            .map(|inbox| inbox.published)
+    }
+
+    pub(crate) fn commit_settled(&self, target: &str, incarnation: &str, settled: u64) {
+        if let Some(inbox) = lock(&self.shared)
+            .inboxes
+            .get_mut(&Key { target: target.into(), incarnation: incarnation.into() })
+        {
+            inbox.committed_settled = inbox.committed_settled.max(settled);
+        }
     }
 
     /// Cancel-safe async predicate, with notification registered before observation.

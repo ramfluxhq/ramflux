@@ -44,6 +44,7 @@ mod migration_barrier;
 pub mod publication;
 mod retention;
 pub mod sender_retry;
+pub(crate) mod settlement;
 mod submission_barrier;
 mod tuple_upgrade;
 pub use identity_registry::IdentityJournalDiscardReport;
@@ -1074,6 +1075,8 @@ impl RouterRedbStore {
         let write_txn =
             self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
+        let (cursor, incarnation) = self.receiver_settlement(&write_txn, cursor)?;
+        let cursor = &cursor;
         let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor)? else {
             return Ok(());
         };
@@ -1099,6 +1102,13 @@ impl RouterRedbStore {
         .map_err(incarnation::error)?;
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
+        }
+        if let Some(id) = incarnation {
+            self.publication_core()?.commit_settled(
+                &cursor.target_delivery_id,
+                &id,
+                cursor.settled_inbox_seq,
+            );
         }
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
         crate::record_router_save_total_us(elapsed_us(save_started));
@@ -1127,6 +1137,8 @@ impl RouterRedbStore {
         let write_txn =
             self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
+        let (cursor, incarnation) = self.receiver_settlement(&write_txn, cursor)?;
+        let cursor = &cursor;
         let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor)? else {
             return Ok(());
         };
@@ -1149,6 +1161,13 @@ impl RouterRedbStore {
         .map_err(incarnation::error)?;
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
+        }
+        if let Some(id) = incarnation {
+            self.publication_core()?.commit_settled(
+                &cursor.target_delivery_id,
+                &id,
+                cursor.settled_inbox_seq,
+            );
         }
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
         crate::record_router_save_total_us(elapsed_us(save_started));
