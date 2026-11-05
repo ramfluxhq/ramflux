@@ -13,7 +13,6 @@ impl Connection {
         if self.control_resource_closed {
             return;
         }
-        self.path.total_recvd = self.path.total_recvd.saturating_add(data.len() as u64);
         let mut remaining = Some(data);
         while let Some(data) = remaining {
             match PartialDecode::new(
@@ -152,6 +151,7 @@ impl Connection {
                     key_update,
                     remaining: None,
                     owner: self.raw_owner.clone(),
+                    generation: 0,
                 };
                 let Some(packet) = self.admit_control_packet(pending) else {
                     return;

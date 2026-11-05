@@ -26,6 +26,7 @@ pub(crate) struct Receiver {
     raw: mpsc::UnboundedReceiver<ConnectionEvent>,
     control: mpsc::UnboundedReceiver<ConnectionEvent>,
     slots: Arc<Mutex<Slots>>,
+    bounded: bool,
 }
 
 pub(crate) fn channel(bounded: bool) -> (Sender, Receiver) {
@@ -43,12 +44,16 @@ pub(crate) fn channel(bounded: bool) -> (Sender, Receiver) {
             raw: raw_recv,
             control: control_recv,
             slots,
+            bounded,
         },
     )
 }
 
 impl Sender {
     pub(crate) fn send(&self, event: ConnectionEvent) -> Result<(), ()> {
+        if !self.bounded {
+            return self.control.send(event).map_err(|_| ());
+        }
         match event {
             ConnectionEvent::RawProto { .. } => self.raw.send(event).map_err(|_| ()),
             ConnectionEvent::Proto(ref proto) if proto.datagram_size().is_some() => {
@@ -91,6 +96,9 @@ impl Sender {
     }
 }
 impl Receiver {
+    pub(crate) fn bounded(&self) -> bool {
+        self.bounded
+    }
     pub(crate) fn poll_recv(
         &mut self,
         cx: &mut Context<'_>,

@@ -24,8 +24,9 @@ original file SHA-256, checked-in file SHA-256 and local delta reason. Added
 files have no upstream hash. MIT and Apache-2.0 license texts and copyrights
 remain unchanged. Rust files carry upstream SPDX. r2 restores upstream Rust
 formatting/import ordering instead of applying product formatting to ~70 files.
-Only the declared SPDX, idle-timeout extraction/no-growth and two strict-lint
-adaptations remain. No protocol behavior changes or runtime certificates follow.
+The initial import changed only SPDX, idle-timeout extraction/no-growth and strict
+lint adaptations. The subsequent opt-in packet/control changes are listed below;
+no runtime certificate or activation follows.
 
 ## Verification and maintenance
 
@@ -43,8 +44,8 @@ Product formatting command: `cargo +1.99.0 fmt --all`, with pinned toolchain
 1.99.0 and `rustfmt 1.10.0-stable (b940084d7e 2026-09-28)`. Excluded vendor
 sources are not bulk formatted. To reproduce r2 vendor source, extract the
 verified upstream archive, prepend `// SPDX-License-Identifier: MIT OR Apache-2.0`
-to Rust sources, then apply each declared semantic-free delta. There is no
-vendor rustfmt command in r2. The provenance record also retains r1's exact
+to Rust sources, then apply each declared delta. Scoped later formatting commands and upstream
+import/whitespace restoration are recorded in the provenance file. The provenance record also retains r1's exact
 `cargo fmt --all` (pinned toolchain 1.99.0) command/config history, superseded by this restoration.
 For newly changed vendor modules use the recorded pinned rustfmt version with
 `rustfmt +1.99.0 --edition 2021 --config-path vendor/rustfmt.toml PATH`; record
@@ -77,7 +78,19 @@ this before the remaining runtime/certificate/activation prerequisites.
 
 The named dependency tests run real Quinn endpoint/connection drivers over a
 bounded deterministic datagram socket, with driver and consumer barriers. They
-cover independent owner/source/endpoint byte and item ceilings, rejected-copy
-accounting, retained stream backing, saturated raw/control progress and Drained.
+cover independent owner/source/endpoint byte and item ceilings, pool-independent
+copy/delivery counts, retained backing, sparse handle mapping and typed capacity
+refusal. The existing control-progress test uses generous control limits; it does
+not prove the small-limit real-driver parking/wakeup matrix, which remains pending.
 The proto packet tests cover the three packet outcomes across actual coalesced
 TLS flights, aggregate directional ceilings and metadata terminal delivery.
+
+Bounded admission maps protocol handles into a fixed owner-slot table; incoming
+traffic has a separate owner. Exhausted owner/source arenas return typed refusal
+classes. Credits surviving Drained prevent premature slot reuse. Control resume
+reads credit generations, counts emitted versus reserved controls and uses current
+runtime time. Receive bytes count each complete datagram once across head/tail
+parking. Eight-packet yield, control-first ordering, Close/Rebind coalescing and
+idempotent endpoint close apply only with bounded admission enabled. Default
+mode retains its FIFO event semantics; channel/bookkeeping layout still differs
+from upstream and must be included in any later layout certificate.

@@ -26,6 +26,8 @@ pub(crate) struct CreditState {
     limits: ControlLimits,
     used: Demand,
     generation: u64,
+    revalidations: u64,
+    overruns: u64,
     wake: Option<Waker>,
 }
 
@@ -33,6 +35,27 @@ pub(crate) struct CreditState {
 pub(crate) struct Reservation {
     state: Arc<Mutex<CreditState>>,
     demand: Demand,
+    emitted: Mutex<Demand>,
+}
+
+impl Reservation {
+    fn emit(&self, reverse: bool) {
+        let mut emitted = self.emitted.lock().unwrap();
+        if reverse {
+            emitted.reverse += 1;
+        } else {
+            emitted.forward += 1;
+        }
+        let valid =
+            emitted.forward <= self.demand.forward && emitted.reverse <= self.demand.reverse;
+        if !valid {
+            self.state.lock().unwrap().overruns += 1;
+        }
+        debug_assert!(valid, "control effects exceed reserved preflight demand");
+    }
+    pub(crate) fn emit_reverse(&self) {
+        self.emit(true);
+    }
 }
 
 impl Drop for Reservation {
@@ -52,7 +75,7 @@ impl Drop for Reservation {
 
 pub(super) enum Admission {
     Reserved(Arc<Reservation>),
-    Pending,
+    Pending(u64),
     Oversize,
 }
 
@@ -62,6 +85,8 @@ impl CreditState {
             limits,
             used: Demand::default(),
             generation: 0,
+            revalidations: 0,
+            overruns: 0,
             wake: None,
         }))
     }
@@ -76,13 +101,14 @@ impl CreditState {
         if demand.forward > forward_limit - locked.used.forward
             || demand.reverse > reverse_limit - locked.used.reverse
         {
-            return Admission::Pending;
+            return Admission::Pending(locked.generation);
         }
         locked.used.forward += demand.forward;
         locked.used.reverse += demand.reverse;
         Admission::Reserved(Arc::new(Reservation {
             state: state.clone(),
             demand,
+            emitted: Mutex::new(Demand::default()),
         }))
     }
     pub(super) fn register(state: &Arc<Mutex<Self>>, cx: &Context<'_>) {
@@ -106,6 +132,7 @@ pub(super) struct PendingPacket {
     pub key_update: Option<packet_crypto::DecryptPacketResult>,
     pub remaining: Option<BytesMut>,
     pub owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    pub generation: u64,
 }
 
 impl Connection {
@@ -132,6 +159,17 @@ impl Connection {
         } else {
             self.active_control.clone()
         };
+        if let Some(control) = self.control.as_ref().filter(|_| !terminal) {
+            debug_assert!(
+                credit.is_some(),
+                "ordinary control emitted without a transaction"
+            );
+            if let Some(reservation) = &credit {
+                reservation.emit(false);
+            } else {
+                control.lock().unwrap().overruns += 1;
+            }
+        }
         self.endpoint_events.push_back(EndpointEvent(event, credit));
     }
 
@@ -141,6 +179,7 @@ impl Connection {
         remote: SocketAddr,
     ) -> Result<Demand, TransportError> {
         let mut demand = Demand::default();
+        let mut crypto_transition = false;
         if !packet.header.has_frames() {
             return Ok(demand);
         }
@@ -157,11 +196,14 @@ impl Connection {
                 Frame::NewConnectionId(_) | Frame::PathResponse(_) => demand.forward += 1,
                 Frame::Crypto(_) if self.is_handshaking() => {
                     // A handshake transition can issue the initial CID vector and reset binding.
-                    demand.forward = demand.forward.max(2);
-                    demand.reverse = demand.reverse.max(1);
+                    crypto_transition = true;
                 }
                 _ => {}
             }
+        }
+        if crypto_transition {
+            demand.forward += 2;
+            demand.reverse += 1;
         }
         Ok(demand)
     }
@@ -192,7 +234,8 @@ impl Connection {
             };
             match CreditState::reserve(self.control.as_ref().unwrap(), demand) {
                 Admission::Reserved(reservation) => self.active_control = Some(reservation),
-                Admission::Pending => {
+                Admission::Pending(generation) => {
+                    pending.generation = generation;
                     self.pending_control = Some(pending);
                     return None;
                 }
@@ -266,7 +309,8 @@ impl Connection {
                 self.control_timer_pending = None;
                 true
             }
-            Admission::Pending => {
+            Admission::Pending(generation) => {
+                self.control_timer_generation = generation;
                 self.timers.stop(Timer::PushNewCid);
                 self.control_timer_pending = Some(now);
                 false
@@ -283,23 +327,28 @@ impl Connection {
 
     /// Retry the single pending remainder after control consumers return credit.
     /// Returns whether packet input remains paused. Existing committed heads are not replayed.
-    pub fn poll_control_resume(&mut self, cx: &mut Context<'_>) -> bool {
+    pub fn poll_control_resume(&mut self, cx: &mut Context<'_>, now: Instant) -> bool {
         if self.pending_control.is_none() && self.control_timer_pending.is_none() {
             return false;
         }
         CreditState::register(self.control.as_ref().unwrap(), cx);
-        if let Some(now) = self.control_timer_pending {
+        let generation = self.control.as_ref().unwrap().lock().unwrap().generation;
+        if self.control_timer_pending.is_some() && generation != self.control_timer_generation {
             self.timers.set(Timer::PushNewCid, now);
             self.handle_timeout(now);
         }
         if self.pending_control.is_none() {
             return false;
         }
+        if self.pending_control.as_ref().unwrap().generation == generation {
+            return true;
+        }
+        self.control.as_ref().unwrap().lock().unwrap().revalidations += 1;
         // Register before retry so a concurrent final consumer cannot lose the wakeup.
         CreditState::register(self.control.as_ref().unwrap(), cx);
         let pending = self.pending_control.take().unwrap();
         let PendingPacket {
-            now,
+            now: _,
             remote,
             ecn,
             packet,
@@ -307,6 +356,7 @@ impl Connection {
             key_update,
             remaining,
             owner,
+            generation: _,
         } = pending;
         self.raw_owner = owner;
         self.handle_authenticated_packet(now, remote, ecn, Ok((packet, number, key_update)), false);

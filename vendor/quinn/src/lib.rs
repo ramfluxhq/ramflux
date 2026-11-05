@@ -48,7 +48,7 @@ mod rawq;
 mod rawq_mailbox;
 #[cfg(test)]
 mod rawq_tests;
-pub use rawq::PacketQueueLimits;
+pub use rawq::{PacketQueueLimits, RawQueueRefusal};
 mod connection;
 mod endpoint;
 mod incoming;
