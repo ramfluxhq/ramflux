@@ -69,6 +69,7 @@ pub(crate) fn pin_referenced(anchor: &str) -> bool {
 
 impl RouterCore {
     /// Accept an envelope from an authenticated federation peer without rewriting it.
+    /// Run on a blocking/store thread; async ingress must prepare there and await publication.
     /// # Errors
     /// Refuses stale sender authority, dormant homes, invalid seals and persistence failures.
     pub fn submit_forwarded_envelope(
@@ -78,10 +79,26 @@ impl RouterCore {
         request: ForwardedEnvelopeRequest,
         now: u64,
     ) -> Result<RouterSubmitOutcome, NodeCoreError> {
+        self.prepare_forwarded_envelope(store, node, request, now)?.published_blocking()?
+    }
+
+    /// Prepare forwarded acceptance on a blocking/store thread, then await
+    /// [`crate::publication::PublishedOperation::published`] from async ingress.
+    /// # Errors
+    /// Refuses nested publication scopes; the operation carries validation/storage errors.
+    pub fn prepare_forwarded_envelope(
+        &self,
+        store: &RouterRedbStore,
+        node: Option<&MigrationNode>,
+        request: ForwardedEnvelopeRequest,
+        now: u64,
+    ) -> Result<
+        crate::publication::PublishedOperation<Result<RouterSubmitOutcome, NodeCoreError>>,
+        NodeCoreError,
+    > {
         crate::router_store::publication::capture(|| {
             self.submit_forwarded_envelope_inner(store, node, request, now)
-        })?
-        .published_blocking()?
+        })
     }
 
     fn authenticated_forwarded_source(

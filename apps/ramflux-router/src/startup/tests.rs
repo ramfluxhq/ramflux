@@ -158,7 +158,11 @@ fn response(
                 std::time::Instant::now(),
                 ramflux_node_core::RouterEnvelopeOrigin::Gateway,
             )?;
-            assert!(reply.outcome.contains("replay"));
+            assert_eq!(reply.outcome, "offline_queued");
+            let rows = handle.state().resume("startup-target", 0, 100);
+            assert_eq!(rows.len(), 1, "recovered retry must retain one accepted delivery");
+            assert_eq!(reply.inbox_seq, Some(rows[0].inbox_seq));
+            assert_eq!(rows[0].envelope.envelope_id, envelope.envelope_id);
             serde_json::json!({"envelope_id": envelope.envelope_id, "reply": reply})
         }
         _ => {

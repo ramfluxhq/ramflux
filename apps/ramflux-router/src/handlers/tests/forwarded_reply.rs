@@ -23,21 +23,23 @@ async fn reply(
         assert_eq!(response.status, 200);
         Ok(response.body)
     } else {
-        let response = handle_mesh_request_value(
-            ramflux_transport::MeshHttpRequest {
-                method: "POST".into(),
-                path: "/mvp0/envelope/forwarded".into(),
-                body: serde_json::to_vec(body)?,
-            },
-            handle,
-            "ramflux-federation",
-        )?;
+        // Production HTTP dispatch runs on a blocking connection thread.
+        let request = ramflux_transport::MeshHttpRequest {
+            method: "POST".into(),
+            path: "/mvp0/envelope/forwarded".into(),
+            body: serde_json::to_vec(body)?,
+        };
+        let handle = handle.clone();
+        let response = tokio::task::spawn_blocking(move || {
+            handle_mesh_request_value(request, &handle, "ramflux-federation")
+        })
+        .await??;
         assert_eq!(response.status, "200 OK");
         Ok(serde_json::from_slice(&response.body)?)
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn forwarded_wire_reply_refuses_dormant_and_acks_durable_duplicate_after_restart()
 -> anyhow::Result<()> {
     for quic in [false, true] {
@@ -69,9 +71,27 @@ async fn forwarded_wire_reply_refuses_dormant_and_acks_durable_duplicate_after_r
         assert_eq!(dormant["accepted"], false);
         assert_eq!(dormant["retryable"], true);
         assert_eq!(handle.state().resume("dormant-target", 0, 10), []);
+        if quic {
+            let refused = handle_mesh_quic_request_value(
+                &ramflux_transport::GatewayQuicRequest {
+                    method: "POST".into(),
+                    path: "/mvp0/envelope/forwarded".into(),
+                    body: bodies[1].clone(),
+                },
+                &handle,
+                "ramflux-gateway",
+            )
+            .await?;
+            assert_eq!(refused.status, 403);
+            assert_eq!(handle.state().resume("active-target", 0, 10), []);
+        }
         let accepted = reply(&handle, &bodies[1], quic).await?;
         assert_eq!(accepted["accepted"], true);
         assert_eq!(accepted["retryable"], false);
+        assert_eq!(accepted["delivery"]["outcome"], "offline_queued");
+        assert_eq!(accepted["delivery"]["inbox_seq"], 1);
+        let original = handle.state().resume("active-target", 0, 10);
+        assert_eq!(original.len(), 1);
         drop(handle);
         let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
         let state = Arc::new(store.load_router()?.ok_or_else(|| anyhow::anyhow!("router"))?);
@@ -79,8 +99,12 @@ async fn forwarded_wire_reply_refuses_dormant_and_acks_durable_duplicate_after_r
         let duplicate = reply(&handle, &bodies[1], quic).await?;
         assert_eq!(duplicate["accepted"], true);
         assert_eq!(duplicate["retryable"], false);
-        assert_eq!(duplicate["delivery"]["outcome"], "duplicate_federated_forward");
-        assert_eq!(handle.state().resume("active-target", 0, 10).len(), 1);
+        assert_eq!(
+            duplicate["delivery"], accepted["delivery"],
+            "retry retains original durable acceptance"
+        );
+        assert_eq!(handle.state().resume("active-target", 0, 10), original);
+        assert_eq!(handle.state().resume("dormant-target", 0, 10), []);
         drop(handle);
         std::fs::remove_file(path)?;
     }

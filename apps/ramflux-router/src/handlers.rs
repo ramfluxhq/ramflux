@@ -444,6 +444,18 @@ pub(crate) async fn handle_mesh_quic_request_value(
             body: serde_json::to_value(response)?,
         });
     }
+    if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp0/envelope/forwarded") {
+        if peer_service_id != "ramflux-federation" {
+            return Ok(ramflux_transport::GatewayQuicResponse {
+                status: 403,
+                body: serde_json::json!({"error": "forwarded ingress requires federation peer"}),
+            });
+        }
+        return Ok(ramflux_transport::GatewayQuicResponse {
+            status: 200,
+            body: router.submit_forwarded_async(serde_json::from_slice(&body)?).await?,
+        });
+    }
     if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp10/own-devices/fanout") {
         let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
             serde_json::from_slice(&body)?;
@@ -470,7 +482,6 @@ pub(crate) async fn handle_mesh_quic_request_value(
     };
     let response = if request.path == ramflux_protocol::custody::CUSTODY_RPC_PATH
         || request.path == ramflux_node_core::MIGRATION_PEER_PATH
-        || request.path == "/mvp0/envelope/forwarded"
     {
         let router = router.clone();
         let peer = peer_service_id.to_owned();
@@ -1613,8 +1624,13 @@ mod tests {
         ))?;
         let replay: ramflux_node_core::EnvelopeSubmitResponse =
             serde_json::from_value(replay.body)?;
-        assert!(replay.outcome.starts_with("rejected_security:"));
-        assert!(replay.outcome.contains("replay:"));
+        assert_eq!(replay.outcome, accepted.outcome);
+        assert_eq!(replay.inbox_seq, accepted.inbox_seq);
+        assert_eq!(replay.target_delivery_id, accepted.target_delivery_id);
+        let rows = handle.state().resume("target_router_async_ingress", 0, 10);
+        assert_eq!(rows.len(), 1, "identical retry adds no second delivery");
+        assert_eq!(Some(rows[0].inbox_seq), accepted.inbox_seq);
+        assert_eq!(rows[0].envelope.envelope_id, "env_router_async_ingress");
 
         let _removed = std::fs::remove_file(&path);
         let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));

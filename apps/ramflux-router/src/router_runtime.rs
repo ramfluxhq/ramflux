@@ -416,18 +416,44 @@ impl RouterHandle {
 }
 
 impl RouterHandle {
+    pub(crate) async fn submit_forwarded_async(
+        &self,
+        request: ramflux_node_core::ForwardedEnvelopeRequest,
+    ) -> anyhow::Result<serde_json::Value> {
+        let router = self.clone();
+        let operation = tokio::task::spawn_blocking(move || {
+            let Self::Tokio(runtime) = &router;
+            let node = runtime.custody.get().and_then(|service| service.migration_node());
+            router.state().prepare_forwarded_envelope(
+                router.store(),
+                node,
+                request,
+                ramflux_node_core::now_unix_seconds(),
+            )
+        })
+        .await??;
+        self.forwarded_reply(operation.published().await)
+    }
+
     pub(crate) fn submit_forwarded(
         &self,
         request: ramflux_node_core::ForwardedEnvelopeRequest,
     ) -> anyhow::Result<serde_json::Value> {
         let Self::Tokio(runtime) = self;
         let node = runtime.custody.get().and_then(|s| s.migration_node());
-        match self.state().submit_forwarded_envelope(
+        self.forwarded_reply(self.state().submit_forwarded_envelope(
             self.store(),
             node,
             request,
             ramflux_node_core::now_unix_seconds(),
-        ) {
+        ))
+    }
+
+    fn forwarded_reply(
+        &self,
+        outcome: Result<ramflux_node_core::RouterSubmitOutcome, ramflux_node_core::NodeCoreError>,
+    ) -> anyhow::Result<serde_json::Value> {
+        match outcome {
             Ok(outcome) => {
                 let delivery =
                     crate::router_engine::submit_response_from_outcome(self.state(), outcome);
