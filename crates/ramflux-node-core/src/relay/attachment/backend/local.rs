@@ -9,13 +9,17 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 #[derive(Clone)]
 pub struct LocalAttachmentBackend {
     db: Arc<redb::Database>,
     namespace: [u8; 32],
     root: PathBuf,
+    drain_busy: Arc<AtomicU64>,
 }
 struct Lease {
     _files: Vec<File>,
@@ -67,7 +71,18 @@ impl LocalAttachmentBackend {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
         }
-        Ok(Self { db, namespace, root: fs::canonicalize(root)? })
+        Ok(Self {
+            db,
+            namespace,
+            root: fs::canonicalize(root)?,
+            drain_busy: Arc::new(AtomicU64::new(0)),
+        })
+    }
+    /// Refused whole-stripe drain attempts requiring retry, shared by backend clones.
+    /// This observes collision contention; it does not guarantee writer fairness.
+    #[must_use]
+    pub fn drain_busy_count(&self) -> u64 {
+        self.drain_busy.load(Ordering::Relaxed)
     }
     #[must_use]
     pub fn namespace_prefix(&self) -> String {
@@ -109,7 +124,14 @@ impl LocalAttachmentBackend {
             .open(self.root.join(format!("{kind}-{slot:04x}.lock")))?;
         let result = if shared { file.try_lock_shared() } else { file.try_lock() };
         result.map_err(|e| match e {
-            std::fs::TryLockError::WouldBlock => BackendError::Busy,
+            std::fs::TryLockError::WouldBlock => {
+                if !segment && !shared {
+                    let _ = self.drain_busy.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some(n.saturating_add(1))
+                    });
+                }
+                BackendError::Busy
+            }
             std::fs::TryLockError::Error(e) => BackendError::Io(e),
         })?;
         Ok(file)

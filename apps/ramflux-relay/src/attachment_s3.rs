@@ -125,6 +125,11 @@ impl<C: AuthenticatedS3Client> S3AttachmentBackend<C> {
     pub fn new(stage: LocalAttachmentBackend, client: C) -> Self {
         Self { stage, client }
     }
+    /// Refused drain attempts requiring retry, including multipart reconciliation.
+    #[must_use]
+    pub fn drain_busy_count(&self) -> u64 {
+        self.stage.drain_busy_count()
+    }
     fn verify_remote(&self, spec: &BackendSegment) -> Result<(), BackendError> {
         let key = self.stage.storage_key(spec);
         let head = self.client.head(&key)?.ok_or(BackendError::Integrity)?;

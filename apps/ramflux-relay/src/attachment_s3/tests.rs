@@ -265,6 +265,7 @@ fn large_s3_backend_matches_local_commit_and_cleanup_contract() {
     backend.read_range(&spec, 3, 7, &mut out).unwrap();
     assert_eq!(out, bytes[3..10]);
     fake.0.lock().unwrap().probe = None;
+    assert!(backend.drain_busy_count() > 0);
     fake.0.lock().unwrap().short = true;
     assert!(backend.read_range(&spec, 0, 16, &mut Vec::new()).is_err());
     fake.0.lock().unwrap().short = false;
@@ -322,10 +323,10 @@ fn shared_backend_contract_s3() {
     ));
     fs::create_dir_all(&root).unwrap();
     let store = ramflux_node_core::RelayRedbStore::open(root.join("db")).unwrap();
-    ramflux_node_core::attachment::backend::contract::contract_suite(|spec| {
+    ramflux_node_core::attachment::backend::contract::contract_suite(|spec, second| {
         let local = store.local_attachment_backend([8; 32], root.join("files")).unwrap();
-        let cursor = local.cursor(spec);
-        (S3AttachmentBackend::new(local, Fake::default()), cursor)
+        let cursors = [local.cursor(spec), local.cursor(second)];
+        (S3AttachmentBackend::new(local, Fake::default()), cursors)
     });
     drop(store);
     fs::remove_dir_all(root).unwrap();

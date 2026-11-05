@@ -130,11 +130,11 @@ fn shared_backend_contract_local() {
     let tx = db.begin_write().unwrap();
     install(&tx).unwrap();
     tx.commit().unwrap();
-    contract::contract_suite(|spec| {
+    contract::contract_suite(|spec, second| {
         let local =
             LocalAttachmentBackend::open(Arc::clone(&db), [4; 32], &root.join("files")).unwrap();
-        let cursor = local.cursor(spec);
-        (local, cursor)
+        let cursors = [local.cursor(spec), local.cursor(second)];
+        (local, cursors)
     });
     drop(db);
     fs::remove_dir_all(root).unwrap();
@@ -262,6 +262,58 @@ fn concurrent_readers_and_segment_writers_do_not_starve_delete() {
         .filter(|p| p.as_ref().unwrap().path().extension().is_some_and(|x| x == "lock"))
         .count();
     assert!(locks <= 4);
+    drop(backend);
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stripe_collision_drain_busy_is_observable_and_retryable() {
+    // Generate one bounded collision fixture; backend operations run only once per case.
+    let slot = |object: &[u8; 32]| {
+        let mut key = [9_u8; 32].to_vec();
+        key.extend(object);
+        key.extend([2_u8; 32]);
+        let hash = blake3::hash(&key);
+        u16::from_be_bytes([hash.as_bytes()[0], hash.as_bytes()[1]]) % 4096
+    };
+    let first = spec(&[71; 16]);
+    let second = (0_u32..65_536)
+        .find_map(|nonce| {
+            let mut candidate = first.clone();
+            candidate.object[..4].copy_from_slice(&nonce.to_be_bytes());
+            (candidate.object != first.object && slot(&candidate.object) == slot(&first.object))
+                .then_some(candidate)
+        })
+        .unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "rf-drain-metric-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let db = Arc::new(redb::Database::create(root.join("db")).unwrap());
+    let tx = db.begin_write().unwrap();
+    install(&tx).unwrap();
+    tx.commit().unwrap();
+    let backend =
+        LocalAttachmentBackend::open(Arc::clone(&db), [9; 32], &root.join("files")).unwrap();
+    for spec in [&first, &second] {
+        backend.write_chunk(spec, 0, &mut Cursor::new([71; 16])).unwrap();
+        backend.commit(spec).unwrap();
+    }
+    let clone = backend.clone();
+    let held = backend.prepare(&first).unwrap();
+    assert!(matches!(clone.reconcile(&second), Err(BackendError::Busy)));
+    assert!(matches!(clone.delete(&second), Err(BackendError::Busy)));
+    assert_eq!(backend.drain_busy_count(), 2);
+    assert_eq!(clone.drain_busy_count(), 2);
+    drop(held);
+    clone.delete(&second).unwrap();
+    backend.reconcile(&first).unwrap();
+    assert_eq!(backend.drain_busy_count(), 2);
+    backend.delete(&first).unwrap();
+    drop(clone);
     drop(backend);
     drop(db);
     fs::remove_dir_all(root).unwrap();
