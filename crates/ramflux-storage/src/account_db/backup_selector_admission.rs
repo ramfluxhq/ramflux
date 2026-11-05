@@ -111,7 +111,7 @@ EXISTS(SELECT 1 FROM {database}.object_message_reference m WHERE NOT EXISTS(SELE
 EXISTS(SELECT 1 FROM {database}.object_payload_dependency d WHERE NOT EXISTS(SELECT 1 FROM {database}.object_retention_payload p WHERE p.commitment=d.parent_commitment AND p.retention_class='transport') OR NOT EXISTS(SELECT 1 FROM {database}.object_retention_payload p WHERE p.commitment=d.child_commitment)) OR
 EXISTS(SELECT 1 FROM {database}.object_reference_actor a WHERE NOT EXISTS(SELECT 1 FROM {database}.object_retention_reference r WHERE r.reference_hash=a.reference_hash)) OR
 EXISTS(SELECT 1 FROM {database}.object_erasure_lookup l JOIN {database}.object_retention_reference r ON r.selector_lookup=l.lookup WHERE r.commitment<>l.commitment) OR
-EXISTS(SELECT 1 FROM {database}.object_erasure_lookup l JOIN {database}.object_retention_payload p ON p.wire_lookup=l.lookup WHERE p.commitment<>l.commitment)
+EXISTS(SELECT 1 FROM {database}.object_erasure_lookup l JOIN {database}.object_retention_payload p ON p.wire_lookup=l.lookup WHERE p.commitment<>l.commitment AND NOT (p.retention_class='standalone' AND EXISTS(SELECT 1 FROM {database}.object_erasure_fence f WHERE f.commitment=l.commitment)))
 "), [], |r| r.get(0))?;
     if invalid {
         return Err(refuse());
@@ -166,6 +166,7 @@ EXISTS(SELECT 1 FROM {database}.object_erasure_lookup l JOIN {database}.object_r
 
 pub(super) mod graph;
 pub(super) mod placeholders;
+pub(super) mod replacements;
 pub(super) mod writer;
 
 #[cfg(test)]
@@ -195,3 +196,6 @@ pub(super) mod final_deletion;
 
 #[cfg(test)]
 mod final_deletion_tests;
+
+#[cfg(test)]
+mod history_tests;

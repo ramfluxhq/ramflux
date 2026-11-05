@@ -48,7 +48,7 @@ SELECT wire_lookup,commitment FROM incoming.object_retention_payload WHERE commi
             ))
         })? {
             let (hash, message, selector, commitment) = row?;
-            let local_deleted = deleted(db, "main", &message)?;
+            let local_deleted = target_deleted(db, &message)?;
             let incoming_deleted = deleted(db, "incoming", &message)?;
             if side == "target" && !local_deleted && incoming_deleted {
                 db.execute(
