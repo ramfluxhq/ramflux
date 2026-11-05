@@ -3,7 +3,6 @@
 
 //! Offline operator rotation and crash-resumable in-root quarantine.
 use super::{error, incarnation, recovery};
-use crate::router_store::incarnation_state;
 use crate::{NodeCoreError, RouterRedbStore, durability_io};
 use redb::ReadableDatabase;
 use serde::{Deserialize, Serialize};
@@ -49,7 +48,11 @@ fn mark(db: &redb::Database, request: &Pending) -> Result<(), NodeCoreError> {
         .map_err(error)?;
     txn.commit().map_err(error)
 }
-fn quarantine(root: &Path, source: &Path) -> Result<Quarantine, NodeCoreError> {
+fn quarantine(
+    db: &redb::Database,
+    root: &Path,
+    source: &Path,
+) -> Result<Quarantine, NodeCoreError> {
     let source = fs::canonicalize(source).map_err(error)?;
     let parent = source.parent().ok_or_else(|| error("segment has no parent"))?;
     let active = parent == root
@@ -65,6 +68,7 @@ fn quarantine(root: &Path, source: &Path) -> Result<Quarantine, NodeCoreError> {
     if !valid {
         return Err(error("quarantine requires an active WAL segment"));
     }
+    recovery::require_quarantine_source(root, db, &source)?;
     // Unix seconds are a UTC timestamp; the random suffix avoids collisions on rapid retries.
     let utc = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -114,6 +118,9 @@ fn amend_quarantine(
     let root = request.wal_root.as_deref().ok_or_else(|| error("quarantine requires WAL mode"))?;
     if let Some(previous) = &request.quarantine {
         if source == previous.source {
+            if source.exists() {
+                recovery::require_quarantine_source(root, db, source)?;
+            }
             return Ok(());
         }
         if previous.source.exists() || !previous.destination.exists() {
@@ -122,7 +129,7 @@ fn amend_quarantine(
             ));
         }
     }
-    let next = quarantine(root, source)?;
+    let next = quarantine(db, root, source)?;
     recovery::preflight(root, db, Some(&next.source))?;
     request.quarantine = Some(next);
     durability_io::boundary(path, "operator_quarantine_amend", || {
@@ -195,16 +202,10 @@ impl RouterRedbStore {
         segment: Option<&Path>,
     ) -> Result<usize, NodeCoreError> {
         let db = Arc::new(redb::Database::open(path).map_err(error)?);
+        // Run the exact ordinary-open schema/import/upgrade sequence before
+        // reading either a pending marker or the cursor inventory.
+        Self::initialize_open_schema(&db)?;
         let resume_pending = pending(&db)?;
-        // Maintenance intentionally bypasses ordinary WAL open, which may refuse
-        // the damaged segment. Import prior cursor-field E without replaying it.
-        let mut tx = db.begin_write().map_err(error)?;
-        tx.set_durability(redb::Durability::Immediate).map_err(error)?;
-        {
-            let _identities = tx.open_table(incarnation_state::TABLE).map_err(error)?;
-        }
-        incarnation_state::import(&tx)?;
-        tx.commit().map_err(error)?;
         if let Some(mut request) = resume_pending {
             if let Some(segment) = segment {
                 amend_quarantine(&db, path, &mut request, segment)?;
@@ -220,6 +221,7 @@ impl RouterRedbStore {
             let quarantine = segment
                 .map(|segment| {
                     quarantine(
+                        &db,
                         wal_root.as_deref().ok_or_else(|| error("quarantine requires WAL mode"))?,
                         segment,
                     )

@@ -478,13 +478,7 @@ impl RouterRedbStore {
             if create { redb::Database::create(path) } else { redb::Database::open(path) }
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?,
         );
-        Self::initialize_mailbox_schema(&db)?;
-        {
-            let txn = db.begin_write().map_err(incarnation::error)?;
-            incarnation_state::import(&txn)?;
-            txn.commit().map_err(incarnation::error)?;
-        }
-        tuple_upgrade::upgrade(&db)?;
+        Self::initialize_open_schema(&db)?;
         let mut legacy_registry: IdentityRegistry =
             load_snapshot(&db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
                 .unwrap_or_default();
@@ -539,6 +533,15 @@ impl RouterRedbStore {
             #[cfg(test)]
             fail_next_migration_commit: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Shared ordinary/maintenance prelude, before pending or cursor reads.
+    pub(crate) fn initialize_open_schema(db: &redb::Database) -> Result<(), NodeCoreError> {
+        Self::initialize_mailbox_schema(db)?;
+        let txn = db.begin_write().map_err(incarnation::error)?;
+        incarnation_state::import(&txn)?;
+        txn.commit().map_err(incarnation::error)?;
+        tuple_upgrade::upgrade(db)
     }
 
     fn initialize_mailbox_schema(db: &redb::Database) -> Result<(), NodeCoreError> {
