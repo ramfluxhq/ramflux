@@ -8,6 +8,7 @@ use crate::bus::protocol::{
     LocalBusAccountCreateRequest, LocalBusClientMode, LocalBusFrame, LocalBusPersistedAccount,
 };
 use crate::bus::state::{LocalBusAccountState, LocalBusDaemonState};
+use crate::client::identity_authority::HeadUse;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn revoke_endpoint(
@@ -173,7 +174,10 @@ async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_r
     );
     assert!(super::review::trust(&bob, &alice).is_err());
     assert!(matches!(
-        bob.client.trusted_device(&bob.client.device_identity(&alice.reference()?)?),
+        bob.client.trusted_device(
+            HeadUse::NewAuthorization,
+            &bob.client.device_identity(&alice.reference()?)?
+        ),
         Err(SdkError::InboundRejected(_))
     ));
     Ok(())

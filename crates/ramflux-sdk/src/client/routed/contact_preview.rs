@@ -3,6 +3,7 @@
 
 //! Roll back a stranger's speculative decrypt before resolving delayed public evidence.
 use super::{GatewayInboxEntry, RamfluxClient, Routing, SdkError};
+use crate::client::identity_authority::HeadUse;
 use crate::prekey::SdkDeviceManifestResponse;
 use zeroize::Zeroizing;
 
@@ -49,7 +50,7 @@ impl RamfluxClient {
         let result: Result<(), Rollback> = self.account_db()?.write_transaction(|| {
             self.remember_contact_request_cache(manifest)?;
             self.persist_fetched_identity_directory(manifest)?;
-            let receipt = self.authenticated_committed_key(entry)?;
+            let receipt = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
             if self.account_db()?.actor_state_exists(&receipt)? {
                 return Err(Rollback::Ready(Box::new(None)));
             }

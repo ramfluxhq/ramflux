@@ -7,6 +7,7 @@ use super::{
     SdkDmX3dhHeader, SdkError, Serialize, associated_data, dm_device_id_hash, invalid,
     prekey_bundle_hash,
 };
+use crate::client::identity_authority::HeadUse;
 use crate::prekey::sdk_fetch_prekey_bundle;
 
 #[derive(Serialize, Deserialize)]
@@ -157,7 +158,9 @@ impl RamfluxClient {
             .is_none_or(|record| record.get("x25519_identity_public").is_none())
             || self
                 .device_identity(recipient)
-                .and_then(|identity| self.require_cached_root_authority(&identity))
+                .and_then(|identity| {
+                    self.require_cached_root_authority(HeadUse::NewAuthorization, &identity)
+                })
                 .is_err()
         {
             self.resolve_target_principal_commitment(

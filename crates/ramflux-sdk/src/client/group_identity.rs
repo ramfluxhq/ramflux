@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Group membership binds principal, commitment and device to an immutable signing-key pin.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 impl RamfluxClient {
     /// Read-model metadata may be unknown; unresolved legacy names never select a root.
@@ -104,14 +105,14 @@ impl RamfluxClient {
                 "local device is not a current group member".into(),
             ));
         }
-        let record = self.authenticated_sender_record(entry)?;
+        let record = self.authenticated_sender_record(HeadUse::NewAuthorization, entry)?;
         let principal = record["principal_id"]
             .as_str()
             .ok_or_else(|| SdkError::InboundRejected("verified sender principal missing".into()))?;
         self.require_group_sender_pin(
             group,
             principal,
-            &self.authenticated_device_identity(entry)?,
+            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
         )?;
         Ok((principal.to_owned(), record["custody_v3_observed"] == true))
     }
@@ -131,7 +132,7 @@ impl RamfluxClient {
                 "group sender root differs from pinned relationship".into(),
             ));
         }
-        let record = self.trusted_device(device)?;
+        let record = self.trusted_device(HeadUse::NewAuthorization, device)?;
         if let Some(state) = db.shared_group_state(group)? {
             if state.view().effective_role(device.root_commitment(), device.device_id()).is_none() {
                 return Err(StorageError::GroupPermissionDenied.into());
@@ -263,7 +264,7 @@ impl RamfluxClient {
         if db.client_record("device", device)?.is_none() {
             return Err(SdkError::InboundPending("joined member identity unavailable".into()));
         }
-        let record = self.trusted_device(&identity)?;
+        let record = self.trusted_device(HeadUse::NewAuthorization, &identity)?;
         let (Some(principal), Some(commitment), Some(key)) = (
             record["principal_id"].as_str(),
             record["principal_commitment"].as_str(),

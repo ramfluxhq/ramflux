@@ -3,6 +3,7 @@
 
 //! Authenticated surface transport controls; account-owned forwarding preserves original wire bytes.
 use super::{Carrier, Payload, PayloadKind, SurfaceSender, invalid};
+use crate::client::identity_authority::HeadUse;
 use crate::own_device_sync::SdkOwnDeviceGroupSnapshot;
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
@@ -163,7 +164,7 @@ impl RamfluxClient {
         if !body.starts_with(CONTROL_PREFIX) {
             return Ok(false);
         }
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         self.receive_surface_control_from(entry, &source, conversation, group, body)
     }
     pub(in crate::client) fn receive_surface_control_from(

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Authenticated message requests remain private until explicit consent; no live ratchets are retained.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -29,7 +30,7 @@ impl RamfluxClient {
         metadata: Option<&MessageMetadata>,
         references: Vec<HeldReference<'_>>,
     ) -> Result<(), SdkError> {
-        let sender = self.authenticated_device_identity(entry)?;
+        let sender = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let request = self
             .account_db()?
             .contact_request(sender.root_commitment(), "inbound")?
@@ -76,7 +77,8 @@ impl RamfluxClient {
             let bytes = Zeroizing::new(bytes);
             let held: Held = serde_json::from_slice(&bytes)?;
             let outcome = self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-                let sender = self.authenticated_device_identity(&held.entry)?;
+                let sender =
+                    self.authenticated_device_identity(HeadUse::NewAuthorization, &held.entry)?;
                 if sender.root_commitment() != root {
                     return Err(super::invalid("held message root mismatch"));
                 }

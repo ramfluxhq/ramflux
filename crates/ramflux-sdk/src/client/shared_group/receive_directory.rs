@@ -3,6 +3,7 @@
 
 //! Explicit directory inputs for authenticated shared-group receive; no task owns an account DB.
 
+use crate::client::identity_authority::HeadUse;
 use crate::client::routed::{Kind, Routing};
 use crate::prelude::*;
 use ramflux_protocol::group_state::GroupStateActor;
@@ -244,6 +245,9 @@ impl RamfluxClient {
         }
         self.verify_group_actor_directory(gateway, &state.snapshot().issuer, entry, directory)
             .await?;
-        self.ensure_shared_group_device(state, &self.authenticated_device_identity(entry)?)
+        self.ensure_shared_group_device(
+            state,
+            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
+        )
     }
 }

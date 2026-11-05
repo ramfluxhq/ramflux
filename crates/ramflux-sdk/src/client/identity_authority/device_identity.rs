@@ -3,6 +3,7 @@
 
 //! Construct device identities only at the account's authenticated authority boundary.
 use super::{invalid, record_key};
+use crate::client::identity_authority::HeadUse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError, prekey::SdkDeviceManifestResponse};
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_protocol::SignedDeviceSetRecord;
@@ -214,9 +215,10 @@ impl RamfluxClient {
     }
     pub(crate) fn authenticated_device_identity(
         &self,
+        purpose: HeadUse,
         entry: &GatewayInboxEntry,
     ) -> Result<RootQualifiedDeviceRef, SdkError> {
-        self.authenticated_envelope_sender(entry)?;
+        self.authenticated_envelope_sender(purpose, entry)?;
         let encoded = self.inbound_device_reference(entry)?;
         let (root, device) = ramflux_protocol::parse_qualified_device_id(&encoded)?
             .ok_or_else(|| invalid("authenticated device requires root authority"))?;

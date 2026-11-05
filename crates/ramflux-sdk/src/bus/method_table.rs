@@ -130,6 +130,7 @@ methods! {
         "grant.list_standing_approvals",
         "group.invitations.list",
         "group.list",
+        "group.history",
         "group.members",
         "group.requests.list",
         "identity.directory",

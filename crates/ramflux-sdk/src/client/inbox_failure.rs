@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Shared immutable-error classification and authenticated retry admission.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 /// Checks immutable signature encoding independently of a possibly incomplete directory cache.
 pub(crate) fn wire_signature_error(entry: &GatewayInboxEntry) -> Option<SdkError> {
@@ -55,7 +56,8 @@ pub(crate) fn set_failure_policy(
     bytes: &[u8],
     at: i64,
 ) -> Result<bool, SdkError> {
-    let verified_source = client.authenticated_device_identity(entry).ok();
+    let verified_source =
+        client.authenticated_device_identity(HeadUse::NewAuthorization, entry).ok();
     let authenticated = verified_source.is_some();
     let opened = if authenticated { client.open_routed(entry, local).ok() } else { None };
     let legacy_group = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)

@@ -3,6 +3,7 @@
 
 //! Legacy compatibility receive quarantines one bad entry and still delivers the next.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 #[tokio::test(flavor = "current_thread")]
 async fn a_rejected_legacy_group_entry_does_not_block_read_or_receive_of_valid_messages()
 -> Result<(), SdkError> {
@@ -143,7 +144,7 @@ fn legacy_group_fixture_with_pin(
         target_delivery_id: "target".into(),
         envelope: crate::dm::gateway_direct_message_envelope(&config, &message, None)?,
     };
-    receiver.client.authenticated_envelope_sender(&good)?;
+    receiver.client.authenticated_envelope_sender(HeadUse::NewAuthorization, &good)?;
     if pin {
         receiver.client.require_group_sender_pin(
             "g",
@@ -239,7 +240,7 @@ async fn forged_sources_and_forged_claims_of_the_real_device_cannot_spend_its_re
             }
             let error = receiver
                 .client
-                .authenticated_envelope_sender(&forged)
+                .authenticated_envelope_sender(HeadUse::NewAuthorization, &forged)
                 .err()
                 .ok_or(SdkError::IdentityRootMissing)?;
             assert!(matches!(
@@ -333,8 +334,8 @@ fn gateway_receipt_replays_share_one_legacy_retry_key_but_forged_signatures_do_n
         "franking".into(),
         serde_json::json!({"franking_tag":"receipt","node_id":"gateway","accepted_at":123}),
     );
-    receiver.client.authenticated_envelope_sender(&original)?;
-    receiver.client.authenticated_envelope_sender(&replay)?;
+    receiver.client.authenticated_envelope_sender(HeadUse::NewAuthorization, &original)?;
+    receiver.client.authenticated_envelope_sender(HeadUse::NewAuthorization, &replay)?;
     assert_eq!(legacy_key(&original)?, legacy_key(&replay)?);
     replay.envelope.signed.signature = "forged".into();
     assert_ne!(legacy_key(&original)?, legacy_key(&replay)?);

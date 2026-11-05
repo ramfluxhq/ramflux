@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Deferred same-root group metadata; only verified manifests can create device identity pins.
+use crate::client::identity_authority::HeadUse;
 use crate::own_device_sync::SdkOwnDeviceGroupMemberPin;
 use crate::{RamfluxClient, SdkError};
 const PREFIX: &str = "own-group/pending-pins/";
@@ -118,7 +119,7 @@ impl RamfluxClient {
                     }
                     if db.group_member_role_metadata(&pin.group_id, device)?.is_some() {
                         let identity = self.device_identity_for_root(root, device)?;
-                        let record = self.trusted_device(&identity)?;
+                        let record = self.trusted_device(HeadUse::NewAuthorization, &identity)?;
                         let outcome = if record["signing_public_key"] == pin.signing_public_key {
                             self.restore_own_member_pin(pin)
                         } else {

@@ -3,6 +3,7 @@
 
 //! Same-root task history forwarding, with causal-prefix and original-signer verification.
 use super::{AcceptedEvent, TaskHistory, carrier::Carrier, invalid};
+use crate::client::identity_authority::HeadUse;
 use crate::client::surface::OwnContext;
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
@@ -155,7 +156,9 @@ impl RamfluxClient {
         }
         let source = self
             .account_db()?
-            .client_device_record(&self.authenticated_device_identity(entry)?)?
+            .client_device_record(
+                &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
+            )?
             .ok_or_else(|| invalid("own task source missing"))?;
         if source["principal_id"] != entry.envelope.source_principal_id {
             return Err(invalid("own task source owner mismatch"));

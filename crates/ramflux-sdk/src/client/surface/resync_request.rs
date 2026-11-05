@@ -3,6 +3,7 @@
 
 //! Peer resync requests use authenticated controls; the original author device answers once per window.
 use super::{Carrier, invalid, key};
+use crate::client::identity_authority::HeadUse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -161,7 +162,10 @@ impl RamfluxClient {
         if thread["group_id"].as_str() != request.group.as_deref() {
             return Err(invalid("resync group context mismatch"));
         }
-        let source = self.trusted_device(&self.authenticated_device_identity(entry)?)?;
+        let source = self.trusted_device(
+            HeadUse::NewAuthorization,
+            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
+        )?;
         if entry.envelope.source_principal_id == local.principal_id {
             self.authorize_owned_surface_source(&source)?;
         } else {
@@ -263,7 +267,10 @@ impl RamfluxClient {
             db.persist_actor_state(&rate, &window)?;
             db.persist_actor_state(&budget, &peer)?;
             db.persist_actor_state(
-                &format!("surface/resync-response/{}", self.authenticated_committed_key(entry)?),
+                &format!(
+                    "surface/resync-response/{}",
+                    self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
+                ),
                 &reply,
             )?;
             Ok::<_, SdkError>(())
@@ -281,8 +288,10 @@ impl RamfluxClient {
             return Err(invalid("resync reply requires the original author device"));
         }
         let target = &reply.destination;
-        let device =
-            self.trusted_device(&self.device_identity_for_root(&target.root, &target.device)?)?;
+        let device = self.trusted_device(
+            HeadUse::NewAuthorization,
+            &self.device_identity_for_root(&target.root, &target.device)?,
+        )?;
         if device["principal_id"] != target.principal
             || device["principal_commitment"] != target.root
         {
@@ -306,7 +315,10 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<Option<ResyncReply>, SdkError> {
         self.prune_surface_resync_state()?;
-        let id = format!("surface/resync-response/{}", self.authenticated_committed_key(entry)?);
+        let id = format!(
+            "surface/resync-response/{}",
+            self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
+        );
         let db = self.account_db()?;
         let Some(reply) = db.load_actor_state::<ResyncReply>(&id)? else { return Ok(None) };
         // Consume before submission; a lost ACK cannot bypass the shared window.

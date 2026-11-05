@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! A restored archive can read immediately, but never sends under saved outbound chains.
+use crate::client::identity_authority::HeadUse;
 use crate::{RamfluxClient, SdkError};
 impl RamfluxClient {
     pub(crate) fn require_backup_outbound_ready(&self) -> Result<(), SdkError> {
@@ -25,7 +26,10 @@ impl RamfluxClient {
                 "restore requires fresh device activation".into(),
             ));
         }
-        self.require_cached_root_authority(&self.owned_device_identity()?)?;
+        self.require_cached_root_authority(
+            HeadUse::NewAuthorization,
+            &self.owned_device_identity()?,
+        )?;
         db.write_transaction(||->Result<(),SdkError>{
             db.persist_actor_state("backup/reestablishing",&false)?;
             db.append_journal("backup:secure-sessions-ready","account.secure_sessions.changed",&serde_json::json!({"local_account_id":db.local_account_id,"secure_sessions":"ready"}),crate::prelude::now_unix_timestamp(),None)?;Ok(())

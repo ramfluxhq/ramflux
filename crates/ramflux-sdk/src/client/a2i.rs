@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 
 impl RamfluxClient {
@@ -92,7 +93,7 @@ impl RamfluxClient {
                     .is_some_and(|route| route.kind == crate::client::routed::Kind::Control)
                 {
                     let key = self
-                        .authenticated_committed_key(&entry)?
+                        .authenticated_committed_key(HeadUse::NewAuthorization, &entry)?
                         .replace("routed/committed/", "routed/control/");
                     if let Some(event) =
                         self.account_db()?.load_actor_state::<A2iControlEvent>(&key)?
@@ -143,7 +144,10 @@ impl RamfluxClient {
             return Ok(None);
         }
         self.ensure_inbound_device(engine.config(), entry).await?;
-        let receipt_key = format!("legacy/a2i/{}", self.authenticated_committed_key(entry)?);
+        let receipt_key = format!(
+            "legacy/a2i/{}",
+            self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
+        );
         if let Some(receipt) =
             self.account_db()?.load_actor_state::<LegacyControlReceipt>(&receipt_key)?
         {
@@ -154,7 +158,7 @@ impl RamfluxClient {
             let event = self
                 .account_db()?
                 .load_actor_state::<A2iControlEvent>(&crate::client::routed::control::a2i_key(
-                    &self.authenticated_device_identity(entry)?,
+                    &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
                     &receipt.event.event_id,
                 )?)?
                 .unwrap_or(receipt.event);

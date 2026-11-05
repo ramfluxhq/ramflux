@@ -3,6 +3,7 @@
 
 //! Group authorization and additive conversation-link projection after authentication.
 use super::{GatewayInboxEntry, RamfluxClient, SdkError, SdkGroupEncryptedEnvelope, invalid};
+use crate::client::identity_authority::HeadUse;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 impl RamfluxClient {
@@ -20,14 +21,17 @@ impl RamfluxClient {
             ));
         }
         if let Some(state) = self.account_db()?.shared_group_state(group)? {
-            self.ensure_shared_group_device(&state, &self.authenticated_device_identity(entry)?)?;
+            self.ensure_shared_group_device(
+                &state,
+                &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
+            )?;
             self.ensure_shared_group_device(&state, &self.owned_device_identity()?)?;
         }
         self.pin_local_group_member(group)?;
         self.require_group_sender_pin(
             group,
             &entry.envelope.source_principal_id,
-            &self.authenticated_device_identity(entry)?,
+            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
         )?;
         Ok(())
     }

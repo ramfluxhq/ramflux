@@ -3,6 +3,7 @@
 
 //! Verified v3 directory state for the ordinary account database and feature paths.
 use super::invalid;
+use crate::client::identity_authority::HeadUse;
 use crate::{RamfluxClient, SdkError};
 use ramflux_crypto::{
     RootQualifiedDeviceRef,
@@ -322,6 +323,7 @@ impl RamfluxClient {
 
     pub(super) fn require_custody_device(
         &self,
+        purpose: HeadUse,
         identity: &RootQualifiedDeviceRef,
         now: u64,
     ) -> Result<bool, SdkError> {
@@ -330,7 +332,7 @@ impl RamfluxClient {
             return Ok(false);
         };
         self.require_owned_custody_floor(identity.root_commitment(), &verified, now)?;
-        self.require_fresh_custody_head(identity.root_commitment(), verified.envelope())?;
+        self.require_fresh_custody_head(purpose, identity.root_commitment(), verified.envelope())?;
         let row = self
             .account_db()?
             .client_record("device", identity.storage_key())?

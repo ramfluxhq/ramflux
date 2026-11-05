@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 
 pub(crate) mod receive_job;
@@ -44,9 +45,11 @@ impl RamfluxClient {
                 SdkError::InboundRejected("own sync target revoked or unavailable".into())
             })?;
         self.require_cached_root_authority(
+            HeadUse::NewAuthorization,
             &self.device_identity_for_root(principal_commitment, &source_device_id)?,
         )?;
         self.require_cached_root_authority(
+            HeadUse::NewAuthorization,
             &self.device_identity_for_root(principal_commitment, target_device_id)?,
         )?;
         if source_device.principal_commitment != target_device.principal_commitment {
@@ -680,9 +683,11 @@ impl RamfluxClient {
             &target.device_id,
         )?;
         self.require_cached_root_authority(
+            HeadUse::NewAuthorization,
             &self.device_identity_for_root(&envelope.principal_commitment, &source.device_id)?,
         )?;
         self.require_cached_root_authority(
+            HeadUse::NewAuthorization,
             &self.device_identity_for_root(&envelope.principal_commitment, &target.device_id)?,
         )?;
         if source.principal_commitment != envelope.principal_commitment

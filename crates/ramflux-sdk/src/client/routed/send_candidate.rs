@@ -3,6 +3,7 @@
 
 //! Abandon unsupported unconfirmed send candidates while retaining receive-only state.
 use super::{RamfluxClient, SdkDmX3dhHeader, SdkError};
+use crate::client::identity_authority::HeadUse;
 pub(super) type SendPair = (ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>, [u8; 32]);
 impl RamfluxClient {
     pub(super) fn sendable_pair(
@@ -17,7 +18,7 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("recipient device is revoked".into()));
         }
-        if self.require_cached_root_authority(remote).is_err() {
+        if self.require_cached_root_authority(HeadUse::NewAuthorization, remote).is_err() {
             return Ok(None);
         }
         let Some((session, bundle)) = self.active_pair(local, remote)? else { return Ok(None) };

@@ -3,6 +3,7 @@
 
 //! Limited stranger authentication for the request-only encrypted envelope.
 use super::{ENVELOPE_SCHEMA, invalid};
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 impl RamfluxClient {
     pub(crate) async fn contact_request_candidate(
@@ -153,7 +154,7 @@ impl RamfluxClient {
         if matches!(route.kind, Kind::GroupControl | Kind::GroupMessage) {
             let group = route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?;
             self.check_group_decline_fence(group)?;
-            let source = self.authenticated_device_identity(entry)?;
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
             if self.friend_rejection_reason(source.root_commitment())?.as_deref()
                 == Some("friend.blocked")
                 || self.friend_rejection_reason(&entry.envelope.source_principal_id)?.as_deref()
@@ -212,7 +213,7 @@ impl RamfluxClient {
                 return Err(rejection);
             }
         }
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if self.pending_contact_root(source.root_commitment())?
             && !self.friend_link_peer_is_accepted(source.root_commitment())?
             && route.kind != Kind::Direct

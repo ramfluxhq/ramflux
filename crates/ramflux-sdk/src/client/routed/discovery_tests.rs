@@ -3,6 +3,7 @@
 
 //! First-contact Root hints are lookup context, never an alternative trust anchor.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -173,7 +174,7 @@ fn signed_root_hint_cannot_override_an_existing_verified_owner() -> TestResult {
     let sender = Fixture::new("alice", 111)?;
     let receiver = Fixture::new("bob", 121)?;
     let mut entry = seal(&sender, &receiver, message("wrong-root-hint", "thread"), b"hello")?;
-    receiver.client.authenticated_envelope_sender(&entry)?;
+    receiver.client.authenticated_envelope_sender(HeadUse::NewAuthorization, &entry)?;
     let mut wrapper = decode(&entry.envelope)?;
     wrapper.source_principal_commitment = Some("different-root".into());
     entry.envelope.encrypted_payload =
@@ -186,7 +187,9 @@ fn signed_root_hint_cannot_override_an_existing_verified_owner() -> TestResult {
         sender.client.device_branch.as_ref().ok_or("branch")?,
         &entry.envelope,
     )?;
-    assert!(receiver.client.authenticated_envelope_sender(&entry).is_err());
+    assert!(
+        receiver.client.authenticated_envelope_sender(HeadUse::NewAuthorization, &entry).is_err()
+    );
     Ok(())
 }
 
@@ -241,13 +244,20 @@ fn saved_group_root_selects_proof_material_but_never_authenticates_an_unproven_d
         identity.root_commitment(),
         "alice"
     )?);
-    assert!(receiver.client.authenticated_device_identity(&entry).is_err());
+    assert!(
+        receiver.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry).is_err()
+    );
     let manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
     receiver.client.persist_root_verified_directory(&manifest)?;
-    assert_eq!(receiver.client.authenticated_device_identity(&entry)?, identity);
+    assert_eq!(
+        receiver.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?,
+        identity
+    );
     let mut forged = entry;
     forged.envelope.signed.signature = ramflux_protocol::encode_base64url([0; 64]);
-    assert!(receiver.client.authenticated_device_identity(&forged).is_err());
+    assert!(
+        receiver.client.authenticated_device_identity(HeadUse::NewAuthorization, &forged).is_err()
+    );
     Ok(())
 }
 
@@ -314,6 +324,7 @@ fn a_mismatched_deferred_pin_is_dropped_without_poisoning_authenticated_traffic(
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0]["reason"], "deferred_pin_key_mismatch");
     receiver.client.trusted_device(
+        HeadUse::NewAuthorization,
         &receiver.client.device_identity_for_root(&manifest.principal_commitment, "alice")?,
     )?;
     Ok(())

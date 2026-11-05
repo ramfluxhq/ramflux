@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Expand signed group membership through current root-bound device authority.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 impl RamfluxClient {
     pub(crate) fn shared_group_member_routes(
@@ -47,7 +48,7 @@ impl RamfluxClient {
                     Err(SdkError::Storage(error)) => return Err(error.into()),
                     Err(_) => continue,
                 };
-                let record = self.trusted_device(&identity)?;
+                let record = self.trusted_device(HeadUse::NewAuthorization, &identity)?;
                 let id =
                     crate::group::group_member_route_event_id(&state.view().group_id, &identity)?;
                 let federation = if let Some(bytes) = self.event_body(&id)? {

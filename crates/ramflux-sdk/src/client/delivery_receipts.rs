@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Durable delivery intents created only with authenticated, stored peer messages.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -82,9 +83,9 @@ impl RamfluxClient {
             Err(SdkError::IdentityRootMissing) => return Ok(()),
             Err(error) => return Err(error),
         };
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let db = self.account_db()?;
-        let device = self.trusted_device(&source)?;
+        let device = self.trusted_device(HeadUse::NewAuthorization, &source)?;
         let root = Some(source.root_commitment().to_owned());
         if source.root_commitment() == local.root_commitment() {
             db.persist_message_actor_state(message, &origin_key(conversation, message)?, &json!({

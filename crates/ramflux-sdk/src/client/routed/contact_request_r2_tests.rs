@@ -3,6 +3,7 @@
 
 //! Adversarial contact admission, retention, selectors and consent races.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 pub(super) fn root(state: &LocalBusDaemonState, who: &str) -> Result<String, SdkError> {
     Ok(account(state, who)?.owned_device_identity()?.root_commitment().into())
 }
@@ -373,7 +374,9 @@ async fn contact02_r2_full_active_queue_defers_the_reply_without_rolling_back_co
     let db = receiver.account_db()?;
     let row = db.contact_request(&source, "inbound")?.ok_or_else(|| invalid("request"))?;
     assert_eq!(serde_json::from_slice::<Value>(&row.request_json)?["needs_reply"], "accept");
-    assert!(db.actor_state_exists(&receiver.authenticated_committed_key(&entry)?)?);
+    assert!(db.actor_state_exists(
+        &receiver.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?
+    )?);
     let peer = ramflux_protocol::encode_base64url([0; 32]);
     let key = format!(
         "contact-request/send/{}",

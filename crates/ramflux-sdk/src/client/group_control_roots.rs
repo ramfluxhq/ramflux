@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Signed group root context and bounded provenance for legacy invite/accept resolution.
+use crate::client::identity_authority::HeadUse;
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 use ramflux_protocol::{
@@ -237,7 +238,8 @@ impl RamfluxClient {
             if self.account_db()?.client_record("device", &actor)?.is_none() {
                 return Err(pending());
             }
-            let device = self.trusted_device(&self.device_identity(&actor)?)?;
+            let device =
+                self.trusted_device(HeadUse::NewAuthorization, &self.device_identity(&actor)?)?;
             if device["principal_id"] != event.actor_principal_id
                 || device["signing_public_key"] != public
             {

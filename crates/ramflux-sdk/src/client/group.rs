@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::HeadUse;
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 
@@ -71,7 +72,7 @@ impl RamfluxClient {
         };
         if self.account_db()?.shared_group_state(group_id)?.is_some() {
             let identity = self.device_identity(&reference)?;
-            let record = self.trusted_device(&identity)?;
+            let record = self.trusted_device(HeadUse::NewAuthorization, &identity)?;
             let member = ramflux_protocol::group_state::GroupMemberIdentity {
                 principal_id: record["principal_id"]
                     .as_str()

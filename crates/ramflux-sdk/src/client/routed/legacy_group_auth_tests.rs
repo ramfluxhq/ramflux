@@ -4,6 +4,7 @@
 //! Legacy group transport must preserve the same device identity and member pins as routed v2.
 use super::review::trust;
 use super::*;
+use crate::client::identity_authority::HeadUse;
 fn setup() -> Result<(Fixture, Fixture), SdkError> {
     let alice = Fixture::new("alice", 101)?;
     let bob = Fixture::new("bob", 111)?;
@@ -43,7 +44,7 @@ fn legacy_group_nonmembers_cannot_speak_as_a_pinned_member() -> Result<(), SdkEr
     let entry =
         packet(&mallory, alice.client.encrypt_group_message("g", "alice", b"forged")?, "forged")?;
     assert!(bob.client.legacy_group_binding("thread", "g", &entry)?);
-    assert!(bob.client.authenticated_envelope_sender(&entry).is_ok());
+    assert!(bob.client.authenticated_envelope_sender(HeadUse::NewAuthorization, &entry).is_ok());
     assert!(
         bob.client
             .append_group_gateway_delivery_for_recipient("thread", "g", "forged", &entry, "bob")

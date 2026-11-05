@@ -3,6 +3,7 @@
 
 //! SDK authority regressions against genuine root signatures and the node registry.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_protocol::{DeviceSetStatus, PrincipalKind};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -151,7 +152,9 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
     assert!(
         peer.client
             .device_identity(&reference)
-            .and_then(|identity| peer.client.require_cached_root_authority(&identity))
+            .and_then(|identity| peer
+                .client
+                .require_cached_root_authority(HeadUse::NewAuthorization, &identity))
             .is_err()
     );
     peer.reopen()?;
@@ -160,7 +163,9 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
     assert!(
         peer.client
             .device_identity(&reference)
-            .and_then(|identity| peer.client.require_cached_root_authority(&identity))
+            .and_then(|identity| peer
+                .client
+                .require_cached_root_authority(HeadUse::NewAuthorization, &identity))
             .is_err()
     );
     assert!(

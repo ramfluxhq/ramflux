@@ -4,6 +4,7 @@
 //! State ordering, sender namespace and confirmed-session recovery regressions.
 use super::review::{Inbox, legacy, pool, trust};
 use super::*;
+use crate::client::identity_authority::HeadUse;
 
 fn from(
     sender: &Fixture,
@@ -620,7 +621,9 @@ async fn unowned_legacy_rows_cannot_squat_new_sender_scoped_projection_or_attach
     )?;
     let scoped = format!(
         "routed:{}",
-        bob.client.authenticated_committed_key(&entry)?.trim_start_matches("routed/committed/")
+        bob.client
+            .authenticated_committed_key(HeadUse::NewAuthorization, &entry)?
+            .trim_start_matches("routed/committed/")
     );
     bob.client.send_direct_message("old-attacker", "old-collision", "carol", b"old squat")?;
     bob.client.send_direct_message("old-attacker", &scoped, "carol", b"old reserved squat")?;

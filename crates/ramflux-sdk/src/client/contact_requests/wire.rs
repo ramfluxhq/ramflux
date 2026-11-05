@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-signed first-contact consent, independently bound to encrypted transport and endpoints.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 pub(super) const DOMAIN: &str = "ramflux.contact_request.v1";
@@ -94,7 +95,7 @@ impl RamfluxClient {
         let body = &control.body;
         let now = now_unix_timestamp();
         let own = self.owned_device_identity()?;
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if self
             .current_custody_authority(source.root_commitment(), crate::custody::network_now()?)?
             .is_some()
@@ -137,7 +138,7 @@ impl RamfluxClient {
             return Err(invalid("contact request endpoint, lifetime or routing mismatch"));
         }
         crate::client::contact::verify_device_manifest(&body.manifest, actor)?;
-        let trusted = self.trusted_device(&source)?;
+        let trusted = self.trusted_device(HeadUse::NewAuthorization, &source)?;
         if body.manifest.principal_id != entry.envelope.source_principal_id
             || !body.manifest.devices.iter().any(|device| {
                 device.device_id == source.device_id()

@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::HeadUse;
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 
@@ -48,9 +49,9 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         recipient_device_id: &str,
     ) -> Result<GroupGatewayDeliveryResult, SdkError> {
-        self.authenticated_envelope_sender(entry)?;
+        self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         self.require_native_operation(
-            &self.authenticated_device_identity(entry)?,
+            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
             NativeOperation::Group,
         )?;
         self.append_gateway_delivery(entry)?;
@@ -122,7 +123,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         recipient_device_id: &str,
     ) -> Result<GroupGatewayDeliveryResult, SdkError> {
-        self.authenticated_envelope_sender(entry)?;
+        self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         self.append_gateway_delivery(entry)?;
         let encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
             .map_err(|error| SdkError::LocalBus(format!("invalid group payload: {error}")))?;
@@ -323,7 +324,7 @@ impl RamfluxClient {
             }
             if self.group_sender_key_counter_seen(
                 envelope,
-                &self.authenticated_device_identity(entry)?,
+                &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
             )? {
                 self.account_db()?.remove_group_pending_undecrypted(message_id)?;
                 return Ok(Vec::new());
@@ -331,7 +332,7 @@ impl RamfluxClient {
             match self.decrypt_group_envelope_for_identity(
                 envelope,
                 message_id,
-                &self.authenticated_device_identity(entry)?,
+                &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
             ) {
                 Ok(plaintext) => self.account_db()?.write_transaction(|| {
                     self.send_direct_message(

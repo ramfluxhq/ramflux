@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Small authenticated controls share pair delivery without impersonating group snapshots.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_protocol::group_state::{GroupChangeRequest, GroupChangeResult, GroupStateActor};
 use serde::{Deserialize, Serialize};
@@ -127,7 +128,7 @@ impl RamfluxClient {
         {
             return Err(StorageError::GroupPermissionDenied.into());
         }
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if source.root_commitment() != actor.root_commitment
             || source.device_id() != actor.device_id
         {
@@ -233,7 +234,7 @@ impl RamfluxClient {
                 }
                 self.ensure_shared_group_device(
                     &state,
-                    &self.authenticated_device_identity(entry)?,
+                    &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
                 )?;
             }
         }
@@ -257,7 +258,7 @@ impl RamfluxClient {
             GroupControlBody::DeviceSet { .. } => {}
             GroupControlBody::Transfer { control } => {
                 let own = self.owned_device_identity()?;
-                let local = self.trusted_device(&own)?;
+                let local = self.trusted_device(HeadUse::NewAuthorization, &own)?;
                 let target = local["target_delivery_id"]
                     .as_str()
                     .ok_or(StorageError::GroupPermissionDenied)?;

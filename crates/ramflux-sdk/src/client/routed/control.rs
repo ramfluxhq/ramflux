@@ -3,6 +3,7 @@
 
 //! Typed control projections, with source/target ownership checked before transactional mutation.
 use super::{A2iControlEvent, GatewayInboxEntry, Kind, Opened, RamfluxClient, SdkError, invalid};
+use crate::client::identity_authority::HeadUse;
 use serde_json::Value;
 fn revocation_error(error: ramflux_storage::StorageError) -> SdkError {
     match error {
@@ -90,7 +91,7 @@ impl RamfluxClient {
             }
             self.account_db()?.persist_actor_state(
                 &self
-                    .authenticated_committed_key(entry)?
+                    .authenticated_committed_key(HeadUse::NewAuthorization, entry)?
                     .replace("routed/committed/", "routed/control/"),
                 &event,
             )?;
@@ -113,7 +114,7 @@ impl RamfluxClient {
                         floor,
                     )?;
                 }
-                self.account_db()?.append_journal(&format!("pair-reset:{}", self.authenticated_committed_key(entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device.storage_key(),"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
+                self.account_db()?.append_journal(&format!("pair-reset:{}", self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device.storage_key(),"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
             } else {
                 self.project_contact_control(entry, &event)?;
             }
@@ -143,8 +144,10 @@ impl RamfluxClient {
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("unknown control event type"))?;
-        let device =
-            self.trusted_device(&self.device_identity(&self.inbound_device_reference(entry)?)?)?;
+        let device = self.trusted_device(
+            HeadUse::NewAuthorization,
+            &self.device_identity(&self.inbound_device_reference(entry)?)?,
+        )?;
         let remote = [
             Some(entry.envelope.source_principal_id.as_str()),
             device.get("principal_commitment").and_then(Value::as_str),

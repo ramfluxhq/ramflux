@@ -4,6 +4,7 @@
 //! Signed call controls pass through the actual pair AEAD and durable routing projection.
 use super::*;
 use crate::client::call::{self, state::LiveCall};
+use crate::client::identity_authority::HeadUse;
 use ramflux_protocol::{CallAction, CallControl, VoiceAllocation};
 use serde_json::json;
 fn contacts(a: &Fixture, b: &Fixture) -> Result<(), SdkError> {
@@ -327,7 +328,7 @@ async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_mes
         .client
         .account_db()?
         .load_actor_state::<super::committed::Committed>(
-            &bob.client.authenticated_committed_key(&packet)?,
+            &bob.client.authenticated_committed_key(HeadUse::NewAuthorization, &packet)?,
         )?
         .ok_or_else(|| invalid("receipt"))?;
     assert_eq!(receipt.entry.envelope.encrypted_payload.len(), 0);

@@ -3,6 +3,7 @@
 
 //! Publication forks and expired session proofs cannot wedge long-lived root authority.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 #[test]
 fn concurrent_own_registration_proposals_rebase_on_the_nodes_accepted_fork() -> TestResult {
     let first = Actor::new("alice", "one", 181, 182, 1)?;
@@ -72,7 +73,9 @@ fn expired_proof_keeps_durable_device_authority_but_new_registration_still_requi
                 &manifest.principal_commitment,
                 "stolen"
             )?)
-            .and_then(|identity| peer.client.require_cached_root_authority(&identity))
+            .and_then(|identity| peer
+                .client
+                .require_cached_root_authority(HeadUse::NewAuthorization, &identity))
             .is_err()
     );
     peer.client
@@ -80,7 +83,9 @@ fn expired_proof_keeps_durable_device_authority_but_new_registration_still_requi
             &manifest.principal_commitment,
             "two",
         )?)
-        .and_then(|identity| peer.client.require_cached_root_authority(&identity))?;
+        .and_then(|identity| {
+            peer.client.require_cached_root_authority(HeadUse::NewAuthorization, &identity)
+        })?;
     peer.client.require_current_device_authorization(
         &peer.client.device_identity_for_root(&manifest.principal_commitment, "two")?,
     )?;
@@ -165,15 +170,16 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
     )?);
     m.devices.clear();
     observe(&alice.client, &m)?;
-    alice
-        .client
-        .device_identity(&bob_ref)
-        .and_then(|identity| alice.client.require_cached_root_authority(&identity))?;
+    alice.client.device_identity(&bob_ref).and_then(|identity| {
+        alice.client.require_cached_root_authority(HeadUse::NewAuthorization, &identity)
+    })?;
     assert!(
         alice
             .client
             .device_identity(&mallory_ref)
-            .and_then(|identity| alice.client.require_cached_root_authority(&identity))
+            .and_then(|identity| alice
+                .client
+                .require_cached_root_authority(HeadUse::NewAuthorization, &identity))
             .is_err()
     );
     assert_eq!(alice.client.account_db()?.group_member_device_key("group", &bob_device)?, pin);

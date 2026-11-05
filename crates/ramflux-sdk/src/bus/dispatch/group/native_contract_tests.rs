@@ -3,6 +3,7 @@
 
 //! Group refusal contracts through the production bus dispatcher.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 use crate::client::native_test_support::{Fixture, TestResult};
 use serde_json::json;
 
@@ -332,7 +333,7 @@ async fn owner_failure_chain_is_characterised() -> TestResult {
             "after rename"
         );
     }
-    // Both stale and peer-only stale fail on actual admitted content, with no gateway entry.
+    // Both stale and peer-only stale display actual admitted content without a fetch.
     for local_fresh in [false, true] {
         let account = state.accounts.get_mut("owner").ok_or("Alice")?;
         *account.client.native_head_freshness.borrow_mut() =
@@ -340,9 +341,14 @@ async fn owner_failure_chain_is_characterised() -> TestResult {
         if local_fresh {
             account.client.persist_fetched_identity_directory(&alice.manifest)?;
         }
-        assert_freshness_refusal(&account.client.committed_routing(&entry));
+        assert_freshness_refusal(
+            &account.client.committed_routing(HeadUse::NewAuthorization, &entry),
+        );
         for method in ["group.read", "group.receive"] {
-            assert_freshness_refusal(&read_group(&mut state, method).await);
+            assert_eq!(
+                read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
+                "after rename"
+            );
         }
     }
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
@@ -351,23 +357,6 @@ async fn owner_failure_chain_is_characterised() -> TestResult {
         account.client.account_db()?.message_content(&messages[0].message_id)?,
         Some(b"after rename".to_vec())
     );
-    // Differential probe localizes the failure to pending-delivery re-projection.
-    let projected = std::mem::take(&mut account.pending_deliveries);
-    for method in ["group.read", "group.receive"] {
-        assert_eq!(
-            read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
-            "after rename"
-        );
-    }
-    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    account.pending_deliveries = projected;
-    account.client.persist_fetched_identity_directory(&bob.manifest)?;
-    for method in ["group.read", "group.receive"] {
-        assert_eq!(
-            read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
-            "after rename"
-        );
-    }
     Ok(())
 }
 
@@ -538,4 +527,124 @@ async fn stale_peer_head_with_served_manifest_is_admitted_on_first_pass() -> Tes
 #[tokio::test]
 async fn both_stale_heads_with_served_peer_manifest_defer_on_local_head() -> TestResult {
     Box::pin(characterise_gateway_admission(false, false, true)).await
+}
+
+#[tokio::test]
+async fn stale_head_new_inbound_stays_pending_until_verified_refresh() -> TestResult {
+    let (alice, bob, entry) = renamed_group_fixture().await?;
+    let (address, directory) =
+        crate::bus::dispatch::surface_transport::fixture::directory(&alice.root.0, BTreeMap::new())
+            .await?;
+    let mut config = alice.config;
+    config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
+    config.gateway_addr = address;
+    config.tcp_gateway_addr = Some(address);
+    config.server_name = "test-gateway".into();
+    config.ca_cert = alice.root.0.join("ca.pem");
+    let mut account = LocalBusAccountState::disconnected(
+        alice.client,
+        config,
+        alice.manifest.principal_commitment.clone(),
+    );
+    *account.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    account.client.persist_fetched_identity_directory(&alice.manifest)?;
+    let key = account.client.inbox_admission_key(&entry)?;
+    install_gateway(&mut account, vec![entry]);
+    let at = now_unix_timestamp() + 60;
+    crate::bus::sync_driver::run_at(&mut account, at).await?;
+    assert_retry_retained(&account, &key)?;
+    let old = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(301))
+        .ok_or("clock")?;
+    account.client.persist_fetched_identity_directory_at(&bob.manifest, old)?;
+    let mut invalid = bob.manifest.clone();
+    invalid.principal_id = "invalid-authority".into();
+    assert!(account.client.persist_fetched_identity_directory(&invalid).is_err());
+    crate::bus::sync_driver::run_at(&mut account, at + 2).await?;
+    assert_retry_retained(&account, &key)?;
+    account.client.persist_fetched_identity_directory(&bob.manifest)?;
+    crate::bus::sync_driver::run_at(&mut account, at + 6).await?;
+    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
+    directory.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn stored_group_history_after_rename_with_expired_head_succeeds() -> TestResult {
+    let (alice, _bob, entry) = renamed_group_fixture().await?;
+    let mut account = LocalBusAccountState::disconnected(
+        alice.client,
+        alice.config,
+        alice.manifest.principal_commitment,
+    );
+    install_gateway(&mut account, vec![entry]);
+    let mut state = daemon(account, &alice.root.0);
+    read_group(&mut state, "group.receive").await?;
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    account.engine = None;
+    *account.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    assert!(crate::bus::readers::is_reader_request("group.history"));
+    let result = read_group(&mut state, "group.history").await?.response_body;
+    assert_eq!(result["metadata"]["name"], "After");
+    assert_eq!(result["metadata"]["member_roster"].as_array().ok_or("roster")?.len(), 2);
+    assert_eq!(result["decrypted_messages"][0]["body_utf8"], "after rename");
+    let frame = LocalBusFrame::request(
+        "offline-reader",
+        Some("owner".into()),
+        "ramflux.sdk.v1",
+        "group.history",
+        json!({"group_id":"group","conversation_id":"thread","limit":32}),
+    );
+    assert_eq!(crate::bus::readers::read_account(&state, "owner", &frame)?, result);
+    assert!(state.accounts.get("owner").ok_or("Alice")?.engine.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn historical_read_ignores_clock_but_not_revocation() -> TestResult {
+    let (alice, bob, entry) = renamed_group_fixture().await?;
+    let mut account = LocalBusAccountState::disconnected(
+        alice.client,
+        alice.config,
+        alice.manifest.principal_commitment,
+    );
+    install_gateway(&mut account, vec![entry]);
+    let mut state = daemon(account, &alice.root.0);
+    read_group(&mut state, "group.receive").await?;
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    *account.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    for method in ["group.history", "group.read", "group.receive"] {
+        assert_eq!(
+            read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
+            "after rename"
+        );
+    }
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    let identity = bob.client.owned_device_identity()?;
+    account
+        .client
+        .account_db()?
+        .persist_actor_state(&RamfluxClient::device_revocation_key(&identity), &true)?;
+    for method in ["group.history", "group.read", "group.receive"] {
+        assert!(
+            read_group(&mut state, method).await.is_err(),
+            "revoked sender readable via {method}"
+        );
+    }
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    account
+        .client
+        .account_db()?
+        .persist_actor_state(&RamfluxClient::device_revocation_key(&identity), &false)?;
+    let id = account.client.direct_messages("thread")?[0].message_id.clone();
+    account.client.delete_direct_message("thread", &id, "local", "erase-proof")?;
+    for method in ["group.history", "group.read", "group.receive"] {
+        let body = read_group(&mut state, method).await?.response_body;
+        assert_eq!(body["decrypted_messages"], json!([]), "erased content via {method}");
+    }
+    Ok(())
 }

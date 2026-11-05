@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Legacy retries preserve ciphertext; only immutable failures authorize rejection ACKs.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 pub(crate) enum LegacyGroupDelivery {
     Applied(GroupGatewayDeliveryResult),
@@ -82,7 +83,10 @@ impl RamfluxClient {
         else {
             return Ok(false);
         };
-        let Ok(source) = self.authenticated_device_identity(entry) else { return Ok(false) };
+        let Ok(source) = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)
+        else {
+            return Ok(false);
+        };
         let cached = self.account_db()?.client_device_record(&source).ok().flatten();
         if cached.is_none_or(|record| record.get("x25519_identity_public").is_none()) {
             return Ok(false);

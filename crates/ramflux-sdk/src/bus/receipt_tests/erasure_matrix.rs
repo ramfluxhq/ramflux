@@ -4,6 +4,7 @@
 //! Real routed own/peer DM and group erasure, replay, quarantine and reopen coverage.
 use super::*;
 use crate::bus::sync_driver;
+use crate::client::identity_authority::HeadUse;
 
 #[tokio::test(flavor = "current_thread")]
 async fn generic_message_copy_scan_covers_own_peer_dm_group_replay_and_restart() -> TestResult {
@@ -125,7 +126,8 @@ async fn case(own: bool, group: bool) -> TestResult {
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
     sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
-    let routing = recipient.client.committed_routing(&entry)?.ok_or("routing")?;
+    let routing =
+        recipient.client.committed_routing(HeadUse::NewAuthorization, &entry)?.ok_or("routing")?;
     let message = routing.message_id;
     let raw = super::erasure_audit::open(&b, &recipient.client)?;
     let identities = super::erasure_audit::identities(&raw)?;
