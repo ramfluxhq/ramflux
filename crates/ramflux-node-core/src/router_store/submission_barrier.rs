@@ -17,9 +17,16 @@ struct Gate {
     state: Mutex<State>,
     changed: Condvar,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Settlement {
+    #[default]
+    Idle,
+    Held,
+}
 #[derive(Default, Debug)]
 struct State {
     readers: usize,
+    settlement: Settlement,
     writer: bool,
     waiting: usize,
 }
@@ -33,6 +40,7 @@ pub struct SubmissionLease {
     writer: bool,
     acquired: bool,
     admission: bool,
+    settlement: Settlement,
     root: Option<Box<SubmissionLease>>,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
@@ -51,6 +59,9 @@ impl Drop for SubmissionLease {
         if self.acquired {
             let mut state =
                 self.gate.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.settlement == Settlement::Held {
+                state.settlement = Settlement::Idle;
+            }
             if self.writer {
                 state.writer = false;
             } else {
@@ -86,6 +97,7 @@ impl TargetGates {
             writer: deadline.is_some(),
             acquired: false,
             admission: false,
+            settlement: Settlement::Idle,
             root: None,
             permit: None,
         };
@@ -178,7 +190,15 @@ impl RouterRedbStore {
     /// # Errors
     /// Returns a retryable migration refusal when a cutover is queued.
     pub fn acquire_acknowledgement(&self, target: &str) -> Result<SubmissionLease, NodeCoreError> {
-        self.submission_gates.acquire(target, None)
+        let mut lease = self.submission_gates.acquire(target, None)?;
+        let mut state = lease.gate.state.lock().map_err(|_| busy())?;
+        while state.settlement == Settlement::Held {
+            state = lease.gate.changed.wait(state).map_err(|_| busy())?;
+        }
+        state.settlement = Settlement::Held;
+        drop(state);
+        lease.settlement = Settlement::Held;
+        Ok(lease)
     }
     pub(super) fn validate_target_lease(
         &self,
@@ -288,6 +308,38 @@ mod tests {
         drop(gates.acquire("moving", None)?);
         drop(reader);
         assert_eq!(gates.0.lock().map_err(|_| "map poisoned")?.len(), 0);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod acknowledgement_tests {
+    use super::*;
+    #[test]
+    fn acknowledgement_lease_serializes_only_its_target() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = crate::router_store::publication::tests::fixture("ack-lease");
+        let store = Arc::new(crate::router_store::incarnation::test_store(&root, 0, 1 << 20)?);
+        let first = store.acquire_acknowledgement("target")?;
+        let gate = Arc::clone(&first.gate);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let other = store.clone();
+        let task = std::thread::spawn(move || {
+            tx.send(other.acquire_acknowledgement("target")).map_err(|e| e.to_string())
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while gate.state.lock().map_err(|_| "gate state")?.readers < 2 {
+            assert!(Instant::now() < deadline, "second lease admission watchdog");
+            std::thread::yield_now();
+        }
+        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        drop(store.acquire_acknowledgement("other")?);
+        drop(first);
+        drop(rx.recv_timeout(Duration::from_secs(5))??);
+        task.join().map_err(|_| "lease thread")??;
+        drop(gate);
+        drop(store.acquire_acknowledgement("target")?);
+        assert!(store.submission_gates.0.lock().map_err(|_| "gates")?.is_empty());
         Ok(())
     }
 }

@@ -6,7 +6,7 @@ use super::{CursorAckState, NodeCoreError, RouterCore};
 use std::collections::BTreeSet;
 
 impl RouterCore {
-    /// Apply up to 64 ACKs under target admission and shard mutation serialization.
+    /// Apply up to 64 ACKs under a target settlement lease.
     /// Each refused ACK leaves the candidate unchanged; storage failure publishes nothing.
     /// # Errors
     /// Returns admission, validation or storage errors before reporting any success.
@@ -17,12 +17,11 @@ impl RouterCore {
         acks: &[ramflux_protocol::Ack],
     ) -> Result<Vec<Result<CursorAckState, NodeCoreError>>, NodeCoreError> {
         if acks.is_empty() || acks.len() > 64 {
-            return Err(NodeCoreError::ItestHttp("ACK batch requires 1..64 members".into()));
+            return Err(NodeCoreError::InvalidAckBatch("requires 1..64 members"));
         }
         self.bind_publication(store)?;
         let lease = store.acquire_acknowledgement(target)?;
-        let mut shard = self.target_shard(target);
-        let mut candidate = shard.inbox.clone();
+        let mut candidate = self.target_shard(target).inbox.clone_ack_target(target);
         let mut results = Vec::with_capacity(acks.len());
         let mut retired = BTreeSet::new();
         let mut acknowledged = Vec::new();
@@ -60,11 +59,12 @@ impl RouterCore {
             let mut cursor = candidate
                 .cursor_state(target)
                 .cloned()
-                .ok_or_else(|| NodeCoreError::ItestHttp("ACK candidate lacks cursor".into()))?;
-            cursor.retired_inbox_seqs = retired.into_iter().collect();
-            store.record_leased_ack_batch(&cursor, &acknowledged, lease)?;
+                .ok_or(NodeCoreError::InvalidAckBatch("candidate lacks cursor"))?;
+            cursor.retired_inbox_seqs = retired.iter().copied().collect();
+            store.record_leased_ack_batch(&cursor, &acknowledged, &lease)?;
+            let mut shard = self.target_shard(target);
             let _publication = crate::fatal_durability::publication()?;
-            shard.inbox = candidate;
+            shard.inbox.publish_ack_cursor(cursor, &acknowledged);
         }
         Ok(results)
     }
@@ -72,3 +72,6 @@ impl RouterCore {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod concurrency_tests;

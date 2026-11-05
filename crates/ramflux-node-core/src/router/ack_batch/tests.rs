@@ -20,7 +20,7 @@ use std::{
 };
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-fn ack(seq: u64) -> ramflux_protocol::Ack {
+pub(super) fn ack(seq: u64) -> ramflux_protocol::Ack {
     let mut ext = ramflux_protocol::Ext::default();
     ext.ext.insert("inbox_seq".into(), serde_json::json!(seq));
     ramflux_protocol::Ack {
