@@ -86,20 +86,6 @@ fn legacy(case: &str) -> TestResult {
         source.db.execute_batch(
             "DELETE FROM object_message_reference; DELETE FROM object_retention_reference;",
         )?;
-        // D9's unowned input is bare: the former fixture left its old object
-        // binding behind. Registered placeholders now have a separate refusal test.
-        source
-            .db
-            .execute("DELETE FROM message_copy_binding WHERE copy_id='object:'||?1", [selector])?;
-        assert_eq!(source.db.query_row("SELECT count(*) FROM message_footprint WHERE kind='revocation_selector' AND json_extract(locator,'$.selector')=?1",[selector],|r|r.get::<_,u64>(0))?,0);
-        assert_eq!(
-            source.db.query_row(
-                "SELECT count(*) FROM message_copy_binding WHERE copy_id='object:'||?1",
-                [selector],
-                |r| r.get::<_, u64>(0)
-            )?,
-            0
-        );
     }
     drop(source);
     let mut target = BackupDatabase::open(&target_path, &saved.key)?;
@@ -483,3 +469,6 @@ mod pr10_review_probes;
 
 #[path = "history_pr10_r3_tests.rs"]
 mod pr10_r2_probes;
+
+#[path = "history_pr10_r4_tests.rs"]
+mod pr10_r4_probes;

@@ -310,3 +310,131 @@ fn fresh_restore_backup_registered_placeholder_refuses_full_and_native_merge() -
     }
     Ok(())
 }
+
+// Native restores require independently installed local authority. Seed only the
+// private data generation with the same single-input normalizer used by fresh restore.
+fn native_fresh_target(
+    root: &Path,
+    index: &AccountIndex,
+    key: &AccountDbKey,
+    source: &Path,
+    saved: &ramflux_storage::AccountBackupSnapshot,
+) -> TestResult {
+    let previous = index.account("account")?;
+    let directory = root.join("accounts/account/fresh-normalized");
+    std::fs::create_dir_all(&directory)?;
+    let target = directory.join("account.db");
+    BackupDatabase::open_restore_input(source, &saved.key, BackupOpenMode::PreNormalization)?
+        .copy_to(&target, key)?;
+    let mut stage =
+        BackupDatabase::open_restore_input(&target, key, BackupOpenMode::PreNormalization)?;
+    stage.normalize_backup_candidate()?;
+    stage.check_integrity()?;
+    drop(stage);
+    let wrapped = index.load_wrapped_db_key("account")?.ok_or("wrapped key")?;
+    let marker = serde_json::to_vec(
+        &json!({"schema":"ramflux.local.native_data_generation.v1","local_account_id":"account","account_anchor":previous.principal_commitment}),
+    )?;
+    index.install_backup_generation(&ramflux_storage::BackupIndexInstall {
+        account_id: "account",
+        principal_commitment: &previous.principal_commitment,
+        db_relative_path: "accounts/account/fresh-normalized/account.db",
+        object_relative_path: "accounts/account/fresh-normalized",
+        manifest_json: &marker,
+        wrapped_key: &wrapped,
+    })?;
+    Ok(())
+}
+
+fn restored_target_older_install(native: bool) -> TestResult {
+    let original = tempfile::tempdir()?;
+    let older_dir = tempfile::tempdir()?;
+    let revoked_dir = tempfile::tempdir()?;
+    let fresh = tempfile::tempdir()?;
+    let mut client = client(original.path(), native)?;
+    producers(&mut client)?;
+    let id = if native { "account" } else { "alice" };
+    let identity = crate::bus::backup_jobs::capture_identity(&client, original.path(), id)?;
+    let older = archive(&client, older_dir.path(), id, false)?;
+    let revoked = archive(&client, revoked_dir.path(), id, true)?;
+    let older_path = older_dir.path().join("archive.db");
+    let revoked_path = revoked_dir.path().join("archive.db");
+    if native {
+        BackupDatabase::open_restore_input(
+            &older_path,
+            &older.key,
+            BackupOpenMode::PreNormalization,
+        )?
+        .sanitize_native_backup()?;
+    }
+    let older_bytes = std::fs::read(&older_path)?;
+    let revoked_bytes = std::fs::read(&revoked_path)?;
+    let (root, index, key) = if native {
+        let index = client.account_index()?.clone();
+        let key = crate::bus::backup_jobs::install::existing_key(
+            &index,
+            original.path(),
+            id,
+            b"local-secret",
+        )?;
+        drop(client);
+        native_fresh_target(original.path(), &index, &key, &revoked_path, &revoked)?;
+        (original.path(), index, key)
+    } else {
+        drop(client);
+        // Capture an independent metadata value for the first SDK install.
+        let first_identity = serde_json::from_slice(&serde_json::to_vec(&identity)?)?;
+        let (index, key) =
+            install_chain_fresh(fresh.path(), &revoked_path, &revoked, first_identity)?;
+        (fresh.path(), index, key)
+    };
+    let before = index.account(id)?;
+    let before_path = root.join(&before.db_relative_path);
+    assert_eq!(registration(&raw(&before_path, &key)?)?, (1, 1, 1, 0));
+    let jobs = BackupJobs::new(root, index.clone())?;
+    let job = jobs.start(crate::backup::BackupJobKind::Restore, "older.rfb".into())?;
+    let directory = jobs.directory(&job.job_id)?;
+    std::fs::copy(&older_path, directory.join("account.db"))?;
+    let metadata = format::Metadata {
+        identity,
+        database_key: *older.key.bytes(),
+        ca_pem: b"test-ca".to_vec(),
+    };
+    let master = [8; 32];
+    format::save_metadata(&directory.join("identity.sealed"), &master, &metadata)?;
+    let staging = crate::backup::VerifiedBackupStaging::new(
+        directory,
+        master,
+        crate::bus::backup_jobs::service::now(),
+    )?;
+    let native_key =
+        native.then(|| crate::bus::backup_jobs::NativeInstallKey { account_id: id.into(), key });
+    jobs.install_generation_mode(&job, staging, native_key, None, true)?;
+    let selected = index.account(id)?;
+    assert_ne!(selected.db_relative_path, before.db_relative_path);
+    let selected_key = crate::bus::backup_jobs::install::existing_key(
+        &index,
+        root,
+        id,
+        if native { b"local-secret" } else { b"account-test-secret" },
+    )?;
+    let selected_path = root.join(&selected.db_relative_path);
+    assert_eq!(registration(&raw(&selected_path, &selected_key)?)?, (1, 1, 1, 0));
+    BackupDatabase::open(&selected_path, &selected_key)?.check_integrity()?;
+    let restored = AccountDb::open(&index, id, &selected_key)?;
+    restored.checkpoint_retired_secrets()?;
+    let second_path = older_dir.path().join("second-generation.db");
+    let second = restored.write_backup_snapshot(&second_path)?;
+    assert_eq!(registration(&raw(&second_path, &second.key)?)?, (1, 1, 1, 0));
+    assert_eq!(std::fs::read(&older_path)?, older_bytes);
+    assert_eq!(std::fs::read(&revoked_path)?, revoked_bytes);
+    Ok(())
+}
+
+#[test]
+fn fresh_restored_target_keeps_revocation_on_older_full_and_native_install() -> TestResult {
+    for native in [false, true] {
+        restored_target_older_install(native)?;
+    }
+    Ok(())
+}

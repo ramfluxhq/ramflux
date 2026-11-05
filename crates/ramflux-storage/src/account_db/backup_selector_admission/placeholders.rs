@@ -167,7 +167,9 @@ fn legacy_target_identity(
     for key in [format!("attachment/reference/{selector}"), format!("directory/object/{selector}")]
     {
         let bytes: Option<Option<Vec<u8>>> = db.query_row("SELECT CASE WHEN length(state_json)<=1048576 THEN state_json END FROM main.runtime_actor_state WHERE state_kind=?1", [key], |r| r.get(0)).optional()?;
-        let Some(bytes) = bytes else { return Ok(None) };
+        let Some(bytes) = bytes else {
+            return registered_target_identity(db, root, selector, manifest);
+        };
         let bytes = zeroize::Zeroizing::new(bytes.ok_or(StorageError::AuthorizationRejected)?);
         values.push(
             serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -206,13 +208,10 @@ fn omit_unresolved_placeholder(
     id: i64,
     selector: &str,
 ) -> Result<(), StorageError> {
-    // Only the incoming input's own registration can add this refusal. Actor
-    // absence is not evidence that a restriction was never registered.
-    if side == "incoming" {
-        let registered: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.message_footprint f WHERE f.kind='revocation_selector' AND json_extract(f.locator,'$.selector')=?1) OR EXISTS(SELECT 1 FROM incoming.message_copy_binding b WHERE b.copy_id='object:'||?1)", [selector], |r|r.get(0))?;
-        if registered {
-            return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
-        }
+    // Restrictions belong to both inputs; ordinary copy provenance is not a veto.
+    let registered: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.message_footprint f WHERE f.kind='revocation_selector' AND CAST(json_extract(f.locator,'$.selector') AS TEXT)=?1)"), [selector], |r|r.get(0))?;
+    if registered {
+        return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
     }
     // Bare unresolved placeholders have no restriction to preserve.
     db.execute(
@@ -224,4 +223,46 @@ fn omit_unresolved_placeholder(
         params![side, selector],
     )?;
     Ok(())
+}
+
+// A fresh-normalized target retains its registered restriction but no unowned actor.
+// Every identity and owner read here belongs to the target; unioned fences only veto.
+fn registered_target_identity(
+    db: &Connection,
+    root: &str,
+    selector: &str,
+    manifest: &str,
+) -> Result<Option<(String, String, String)>, StorageError> {
+    let mut query = db.prepare("SELECT DISTINCT json_extract(f.locator,'$.wire'),json_extract(f.locator,'$.manifest'),json_extract(f.locator,'$.commitment'),b.message_id FROM main.message_footprint f JOIN main.message_copy_binding b ON b.message_id=f.message_id AND b.copy_id='object:'||?1 WHERE f.kind='revocation_selector' AND CAST(json_extract(f.locator,'$.selector') AS TEXT)=?1")?;
+    let mut identity = None;
+    for row in query.query_map([selector], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })? {
+        let (wire, known_manifest, commitment, message) = row?;
+        if wire.is_empty()
+            || known_manifest.is_empty()
+            || commitment != object_erasure_commitment(root, &wire, &known_manifest)
+            || (manifest.as_bytes() != [0_u8; 32] && manifest != known_manifest)
+        {
+            return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
+        }
+        if super::graph::target_deleted(db, &message)? {
+            continue;
+        }
+        let vetoed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?1) OR EXISTS(SELECT 1 FROM object_erasure_lookup WHERE lookup=?2)", params![commitment,object_erasure_lookup(root,selector)], |r|r.get(0))?;
+        if vetoed {
+            continue;
+        }
+        let candidate = (wire, known_manifest, commitment);
+        if identity.as_ref().is_some_and(|old| old != &candidate) {
+            return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
+        }
+        identity = Some(candidate);
+    }
+    Ok(identity)
 }
