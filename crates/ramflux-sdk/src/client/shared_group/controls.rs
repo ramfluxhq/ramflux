@@ -257,7 +257,10 @@ impl RamfluxClient {
             GroupControlBody::DeviceSet { .. } => {}
             GroupControlBody::Transfer { control } => {
                 let own = self.owned_device_identity()?;
-                let local = self.trusted_device(&own)?;
+                let local = self.trusted_device(
+                    &own,
+                    crate::client::identity_authority::HeadUse::NewAuthorization,
+                )?;
                 let target = local["target_delivery_id"]
                     .as_str()
                     .ok_or(StorageError::GroupPermissionDenied)?;

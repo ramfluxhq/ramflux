@@ -161,7 +161,10 @@ impl RamfluxClient {
         if thread["group_id"].as_str() != request.group.as_deref() {
             return Err(invalid("resync group context mismatch"));
         }
-        let source = self.trusted_device(&self.authenticated_device_identity(entry)?)?;
+        let source = self.trusted_device(
+            &self.authenticated_device_identity(entry)?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         if entry.envelope.source_principal_id == local.principal_id {
             self.authorize_owned_surface_source(&source)?;
         } else {
@@ -281,8 +284,10 @@ impl RamfluxClient {
             return Err(invalid("resync reply requires the original author device"));
         }
         let target = &reply.destination;
-        let device =
-            self.trusted_device(&self.device_identity_for_root(&target.root, &target.device)?)?;
+        let device = self.trusted_device(
+            &self.device_identity_for_root(&target.root, &target.device)?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         if device["principal_id"] != target.principal
             || device["principal_commitment"] != target.root
         {

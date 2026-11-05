@@ -118,7 +118,10 @@ impl RamfluxClient {
                     }
                     if db.group_member_role_metadata(&pin.group_id, device)?.is_some() {
                         let identity = self.device_identity_for_root(root, device)?;
-                        let record = self.trusted_device(&identity)?;
+                        let record = self.trusted_device(
+                            &identity,
+                            crate::client::identity_authority::HeadUse::NewAuthorization,
+                        )?;
                         let outcome = if record["signing_public_key"] == pin.signing_public_key {
                             self.restore_own_member_pin(pin)
                         } else {

@@ -47,7 +47,10 @@ impl RamfluxClient {
                     Err(SdkError::Storage(error)) => return Err(error.into()),
                     Err(_) => continue,
                 };
-                let record = self.trusted_device(&identity)?;
+                let record = self.trusted_device(
+                    &identity,
+                    crate::client::identity_authority::HeadUse::NewAuthorization,
+                )?;
                 let id =
                     crate::group::group_member_route_event_id(&state.view().group_id, &identity)?;
                 let federation = if let Some(bytes) = self.event_body(&id)? {

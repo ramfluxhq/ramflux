@@ -143,8 +143,10 @@ impl RamfluxClient {
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("unknown control event type"))?;
-        let device =
-            self.trusted_device(&self.device_identity(&self.inbound_device_reference(entry)?)?)?;
+        let device = self.trusted_device(
+            &self.device_identity(&self.inbound_device_reference(entry)?)?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         let remote = [
             Some(entry.envelope.source_principal_id.as_str()),
             device.get("principal_commitment").and_then(Value::as_str),

@@ -27,7 +27,12 @@ impl RamfluxClient {
         self.require_pair_device_active(&local)?;
         let recipient = Self::qualified_recipient(message)?;
         let remote = self.device_identity(&recipient)?;
-        let authority = self.require_cached_root_authority(&remote).is_ok();
+        let authority = self
+            .require_cached_root_authority(
+                &remote,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
+            )
+            .is_ok();
         let pair = self.active_pair(&local, &remote)?;
         let reusable = if let Some((session, _)) = pair {
             let inactive = self

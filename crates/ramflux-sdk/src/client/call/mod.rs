@@ -118,7 +118,10 @@ impl RamfluxClient {
         }
         let identity = self.call_device_identity(&c.sender)?;
         self.require_native_operation(&identity, NativeOperation::Call)?;
-        let sender = self.trusted_device(&identity)?;
+        let sender = self.trusted_device(
+            &identity,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         if sender["principal_id"] != c.sender.principal_id {
             return Err(invalid("sender principal differs from root authority"));
         }
@@ -172,7 +175,10 @@ impl RamfluxClient {
         if peer != &c.sender {
             return Err(invalid("control source is not peer"));
         }
-        let record = self.trusted_device(&self.call_device_identity(&c.sender)?)?;
+        let record = self.trusted_device(
+            &self.call_device_identity(&c.sender)?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         let key =
             record["signing_public_key"].as_str().ok_or_else(|| invalid("sender key missing"))?;
         ramflux_crypto::verify_canonical_signature(&signing_bytes(c)?, &c.signature, key)?;
@@ -203,11 +209,13 @@ impl RamfluxClient {
                 return Err(invalid("call capacity or retired id"));
             }
             let mut incoming = LiveCall::incoming(c, self.call_local_endpoint()?, now)?;
-            let key =
-                self.trusted_device(&self.call_device_identity(&c.sender)?)?["signing_public_key"]
-                    .as_str()
-                    .ok_or_else(|| invalid("peer signing key missing"))?
-                    .to_owned();
+            let key = self.trusted_device(
+                &self.call_device_identity(&c.sender)?,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
+            )?["signing_public_key"]
+                .as_str()
+                .ok_or_else(|| invalid("peer signing key missing"))?
+                .to_owned();
             incoming.pin_peer(c.sender.clone(), key)?;
             if self.voice_calls.values().any(|call| call.row.state != "ended") {
                 incoming.busy(now)?;

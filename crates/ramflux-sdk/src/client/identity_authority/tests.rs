@@ -151,7 +151,10 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
     assert!(
         peer.client
             .device_identity(&reference)
-            .and_then(|identity| peer.client.require_cached_root_authority(&identity))
+            .and_then(|identity| peer.client.require_cached_root_authority(
+                &identity,
+                crate::client::identity_authority::HeadUse::NewAuthorization
+            ))
             .is_err()
     );
     peer.reopen()?;
@@ -160,7 +163,10 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
     assert!(
         peer.client
             .device_identity(&reference)
-            .and_then(|identity| peer.client.require_cached_root_authority(&identity))
+            .and_then(|identity| peer.client.require_cached_root_authority(
+                &identity,
+                crate::client::identity_authority::HeadUse::NewAuthorization
+            ))
             .is_err()
     );
     assert!(

@@ -48,7 +48,10 @@ impl RamfluxClient {
             }
             return Ok(());
         };
-        self.require_cached_root_authority(device)?;
+        self.require_cached_root_authority(
+            device,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         let entry = current
             .envelope()
             .body

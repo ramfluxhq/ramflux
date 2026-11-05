@@ -32,7 +32,10 @@ fn copied_name_cannot_pin_first_claimer_and_signed_member_root_chooses_bob() -> 
         alice
             .client
             .device_identity("shared")
-            .and_then(|identity| alice.client.require_cached_root_authority(&identity))
+            .and_then(|identity| alice.client.require_cached_root_authority(
+                &identity,
+                crate::client::identity_authority::HeadUse::NewAuthorization
+            ))
             .is_err()
     );
 

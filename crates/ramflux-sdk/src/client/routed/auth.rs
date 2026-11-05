@@ -71,7 +71,12 @@ impl RamfluxClient {
         }
         if self
             .device_identity(&reference)
-            .and_then(|identity| self.require_cached_root_authority(&identity))
+            .and_then(|identity| {
+                self.require_cached_root_authority(
+                    &identity,
+                    crate::client::identity_authority::HeadUse::NewAuthorization,
+                )
+            })
             .is_ok()
         {
             return Ok(None);
@@ -152,6 +157,7 @@ impl RamfluxClient {
     pub(crate) fn trusted_device(
         &self,
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
+        purpose: crate::client::identity_authority::HeadUse,
     ) -> Result<Value, SdkError> {
         if self
             .account_db()?
@@ -161,7 +167,7 @@ impl RamfluxClient {
             return Err(SdkError::InboundRejected("revoked device".to_owned()));
         }
 
-        self.require_cached_root_authority(identity).map_err(|error| {
+        self.require_cached_root_authority(identity, purpose).map_err(|error| {
             crate::client::inbox_failure::lookup_error(
                 error,
                 "cached sender directory is incomplete",
@@ -187,8 +193,10 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<Value, SdkError> {
-        let record =
-            self.trusted_device(&self.device_identity(&self.inbound_device_reference(entry)?)?)?;
+        let record = self.trusted_device(
+            &self.device_identity(&self.inbound_device_reference(entry)?)?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         if let Some(hint) =
             decode(&entry.envelope).ok().and_then(|wrapper| wrapper.source_principal_commitment)
             && record["principal_commitment"] != hint
@@ -215,7 +223,8 @@ impl RamfluxClient {
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
         header: &SdkDmX3dhHeader,
     ) -> Result<(), SdkError> {
-        let record = self.trusted_device(remote)?;
+        let record = self
+            .trusted_device(remote, crate::client::identity_authority::HeadUse::NewAuthorization)?;
         let expected: [u8; 32] = serde_json::from_value(
             record
                 .get("x25519_identity_public")

@@ -344,7 +344,10 @@ impl RamfluxClient {
             )?
         };
         if identity.is_some() {
-            self.require_cached_root_authority(&source)?;
+            self.require_cached_root_authority(
+                &source,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
+            )?;
         }
         if self.account_db()?.group_member_device_key(&distribution.group_id, &source)?.as_ref()
             != Some(public_key)

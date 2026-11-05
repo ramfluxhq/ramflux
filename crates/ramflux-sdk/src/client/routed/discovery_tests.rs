@@ -315,6 +315,7 @@ fn a_mismatched_deferred_pin_is_dropped_without_poisoning_authenticated_traffic(
     assert_eq!(skipped[0]["reason"], "deferred_pin_key_mismatch");
     receiver.client.trusted_device(
         &receiver.client.device_identity_for_root(&manifest.principal_commitment, "alice")?,
+        crate::client::identity_authority::HeadUse::NewAuthorization,
     )?;
     Ok(())
 }

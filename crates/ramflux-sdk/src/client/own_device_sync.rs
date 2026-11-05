@@ -45,9 +45,11 @@ impl RamfluxClient {
             })?;
         self.require_cached_root_authority(
             &self.device_identity_for_root(principal_commitment, &source_device_id)?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
         )?;
         self.require_cached_root_authority(
             &self.device_identity_for_root(principal_commitment, target_device_id)?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
         )?;
         if source_device.principal_commitment != target_device.principal_commitment {
             return Err(SdkError::LocalBus("own-device sync principal mismatch".to_owned()));
@@ -681,9 +683,11 @@ impl RamfluxClient {
         )?;
         self.require_cached_root_authority(
             &self.device_identity_for_root(&envelope.principal_commitment, &source.device_id)?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
         )?;
         self.require_cached_root_authority(
             &self.device_identity_for_root(&envelope.principal_commitment, &target.device_id)?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
         )?;
         if source.principal_commitment != envelope.principal_commitment
             || target.principal_commitment != envelope.principal_commitment

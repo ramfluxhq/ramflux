@@ -179,11 +179,18 @@ impl RamfluxClient {
         let own = self.owned_device_identity()?;
         let actor = &consent.actor.identity;
         let now = now_unix_timestamp();
-        self.require_cached_root_authority(source)?;
+        self.require_cached_root_authority(
+            source,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         if source.root_commitment() != own.root_commitment()
             || actor.root_commitment != source.root_commitment()
             || actor.device_id != source.device_id()
-            || self.trusted_device(source)?["signing_public_key"] != actor.signing_public_key
+            || self.trusted_device(
+                source,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
+            )?["signing_public_key"]
+                != actor.signing_public_key
             || consent.schema != DOMAIN
             || consent.issued_at < 0
             || consent.issued_at > now.saturating_add(300)

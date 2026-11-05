@@ -415,12 +415,18 @@ impl RamfluxClient {
             &request.actor.identity.root_commitment,
             &request.actor.identity.device_id,
         )?;
-        self.require_cached_root_authority(&identity)?;
+        self.require_cached_root_authority(
+            &identity,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         if state.view().effective_role(identity.root_commitment(), identity.device_id()).is_none() {
             return Err(StorageError::GroupPermissionDenied.into());
         }
         self.ensure_shared_group_device(state, &identity)?;
-        let trusted = self.trusted_device(&identity)?;
+        let trusted = self.trusted_device(
+            &identity,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         if trusted["principal_id"] != request.actor.identity.principal_id
             || trusted["signing_public_key"] != request.actor.identity.signing_public_key
         {

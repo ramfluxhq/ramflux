@@ -131,7 +131,8 @@ impl RamfluxClient {
                 "group sender root differs from pinned relationship".into(),
             ));
         }
-        let record = self.trusted_device(device)?;
+        let record = self
+            .trusted_device(device, crate::client::identity_authority::HeadUse::NewAuthorization)?;
         if let Some(state) = db.shared_group_state(group)? {
             if state.view().effective_role(device.root_commitment(), device.device_id()).is_none() {
                 return Err(StorageError::GroupPermissionDenied.into());
@@ -263,7 +264,10 @@ impl RamfluxClient {
         if db.client_record("device", device)?.is_none() {
             return Err(SdkError::InboundPending("joined member identity unavailable".into()));
         }
-        let record = self.trusted_device(&identity)?;
+        let record = self.trusted_device(
+            &identity,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         let (Some(principal), Some(commitment), Some(key)) = (
             record["principal_id"].as_str(),
             record["principal_commitment"].as_str(),

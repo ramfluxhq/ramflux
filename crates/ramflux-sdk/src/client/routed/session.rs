@@ -157,7 +157,12 @@ impl RamfluxClient {
             .is_none_or(|record| record.get("x25519_identity_public").is_none())
             || self
                 .device_identity(recipient)
-                .and_then(|identity| self.require_cached_root_authority(&identity))
+                .and_then(|identity| {
+                    self.require_cached_root_authority(
+                        &identity,
+                        crate::client::identity_authority::HeadUse::NewAuthorization,
+                    )
+                })
                 .is_err()
         {
             self.resolve_target_principal_commitment(

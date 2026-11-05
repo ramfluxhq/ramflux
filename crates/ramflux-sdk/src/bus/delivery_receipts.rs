@@ -198,7 +198,9 @@ fn receipt_message(
     if work.receiver != receiver.storage_key() || receiver.device_id() != config.device_id {
         return Err(SdkError::InboundRejected("receipt receiving device changed".into()));
     }
-    let device = account.client.trusted_device(&source)?;
+    let device = account
+        .client
+        .trusted_device(&source, crate::client::identity_authority::HeadUse::NewAuthorization)?;
     if work.root.as_deref() != Some(source.root_commitment())
         || device["principal_commitment"].as_str() != Some(source.root_commitment())
     {

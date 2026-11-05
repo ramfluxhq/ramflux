@@ -71,7 +71,10 @@ impl RamfluxClient {
         };
         if self.account_db()?.shared_group_state(group_id)?.is_some() {
             let identity = self.device_identity(&reference)?;
-            let record = self.trusted_device(&identity)?;
+            let record = self.trusted_device(
+                &identity,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
+            )?;
             let member = ramflux_protocol::group_state::GroupMemberIdentity {
                 principal_id: record["principal_id"]
                     .as_str()

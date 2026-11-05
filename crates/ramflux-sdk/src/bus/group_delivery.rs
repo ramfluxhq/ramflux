@@ -234,11 +234,22 @@ mod tests {
             &peer.manifest.principal_commitment,
             &peer.config.device_id,
         )?;
-        assert!(owner.client.trusted_device(&peer_identity).is_ok());
+        assert!(
+            owner
+                .client
+                .trusted_device(
+                    &peer_identity,
+                    crate::client::identity_authority::HeadUse::NewAuthorization
+                )
+                .is_ok()
+        );
         *owner.client.native_head_freshness.borrow_mut() =
             crate::client::identity_authority::NativeHeadFreshness::default();
         assert!(matches!(
-            owner.client.trusted_device(&peer_identity),
+            owner.client.trusted_device(
+                &peer_identity,
+                crate::client::identity_authority::HeadUse::NewAuthorization
+            ),
             Err(SdkError::InboundPending(_))
         ));
         let view = crate::bus::read_model::row(&owner.client, "conversation", "thread")?;
@@ -259,7 +270,10 @@ mod tests {
         );
         assert!(resolve(&account, &request).is_err(), "read projection lent send authority");
         assert!(matches!(
-            account.client.trusted_device(&peer_identity),
+            account.client.trusted_device(
+                &peer_identity,
+                crate::client::identity_authority::HeadUse::NewAuthorization
+            ),
             Err(SdkError::InboundPending(_))
         ));
         Ok(())

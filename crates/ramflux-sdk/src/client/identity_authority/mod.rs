@@ -2,6 +2,14 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-authenticated device authority, monotonic observation and local root publication.
+/// Purpose of a current-head check. Ambiguous consumers require new authorization.
+/// No historical-read bypass is enabled: the group failure is new inbound admission.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum HeadUse {
+    #[default]
+    NewAuthorization,
+}
+
 mod custody_directory;
 mod custody_freshness;
 pub(crate) use custody_freshness::NativeHeadFreshness;
@@ -108,13 +116,17 @@ impl RamfluxClient {
 impl RamfluxClient {
     pub(crate) fn root_qualified_device_lookup(&self, device: &str) -> Result<String, SdkError> {
         let identity = self.device_identity(device)?;
-        self.require_cached_root_authority(&identity)?;
+        self.require_cached_root_authority(
+            &identity,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         Ok(identity.storage_key().into())
     }
 
     pub(crate) fn require_cached_root_authority(
         &self,
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
+        purpose: crate::client::identity_authority::HeadUse,
     ) -> Result<(), SdkError> {
         let device = identity.storage_key();
         let raw = identity.device_id();
@@ -124,7 +136,7 @@ impl RamfluxClient {
         }
         let now = u64::try_from(crate::time::now_unix_timestamp())
             .map_err(|_| invalid("invalid authority clock"))?;
-        if self.require_custody_device(identity, now)? {
+        if self.require_custody_device(identity, now, purpose)? {
             return Ok(());
         }
         let row =
@@ -186,3 +198,6 @@ mod tests;
 
 #[cfg(test)]
 mod custody_directory_tests;
+
+#[cfg(test)]
+mod head_use_tests;

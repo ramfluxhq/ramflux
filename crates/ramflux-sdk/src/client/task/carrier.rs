@@ -114,7 +114,10 @@ impl RamfluxClient {
             ));
         }
         let identity = self.peer_device_identity(principal, device)?;
-        self.require_cached_root_authority(&identity)?;
+        self.require_cached_root_authority(
+            &identity,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         let record = self
             .account_db()?
             .client_device_record(&identity)?

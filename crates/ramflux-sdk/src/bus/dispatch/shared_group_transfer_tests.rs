@@ -99,7 +99,10 @@ impl Rig {
             [&mut self.phone, &mut self.laptop, &mut self.next].into_iter().zip(gateways)
         {
             let own = account.client.owned_device_identity()?;
-            let row = account.client.trusted_device(&own)?;
+            let row = account.client.trusted_device(
+                &own,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
+            )?;
             let mut config = self.config.clone();
             config.principal_id = account
                 .client

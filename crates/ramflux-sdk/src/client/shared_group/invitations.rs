@@ -173,7 +173,10 @@ impl RamfluxClient {
             db.remove_actor_state(&key(group))?;
             let own = self.owned_device_identity()?;
             if state.view().effective_role(own.root_commitment(), own.device_id()).is_some() {
-                let local = self.trusted_device(&own)?;
+                let local = self.trusted_device(
+                    &own,
+                    crate::client::identity_authority::HeadUse::NewAuthorization,
+                )?;
                 let target = local["target_delivery_id"]
                     .as_str()
                     .ok_or_else(|| super::invalid("own group target is unavailable"))?;

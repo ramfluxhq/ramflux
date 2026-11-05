@@ -328,3 +328,60 @@ async fn owner_failure_chain_is_characterised() -> TestResult {
     assert_eq!(account.client.direct_messages("thread")?.len(), 1);
     Ok(())
 }
+/// Baseline admission leg; the refresh courier integration is added separately.
+#[tokio::test]
+async fn stale_head_new_inbound_stays_pending_until_verified_refresh() -> TestResult {
+    let (alice, bob, entry) = renamed_group_fixture().await?;
+    *alice.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    let mut account = LocalBusAccountState::disconnected(
+        alice.client,
+        alice.config,
+        alice.manifest.principal_commitment.clone(),
+    );
+    account.install_test_session(GatewaySessionEngine::with_test_transport(
+        account.gateway_config.clone(),
+        Box::new(crate::bus::dispatch::surface_transport::fixture::RecordingGateway::new(
+            std::sync::Arc::default(),
+        )),
+    ));
+    let mut state = daemon(account, &alice.root.0);
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    account.client.persist_fetched_identity_directory(&bob.manifest)?;
+    account.client.account_db()?.hold_unrouted(
+        &account.client.inbox_admission_key(&entry)?,
+        entry.inbox_seq,
+        &serde_json::to_vec(&entry)?,
+        now_unix_timestamp(),
+    )?;
+    for method in ["group.read", "group.receive"] {
+        let result = read_group(&mut state, method).await;
+        assert!(
+            matches!(&result, Err(SdkError::InboundPending(reason)) if reason ==
+            "native current-head freshness expired; refresh directory"),
+            "new admission {method}: {:?}",
+            result.as_ref().map(|response| &response.response_body)
+        );
+    }
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    assert_eq!(account.client.direct_messages("thread")?.len(), 0);
+    assert_eq!(account.client.account_db()?.unrouted_count()?, 1);
+    let old = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(301))
+        .ok_or("clock range")?;
+    account.client.persist_fetched_identity_directory_at(&alice.manifest, old)?;
+    let mut invalid = alice.manifest.clone();
+    invalid.principal_commitment = bob.manifest.principal_commitment.clone();
+    assert!(account.client.persist_fetched_identity_directory(&invalid).is_err());
+    let refused = read_group(&mut state, "group.receive").await;
+    assert!(matches!(refused, Err(SdkError::InboundPending(_))));
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    assert_eq!(account.client.direct_messages("thread")?.len(), 0);
+    assert_eq!(account.client.account_db()?.unrouted_count()?, 1);
+    account.client.persist_fetched_identity_directory(&alice.manifest)?;
+    let received = read_group(&mut state, "group.receive").await?;
+    let account = state.accounts.get("owner").ok_or("Alice")?;
+    assert_eq!(received.response_body["decrypted_messages"][0]["body_utf8"], "after rename");
+    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    Ok(())
+}

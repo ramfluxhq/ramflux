@@ -17,7 +17,13 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("recipient device is revoked".into()));
         }
-        if self.require_cached_root_authority(remote).is_err() {
+        if self
+            .require_cached_root_authority(
+                remote,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
+            )
+            .is_err()
+        {
             return Ok(None);
         }
         let Some((session, bundle)) = self.active_pair(local, remote)? else { return Ok(None) };

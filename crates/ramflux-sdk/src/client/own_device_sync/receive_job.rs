@@ -91,6 +91,7 @@ impl RamfluxClient {
         for device in [&envelope.source_device_id, &envelope.target_device_id] {
             self.require_cached_root_authority(
                 &self.device_identity_for_root(&envelope.principal_commitment, device)?,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
             )?;
         }
         Ok(())
@@ -144,14 +145,20 @@ impl RamfluxClient {
             &envelope.source_device_id,
             &envelope.target_device_id,
         )?;
-        let source = self.trusted_device(&self.device_identity_for_root(
-            &envelope.principal_commitment,
-            &envelope.source_device_id,
-        )?)?;
-        self.trusted_device(&self.device_identity_for_root(
-            &envelope.principal_commitment,
-            &envelope.target_device_id,
-        )?)?;
+        let source = self.trusted_device(
+            &self.device_identity_for_root(
+                &envelope.principal_commitment,
+                &envelope.source_device_id,
+            )?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
+        self.trusted_device(
+            &self.device_identity_for_root(
+                &envelope.principal_commitment,
+                &envelope.target_device_id,
+            )?,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         let key = source["signing_public_key"]
             .as_str()
             .ok_or_else(|| SdkError::InboundPending("own history signer missing".into()))?;

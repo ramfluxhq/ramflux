@@ -177,7 +177,10 @@ fn prepare_lease(
         }
     };
     let peer = if next.local == next.caller { &next.callee } else { &next.caller };
-    let record = account.client.trusted_device(&account.client.call_device_identity(peer)?)?;
+    let record = account.client.trusted_device(
+        &account.client.call_device_identity(peer)?,
+        crate::client::identity_authority::HeadUse::NewAuthorization,
+    )?;
     if !targets.iter().any(|target| target.device == peer.device_id)
         || !record["signing_public_key"]
             .as_str()

@@ -190,7 +190,10 @@ impl RamfluxClient {
                 let issuer = &state.snapshot().issuer.identity;
                 let source =
                     self.device_identity_for_root(&issuer.root_commitment, &issuer.device_id)?;
-                let trusted = self.trusted_device(&source)?;
+                let trusted = self.trusted_device(
+                    &source,
+                    crate::client::identity_authority::HeadUse::NewAuthorization,
+                )?;
                 if !matches!(
                     (parsed.schema.as_str(), parsed.version),
                     ("ramflux.sdk.group_sender_key.distribution.v3", 3)

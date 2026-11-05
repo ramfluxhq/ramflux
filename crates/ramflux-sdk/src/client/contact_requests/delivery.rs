@@ -79,7 +79,8 @@ fn material_hash(
     client: &RamfluxClient,
     recipient: &ramflux_crypto::RootQualifiedDeviceRef,
 ) -> Result<String, SdkError> {
-    let record = client.trusted_device(recipient)?;
+    let record = client
+        .trusted_device(recipient, crate::client::identity_authority::HeadUse::NewAuthorization)?;
     Ok(ramflux_protocol::hash_base64url(
         "ramflux.contact_request.recipient_material.v1",
         &ramflux_protocol::canonical_json_bytes(&(

@@ -137,7 +137,10 @@ impl RamfluxClient {
             return Err(invalid("contact request endpoint, lifetime or routing mismatch"));
         }
         crate::client::contact::verify_device_manifest(&body.manifest, actor)?;
-        let trusted = self.trusted_device(&source)?;
+        let trusted = self.trusted_device(
+            &source,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         if body.manifest.principal_id != entry.envelope.source_principal_id
             || !body.manifest.devices.iter().any(|device| {
                 device.device_id == source.device_id()

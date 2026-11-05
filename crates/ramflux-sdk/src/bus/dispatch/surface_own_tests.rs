@@ -829,6 +829,7 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
     }
     sibling.client.require_cached_root_authority(
         &sibling.client.device_identity_for_root(&peer_root, "device-peer-one")?,
+        crate::client::identity_authority::HeadUse::NewAuthorization,
     )?;
     let mut peer_config = config;
     peer_config.principal_id = "peer".into();

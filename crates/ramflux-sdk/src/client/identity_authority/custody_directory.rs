@@ -324,13 +324,14 @@ impl RamfluxClient {
         &self,
         identity: &RootQualifiedDeviceRef,
         now: u64,
+        purpose: crate::client::identity_authority::HeadUse,
     ) -> Result<bool, SdkError> {
         let Some(verified) = self.current_custody_authority(identity.root_commitment(), now)?
         else {
             return Ok(false);
         };
         self.require_owned_custody_floor(identity.root_commitment(), &verified, now)?;
-        self.require_fresh_custody_head(identity.root_commitment(), verified.envelope())?;
+        self.require_fresh_custody_head(identity.root_commitment(), verified.envelope(), purpose)?;
         let row = self
             .account_db()?
             .client_record("device", identity.storage_key())?

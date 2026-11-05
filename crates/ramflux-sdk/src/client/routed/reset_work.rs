@@ -16,7 +16,8 @@ impl RamfluxClient {
         &self,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<String, SdkError> {
-        let record = self.trusted_device(remote)?;
+        let record = self
+            .trusted_device(remote, crate::client::identity_authority::HeadUse::NewAuthorization)?;
         if let Some(target) = record.get("target_delivery_id").and_then(serde_json::Value::as_str) {
             return Ok(target.to_owned());
         }

@@ -84,7 +84,10 @@ impl RamfluxClient {
         };
         let source = self.authenticated_device_identity(entry)?;
         let db = self.account_db()?;
-        let device = self.trusted_device(&source)?;
+        let device = self.trusted_device(
+            &source,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )?;
         let root = Some(source.root_commitment().to_owned());
         if source.root_commitment() == local.root_commitment() {
             db.persist_message_actor_state(message, &origin_key(conversation, message)?, &json!({

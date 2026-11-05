@@ -72,7 +72,10 @@ fn expired_proof_keeps_durable_device_authority_but_new_registration_still_requi
                 &manifest.principal_commitment,
                 "stolen"
             )?)
-            .and_then(|identity| peer.client.require_cached_root_authority(&identity))
+            .and_then(|identity| peer.client.require_cached_root_authority(
+                &identity,
+                crate::client::identity_authority::HeadUse::NewAuthorization
+            ))
             .is_err()
     );
     peer.client
@@ -80,7 +83,12 @@ fn expired_proof_keeps_durable_device_authority_but_new_registration_still_requi
             &manifest.principal_commitment,
             "two",
         )?)
-        .and_then(|identity| peer.client.require_cached_root_authority(&identity))?;
+        .and_then(|identity| {
+            peer.client.require_cached_root_authority(
+                &identity,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
+            )
+        })?;
     peer.client.require_current_device_authorization(
         &peer.client.device_identity_for_root(&manifest.principal_commitment, "two")?,
     )?;
@@ -165,15 +173,20 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
     )?);
     m.devices.clear();
     observe(&alice.client, &m)?;
-    alice
-        .client
-        .device_identity(&bob_ref)
-        .and_then(|identity| alice.client.require_cached_root_authority(&identity))?;
+    alice.client.device_identity(&bob_ref).and_then(|identity| {
+        alice.client.require_cached_root_authority(
+            &identity,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+        )
+    })?;
     assert!(
         alice
             .client
             .device_identity(&mallory_ref)
-            .and_then(|identity| alice.client.require_cached_root_authority(&identity))
+            .and_then(|identity| alice.client.require_cached_root_authority(
+                &identity,
+                crate::client::identity_authority::HeadUse::NewAuthorization
+            ))
             .is_err()
     );
     assert_eq!(alice.client.account_db()?.group_member_device_key("group", &bob_device)?, pin);

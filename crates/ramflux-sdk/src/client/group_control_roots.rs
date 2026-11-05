@@ -237,7 +237,10 @@ impl RamfluxClient {
             if self.account_db()?.client_record("device", &actor)?.is_none() {
                 return Err(pending());
             }
-            let device = self.trusted_device(&self.device_identity(&actor)?)?;
+            let device = self.trusted_device(
+                &self.device_identity(&actor)?,
+                crate::client::identity_authority::HeadUse::NewAuthorization,
+            )?;
             if device["principal_id"] != event.actor_principal_id
                 || device["signing_public_key"] != public
             {

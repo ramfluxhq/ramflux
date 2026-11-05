@@ -700,7 +700,10 @@ fn freshly_activated_sibling_restores_foreign_authority_before_group_keys_and_of
         &envelope("source_device_sync", "target_device_sync"),
         &history,
     )?;
-    target.require_cached_root_authority(&target.device_identity_for_root(&commitment, "bob")?)?;
+    target.require_cached_root_authority(
+        &target.device_identity_for_root(&commitment, "bob")?,
+        crate::client::identity_authority::HeadUse::NewAuthorization,
+    )?;
     drop(target);
     let mut reader = RamfluxClient::new();
     reader.open_account_index(&tr)?;
