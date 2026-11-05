@@ -95,7 +95,7 @@ fn recovery_sync_before_ready() -> TestResult {
         drop(wal);
         fs::remove_dir_all(root)?;
     }
-    super::startup_tests::matrix()?;
+    super::startup_tests::redb_crashes()?;
     for wal in [false, true] {
         let root = fixture("commit");
         fs::create_dir_all(&root)?;
