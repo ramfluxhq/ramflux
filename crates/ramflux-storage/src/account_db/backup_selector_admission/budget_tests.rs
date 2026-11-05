@@ -91,7 +91,7 @@ DROP TABLE budget_numbers;")?;
                 [],
                 |r| r.get::<_, usize>(0)
             )?,
-            2 + usize::try_from(n)?
+            m + 1 + usize::try_from(n)?
         );
         assert_eq!(
             target.db.query_row("SELECT count(*) FROM backup_target_delete", [], |r| r
@@ -145,18 +145,19 @@ fn add_candidates(live: &AccountDb, m: usize) -> TestResult {
     live.connection.execute_batch("PRAGMA synchronous=OFF;")?;
     for i in 1..m {
         let message = format!("candidate-{i}");
+        let wire = format!("candidate-wire-{i}");
         live.send_direct_message("thread", &message, "peer", b"body")?;
         let hash = blake3_256_base64url(
             "ramflux.object.transport.owner.v1",
-            &ramflux_protocol::canonical_json_bytes(&("wire", "manifest", &message))?,
+            &ramflux_protocol::canonical_json_bytes(&(&wire, "manifest", &message))?,
         );
         live.register_object_reference(
             ObjectReferenceAdmission::FreshMessage,
             &ObjectReferenceOwner {
                 reference_hash: &hash,
-                wire_id: "wire",
+                wire_id: &wire,
                 manifest_hash: "manifest",
-                selector: "wire",
+                selector: &wire,
                 message_id: &message,
                 reference: &json!({}),
                 metadata: &json!({}),
@@ -220,6 +221,16 @@ fn measure_candidates(
         veto_steps += u64::try_from(query.get_status(StatementStatus::VmStep))?;
     }
     measured.push(veto_steps);
+    measured.extend(standalone_owner_writes(&target.db, candidates)?);
+    let mut fence_steps = 0;
+    for (_, _, _, commitment) in candidates {
+        let mut statement = target.db.prepare(graph::FENCED)?;
+        statement.reset_status(StatementStatus::VmStep);
+        let _: bool = statement.query_row([commitment], |r| r.get(0))?;
+        fence_steps += u64::try_from(statement.get_status(StatementStatus::VmStep))?;
+    }
+    measured.push(fence_steps);
+
     let target_candidate = target.db.query_row("SELECT r.reference_hash,m.message_id,r.selector,r.commitment FROM main.object_retention_reference r JOIN main.object_message_reference m USING(reference_hash) WHERE r.selector='wire'", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?;
     target.db.execute(
         "DELETE FROM backup_reference_admission WHERE side='target' AND reference_hash=?1",
@@ -236,8 +247,9 @@ fn measure_candidates(
         for (hash, message, selector, commitment) in candidates {
             graph::classify_owner(&target.db, "incoming", hash, message, selector, commitment)?;
         }
-        let (_, _, selector, commitment) = &candidates[0];
-        graph::classify_selector(&target.db, "incoming", selector, commitment)?;
+        for (_, _, selector, commitment) in candidates {
+            graph::classify_selector(&target.db, "incoming", selector, commitment)?;
+        }
         Ok(())
     });
     result?;
@@ -245,12 +257,38 @@ fn measure_candidates(
     // Fully step the production selector decision independently against populated admissions.
     target.db.execute_batch("SAVEPOINT selector_statement; DELETE FROM backup_selector_admission WHERE side='incoming';")?;
     let mut statement = target.db.prepare(graph::SELECTOR)?;
-    statement.reset_status(StatementStatus::VmStep);
-    statement.execute(params!["incoming", candidates[0].2, candidates[0].3])?;
-    measured.push(u64::try_from(statement.get_status(StatementStatus::VmStep))?);
+    let mut selector_steps = 0;
+    for (_, _, selector, commitment) in candidates {
+        statement.reset_status(StatementStatus::VmStep);
+        statement.execute(params!["incoming", selector, commitment])?;
+        selector_steps += u64::try_from(statement.get_status(StatementStatus::VmStep))?;
+    }
+    measured.push(selector_steps);
     drop(statement);
     target.db.execute_batch("ROLLBACK TO selector_statement; RELEASE selector_statement;")?;
     measured.push(grouped);
     assert!(measured.iter().all(|&steps| steps > 0));
     Ok(measured)
+}
+
+fn standalone_owner_writes(
+    db: &Connection,
+    candidates: &[Candidate],
+) -> Result<[u64; 2], Box<dyn std::error::Error>> {
+    let mut steps = [0; 2];
+    for (hash, message, selector, commitment) in candidates {
+        db.execute_batch("SAVEPOINT owner_statements;")?;
+        for (index, sql) in [graph::ADMIT, graph::PENDING].into_iter().enumerate() {
+            let mut statement = db.prepare(sql)?;
+            statement.reset_status(StatementStatus::VmStep);
+            if index == 0 {
+                statement.execute(params!["incoming", hash, message, selector, commitment])?;
+            } else {
+                statement.execute(params![hash, message, selector, commitment])?;
+            }
+            steps[index] += u64::try_from(statement.get_status(StatementStatus::VmStep))?;
+        }
+        db.execute_batch("ROLLBACK TO owner_statements; RELEASE owner_statements;")?;
+    }
+    Ok(steps)
 }

@@ -68,6 +68,11 @@ pub(in crate::account_db) fn classify(db: &Connection) -> Result<(), StorageErro
 }
 
 // Point operations are shared by traversal and the isolated candidate work meter.
+pub(super) const ADMIT: &str = "INSERT INTO backup_reference_admission VALUES(?1,?2,?3,?4,?5)";
+pub(super) const PENDING: &str = "INSERT OR IGNORE INTO backup_target_delete VALUES(?1,?2,?3,?4)";
+pub(super) const FENCED: &str =
+    "SELECT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?1)";
+// Only a captured target origin can veto incoming ownership. The target pass is complete.
 pub(super) const VETO: &str = "SELECT EXISTS(SELECT 1 FROM incoming.object_retention_reference r JOIN backup_lookup_origin o ON o.lookup=r.selector_lookup AND o.side='target' WHERE r.reference_hash=?1) AND NOT EXISTS(SELECT 1 FROM backup_reference_admission t WHERE t.side='target' AND t.selector=?2 AND t.commitment=?3)";
 pub(super) const SELECTOR: &str = "INSERT INTO backup_selector_admission SELECT ?1,?2,?3,CASE WHEN EXISTS(SELECT 1 FROM backup_reference_admission a WHERE a.side=?1 AND a.selector=?2 AND a.commitment=?3) THEN 'keep' ELSE 'erase' END";
 
@@ -82,23 +87,13 @@ pub(super) fn classify_owner(
     let local_deleted = deleted(db, "main", message)?;
     let incoming_deleted = deleted(db, "incoming", message)?;
     if side == "target" && !target_deleted(db, message)? && (local_deleted || incoming_deleted) {
-        db.execute(
-            "INSERT OR IGNORE INTO backup_target_delete VALUES(?1,?2,?3,?4)",
-            params![hash, message, selector, commitment],
-        )?;
+        db.execute(PENDING, params![hash, message, selector, commitment])?;
     }
-    let fenced: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?1)",
-        [commitment],
-        |r| r.get(0),
-    )?;
+    let fenced: bool = db.query_row(FENCED, [commitment], |r| r.get(0))?;
     let vetoed = side == "incoming"
         && db.query_row(VETO, params![hash, selector, commitment], |r| r.get::<_, bool>(0))?;
     if !local_deleted && !incoming_deleted && !fenced && !vetoed {
-        db.execute(
-            "INSERT INTO backup_reference_admission VALUES(?1,?2,?3,?4,?5)",
-            params![side, hash, message, selector, commitment],
-        )?;
+        db.execute(ADMIT, params![side, hash, message, selector, commitment])?;
     }
     Ok(())
 }
