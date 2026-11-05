@@ -72,7 +72,7 @@ class TransactionGuardTests(unittest.TestCase):
         self.check('#[cfg(test)] mod tests {}\nfn write() { db.savepoint()?; }')
 
     def test_allowlist_is_function_scoped(self):
-        for name in ('begin_message_merge', 'merge_backup_mode', 'archive_outbound'):
+        for name in ('begin_message_merge', 'merge_backup_pipeline', 'archive_outbound'):
             self.check(f'fn {name}() {{ db.execute_batch("BEGIN IMMEDIATE")?; }}', False, 'account_db/backup_merge.rs')
             self.check(f'fn {name}() {{ db.execute_batch("BEGIN IMMEDIATE")?; }}', True)
         self.check('fn sanitize_native_backup() { db.execute_batch("BEGIN IMMEDIATE; COMMIT;")?; }', False, 'account_db/backup_native.rs')
