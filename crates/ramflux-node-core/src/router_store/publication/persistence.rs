@@ -26,12 +26,13 @@ impl RouterRedbStore {
     /// # Errors
     /// Returns corrupt metadata or resolver-thread creation errors.
     pub fn publication_core(&self) -> Result<Arc<PublicationCore>, NodeCoreError> {
+        crate::fatal_durability::initialize();
         let mut installed =
             self.publication.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(core) = &*installed {
             return Ok(Arc::clone(core));
         }
-        let txn = self.db.begin_write().map_err(error)?;
+        let txn = self.begin_write().map_err(error)?;
         txn.open_table(TABLE).map_err(error)?;
         txn.commit().map_err(error)?;
         let txn = self.db.begin_read().map_err(error)?;
@@ -93,6 +94,7 @@ pub(super) fn abort_batch(
     shared: &Shared,
     descriptors: &[Arc<Descriptor>],
 ) -> Result<(), NodeCoreError> {
+    let guard = crate::fatal_durability::WriteGuard::new(true)?;
     crate::durability_io::boundary(&shared.path, "tombstone_checkpoint", || {
         let mut tx = crate::durability_io::boundary(&shared.path, "begin_write", || {
             shared.db.begin_write().map_err(std::io::Error::other)
@@ -130,5 +132,6 @@ pub(super) fn abort_batch(
             tx.commit().map_err(std::io::Error::other)
         })
     })
-    .map_err(error)
+    .map_err(error)?;
+    guard.complete()
 }

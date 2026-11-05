@@ -24,7 +24,7 @@ impl RouterRedbStore {
         node: &VerifiedNodeRecord,
         now: u64,
     ) -> Result<(), NodeCoreError> {
-        let tx = self.db.begin_write().map_err(error)?;
+        let tx = self.begin_write().map_err(error)?;
         {
             let mut heads = tx.open_table(HEADS).map_err(error)?;
             let mut history = tx.open_table(HISTORY).map_err(error)?;
@@ -119,7 +119,7 @@ impl RouterRedbStore {
         target: &str,
         bundle: &serde_json::Value,
     ) -> Result<(), NodeCoreError> {
-        let tx = self.db.begin_write().map_err(error)?;
+        let tx = self.begin_write().map_err(error)?;
         {
             let mut table = tx.open_table(PREKEYS).map_err(error)?;
             let bytes = ramflux_protocol::canonical_json_bytes(bundle).map_err(error)?;

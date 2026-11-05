@@ -208,6 +208,17 @@ fn held_directory_sync_blocks_segment_open() -> TestResult {
 
 #[test]
 fn failed_recovery_sync_refuses_open() -> TestResult {
+    if std::env::var_os("RAMFLUX_FAILED_RECOVERY_CHILD").is_none() {
+        let child = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "router_wal::durability_tests::failed_recovery_sync_refuses_open",
+                "--nocapture",
+            ])
+            .env("RAMFLUX_FAILED_RECOVERY_CHILD", "1")
+            .spawn()?;
+        return wait_for_abort(child);
+    }
     let root = fixture("failed");
     fs::create_dir_all(&root)?;
     let segment = router_wal_segment_path(&root, 0);
@@ -224,10 +235,10 @@ fn failed_recovery_sync_refuses_open() -> TestResult {
             Ok(())
         }),
     );
-    assert!(RouterWalStore::open_with_shards_config(&root, 1, false).is_err());
-    assert!(reached.load(Ordering::SeqCst));
-    fs::remove_dir_all(root)?;
-    Ok(())
+    let _ = RouterWalStore::open_with_shards_config(&root, 1, false);
+    loop {
+        thread::park_timeout(Duration::from_secs(1));
+    }
 }
 
 #[test]
@@ -336,5 +347,7 @@ fn record_k_child(root: PathBuf) -> TestResult {
         writer.append_batch(&payloads).is_err()
     };
     assert!(failed);
-    std::process::abort();
+    loop {
+        thread::park_timeout(Duration::from_secs(1));
+    }
 }

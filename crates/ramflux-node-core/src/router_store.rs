@@ -31,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod custody;
 mod custody_accounts;
+mod direct_write;
 pub(crate) use custody_accounts::CustodyAccountWrite;
 mod custody_budget_policy;
 pub use custody_accounts::CustodyPublicationBudgetRow;
@@ -154,15 +155,18 @@ impl RouterCommitWriter {
     }
 
     fn commit(&self, op: RouterCommitOp) -> Result<(), NodeCoreError> {
+        crate::fatal_durability::check()?;
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
             .as_ref()
             .ok_or_else(|| NodeCoreError::ItestJson("router commit writer stopped".to_owned()))?
             .send(RouterCommitRequest { op, reply })
             .map_err(|source| {
+                crate::fatal_durability::fence(false);
                 NodeCoreError::ItestJson(format!("router commit writer stopped: {source}"))
             })?;
         response.recv().map_err(|source| {
+            crate::fatal_durability::fence(false);
             NodeCoreError::ItestJson(format!("router commit response closed: {source}"))
         })?
     }
@@ -184,11 +188,19 @@ fn router_commit_writer_loop(
     batch_max: usize,
     window: Duration,
 ) {
-    while let Ok(first) = receiver.recv() {
+    while crate::fatal_durability::check().is_ok() {
+        let Ok(first) = receiver.recv() else { break };
+        let Ok(batch_guard) = crate::fatal_durability::WriteGuard::new(false) else { return };
+        if crate::fatal_durability::check().is_err() {
+            return;
+        }
         let mut batch = Vec::with_capacity(batch_max);
         batch.push(first);
         let deadline = Instant::now() + window;
         while batch.len() < batch_max {
+            if crate::fatal_durability::check().is_err() {
+                return;
+            }
             match receiver.try_recv() {
                 Ok(request) => batch.push(request),
                 Err(mpsc::TryRecvError::Disconnected) => break,
@@ -210,16 +222,20 @@ fn router_commit_writer_loop(
         match result {
             Ok(()) => {
                 for request in batch {
+                    let Ok(_gate) = crate::fatal_durability::publication() else { return };
                     let _sent = request.reply.send(Ok(()));
                 }
             }
             Err(error) => {
+                crate::fatal_durability::fence(false);
                 let message = error.to_string();
                 for request in batch {
                     let _sent = request.reply.send(Err(NodeCoreError::Redb(message.clone())));
                 }
             }
         }
+
+        let _ = batch_guard.complete();
     }
 }
 
@@ -228,26 +244,31 @@ fn router_commit_batch<'a>(
     path: &Path,
     ops: impl Iterator<Item = &'a RouterCommitOp>,
 ) -> Result<(), NodeCoreError> {
-    let begin_write_started = Instant::now();
-    let write_txn = crate::durability_io::boundary(path, "begin_write", || {
-        db.begin_write().map_err(std::io::Error::other)
-    })
-    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    crate::record_router_save_begin_write_us(elapsed_us(begin_write_started));
-    let mutation_started = Instant::now();
-    {
-        for op in ops {
-            router_apply_commit_op(&write_txn, op)?;
+    crate::fatal_durability::run(|| {
+        let begin_write_started = Instant::now();
+        let write_txn = crate::durability_io::boundary(path, "begin_write", || {
+            db.begin_write().map_err(std::io::Error::other)
+        })
+        .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        crate::record_router_save_begin_write_us(elapsed_us(begin_write_started));
+        let mutation_started = Instant::now();
+        {
+            for op in ops {
+                crate::durability_io::boundary(path, "commit_apply", || {
+                    router_apply_commit_op(&write_txn, op).map_err(std::io::Error::other)
+                })
+                .map_err(incarnation::error)?;
+            }
         }
-    }
-    crate::record_router_save_mutation_us(elapsed_us(mutation_started));
-    let commit_started = Instant::now();
-    crate::durability_io::boundary(path, "commit", || {
-        write_txn.commit().map_err(std::io::Error::other)
+        crate::record_router_save_mutation_us(elapsed_us(mutation_started));
+        let commit_started = Instant::now();
+        crate::durability_io::boundary(path, "commit", || {
+            write_txn.commit().map_err(std::io::Error::other)
+        })
+        .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        crate::record_router_save_commit_us(elapsed_us(commit_started));
+        Ok(())
     })
-    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    crate::record_router_save_commit_us(elapsed_us(commit_started));
-    Ok(())
 }
 
 fn router_apply_commit_op(
@@ -466,6 +487,7 @@ impl RouterRedbStore {
         wal_root: Option<&Path>,
         create: bool,
     ) -> Result<Self, NodeCoreError> {
+        crate::fatal_durability::initialize();
         let path = path.as_ref();
         if create
             && let Some(parent) = path.parent()
@@ -590,7 +612,7 @@ impl RouterRedbStore {
         mailbox_keys::upgrade(&write_txn)?;
         migration_barrier::upgrade_legacy_snapshot(&write_txn)?;
         expiry_index::upgrade(&write_txn)?;
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        write_txn.commit().map_err(incarnation::error)?;
         Ok(())
     }
 
@@ -602,87 +624,89 @@ impl RouterRedbStore {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn save_router(&self, router: &RouterCore) -> Result<(), NodeCoreError> {
-        let save_started = Instant::now();
-        crate::record_router_snapshot_save();
-        let snapshot = router.snapshot();
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_SESSION_CHECKPOINT_KEY,
-            &snapshot.registry,
-        )?;
-        let inbox_started = Instant::now();
-        self.replace_incremental_router_tables(&snapshot)?;
-        crate::record_router_save_inbox_us(elapsed_us(inbox_started));
-        router.persist_identity_registry(self)?;
-        for record in &snapshot.foreign_device_heads.records {
-            self.observe_foreign_device_set(record)?.admitted()?;
-        }
-        crate::foreign_device_store::save_fences(
-            &self.db,
-            crate::foreign_device_store::Namespace::Router,
-            &snapshot.foreign_device_heads,
-        )?;
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_LIFECYCLE_STATE_KEY,
-            &snapshot.lifecycle_by_principal,
-        )?;
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_LIFECYCLE_TOMBSTONE_KEY,
-            &snapshot.lifecycle_tombstones,
-        )?;
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_DEACTIVATED_TARGETS_KEY,
-            &snapshot.deactivated_delivery_targets,
-        )?;
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_DELETED_TARGETS_KEY,
-            &snapshot.deleted_delivery_targets,
-        )?;
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_ABUSE_REPORT_KEY,
-            &snapshot.abuse_reports,
-        )?;
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_HOME_NODE_MIGRATION_KEY,
-            &snapshot.home_node_migrations,
-        )?;
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_HOME_NODE_ROUTE_KEY,
-            &snapshot.home_node_routes,
-        )?;
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
-            &snapshot.identity_lineage_events,
-        )?;
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_IDENTITY_LINEAGE_HEADS_KEY,
-            &snapshot.identity_lineage_heads,
-        )?;
-        self.replace_per_key_router_tables(&snapshot)?;
-        let replay_guard_started = Instant::now();
-        crate::record_router_save_replay_guard_us(elapsed_us(replay_guard_started));
-        crate::record_router_replay_guard_redb_write();
-        crate::record_router_save_total_us(elapsed_us(save_started));
-        Ok(())
+        crate::fatal_durability::run(|| {
+            let save_started = Instant::now();
+            crate::record_router_snapshot_save();
+            let snapshot = router.snapshot();
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_SESSION_CHECKPOINT_KEY,
+                &snapshot.registry,
+            )?;
+            let inbox_started = Instant::now();
+            self.replace_incremental_router_tables(&snapshot)?;
+            crate::record_router_save_inbox_us(elapsed_us(inbox_started));
+            router.persist_identity_registry(self)?;
+            for record in &snapshot.foreign_device_heads.records {
+                self.observe_foreign_device_set(record)?.admitted()?;
+            }
+            crate::foreign_device_store::save_fences(
+                &self.db,
+                crate::foreign_device_store::Namespace::Router,
+                &snapshot.foreign_device_heads,
+            )?;
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_LIFECYCLE_STATE_KEY,
+                &snapshot.lifecycle_by_principal,
+            )?;
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_LIFECYCLE_TOMBSTONE_KEY,
+                &snapshot.lifecycle_tombstones,
+            )?;
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_DEACTIVATED_TARGETS_KEY,
+                &snapshot.deactivated_delivery_targets,
+            )?;
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_DELETED_TARGETS_KEY,
+                &snapshot.deleted_delivery_targets,
+            )?;
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_ABUSE_REPORT_KEY,
+                &snapshot.abuse_reports,
+            )?;
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_HOME_NODE_MIGRATION_KEY,
+                &snapshot.home_node_migrations,
+            )?;
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_HOME_NODE_ROUTE_KEY,
+                &snapshot.home_node_routes,
+            )?;
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
+                &snapshot.identity_lineage_events,
+            )?;
+            save_snapshot(
+                &self.db,
+                ROUTER_SNAPSHOT_TABLE,
+                ROUTER_IDENTITY_LINEAGE_HEADS_KEY,
+                &snapshot.identity_lineage_heads,
+            )?;
+            self.replace_per_key_router_tables(&snapshot)?;
+            let replay_guard_started = Instant::now();
+            crate::record_router_save_replay_guard_us(elapsed_us(replay_guard_started));
+            crate::record_router_replay_guard_redb_write();
+            crate::record_router_save_total_us(elapsed_us(save_started));
+            Ok(())
+        })
     }
 
     fn replace_per_key_router_tables(
@@ -703,7 +727,7 @@ impl RouterRedbStore {
             abuse_reports.iter().map(serialize_value).collect::<Result<Vec<_>, _>>()?;
         let true_bytes = serialize_value(&true)?;
         let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
             replace_table_values(
                 &write_txn,
@@ -756,7 +780,10 @@ impl RouterRedbStore {
                     .zip(std::iter::repeat(true_bytes.as_slice())),
             )?;
         }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        crate::durability_io::boundary(&self.path, "direct_commit", || {
+            write_txn.commit().map_err(std::io::Error::other)
+        })
+        .map_err(incarnation::error)?;
         Ok(())
     }
 
@@ -1000,8 +1027,9 @@ impl RouterRedbStore {
         let _lease = lease;
         let save_started = Instant::now();
         let inbox_started = Instant::now();
+
         let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
         let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor)? else {
             return Ok(());
@@ -1022,7 +1050,10 @@ impl RouterRedbStore {
             let key = inbox_entry_storage_key(&cursor.target_delivery_id, sequence);
             expiry_index::remove_inbox_row(&write_txn, &key)?;
         }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        crate::durability_io::boundary(&self.path, "direct_commit", || {
+            write_txn.commit().map_err(std::io::Error::other)
+        })
+        .map_err(incarnation::error)?;
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
         }
@@ -1049,8 +1080,9 @@ impl RouterRedbStore {
         let _lease = lease;
         let save_started = Instant::now();
         let inbox_started = Instant::now();
+
         let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
         let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor)? else {
             return Ok(());
@@ -1068,7 +1100,10 @@ impl RouterRedbStore {
             let key = inbox_entry_storage_key(&cursor.target_delivery_id, *sequence);
             expiry_index::remove_inbox_row(&write_txn, &key)?;
         }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        crate::durability_io::boundary(&self.path, "direct_commit", || {
+            write_txn.commit().map_err(std::io::Error::other)
+        })
+        .map_err(incarnation::error)?;
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
         }
@@ -1089,11 +1124,13 @@ impl RouterRedbStore {
         &self,
         registry: &IdentityRegistry,
     ) -> Result<(), NodeCoreError> {
-        let txn = self.db.begin_write().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-        identity_registry::checkpoint(&txn, registry)?;
-        txn.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-        self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+        crate::fatal_durability::run(|| {
+            let txn = self.begin_write().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            identity_registry::checkpoint(&txn, registry)?;
+            txn.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        })
     }
 
     #[cfg(test)]
@@ -1155,13 +1192,18 @@ impl RouterRedbStore {
         target_delivery_id: &str,
         state: &crate::AccountLifecycleState,
     ) -> Result<(), NodeCoreError> {
-        let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        {
-            record_target_lifecycle_marker_in_txn(&write_txn, target_delivery_id, state)?;
-        }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(())
+        crate::fatal_durability::run(|| {
+            let write_txn =
+                self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            {
+                record_target_lifecycle_marker_in_txn(&write_txn, target_delivery_id, state)?;
+            }
+            crate::durability_io::boundary(&self.path, "direct_commit", || {
+                write_txn.commit().map_err(std::io::Error::other)
+            })
+            .map_err(incarnation::error)?;
+            Ok(())
+        })
     }
 
     /// # Errors
@@ -1172,22 +1214,27 @@ impl RouterRedbStore {
         target_delivery_id: &str,
         state: &crate::AccountLifecycleState,
     ) -> Result<(), NodeCoreError> {
-        let tombstone_bytes = tombstone.map(serialize_value).transpose()?;
-        let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        {
-            if let (Some(tombstone), Some(bytes)) = (tombstone, tombstone_bytes.as_deref()) {
-                let mut tombstone_table = write_txn
-                    .open_table(ROUTER_LIFECYCLE_TOMBSTONE_TABLE)
-                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-                tombstone_table
-                    .insert(tombstone.tombstone_id.as_str(), bytes)
-                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        crate::fatal_durability::run(|| {
+            let tombstone_bytes = tombstone.map(serialize_value).transpose()?;
+            let write_txn =
+                self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            {
+                if let (Some(tombstone), Some(bytes)) = (tombstone, tombstone_bytes.as_deref()) {
+                    let mut tombstone_table = write_txn
+                        .open_table(ROUTER_LIFECYCLE_TOMBSTONE_TABLE)
+                        .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                    tombstone_table
+                        .insert(tombstone.tombstone_id.as_str(), bytes)
+                        .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                }
+                record_target_lifecycle_marker_in_txn(&write_txn, target_delivery_id, state)?;
             }
-            record_target_lifecycle_marker_in_txn(&write_txn, target_delivery_id, state)?;
-        }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(())
+            crate::durability_io::boundary(&self.path, "direct_commit", || {
+                write_txn.commit().map_err(std::io::Error::other)
+            })
+            .map_err(incarnation::error)?;
+            Ok(())
+        })
     }
 
     /// # Errors
@@ -1198,31 +1245,41 @@ impl RouterRedbStore {
         identity_registry: &IdentityRegistry,
         lifecycle_record: &AccountLifecycleRecord,
     ) -> Result<(), NodeCoreError> {
-        let lifecycle_bytes = serialize_value(lifecycle_record)?;
-        let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        {
-            identity_registry::checkpoint(&write_txn, identity_registry)?;
+        crate::fatal_durability::run(|| {
+            let lifecycle_bytes = serialize_value(lifecycle_record)?;
+            let write_txn =
+                self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            {
+                identity_registry::checkpoint(&write_txn, identity_registry)?;
 
-            let mut lifecycle_table = write_txn
-                .open_table(ROUTER_LIFECYCLE_RECORD_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            lifecycle_table
-                .insert(lifecycle_record.principal_id.as_str(), lifecycle_bytes.as_slice())
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                let mut lifecycle_table = write_txn
+                    .open_table(ROUTER_LIFECYCLE_RECORD_TABLE)
+                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                lifecycle_table
+                    .insert(lifecycle_record.principal_id.as_str(), lifecycle_bytes.as_slice())
+                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
 
-            if let Some(target_delivery_id) = target_delivery_id {
-                remove_key(&write_txn, ROUTER_SESSION_ENTRY_TABLE, target_delivery_id)?;
-                remove_key(&write_txn, ROUTER_CURSOR_STATE_TABLE, target_delivery_id)?;
-                remove_key(&write_txn, incarnation_state::TABLE, target_delivery_id)?;
-                put_bool(&write_txn, ROUTER_DEACTIVATED_TARGET_TABLE, target_delivery_id, false)?;
-                put_bool(&write_txn, ROUTER_DELETED_TARGET_TABLE, target_delivery_id, true)?;
-                remove_inbox_entries_for_target(&write_txn, target_delivery_id)?;
+                if let Some(target_delivery_id) = target_delivery_id {
+                    remove_key(&write_txn, ROUTER_SESSION_ENTRY_TABLE, target_delivery_id)?;
+                    remove_key(&write_txn, ROUTER_CURSOR_STATE_TABLE, target_delivery_id)?;
+                    remove_key(&write_txn, incarnation_state::TABLE, target_delivery_id)?;
+                    put_bool(
+                        &write_txn,
+                        ROUTER_DEACTIVATED_TARGET_TABLE,
+                        target_delivery_id,
+                        false,
+                    )?;
+                    put_bool(&write_txn, ROUTER_DELETED_TARGET_TABLE, target_delivery_id, true)?;
+                    remove_inbox_entries_for_target(&write_txn, target_delivery_id)?;
+                }
             }
-        }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+            crate::durability_io::boundary(&self.path, "direct_commit", || {
+                write_txn.commit().map_err(std::io::Error::other)
+            })
+            .map_err(incarnation::error)?;
+            self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        })
     }
 
     /// # Errors
@@ -1322,19 +1379,24 @@ impl RouterRedbStore {
         key: &str,
         value: &T,
     ) -> Result<(), NodeCoreError> {
-        let value_bytes = serialize_value(value)?;
-        let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        {
-            let mut table = write_txn
-                .open_table(table)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            table
-                .insert(key, value_bytes.as_slice())
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(())
+        crate::fatal_durability::run(|| {
+            let value_bytes = serialize_value(value)?;
+            let write_txn =
+                self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            {
+                let mut table = write_txn
+                    .open_table(table)
+                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                table
+                    .insert(key, value_bytes.as_slice())
+                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            }
+            crate::durability_io::boundary(&self.path, "direct_commit", || {
+                write_txn.commit().map_err(std::io::Error::other)
+            })
+            .map_err(incarnation::error)?;
+            Ok(())
+        })
     }
 
     /// # Errors
@@ -1586,7 +1648,7 @@ impl RouterRedbStore {
             .map(|(_key, expires_at)| serialize_value(expires_at))
             .collect::<Result<Vec<_>, _>>()?;
         let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let cursor_state_bytes = cursor_states
             .iter()
             .map(|cursor| {
@@ -1653,7 +1715,10 @@ impl RouterRedbStore {
             }),
             &replay_tuples,
         )?;
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        crate::durability_io::boundary(&self.path, "direct_commit", || {
+            write_txn.commit().map_err(std::io::Error::other)
+        })
+        .map_err(incarnation::error)?;
         Ok(())
     }
 
@@ -1773,7 +1838,7 @@ impl RouterRedbStore {
         now_unix_seconds: i64,
     ) -> Result<Vec<(String, i64)>, NodeCoreError> {
         let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let (active, expired_keys) = {
             let table = write_txn
                 .open_table(ROUTER_REPLAY_TUPLE_TABLE)
@@ -1804,7 +1869,10 @@ impl RouterRedbStore {
                     .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
             }
         }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        crate::durability_io::boundary(&self.path, "direct_commit", || {
+            write_txn.commit().map_err(std::io::Error::other)
+        })
+        .map_err(incarnation::error)?;
         Ok(active)
     }
 }

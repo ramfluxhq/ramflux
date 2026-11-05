@@ -12,13 +12,17 @@ pub(crate) fn boundary<T>(
     operation: &str,
     work: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
+    let fatal_guard = crate::fatal_durability::WriteGuard::new(operation.starts_with("tombstone"))
+        .map_err(io::Error::other)?;
     #[cfg(any(test, feature = "durability-test-hooks"))]
     crate::durability_test_hooks::notify(path, operation, false)?;
+    crate::fatal_durability::check().map_err(io::Error::other)?;
     #[cfg(not(any(test, feature = "durability-test-hooks")))]
     let _ = (path, operation);
     let result = work()?;
     #[cfg(any(test, feature = "durability-test-hooks"))]
     crate::durability_test_hooks::notify(path, operation, true)?;
+    fatal_guard.complete().map_err(io::Error::other)?;
     Ok(result)
 }
 
@@ -58,10 +62,13 @@ pub(crate) fn immediate_commit(
     db: &redb::Database,
     path: &Path,
 ) -> Result<(), crate::NodeCoreError> {
-    boundary(path, "immediate_commit", || {
-        let mut txn = boundary(path, "begin_write", || db.begin_write().map_err(io::Error::other))?;
-        txn.set_durability(redb::Durability::Immediate).map_err(io::Error::other)?;
-        txn.commit().map_err(io::Error::other)
+    crate::fatal_durability::run(|| {
+        boundary(path, "immediate_commit", || {
+            let mut txn =
+                boundary(path, "begin_write", || db.begin_write().map_err(io::Error::other))?;
+            txn.set_durability(redb::Durability::Immediate).map_err(io::Error::other)?;
+            txn.commit().map_err(io::Error::other)
+        })
+        .map_err(|error| crate::NodeCoreError::Redb(error.to_string()))
     })
-    .map_err(|error| crate::NodeCoreError::Redb(error.to_string()))
 }

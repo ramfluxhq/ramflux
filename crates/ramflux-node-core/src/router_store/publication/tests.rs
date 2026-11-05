@@ -250,6 +250,7 @@ fn aborted_slot_capacity() -> Result {
 
 #[test]
 fn single_worker_reply_and_drop() -> Result {
+    crate::router_wal::fatal_tests::panic_in_write()?;
     for mode in 0..=2 {
         let root = fixture(&format!("worker-{mode}"));
         let store = test_store(&root, mode, 1024 * 1024)?;

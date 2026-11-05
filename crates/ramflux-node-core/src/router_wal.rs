@@ -5,6 +5,8 @@ use crate::{InboxEntry, NodeCoreError, durability_io};
 
 #[cfg(test)]
 mod durability_tests;
+#[cfg(test)]
+pub(crate) mod fatal_tests;
 pub(crate) mod identity;
 #[cfg(test)]
 pub(crate) mod identity_tests;
@@ -929,6 +931,7 @@ impl RouterWalWriter {
             RouterWalAppendRequest { payload, reply: RouterWalAppendReply::Sync(reply) },
         )?;
         response.recv().map_err(|source| {
+            crate::fatal_durability::fence(false);
             NodeCoreError::ItestJson(format!("router WAL append response closed: {source}"))
         })?
     }
@@ -946,6 +949,7 @@ impl RouterWalWriter {
         )
         .await?;
         response.await.map_err(|source| {
+            crate::fatal_durability::fence(false);
             NodeCoreError::ItestJson(format!("router WAL append response closed: {source}"))
         })?
     }
@@ -958,12 +962,14 @@ impl RouterWalWriter {
     }
 
     fn submit(&self, shard: usize, request: RouterWalAppendRequest) -> Result<(), NodeCoreError> {
+        crate::fatal_durability::check()?;
         self.shards
             .get(shard)
             .and_then(|shard| shard.sender.as_ref())
             .ok_or_else(|| NodeCoreError::ItestJson("router WAL writer stopped".to_owned()))?
             .send(request)
             .map_err(|source| {
+                crate::fatal_durability::fence(false);
                 NodeCoreError::ItestJson(format!("router WAL writer stopped: {source}"))
             })
     }
@@ -979,6 +985,7 @@ impl RouterWalWriter {
             .and_then(|shard| shard.sender.as_ref())
             .ok_or_else(|| NodeCoreError::ItestJson("router WAL writer stopped".to_owned()))?;
         loop {
+            crate::fatal_durability::check()?;
             match sender.try_send(request) {
                 Ok(()) => return Ok(()),
                 Err(mpsc::TrySendError::Full(returned)) => {
@@ -987,6 +994,7 @@ impl RouterWalWriter {
                     tokio::task::yield_now().await;
                 }
                 Err(mpsc::TrySendError::Disconnected(_returned)) => {
+                    crate::fatal_durability::fence(false);
                     return Err(NodeCoreError::ItestJson("router WAL writer stopped".to_owned()));
                 }
             }
@@ -1045,6 +1053,7 @@ impl RouterWalWriterState {
         durability_io::create_dir_all(&root)
             .map_err(|source| NodeCoreError::StoreDirectory { path: root.clone(), source })?;
         let path = router_wal_segment_path(&root, segment_id);
+        writer_check(&root, "roll_open")?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -1089,73 +1098,92 @@ impl RouterWalWriterState {
         &mut self,
         payloads: &[RouterWalPayload],
     ) -> Result<Vec<RouterWalRecordLocation>, NodeCoreError> {
-        let mut locations = Vec::with_capacity(payloads.len());
-        let write_started = Instant::now();
-        for payload in payloads {
-            if self.poisoned {
-                return Err(identity::error("router WAL writer fenced"));
+        crate::fatal_durability::run(|| {
+            let mut locations = Vec::with_capacity(payloads.len());
+            let write_started = Instant::now();
+            for payload in payloads {
+                crate::fatal_durability::check()?;
+                if self.poisoned {
+                    return Err(identity::error("router WAL writer fenced"));
+                }
+                writer_check(&self.root, "wal_convert")?;
+                let stored = identity::encode_payload(self.association.as_deref(), payload)?;
+                writer_check(&self.root, "wal_serialize")?;
+                let encoded = postcard::to_allocvec(&stored)
+                    .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+                writer_check(&self.root, "wal_frame_len")?;
+                let frame_len = 8_u64
+                    .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
+                    .ok_or_else(|| {
+                        NodeCoreError::ItestJson("router WAL frame too large".to_owned())
+                    })?;
+                if self.offset > self.header_len
+                    && (self.offset.saturating_add(frame_len) > self.segment_bytes
+                        || self.segment_born.elapsed().is_ok_and(|age| age.as_secs() >= 3600))
+                {
+                    durability_io::sync_file(
+                        &self.file,
+                        &router_wal_segment_path(&self.root, self.segment_id),
+                    )
+                    .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+                    self.roll_segment()?;
+                }
+                locations.push(self.write_record(&encoded)?);
             }
-            let stored = identity::encode_payload(self.association.as_deref(), payload)?;
-            let encoded = postcard::to_allocvec(&stored)
-                .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
-            let frame_len = 8_u64
-                .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| NodeCoreError::ItestJson("router WAL frame too large".to_owned()))?;
-            if self.offset > self.header_len
-                && (self.offset.saturating_add(frame_len) > self.segment_bytes
-                    || self.segment_born.elapsed().is_ok_and(|age| age.as_secs() >= 3600))
-            {
-                durability_io::sync_file(
-                    &self.file,
-                    &router_wal_segment_path(&self.root, self.segment_id),
-                )
-                .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-                self.roll_segment()?;
-            }
-            locations.push(self.write_record(&encoded)?);
-        }
-        crate::record_router_save_mutation_us(elapsed_us(write_started));
-        let sync_started = Instant::now();
-        durability_io::sync_file(&self.file, &router_wal_segment_path(&self.root, self.segment_id))
+            crate::record_router_save_mutation_us(elapsed_us(write_started));
+            let sync_started = Instant::now();
+            durability_io::sync_file(
+                &self.file,
+                &router_wal_segment_path(&self.root, self.segment_id),
+            )
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-        let sync_us = elapsed_us(sync_started);
-        crate::record_router_save_commit_us(sync_us);
-        crate::record_router_wal_batch(payloads.len(), sync_us);
-        Ok(locations)
+            let sync_us = elapsed_us(sync_started);
+            crate::record_router_save_commit_us(sync_us);
+            crate::record_router_wal_batch(payloads.len(), sync_us);
+            Ok(locations)
+        })
     }
 
     fn append_batch_no_sync(
         &mut self,
         payloads: &[RouterWalPayload],
     ) -> Result<RouterWalAppendGroup, NodeCoreError> {
-        let mut locations = Vec::with_capacity(payloads.len());
-        let mut sync_files = Vec::with_capacity(1);
-        let write_started = Instant::now();
-        for payload in payloads {
-            if self.poisoned {
-                return Err(identity::error("router WAL writer fenced"));
+        crate::fatal_durability::run(|| {
+            let mut locations = Vec::with_capacity(payloads.len());
+            let mut sync_files = Vec::with_capacity(1);
+            let write_started = Instant::now();
+            for payload in payloads {
+                crate::fatal_durability::check()?;
+                if self.poisoned {
+                    return Err(identity::error("router WAL writer fenced"));
+                }
+                writer_check(&self.root, "wal_convert")?;
+                let stored = identity::encode_payload(self.association.as_deref(), payload)?;
+                writer_check(&self.root, "wal_serialize")?;
+                let encoded = postcard::to_allocvec(&stored)
+                    .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+                writer_check(&self.root, "wal_frame_len")?;
+                let frame_len = 8_u64
+                    .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
+                    .ok_or_else(|| {
+                        NodeCoreError::ItestJson("router WAL frame too large".to_owned())
+                    })?;
+                if self.offset > self.header_len
+                    && (self.offset.saturating_add(frame_len) > self.segment_bytes
+                        || self.segment_born.elapsed().is_ok_and(|age| age.as_secs() >= 3600))
+                {
+                    self.roll_segment()?;
+                }
+                push_unique_router_wal_file(
+                    &mut sync_files,
+                    &router_wal_segment_path(&self.root, self.segment_id),
+                    &self.file,
+                );
+                locations.push(self.write_record(&encoded)?);
             }
-            let stored = identity::encode_payload(self.association.as_deref(), payload)?;
-            let encoded = postcard::to_allocvec(&stored)
-                .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
-            let frame_len = 8_u64
-                .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| NodeCoreError::ItestJson("router WAL frame too large".to_owned()))?;
-            if self.offset > self.header_len
-                && (self.offset.saturating_add(frame_len) > self.segment_bytes
-                    || self.segment_born.elapsed().is_ok_and(|age| age.as_secs() >= 3600))
-            {
-                self.roll_segment()?;
-            }
-            push_unique_router_wal_file(
-                &mut sync_files,
-                &router_wal_segment_path(&self.root, self.segment_id),
-                &self.file,
-            );
-            locations.push(self.write_record(&encoded)?);
-        }
-        crate::record_router_save_mutation_us(elapsed_us(write_started));
-        Ok(RouterWalAppendGroup { locations, sync_files })
+            crate::record_router_save_mutation_us(elapsed_us(write_started));
+            Ok(RouterWalAppendGroup { locations, sync_files })
+        })
     }
 
     fn write_record(&mut self, encoded: &[u8]) -> Result<RouterWalRecordLocation, NodeCoreError> {
@@ -1164,7 +1192,7 @@ impl RouterWalWriterState {
         let offset = self.offset;
         let path = router_wal_segment_path(&self.root, self.segment_id);
         durability_io::boundary(&path, "record_write", || {
-            write_router_wal_record_to_file(&self.file, encoded).map_err(io::Error::other)
+            write_router_wal_record_with_path(&self.file, encoded, &path).map_err(io::Error::other)
         })
         .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         self.offset = self.offset.saturating_add(8 + u64::from(len));
@@ -1174,6 +1202,7 @@ impl RouterWalWriterState {
     fn roll_segment(&mut self) -> Result<(), NodeCoreError> {
         self.segment_id = self.segment_id.saturating_add(1);
         let path = router_wal_segment_path(&self.root, self.segment_id);
+        writer_check(&self.root, "roll_open")?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -1220,11 +1249,19 @@ fn router_wal_writer_loop(
     batch_max: usize,
     window: Duration,
 ) {
-    while let Ok(first) = receiver.recv() {
+    while crate::fatal_durability::check().is_ok() {
+        let Ok(first) = receiver.recv() else { break };
+        let Ok(batch_guard) = crate::fatal_durability::WriteGuard::new(false) else { return };
+        if crate::fatal_durability::check().is_err() {
+            return;
+        }
         let mut batch = Vec::with_capacity(batch_max);
         batch.push(first);
         let deadline = Instant::now() + window;
         while batch.len() < batch_max {
+            if crate::fatal_durability::check().is_err() {
+                return;
+            }
             match receiver.try_recv() {
                 Ok(request) => batch.push(request),
                 Err(mpsc::TryRecvError::Disconnected) => break,
@@ -1247,9 +1284,13 @@ fn router_wal_writer_loop(
         }
         let payloads = batch.iter().map(|request| request.payload.clone()).collect::<Vec<_>>();
         match state.append_batch(&payloads) {
-            Ok(locations) => router_wal_ack_success(batch, &payloads, locations, wal_state),
+            Ok(locations) => {
+                router_wal_ack_success(batch, &payloads, locations, wal_state, &state.root);
+            }
             Err(error) => router_wal_ack_error(batch, &error),
         }
+
+        let _ = batch_guard.complete();
     }
 }
 
@@ -1260,11 +1301,19 @@ fn router_wal_pipeline_writer_loop(
     batch_max: usize,
     window: Duration,
 ) {
-    while let Ok(first) = receiver.recv() {
+    while crate::fatal_durability::check().is_ok() {
+        let Ok(first) = receiver.recv() else { break };
+        let Ok(batch_guard) = crate::fatal_durability::WriteGuard::new(false) else { return };
+        if crate::fatal_durability::check().is_err() {
+            return;
+        }
         let mut batch = Vec::with_capacity(batch_max);
         batch.push(first);
         let deadline = Instant::now() + window;
         while batch.len() < batch_max {
+            if crate::fatal_durability::check().is_err() {
+                return;
+            }
             match receiver.try_recv() {
                 Ok(request) => batch.push(request),
                 Err(mpsc::TryRecvError::Disconnected) => break,
@@ -1294,6 +1343,10 @@ fn router_wal_pipeline_writer_loop(
                     locations: group.locations,
                     sync_files: group.sync_files,
                 };
+                if let Err(error) = writer_check(&state.root, "fsync_enqueue") {
+                    router_wal_ack_error(fsync_group.batch, &error);
+                    return;
+                }
                 if let Err(error) = fsync_sender.send(fsync_group) {
                     router_wal_ack_error(
                         error.0.batch,
@@ -1303,6 +1356,8 @@ fn router_wal_pipeline_writer_loop(
             }
             Err(error) => router_wal_ack_error(batch, &error),
         }
+
+        let _ = batch_guard.complete();
     }
     drop(fsync_sender);
 }
@@ -1311,9 +1366,15 @@ fn router_wal_fsync_loop(
     receiver: &mpsc::Receiver<RouterWalFsyncGroup>,
     wal_state: &Arc<Mutex<RouterWalState>>,
 ) {
-    while let Ok(first) = receiver.recv() {
+    while crate::fatal_durability::check().is_ok() {
+        let Ok(first) = receiver.recv() else { break };
+        let Ok(batch_guard) = crate::fatal_durability::WriteGuard::new(false) else { return };
+        if crate::fatal_durability::check().is_err() {
+            return;
+        }
         let mut groups = vec![first];
-        while let Ok(group) = receiver.try_recv() {
+        while crate::fatal_durability::check().is_ok() {
+            let Ok(group) = receiver.try_recv() else { break };
             groups.push(group);
         }
 
@@ -1327,7 +1388,7 @@ fn router_wal_fsync_loop(
         }
 
         let sync_started = Instant::now();
-        let sync_result = sync_router_wal_files(&sync_files);
+        let sync_result = crate::fatal_durability::run(|| sync_router_wal_files(&sync_files));
         let sync_us = elapsed_us(sync_started);
         match sync_result {
             Ok(()) => {
@@ -1339,6 +1400,7 @@ fn router_wal_fsync_loop(
                         &group.payloads,
                         group.locations,
                         wal_state,
+                        sync_files.first().map_or(Path::new(""), |(path, _)| path.as_path()),
                     );
                 }
             }
@@ -1348,6 +1410,8 @@ fn router_wal_fsync_loop(
                 }
             }
         }
+
+        let _ = batch_guard.complete();
     }
 }
 
@@ -1356,21 +1420,37 @@ fn router_wal_ack_success(
     payloads: &[RouterWalPayload],
     locations: Vec<RouterWalRecordLocation>,
     wal_state: &Arc<Mutex<RouterWalState>>,
+    path: &Path,
 ) {
+    let Ok(guard) = crate::fatal_durability::WriteGuard::new(false) else { return };
     #[cfg(test)]
     let _pause = acknowledgement_test::before_apply(wal_state);
-    let update_result = wal_state.lock().map_err(|source| source.to_string()).map(|mut guard| {
-        for (payload, location) in payloads.iter().cloned().zip(locations.iter().cloned()) {
-            guard.apply(payload, location);
-        }
-    });
+    if writer_check(path, "index_update").is_err() {
+        return;
+    }
+    let update_result = wal_state
+        .lock()
+        .map_err(|source| source.to_string())
+        .map(|mut guard| {
+            let _gate = crate::fatal_durability::publication().map_err(|e| e.to_string())?;
+            for (payload, location) in payloads.iter().cloned().zip(locations.iter().cloned()) {
+                guard.apply(payload, location);
+            }
+            Ok::<_, String>(())
+        })
+        .and_then(std::convert::identity);
     match update_result {
         Ok(()) => {
             for (request, location) in batch.into_iter().zip(locations) {
+                if writer_check(path, "writer_reply").is_err() {
+                    return;
+                }
+                let Ok(_gate) = crate::fatal_durability::publication() else { return };
                 request.reply.send(Ok(location));
             }
         }
         Err(error) => {
+            crate::fatal_durability::fence(false);
             for request in batch {
                 request.reply.send(Err(NodeCoreError::ItestJson(format!(
                     "router WAL index lock poisoned: {error}"
@@ -1378,9 +1458,11 @@ fn router_wal_ack_success(
             }
         }
     }
+    let _ = guard.complete();
 }
 
 fn router_wal_ack_error(batch: Vec<RouterWalAppendRequest>, error: &NodeCoreError) {
+    crate::fatal_durability::fence(false);
     let message = error.to_string();
     for request in batch {
         request.reply.send(Err(NodeCoreError::ItestJson(message.clone())));
@@ -1643,16 +1725,35 @@ pub(crate) fn write_legacy_router_wal_segment(
     write_router_wal_record_to_file(&file, &encoded)
 }
 
+fn writer_check(path: &Path, operation: &str) -> Result<(), NodeCoreError> {
+    crate::fatal_durability::check()?;
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    crate::durability_test_hooks::notify(path, operation, false).map_err(identity::error)?;
+    #[cfg(not(any(test, feature = "durability-test-hooks")))]
+    let _ = (path, operation);
+    Ok(())
+}
 fn write_router_wal_record_to_file(file: &File, encoded: &[u8]) -> Result<(), NodeCoreError> {
+    write_router_wal_record_with_path(file, encoded, Path::new(""))
+}
+fn write_router_wal_record_with_path(
+    file: &File,
+    encoded: &[u8],
+    path: &Path,
+) -> Result<(), NodeCoreError> {
     let len = u32::try_from(encoded.len())
         .map_err(|_| NodeCoreError::ItestJson("router WAL record too large".to_owned()))?;
     let crc = crc32fast::hash(encoded);
     let mut writer = file;
-    writer
-        .write_all(&len.to_le_bytes())
-        .and_then(|()| writer.write_all(&crc.to_le_bytes()))
-        .and_then(|()| writer.write_all(encoded))
-        .map_err(|source| NodeCoreError::ItestJson(source.to_string()))
+    for (operation, bytes) in [
+        ("record_length", len.to_le_bytes().as_slice()),
+        ("record_crc", crc.to_le_bytes().as_slice()),
+        ("record_payload", encoded),
+    ] {
+        durability_io::boundary(path, operation, || writer.write_all(bytes))
+            .map_err(identity::error)?;
+    }
+    Ok(())
 }
 
 fn router_wal_usize_env(name: &str, default: usize) -> usize {

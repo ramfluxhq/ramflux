@@ -232,7 +232,7 @@ impl RouterRedbStore {
         now: u64,
     ) -> Result<(), NodeCoreError> {
         self.prune_custody_history(now)?;
-        let tx = self.db.begin_write().map_err(error)?;
+        let tx = self.begin_write().map_err(error)?;
         self.record_custody_account_in_tx(
             &tx,
             CustodyAccountWrite { anchor, state, is_new, source, now },
