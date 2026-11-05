@@ -32,7 +32,20 @@ fn scan(db: &Connection) -> TestResult {
     }
     Ok(())
 }
-fn restore(label: &str, placeholder: bool, historical: bool, fault: bool) -> TestResult {
+#[derive(Clone, Copy)]
+enum Case {
+    Lookup,
+    Placeholder,
+    DeletedOwner,
+    Historical,
+    Fault,
+}
+fn restore(label: &str, case: Case) -> TestResult {
+    let placeholder = matches!(case, Case::Placeholder | Case::Fault);
+    let historical = matches!(case, Case::Historical);
+    let fault = matches!(case, Case::Fault);
+    let deleted_owner = matches!(case, Case::DeletedOwner);
+    let check_access = matches!(case, Case::Lookup | Case::Historical);
     super::tests::fixture(label, |root, live, target, _, _| {
         seed_payload(live, target)?;
         let message = if historical { "never-deleted-m3" } else { "retired-owner" };
@@ -58,40 +71,31 @@ fn restore(label: &str, placeholder: bool, historical: bool, fault: bool) -> Tes
         let path = root.join("preservation-source.db");
         let saved = live.write_backup_snapshot(&path)?;
         let source = BackupDatabase::open(&path, &saved.key)?;
-        source.ensure_missing_manifest()?;
-        source.db.execute(
-            "INSERT INTO backup_missing_attachment VALUES(?1,'manifest','plain')",
-            [CANARY],
-        )?;
-        let actor = json!({"reference":reference,"prepared_slot":CANARY});
-        for key in [format!("attachment/reference/{CANARY}"), format!("directory/object/{CANARY}")]
-        {
-            source.db.execute(
-                "INSERT OR IGNORE INTO object_payload_actor VALUES(?1,?2)",
-                params![object_erasure_commitment("principal", "wire", "manifest"), key],
-            )?;
-            source.db.execute(
-                "INSERT OR REPLACE INTO runtime_actor_state VALUES(?1,?2)",
-                params![key, serde_json::to_vec(&actor)?],
-            )?;
-        }
-        source.db.execute_batch("CREATE TABLE backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); CREATE TABLE backup_archived_local_event AS SELECT 'old' AS source,* FROM local_event_log WHERE 0;")?;
-        source.db.execute(
-            "INSERT INTO backup_archived_actor_state VALUES('old','historical/shared',?1)",
-            params![serde_json::to_vec(&json!({"items":[actor,kept]}))?],
-        )?;
-        source.db.execute("INSERT INTO local_event_log VALUES('mixed-event','test','peer','device',999,999,1,NULL,?1,x'1234','verified','pending')",params![serde_json::to_vec(&json!({"items":[actor,kept]}))?])?;
-        source.db.execute_batch("INSERT INTO backup_archived_local_event SELECT 'old',* FROM local_event_log WHERE event_id='mixed-event';")?;
-        if placeholder {
-            source.db.execute("INSERT INTO object_index(object_id,manifest_hash,ciphertext,chunk_count,chunk_manifest_hash,tombstoned,updated_at,object_body,object_state,total_cipher_size,created_at) VALUES(?1,?2,x'',0,?2,1,1,x'7b7d','revoked',0,1)",params![CANARY,b"manifest".as_slice()])?;
-        }
+        seed_copies(&source, &reference, &kept, placeholder)?;
         drop(source);
         let before = std::fs::read(&path)?;
         let commitment = object_erasure_commitment("principal", "wire", "manifest");
-        target.db.execute(
-            "INSERT INTO object_erasure_lookup VALUES(?1,?2)",
-            params![object_erasure_lookup("principal", CANARY), commitment],
-        )?;
+        if deleted_owner {
+            let marker = blake3_256_base64url("ramflux.deleted-message.v1", message.as_bytes());
+            target.db.execute(
+                "INSERT INTO runtime_actor_state VALUES(?1,x'7b7d')",
+                [format!("message/deleted/{marker}")],
+            )?;
+            assert_eq!(
+                target.db.query_row(
+                    "SELECT count(*) FROM object_erasure_lookup WHERE lookup=?1",
+                    [object_erasure_lookup("principal", CANARY)],
+                    |r| r.get::<_, u64>(0)
+                )?,
+                0
+            );
+        } else {
+            target.db.execute(
+                "INSERT INTO object_erasure_lookup VALUES(?1,?2)",
+                params![object_erasure_lookup("principal", CANARY), commitment],
+            )?;
+        }
+
         assert_eq!(
             target.db.query_row(
                 "SELECT count(*) FROM object_erasure_fence WHERE commitment=?1",
@@ -116,30 +120,30 @@ fn restore(label: &str, placeholder: bool, historical: bool, fault: bool) -> Tes
         target.merge_backup_candidate(&path, &saved.key, || Ok(()))?;
         assert_eq!(std::fs::read(&path)?, before);
         verify_target(target, &hash, message)?;
-        verify_snapshot(root, target, &saved.key)?;
+        verify_snapshot(root, target, &saved.key, check_access)?;
 
         Ok(())
     })
 }
 #[test]
 fn e7_incoming_reference_without_placeholder_excluded() -> TestResult {
-    restore("preserve-no-placeholder", false, false, false)
+    restore("preserve-no-placeholder", Case::DeletedOwner)
 }
 #[test]
 fn e7_d7_style_object_exclusion_retained() -> TestResult {
-    restore("preserve-d7", true, false, false)
+    restore("preserve-d7", Case::Placeholder)
 }
 #[test]
 fn e7_lookup_only_restore_does_not_import_alias() -> TestResult {
-    restore("preserve-lookup", true, false, false)
+    restore("preserve-lookup", Case::Lookup)
 }
 #[test]
 fn e17_historical_lookup_alone_omits_never_deleted_m3_attachment() -> TestResult {
-    restore("preserve-history", false, true, false)
+    restore("preserve-history", Case::Historical)
 }
 #[test]
 fn e14_fault_after_archive_preservation() -> TestResult {
-    restore("preserve-fault", false, false, true)
+    restore("preserve-fault", Case::Fault)
 }
 
 fn verify_target(target: &BackupDatabase, hash: &str, message: &str) -> TestResult {
@@ -263,6 +267,7 @@ fn verify_snapshot(
     root: &std::path::Path,
     target: &BackupDatabase,
     key: &crate::AccountDbKey,
+    check_access: bool,
 ) -> TestResult {
     let installed = root.join("installed");
     let index = crate::AccountIndex::open(&installed)?;
@@ -271,7 +276,9 @@ fn verify_snapshot(
     std::fs::create_dir_all(copy.parent().ok_or(StorageError::AuthorizationRejected)?)?;
     target.copy_to(&copy, key)?;
     let reopened = crate::AccountDb::open(&index, "acct", key)?;
-    assert!(matches!(reopened.check_object_access(CANARY), Err(StorageError::ObjectErased)));
+    if check_access {
+        assert!(matches!(reopened.check_object_access(CANARY), Err(StorageError::ObjectErased)));
+    }
     reopened.check_object_access("wire")?;
     reopened.checkpoint_retired_secrets()?;
     let snapshot_path = root.join("post-restore-snapshot.db");
@@ -347,5 +354,85 @@ fn verify_rollback(
         0
     );
 
+    Ok(())
+}
+
+#[test]
+fn oversized_unrelated_actor_is_preserved() -> TestResult {
+    super::tests::fixture("oversized-unrelated", |_, _, target, path, key| {
+        let source = BackupDatabase::open(path, key)?;
+        let body = vec![b' '; 1_048_577];
+        source.db.execute(
+            "INSERT INTO runtime_actor_state VALUES('settings/opaque',?1)",
+            params![body],
+        )?;
+        drop(source);
+        target.merge_backup_candidate(path, key, || Ok(()))?;
+        assert_eq!(target.db.query_row("SELECT length(state_json) FROM runtime_actor_state WHERE state_kind='settings/opaque'", [], |r|r.get::<_,u64>(0))?, 1_048_577);
+        Ok(())
+    })
+}
+
+#[test]
+fn preservation_progress_cancellation_rolls_back() -> TestResult {
+    super::tests::fixture("preserve-cancellation", |_, _, target, path, key| {
+        let before = std::fs::read(path)?;
+        let mut calls = 0;
+        let result = target.merge_backup_pipeline(path, key,
+            (super::super::backup_merge::BackupMergeMode::FullAccount(None), true),
+            &mut || Ok(()), |db| {
+                graph::classify(db)?;
+                db.execute_batch("CREATE TEMP TABLE backup_erased_copy(database_name TEXT,table_name TEXT,row_id INTEGER);")?;
+                preservation::prepare(db, "principal", &mut || {
+                    calls += 1;
+                    Err(StorageError::AuthorizationRejected)
+                })
+            });
+        assert!(matches!(result, Err(StorageError::AuthorizationRejected)));
+        assert_eq!(calls, 1);
+        assert_eq!(std::fs::read(path)?, before);
+        assert_eq!(
+            target.db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='backup_preserved_copy'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )?,
+            0
+        );
+        Ok(())
+    })
+}
+
+fn seed_copies(
+    source: &BackupDatabase,
+    reference: &Value,
+    kept: &Value,
+    placeholder: bool,
+) -> TestResult {
+    source.ensure_missing_manifest()?;
+    source
+        .db
+        .execute("INSERT INTO backup_missing_attachment VALUES(?1,'manifest','plain')", [CANARY])?;
+    let actor = json!({"reference":reference,"prepared_slot":CANARY});
+    for key in [format!("attachment/reference/{CANARY}"), format!("directory/object/{CANARY}")] {
+        source.db.execute(
+            "INSERT OR IGNORE INTO object_payload_actor VALUES(?1,?2)",
+            params![object_erasure_commitment("principal", "wire", "manifest"), key],
+        )?;
+        source.db.execute(
+            "INSERT OR REPLACE INTO runtime_actor_state VALUES(?1,?2)",
+            params![key, serde_json::to_vec(&actor)?],
+        )?;
+    }
+    source.db.execute_batch("CREATE TABLE backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); CREATE TABLE backup_archived_local_event AS SELECT 'old' AS source,* FROM local_event_log WHERE 0;")?;
+    source.db.execute(
+        "INSERT INTO backup_archived_actor_state VALUES('old','historical/shared',?1)",
+        params![serde_json::to_vec(&json!({"items":[actor,kept]}))?],
+    )?;
+    source.db.execute("INSERT INTO local_event_log VALUES('mixed-event','test','peer','device',999,999,1,NULL,?1,x'1234','verified','pending')",params![serde_json::to_vec(&json!({"items":[actor,kept]}))?])?;
+    source.db.execute_batch("INSERT INTO backup_archived_local_event SELECT 'old',* FROM local_event_log WHERE event_id='mixed-event';")?;
+    if placeholder {
+        source.db.execute("INSERT INTO object_index(object_id,manifest_hash,ciphertext,chunk_count,chunk_manifest_hash,tombstoned,updated_at,object_body,object_state,total_cipher_size,created_at) VALUES(?1,?2,x'',0,?2,1,1,x'7b7d','revoked',0,1)",params![CANARY,b"manifest".as_slice()])?;
+    }
     Ok(())
 }
