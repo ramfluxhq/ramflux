@@ -167,6 +167,20 @@ impl BackupDatabase {
                 params![digest, wire, manifest],
             )?;
         }
+        if candidate {
+            // Capture before deleting the only local mapping. The shared payload
+            // body expands dependencies and consumes this capture without clearing it.
+            self.db.execute_batch(
+                r"
+INSERT INTO object_erasure_work
+SELECT commitment,wire_id,manifest_hash FROM object_retention_payload
+WHERE commitment IN (SELECT commitment FROM object_erasure_fence) ON CONFLICT DO NOTHING;
+INSERT INTO object_reference_erasure_work
+SELECT reference_hash,selector,selector_lookup,commitment FROM object_retention_reference
+WHERE commitment IN (SELECT commitment FROM object_erasure_fence) ON CONFLICT DO NOTHING;
+",
+            )?;
+        }
         self.db.execute_batch("DELETE FROM object_message_reference WHERE reference_hash IN (SELECT reference_hash FROM object_retention_reference WHERE commitment IN (SELECT commitment FROM object_erasure_fence)); DELETE FROM object_retention_reference WHERE commitment IN (SELECT commitment FROM object_erasure_fence);")?;
         self.db.execute_batch(&super::object_retention::payload_erasure_body(&self.db)?)?;
         for table in [

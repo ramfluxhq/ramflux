@@ -172,3 +172,6 @@ mod tests;
 
 #[cfg(test)]
 mod placeholder_compat_tests;
+
+#[cfg(test)]
+mod local_erasure_tests;
