@@ -6,3 +6,6 @@
 
 # Locally generated private node keys.
 /deploy/config/node-identity/
+
+# Python oracle bytecode.
+__pycache__/
