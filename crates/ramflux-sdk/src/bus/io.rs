@@ -70,6 +70,15 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
 }
 
 pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
+    if super::account_runtime::head_refresh::is_freshness_refusal(error) {
+        return local_bus_error_body(&SdkError::NetworkingPendingContext {
+            retry_after_ms: Some(1_000),
+            networking: Box::new(
+                serde_json::json!({"phase":"pending","reason":"authority_refresh"}),
+            ),
+        });
+    }
+
     if let SdkError::LifecycleShared(source) = error {
         return local_bus_error_body(source);
     }
@@ -155,6 +164,10 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 }
 
 pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
+    if super::account_runtime::head_refresh::is_freshness_refusal(error) {
+        return "NetworkingPending";
+    }
+
     if let SdkError::LifecycleShared(source) = error {
         return local_bus_error_code(source);
     }

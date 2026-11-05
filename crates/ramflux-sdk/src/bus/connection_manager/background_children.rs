@@ -67,6 +67,10 @@ pub(super) fn start(
         let _ = handle.spawn_session_child("delivery-receipts", move |context| {
             Box::pin(crate::bus::delivery_receipts::run_background(context, receipt_work.clone()))
         });
+        let refresh_work = work.clone();
+        let _ = handle.spawn_session_child("head-refresh", move |context| {
+            Box::pin(crate::bus::couriers::head_refresh::run(context, refresh_work.clone()))
+        });
         let backfill_work = work.clone();
         let _ = handle.spawn_session_child("own-contact-backfill", move |context| {
             Box::pin(crate::bus::couriers::directory::backfill(context, backfill_work.clone()))

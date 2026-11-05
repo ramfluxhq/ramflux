@@ -13,6 +13,7 @@ mod commands;
 mod connection;
 mod directory;
 pub(super) mod fetches;
+pub(crate) mod head_refresh;
 mod readers;
 pub(super) mod uploads;
 

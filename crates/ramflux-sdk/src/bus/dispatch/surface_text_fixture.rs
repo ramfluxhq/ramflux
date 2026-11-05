@@ -213,7 +213,7 @@ pub(in crate::bus::dispatch) fn manifest(
 ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
     crate::client::identity_authority::test_support::public_manifest(client)
 }
-pub(in crate::bus::dispatch) async fn directory(
+pub(in crate::bus) async fn directory(
     root: &Path,
     manifests: BTreeMap<String, serde_json::Value>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
