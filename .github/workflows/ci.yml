@@ -64,10 +64,11 @@ jobs:
 
   # Only main pushes and same-repository PRs use the sandboxed pool.
   # Dependabot, forks, manual runs and RF_CI_RUNNER=github use GitHub-hosted runners.
+  # Set repository variable RF_CI_RUNNER=github to force the hosted fallback.
   # Pool jobs have no secrets and require the host's native build dependencies.
   rust:
     name: Rust checks
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -77,8 +78,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -86,6 +93,7 @@ jobs:
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: checks
 
       - name: Install cargo-machete
@@ -113,7 +121,7 @@ jobs:
 
   clippy-itest:
     name: Clippy (itest, all features)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -123,8 +131,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -132,6 +146,7 @@ jobs:
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: clippy-itest
 
       - name: Clippy
@@ -139,7 +154,7 @@ jobs:
 
   clippy-default:
     name: Clippy (default features)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -149,8 +164,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -158,6 +179,7 @@ jobs:
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: clippy-default
 
       - name: Clippy
@@ -165,7 +187,7 @@ jobs:
 
   doctests:
     name: Doctests
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -175,8 +197,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -184,6 +212,7 @@ jobs:
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: doctests
 
       - name: Doctests
@@ -191,7 +220,7 @@ jobs:
 
   build-sdk:
     name: Build test archive (sdk)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -201,8 +230,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -210,6 +245,7 @@ jobs:
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: arch-sdk
 
       - name: Install nextest
@@ -230,7 +266,7 @@ jobs:
 
   build-rest:
     name: Build test archive (rest)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -240,8 +276,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -249,6 +291,7 @@ jobs:
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: arch-rest
 
       - name: Install nextest
@@ -273,7 +316,7 @@ jobs:
   test-sdk:
     name: Tests (sdk ${{ matrix.shard }}/6)
     needs: build-sdk
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -287,8 +330,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -296,6 +345,12 @@ jobs:
         if: runner.environment == 'github-hosted'
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
+
+      - name: Create private test temp directory
+        if: runner.environment == 'self-hosted'
+        run: |
+          job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
+          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
@@ -309,6 +364,11 @@ jobs:
       - name: Run shard
         run: cargo nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci -E 'not binary(c_abi_smoke)' --partition hash:${{ matrix.shard }}/6
 
+      - name: Clean private test temp directory
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
+
       - name: Upload JUnit
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -320,7 +380,7 @@ jobs:
   test-rest:
     name: Tests (rest ${{ matrix.shard }}/2)
     needs: build-rest
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -334,8 +394,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -343,6 +409,12 @@ jobs:
         if: runner.environment == 'github-hosted'
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
+
+      - name: Create private test temp directory
+        if: runner.environment == 'self-hosted'
+        run: |
+          job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
+          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
@@ -356,6 +428,11 @@ jobs:
       - name: Run shard
         run: cargo nextest run --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci --partition hash:${{ matrix.shard }}/2
 
+      - name: Clean private test temp directory
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
+
       - name: Upload JUnit
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -366,7 +443,7 @@ jobs:
 
   v-memory-vault:
     name: "SDK variant: memory vault (custody + approve_once)"
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -376,8 +453,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -386,10 +469,17 @@ jobs:
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
 
+      - name: Create private test temp directory
+        if: runner.environment == 'self-hosted'
+        run: |
+          job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
+          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: v-memory-vault
 
       - name: Install nextest
@@ -399,6 +489,11 @@ jobs:
 
       - name: Test
         run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
+
+      - name: Clean private test temp directory
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
 
       - name: Upload JUnit
         if: always()
@@ -411,7 +506,7 @@ jobs:
 
   v-production:
     name: "SDK variant: migration fixture absent from production"
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -421,8 +516,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -431,10 +532,17 @@ jobs:
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
 
+      - name: Create private test temp directory
+        if: runner.environment == 'self-hosted'
+        run: |
+          job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
+          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: v-production
 
       - name: Install nextest
@@ -444,6 +552,11 @@ jobs:
 
       - name: Test
         run: RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
+
+      - name: Clean private test temp directory
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
 
       - name: Upload JUnit
         if: always()
@@ -456,7 +569,7 @@ jobs:
 
   v-legacy:
     name: "SDK variant: legacy accounts fixture"
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -466,8 +579,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -476,10 +595,17 @@ jobs:
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
 
+      - name: Create private test temp directory
+        if: runner.environment == 'self-hosted'
+        run: |
+          job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
+          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: v-legacy
 
       - name: Install nextest
@@ -489,6 +615,11 @@ jobs:
 
       - name: Test
         run: RAMFLUX_ITEST_BUILD=1 cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
+
+      - name: Clean private test temp directory
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
 
       - name: Upload JUnit
         if: always()
@@ -501,7 +632,7 @@ jobs:
 
   v-local-mint:
     name: Gateway local-mint regression tests
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -511,8 +642,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -521,10 +658,17 @@ jobs:
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
 
+      - name: Create private test temp directory
+        if: runner.environment == 'self-hosted'
+        run: |
+          job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
+          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: v-local-mint
 
       - name: Install nextest
@@ -534,6 +678,11 @@ jobs:
 
       - name: Test
         run: cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
+
+      - name: Clean private test temp directory
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
 
       - name: Upload JUnit
         if: always()
@@ -547,7 +696,7 @@ jobs:
   mutants:
     name: Mutants (advisory, diff only)
     if: github.event_name == 'pull_request'
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 10
     continue-on-error: true
     steps:
@@ -559,8 +708,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -574,6 +729,7 @@ jobs:
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: mutants
 
       - name: Install nextest and cargo-mutants
@@ -601,7 +757,7 @@ jobs:
 
   test-graceful-shutdown:
     name: Configured graceful shutdown (Linux)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || (github.actor != 'dependabot[bot]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -611,8 +767,14 @@ jobs:
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          command -v cc c++ make cmake pkg-config perl python3 git
-          pkg-config --exists openssl
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
@@ -620,6 +782,7 @@ jobs:
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
           shared-key: graceful-shutdown
 
       - name: Install nextest
