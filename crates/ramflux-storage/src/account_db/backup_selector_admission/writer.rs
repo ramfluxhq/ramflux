@@ -7,6 +7,7 @@ use rusqlite::{Connection, params};
 use serde_json::Value;
 
 pub(in crate::account_db) fn merge(db: &Connection) -> Result<(), StorageError> {
+    db.execute_batch("CREATE TEMP TABLE IF NOT EXISTS backup_erased_copy(database_name TEXT NOT NULL,table_name TEXT NOT NULL,row_id INTEGER NOT NULL,PRIMARY KEY(database_name,table_name,row_id));")?;
     db.execute_batch(r"
 INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class,hold_expires_at)
 SELECT p.commitment,p.wire_id,p.manifest_hash,p.wire_lookup,p.retention_class,p.hold_expires_at FROM incoming.object_retention_payload p
@@ -28,6 +29,7 @@ ON CONFLICT DO NOTHING;
 INSERT INTO object_payload_actor
 SELECT a.* FROM incoming.object_payload_actor a
 WHERE NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=a.commitment)
+AND NOT EXISTS(SELECT 1 FROM incoming.runtime_actor_state r JOIN backup_erased_copy e ON e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid WHERE r.state_kind=a.state_kind)
 ON CONFLICT DO NOTHING;
 INSERT INTO object_payload_dependency
 SELECT d.* FROM incoming.object_payload_dependency d
@@ -36,6 +38,7 @@ ON CONFLICT DO NOTHING;
 INSERT INTO object_transport_actor
 SELECT a.* FROM incoming.object_transport_actor a
 WHERE NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=a.commitment)
+AND NOT EXISTS(SELECT 1 FROM incoming.runtime_actor_state r JOIN backup_erased_copy e ON e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid WHERE r.state_kind=a.state_kind)
 ON CONFLICT DO NOTHING;
 INSERT INTO object_identity_replacement
 SELECT * FROM incoming.object_identity_replacement WHERE 1 ON CONFLICT DO NOTHING;

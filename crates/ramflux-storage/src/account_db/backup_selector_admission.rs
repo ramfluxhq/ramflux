@@ -15,11 +15,11 @@ const TABLES: [&str; 4] = [
 ];
 
 pub(super) fn is_scratch(table: &str) -> bool {
-    TABLES.contains(&table)
+    TABLES.contains(&table) || table == "backup_preserved_copy"
 }
 
 pub(super) fn drop_scratch(db: &Connection) -> rusqlite::Result<()> {
-    for table in TABLES {
+    for table in TABLES.into_iter().chain(["backup_preserved_copy"]) {
         db.execute_batch(&format!("DROP TABLE IF EXISTS main.{table}"))?;
     }
     Ok(())
@@ -182,3 +182,8 @@ mod placeholder_compat_tests;
 
 #[cfg(test)]
 mod local_erasure_tests;
+
+pub(super) mod preservation;
+
+#[cfg(test)]
+mod preservation_tests;

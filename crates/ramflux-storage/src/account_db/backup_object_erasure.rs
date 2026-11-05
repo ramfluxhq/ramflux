@@ -88,6 +88,9 @@ impl BackupDatabase {
         if candidate {
             super::backup_selector_admission::placeholders::classify(&self.db, &root)?;
         }
+        if candidate {
+            super::backup_selector_admission::preservation::prepare(&self.db, &root)?;
+        }
         for database in ["main", "incoming"] {
             scan_objects(&self.db, database, &root, candidate, progress)?;
             for (table, key, column) in [
@@ -96,7 +99,7 @@ impl BackupDatabase {
                 ("local_event_log", "event_id", "event_body"),
                 ("backup_archived_local_event", "event_id", "event_body"),
             ] {
-                if exists(&self.db, database, table)? {
+                if !candidate && exists(&self.db, database, table)? {
                     scan_copies(
                         &self.db,
                         database,
