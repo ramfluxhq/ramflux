@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Keep admitted native group history readable after authority observations expire:
+  `group.history` reads stored history, name and roster offline while retaining
+  revocation and erasure fences. New authorization keeps fresh-head checks and
+  returns typed `NetworkingPending` within five seconds when refresh is unavailable.
+  Refresh heads on connect, every 150 seconds and on demand, with fair 32-root
+  passes; verified refresh immediately redrives matching deferred inbox entries
+  once, preserving unrelated retry backoff. Backup restore keeps freshness empty
+  until a new network observation. Peer changes use eventual observation, without
+  a new node push notification.
+
 - All pending mutation receipts now return the bus code
   `OperationReconciliationRequired`, preserving the reconciliation message while
   dropping its former `event id conflict:` prefix. The C ABI maps both lifecycle

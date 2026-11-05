@@ -435,3 +435,6 @@ async fn backup_publication_erasure_generation_orders_both_deletion_races() -> T
         Ok(())
     })).await
 }
+
+#[path = "native_freshness_tests.rs"]
+mod freshness_tests;

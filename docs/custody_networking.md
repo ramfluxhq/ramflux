@@ -33,9 +33,31 @@ roots and wait against the same five-second budget measured from command admissi
 A successful verified fetch permits the command to continue. Held or unavailable
 fetches return `NetworkingPending` with `retry_after_ms` and `details.networking`,
 including when the session is Live. Legacy freshness refusals are serialized as
-this typed pending outcome. Stored `group.history` remains a local read. Existing
-inline peer refresh during receive is preserved; deferred inbox redrive and
-connect/periodic refresh scheduling are separate work.
+this typed pending outcome. `group.history` reads stored history, name and roster
+through the local reader pool without a session, sync or inbound application.
+Already-admitted projection skips only the 300-second freshness clock; revocation,
+signature/authority and erasure fences remain. New sends, mutations and inbound
+admission still require fresh authority. Existing inline peer refresh can admit
+on the first receive pass. Otherwise, authority-dependent entries remain in the
+durable inbox retry path; verified refresh makes matching retries immediately
+eligible and wakes the existing receive courier for ordered, once-only admission.
+Failed or old refreshes leave them pending; unrelated retry backoff is preserved.
+`group.read` and `group.receive` keep network/admission semantics. Only a decoded,
+authenticated route for the requested group can hold those RPCs pending; unknown
+routes and unrelated conversations continue background refresh and retry.
+
+Heads refresh on connect, every 150 seconds while Live, and on demand. Each
+account runs one pass at a time, at most 32 sequential roots per pass with fair
+continuation and at most 512 pending demands. Fetches run off the account writer;
+Apply checks generation, session, root and current membership and retains the
+conservative fetch-start time. Lock or session loss cancels the pass. Freshness
+is process-local: backups preserve data and authority evidence, never observation
+clocks. A restored account starts without fresh observations and refreshes on
+connect; there is no schema or wire migration. For recovery, reconnect or restart
+the daemon to sweep due roots, or use `device.refresh` with networking available
+to request an immediate refresh. Peer device-set changes are observed eventually
+through reconnect, the timer, demand or inbound processing. There is no device-set
+change push notification. Desktop adoption is a separate integration.
 
 A native connection attempt has one 120-second outer deadline. Its admission
 retry budget is 90 seconds, and each open or frame read retains its 15-second
