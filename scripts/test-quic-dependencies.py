@@ -37,9 +37,10 @@ for package in ("quinn", "quinn-proto"):
             "rawq_tests::packet_credit_covers_enqueue_processing_and_backing_release",
             "rawq_tests::control_credit_preserves_cid_close_and_drained",
             "rawq_tests::stateless_responses_bound_allocations_and_sender_tasks",
+            "rawq_tests::metadata_credit_exhaustion_propagates_resource_limit",
         }
         if missing := required.difference(tests):
-            raise SystemExit(f"{package}: missing required raw/control/response tests: {sorted(missing)}")
+            raise SystemExit(f"{package}: missing required raw/control/response/metadata tests: {sorted(missing)}")
     print(f"{package}: {len(tests)} library tests selected", flush=True)
     if not args.list_only:
         subprocess.run(command, cwd=ROOT, check=True)

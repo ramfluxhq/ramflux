@@ -6,7 +6,6 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes};
-use tinyvec::TinyVec;
 
 use crate::{
     Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, ResetToken, StreamId, TransportError, TransportErrorCode,
@@ -507,7 +506,7 @@ impl StreamMeta {
 }
 
 /// A vector of [`StreamMeta`] with optimization for the single element case
-pub(crate) type StreamMetaVec = TinyVec<[StreamMeta; 1]>;
+pub(crate) use crate::connection::metadata_vec::StreamMetaVec;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Crypto {

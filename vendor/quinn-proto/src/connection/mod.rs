@@ -58,6 +58,11 @@ mod packet_builder;
 use packet_builder::PacketBuilder;
 
 pub(crate) mod control;
+mod metadata_credit;
+pub(crate) mod metadata_vec;
+pub use metadata_credit::{MetadataClass, MetadataStats, ResourceExhausted};
+#[cfg(feature="__control-test")]
+pub use metadata_credit::MetadataProbe;
 pub use control::ControlLimits;
 mod packet_crypto;
 mod packet_processing;
@@ -135,6 +140,7 @@ use timer::{Timer, TimerTable};
 /// call to [`handle_event`](Self::handle_event) at that same instant; however
 /// events or timeouts with different instants must not be interleaved.
 pub struct Connection {
+    metadata: Option<Arc<metadata_credit::MetadataCredit>>,
     control: Option<Arc<std::sync::Mutex<control::CreditState>>>,
     active_control: Option<Arc<control::Reservation>>,
     pending_control: Option<control::PendingPacket>,
@@ -293,6 +299,7 @@ impl Connection {
             .control_limits
             .map(control::CreditState::new);
         let mut this = Self {
+            metadata: None,
             endpoint_config,
             crypto,
             handshake_cid: loc_cid,
@@ -484,6 +491,7 @@ impl Connection {
         max_datagrams: usize,
         buf: &mut Vec<u8>,
     ) -> Option<Transmit> {
+        if self.metadata_exhausted() { self.resource_exhausted(now); }
         assert!(max_datagrams != 0);
         let max_datagrams = match self.config.enable_segmentation_offload {
             false => 1,
@@ -909,6 +917,13 @@ impl Connection {
 
             let sent =
                 self.populate_packet(now, space_id, buf, builder.max_size, builder.exact_number);
+            if self.metadata_exhausted() {
+                // No partially constructed packet is emitted after a metadata refusal.
+                drop(sent);
+                buf.clear();
+                self.resource_exhausted(now);
+                return self.poll_transmit(now,max_datagrams,buf);
+            }
 
             // ACK-only packets should only be sent when explicitly allowed. If we write them due to
             // any other reason, there is a bug which leads to one component announcing write

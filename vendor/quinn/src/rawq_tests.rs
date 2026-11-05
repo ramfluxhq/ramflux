@@ -476,3 +476,97 @@ mod stateless_response_tests;
 
 #[tokio::test]
 async fn stateless_responses_bound_allocations_and_sender_tasks() { stateless_response_tests::run().await; }
+
+#[tokio::test]
+async fn metadata_credit_exhaustion_propagates_resource_limit() {
+    metadata_stream_frame_growth_aborts_wire_packet_before_effects().await;
+    metadata_frame_backing_follows_real_ack_and_release().await;
+    // B1 checkpoint: send deque and STREAM metadata backing. Remaining classes are not certified.
+    for limit in [0, 192] {
+        let (client_endpoint, server_endpoint, client, server, gate, _) =
+            pair(65536,64,524288,512,65536,128).await;
+        // pair's first returned connection is on the endpoint behind this gate.
+        // Charge that actual sender while its driver cannot dequeue/transmit the segments.
+        gate.closed.store(true,Ordering::SeqCst);
+        let probe=client.control_test(|p|p.metadata_test_limit(limit));
+        let mut stream=client.open_uni().await.unwrap();
+        if limit!=0 {
+            for _ in 0..4 { stream.write_chunk(bytes::Bytes::from_static(b"x")).await.unwrap(); }
+            let (capacity,offset)=client.control_test(|p|p.metadata_test_send_storage());
+            assert_eq!((capacity,offset),(4*std::mem::size_of::<bytes::Bytes>(),4));
+            assert_eq!((probe.stats().used,probe.stats().allocations),(192,1));
+            assert_eq!(probe.stats().refusals,0,"exactly full credit remains valid");
+        }
+        let before=probe.stats();
+        let mut source=[bytes::Bytes::from_static(b"must-not-be-consumed")];
+        assert!(matches!(stream.write_chunks(&mut source).await,
+            Err(crate::WriteError::ConnectionLost(ConnectionError::LocallyClosed))));
+        assert_eq!(&source[0][..],b"must-not-be-consumed");
+        assert_eq!(probe.stats().used,before.used);
+        assert_eq!(probe.stats().allocations,before.allocations,"refusal precedes actual deque allocation");
+        assert_eq!(client.control_test(|p|p.metadata_test_send_storage()).0,if limit==0 {0}else{4*std::mem::size_of::<bytes::Bytes>()});
+        gate.open();
+        assert!(matches!(timeout(Duration::from_secs(5),client.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+        assert!(matches!(timeout(Duration::from_secs(5),server.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref reason) if reason.error_code==VarInt::from_u32(0x524c)));
+        timeout(Duration::from_secs(5),client_endpoint.wait_idle()).await.unwrap();
+        assert_eq!(client_endpoint.open_connections(),0);
+        let held=probe.stats().used;
+        assert_eq!(held,limit,"Drained does not refund retained send backing");
+        drop((stream,client,server,client_endpoint,server_endpoint));
+        until(||probe.stats().used==0).await;
+    }
+}
+
+
+async fn metadata_stream_frame_growth_aborts_wire_packet_before_effects() {
+    let (endpoint, peer_endpoint, connection, peer, gate, _) = pair(65536,64,524288,512,65536,128).await;
+    gate.closed.store(true,Ordering::SeqCst);
+    let probe=connection.control_test(|p|p.metadata_test_limit(384));
+    let mut first=connection.open_uni().await.unwrap();
+    let mut second=connection.open_uni().await.unwrap();
+    first.write_chunk(bytes::Bytes::from_static(b"a")).await.unwrap();
+    second.write_chunk(bytes::Bytes::from_static(b"b")).await.unwrap();
+    assert_eq!(probe.stats().used,384);
+    assert_eq!(probe.stats().allocations,2);
+    let received=peer.stats().frame_rx.stream;
+    gate.open();
+    assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+    assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref close) if close.error_code==VarInt::from_u32(0x524c)));
+    assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::SentFrameMetadata));
+    assert_eq!(probe.stats().allocations,2,"refused spill never allocates a metadata vector");
+    assert_eq!(peer.stats().frame_rx.stream,received,"partial packet never reaches the wire");
+    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    assert_eq!(probe.stats().used,384);
+    drop((first,second,connection,peer,endpoint,peer_endpoint));
+    until(||probe.stats().used==0).await;
+}
+
+
+async fn metadata_frame_backing_follows_real_ack_and_release() {
+    let (endpoint, peer_endpoint, connection, peer, gate, wire)=pair(65536,64,524288,512,65536,128).await;
+    gate.closed.store(true,Ordering::SeqCst);wire.held.store(true,Ordering::SeqCst);
+    let probe=connection.control_test(|p|p.metadata_test_limit(4096));
+    let mut first=connection.open_uni().await.unwrap();let mut second=connection.open_uni().await.unwrap();
+    first.write_chunk(bytes::Bytes::from_static(b"first")).await.unwrap();
+    second.write_chunk(bytes::Bytes::from_static(b"second")).await.unwrap();
+    gate.open();
+    until(||connection.control_test(|p|p.metadata_test_frame_storage())>0).await;
+    let mut received=Vec::new();let mut receivers=Vec::new();
+    for _ in 0..2 {
+        let mut recv=timeout(Duration::from_secs(5),peer.accept_uni()).await.unwrap().unwrap();
+        let chunk=recv.read_chunk(16,true).await.unwrap().unwrap();
+        received.push(chunk.bytes.to_vec());receivers.push(recv);
+    }
+    received.sort();assert_eq!(received,vec![b"first".to_vec(),b"second".to_vec()]);
+    let frame_capacity=connection.control_test(|p|p.metadata_test_frame_storage());
+    assert_eq!(frame_capacity,128);assert_eq!(probe.stats().used,576);
+    assert_eq!(probe.stats().allocations,3);
+    wire.held.store(false,Ordering::SeqCst);if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}
+    until(||connection.control_test(|p|p.metadata_test_frame_storage())==0).await;
+    assert_eq!(probe.stats().used,384,"empty send deques retain their actual capacity after ACK");
+    first.reset(0u32.into()).unwrap();second.reset(0u32.into()).unwrap();
+    assert_eq!(probe.stats().used,0);
+    assert!(connection.close_reason().is_none());
+    connection.close(0u32.into(),b"done");
+    drop((first,second,connection,peer,endpoint,peer_endpoint,receivers));
+}

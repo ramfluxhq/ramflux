@@ -162,3 +162,28 @@ is an R4 service-scope policy decision; this hook exposes the distinction withou
 changing that policy. The response test also counts actual delivered wire datagrams
 independently of response permits and requires exactly the reserved capacity after
 unblocking each negotiation/Retry/refusal case.
+
+
+## Partial metadata hooks: no activation or certificate
+
+The shared metadata ledger reserves `align_up(capacity,64)+64` before actual backing
+growth; old and new allocations overlap until the old backing is destroyed. The
+ledger is not doubled again and has no per-class item caps. This checkpoint hooks
+send-segment deque backing and STREAM frame metadata heap capacity only, preserving
+inline/default representations. Unique leases follow backing through packet
+retirement and owned iteration; empty retained capacity stays charged.
+
+The owned metadata regression currently exercises only those two classes using
+actual Tokio drivers, independent actual-capacity/source/payload/wire observations,
+exact-full versus attempted-overflow, local RESOURCE_LIMIT/peer application-close,
+and retained owners through Drained and final destruction. It does not certify the
+other ten census classes. Production metadata configuration is intentionally absent;
+only the rejected-from-product `__control-test` feature can instantiate this partial
+ledger. The remaining classes need fallible storage hooks before activation.
+
+Still unimplemented on the send side: sent-record/map/builders, retransmit owners
+and children, both send range sets, pending transfers, PendingAcks and ACK/loss
+scratch. Std BTreeMap does not expose allocated-node capacity: an entry count or
+payload-size estimate is not an actual-capacity certificate. Receive/CRYPTO/history
+hooks, full mixed-exhaustion propagation, supported writer/envelope and all allocation
+certificates also remain future work. No profile arithmetic is changed here.

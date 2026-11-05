@@ -68,6 +68,7 @@ impl StreamRecv {
 
 #[allow(unreachable_pub)] // fuzzing only
 pub struct StreamsState {
+    pub(crate) metadata: Option<std::sync::Arc<super::super::metadata_credit::MetadataCredit>>,
     pub(super) side: Side,
     // Set of streams that are currently open, or could be immediately opened by the peer
     pub(super) send: FxHashMap<StreamId, Option<Box<Send>>>,
@@ -145,6 +146,13 @@ pub struct StreamsState {
 }
 
 impl StreamsState {
+    #[cfg(feature="__control-test")]
+    pub(crate) fn metadata_send_storage(&self) -> (usize,u64) {
+        self.send.values().filter_map(|s|s.as_ref()).fold((0,0),|(capacity,offset),send| {
+            (capacity+send.pending.segment_capacity_bytes(),offset+send.pending.offset())
+        })
+    }
+
     #[allow(unreachable_pub)] // fuzzing only
     pub fn new(
         side: Side,
@@ -155,6 +163,7 @@ impl StreamsState {
         stream_receive_window: VarInt,
     ) -> Self {
         let mut this = Self {
+            metadata: None,
             side,
             send: FxHashMap::default(),
             recv: FxHashMap::default(),
@@ -602,7 +611,7 @@ impl StreamsState {
         max_buf_size: usize,
         fair: bool,
     ) -> StreamMetaVec {
-        let mut stream_frames = StreamMetaVec::new();
+        let mut stream_frames = StreamMetaVec::with_metadata(self.metadata.clone());
         while buf.len() + frame::Stream::SIZE_BOUND < max_buf_size {
             if max_buf_size
                 .checked_sub(buf.len() + frame::Stream::SIZE_BOUND)
@@ -630,6 +639,11 @@ impl StreamsState {
             // check for them explicitly.
             if stream.is_reset() {
                 continue;
+            }
+
+            if stream_frames.reserve_frame().is_err() {
+                self.pending.reinsert_pending(id,stream.priority);
+                break;
             }
 
             // Now that we know the `StreamId`, we can better account for how many bytes

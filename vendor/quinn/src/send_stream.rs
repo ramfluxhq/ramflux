@@ -149,7 +149,12 @@ impl SendStream {
             return Poll::Ready(Err(WriteError::ConnectionLost(x.clone())));
         }
 
-        let result = match write_fn(&mut conn.inner.send_stream(self.stream)) {
+        let written = write_fn(&mut conn.inner.send_stream(self.stream));
+        if conn.inner.metadata_exhausted() {
+            conn.fail_metadata();
+            return Poll::Ready(Err(WriteError::ConnectionLost(ConnectionError::LocallyClosed)));
+        }
+        let result = match written {
             Ok(result) => result,
             Err(Blocked) => {
                 conn.blocked_writers.insert(self.stream, cx.waker().clone());
