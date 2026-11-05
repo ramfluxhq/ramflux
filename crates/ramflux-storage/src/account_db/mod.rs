@@ -52,6 +52,7 @@ pub mod history;
 pub(crate) mod home_migration;
 pub mod identity_verification;
 pub mod journal;
+pub mod large_segments;
 pub(crate) mod mac_subkeys;
 pub mod mcp;
 pub(crate) mod message_footprint;
