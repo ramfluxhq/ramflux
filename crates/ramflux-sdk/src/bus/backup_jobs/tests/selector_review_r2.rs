@@ -106,10 +106,19 @@ fn run_review(kind: PathKind, revoke: bool) -> TestResult {
     let master = [8; 32];
     format::save_metadata(&dir.join("identity.sealed"), &master, &metadata)?;
     let staging = crate::backup::VerifiedBackupStaging::new(
-        dir,
+        dir.clone(),
         master,
         crate::bus::backup_jobs::service::now(),
-    )?;
+    )?
+    .with_input_observation(
+        BackupDatabase::open_restore_input(
+            &dir.join("account.db"),
+            &AccountDbKey::from_bytes(metadata.database_key),
+            BackupOpenMode::PreNormalization,
+        )?
+        .original_input()
+        .clone(),
+    );
     drop(client);
     let result = jobs.install_generation_mode(&job, staging, native_key, None, true);
     assert_eq!(std::fs::read(&source)?, source_bytes);
@@ -240,10 +249,19 @@ fn install_chain_fresh(
     let master = [8; 32];
     format::save_metadata(&dir.join("identity.sealed"), &master, &metadata)?;
     let staging = crate::backup::VerifiedBackupStaging::new(
-        dir,
+        dir.clone(),
         master,
         crate::bus::backup_jobs::service::now(),
-    )?;
+    )?
+    .with_input_observation(
+        BackupDatabase::open_restore_input(
+            &dir.join("account.db"),
+            &AccountDbKey::from_bytes(metadata.database_key),
+            BackupOpenMode::PreNormalization,
+        )?
+        .original_input()
+        .clone(),
+    );
     jobs.install_generation_mode(&job, staging, None, None, true)?;
     let key = crate::bus::backup_jobs::install::existing_key(
         &index,
@@ -406,10 +424,19 @@ fn restored_target_older_install(native: bool) -> TestResult {
     let master = [8; 32];
     format::save_metadata(&directory.join("identity.sealed"), &master, &metadata)?;
     let staging = crate::backup::VerifiedBackupStaging::new(
-        directory,
+        directory.clone(),
         master,
         crate::bus::backup_jobs::service::now(),
-    )?;
+    )?
+    .with_input_observation(
+        BackupDatabase::open_restore_input(
+            &directory.join("account.db"),
+            &AccountDbKey::from_bytes(metadata.database_key),
+            BackupOpenMode::PreNormalization,
+        )?
+        .original_input()
+        .clone(),
+    );
     let native_key =
         native.then(|| crate::bus::backup_jobs::NativeInstallKey { account_id: id.into(), key });
     jobs.install_generation_mode(&job, staging, native_key, None, true)?;

@@ -119,7 +119,7 @@ pub(super) fn after_upgrade() -> Result<(), StorageError> {
 }
 
 #[test]
-fn e14_staged_v12_upgrade_rollback() -> TestResult {
+fn private_upgrade_retry_preserves_original_observation() -> TestResult {
     let (root, db) = crate::tests::test_db("upgrade-recovery")?;
     legacy_input(&db)?;
     let source = db.path.clone();
@@ -132,9 +132,7 @@ fn e14_staged_v12_upgrade_rollback() -> TestResult {
     let result = BackupDatabase::open_restore_input(&stage, &key, BackupOpenMode::PreNormalization);
     FAIL_UPGRADE.set(false);
     assert!(matches!(result, Err(StorageError::AuthorizationRejected)));
-    std::fs::remove_file(&stage)?;
     assert_eq!(std::fs::read(&source)?, original);
-    std::fs::copy(&source, &stage)?;
     let mut retry =
         BackupDatabase::open_restore_input(&stage, &key, BackupOpenMode::PreNormalization)?;
     assert_eq!(retry.original_input().schema_version, 12);
@@ -145,6 +143,26 @@ fn e14_staged_v12_upgrade_rollback() -> TestResult {
     assert_eq!(strict.counts()?.attachments, 0);
     assert_eq!(std::fs::read(&source)?, original);
     drop(strict);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[path = "review_r2.rs"]
+mod review_r2;
+
+#[test]
+fn candidate_placeholder_is_checked_without_claiming_a_verified_payload() -> TestResult {
+    let (root, db) = crate::tests::test_db("placeholder-count")?;
+    legacy_input(&db)?;
+    let path = db.path.clone();
+    drop(db);
+    let key = AccountDbKey::derive("acct", b"storage-test-secret");
+    let input = BackupDatabase::open_restore_input(&path, &key, BackupOpenMode::PreNormalization)?;
+    let checks = input.verify_candidate_input_attachments(|_, _| Ok(()))?;
+    assert_eq!(checks.verified, 0);
+    assert_eq!(checks.placeholders_checked, 1);
+    assert_eq!(checks.verified + checks.placeholders_checked, input.counts()?.attachments);
+    drop(input);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

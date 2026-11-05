@@ -99,6 +99,9 @@ pub struct BackupArchivePreview {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BackupAttachmentChecks {
     pub verified: u64,
+    #[serde(default)]
+    /// Checked payload-free placeholders; these are not verified attachments.
+    pub placeholders_checked: u64,
     pub mismatched: u64,
     pub missing: u64,
     #[serde(default)]

@@ -170,8 +170,14 @@ impl BackupJobs {
             db.verify_attachments(progress)
         }
         .map_err(|error| storage_error(&error))?;
+        if candidate
+            && checks.verified.checked_add(checks.placeholders_checked) != Some(counts.attachments)
+        {
+            return Err(failure(BackupFailureCode::AttachmentMismatch));
+        }
         let checks = BackupAttachmentChecks {
             verified: checks.verified,
+            placeholders_checked: checks.placeholders_checked,
             mismatched: checks.mismatched,
             missing: checks.missing,
             unavailable_at_source: checks.unavailable_at_source,
@@ -447,7 +453,7 @@ impl BackupJobs {
             &counts,
             input_mode(candidate),
         )?;
-        db.check_integrity().map_err(|error| storage_error(&error))?;
+        check_opened_input(&db)?;
         db.rekey(&key).map_err(|error| storage_error(&error))?;
         metadata.database_key = *key.bytes();
         if db.approved_missing_count().map_err(|error| storage_error(&error))?
@@ -701,3 +707,14 @@ fn check_database_size(
 
 #[cfg(test)]
 mod input_tests;
+
+#[cfg(test)]
+thread_local! { pub(super) static FAIL_AFTER_INPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+fn check_opened_input(db: &BackupDatabase) -> Result<(), BackupFailure> {
+    #[cfg(test)]
+    if FAIL_AFTER_INPUT.get() {
+        return Err(failure(BackupFailureCode::Interrupted));
+    }
+    db.check_integrity().map_err(|error| storage_error(&error))
+}

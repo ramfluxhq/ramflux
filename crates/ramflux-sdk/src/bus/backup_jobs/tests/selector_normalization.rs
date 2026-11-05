@@ -110,7 +110,9 @@ fn run(
     let saved = state.client.account_db()?.write_backup_snapshot(&path)?;
     drop(state);
     prepare_input(&path, &saved.key, version, unwrapped, invalid)?;
-    check_input(&path, &saved.key)?;
+    if !observation_tests::RETRY_UPGRADE.get() {
+        check_input(&path, &saved.key)?;
+    }
     let before = std::fs::read(&path)?;
     let source_copy = source_root.path().join("unchanged.db");
     std::fs::write(&source_copy, &before)?;
@@ -275,7 +277,9 @@ fn run_native(
     let before = std::fs::read(snapshot)?;
     std::fs::copy(snapshot, dir.join("account.db"))?;
     prepare_input(&dir.join("account.db"), &saved.key, version, unwrapped, invalid)?;
-    check_input(&dir.join("account.db"), &saved.key)?;
+    if !observation_tests::RETRY_UPGRADE.get() {
+        check_input(&dir.join("account.db"), &saved.key)?;
+    }
     let metadata =
         format::Metadata { identity, database_key: *saved.key.bytes(), ca_pem: Vec::new() };
     let staging = worker_staging(&jobs, &job, &dir, &metadata)?;
@@ -541,6 +545,7 @@ fn check_input(path: &Path, key: &ramflux_storage::AccountDbKey) -> TestResult {
 
 #[test]
 fn e14_v12_unowned_actor_with_placeholder_check_and_install_omits() -> TestResult {
+    observation_tests::assert_observation_refused("schema")?;
     for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
         run(k, 12, false, None, None)?;
     }
@@ -555,6 +560,7 @@ fn e14_p1_upgraded_target_inherited_unowned_state_restores() -> TestResult {
 }
 #[test]
 fn e14_every_intermediate_reopen_reaches_normalization_before_strict_validation() -> TestResult {
+    observation_tests::assert_observation_refused("schema")?;
     for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
         run(k, 12, false, None, None)?;
     }
@@ -603,6 +609,11 @@ fn worker_staging(
     use ramflux_crypto::backup_stream::{BackupContext, encrypt_backup_stream};
     let path = dir.join("account.db");
     let key = ramflux_storage::AccountDbKey::from_bytes(metadata.database_key);
+    let original_schema: i64 = raw(&path, &key)?.query_row(
+        "SELECT MAX(schema_version) FROM schema_migration",
+        [],
+        |r| r.get(0),
+    )?;
     let count_path = dir.join("count-copy.db");
     std::fs::copy(&path, &count_path)?;
     let counts =
@@ -631,11 +642,26 @@ fn worker_staging(
     drop(output);
     let original = std::fs::read(&job.path)?;
     std::fs::remove_dir_all(dir)?;
+    if observation_tests::RETRY_UPGRADE.get() {
+        crate::bus::backup_jobs::workers::FAIL_AFTER_INPUT.set(true);
+        let failed = jobs.verify_archive_mode(job, zeroize::Zeroizing::new(secret.into()), true);
+        crate::bus::backup_jobs::workers::FAIL_AFTER_INPUT.set(false);
+        assert!(matches!(
+            failed,
+            Err(crate::backup::BackupFailure {
+                code: crate::backup::BackupFailureCode::Interrupted,
+                ..
+            })
+        ));
+        assert!(!dir.exists(), "production PrivateDirectory must discard failed stage");
+        assert!(std::fs::read(&job.path)? == original, "source archive changed on failure");
+    }
     jobs.verify_archive_mode(job, zeroize::Zeroizing::new(secret.into()), true)
         .map_err(|e| format!("real check worker: {e:?}"))?;
     assert_eq!(std::fs::read(&job.path)?, original);
     let (_, staging) = jobs.begin_install(&job.job_id)?;
     let observation = staging.input_observation().ok_or("original input observation")?;
+    assert_eq!(observation.schema_version, original_schema);
     assert_eq!(observation.unowned_legacy_actor_count, 1);
     assert_eq!(observation.counts, counts);
     Ok(staging)
@@ -673,3 +699,6 @@ fn assert_installed(index: &AccountIndex, root: &Path, id: &str, secret: &[u8]) 
 
 #[path = "selector_review_r2.rs"]
 mod review_r2;
+
+#[path = "selector_observation.rs"]
+mod observation_tests;

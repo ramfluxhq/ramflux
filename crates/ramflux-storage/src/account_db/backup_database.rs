@@ -10,6 +10,9 @@ use std::path::Path;
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BackupAttachmentVerification {
     pub verified: u64,
+    #[serde(default)]
+    /// Payload-free tombstone records checked separately from verified ciphertext.
+    pub placeholders_checked: u64,
     pub mismatched: u64,
     pub missing: u64,
     pub unavailable_at_source: u64,
@@ -120,15 +123,11 @@ impl BackupDatabase {
         crate::schema_object_erasure::validate(&db)?;
         // P1's schema-only private upgrade never omits rows. Capture before any
         // candidate normalization and retain the input's original version.
-        let original_input = BackupInputObservation {
-            counts: super::backup::read_counts(&db)?,
-            unowned_legacy_actor_count: db.query_row(
-                "SELECT count(*) FROM runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22))",
-                [],
-                |row| row.get(0),
-            )?,
-            schema_version: input_version,
-        };
+        let original_input = observation::capture(
+            &db,
+            mode == BackupOpenMode::PreNormalization
+                && matches!(source, MarkerAuthoritySource::ArchiveInput),
+        )?;
         if input_version < crate::schema_object_erasure::VERSION {
             let writer = crate::database::Connection::open(path)?;
             crate::encryption::apply_key(&writer, key)?;
@@ -185,7 +184,18 @@ impl BackupDatabase {
     ) -> Result<Self, StorageError> {
         let mut reopened = Self::open_restore_input(path, key, mode)?;
         reopened.original_input = self.original_input.clone();
+        if mode == BackupOpenMode::PreNormalization {
+            observation::retain(&reopened.db, self.original_input.schema_version)?;
+        }
         Ok(reopened)
+    }
+
+    /// Carries already authenticated input metadata across a private stage open.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn retain_original_input(mut self, original: &BackupInputObservation) -> Self {
+        self.original_input = original.clone();
+        self
     }
 
     /// Copies a quiesced generation to a fresh encrypted private generation.
@@ -288,7 +298,7 @@ impl BackupDatabase {
         let placeholders: u64 = self.db.query_row(
             "SELECT count(*) FROM object_index WHERE backup_excluded=0 AND tombstoned=1 AND length(ciphertext)=0 AND chunk_count=0",
             [], |r|r.get(0))?;
-        checks.verified += placeholders;
+        checks.placeholders_checked = placeholders;
         Ok(checks)
     }
     /// Authenticates every attachment and both hashes, streaming BLOBs in bounded buffers.
@@ -387,3 +397,5 @@ impl<R: std::io::Read, F: FnMut() -> Result<(), StorageError>> std::io::Read
 
 #[cfg(test)]
 mod tests;
+
+mod observation;

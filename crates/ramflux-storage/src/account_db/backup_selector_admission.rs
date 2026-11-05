@@ -15,12 +15,20 @@ const TABLES: [&str; 4] = [
 ];
 
 pub(super) fn is_scratch(table: &str) -> bool {
-    TABLES.contains(&table) || matches!(table, "backup_preserved_copy" | "backup_replacement_hash")
+    TABLES.contains(&table)
+        || matches!(
+            table,
+            "backup_preserved_copy" | "backup_replacement_hash" | "backup_input_origin"
+        )
 }
 
 pub(super) fn drop_scratch(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch("DROP TRIGGER IF EXISTS main.backup_replacement_hash_update; DROP TRIGGER IF EXISTS main.backup_replacement_hash_delete;")?;
-    for table in TABLES.into_iter().chain(["backup_preserved_copy", "backup_replacement_hash"]) {
+    for table in TABLES.into_iter().chain([
+        "backup_preserved_copy",
+        "backup_replacement_hash",
+        "backup_input_origin",
+    ]) {
         db.execute_batch(&format!("DROP TABLE IF EXISTS main.{table}"))?;
     }
     Ok(())

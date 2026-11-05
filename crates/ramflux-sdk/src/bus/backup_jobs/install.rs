@@ -172,7 +172,7 @@ impl BackupJobs {
                 &target,
                 &installed_key,
                 &mut metadata,
-                candidate,
+                (candidate, staging.input_observation()),
             )?
         };
         #[cfg(test)]
@@ -244,6 +244,7 @@ impl BackupJobs {
                 &job.job_id,
                 crate::backup::BackupAttachmentChecks {
                     verified: files.verified,
+                    placeholders_checked: files.placeholders_checked,
                     mismatched: files.mismatched,
                     missing: files.missing,
                     unavailable_at_source: files.unavailable_at_source,
@@ -259,18 +260,16 @@ fn validate_staged_observation(
     staging: &VerifiedBackupStaging,
     metadata: &format::Metadata,
 ) -> Result<(), SdkError> {
-    if let Some(original) = staging.input_observation() {
-        let db = open_stage(
-            &staging.directory().join("account.db"),
-            &AccountDbKey::from_bytes(metadata.database_key),
-            true,
-        )?;
-        let current = db.original_input();
-        if current.counts != original.counts
-            || current.unowned_legacy_actor_count != original.unowned_legacy_actor_count
-        {
-            return Err(ramflux_storage::StorageError::AuthorizationRejected.into());
-        }
+    let original =
+        staging.input_observation().ok_or(ramflux_storage::StorageError::AuthorizationRejected)?;
+    let db = open_stage(
+        &staging.directory().join("account.db"),
+        &AccountDbKey::from_bytes(metadata.database_key),
+        true,
+        None,
+    )?;
+    if db.original_input() != original {
+        return Err(ramflux_storage::StorageError::AuthorizationRejected.into());
     }
     Ok(())
 }
@@ -281,9 +280,10 @@ fn prepare_fresh_restore(
     target: &Path,
     installed_key: &AccountDbKey,
     metadata: &mut format::Metadata,
-    candidate: bool,
+    input: (bool, Option<&ramflux_storage::BackupInputObservation>),
 ) -> Result<(BackupCounts, BackupCounts), SdkError> {
-    let source = open_stage(incoming, incoming_key, candidate)?;
+    let (candidate, original) = input;
+    let source = open_stage(incoming, incoming_key, candidate, original)?;
     source.copy_to(target, installed_key)?;
     #[cfg(test)]
     super::tests::selector_normalization_tests::record_open("stage");
@@ -402,10 +402,11 @@ fn open_stage(
     path: &Path,
     key: &AccountDbKey,
     candidate: bool,
+    original: Option<&ramflux_storage::BackupInputObservation>,
 ) -> Result<BackupDatabase, ramflux_storage::StorageError> {
     #[cfg(test)]
     super::tests::selector_normalization_tests::record_open("stage");
-    BackupDatabase::open_restore_input(
+    let db = BackupDatabase::open_restore_input(
         path,
         key,
         if candidate {
@@ -413,7 +414,8 @@ fn open_stage(
         } else {
             ramflux_storage::BackupOpenMode::Normalized
         },
-    )
+    )?;
+    Ok(if let Some(original) = original { db.retain_original_input(original) } else { db })
 }
 
 fn copy_live_stage(

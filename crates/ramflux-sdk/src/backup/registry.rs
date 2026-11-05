@@ -327,7 +327,7 @@ impl BackupJobRegistry {
         let VerifiedBackup { preview, counts, archive_bytes, checks, staging } = verified;
         if checks.mismatched != 0
             || checks.missing != checks.unavailable_at_source
-            || checks.verified != counts.attachments
+            || checks.verified.checked_add(checks.placeholders_checked) != Some(counts.attachments)
         {
             return Err(refused("attachment_mismatch"));
         }
