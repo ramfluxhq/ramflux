@@ -59,12 +59,7 @@ pub(in crate::account_db) fn classify(db: &Connection, root: &str) -> Result<(),
                 return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
             }
             let Some((_, _, commitment)) = identities.first() else {
-                // No authenticated mapping: omit without inventing a payload fence or lookup.
-                db.execute(
-                    "INSERT OR IGNORE INTO backup_erased_copy VALUES(?1,'object_index',?2)",
-                    params![schema, id],
-                )?;
-                db.execute("INSERT OR REPLACE INTO backup_selector_admission VALUES(?1,?2,'','unowned_legacy')",params![side,selector])?;
+                omit_unresolved_placeholder(db, schema, side, id, &selector)?;
                 continue;
             };
             if inherited {
@@ -202,4 +197,31 @@ fn legacy_target_identity(
     let commitment = object_erasure_commitment(root, wire, manifest);
     let witnessed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.message_footprint f JOIN main.message_copy_binding b ON b.message_id=f.message_id AND b.copy_id='object:'||?1 WHERE f.message_id=?2 AND f.kind='revocation_selector' AND json_extract(f.locator,'$.selector')=?1 AND json_extract(f.locator,'$.wire')=?3 AND json_extract(f.locator,'$.manifest')=?4 AND json_extract(f.locator,'$.commitment')=?5) AND NOT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?5) AND NOT EXISTS(SELECT 1 FROM object_erasure_lookup WHERE lookup=?6)", params![selector,message,wire,manifest,commitment,object_erasure_lookup(root,selector)], |r| r.get(0))?;
     Ok(witnessed.then(|| (wire.to_owned(), manifest.to_owned(), commitment)))
+}
+
+fn omit_unresolved_placeholder(
+    db: &Connection,
+    schema: &str,
+    side: &str,
+    id: i64,
+    selector: &str,
+) -> Result<(), StorageError> {
+    // Only the incoming input's own registration can add this refusal. Actor
+    // absence is not evidence that a restriction was never registered.
+    if side == "incoming" {
+        let registered: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.message_footprint f WHERE f.kind='revocation_selector' AND json_extract(f.locator,'$.selector')=?1) OR EXISTS(SELECT 1 FROM incoming.message_copy_binding b WHERE b.copy_id='object:'||?1)", [selector], |r|r.get(0))?;
+        if registered {
+            return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
+        }
+    }
+    // Bare unresolved placeholders have no restriction to preserve.
+    db.execute(
+        "INSERT OR IGNORE INTO backup_erased_copy VALUES(?1,'object_index',?2)",
+        params![schema, id],
+    )?;
+    db.execute(
+        "INSERT OR REPLACE INTO backup_selector_admission VALUES(?1,?2,'','unowned_legacy')",
+        params![side, selector],
+    )?;
+    Ok(())
 }
