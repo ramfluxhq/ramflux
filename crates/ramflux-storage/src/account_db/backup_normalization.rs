@@ -29,6 +29,7 @@ impl BackupDatabase {
             // No message, binding, deletion, reference, or payload rows enter the peer.
             self.db.execute_batch("INSERT INTO incoming.runtime_account_identity SELECT * FROM main.runtime_account_identity; INSERT INTO incoming.schema_migration SELECT * FROM main.schema_migration; INSERT INTO incoming.account_mac_bundle SELECT * FROM main.account_mac_bundle;")?;
             self.begin_merge_inputs(true, |_| Ok(()))?;
+            capture_input_deletions(&self.db)?;
             self.merge_object_erasure(&mut || Ok(()))?;
             self.merge_contact_fences()?;
             self.prepare_conversation_counts()?;
@@ -40,4 +41,24 @@ impl BackupDatabase {
         self.db.execute_batch("DETACH DATABASE incoming")?;
         result
     }
+}
+
+fn capture_input_deletions(db: &rusqlite::Connection) -> Result<(), StorageError> {
+    let mut query = db.prepare("SELECT r.reference_hash,m.message_id,r.selector,r.commitment FROM main.object_retention_reference r JOIN main.object_message_reference m USING(reference_hash)")?;
+    let mut rows = query.query([])?;
+    while let Some(row) = rows.next()? {
+        let message: String = row.get(1)?;
+        if crate::account_db::backup_selector_admission::graph::target_deleted(db, &message)? {
+            db.execute(
+                "INSERT OR IGNORE INTO main.backup_target_delete VALUES(?1,?2,?3,?4)",
+                rusqlite::params![
+                    row.get::<_, String>(0)?,
+                    message,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?
+                ],
+            )?;
+        }
+    }
+    Ok(())
 }

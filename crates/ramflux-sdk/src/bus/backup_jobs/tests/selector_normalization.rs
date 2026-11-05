@@ -28,6 +28,7 @@ fn raw(path: &Path, key: &ramflux_storage::AccountDbKey) -> TestResult<rusqlite:
 
 fn producers(client: &mut RamfluxClient) -> TestResult {
     client.account_db()?.send_direct_message("thread", "owner", "peer", b"body")?;
+    client.account_db()?.send_direct_message("thread", "other-owner", "peer", b"body")?;
     client.prepare_history_transport("history-owned", br#"{"message_id":"owner"}"#, &[])?;
     let object = client.put_encrypted_object("attachment-owned", b"attachment")?;
     let mut sender = ramflux_crypto::DmSession::initiator([7; 32], [1; 32], [2; 32], [3; 32])?;
@@ -78,6 +79,9 @@ fn run(
         Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
     )?;
     producers(&mut state.client)?;
+    if matches!(kind, PathKind::Fresh) {
+        fresh_restrictions(&mut state.client)?;
+    }
     if matches!(kind, PathKind::Native) {
         drop(state);
         return native_case(
@@ -104,6 +108,7 @@ fn run(
     let before = std::fs::read(&path)?;
     let source_copy = source_root.path().join("unchanged.db");
     std::fs::write(&source_copy, &before)?;
+    std::fs::copy(&source_copy, &path)?;
     let metadata = format::Metadata {
         identity,
         database_key: *saved.key.bytes(),
@@ -119,7 +124,15 @@ fn run(
     let previous = target_index.account(id).ok().map(|r| r.db_relative_path);
     let seen = install_hook(&jobs, &target_index, id, fault)?;
     let result = jobs.install_generation_mode(&job, staging, None, None, true);
-    if invalid.is_some() || fault.is_some() {
+    if invalid.is_some() {
+        assert!(matches!(
+            result,
+            Err(SdkError::Storage(
+                ramflux_storage::StorageError::ObjectOwnershipUnverified { .. }
+                    | ramflux_storage::StorageError::AuthorizationRejected
+            ))
+        ));
+    } else if fault.is_some() {
         assert!(result.is_err());
     } else {
         result?;
@@ -152,13 +165,14 @@ fn run(
 fn corrupt(db: &rusqlite::Connection, what: &str) -> TestResult {
     match what {
         "hash" => {
-            db.execute("UPDATE object_retention_reference SET reference_hash='wrong' WHERE selector='history-owned'",[])?;
+            db.execute_batch("UPDATE object_message_reference SET reference_hash='wrong' WHERE reference_hash IN (SELECT reference_hash FROM object_retention_reference WHERE selector='history-owned'); UPDATE object_reference_actor SET reference_hash='wrong' WHERE reference_hash IN (SELECT reference_hash FROM object_retention_reference WHERE selector='history-owned'); UPDATE object_retention_reference SET reference_hash='wrong' WHERE selector='history-owned';")?;
         }
         "owner" => {
-            db.execute("UPDATE object_message_reference SET message_id='absent' WHERE reference_hash IN (SELECT reference_hash FROM object_retention_reference WHERE selector='history-owned')",[])?;
+            db.execute("UPDATE object_message_reference SET message_id='other-owner' WHERE reference_hash IN (SELECT reference_hash FROM object_retention_reference WHERE selector='history-owned')",[])?;
         }
         _ => {
             db.execute("UPDATE object_retention_reference SET reference_json=x'7b7d' WHERE selector='attachment-owned'",[])?;
+            db.execute("UPDATE object_message_reference SET metadata_json=x'7b7d' WHERE reference_hash IN (SELECT reference_hash FROM object_retention_reference WHERE selector='attachment-owned')",[])?;
         }
     }
     Ok(())
@@ -175,6 +189,8 @@ fn assert_clean(db: &rusqlite::Connection) -> TestResult {
             &ramflux_protocol::canonical_json_bytes(&(&transport.1, &transport.2, "owner"))?
         )
     );
+    let retired: u64 = db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id='retired-owner' AND deleted=0",[],|r|r.get(0))?;
+    assert_eq!(retired, 0, "single-input marker authority must delete stale projection");
     for table in ["object_erasure_work", "object_reference_erasure_work"] {
         assert_eq!(
             db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, u64>(0))?,
@@ -272,7 +288,15 @@ fn run_native(
     let seen = install_hook(&jobs, &index, "account", fault)?;
     let result = jobs.install_generation_mode(&job, staging, key, None, true);
     assert_eq!(std::fs::read(snapshot)?, before);
-    if fault.is_some() || invalid.is_some() {
+    if invalid.is_some() {
+        assert!(matches!(
+            result,
+            Err(SdkError::Storage(
+                ramflux_storage::StorageError::ObjectOwnershipUnverified { .. }
+                    | ramflux_storage::StorageError::AuthorizationRejected
+            ))
+        ));
+    } else if fault.is_some() {
         assert!(result.is_err());
     } else {
         result?;
@@ -410,6 +434,20 @@ fn prepare_input(
         // v13 has no table/column changes; remove its candidate index and v14 bundle.
         db.execute_batch("DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version>12; DROP INDEX IF EXISTS runtime_outbox_object_selector; UPDATE schema_migration SET checksum='2026-06-14-account-core-v1;writer-floor=12;object-erasure-v1' WHERE schema_version=1;")?;
     }
+    let retired: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM object_retention_reference WHERE selector='retired-history')",
+        [],
+        |r| r.get(0),
+    )?;
+    if retired {
+        let marker =
+            ramflux_crypto::blake3_256_base64url("ramflux.deleted-message.v1", b"retired-owner");
+        db.execute(
+            "INSERT INTO runtime_actor_state VALUES(?1,x'7b7d')",
+            [format!("message/deleted/{marker}")],
+        )?;
+    }
+    db.execute("INSERT OR IGNORE INTO object_erasure_fence SELECT commitment FROM object_retention_payload WHERE wire_id='fenced-history'",[])?;
     if unwrapped {
         db.execute("UPDATE object_retention_reference SET reference_json=CAST(json_extract(CAST(reference_json AS TEXT),'$.reference') AS BLOB) WHERE selector='attachment-owned'",[])?;
     }
@@ -443,5 +481,26 @@ fn initialize_local(root: &Path, index: &AccountIndex) -> TestResult {
     )?;
     let db = raw(&root.join(index.account("alice")?.db_relative_path), &key)?;
     db.execute_batch("DELETE FROM object_index WHERE object_id='file'; DELETE FROM object_manifest WHERE object_id='file'; DELETE FROM object_chunk WHERE object_id='file'; DELETE FROM object_key_slot WHERE object_id='file'; DELETE FROM object_retention_payload WHERE wire_id='file';")?;
+    Ok(())
+}
+
+fn fresh_restrictions(client: &mut RamfluxClient) -> TestResult {
+    client.account_db()?.send_direct_message(
+        "thread",
+        "retired-owner",
+        "peer",
+        b"normalization-only-canary",
+    )?;
+    client.prepare_history_transport(
+        "retired-history",
+        br#"{"message_id":"retired-owner"}"#,
+        &[],
+    )?;
+    let fenced =
+        client.prepare_history_transport("fenced-history", br#"{"message_id":"owner"}"#, &[])?;
+    client.account_db()?.persist_actor_state(
+            "attachment/upload/fenced",
+            &json!({"wire_object_id":"fenced-history","manifest_hash":fenced.manifest_hash,"content_key":"normalization-only-canary"}),
+        )?;
     Ok(())
 }
