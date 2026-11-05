@@ -27,6 +27,7 @@ pub(crate) struct SafetyPlan {
     pub link: serde_json::Value,
 }
 pub(crate) enum DirectoryWork {
+    HeadRefresh(super::head_refresh::Work),
     PrepareBackfill {
         generation: u64,
         reply: oneshot::Sender<Result<Option<BackfillPlan>, SdkError>>,
@@ -148,7 +149,7 @@ async fn safety_pass(
         .map_err(|_| stopped())?;
     response.await.map_err(|_| stopped())?
 }
-async fn fetch(
+pub(super) async fn fetch(
     config: &GatewaySessionConfig,
     root: &str,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
