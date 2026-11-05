@@ -311,10 +311,29 @@ impl BackupDatabase {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     fn finish_merge(&self) -> Result<(), StorageError> {
-        self.db.execute_batch("UPDATE direct_message_projection SET is_own=1 WHERE deleted=1 AND EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1); UPDATE direct_message_projection SET is_own=CASE WHEN is_own=1 OR EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1) OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND direct_message_projection.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END,sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DELETE FROM runtime_message_content WHERE message_id IN (SELECT message_id FROM direct_message_projection WHERE deleted=1); UPDATE direct_message_projection SET deleted=1 WHERE deleted=1; ")?;
-        self.remove_deleted_message_origins()?;
+        let candidate = super::backup_selector_admission::placeholders::active(&self.db)?;
+        #[cfg(test)]
+        if candidate {
+            super::backup_selector_admission::final_deletion::checkpoint(&self.db, false)?;
+        }
+        self.final_message_deletion(candidate)?;
+        #[cfg(test)]
+        if candidate {
+            super::backup_selector_admission::final_deletion::checkpoint(&self.db, true)?;
+        }
+        if candidate {
+            super::backup_selector_admission::final_deletion::verify(&self.db)?;
+        }
         super::backup_selector_admission::drop_scratch(&self.db)?;
         self.db.execute_batch("DROP TABLE backup_local_message_own; DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; DROP TABLE backup_local_consent; DROP TABLE backup_source_consent; DROP TABLE backup_local_link_consent; DROP TABLE backup_source_link_consent; COMMIT;")?;
+        Ok(())
+    }
+    fn final_message_deletion(&self, candidate: bool) -> Result<(), StorageError> {
+        if candidate {
+            super::backup_selector_admission::final_deletion::apply(&self.db)?;
+        }
+        self.db.execute_batch("UPDATE direct_message_projection SET is_own=1 WHERE deleted=1 AND EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1); UPDATE direct_message_projection SET is_own=CASE WHEN is_own=1 OR EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1) OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND direct_message_projection.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END,sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DELETE FROM runtime_message_content WHERE message_id IN (SELECT message_id FROM direct_message_projection WHERE deleted=1); UPDATE direct_message_projection SET deleted=1 WHERE deleted=1; ")?;
+        self.remove_deleted_message_origins()?;
         Ok(())
     }
     fn remove_deleted_message_origins(&self) -> Result<(), StorageError> {
