@@ -139,7 +139,7 @@ fn forward(account: &LocalBusAccountState, key: &str, carrier: &Carrier) -> Case
     Ok(())
 }
 
-fn runtime(
+pub(super) fn runtime(
     account: LocalBusAccountState,
     root: &Path,
 ) -> (

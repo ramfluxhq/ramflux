@@ -80,7 +80,7 @@ impl AccountRuntime {
         loop {
             tokio::select! {
                 biased;
-                ready=&mut ready=>return ready,
+                ready=&mut ready=>{ready?;break;},
                 work=self.connection_work.recv()=>{if let Some(work)=work {
                     #[cfg(test)]
                     let outcome = matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
@@ -93,6 +93,7 @@ impl AccountRuntime {
                 }}
             }
         }
+        self.prepare_command_heads(command, admitted_at).await
     }
 
     pub(super) async fn apply_connection_work(

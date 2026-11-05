@@ -22,6 +22,15 @@ options. Object deletion is also conditional: a local tombstone works offline,
 while a selected relay requires Live before an operation receipt is reserved.
 Lock and daemon shutdown cancel background work before returning.
 
+Native group mutations enqueue refreshes for stale own and group-member authority
+roots and wait against the same five-second budget measured from command admission.
+A successful verified fetch permits the command to continue. Held or unavailable
+fetches return `NetworkingPending` with `retry_after_ms` and `details.networking`,
+including when the session is Live. Legacy freshness refusals are serialized as
+this typed pending outcome. Stored `group.history` remains a local read. Existing
+inline peer refresh during receive is preserved; deferred inbox redrive and
+connect/periodic refresh scheduling are separate work.
+
 A native connection attempt has one 120-second outer deadline. Its admission
 retry budget is 90 seconds, and each open or frame read retains its 15-second
 bound. An ordinary live session call has a 20-second budget. These are separate

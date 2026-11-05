@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant writer Prepare / off-actor fetch / writer Apply for current heads.
-//! No child, timer or demand producer is registered until command activation.
+//! Demand-driven writer Prepare / off-actor fetch / writer Apply for current heads.
 
 use crate::bus::connection_manager::{AccountWork, ConnectionPhase, SessionContext};
 use crate::bus::state::LocalBusAccountState;
@@ -20,6 +19,7 @@ const PASS_ROOTS: usize = 32;
 #[derive(Default)]
 pub(crate) struct RefreshState {
     pending: BTreeSet<String>,
+    wake: Arc<tokio::sync::Notify>,
     // A dropped/cancelled pass releases ownership without needing an actor message.
     active: Weak<()>,
 }
@@ -27,12 +27,14 @@ impl RefreshState {
     /// Returns false at capacity so activation can return a retryable result.
     pub(crate) fn enqueue(&mut self, root: String) -> bool {
         if self.pending.contains(&root) {
+            self.wake.notify_one();
             return true;
         }
         if self.pending.len() == MAX_PENDING {
             return false;
         }
         self.pending.insert(root);
+        self.wake.notify_one();
         true
     }
 }
@@ -60,6 +62,9 @@ pub(crate) struct Plan {
     config: GatewaySessionConfig,
 }
 pub(crate) enum Work {
+    Subscribe {
+        reply: oneshot::Sender<Arc<tokio::sync::Notify>>,
+    },
     Prepare {
         fence: Fence,
         reply: oneshot::Sender<Result<Option<Plan>, SdkError>>,
@@ -166,6 +171,9 @@ fn apply(
 /// Invoked only on the account writer. All network inputs are owned values.
 pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) {
     match work {
+        Work::Subscribe { reply } => {
+            let _ = reply.send(account.head_refresh.wake.clone());
+        }
         Work::Prepare { fence, reply } => {
             if !reply.is_closed() {
                 let _ = reply.send(prepare(account, fence));
@@ -240,6 +248,28 @@ async fn send(writer: &mpsc::Sender<AccountWork>, work: Work) -> Result<(), SdkE
 }
 fn stopped() -> SdkError {
     ramflux_transport::TransportError::ShutdownDraining.into()
+}
+
+/// Only explicit demand wakes this child; no connect or periodic refresh yet.
+pub(crate) async fn run(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
+    let mut cancel = context.cancel.clone();
+    if *cancel.borrow() {
+        return;
+    }
+    let run = async {
+        let (reply, response) = oneshot::channel();
+        send(&writer, Work::Subscribe { reply }).await?;
+        let wake = response.await.map_err(|_| stopped())?;
+        loop {
+            wake.notified().await;
+            pass(context.clone(), writer.clone()).await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), SdkError>(())
+    };
+    tokio::select! { biased; _ = cancel.changed() => {}, result = run => {
+        if let Err(error) = result { tracing::debug!(%error, "head refresh stopped"); }
+    }}
 }
 
 #[cfg(test)]
