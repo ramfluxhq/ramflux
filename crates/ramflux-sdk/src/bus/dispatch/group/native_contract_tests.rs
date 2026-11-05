@@ -179,3 +179,152 @@ async fn group_bus_generic_refusals_preserve_legacy_codes_and_type_only_native_a
     }
     Ok(())
 }
+
+async fn read_group(
+    state: &mut LocalBusDaemonState,
+    method: &str,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let frame = LocalBusFrame::request(
+        method,
+        Some("owner".into()),
+        "ramflux.sdk.v1",
+        method,
+        json!({"group_id":"group","conversation_id":"thread","limit":32}),
+    );
+    let (outbound, _receiver) = mpsc::channel(8);
+    let mut connection = LocalBusConnectionState::new(1, outbound);
+    Box::pin(crate::bus::daemon::dispatch_local_bus_request(&frame, state, &mut connection)).await
+}
+
+async fn renamed_group_fixture() -> TestResult<(Fixture, Fixture, GatewayInboxEntry)> {
+    use ramflux_protocol::group_state::GroupStateChange;
+    let alice = Fixture::with_device("freshness-alice", "alice-device").await?;
+    let bob = Fixture::with_device("freshness-bob", "bob-device").await?;
+    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
+    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    let primary = bob
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or("native Bob")?
+        .group_primary(bob.vault.as_ref())?;
+    bob.client.shared_group_create_with_primary(
+        "group",
+        "thread",
+        Some("Before".into()),
+        &bob.config.target_delivery_id,
+        Some(&primary),
+    )?;
+    let joined = bob.client.shared_group_change_with_primary(
+        "group",
+        &bob.config.target_delivery_id,
+        GroupStateChange::Add {
+            member: alice.client.owned_group_actor(&alice.config.target_delivery_id)?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+        Some(&primary),
+    )?;
+    alice.client.accept_shared_group_state(&joined, &alice.config.target_delivery_id)?;
+    let renamed = bob.client.shared_group_change_with_primary(
+        "group",
+        &bob.config.target_delivery_id,
+        GroupStateChange::SetName { name: "After".into() },
+        Some(&primary),
+    )?;
+    alice.client.accept_shared_group_state(&renamed, &alice.config.target_delivery_id)?;
+    let distribution = bob.client.export_group_sender_key_distribution("group", "bob-device")?;
+    alice.client.import_group_sender_key_distribution(&distribution)?;
+    let mut message = GatewayDirectMessage {
+        conversation_id: "thread".into(),
+        message_id: "after-rename".into(),
+        envelope_id: "after-rename".into(),
+        source_principal_id: bob.config.principal_id.clone(),
+        sender_id: "bob-device".into(),
+        recipient_device_id: Some("alice-device".into()),
+        recipient_principal_commitment: Some(alice.manifest.principal_commitment.clone()),
+        target_delivery_id: alice.config.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 3600,
+    };
+    let body = bob.client.encrypt_group_message("group", "bob-device", b"after rename")?;
+    let sealed = bob.client.seal_routed_prepared(
+        &bob.config,
+        &message,
+        &body,
+        crate::client::routed::Route::group_message("group"),
+        crate::client::routed::SendMaterial {
+            manifest: None,
+            bundle: Some(
+                alice
+                    .client
+                    .load_x3dh_private_state(&alice.client.owned_device_identity()?)?
+                    .bundle,
+            ),
+        },
+    )?;
+    message.encrypted_body = serde_json::to_vec(&sealed)?;
+    let entry = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: alice.config.target_delivery_id.clone(),
+        envelope: crate::dm::gateway_direct_message_envelope(&bob.config, &message, None)?,
+    };
+    Ok((alice, bob, entry))
+}
+
+#[tokio::test]
+async fn owner_failure_chain_is_characterised() -> TestResult {
+    let (alice, bob, entry) = renamed_group_fixture().await?;
+    *alice.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    let mut account = LocalBusAccountState::disconnected(
+        alice.client,
+        alice.config,
+        alice.manifest.principal_commitment.clone(),
+    );
+    account.install_test_session(GatewaySessionEngine::with_test_transport(
+        account.gateway_config.clone(),
+        Box::new(crate::bus::dispatch::surface_transport::fixture::RecordingGateway::new(
+            std::sync::Arc::default(),
+        )),
+    ));
+    let mut state = daemon(account, &alice.root.0);
+    for method in ["group.read", "group.receive"] {
+        let result = read_group(&mut state, method).await;
+        assert!(
+            result.is_ok(),
+            "admitted display {method}: {:?}",
+            result.as_ref().map(|response| &response.response_body)
+        );
+    }
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    account.client.persist_fetched_identity_directory(&bob.manifest)?;
+    let local = account.client.owned_device_identity()?;
+    assert!(account.client.require_current_device_authorization(&local).is_err());
+    account.client.require_current_device_authorization(&bob.client.owned_device_identity()?)?;
+    account.client.account_db()?.hold_unrouted(
+        &account.client.inbox_admission_key(&entry)?,
+        entry.inbox_seq,
+        &serde_json::to_vec(&entry)?,
+        now_unix_timestamp(),
+    )?;
+    for method in ["group.read", "group.receive"] {
+        let result = read_group(&mut state, method).await;
+        assert!(
+            matches!(&result, Err(SdkError::InboundPending(reason)) if reason ==
+            "native current-head freshness expired; refresh directory"),
+            "new admission {method}: {:?}",
+            result.as_ref().map(|response| &response.response_body)
+        );
+    }
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    assert_eq!(account.client.direct_messages("thread")?.len(), 0);
+    assert_eq!(account.client.account_db()?.unrouted_count()?, 1);
+    account.client.persist_fetched_identity_directory(&alice.manifest)?;
+    let received = read_group(&mut state, "group.receive").await?;
+    let account = state.accounts.get("owner").ok_or("Alice")?;
+    assert_eq!(received.response_body["decrypted_messages"][0]["body_utf8"], "after rename");
+    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    Ok(())
+}
