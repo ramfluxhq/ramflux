@@ -1218,6 +1218,12 @@ impl RouterCore {
         }
         for cursor in snapshot.inbox.cursor_states().cloned().collect::<Vec<_>>() {
             router.index_cursor_targets(&cursor);
+            if let Some(id) = snapshot.inbox.incarnation_id(&cursor.target_delivery_id) {
+                router
+                    .target_shard(&cursor.target_delivery_id)
+                    .inbox
+                    .restore_incarnation(&cursor.target_delivery_id, id.into());
+            }
             router.target_shard(&cursor.target_delivery_id).inbox.restore_cursor_state(cursor);
         }
         for target in snapshot.deactivated_delivery_targets {
@@ -1265,6 +1271,11 @@ impl RouterCore {
         }
         for cursor in snapshot.inbox.cursor_states().cloned().collect::<Vec<_>>() {
             self.index_cursor_targets(&cursor);
+            if let Some(id) = snapshot.inbox.incarnation_id(&cursor.target_delivery_id) {
+                self.target_shard(&cursor.target_delivery_id)
+                    .inbox
+                    .restore_incarnation(&cursor.target_delivery_id, id.into());
+            }
             self.target_shard(&cursor.target_delivery_id).inbox.restore_cursor_state(cursor);
         }
         for target in snapshot.deactivated_delivery_targets {

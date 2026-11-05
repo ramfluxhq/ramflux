@@ -273,6 +273,12 @@ fn redb_crashes() -> Result {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].inbox_seq, 1);
         assert_eq!(rows[0].envelope.envelope_id, "startup-row");
+        let original = fs::read_to_string(root.join("original-E"))?;
+        assert_eq!(store.inbox_status("startup-target")?, (Some(original.clone()), 1));
+        assert_eq!(
+            router.inbox_snapshot().incarnation_id("startup-target"),
+            Some(original.as_str())
+        );
         drop(store);
         fs::remove_dir_all(root)?;
     }
@@ -280,6 +286,8 @@ fn redb_crashes() -> Result {
 }
 fn redb_crash_child(root: &Path, kind: &str) -> Result {
     let store = open(root, "redb")?;
+    let original = store.initialize_inbox("startup-target")?;
+    fs::write(root.join("original-E"), original)?;
     let uncertain = kind == "uncertain";
     let _guard = observe(
         root.to_path_buf(),

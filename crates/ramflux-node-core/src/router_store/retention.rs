@@ -71,6 +71,9 @@ impl RouterRedbStore {
             self.db.begin_write().map_err(std::io::Error::other)
         })
         .map_err(redb_error)?;
+        for cursor in cursors {
+            self.checkpoint_incarnation(&txn, cursor)?;
+        }
         {
             let mut table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(redb_error)?;
             for cursor in cursors {

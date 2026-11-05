@@ -12,7 +12,7 @@ fn store(root: &Path, pipeline: bool) -> std::result::Result<RouterWalStore, Nod
     let state = Arc::new(Mutex::new(recovered.state));
     // A tiny segment limit exercises the real production writer and fsync loops.
     let writer = RouterWalWriter::start(root, 1, 1, &recovered.shards, &state, pipeline)?;
-    Ok(RouterWalStore { root: root.to_path_buf(), state, writer })
+    Ok(RouterWalStore { root: root.to_path_buf(), state, writer, association: None })
 }
 pub(super) fn matrix() -> Result {
     for pipeline in [false, true] {
