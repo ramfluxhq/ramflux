@@ -50,7 +50,8 @@ pub struct SegmentStore<'a> {
 }
 
 impl AccountDb {
-    /// Opens the dormant I/O owner and reconciles its existing transfers once.
+    /// Opens the dormant I/O owner and reconciles once per account handle.
+    /// Busy transfers remain owned and reconciled by their active lease holder.
     /// # Errors
     /// Returns schema or private-directory I/O failures.
     pub fn segment_store(&self) -> Result<SegmentStore<'_>, StorageError> {
@@ -196,14 +197,17 @@ impl SegmentStore<'_> {
     }
 
     fn current(&self, id: &str, generation: u64) -> Result<u32, StorageError> {
-        let row = self.db.connection.query_row("SELECT segment_generation,object_id,manifest_hash,chunk_size FROM object_transfer_state WHERE transfer_id=?1 AND state='segmented'",params![id],|r| Ok((r.get::<_,Option<i64>>(0)?,r.get::<_,String>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,u32>(3)?))).optional()?.ok_or(StorageError::ObjectIdentityConflict)?;
-        if row.0 != Some(integer(generation)?) || !matches!(row.3, 524_288 | 1_048_576) {
+        let row = self.db.connection.query_row("SELECT segment_generation,object_id,manifest_hash,chunk_size FROM object_transfer_state WHERE transfer_id=?1 AND state='segmented'",params![id],|r| Ok((r.get::<_,Option<i64>>(0)?,r.get::<_,String>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,i64>(3)?))).optional()?.ok_or(StorageError::ObjectIdentityConflict)?;
+        if generation == 0
+            || row.0 != Some(integer(generation)?)
+            || !matches!(row.3, 524_288 | 1_048_576)
+        {
             return Err(StorageError::ObjectIdentityConflict);
         }
         let hash =
             std::str::from_utf8(&row.2).map_err(|_| StorageError::Integrity("manifest hash"))?;
         self.db.check_object_identity(&row.1, hash)?;
-        Ok(row.3)
+        u32::try_from(row.3).map_err(|_| StorageError::ObjectIdentityConflict)
     }
 
     /// Returns a bounded keyset page after the store's startup reconciliation.
@@ -229,7 +233,7 @@ impl SegmentStore<'_> {
         loop {
             let mut stmt=self.db.connection.prepare("SELECT transfer_id,segment_generation FROM object_transfer_state WHERE segment_generation IS NOT NULL AND state='segmented' AND transfer_id>?1 ORDER BY transfer_id LIMIT 128")?;
             let transfers = stmt
-                .query_map(params![after], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))?
+                .query_map(params![after], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
             if transfers.is_empty() {
                 break;
@@ -241,6 +245,13 @@ impl SegmentStore<'_> {
                     Err(StorageError::AccountWriterBusy(_)) => continue,
                     Err(error) => return Err(error),
                 };
+                let generation = match u64::try_from(generation) {
+                    Ok(g) if g > 0 => g,
+                    _ => {
+                        self.quarantine(&id, generation)?;
+                        continue;
+                    }
+                };
                 if matches!(self.current(&id, generation), Err(StorageError::ObjectErased)) {
                     continue;
                 }
@@ -248,11 +259,8 @@ impl SegmentStore<'_> {
                 loop {
                     let rows = match self.recover_page(&id, generation, start, PAGE_LIMIT) {
                         Ok(rows) => rows,
-                        Err(StorageError::Integrity(_)) => {
-                            let tx = self.db.connection.immediate_transaction()?;
-                            self.db.connection.execute("UPDATE object_transfer_state SET state='segment_quarantined',last_error='segment_integrity',done_bytes=0,segment_sequence=segment_sequence+1 WHERE transfer_id=?1 AND segment_generation=?2",params![id,integer(generation)?])?;
-                            self.db.connection.execute("UPDATE object_segment_file SET received_bitmap=0,cipher_verified=0 WHERE transfer_id=?1 AND generation=?2",params![id,integer(generation)?])?;
-                            tx.commit()?;
+                        Err(StorageError::Integrity(_) | StorageError::ObjectIdentityConflict) => {
+                            self.quarantine(&id, integer(generation)?)?;
                             break;
                         }
                         Err(error) => return Err(error),
@@ -270,6 +278,14 @@ impl SegmentStore<'_> {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn quarantine(&self, id: &str, generation: i64) -> Result<(), StorageError> {
+        let tx = self.db.connection.immediate_transaction()?;
+        self.db.connection.execute("UPDATE object_transfer_state SET state='segment_quarantined',last_error='segment_integrity',done_bytes=0,segment_sequence=segment_sequence+1 WHERE transfer_id=?1 AND segment_generation=?2",params![id,generation])?;
+        self.db.connection.execute("UPDATE object_segment_file SET received_bitmap=0,cipher_verified=0 WHERE transfer_id=?1 AND generation=?2",params![id,generation])?;
+        tx.commit()?;
         Ok(())
     }
 

@@ -13,6 +13,7 @@ pub struct AttachmentPolicy {
     pub pending_lease_seconds: u64,
     pub pending_max_seconds: u64,
     pub max_records_per_owner: u64,
+    pub max_identity_fences_per_owner: u64,
 }
 impl Default for AttachmentPolicy {
     fn default() -> Self {
@@ -23,6 +24,7 @@ impl Default for AttachmentPolicy {
             pending_lease_seconds: 3600,
             pending_max_seconds: 86_400,
             max_records_per_owner: 16384,
+            max_identity_fences_per_owner: 65_536,
         }
     }
 }
@@ -32,6 +34,7 @@ impl AttachmentPolicy {
             || self.pending_lease_seconds == 0
             || self.pending_max_seconds < self.pending_lease_seconds
             || self.max_records_per_owner == 0
+            || self.max_identity_fences_per_owner == 0
         {
             return Err(AttachmentLedgerError::Invalid);
         }
@@ -87,7 +90,7 @@ impl AttachmentLedger {
             Ok(())
         })
     }
-    /// Returns at most 128 indexed expiry jobs; no backend I/O or charge release.
+    /// Returns at most 64 indexed expiry jobs; no backend I/O or charge release.
     /// Expiry fences serving before cleanup. Unfinished cleanup remains durable debt.
     /// # Errors
     /// Refuses invalid work bounds, corrupt state or storage failure.
@@ -96,17 +99,18 @@ impl AttachmentLedger {
         now: u64,
         limit: usize,
     ) -> Result<Vec<AttachmentReservation>, AttachmentLedgerError> {
-        if limit == 0 || limit > 128 {
+        if limit == 0 || limit > 64 {
             return Err(AttachmentLedgerError::Invalid);
         }
         let tx = self.db.begin_write().map_err(store)?;
+        let pruned = super::identity::prune(&tx, now, limit)?;
         let mut index = tx.open_table(DEADLINES).map_err(store)?;
         let mut upper = now.to_be_bytes().to_vec();
         upper.extend_from_slice(&[255; 512]);
         let keys = index
             .range(..=upper.as_slice())
             .map_err(store)?
-            .take(limit)
+            .take(limit - pruned)
             .map(|item| item.map(|(key, _)| key.value().to_vec()).map_err(store))
             .collect::<Result<Vec<_>, _>>()?;
         let mut records = tx.open_table(RECORDS).map_err(store)?;
@@ -150,7 +154,7 @@ impl AttachmentLedger {
         after: Option<[u8; 32]>,
         limit: usize,
     ) -> Result<Vec<AttachmentReservation>, AttachmentLedgerError> {
-        if limit == 0 || limit > 128 {
+        if limit == 0 || limit > 64 {
             return Err(AttachmentLedgerError::Invalid);
         }
         let tx = self.db.begin_read().map_err(store)?;
@@ -189,11 +193,14 @@ impl AttachmentLedger {
         owner: &AttachmentOwner,
         id: &[u8; 32],
         cleanup: impl FnOnce(&AttachmentReservation) -> Result<(), AttachmentLedgerError>,
-    ) -> Result<AttachmentReservation, AttachmentLedgerError> {
-        let record = self.reservation(owner, id)?;
-        if record.state == AttachmentReservationState::Released {
-            return Ok(record);
-        }
+    ) -> Result<(), AttachmentLedgerError> {
+        let record = match self.reservation(owner, id) {
+            Ok(record) => record,
+            Err(AttachmentLedgerError::Conflict) if self.has_identity_fence(owner, id)? => {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         if !matches!(
             record.state,
             AttachmentReservationState::DebtPending | AttachmentReservationState::DebtCommitted
@@ -201,24 +208,7 @@ impl AttachmentLedger {
             return Err(AttachmentLedgerError::State);
         }
         cleanup(&record)?;
-        self.change(owner, id, |current, total| {
-            match current.state {
-                AttachmentReservationState::DebtPending => {
-                    total.reserved = total
-                        .reserved
-                        .checked_sub(current.size)
-                        .ok_or(AttachmentLedgerError::State)?;
-                }
-                AttachmentReservationState::DebtCommitted => {
-                    total.used =
-                        total.used.checked_sub(current.size).ok_or(AttachmentLedgerError::State)?;
-                }
-                AttachmentReservationState::Released => return Ok(()),
-                _ => return Err(AttachmentLedgerError::State),
-            }
-            current.state = AttachmentReservationState::Released;
-            Ok(())
-        })
+        self.compact_release(owner, id)
     }
     /// Checks retention without sliding expiry or minting native grants/tokens.
     /// # Errors
@@ -242,5 +232,63 @@ impl AttachmentLedger {
             return Err(AttachmentLedgerError::State);
         }
         Ok(record)
+    }
+}
+
+pub struct AttachmentDebtPage {
+    pub jobs: Vec<AttachmentReservation>,
+    pub next: Option<Vec<u8>>,
+}
+impl AttachmentLedger {
+    /// Global private-worker debt recovery, including after a GC worker crash.
+    /// # Errors
+    /// Refuses malformed cursors, limits above64 and corrupt durable state.
+    pub fn debt_page(
+        &self,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<AttachmentDebtPage, AttachmentLedgerError> {
+        if limit == 0 || limit > 64 {
+            return Err(AttachmentLedgerError::Invalid);
+        }
+        if let Some(cursor) = &after {
+            let len = u64::from_be_bytes(
+                cursor
+                    .get(..8)
+                    .ok_or(AttachmentLedgerError::Invalid)?
+                    .try_into()
+                    .map_err(|_| AttachmentLedgerError::Invalid)?,
+            );
+            if !(1..=256).contains(&len)
+                || cursor.len()
+                    != usize::try_from(len).map_err(|_| AttachmentLedgerError::Invalid)? + 40
+            {
+                return Err(AttachmentLedgerError::Invalid);
+            }
+        }
+        let tx = self.db.begin_read().map_err(store)?;
+        let debts = tx.open_table(DEBTS).map_err(store)?;
+        let records = tx.open_table(RECORDS).map_err(store)?;
+        let start = after.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        let mut jobs = Vec::new();
+        let mut last = None;
+        for entry in
+            debts.range::<&[u8]>((start, std::ops::Bound::Unbounded)).map_err(store)?.take(limit)
+        {
+            let (key, _) = entry.map_err(store)?;
+            let value =
+                records.get(key.value()).map_err(store)?.ok_or(AttachmentLedgerError::State)?;
+            let record: AttachmentReservation = decode(value.value())?;
+            if !matches!(
+                record.state,
+                AttachmentReservationState::DebtPending | AttachmentReservationState::DebtCommitted
+            ) {
+                return Err(AttachmentLedgerError::State);
+            }
+            last = Some(key.value().to_vec());
+            jobs.push(record);
+        }
+        let next = if jobs.len() == limit { last } else { None };
+        Ok(AttachmentDebtPage { jobs, next })
     }
 }
