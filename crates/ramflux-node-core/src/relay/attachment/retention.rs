@@ -103,14 +103,15 @@ impl AttachmentLedger {
             return Err(AttachmentLedgerError::Invalid);
         }
         let tx = self.db.begin_write().map_err(store)?;
-        let pruned = super::identity::prune(&tx, now, limit)?;
+        // Fence maintenance has its own bounded turn; it cannot hide due jobs.
+        super::identity::prune(&tx, now, 64)?;
         let mut index = tx.open_table(DEADLINES).map_err(store)?;
         let mut upper = now.to_be_bytes().to_vec();
         upper.extend_from_slice(&[255; 512]);
         let keys = index
             .range(..=upper.as_slice())
             .map_err(store)?
-            .take(limit - pruned)
+            .take(limit)
             .map(|item| item.map(|(key, _)| key.value().to_vec()).map_err(store))
             .collect::<Result<Vec<_>, _>>()?;
         let mut records = tx.open_table(RECORDS).map_err(store)?;

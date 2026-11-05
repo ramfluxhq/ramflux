@@ -3,7 +3,10 @@
 
 //! Dormant ciphertext storage; authentication/quota and final message publication
 //! remain with their service owners. Operators keep the root private and fixed.
+#[cfg(any(test, feature = "test-support"))]
+pub mod contract;
 mod local;
+mod stored_segment;
 pub use local::{LocalAttachmentBackend, PreparedSegment};
 #[cfg(test)]
 mod tests;
@@ -35,7 +38,7 @@ pub enum BackendError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BackendSegment {
     object: [u8; 32],
     manifest: [u8; 32],
@@ -95,6 +98,7 @@ impl BackendSegment {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Record {
+    #[serde(with = "stored_segment")]
     spec: BackendSegment,
     bits: u8,
     hashes: Vec<[u8; 32]>,

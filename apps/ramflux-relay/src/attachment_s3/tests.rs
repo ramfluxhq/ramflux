@@ -30,10 +30,10 @@ struct State {
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<State>>);
 impl AuthenticatedS3Client for Fake {
-    fn head(&self, key: &str) -> Result<Option<S3Object>, BackendError> {
+    fn head(&self, key: &str) -> Result<Option<S3Object>, S3ClientError> {
         Ok(self.0.lock().unwrap().objects.get(key).map(|(m, _)| m.clone()))
     }
-    fn begin_multipart(&self, key: &str, object: &S3Object) -> Result<String, BackendError> {
+    fn begin_multipart(&self, key: &str, object: &S3Object) -> Result<String, S3ClientError> {
         let mut s = self.0.lock().unwrap();
         s.next += 1;
         let id = s.next.to_string();
@@ -46,10 +46,10 @@ impl AuthenticatedS3Client for Fake {
         id: &str,
         length: u64,
         body: &mut dyn Read,
-    ) -> Result<String, BackendError> {
+    ) -> Result<String, S3ClientError> {
         let mut s = self.0.lock().unwrap();
         if s.upload_fail {
-            return Err(BackendError::Remote("upload"));
+            return Err(S3ClientError::Transport);
         }
         let mut bytes = Vec::new();
         let mut buf = [0; 1024];
@@ -64,26 +64,26 @@ impl AuthenticatedS3Client for Fake {
         s.parts.get_mut(id).unwrap().2 = bytes;
         Ok("part-etag".into())
     }
-    fn complete_if_absent(&self, key: &str, id: &str, _etag: &str) -> Result<(), BackendError> {
+    fn complete_if_absent(&self, key: &str, id: &str, _etag: &str) -> Result<(), S3ClientError> {
         let mut s = self.0.lock().unwrap();
         if s.complete_fail {
-            return Err(BackendError::Remote("completion XML error"));
+            return Err(S3ClientError::Completion);
         }
         if s.objects.contains_key(key) {
-            return Err(BackendError::Conflict);
+            return Err(S3ClientError::Conflict);
         }
         let (_, m, b) = s.parts.get(id).unwrap().clone();
         s.objects.insert(key.into(), (m, b));
         if s.race {
-            return Err(BackendError::Conflict);
+            return Err(S3ClientError::Conflict);
         }
         s.parts.remove(id);
         Ok(())
     }
-    fn abort_multipart(&self, _key: &str, id: &str) -> Result<(), BackendError> {
+    fn abort_multipart(&self, _key: &str, id: &str) -> Result<(), S3ClientError> {
         let mut s = self.0.lock().unwrap();
         if s.abort_fail {
-            return Err(BackendError::Remote("abort"));
+            return Err(S3ClientError::Abort);
         }
         s.parts.remove(id);
         Ok(())
@@ -94,22 +94,22 @@ impl AuthenticatedS3Client for Fake {
         offset: u64,
         length: u64,
         out: &mut dyn Write,
-    ) -> Result<(), BackendError> {
+    ) -> Result<(), S3ClientError> {
         let s = self.0.lock().unwrap();
         if let Some((local, spec)) = &s.probe {
-            assert!(matches!(local.delete(spec), Err(BackendError::Busy)));
+            assert!(matches!(local.reconcile(spec), Err(BackendError::Busy)));
         }
-        let bytes = &s.objects.get(key).ok_or(BackendError::Integrity)?.1;
+        let bytes = &s.objects.get(key).ok_or(S3ClientError::Integrity)?.1;
         let length = if s.short { length - 1 } else { length };
         out.write_all(
             &bytes[usize::try_from(offset).unwrap()..usize::try_from(offset + length).unwrap()],
         )?;
         Ok(())
     }
-    fn delete(&self, key: &str) -> Result<(), BackendError> {
+    fn delete(&self, key: &str) -> Result<(), S3ClientError> {
         let mut s = self.0.lock().unwrap();
         if s.delete_fail {
-            return Err(BackendError::Remote("delete"));
+            return Err(S3ClientError::Delete);
         }
         s.objects.remove(key);
         Ok(())
@@ -119,7 +119,7 @@ impl AuthenticatedS3Client for Fake {
         prefix: &str,
         _after: Option<&str>,
         limit: usize,
-    ) -> Result<MultipartPage, BackendError> {
+    ) -> Result<MultipartPage, S3ClientError> {
         let s = self.0.lock().unwrap();
         let uploads = s
             .parts
@@ -165,7 +165,10 @@ fn raw_committed(path: &Path) -> bool {
     let table: redb::TableDefinition<&[u8], &[u8]> =
         redb::TableDefinition::new("native_attachment_backend_segments_v1");
     let table = tx.open_table(table).unwrap();
-    let (_, v) = table.iter().unwrap().next().unwrap().unwrap();
+    let Some(row) = table.iter().unwrap().next() else {
+        return false;
+    };
+    let (_, v) = row.unwrap();
     let json: serde_json::Value = serde_json::from_slice(v.value()).unwrap();
     json["committed"].as_bool().unwrap()
 }
@@ -308,4 +311,32 @@ fn large_s3_backend_matches_local_commit_and_cleanup_contract() {
     drop(store);
     assert!(!raw_committed(&path));
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shared_backend_contract_s3() {
+    let root = std::env::temp_dir().join(format!(
+        "rf-s3-contract-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let store = ramflux_node_core::RelayRedbStore::open(root.join("db")).unwrap();
+    ramflux_node_core::attachment::backend::contract::contract_suite(|spec| {
+        let local = store.local_attachment_backend([8; 32], root.join("files")).unwrap();
+        let cursor = local.cursor(spec);
+        (S3AttachmentBackend::new(local, Fake::default()), cursor)
+    });
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn client_errors_discard_transport_text_and_sources() {
+    let client = S3ClientError::from(std::io::Error::other("credential-bearing transport details"));
+    assert_eq!(client.to_string(), "s3_transport");
+    assert!(std::error::Error::source(&client).is_none());
+    let backend = BackendError::from(client);
+    assert!(matches!(backend, BackendError::Remote("s3_transport")));
+    assert!(!backend.to_string().contains("credential"));
 }

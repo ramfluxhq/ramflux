@@ -5,7 +5,6 @@ use super::{
     ReadableDatabase, ReadableTable, Record, SEGMENTS, chunk_length, decode, encode, hex, range,
     segment_hasher, store,
 };
-use fs2::FileExt;
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -18,11 +17,8 @@ pub struct LocalAttachmentBackend {
     namespace: [u8; 32],
     root: PathBuf,
 }
-struct Lease(File);
-impl Drop for Lease {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
-    }
+struct Lease {
+    _files: Vec<File>,
 }
 /// Immutable verified staged bytes. Its object lease survives through remote I/O
 /// and final publication. It cannot be constructed or cloned by callers.
@@ -100,22 +96,49 @@ impl LocalAttachmentBackend {
     fn path(&self, spec: &BackendSegment, suffix: &str) -> PathBuf {
         self.root.join(format!("{}.{}", self.storage_key(spec), suffix))
     }
-    fn lock(&self, spec: &BackendSegment) -> Result<Lease, BackendError> {
-        spec.validate()?;
+    // Fixed stripes keep filesystem lock resources bounded, including orphan sweeps.
+    fn stripe(&self, key: &[u8], segment: bool, shared: bool) -> Result<File, BackendError> {
+        let hash = blake3::hash(key);
+        let slot = u16::from_be_bytes([hash.as_bytes()[0], hash.as_bytes()[1]]) % 4096;
+        let kind = if segment { "segment" } else { "object" };
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(self.root.join(format!("{}.lock", hex(&self.object_key(spec)))))?;
-        file.try_lock_exclusive().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::WouldBlock {
-                BackendError::Busy
-            } else {
-                BackendError::Io(e)
-            }
+            .open(self.root.join(format!("{kind}-{slot:04x}.lock")))?;
+        let result = if shared { file.try_lock_shared() } else { file.try_lock() };
+        result.map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => BackendError::Busy,
+            std::fs::TryLockError::Error(e) => BackendError::Io(e),
         })?;
-        Ok(Lease(file))
+        Ok(file)
+    }
+    fn unfenced(&self, spec: &BackendSegment) -> Result<(), BackendError> {
+        let tx = self.db.begin_read().map_err(store)?;
+        let table = tx.open_table(OBJECTS).map_err(store)?;
+        if let Some(value) = table.get(self.object_key(spec).as_slice()).map_err(store)? {
+            let object: Object = decode(value.value())?;
+            if object.retired {
+                return Err(BackendError::Retired);
+            }
+            if object.generation != spec.generation {
+                return Err(BackendError::Conflict);
+            }
+        }
+        Ok(())
+    }
+    fn lock(&self, spec: &BackendSegment, read: bool) -> Result<Lease, BackendError> {
+        spec.validate()?;
+        self.unfenced(spec)?;
+        let object = self.stripe(&self.object_key(spec), false, true)?;
+        let segment = self.stripe(&self.key(spec), true, read)?;
+        self.unfenced(spec)?;
+        Ok(Lease { _files: vec![object, segment] })
+    }
+    fn whole_object(&self, spec: &BackendSegment) -> Result<Lease, BackendError> {
+        spec.validate()?;
+        Ok(Lease { _files: vec![self.stripe(&self.object_key(spec), false, false)?] })
     }
     fn active(&self, spec: &BackendSegment) -> Result<(), BackendError> {
         let tx = self.db.begin_read().map_err(store)?;
@@ -207,7 +230,7 @@ impl LocalAttachmentBackend {
     /// # Errors
     /// Refuses missing chunks, corrupt bytes, retired identities and concurrent work.
     pub fn prepare(&self, spec: &BackendSegment) -> Result<PreparedSegment, BackendError> {
-        let lease = self.lock(spec)?;
+        let lease = self.lock(spec, false)?;
         self.active(spec)?;
         let record = self.load(spec)?;
         let count = spec.length.div_ceil(u64::from(spec.chunk));
@@ -324,20 +347,7 @@ impl LocalAttachmentBackend {
         if hex(&raw) != key {
             return Err(BackendError::Bounds);
         }
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.root.join(format!("{}.lock", hex(&raw[..96]))))?;
-        lock.try_lock_exclusive().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::WouldBlock {
-                BackendError::Busy
-            } else {
-                BackendError::Io(e)
-            }
-        })?;
-        let _lease = Lease(lock);
+        let _lease = self.stripe(&raw[..96], false, false)?;
         abort()?;
         let tx = self.db.begin_write().map_err(store)?;
         {
@@ -413,7 +423,7 @@ impl LocalAttachmentBackend {
         spec: &BackendSegment,
         confirm: impl FnOnce() -> Result<(), BackendError>,
     ) -> Result<(), BackendError> {
-        let _lease = self.lock(spec)?;
+        let _lease = self.whole_object(spec)?;
         self.active(spec)?;
         let mut record = self.load(spec)?;
         let data = self.path(spec, "data");
@@ -472,7 +482,7 @@ impl LocalAttachmentBackend {
         length: u64,
         read: impl FnOnce() -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
-        let _lease = self.lock(spec)?;
+        let _lease = self.lock(spec, true)?;
         range(spec, offset, length)?;
         self.active(spec)?;
         if !self.load(spec)?.committed {
@@ -488,7 +498,7 @@ impl LocalAttachmentBackend {
         spec: &BackendSegment,
         remote: impl FnOnce(Option<&str>) -> Result<(), BackendError>,
     ) -> Result<(), BackendError> {
-        let _lease = self.lock(spec)?;
+        spec.validate()?;
         let tx = self.db.begin_write().map_err(store)?;
         {
             let mut objects = tx.open_table(OBJECTS).map_err(store)?;
@@ -508,6 +518,8 @@ impl LocalAttachmentBackend {
                 .map_err(store)?;
         }
         tx.commit().map_err(store)?;
+        // Persist the fence first: fresh readers cannot starve cleanup retries.
+        let _lease = self.whole_object(spec)?;
         let record = {
             let tx = self.db.begin_read().map_err(store)?;
             let rows = tx.open_table(SEGMENTS).map_err(store)?;
@@ -526,12 +538,16 @@ impl LocalAttachmentBackend {
             }
         }
         sync_dir(&self.root)?;
-        if let Some(mut record) = record {
-            record.bits = 0;
-            record.committed = false;
-            record.upload = None;
-            self.save(&record)?;
+        let tx = self.db.begin_write().map_err(store)?;
+        {
+            tx.open_table(SEGMENTS)
+                .map_err(store)?
+                .remove(self.key(spec).as_slice())
+                .map_err(store)?;
         }
+        tx.commit().map_err(store)?;
+        // Only the object generation/retired tombstone remains; segment rows are gone.
+
         Ok(())
     }
 }
@@ -542,12 +558,13 @@ impl AttachmentBackend for LocalAttachmentBackend {
         offset: u64,
         input: &mut dyn Read,
     ) -> Result<(), BackendError> {
-        let _lease = self.lock(spec)?;
+        let _lease = self.lock(spec, false)?;
         let len = chunk_length(spec, offset)?;
         let mut record = self.admit(spec)?;
         let index =
             usize::try_from(offset / u64::from(spec.chunk)).map_err(|_| BackendError::Bounds)?;
-        let path = self.path(spec, if record.committed { "data" } else { "part" });
+        let data = self.path(spec, "data");
+        let path = if data.exists() { data } else { self.path(spec, "part") };
         if record.bits & (1 << index) != 0 {
             regular(&path)?;
             let mut file = File::open(path)?;
@@ -585,7 +602,7 @@ impl AttachmentBackend for LocalAttachmentBackend {
         length: u64,
         output: &mut dyn Write,
     ) -> Result<(), BackendError> {
-        let _lease = self.lock(spec)?;
+        let _lease = self.lock(spec, true)?;
         range(spec, offset, length)?;
         self.active(spec)?;
         if !self.load(spec)?.committed {

@@ -10,6 +10,7 @@ repository.workspace = true
 commercial-license = true
 
 [features]
+test-support = []
 default = []
 durability-test-hooks = []
 itest-http = []
@@ -27,7 +28,6 @@ itest-redb-cache-probe = ["redb/cache_metrics"]
 
 [dependencies]
 blake3.workspace = true
-fs2 = "0.4"
 ed25519-dalek = { workspace = true }
 aes-gcm = { workspace = true }
 arc-swap = { workspace = true }

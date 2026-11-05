@@ -2629,7 +2629,6 @@ dependencies = [
  "crc32fast",
  "curve25519-dalek",
  "ed25519-dalek",
- "fs2",
  "hmac",
  "postcard",
  "ramflux-core",

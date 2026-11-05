@@ -148,9 +148,6 @@ impl AttachmentLedger {
                     .ok_or(AttachmentLedgerError::State)?;
                 decode(v.value())?
             };
-            if total.fences >= self.policy.max_identity_fences_per_owner {
-                return Err(AttachmentLedgerError::Capacity);
-            }
             match record.state {
                 AttachmentReservationState::DebtPending => {
                     total.reserved = total
