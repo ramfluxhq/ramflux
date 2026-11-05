@@ -9,6 +9,14 @@ use crate::StorageError;
 use ramflux_crypto::{object_erasure_commitment, object_erasure_lookup};
 use rusqlite::{Connection, OptionalExtension, params};
 
+type Identity = (String, String, String);
+
+enum TargetWitness {
+    Resolved(Identity),
+    Vetoed(Identity),
+    Unresolved,
+}
+
 pub(in crate::account_db) fn active(db: &Connection) -> rusqlite::Result<bool> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='backup_selector_admission')",
@@ -34,22 +42,43 @@ pub(in crate::account_db) fn classify(db: &Connection, root: &str) -> Result<(),
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut inherited = false;
+            let mut vetoed = false;
             if identities.is_empty() && side == "incoming" {
-                let (other_schema, other_side) = ("main", "target");
-                let mut other = db.prepare_cached(&format!("SELECT DISTINCT p.wire_id,p.manifest_hash,r.commitment FROM {other_schema}.object_retention_reference r JOIN {other_schema}.object_retention_payload p USING(commitment) JOIN backup_reference_admission a ON a.side=?2 AND a.reference_hash=r.reference_hash WHERE r.selector=?1 AND EXISTS(SELECT 1 FROM backup_selector_admission s WHERE s.side=a.side AND s.selector=r.selector AND s.commitment=r.commitment AND s.decision='keep')"))?;
-                identities = other
-                    .query_map(params![selector, other_side], |r| {
-                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                identities = inherited_references(db, &selector)?;
                 inherited = !identities.is_empty();
+                if inherited
+                    && registered(db, "incoming", &selector)?
+                    && (identities.len() != 1
+                        || !incoming_matches_target(db, &selector, &identities[0], true)?)
+                {
+                    return Err(refuse());
+                }
             }
-            if identities.is_empty()
-                && side == "target"
-                && let Some(identity) = legacy_target_identity(db, root, &selector, &manifest)?
-            {
-                identities.push(identity);
-                inherited = true;
+            if identities.is_empty() {
+                let witness = legacy_target_identity(db, root, &selector, &manifest)?;
+                let applicable = side == "target"
+                    || match &witness {
+                        TargetWitness::Resolved(id) => {
+                            incoming_matches_target(db, &selector, id, true)?
+                        }
+                        TargetWitness::Vetoed(id) => {
+                            incoming_matches_target(db, &selector, id, false)?
+                        }
+                        TargetWitness::Unresolved => false,
+                    };
+                if applicable {
+                    match witness {
+                        TargetWitness::Resolved(id) => {
+                            identities.push(id);
+                            inherited = true;
+                        }
+                        TargetWitness::Vetoed(id) => {
+                            identities.push(id);
+                            vetoed = true;
+                        }
+                        TargetWitness::Unresolved => {}
+                    }
+                }
             }
             if identities.len() > 1
                 || identities
@@ -62,6 +91,12 @@ pub(in crate::account_db) fn classify(db: &Connection, root: &str) -> Result<(),
                 omit_unresolved_placeholder(db, schema, side, id, &selector)?;
                 continue;
             };
+            if vetoed {
+                db.execute(
+                    "INSERT OR REPLACE INTO backup_selector_admission VALUES(?1,?2,?3,'erase')",
+                    params![side, selector, commitment],
+                )?;
+            }
             if inherited {
                 db.execute(
                     "INSERT OR REPLACE INTO backup_selector_admission VALUES(?1,?2,?3,'keep')",
@@ -162,7 +197,7 @@ fn legacy_target_identity(
     root: &str,
     selector: &str,
     manifest: &str,
-) -> Result<Option<(String, String, String)>, StorageError> {
+) -> Result<TargetWitness, StorageError> {
     let mut values = Vec::new();
     for key in [format!("attachment/reference/{selector}"), format!("directory/object/{selector}")]
     {
@@ -184,21 +219,23 @@ fn legacy_target_identity(
         record["owner"].as_str(),
         record["message_id"].as_str(),
     ) else {
-        return Ok(None);
+        return Ok(TargetWitness::Unresolved);
     };
     if wire.is_empty()
         || owner.is_empty()
         || actor_manifest.is_empty()
         || actor_manifest.bytes().all(|b| b == 0)
-        || actor_manifest != manifest
-        || record["manifest_hash"].as_str().is_some_and(|m| m != manifest)
-        || super::graph::target_deleted(db, message)?
+        || (manifest.as_bytes() != [0_u8; 32] && actor_manifest != manifest)
+        || record["manifest_hash"].as_str().is_some_and(|m| m != actor_manifest)
     {
-        return Ok(None);
+        return Ok(TargetWitness::Unresolved);
     }
-    let commitment = object_erasure_commitment(root, wire, manifest);
-    let witnessed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.message_footprint f JOIN main.message_copy_binding b ON b.message_id=f.message_id AND b.copy_id='object:'||?1 WHERE f.message_id=?2 AND f.kind='revocation_selector' AND json_extract(f.locator,'$.selector')=?1 AND json_extract(f.locator,'$.wire')=?3 AND json_extract(f.locator,'$.manifest')=?4 AND json_extract(f.locator,'$.commitment')=?5) AND NOT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?5) AND NOT EXISTS(SELECT 1 FROM object_erasure_lookup WHERE lookup=?6)", params![selector,message,wire,manifest,commitment,object_erasure_lookup(root,selector)], |r| r.get(0))?;
-    Ok(witnessed.then(|| (wire.to_owned(), manifest.to_owned(), commitment)))
+    let commitment = object_erasure_commitment(root, wire, actor_manifest);
+    let witnessed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.message_footprint f JOIN main.message_copy_binding b ON b.message_id=f.message_id AND b.copy_id='object:'||?1 WHERE f.message_id=?2 AND f.kind='revocation_selector' AND json_extract(f.locator,'$.selector')=?1 AND json_extract(f.locator,'$.wire')=?3 AND json_extract(f.locator,'$.manifest')=?4 AND json_extract(f.locator,'$.commitment')=?5)", params![selector,message,wire,actor_manifest,commitment], |r| r.get(0))?;
+    if !witnessed {
+        return Ok(TargetWitness::Unresolved);
+    }
+    registered_target_identity(db, root, selector, manifest)
 }
 
 fn omit_unresolved_placeholder(
@@ -209,9 +246,8 @@ fn omit_unresolved_placeholder(
     selector: &str,
 ) -> Result<(), StorageError> {
     // Restrictions belong to both inputs; ordinary copy provenance is not a veto.
-    let registered: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.message_footprint f WHERE f.kind='revocation_selector' AND CAST(json_extract(f.locator,'$.selector') AS TEXT)=?1)"), [selector], |r|r.get(0))?;
-    if registered {
-        return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
+    if registered(db, schema, selector)? {
+        return Err(refuse());
     }
     // Bare unresolved placeholders have no restriction to preserve.
     db.execute(
@@ -232,18 +268,16 @@ fn registered_target_identity(
     root: &str,
     selector: &str,
     manifest: &str,
-) -> Result<Option<(String, String, String)>, StorageError> {
+) -> Result<TargetWitness, StorageError> {
     let mut query = db.prepare("SELECT DISTINCT json_extract(f.locator,'$.wire'),json_extract(f.locator,'$.manifest'),json_extract(f.locator,'$.commitment'),b.message_id FROM main.message_footprint f JOIN main.message_copy_binding b ON b.message_id=f.message_id AND b.copy_id='object:'||?1 WHERE f.kind='revocation_selector' AND CAST(json_extract(f.locator,'$.selector') AS TEXT)=?1")?;
     let mut identity = None;
+    let mut surviving_owner = false;
     for row in query.query_map([selector], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-        ))
+        Ok((optional_text(r, 0)?, optional_text(r, 1)?, optional_text(r, 2)?, optional_text(r, 3)?))
     })? {
-        let (wire, known_manifest, commitment, message) = row?;
+        let (Some(wire), Some(known_manifest), Some(commitment), Some(message)) = row? else {
+            return Err(refuse());
+        };
         if wire.is_empty()
             || known_manifest.is_empty()
             || commitment != object_erasure_commitment(root, &wire, &known_manifest)
@@ -251,18 +285,77 @@ fn registered_target_identity(
         {
             return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
         }
-        if super::graph::target_deleted(db, &message)? {
-            continue;
-        }
-        let vetoed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?1) OR EXISTS(SELECT 1 FROM object_erasure_lookup WHERE lookup=?2)", params![commitment,object_erasure_lookup(root,selector)], |r|r.get(0))?;
-        if vetoed {
-            continue;
-        }
+        surviving_owner |= !owner_vetoed(db, root, selector, &commitment, &message)?;
         let candidate = (wire, known_manifest, commitment);
         if identity.as_ref().is_some_and(|old| old != &candidate) {
             return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
         }
         identity = Some(candidate);
     }
-    Ok(identity)
+    Ok(match identity {
+        Some(id) if surviving_owner => TargetWitness::Resolved(id),
+        Some(id) => TargetWitness::Vetoed(id),
+        None => TargetWitness::Unresolved,
+    })
+}
+
+fn refuse() -> StorageError {
+    StorageError::ObjectOwnershipUnverified { schema_version: 13 }
+}
+
+fn optional_text(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<Option<String>> {
+    match row.get(column) {
+        Err(rusqlite::Error::InvalidColumnType(..)) => Ok(None),
+        value => value,
+    }
+}
+
+fn registered(db: &Connection, schema: &str, selector: &str) -> rusqlite::Result<bool> {
+    db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.message_footprint WHERE kind='revocation_selector' AND CAST(json_extract(locator,'$.selector') AS TEXT)=?1)"),[selector],|r|r.get(0))
+}
+
+fn owner_vetoed(
+    db: &Connection,
+    root: &str,
+    selector: &str,
+    commitment: &str,
+    message: &str,
+) -> Result<bool, StorageError> {
+    // Target authority uses only its own owner links. Incoming deletion rows may add a veto.
+    Ok(super::graph::target_deleted(db,message)? || super::graph::deleted(db,"incoming",message)? || db.query_row("SELECT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?1) OR EXISTS(SELECT 1 FROM object_erasure_lookup WHERE lookup=?2)",params![commitment,object_erasure_lookup(root,selector)],|r|r.get::<_,bool>(0))?)
+}
+
+fn inherited_references(db: &Connection, selector: &str) -> Result<Vec<Identity>, StorageError> {
+    Ok(db.prepare("SELECT DISTINCT p.wire_id,p.manifest_hash,r.commitment FROM main.object_retention_reference r JOIN main.object_retention_payload p USING(commitment) JOIN backup_reference_admission a ON a.side='target' AND a.reference_hash=r.reference_hash WHERE r.selector=?1 AND EXISTS(SELECT 1 FROM backup_selector_admission s WHERE s.side=a.side AND s.selector=r.selector AND s.commitment=r.commitment AND s.decision='keep')")?
+        .query_map([selector],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn incoming_matches_target(
+    db: &Connection,
+    selector: &str,
+    id: &Identity,
+    grant: bool,
+) -> Result<bool, StorageError> {
+    let mut query = db.prepare("SELECT json_extract(locator,'$.wire'),json_extract(locator,'$.manifest'),json_extract(locator,'$.commitment'),message_id FROM incoming.message_footprint WHERE kind='revocation_selector' AND CAST(json_extract(locator,'$.selector') AS TEXT)=?1")?;
+    let mut any = false;
+    for row in query.query_map([selector], |r| {
+        Ok((optional_text(r, 0)?, optional_text(r, 1)?, optional_text(r, 2)?, optional_text(r, 3)?))
+    })? {
+        let (Some(wire), Some(manifest), Some(commitment), Some(owner)) = row? else {
+            return Err(refuse());
+        };
+        if (&wire, &manifest, &commitment) != (&id.0, &id.1, &id.2) {
+            return Ok(false);
+        }
+        let owns: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.message_copy_binding WHERE copy_id='object:'||?1 AND message_id=?2) AND (EXISTS(SELECT 1 FROM main.message_footprint f JOIN main.message_copy_binding b ON b.message_id=f.message_id AND b.copy_id='object:'||?1 WHERE f.kind='revocation_selector' AND f.message_id=?2 AND json_extract(f.locator,'$.selector')=?1 AND json_extract(f.locator,'$.wire')=?3 AND json_extract(f.locator,'$.manifest')=?4 AND json_extract(f.locator,'$.commitment')=?5) OR EXISTS(SELECT 1 FROM backup_reference_admission WHERE side='target' AND message_id=?2 AND selector=?1 AND commitment=?5))",params![selector,owner,wire,manifest,commitment],|r|r.get(0))?;
+        if !owns
+            || (grant
+                && (super::graph::target_deleted(db, &owner)?
+                    || super::graph::deleted(db, "incoming", &owner)?))
+        {
+            return Ok(false);
+        }
+        any = true;
+    }
+    Ok(any)
 }
