@@ -392,3 +392,24 @@ fn fanout_reservation_is_atomic() -> Result {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn request_guard_does_not_own_storage_shutdown() -> Result {
+    let root = fixture("shutdown-owner");
+    let store = test_store(&root, 0, 1024 * 1024)?;
+    let id = store.initialize_inbox("target")?;
+    let core = store.publication_core()?;
+    let guard = core.reserve("target", &id, &[])?;
+    let database = Arc::downgrade(&store.db);
+    drop(core);
+    drop(store);
+    assert!(database.upgrade().is_none(), "request handle must not own database shutdown");
+    assert_eq!(guard.state(), PersistenceState::AbortedDurable);
+    assert!(guard.hand_off().is_none());
+    drop(guard);
+    let store = test_store(&root, 0, 1024 * 1024)?;
+    assert_eq!(store.publication_core()?.view("target", &id), (1, vec![(1, 1)]));
+    drop(store);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

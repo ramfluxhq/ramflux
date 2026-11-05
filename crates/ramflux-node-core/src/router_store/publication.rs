@@ -15,7 +15,7 @@ use crate::NodeCoreError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -122,7 +122,8 @@ pub struct AssignmentReservation<'a> {
 
 /// A request owns only a handle; the store retains the actual descriptor.
 pub struct AssignmentGuard {
-    shared: Arc<Shared>,
+    shared: Weak<Shared>,
+    wake: Option<thread::Thread>,
     descriptor: Arc<Descriptor>,
 }
 
@@ -199,7 +200,11 @@ impl PublicationCore {
             for resource in request.resources {
                 registry.resources.entry(resource.clone()).or_default().insert((key.clone(), seq));
             }
-            guards.push(AssignmentGuard { shared: Arc::clone(&self.shared), descriptor });
+            guards.push(AssignmentGuard {
+                shared: Arc::downgrade(&self.shared),
+                wake: self.shared.worker.get().cloned(),
+                descriptor,
+            });
         }
         Ok(guards)
     }
@@ -268,6 +273,7 @@ impl AssignmentGuard {
     /// None means the resolver already claimed this descriptor: never issue a write.
     #[must_use]
     pub fn hand_off(&self) -> Option<PublicationWrite> {
+        let shared = self.shared.upgrade()?;
         self.descriptor
             .state
             .compare_exchange(
@@ -277,10 +283,7 @@ impl AssignmentGuard {
                 Ordering::Acquire,
             )
             .ok()?;
-        Some(PublicationWrite {
-            shared: Arc::clone(&self.shared),
-            descriptor: Arc::clone(&self.descriptor),
-        })
+        Some(PublicationWrite { shared, descriptor: Arc::clone(&self.descriptor) })
     }
 
     /// Caller-side preflight rejected before hand-off. Generic store errors must
@@ -303,7 +306,7 @@ impl AssignmentGuard {
 
     fn detach(&self) {
         self.descriptor.detached.store(true, Ordering::Release);
-        if let Some(worker) = self.shared.worker.get() {
+        if let Some(worker) = &self.wake {
             worker.unpark();
         }
     }
