@@ -63,6 +63,7 @@ mod metadata_scratch;
 mod loss_detection;
 pub(crate) mod metadata_vec;
 mod metadata_map;
+mod metadata_ranges;
 pub use metadata_credit::{MetadataClass, MetadataStats, ResourceExhausted};
 #[cfg(feature="__control-test")]
 pub use metadata_credit::MetadataProbe;
@@ -1604,6 +1605,7 @@ impl Connection {
                 self.ack_frequency.on_acked(packet);
 
                 self.on_packet_acked(now, info);
+                if self.metadata_exhausted(){self.resource_exhausted(now);return Ok(());}
             }
         }
 
@@ -1712,6 +1714,7 @@ impl Connection {
 
         for frame in info.stream_frames {
             self.streams.received_ack_of(frame);
+            if self.metadata_exhausted(){return;}
         }
     }
 

@@ -479,6 +479,7 @@ async fn stateless_responses_bound_allocations_and_sender_tasks() { stateless_re
 
 #[tokio::test]
 async fn metadata_credit_exhaustion_propagates_resource_limit() {
+    metadata_send_ack_ranges_refuse_before_third_range().await;
     metadata_record_growth_refuses_before_ping_or_record_effects().await;
     metadata_scratch_and_ack_growth_use_real_driver_boundaries().await;
     metadata_stream_frame_growth_aborts_wire_packet_before_effects().await;
@@ -643,4 +644,42 @@ async fn metadata_scratch_and_ack_growth_use_real_driver_boundaries() {
     assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
     timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
     drop((connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+}
+
+
+async fn metadata_send_ack_ranges_refuse_before_third_range() {
+    let(endpoint,peer_endpoint,connection,peer,gate,wire)=pair(65536,64,524288,512,65536,128).await;
+    gate.closed.store(true,Ordering::SeqCst);
+    wire.held.store(true,Ordering::SeqCst);
+    let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));
+    let mut stream=connection.open_uni().await.unwrap();
+    gate.open();
+    for _ in 0..6 {
+        let before=connection.stats().frame_tx.stream;
+        stream.write_chunk(bytes::Bytes::from_static(b"x")).await.unwrap();
+        until(||connection.stats().frame_tx.stream>before).await;
+    }
+    let packets=connection.control_test(|p|p.metadata_test_stream_packets());
+    let mut acked=Vec::new();
+    for offset in [1,3,5] {acked.push(packets.iter().find(|(_,o)|*o==offset).unwrap().0);}
+    for (index,packet_number) in acked.into_iter().enumerate() {
+        gate.closed.store(true,Ordering::SeqCst);
+        wire.held.store(true,Ordering::SeqCst);
+        let number=connection.control_test(|p|p.metadata_test_next_received());
+        let packet=peer.control_test(|p|p.control_test_ack_packet(number,&[packet_number]));
+        wire.packets.lock().unwrap().clear();
+        if index==2 {probe.freeze_at_live_allocations();}
+        wire.packets.lock().unwrap().push_back(packet);
+        wire.held.store(false,Ordering::SeqCst);
+        if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}
+        gate.open();
+        if index<2 {until(||connection.control_test(|p|p.metadata_test_send_ranges()).0==index+1).await;}
+    }
+    assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+    assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::SendRanges));
+    assert_eq!(connection.control_test(|p|p.metadata_test_send_ranges()).0,2,"refused third disjoint ACK range is never inserted");
+    assert!(probe.stats().peak<=1<<20);
+    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    drop((stream,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
 }

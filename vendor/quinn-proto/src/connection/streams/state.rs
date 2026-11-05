@@ -146,6 +146,9 @@ pub struct StreamsState {
 }
 
 impl StreamsState {
+
+    #[cfg(feature="__control-test")]
+    pub(crate) fn metadata_send_ranges(&self)->(usize,usize){self.send.values().filter_map(|s|s.as_ref()).map(|s|s.pending.send_range_counts()).fold((0,0),|(a,b),(c,d)|(a+c,b+d))}
     #[cfg(feature="__control-test")]
     pub(crate) fn metadata_send_storage(&self) -> (usize,u64) {
         self.send.values().filter_map(|s|s.as_ref()).fold((0,0),|(capacity,offset),send| {
@@ -729,6 +732,7 @@ impl StreamsState {
         let id = frame.id;
         let buffered = stream.pending.buffered();
         let finished = stream.ack(frame);
+        if stream.pending.metadata_exhausted(){return;}
         self.buffered_data -= buffered - stream.pending.buffered();
         if !finished {
             // The stream is unfinished or may still need retransmits

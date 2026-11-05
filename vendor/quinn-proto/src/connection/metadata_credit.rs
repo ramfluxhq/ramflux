@@ -123,6 +123,13 @@ impl super::Connection {
     /// Actual retained Data ACK range count, independent of metadata credit.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_ack_ranges(&self)->usize{self.spaces[super::SpaceId::Data].pending_acks.ranges().len()}
+
+    /// Actual send ACK/retransmit range counts for driver tests.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_send_ranges(&self)->(usize,usize){self.streams.metadata_send_ranges()}
+    /// Actual STREAM offsets retained under Data packet numbers.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_stream_packets(&self)->Vec<(u64,u64)>{self.spaces[super::SpaceId::Data].sent_packets.range(..).flat_map(|(n,p)|p.stream_frames.iter().map(move|f|(*n,f.offsets.start))).collect()}
     /// Actual live Data packet numbers for driver-level ACK/loss fault injection.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_sent_numbers(&self)->Vec<u64>{self.spaces[super::SpaceId::Data].sent_packets.range(..).map(|(n,_)|*n).collect()}

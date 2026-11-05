@@ -3,7 +3,8 @@ use std::{collections::VecDeque, ops::Range};
 
 use bytes::{Buf, Bytes};
 
-use crate::{VarInt, range_set::RangeSet};
+use crate::VarInt;
+use super::metadata_ranges::SendRanges;
 
 /// Buffer of outgoing retransmittable stream data
 #[derive(Default, Debug)]
@@ -26,18 +27,24 @@ pub(super) struct SendBuffer {
     /// Acknowledged ranges which couldn't be discarded yet as they don't include the earliest
     /// offset in `unacked`
     // TODO: Recover storage from these by compacting (#700)
-    acks: RangeSet,
+    acks: SendRanges,
     /// Previously transmitted ranges deemed lost
-    retransmits: RangeSet,
+    retransmits: SendRanges,
 }
 
 impl SendBuffer {
     pub(super) fn set_metadata(&mut self, metadata: Option<std::sync::Arc<super::metadata_credit::MetadataCredit>>) {
         if self.metadata.is_none() { self.metadata=metadata; }
+        if self.acks.bind(self.metadata.clone()).is_err(){return;}
+        let _ = self.retransmits.bind(self.metadata.clone());
+    }
+    pub(super) fn metadata_exhausted(&self) -> bool {
+        self.metadata.as_ref().is_some_and(|credit|credit.stats().exhausted)
     }
     pub(super) fn reserve_segment(&mut self) -> Result<(),super::metadata_credit::ResourceExhausted> {
         use super::metadata_credit::MetadataClass;
         let Some(credit)=self.metadata.as_ref() else { return Ok(()); };
+        if credit.stats().exhausted { return Err(super::metadata_credit::ResourceExhausted { class: credit.stats().failed_class.unwrap_or(MetadataClass::SendSegments) }); }
         if self.unacked_segments.len()<self.unacked_segments.capacity() { return Ok(()); }
         let capacity=self.unacked_segments.capacity().checked_mul(2).map(|n|n.max(4))
             .ok_or_else(||credit.fail(MetadataClass::SendSegments))?;
@@ -53,6 +60,9 @@ impl SendBuffer {
         self.segment_charge=Some(charge);
         Ok(())
     }
+
+    #[cfg(feature="__control-test")]
+    pub(super) fn send_range_counts(&self)->(usize,usize){(self.acks.len(),self.retransmits.len())}
     #[cfg(feature="__control-test")]
     pub(super) fn segment_capacity_bytes(&self) -> usize { self.unacked_segments.capacity()*std::mem::size_of::<Bytes>() }
 
@@ -70,12 +80,15 @@ impl SendBuffer {
 
     /// Discard a range of acknowledged stream data
     pub(super) fn ack(&mut self, mut range: Range<u64>) {
+        self.set_metadata(self.metadata.clone());
+        if self.metadata.as_ref().is_some_and(|c|c.stats().exhausted){return;}
         // Clamp the range to data which is still tracked
         let base_offset = self.offset - self.unacked_len as u64;
         range.start = base_offset.max(range.start);
         range.end = base_offset.max(range.end);
 
         self.acks.insert(range);
+        if self.metadata.as_ref().is_some_and(|c|c.stats().exhausted){return;}
 
         while self.acks.min() == Some(self.offset - self.unacked_len as u64) {
             let prefix = self.acks.pop_min().unwrap();
@@ -199,6 +212,8 @@ impl SendBuffer {
 
     /// Queue a range of sent but unacknowledged data to be retransmitted
     pub(super) fn retransmit(&mut self, range: Range<u64>) {
+        self.set_metadata(self.metadata.clone());
+        if self.metadata.as_ref().is_some_and(|c|c.stats().exhausted){return;}
         debug_assert!(range.end <= self.unsent, "unsent data can't be lost");
         self.retransmits.insert(range);
     }
@@ -254,6 +269,24 @@ mod tests {
         buffer.discard();
         assert_eq!(buffer.unacked_segments.capacity(),0);
         assert_eq!(credit.stats().used,0);
+    }
+
+    #[test]
+    fn metadata_ack_and_retransmit_ranges_share_actual_capacity() {
+        use super::super::metadata_credit::{MetadataClass,MetadataCredit};
+        let credit=MetadataCredit::new(320);
+        let mut buffer=SendBuffer::new();buffer.set_metadata(Some(credit.clone()));
+        buffer.reserve_segment().unwrap();buffer.write(Bytes::from_static(b"0123456789"));
+        assert_eq!(buffer.poll_transmit(32).0,0..10);
+        buffer.ack(1..2);buffer.ack(3..4);buffer.ack(5..6);
+        assert_eq!(buffer.acks.len(),3);
+        assert!(matches!(&buffer.acks,SendRanges::Bounded(r) if r.heap_capacity_bytes()==64));
+        assert_eq!(credit.stats().used,320,"deque192 plus actual four-range allocation128");
+        buffer.retransmit(1..2);buffer.retransmit(3..4);buffer.retransmit(5..6);
+        assert_eq!(buffer.retransmits.len(),2,"other range set cannot spill at the shared ceiling");
+        assert_eq!(credit.stats().failed_class,Some(MetadataClass::SendRanges));
+        assert_eq!(credit.stats().allocations,2);
+        drop(buffer);assert_eq!(credit.stats().used,0);
     }
 
     use super::*;
