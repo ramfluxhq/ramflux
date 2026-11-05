@@ -160,30 +160,30 @@ impl ContentManifest {
     }
 }
 
-fn identity(out: &mut Vec<u8>, id: &str) -> Result<(), FormatError> {
+pub(super) fn identity(out: &mut Vec<u8>, id: &str) -> Result<(), FormatError> {
     if id.is_empty() || id.len() > 256 {
         return Err(FormatError("native identity length"));
     }
     lp(out, id.as_bytes())
 }
 
-struct Cursor<'a>(&'a [u8]);
+pub(super) struct Cursor<'a>(pub(super) &'a [u8]);
 impl<'a> Cursor<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], FormatError> {
+    pub(super) fn take(&mut self, n: usize) -> Result<&'a [u8], FormatError> {
         let b = self.0.get(..n).ok_or(FormatError("truncated native"))?;
         self.0 = &self.0[n..];
         Ok(b)
     }
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], FormatError> {
+    pub(super) fn array<const N: usize>(&mut self) -> Result<[u8; N], FormatError> {
         self.take(N)?.try_into().map_err(|_| FormatError("native array"))
     }
-    fn u32(&mut self) -> Result<u32, FormatError> {
+    pub(super) fn u32(&mut self) -> Result<u32, FormatError> {
         Ok(u32::from_be_bytes(self.array()?))
     }
-    fn u64(&mut self) -> Result<u64, FormatError> {
+    pub(super) fn u64(&mut self) -> Result<u64, FormatError> {
         Ok(u64::from_be_bytes(self.array()?))
     }
-    fn identity(&mut self) -> Result<String, FormatError> {
+    pub(super) fn identity(&mut self) -> Result<String, FormatError> {
         let n = self.u32()? as usize;
         if n == 0 || n > 256 {
             return Err(FormatError("native identity length"));
