@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Restore attachment references per owner and selector, reject stale aliases behind
+  erased selectors or payload fences, and omit unowned legacy placeholders while
+  preserving registered revocations.
+
 - Keep admitted native group history readable after authority observations expire:
   `group.history` reads stored history, name and roster offline while retaining
   revocation and erasure fences. New authorization keeps fresh-head checks and
