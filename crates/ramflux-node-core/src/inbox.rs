@@ -8,6 +8,7 @@ use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+mod ack_candidate;
 mod pending_rows;
 #[cfg(test)]
 mod settlement_tests;
@@ -23,12 +24,28 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InboxEntry {
     pub inbox_seq: u64,
     pub target_delivery_id: String,
     pub envelope: ramflux_protocol::Envelope,
 }
+
+impl Clone for InboxEntry {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        CLONED_ENTRIES.with(|counts| {
+            *counts.borrow_mut().entry(self.target_delivery_id.clone()).or_default() += 1;
+        });
+        Self {
+            inbox_seq: self.inbox_seq,
+            target_delivery_id: self.target_delivery_id.clone(),
+            envelope: self.envelope.clone(),
+        }
+    }
+}
+#[cfg(test)]
+thread_local! { pub(crate) static CLONED_ENTRIES: std::cell::RefCell<BTreeMap<String,usize>> = const { std::cell::RefCell::new(BTreeMap::new()) }; }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CursorAckState {

@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("invalid ACK batch: {0}")]
+    InvalidAckBatch(&'static str),
     #[error("ack_backpressure_retry")]
     AckBackpressureRetry,
     #[error(transparent)]

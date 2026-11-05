@@ -560,3 +560,6 @@ async fn sender_retry_refusals_keep_the_existing_nack_shape()
     }
     Ok(())
 }
+
+#[path = "ack_refusal_tests.rs"]
+mod ack_refusal_tests;

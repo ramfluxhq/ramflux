@@ -1067,23 +1067,24 @@ impl RouterRedbStore {
         _envelope_id: &str,
         lease: SubmissionLease,
     ) -> Result<(), NodeCoreError> {
-        let sequence = cursor.last_acknowledged_inbox_seq.ok_or_else(|| {
-            NodeCoreError::ItestHttp("ACK lacks a mailbox delivery sequence".into())
-        })?;
-        self.record_leased_ack_batch(cursor, &[sequence], lease)
+        let sequence = cursor
+            .last_acknowledged_inbox_seq
+            .ok_or(NodeCoreError::InvalidAckBatch("ACK lacks a mailbox delivery sequence"))?;
+        let result = self.record_leased_ack_batch(cursor, &[sequence], &lease);
+        drop(lease);
+        result
     }
 
     pub(crate) fn record_leased_ack_batch(
         &self,
         cursor: &CursorAckState,
         sequences: &[u64],
-        lease: SubmissionLease,
+        lease: &SubmissionLease,
     ) -> Result<(), NodeCoreError> {
         let mut candidate = cursor.clone();
         candidate.retired_inbox_seqs.extend(sequences.iter().copied());
         let cursor = &candidate;
-        self.validate_target_lease(&cursor.target_delivery_id, &lease)?;
-        let _lease = lease;
+        self.validate_target_lease(&cursor.target_delivery_id, lease)?;
         let save_started = Instant::now();
         let inbox_started = Instant::now();
         // Installation may wait for a DB writer. Snapshot it before taking that

@@ -173,7 +173,7 @@ pub(crate) fn dispatch_protected_itest_request(
         }
         ("POST", "/mvp0/ack") => {
             let ack: ramflux_protocol::Ack = serde_json::from_slice(&request.body)?;
-            let response: ramflux_node_core::InboxCursorResponse =
+            let response: ramflux_node_core::RouterAckResponse =
                 router_post_json(router, "/mvp0/ack", &ack)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }

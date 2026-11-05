@@ -21,7 +21,7 @@ pub(crate) async fn dispatch_quic_json_request(
         ("POST", "/mvp0/envelope") => forward_quic_envelope(router, request.body).await?,
         ("POST", "/mvp0/ack") => {
             let ack: ramflux_protocol::Ack = serde_json::from_value(request.body)?;
-            let response: ramflux_node_core::InboxCursorResponse =
+            let response: ramflux_node_core::RouterAckResponse =
                 router_post_json(router, "/mvp0/ack", &ack)?;
             serde_json::to_value(response)?
         }
