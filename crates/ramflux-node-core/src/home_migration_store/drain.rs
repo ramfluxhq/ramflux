@@ -7,7 +7,7 @@ use super::{
     RouterRedbStore, Serialize, TableDefinition, clock, commit_transition, decode, read, storage,
     write,
 };
-use crate::router_store::{expiry_index, inbox_entry_storage_key};
+use crate::router_store::{expiry_index, inbox_entry_storage_key, incarnation};
 use crate::{CursorAckState, InboxEntry, ROUTER_CURSOR_STATE_TABLE, ROUTER_INBOX_ENTRY_TABLE};
 const ENTRIES: TableDefinition<&str, &[u8]> = TableDefinition::new("migration_drain_entries_v1");
 
@@ -238,6 +238,15 @@ impl RouterRedbStore {
         if fail {
             return Err(storage("injected AfterBAckBeforeACommit"));
         }
+        if terminal {
+            self.checkpoint_incarnation(
+                &tx,
+                &CursorAckState {
+                    target_delivery_id: current.entry.target_delivery_id.clone(),
+                    ..CursorAckState::default()
+                },
+            )?;
+        }
         apply(&tx, current, outcome, now, false)?;
         commit_transition(self, tx)?;
         // Publish only after the durable commit, even if later WAL observation fails.
@@ -346,7 +355,14 @@ fn apply(
         // replacing the pending entries' issued watermark with an older stored cursor.
         settled.issued_inbox_seq = settled.issued_inbox_seq.max(cursor.high_water);
         settled.acked_inbox_seqs.insert(row.entry.inbox_seq);
-        write(tx, ROUTER_CURSOR_STATE_TABLE, &row.entry.target_delivery_id, &settled)?;
+        // ACK history updates must preserve the independent inbox identity and its
+        // compatibility field; drain settlement never mints or rotates E.
+        let id = incarnation::read_id(tx, &row.entry.target_delivery_id)?;
+        let bytes = incarnation::encode_cursor(&settled, id.as_deref())?;
+        tx.open_table(ROUTER_CURSOR_STATE_TABLE)
+            .map_err(storage)?
+            .insert(row.entry.target_delivery_id.as_str(), bytes.as_slice())
+            .map_err(storage)?;
     } else {
         // A repeated refusal never creates a second outstanding obligation.
         row.state = if row.state == MigrationDrainState::Rejected
@@ -405,9 +421,14 @@ pub(crate) fn receiver_settled(
     tx: &redb::WriteTransaction,
     cursor: &CursorAckState,
 ) -> Result<(), NodeCoreError> {
-    let mut merged: CursorAckState =
-        read(tx, ROUTER_CURSOR_STATE_TABLE, &cursor.target_delivery_id)?
-            .unwrap_or_else(|| cursor.clone());
+    let mut merged: CursorAckState = tx
+        .open_table(ROUTER_CURSOR_STATE_TABLE)
+        .map_err(storage)?
+        .get(cursor.target_delivery_id.as_str())
+        .map_err(storage)?
+        .map(|row| incarnation::decode_cursor(row.value()))
+        .transpose()?
+        .unwrap_or_else(|| cursor.clone());
     merged.retired_inbox_seqs.extend(&cursor.retired_inbox_seqs);
     let cursor = &merged;
     let rows = {

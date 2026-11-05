@@ -59,6 +59,15 @@ fn cursors(db: &redb::Database) -> Result<CursorInventory, NodeCoreError> {
             ids.insert(target.value().into(), id);
         }
     }
+    // The compact row is canonical, including counters never checkpointed into JSON.
+    let identities =
+        txn.open_table(crate::router_store::incarnation_state::TABLE).map_err(error)?;
+    for row in identities.iter().map_err(error)? {
+        let (target, bytes) = row.map_err(error)?;
+        let (id, seq) = crate::router_store::incarnation_state::decode(bytes.value())?;
+        ids.insert(target.value().into(), id);
+        issued.entry(target.value().into()).and_modify(|old| *old = (*old).max(seq)).or_insert(seq);
+    }
     // Legacy snapshot-only counters must participate even before incremental tables exist.
     let snapshots = txn.open_table(crate::ROUTER_SNAPSHOT_TABLE).map_err(error)?;
     if let Some(bytes) = snapshots.get(crate::ROUTER_INBOX_SLICE_KEY).map_err(error)? {

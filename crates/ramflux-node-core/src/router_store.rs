@@ -38,6 +38,7 @@ mod custody_history;
 pub(crate) mod expiry_index;
 mod identity_registry;
 pub(crate) mod incarnation;
+pub(crate) mod incarnation_state;
 mod migration_barrier;
 mod retention;
 mod submission_barrier;
@@ -92,7 +93,7 @@ struct RouterCommitRequest {
 
 enum RouterCommitOp {
     Incarnated {
-        ids: BTreeMap<String, String>,
+        ids: BTreeMap<String, (String, u64)>,
         inner: Box<RouterCommitOp>,
     },
     Forwarded {
@@ -253,8 +254,8 @@ fn router_apply_commit_op(
 ) -> Result<(), NodeCoreError> {
     match op {
         RouterCommitOp::Incarnated { ids, inner } => {
-            for (target, id) in ids {
-                incarnation::set_cursor(write_txn, target, 0, id, false)?;
+            for (target, (id, issued)) in ids {
+                incarnation::set_cursor(write_txn, target, *issued, id, false)?;
             }
             router_apply_commit_op(write_txn, inner)
         }
@@ -478,6 +479,11 @@ impl RouterRedbStore {
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?,
         );
         Self::initialize_mailbox_schema(&db)?;
+        {
+            let txn = db.begin_write().map_err(incarnation::error)?;
+            incarnation_state::import(&txn)?;
+            txn.commit().map_err(incarnation::error)?;
+        }
         tuple_upgrade::upgrade(&db)?;
         let mut legacy_registry: IdentityRegistry =
             load_snapshot(&db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
@@ -538,6 +544,8 @@ impl RouterRedbStore {
         let write_txn =
             db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
+            let _identities =
+                write_txn.open_table(incarnation_state::TABLE).map_err(incarnation::error)?;
             let _table = write_txn
                 .open_table(ROUTER_SNAPSHOT_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
@@ -983,15 +991,14 @@ impl RouterRedbStore {
     ) -> Result<(), NodeCoreError> {
         self.validate_target_lease(&cursor.target_delivery_id, &lease)?;
         let _lease = lease;
-        if self.inbox_status(&cursor.target_delivery_id)?.0.is_none() {
-            return Ok(());
-        }
         let save_started = Instant::now();
         let inbox_started = Instant::now();
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
-        let cursor_bytes = retention::cursor_bytes(&write_txn, cursor)?;
+        let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor)? else {
+            return Ok(());
+        };
         {
             let mut cursor_table = write_txn
                 .open_table(ROUTER_CURSOR_STATE_TABLE)
@@ -1033,15 +1040,14 @@ impl RouterRedbStore {
     ) -> Result<(), NodeCoreError> {
         self.validate_target_lease(&cursor.target_delivery_id, &lease)?;
         let _lease = lease;
-        if self.inbox_status(&cursor.target_delivery_id)?.0.is_none() {
-            return Ok(());
-        }
         let save_started = Instant::now();
         let inbox_started = Instant::now();
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
-        let cursor_bytes = retention::cursor_bytes(&write_txn, cursor)?;
+        let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor)? else {
+            return Ok(());
+        };
         {
             let mut cursor_table = write_txn
                 .open_table(ROUTER_CURSOR_STATE_TABLE)
@@ -1201,6 +1207,7 @@ impl RouterRedbStore {
             if let Some(target_delivery_id) = target_delivery_id {
                 remove_key(&write_txn, ROUTER_SESSION_ENTRY_TABLE, target_delivery_id)?;
                 remove_key(&write_txn, ROUTER_CURSOR_STATE_TABLE, target_delivery_id)?;
+                remove_key(&write_txn, incarnation_state::TABLE, target_delivery_id)?;
                 put_bool(&write_txn, ROUTER_DEACTIVATED_TARGET_TABLE, target_delivery_id, false)?;
                 put_bool(&write_txn, ROUTER_DELETED_TARGET_TABLE, target_delivery_id, true)?;
                 remove_inbox_entries_for_target(&write_txn, target_delivery_id)?;
@@ -1285,15 +1292,13 @@ impl RouterRedbStore {
                     Vec::new()
                 }
             };
-            let ids = entries
-                .into_iter()
-                .map(|entry| {
-                    Ok((
-                        entry.target_delivery_id.clone(),
-                        wal.reserve_incarnation(&entry.target_delivery_id)?,
-                    ))
-                })
-                .collect::<Result<BTreeMap<_, _>, NodeCoreError>>()?;
+            let mut ids: BTreeMap<String, (String, u64)> = BTreeMap::new();
+            for entry in entries {
+                let id = wal.reserve_incarnation(&entry.target_delivery_id)?;
+                ids.entry(entry.target_delivery_id.clone())
+                    .and_modify(|(_, issued)| *issued = (*issued).max(entry.inbox_seq))
+                    .or_insert((id, entry.inbox_seq));
+            }
             RouterCommitOp::Incarnated { ids, inner: Box::new(op) }
         } else {
             op
@@ -1737,7 +1742,23 @@ impl RouterRedbStore {
     }
 
     fn load_incremental_cursor_states(&self) -> Result<Vec<CursorAckState>, NodeCoreError> {
-        load_table_values(&self.db, ROUTER_CURSOR_STATE_TABLE)
+        let cursors: Vec<CursorAckState> = load_table_values(&self.db, ROUTER_CURSOR_STATE_TABLE)?;
+        let mut cursors = cursors
+            .into_iter()
+            .map(|cursor| (cursor.target_delivery_id.clone(), cursor))
+            .collect::<BTreeMap<_, _>>();
+        let txn = self.db.begin_read().map_err(incarnation::error)?;
+        let table = txn.open_table(incarnation_state::TABLE).map_err(incarnation::error)?;
+        for row in table.iter().map_err(incarnation::error)? {
+            let (target, bytes) = row.map_err(incarnation::error)?;
+            let (_, issued) = incarnation_state::decode(bytes.value())?;
+            let cursor = cursors.entry(target.value().into()).or_insert_with(|| CursorAckState {
+                target_delivery_id: target.value().into(),
+                ..CursorAckState::default()
+            });
+            cursor.issued_inbox_seq = cursor.issued_inbox_seq.max(issued);
+        }
+        Ok(cursors.into_values().collect())
     }
 
     fn load_incremental_replay_tuples(

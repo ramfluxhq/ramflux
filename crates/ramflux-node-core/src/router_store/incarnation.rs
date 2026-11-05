@@ -3,16 +3,35 @@
 
 //! Storage-only incarnation metadata, kept out of the legacy public cursor shape.
 
+use super::incarnation_state as state;
 use super::{CursorAckState, InboxEntry, NodeCoreError, ROUTER_CURSOR_STATE_TABLE};
 use redb::ReadableTable;
+#[cfg(test)]
+pub(super) mod work;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct StoredCursor {
     #[serde(flatten)]
     pub(crate) cursor: CursorAckState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) inbox_incarnation_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for StoredCursor {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // serde's flatten buffer does not decode numeric JSON object keys. Preserve
+        // ordinary CursorAckState decoding for nack_attempts and other sequence maps.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inbox_incarnation_id = value
+            .get("inbox_incarnation_id")
+            .map(|id| Option::<String>::deserialize(id.clone()))
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .flatten();
+        let cursor = CursorAckState::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(Self { cursor, inbox_incarnation_id })
+    }
 }
 
 pub(crate) fn error(value: impl std::fmt::Display) -> NodeCoreError {
@@ -39,17 +58,16 @@ pub(crate) fn new_id() -> Result<String, NodeCoreError> {
     Ok(result)
 }
 
-pub(super) fn read_id(
-    table: &redb::Table<'_, &str, &[u8]>,
+pub(crate) fn read_id(
+    txn: &redb::WriteTransaction,
     target: &str,
 ) -> Result<Option<String>, NodeCoreError> {
-    let stored = table.get(target).map_err(error)?;
-    let Some(stored) = stored else { return Ok(None) };
-    let cursor: StoredCursor = serde_json::from_slice(stored.value()).map_err(error)?;
-    if let Some(id) = &cursor.inbox_incarnation_id {
-        validate(id)?;
-    }
-    Ok(cursor.inbox_incarnation_id)
+    Ok(state::read(txn, target)?.map(|(id, _)| id))
+}
+pub(crate) fn decode_cursor(bytes: &[u8]) -> Result<CursorAckState, NodeCoreError> {
+    #[cfg(test)]
+    work::read(bytes.len());
+    serde_json::from_slice(bytes).map_err(error)
 }
 
 pub(crate) fn encode_cursor(
@@ -59,11 +77,14 @@ pub(crate) fn encode_cursor(
     if let Some(id) = id {
         validate(id)?;
     }
-    serde_json::to_vec(&StoredCursor {
+    let bytes = serde_json::to_vec(&StoredCursor {
         cursor: cursor.clone(),
         inbox_incarnation_id: id.map(str::to_owned),
     })
-    .map_err(error)
+    .map_err(error)?;
+    #[cfg(test)]
+    work::write(bytes.len());
+    Ok(bytes)
 }
 
 /// Assign E and advance the issued counter inside the entry's existing transaction.
@@ -80,31 +101,7 @@ pub(super) fn ensure_cursor(
     target: &str,
     issued: u64,
 ) -> Result<String, NodeCoreError> {
-    let mut table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(error)?;
-    let previous = table
-        .get(target)
-        .map_err(error)?
-        .map(|bytes| serde_json::from_slice::<StoredCursor>(bytes.value()))
-        .transpose()
-        .map_err(error)?;
-    let mut stored = previous.unwrap_or_else(|| StoredCursor {
-        cursor: CursorAckState {
-            target_delivery_id: target.to_owned(),
-            ..CursorAckState::default()
-        },
-        inbox_incarnation_id: None,
-    });
-    let id = match stored.inbox_incarnation_id {
-        Some(id) => {
-            validate(&id)?;
-            id
-        }
-        None => new_id()?,
-    };
-    stored.cursor.issued_inbox_seq = stored.cursor.issued_inbox_seq.max(issued);
-    let bytes = encode_cursor(&stored.cursor, Some(&id))?;
-    table.insert(target, bytes.as_slice()).map_err(error)?;
-    Ok(id)
+    state::set(txn, target, issued, None, false)
 }
 
 #[cfg(test)]
@@ -140,28 +137,17 @@ pub(crate) fn set_cursor(
     id: &str,
     rotate: bool,
 ) -> Result<(), NodeCoreError> {
-    validate(id)?;
-    let mut table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(error)?;
-    let previous = table
-        .get(target)
-        .map_err(error)?
-        .map(|row| serde_json::from_slice::<StoredCursor>(row.value()))
-        .transpose()
-        .map_err(error)?;
-    let mut cursor = previous.as_ref().map_or_else(
-        || CursorAckState { target_delivery_id: target.into(), ..CursorAckState::default() },
-        |stored| stored.cursor.clone(),
-    );
-    if !rotate
-        && previous
-            .as_ref()
-            .and_then(|stored| stored.inbox_incarnation_id.as_deref())
-            .is_some_and(|old| old != id)
-    {
-        return Err(error("inbox incarnation mismatch during persistence"));
+    state::set(txn, target, issued, Some(id), rotate)?;
+    if rotate {
+        // Rotation is offline; update the compatibility field once, never per append.
+        let mut table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(error)?;
+        let previous =
+            table.get(target).map_err(error)?.map(|row| decode_cursor(row.value())).transpose()?;
+        if let Some(mut cursor) = previous {
+            cursor.issued_inbox_seq = cursor.issued_inbox_seq.max(issued);
+            table.insert(target, encode_cursor(&cursor, Some(id))?.as_slice()).map_err(error)?;
+        }
     }
-    cursor.issued_inbox_seq = cursor.issued_inbox_seq.max(issued);
-    table.insert(target, encode_cursor(&cursor, Some(id))?.as_slice()).map_err(error)?;
     Ok(())
 }
 
@@ -172,26 +158,13 @@ impl super::RouterRedbStore {
     pub fn inbox_status(&self, target: &str) -> Result<(Option<String>, u64), NodeCoreError> {
         use redb::ReadableDatabase;
         let txn = self.db.begin_read().map_err(error)?;
-        let table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(error)?;
-        let stored = table
+        let table = txn.open_table(state::TABLE).map_err(error)?;
+        let (mut id, mut issued) = table
             .get(target)
             .map_err(error)?
-            .map(|row| serde_json::from_slice::<StoredCursor>(row.value()))
-            .transpose()
-            .map_err(error)?;
-        let (mut id, mut issued) = stored.map_or((None, 0), |stored| {
-            (
-                stored.inbox_incarnation_id,
-                stored
-                    .cursor
-                    .issued_inbox_seq
-                    .max(stored.cursor.inbox_seq)
-                    .max(stored.cursor.settled_inbox_seq),
-            )
-        });
-        if let Some(current) = &id {
-            validate(current)?;
-        }
+            .map(|row| state::decode(row.value()))
+            .transpose()?
+            .map_or((None, 0), |(id, issued)| (Some(id), issued));
         if let Some(wal) = &self.submission_wal
             && let Some((wal_id, wal_issued)) = wal.committed_inbox(target)?
         {
@@ -221,7 +194,7 @@ impl super::RouterRedbStore {
         txn.commit().map_err(error)?;
         Ok(id)
     }
-    pub(super) fn checkpoint_incarnation(
+    pub(crate) fn checkpoint_incarnation(
         &self,
         txn: &redb::WriteTransaction,
         cursor: &CursorAckState,

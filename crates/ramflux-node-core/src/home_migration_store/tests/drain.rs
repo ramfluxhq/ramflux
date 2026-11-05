@@ -4,13 +4,25 @@
 //! Conservation and restart tests at the B commit / A settlement boundary.
 use super::super::drain::DrainFailPoint;
 use super::*;
+use crate::{CursorAckState, ROUTER_CURSOR_STATE_TABLE};
 fn setup() -> TestResult<(Scenario, crate::ForwardedEnvelopeRequest, MigrationDrainEntry)> {
     setup_count(1)
 }
 fn setup_count(
     count: u64,
 ) -> TestResult<(Scenario, crate::ForwardedEnvelopeRequest, MigrationDrainEntry)> {
-    let s = Scenario::prepared()?;
+    setup_count_mode(count, false, false)
+}
+fn setup_count_mode(
+    count: u64,
+    direct: bool,
+    redb_only: bool,
+) -> TestResult<(Scenario, crate::ForwardedEnvelopeRequest, MigrationDrainEntry)> {
+    let mut s = Scenario::prepared()?;
+    if redb_only {
+        drop(s.a.store.take());
+        s.a.store = Some(RouterRedbStore::open_without_wal(&s.a.path)?);
+    }
     let op = s.seal()?;
     let mut request = super::forwarded::sender(&s.target)?;
     let entry = crate::InboxEntry {
@@ -22,11 +34,15 @@ fn setup_count(
         let mut entry = entry.clone();
         entry.inbox_seq += offset;
         if offset == 0 {
-            s.a.store()?.record_submission_increment(
-                "drain-cutover",
-                i64::MAX / 2,
-                Some(&entry),
-            )?;
+            if direct {
+                s.a.store()?.record_inbox_entry(&entry)?;
+            } else {
+                s.a.store()?.record_submission_increment(
+                    "drain-cutover",
+                    i64::MAX / 2,
+                    Some(&entry),
+                )?;
+            }
             request.envelope = entry.envelope.clone();
         } else {
             s.a.store()?.record_inbox_entry(&entry)?;
@@ -504,6 +520,47 @@ fn settlement_preserves_memory_only_issued_and_settled_marks() -> TestResult {
             s.a.core.resume(&s.target, 0, 10),
             vec![rows[0].entry.clone(), rows[2].entry.clone()]
         );
+    }
+    Ok(())
+}
+
+#[test]
+pub(crate) fn drain_then_ack_restart_preserves_incarnation_and_ack() -> TestResult {
+    for mode in 0..3 {
+        let redb_only = mode == 0;
+        let (mut s, _, row) = setup_count_mode(2, mode != 2, redb_only)?;
+        let id = s.a.store()?.inbox_status(&s.target)?.0.ok_or("E")?;
+        s.a.store()?.settle_migration_drain(
+            &s.a.core,
+            &row,
+            MigrationDrainOutcome::BAck,
+            NOW + 4,
+        )?;
+        assert_eq!(s.a.store()?.inbox_status(&s.target)?.0, Some(id.clone()));
+        let ack_seq = if row.entry.inbox_seq == 7 { 8 } else { 7 };
+        let cursor = CursorAckState {
+            target_delivery_id: s.target.clone(),
+            issued_inbox_seq: 8,
+            acked_inbox_seqs: [ack_seq].into(),
+            last_acknowledged_inbox_seq: Some(ack_seq),
+            ..CursorAckState::default()
+        };
+        s.a.store()?.record_ack_increment(&cursor, &row.entry.envelope.envelope_id)?;
+        drop(s.a.store.take());
+        let store = if redb_only {
+            RouterRedbStore::open_without_wal(&s.a.path)?
+        } else {
+            RouterRedbStore::open_with_wal(&s.a.path, s.a.path.with_extension("wal"))?
+        };
+        s.a.core = store.load_router()?.ok_or("restarted router")?;
+        s.a.store = Some(store);
+        assert_eq!(s.a.store()?.inbox_status(&s.target)?, (Some(id.clone()), 8));
+        assert_eq!(s.a.core.resume(&s.target, 0, 10), []);
+        let tx = s.a.store()?.migration_db().begin_write()?;
+        let saved: CursorAckState =
+            read(&tx, ROUTER_CURSOR_STATE_TABLE, &s.target)?.ok_or("ACK cursor")?;
+        assert!(saved.acked_inbox_seqs.contains(&ack_seq) || saved.settled_inbox_seq >= ack_seq);
+        assert_eq!(crate::router_store::incarnation::read_id(&tx, &s.target)?, Some(id));
     }
     Ok(())
 }

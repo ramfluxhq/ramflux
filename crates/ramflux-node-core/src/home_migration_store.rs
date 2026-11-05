@@ -373,3 +373,6 @@ fn authorization_key(auth: &Signed<Authorization>) -> Result<String, NodeCoreErr
     serde_json::to_string(&(&auth.body.account_anchor, message_hash(auth).map_err(storage)?))
         .map_err(storage)
 }
+
+#[cfg(test)]
+pub(crate) use tests::drain::drain_then_ack_restart_preserves_incarnation_and_ack;
