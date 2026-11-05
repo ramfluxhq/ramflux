@@ -40,6 +40,8 @@ fn sample(n: i64, m: usize) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
 INSERT INTO message_copy_binding SELECT 'group:other:unrelated-'||i,'unrelated-'||i FROM budget_numbers;
 INSERT INTO message_copy_binding VALUES('group:missing:missing','message');
 INSERT INTO runtime_actor_state SELECT 'budget/'||i,x'7b7d' FROM budget_numbers;
+INSERT INTO message_footprint SELECT 'unrelated-'||i,'actor','budget/'||i FROM budget_numbers;
+INSERT INTO message_footprint SELECT 'unrelated-'||i,'revocation_selector',json_object('selector','alias-'||i,'wire','wire-'||i,'manifest','manifest','commitment','c-'||i) FROM budget_numbers;
 INSERT INTO group_message_tombstone_projection SELECT 'other','unrelated-'||i,'delete','device','all',1,'',1 FROM budget_numbers;
 DROP TABLE budget_numbers; COMMIT;")?;
         let source_before = std::fs::read(&path)?;
@@ -49,6 +51,14 @@ DROP TABLE budget_numbers; COMMIT;")?;
         )?;
         target.db.execute_batch("BEGIN IMMEDIATE;")?;
         prepare(&target.db)?;
+        assert_eq!(
+            target.db.query_row(
+                "SELECT count(*) FROM message_footprint WHERE message_id GLOB 'unrelated-*'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            2 * n
+        );
         for table in TABLES {
             assert!(!target.db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM temp.sqlite_master WHERE name=?1)",
@@ -80,6 +90,9 @@ INSERT INTO backup_selector_admission SELECT 'target','alias-'||i,'c-'||i,'keep'
 DROP TABLE budget_numbers;")?;
         measured = measure_candidates(target, &candidates)?;
         // Decisions are independent of unrelated state, including on the U26 broken index path.
+        for (hash, message, selector, commitment) in &candidates {
+            assert!(target.db.query_row("SELECT EXISTS(SELECT 1 FROM backup_reference_admission r JOIN backup_selector_admission s USING(side,selector,commitment) WHERE r.side='incoming' AND r.reference_hash=?1 AND r.message_id=?2 AND r.selector=?3 AND r.commitment=?4 AND s.decision='keep')", params![hash,message,selector,commitment], |r|r.get::<_,bool>(0))?);
+        }
         let rows =
             target.db.query_row("SELECT count(*) FROM backup_reference_admission", [], |r| {
                 r.get::<_, usize>(0)
