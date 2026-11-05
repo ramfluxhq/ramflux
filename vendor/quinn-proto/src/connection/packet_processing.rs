@@ -152,6 +152,7 @@ impl Connection {
                     remaining: None,
                     owner: self.raw_owner.clone(),
                     generation: 0,
+                    data_len: 0,
                 };
                 let Some(packet) = self.admit_control_packet(pending) else {
                     return;

@@ -1180,11 +1180,12 @@ impl Connection {
                 self.handle_decode(now, remote, ecn, first_decode);
                 // Decoding may migrate to a new path. Charge this datagram once
                 // to that path before returning for a parked head or tail.
-                self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
                 if let Some(pending) = self.pending_control.as_mut() {
+                    pending.data_len = data_len;
                     pending.remaining = remaining;
                     return;
                 }
+                self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
                 if self.control_resource_closed {
                     return;
                 }
@@ -2094,6 +2095,7 @@ impl Connection {
             remaining: None,
             owner: self.raw_owner.clone(),
             generation: 0,
+            data_len: 0,
         };
         let Some(packet) = self.admit_control_packet(pending) else {
             if let Some(pending) = self.pending_control.as_mut() {

@@ -493,12 +493,12 @@ fn parked_head_counts_whole_datagram_once_and_resume_uses_current_generation() {
     let before = conn.path.total_recvd;
     conn.handle_event(event);
     assert!(conn.pending_control.is_some());
-    assert_eq!(conn.path.total_recvd, before + len);
+    assert_eq!(conn.path.total_recvd, before);
     let wake = Arc::new(WakeCount(AtomicUsize::new(0)));
     let waker = Waker::from(wake);
     let mut cx = Context::from_waker(&waker);
     assert!(conn.poll_control_resume(&mut cx, now + Duration::from_millis(10)));
-    assert_eq!(conn.path.total_recvd, before + len);
+    assert_eq!(conn.path.total_recvd, before);
     assert_eq!(
         conn.control.as_ref().unwrap().lock().unwrap().revalidations,
         0
@@ -558,4 +558,46 @@ fn timer_credit_retry_uses_current_time_and_census_guard_records_overrun() {
     let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| guard.emit_reverse()));
     assert!(rejected.is_err());
     assert_eq!(state.lock().unwrap().overruns, 1);
+}
+
+
+#[test]
+fn bounded_migration_parked_head_credits_the_new_path_once() {
+    let mut pair = Pair::default();
+    let (client, server) = pair.connect();
+    pair.drive();
+    let now = pair.time;
+    let old_remote = pair.client.addr;
+    pair.client.addr.set_port(old_remote.port() + 1);
+    let new_remote = pair.client.addr;
+    let block = {
+        let conn = pair.server_conn_mut(server);
+        conn.set_control_credit_limits(ControlLimits { bytes: 4096, items: 4 }).unwrap();
+        match CreditState::reserve(conn.control.as_ref().unwrap(), Demand { forward: 4, reverse: 4 }) {
+            Admission::Reserved(r) => r,
+            _ => panic!("reserve"),
+        }
+    };
+    pair.client_conn_mut(client).ping();
+    pair.drive_client();
+    pair.drive_server();
+    let conn = pair.server_conn_mut(server);
+    assert_eq!(conn.remote_address(), old_remote);
+    let len = conn.pending_control.as_ref().unwrap().data_len as u64;
+    assert!(len > 0);
+    let before = conn.total_authed_packets;
+    let waker = Waker::from(Arc::new(WakeCount(AtomicUsize::new(0))));
+    let mut cx = Context::from_waker(&waker);
+    assert!(conn.poll_control_resume(&mut cx, now));
+    drop(block);
+    assert!(!conn.poll_control_resume(&mut cx, now));
+    assert_eq!(conn.remote_address(), new_remote);
+    assert_eq!(conn.path.total_recvd, len);
+    assert_eq!(conn.total_authed_packets, before + 1);
+    assert!(!conn.path.anti_amplification_blocked(1));
+    assert!(!conn.poll_control_resume(&mut cx, now));
+    assert_eq!(conn.path.total_recvd, len);
+    drop(conn.poll_endpoint_events());
+    pair.drive();
+    assert_eq!(pair.server_conn_mut(server).remote_address(), new_remote);
 }
