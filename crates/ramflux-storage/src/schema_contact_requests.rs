@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS contact_message_request_fence(sender_identity TEXT NO
 CREATE TABLE IF NOT EXISTS contact_message_fence_retention(sender_identity TEXT NOT NULL,message_id TEXT NOT NULL,until INTEGER NOT NULL,PRIMARY KEY(sender_identity,message_id));
 CREATE INDEX IF NOT EXISTS contact_message_fence_expiry ON contact_message_fence_retention(until);
 INSERT OR IGNORE INTO contact_message_fence_retention SELECT sender_identity,message_id,unixepoch()+604800 FROM contact_message_request_fence;
-DROP TRIGGER IF EXISTS contact_message_erasure_fence;
+DROP TRIGGER IF EXISTS main.contact_message_erasure_fence;
 CREATE TRIGGER contact_message_erasure_fence AFTER DELETE ON contact_message_request BEGIN
  INSERT OR IGNORE INTO contact_message_request_fence(sender_identity,message_id) VALUES(OLD.sender_identity,OLD.message_id);
  INSERT INTO contact_message_fence_retention VALUES(OLD.sender_identity,OLD.message_id,max(OLD.expires_at,OLD.created_at+604800))

@@ -256,7 +256,7 @@ fn mac_subkey_bundle_debug_is_redacted_and_secret_lifecycle_is_zeroizing() {
     assert_eq!(format!("{bundle:?}"), "MacSubkeyBundle([redacted])");
 }
 
-fn assert_deleted(db: &AccountDb) -> Result<(), StorageError> {
+pub(super) fn assert_deleted(db: &AccountDb) -> Result<(), StorageError> {
     assert!(db.message_is_deleted("erased")?);
     assert!(db.envelope_refers_to_deleted_message("envelope")?);
     assert!(!db.message_is_deleted("fresh")?);
@@ -280,7 +280,7 @@ fn assert_deleted(db: &AccountDb) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn seed_deleted(db: &AccountDb) -> Result<(), StorageError> {
+pub(super) fn seed_deleted(db: &AccountDb) -> Result<(), StorageError> {
     db.send_direct_message_with_metadata(
         "thread",
         "erased",
@@ -354,6 +354,7 @@ fn mac_subkey_bundle_snapshot_restore_round_trip() -> TestResult {
     for (label, expected) in LABELS.iter().zip(expected) {
         assert_eq!(current_mac(&copied.db, label, b"value")?, expected);
     }
+    super::restore_tests::assert_fresh_install(&root.join("fresh-installed"), &copied)?;
     drop(copied);
     drop(snapshot_db);
     drop(db);

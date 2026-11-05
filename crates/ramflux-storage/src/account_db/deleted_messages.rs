@@ -72,16 +72,27 @@ impl AccountDb {
         {
             return Ok(true);
         }
-        Ok(self.actor_state_exists(&self.deletion_marker_key(message)?)?
-            || self.actor_state_exists(&legacy_deletion_marker_key(message))?)
+        for mac in self.account_macs(b"ramflux/tombstone-key/v1", message.as_bytes())? {
+            if self.actor_state_exists(&format!("message/deleted/{mac}"))? {
+                return Ok(true);
+            }
+        }
+        self.actor_state_exists(&legacy_deletion_marker_key(message))
     }
 
     pub(crate) fn envelope_refers_to_deleted_message(
         &self,
         envelope: &str,
     ) -> Result<bool, StorageError> {
-        Ok(self.message_is_deleted(envelope)?
-            || self.actor_state_exists(&self.deleted_envelope_marker_key(envelope)?)?)
+        if self.message_is_deleted(envelope)? {
+            return Ok(true);
+        }
+        for mac in self.account_macs(b"ramflux/deleted-envelope/v1", envelope.as_bytes())? {
+            if self.actor_state_exists(&format!("message/deleted-envelope/{mac}"))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn persist_deleted_envelope_markers(&self, message: &str) -> Result<(), StorageError> {
@@ -148,6 +159,16 @@ impl AccountDb {
         let info = info.to_vec();
         let value = value.to_vec();
         self.connection.call(move |raw| Ok(super::mac_subkeys::current_mac(raw, &info, &value)))?
+    }
+
+    pub(super) fn account_macs(
+        &self,
+        info: &[u8],
+        value: &[u8],
+    ) -> Result<Vec<String>, StorageError> {
+        let info = info.to_vec();
+        let value = value.to_vec();
+        self.connection.call(move |raw| Ok(super::mac_subkeys::all_macs(raw, &info, &value)))?
     }
 
     fn deletion_hash(&self, message: &str) -> Result<String, StorageError> {

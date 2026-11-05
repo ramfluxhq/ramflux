@@ -69,12 +69,32 @@ impl AccountDb {
         Ok(format!("routed/seen/{}", self.account_mac(b"ramflux/replay-key/v1", &digest)?))
     }
 
+    /// Returns all retained selectors for replay lookup, current authority first.
+    /// # Errors
+    /// Returns storage errors or refuses malformed bundles.
+    pub fn routed_seen_keys(&self, canonical_envelope: &[u8]) -> Result<Vec<String>, StorageError> {
+        use sha2::Digest;
+        Ok(self
+            .account_macs(b"ramflux/replay-key/v1", &sha2::Sha256::digest(canonical_envelope))?
+            .into_iter()
+            .map(|mac| format!("routed/seen/{mac}"))
+            .collect())
+    }
+
     /// Extracts a canonical-envelope marker from a retained wire entry without identity lookup.
     ///
     /// # Errors
     /// Returns canonical encoding or key derivation errors.
     pub fn inbox_envelope_marker(&self, entry: &[u8]) -> Result<Option<String>, StorageError> {
-        canonical_envelope(entry)?.map(|(_, envelope)| self.routed_seen_key(&envelope)).transpose()
+        let Some((_, envelope)) = canonical_envelope(entry)? else {
+            return Ok(None);
+        };
+        for marker in self.routed_seen_keys(&envelope)? {
+            if self.actor_state_exists(&marker)? {
+                return Ok(Some(marker));
+            }
+        }
+        Ok(Some(self.routed_seen_key(&envelope)?))
     }
 
     /// Returns canonical bytes only when the entry names a deleted message.

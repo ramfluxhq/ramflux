@@ -39,12 +39,17 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<Option<(String, String)>, SdkError> {
         let db = self.account_db()?;
-        let marker =
-            db.routed_seen_key(&ramflux_protocol::canonical_json_bytes(&entry.envelope)?)?;
-        Ok(db
-            .load_actor_state::<serde_json::Value>(&marker)?
-            .and_then(|value| value["payload_hash"].as_str().map(str::to_owned))
-            .map(|hash| (marker, hash)))
+        for marker in
+            db.routed_seen_keys(&ramflux_protocol::canonical_json_bytes(&entry.envelope)?)?
+        {
+            if let Some(hash) = db
+                .load_actor_state::<serde_json::Value>(&marker)?
+                .and_then(|value| value["payload_hash"].as_str().map(str::to_owned))
+            {
+                return Ok(Some((marker, hash)));
+            }
+        }
+        Ok(None)
     }
 
     pub(super) fn persist_routed_seen(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {

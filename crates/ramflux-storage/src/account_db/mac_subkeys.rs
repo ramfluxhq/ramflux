@@ -33,6 +33,7 @@ type HmacSha256 = Hmac<Sha256>;
 struct Bundle {
     id: String,
     keys: Zeroizing<[u8; BUNDLE_BYTES]>,
+    current: bool,
 }
 
 impl std::fmt::Debug for Bundle {
@@ -51,7 +52,7 @@ impl Bundle {
             let output = keyed_hash(&prk, &[label, &[1]]);
             keys[index * 32..(index + 1) * 32].copy_from_slice(output.as_ref());
         }
-        Self { id: bundle_id(keys.as_ref()), keys }
+        Self { id: bundle_id(keys.as_ref()), keys, current: true }
     }
 
     fn mac(&self, label: &[u8], value: &[u8]) -> Result<String, StorageError> {
@@ -100,31 +101,21 @@ fn bundle_id(keys: &[u8]) -> String {
 }
 
 fn load(db: &Connection) -> Result<Bundle, StorageError> {
-    let valid: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM schema_migration WHERE schema_version=14 AND checksum=?1)",
-        [CHECKSUM],
-        |r| r.get(0),
-    )?;
-    if !valid {
-        return Err(StorageError::AuthorizationRejected);
-    }
-    let mut query =
-        db.prepare("SELECT bundle_id,subkeys,is_current FROM account_mac_bundle LIMIT 2")?;
-    let mut rows = query.query([])?;
-    let row = rows.next()?.ok_or(StorageError::AuthorizationRejected)?;
-    let id: String = row.get(0)?;
-    // Borrow SQLite's encrypted-page result; never create an ordinary secret Vec.
-    let bytes = row.get_ref(1)?.as_blob().map_err(|_| StorageError::AuthorizationRejected)?;
-    if bytes.len() != BUNDLE_BYTES || bundle_id(bytes) != id || row.get::<_, i64>(2)? != 1 {
-        return Err(StorageError::AuthorizationRejected);
-    }
-    let mut keys = Zeroizing::new([0; BUNDLE_BYTES]);
-    keys.copy_from_slice(bytes);
-    if rows.next()?.is_some() {
-        return Err(StorageError::AuthorizationRejected);
-    }
-    Ok(Bundle { id, keys })
+    merge::load_set(db, "main")?
+        .into_iter()
+        .find(|b| b.current)
+        .ok_or(StorageError::AuthorizationRejected)
 }
+
+pub(super) fn all_macs(
+    db: &Connection,
+    label: &[u8],
+    value: &[u8],
+) -> Result<Vec<String>, StorageError> {
+    merge::load_set(db, "main")?.iter().map(|b| b.mac(label, value)).collect()
+}
+
+pub(super) mod merge;
 
 pub(super) fn initialize(
     db: &mut Connection,
@@ -178,7 +169,7 @@ fn initialize_inner(
         if checksum != CHECKSUM || !exists {
             return Err(StorageError::AuthorizationRejected);
         }
-        load(db)?;
+        merge::validate(db)?;
         return Ok(());
     }
     // A half-initialized or malformed account must never acquire replacement authority.
@@ -216,3 +207,6 @@ pub(super) fn current_mac(
 
 #[cfg(test)]
 pub(super) mod tests;
+
+#[cfg(test)]
+mod restore_tests;

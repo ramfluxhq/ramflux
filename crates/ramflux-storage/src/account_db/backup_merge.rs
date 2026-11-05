@@ -37,6 +37,7 @@ fn skip_merge_table(table: &str) -> bool {
     matches!(
         table,
         "account_mac_bundle"
+            | "account_mac_marker_bundle"
             | "account_erasure_generation"
             | "message_footprint"
             | "message_copy_binding"
@@ -100,9 +101,17 @@ impl BackupDatabase {
         Ok(())
     }
     fn attach(&self, path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
+        // Attaching an archive is read-only even when the enclosing merge writes main.
+        let absolute = std::fs::canonicalize(path)?;
+        let mut uri = String::from("file:");
+        for byte in absolute.as_os_str().as_encoded_bytes() {
+            use std::fmt::Write as _;
+            write!(&mut uri, "%{byte:02X}").map_err(|_| StorageError::AuthorizationRejected)?;
+        }
+        uri.push_str("?mode=ro");
         self.db.execute(
             &format!("ATTACH DATABASE ?1 AS incoming KEY \"x'{}'\"", key.sqlcipher_hex()),
-            params![path.to_string_lossy()],
+            params![uri],
         )?;
         Ok(())
     }
@@ -190,6 +199,7 @@ impl BackupDatabase {
         let result = (|| {
             let tables = self.incoming_tables()?;
             self.begin_message_merge()?;
+            let marker_ids = super::mac_subkeys::merge::prepare(&self.db)?;
             if candidate {
                 super::backup_selector_admission::prepare(&self.db)?;
                 after_capture(&self.db)?;
@@ -270,6 +280,7 @@ impl BackupDatabase {
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;
             self.link_imported_message_footprints(key)?;
+            super::mac_subkeys::merge::finish(&self.db, marker_ids)?;
             self.finish_merge()?;
             Ok(report)
         })();
