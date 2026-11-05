@@ -504,3 +504,6 @@ fn fresh_restrictions(client: &mut RamfluxClient) -> TestResult {
         )?;
     Ok(())
 }
+
+#[path = "selector_review_r2.rs"]
+mod review_r2;

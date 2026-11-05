@@ -463,3 +463,6 @@ fn replace(db: &AccountDb) -> Result<String, StorageError> {
 
 #[path = "history_review_tests.rs"]
 mod review_probes;
+
+#[path = "history_pr10_review_tests.rs"]
+mod pr10_review_probes;
