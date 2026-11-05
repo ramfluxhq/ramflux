@@ -138,6 +138,9 @@ impl super::Connection {
 
 
 
+    /// Force an ordinary peer ACK after a controlled ACK in the driver race regression.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_force_ack(&mut self){self.spaces[super::SpaceId::Data].pending_acks.set_immediate_ack_required();}
     /// Actual retained pending-ACK heap backing across packet spaces.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_ack_storage(&self)->usize{self.spaces.iter().map(|s|s.pending_acks.ranges().heap_capacity_bytes()).sum()}

@@ -219,3 +219,22 @@ cover all three packet-space builder boundaries and transfers, key discard, a re
 Retry handshake and peer APPLICATION_ERROR conversion without ordinary CRYPTO.
 The original `metadata_credit_exhaustion_propagates_resource_limit` remains the
 next PR's complete twelve-class receive/mixed/handshake/waiter matrix ownership.
+
+
+### Send-metadata fixture ordering and committed ownership
+
+The disjoint send-ACK range fixture discards ordinary peer transmissions at the
+in-memory socket send boundary while admitting its controlled ACK injections.
+Clearing queued datagrams alone did not exclude a later cumulative ACK from the
+peer driver. A regression explicitly schedules that late ordinary ACK after each
+controlled ACK and checks actual wire delivery remains unchanged. Wait failures
+report the originating condition location; wait durations and protocol recovery
+parameters are unchanged.
+
+PTO transfer now reserves from a borrowed sent owner before taking it, so refusal
+retains the committed box and children. Packet-populate refusal truncates only the
+current unfinished packet, returns any completed datagram prefix with the correct
+GSO count, and sends terminal close on the next poll. Focused protocol tests assert
+actual retained owners and completed prefix bytes/records independently of credit
+counters. The earlier loss/retransmit module relocations are cohesive responsibility
+extractions; their upstream source/deltas remain explicitly recorded.

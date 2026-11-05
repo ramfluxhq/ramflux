@@ -937,9 +937,14 @@ impl Connection {
             if self.metadata_exhausted() {
                 // No partially constructed packet is emitted after a metadata refusal.
                 drop(sent);
-                buf.clear();
+                let packet_start=builder.partial_encode.start;
+                buf.truncate(packet_start);
+                builder_storage=None;
+                if packet_start==datagram_start {num_datagrams-=1;}
                 self.resource_exhausted(now);
-                return self.poll_transmit(now,max_datagrams,buf);
+                // Finished packets already have sent records. Return that prefix;
+                // the next poll uses the terminal reservation for CONNECTION_CLOSE.
+                break;
             }
 
             // ACK-only packets should only be sent when explicitly allowed. If we write them due to

@@ -117,8 +117,11 @@ impl Retransmits {
         self.retire_cids.reserve(rhs.retire_cids.len())?;self.new_tokens.reserve(rhs.new_tokens.len())?;
         Ok(())
     }
+    pub(super) fn reserve_thin(&mut self,rhs:&ThinRetransmits)->Result<(),ResourceExhausted>{
+        if let Some(boxed)=rhs.retransmits.as_ref(){self.reserve_merge(&boxed[0].value)?;}Ok(())
+    }
     pub(super) fn try_merge_thin(&mut self,mut rhs:ThinRetransmits)->Result<(),ResourceExhausted>{
-        if let Some(boxed)=rhs.retransmits.as_ref(){self.reserve_merge(&boxed[0].value)?;}
+        self.reserve_thin(&rhs)?;
         if let Some(mut boxed)=rhs.retransmits.take(){
             let charge=boxed[0].charge.take();
             let value=std::mem::take(&mut boxed[0].value);

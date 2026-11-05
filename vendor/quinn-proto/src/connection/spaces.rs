@@ -135,6 +135,7 @@ impl PacketSpace {
             if !packet.retransmits.is_empty(streams) {
                 // Remove retransmitted data from the old packet so we don't end up retransmitting
                 // it *again* even if the copy we're sending now gets acknowledged.
+                if self.pending.reserve_thin(&packet.retransmits).is_err(){return;}
                 if self.pending.try_merge_thin(mem::take(&mut packet.retransmits)).is_err(){return;}
                 return;
             }
