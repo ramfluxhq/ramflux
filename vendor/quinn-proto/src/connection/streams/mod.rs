@@ -142,12 +142,7 @@ impl RecvStream<'_> {
         let stream = get_or_insert_recv(self.state.stream_receive_window)(entry.get_mut());
 
         let (read_credits, stop_sending) = stream.stop()?;
-        if stop_sending.should_transmit() {
-            self.pending.stop_sending.push(frame::StopSending {
-                id: self.id,
-                error_code,
-            });
-        }
+        if stop_sending.should_transmit() && self.pending.stop_sending.push(frame::StopSending {id:self.id,error_code}).is_err(){return Err(ClosedStream{_private:()});}
 
         // We need to keep stopped streams around until they're finished or reset so we can update
         // connection-level flow control to account for discarded data. Otherwise, we can discard
@@ -278,7 +273,7 @@ impl<'a> SendStream<'a> {
             Err(WriteError::Blocked) => {
                 if stream.data_blocked_limit != Some(stream.max_data) {
                     stream.data_blocked_limit = Some(stream.max_data);
-                    self.pending.stream_data_blocked.insert(self.id);
+                    if self.pending.stream_data_blocked.insert(self.id).is_err(){return Err(WriteError::ClosedStream);}
                 }
                 return Err(WriteError::Blocked);
             }
@@ -348,7 +343,7 @@ impl<'a> SendStream<'a> {
         // credit based on the final offset communicated in the RESET_STREAM frame we send.
         self.state.buffered_data -= stream.pending.buffered();
         stream.reset();
-        self.pending.reset_stream.push((self.id, error_code));
+        if self.pending.reset_stream.push((self.id,error_code)).is_err(){return Err(ClosedStream{_private:()});}
 
         // Don't reopen an already-closed stream we haven't forgotten yet
         Ok(())

@@ -466,10 +466,7 @@ impl StreamsState {
                 None => continue,
             };
             trace!(stream = %id, "RESET_STREAM");
-            retransmits
-                .get_or_create()
-                .reset_stream
-                .push((id, error_code));
+            if (match retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return}).reset_stream.push((id,error_code)).is_err(){return;}
             frame::ResetStream {
                 id,
                 error_code,
@@ -494,7 +491,7 @@ impl StreamsState {
             // can't be relied upon regardless.
             trace!(stream = %frame.id, "STOP_SENDING");
             frame.encode(buf);
-            retransmits.get_or_create().stop_sending.push(frame);
+            if (match retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return}).stop_sending.push(frame).is_err(){return;}
             stats.stop_sending += 1;
         }
 
@@ -515,7 +512,7 @@ impl StreamsState {
                 self.sent_max_data = max;
             }
 
-            retransmits.get_or_create().max_data = true;
+            (match retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return}).max_data = true;
             buf.write(frame::FrameType::MAX_DATA);
             buf.write(max);
             stats.max_data += 1;
@@ -540,7 +537,7 @@ impl StreamsState {
             if !rs.can_send_flow_control() {
                 continue;
             }
-            retransmits.get_or_create().max_stream_data.insert(id);
+            if (match retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return}).max_stream_data.insert(id).is_err(){return;}
 
             let (max, _) = rs.max_stream_data(self.stream_receive_window);
             rs.record_sent_max_stream_data(max);
@@ -559,7 +556,7 @@ impl StreamsState {
             }
 
             pending.max_stream_id[dir as usize] = false;
-            retransmits.get_or_create().max_stream_id[dir as usize] = true;
+            (match retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return}).max_stream_id[dir as usize] = true;
             self.sent_max_remote[dir as usize] = self.max_remote[dir as usize];
             trace!(
                 value = self.max_remote[dir as usize],
@@ -581,7 +578,7 @@ impl StreamsState {
             pending.data_blocked = false;
             // The peer may have raised the limit since the frame was queued
             if self.can_send_data_blocked() {
-                retransmits.get_or_create().data_blocked = true;
+                (match retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return}).data_blocked = true;
                 trace!(limit = self.max_data, "DATA_BLOCKED");
                 buf.write(frame::FrameType::DATA_BLOCKED);
                 buf.write_var(self.max_data);
@@ -598,7 +595,7 @@ impl StreamsState {
             let Some(limit) = self.stream_data_blocked_limit(id) else {
                 continue;
             };
-            retransmits.get_or_create().stream_data_blocked.insert(id);
+            if (match retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return}).stream_data_blocked.insert(id).is_err(){return;}
 
             trace!(stream = %id, limit, "STREAM_DATA_BLOCKED");
             buf.write(frame::FrameType::STREAM_DATA_BLOCKED);
@@ -1896,7 +1893,7 @@ mod tests {
         stream.write(b"hello").unwrap();
         stream.reset(0u32.into()).unwrap();
 
-        assert_eq!(pending.reset_stream, &[(id, 0u32.into())]);
+        assert_eq!(&*pending.reset_stream, &[(id, 0u32.into())]);
         assert!(!server.can_send_stream_data());
     }
 

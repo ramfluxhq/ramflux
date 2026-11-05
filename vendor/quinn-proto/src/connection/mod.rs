@@ -64,6 +64,10 @@ mod loss_detection;
 pub(crate) mod metadata_vec;
 mod metadata_map;
 mod metadata_ranges;
+mod metadata_collections;
+mod metadata_retransmits;
+#[cfg(test)]
+mod metadata_send_tests;
 pub use metadata_credit::{MetadataClass, MetadataStats, ResourceExhausted};
 #[cfg(feature="__control-test")]
 pub use metadata_credit::MetadataProbe;
@@ -525,6 +529,7 @@ impl Connection {
             let request_immediate_ack =
                 space == SpaceId::Data && self.peer_supports_ack_frequency();
             self.spaces[space].maybe_queue_probe(request_immediate_ack, &self.streams);
+            if self.metadata_exhausted(){self.resource_exhausted(now);break;}
         }
 
         // Check whether we need to send a close message
@@ -1236,9 +1241,9 @@ impl Connection {
             }
             NewIdentifiers(ids, now, _credit) => {
                 self.local_cid_state.new_cids(&ids, now);
-                ids.into_iter().rev().for_each(|frame| {
-                    self.spaces[SpaceId::Data].pending.new_cids.push(frame);
-                });
+                for frame in ids.into_iter().rev(){
+                    if self.spaces[SpaceId::Data].pending.new_cids.push(frame).is_err(){self.resource_exhausted(now);return;}
+                }
                 // Update Timer::PushNewCid
                 if self.timers.get(Timer::PushNewCid).is_none_or(|x| x <= now) {
                     self.reset_cid_retirement();
@@ -2146,10 +2151,7 @@ impl Connection {
             }
             self.spaces[space].crypto_offset += outgoing.len() as u64;
             trace!("wrote {} {:?} CRYPTO bytes", outgoing.len(), space);
-            self.spaces[space].pending.crypto.push_back(frame::Crypto {
-                offset,
-                data: outgoing,
-            });
+            if self.spaces[space].pending.crypto.push_back(frame::Crypto {offset,data:outgoing}).is_err(){return;}
         }
     }
 
@@ -2289,19 +2291,20 @@ impl Connection {
                     crypto_offset: client_hello.len() as u64,
                     ..PacketSpace::new(now)
                 };
-                self.spaces[SpaceId::Initial]
+                self.spaces[SpaceId::Initial].pending=Retransmits::with_metadata(self.metadata.clone(),metadata_credit::MetadataClass::PendingRetransmits);
+                if self.spaces[SpaceId::Initial]
                     .pending
                     .crypto
                     .push_back(frame::Crypto {
                         offset: 0,
                         data: client_hello,
-                    });
+                    }).is_err(){self.resource_exhausted(now);return Ok(());}
 
                 // Retransmit all 0-RTT data
                 let zero_rtt = mem::take(&mut self.spaces[SpaceId::Data].sent_packets);
                 for info in zero_rtt.into_values() {
                     self.remove_in_flight(&info);
-                    self.spaces[SpaceId::Data].pending |= info.retransmits;
+                    if self.spaces[SpaceId::Data].pending.try_merge_thin(info.retransmits).is_err(){self.resource_exhausted(now);return Ok(());}
                 }
                 self.streams.retransmit_all_for_0rtt();
 
@@ -2360,7 +2363,7 @@ impl Connection {
                             self.streams.zero_rtt_rejected();
 
                             // Discard already-queued frames
-                            self.spaces[SpaceId::Data].pending = Retransmits::default();
+                            self.spaces[SpaceId::Data].pending = Retransmits::with_metadata(self.metadata.clone(),metadata_credit::MetadataClass::PendingRetransmits);
 
                             // Discard 0-RTT packets
                             let sent_packets =
@@ -2709,6 +2712,7 @@ impl Connection {
                         Ok(None) => {}
                         Ok(Some((retired, reset_token))) => {
                             self.spaces[SpaceId::Data].pending.retire_cids(retired)?;
+                            if self.metadata_exhausted(){return Ok(());}
                             self.set_reset_token(reset_token);
                         }
                         Err(InsertError::ExceedsLimit) => {
@@ -2722,6 +2726,7 @@ impl Connection {
                             self.spaces[SpaceId::Data]
                                 .pending
                                 .retire_cids(frame.sequence..frame.sequence.saturating_add(1))?;
+                            if self.metadata_exhausted(){return Ok(());}
                             continue;
                         }
                     };
@@ -2730,6 +2735,7 @@ impl Connection {
                         // We're a server still using the initial remote CID for the client, so
                         // let's switch immediately to enable clientside stateless resets.
                         self.update_rem_cid();
+                        if self.metadata_exhausted(){return Ok(());}
                     }
                 }
                 Frame::NewToken(NewToken { token }) => {
@@ -2832,6 +2838,7 @@ impl Connection {
             self.migrate(now, remote);
             // Break linkability, if possible
             self.update_rem_cid();
+            if self.metadata_exhausted(){return Ok(());}
             self.spin = false;
         }
 
@@ -2883,6 +2890,7 @@ impl Connection {
     /// Handle a change in the local address, i.e. an active migration
     pub fn local_address_changed(&mut self) {
         self.update_rem_cid();
+        if self.metadata_exhausted(){return;}
         self.ping();
     }
 
@@ -2894,10 +2902,7 @@ impl Connection {
         };
 
         // Retire the current remote CID and any CIDs we had to skip.
-        self.spaces[SpaceId::Data]
-            .pending
-            .retire_cids
-            .extend(retired);
+        for cid in retired {if self.spaces[SpaceId::Data].pending.retire_cids.push(cid).is_err(){return;}}
         self.set_reset_token(reset_token);
     }
 
@@ -2944,7 +2949,7 @@ impl Connection {
         // HANDSHAKE_DONE
         if !is_0rtt && mem::replace(&mut space.pending.handshake_done, false) {
             buf.write(frame::FrameType::HANDSHAKE_DONE);
-            sent.retransmits.get_or_create().handshake_done = true;
+            (match sent.retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return sent}).handshake_done = true;
             // This is just a u8 counter and the frame is typically just sent once
             self.stats.frame_tx.handshake_done =
                 self.stats.frame_tx.handshake_done.saturating_add(1);
@@ -3003,7 +3008,7 @@ impl Connection {
             }
             .encode(buf);
 
-            sent.retransmits.get_or_create().ack_frequency = true;
+            (match sent.retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return sent}).ack_frequency = true;
 
             self.ack_frequency.ack_frequency_sent(pn, max_ack_delay);
             self.stats.frame_tx.ack_frequency += 1;
@@ -3071,10 +3076,10 @@ impl Connection {
             );
             truncated.encode(buf);
             self.stats.frame_tx.crypto += 1;
-            sent.retransmits.get_or_create().crypto.push_back(truncated);
+            if (match sent.retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return sent}).crypto.push_back(truncated).is_err(){return sent;}
             if !frame.data.is_empty() {
                 frame.offset += len as u64;
-                space.pending.crypto.push_front(frame);
+                if space.pending.crypto.push_front(frame).is_err(){return sent;}
             }
         }
 
@@ -3086,6 +3091,7 @@ impl Connection {
                 &mut self.stats.frame_tx,
                 max_size,
             );
+            if self.metadata.as_ref().is_some_and(|c|c.stats().exhausted){return sent;}
         }
 
         // NEW_CONNECTION_ID
@@ -3106,7 +3112,7 @@ impl Connection {
                 reset_token: issued.reset_token,
             }
             .encode(buf);
-            sent.retransmits.get_or_create().new_cids.push(issued);
+            if (match sent.retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return sent}).new_cids.push(issued).is_err(){return sent;}
             self.stats.frame_tx.new_connection_id += 1;
         }
 
@@ -3119,7 +3125,7 @@ impl Connection {
             trace!(sequence = seq, "RETIRE_CONNECTION_ID");
             buf.write(frame::FrameType::RETIRE_CONNECTION_ID);
             buf.write_var(seq);
-            sent.retransmits.get_or_create().retire_cids.push(seq);
+            if (match sent.retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return sent}).retire_cids.push(seq).is_err(){return sent;}
             self.stats.frame_tx.retire_connection_id += 1;
         }
 
@@ -3167,15 +3173,12 @@ impl Connection {
             };
 
             if buf.len() + new_token.size() >= max_size {
-                space.pending.new_tokens.push(remote_addr);
+                if space.pending.new_tokens.push(remote_addr).is_err(){return sent;}
                 break;
             }
 
             new_token.encode(buf);
-            sent.retransmits
-                .get_or_create()
-                .new_tokens
-                .push(remote_addr);
+            if (match sent.retransmits.get_or_create(self.metadata.clone()){Ok(v)=>v,Err(_)=>return sent}).new_tokens.push(remote_addr).is_err(){return sent;}
             self.stats.frame_tx.new_token += 1;
         }
 
@@ -3535,7 +3538,7 @@ impl Connection {
         let new_tokens = &mut self.spaces[SpaceId::Data as usize].pending.new_tokens;
         new_tokens.clear();
         for _ in 0..server_config.validation_token.sent {
-            new_tokens.push(self.path.remote);
+            if new_tokens.push(self.path.remote).is_err(){return;}
         }
     }
 }

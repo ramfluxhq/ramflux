@@ -1,20 +1,17 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::{
     cmp,
-    collections::VecDeque,
     mem,
-    ops::{Bound, Index, IndexMut, Range},
+    ops::{Bound, Index, IndexMut},
 };
 
 use rand::{Rng, RngExt};
-use rustc_hash::FxHashSet;
 use tracing::trace;
 
 use super::assembler::Assembler;
 use crate::{
-    Dir, Duration, Instant, SocketAddr, StreamId, TransportError, VarInt, cid_queue::CidQueue,
+    Duration, Instant, TransportError,
     connection::StreamsState, crypto::Keys, frame, packet::SpaceId, range_set::ArrayRangeSet,
-    shared::IssuedCid,
 };
 
 pub(super) struct PacketSpace {
@@ -138,7 +135,7 @@ impl PacketSpace {
             if !packet.retransmits.is_empty(streams) {
                 // Remove retransmitted data from the old packet so we don't end up retransmitting
                 // it *again* even if the copy we're sending now gets acknowledged.
-                self.pending |= mem::take(&mut packet.retransmits);
+                if self.pending.try_merge_thin(mem::take(&mut packet.retransmits)).is_err(){return;}
                 return;
             }
         }
@@ -304,158 +301,9 @@ pub(super) struct SentPacket {
     pub(super) stream_frames: frame::StreamMetaVec,
 }
 
-/// Retransmittable data queue
-#[allow(unreachable_pub)] // fuzzing only
-#[derive(Debug, Default, Clone)]
-pub struct Retransmits {
-    pub(super) max_data: bool,
-    pub(super) data_blocked: bool,
-    pub(super) max_stream_id: [bool; 2],
-    pub(super) reset_stream: Vec<(StreamId, VarInt)>,
-    pub(super) stop_sending: Vec<frame::StopSending>,
-    pub(super) max_stream_data: FxHashSet<StreamId>,
-    pub(super) stream_data_blocked: FxHashSet<StreamId>,
-    pub(super) crypto: VecDeque<frame::Crypto>,
-    pub(super) new_cids: Vec<IssuedCid>,
-    pub(super) retire_cids: Vec<u64>,
-    pub(super) ack_frequency: bool,
-    pub(super) handshake_done: bool,
-    /// For each enqueued NEW_TOKEN frame, a copy of the path's remote address
-    ///
-    /// There are 2 reasons this is unusual:
-    ///
-    /// - If the path changes, NEW_TOKEN frames bound for the old path are not retransmitted on the
-    ///   new path. That is why this field stores the remote address: so that ones for old paths
-    ///   can be filtered out.
-    /// - If a token is lost, a new randomly generated token is re-transmitted, rather than the
-    ///   original. This is so that if both transmissions are received, the client won't risk
-    ///   sending the same token twice. That is why this field does _not_ store any actual token.
-    ///
-    /// It is true that a QUIC endpoint will only want to effectively have NEW_TOKEN frames
-    /// enqueued for its current path at a given point in time. Based on that, we could conceivably
-    /// change this from a vector to an `Option<(SocketAddr, usize)>` or just a `usize` or
-    /// something. However, due to the architecture of Quinn, it is considerably simpler to not do
-    /// that; consider what such a change would mean for implementing `BitOrAssign` on Self.
-    pub(super) new_tokens: Vec<SocketAddr>,
-}
-
-impl Retransmits {
-    pub(super) fn retire_cids(&mut self, cids: Range<u64>) -> Result<(), TransportError> {
-        // We don't bother counting in-flight frames because those are bounded by congestion control.
-        let num = cids.end.saturating_sub(cids.start);
-        if (self.retire_cids.len() as u64).saturating_add(num) > Self::MAX_PENDING_RETIRED_CIDS {
-            return Err(TransportError::CONNECTION_ID_LIMIT_ERROR(
-                "queued too many retired CIDs",
-            ));
-        }
-
-        self.retire_cids.extend(cids);
-        Ok(())
-    }
-
-    pub(super) fn is_empty(&self, streams: &StreamsState) -> bool {
-        !self.max_data
-            && !(self.data_blocked && streams.can_send_data_blocked())
-            && !self.max_stream_id.into_iter().any(|x| x)
-            && self.reset_stream.is_empty()
-            && self.stop_sending.is_empty()
-            && self
-                .max_stream_data
-                .iter()
-                .all(|&id| !streams.can_send_flow_control(id))
-            && self
-                .stream_data_blocked
-                .iter()
-                .all(|&id| streams.stream_data_blocked_limit(id).is_none())
-            && self.crypto.is_empty()
-            && self.new_cids.is_empty()
-            && self.retire_cids.is_empty()
-            && !self.ack_frequency
-            && !self.handshake_done
-            && self.new_tokens.is_empty()
-    }
-
-    /// Ensure `pending_retired` cannot grow without bound
-    ///
-    /// Limit is somewhat arbitrary but very permissive.
-    const MAX_PENDING_RETIRED_CIDS: u64 = CidQueue::LEN as u64 * 10;
-}
-
-impl ::std::ops::BitOrAssign for Retransmits {
-    fn bitor_assign(&mut self, rhs: Self) {
-        // We reduce in-stream head-of-line blocking by queueing retransmits before other data for
-        // STREAM and CRYPTO frames.
-        self.max_data |= rhs.max_data;
-        self.data_blocked |= rhs.data_blocked;
-        for dir in Dir::iter() {
-            self.max_stream_id[dir as usize] |= rhs.max_stream_id[dir as usize];
-        }
-        self.reset_stream.extend_from_slice(&rhs.reset_stream);
-        self.stop_sending.extend_from_slice(&rhs.stop_sending);
-        self.max_stream_data.extend(&rhs.max_stream_data);
-        self.stream_data_blocked.extend(&rhs.stream_data_blocked);
-        for crypto in rhs.crypto.into_iter().rev() {
-            self.crypto.push_front(crypto);
-        }
-        self.new_cids.extend(&rhs.new_cids);
-        self.retire_cids.extend(rhs.retire_cids);
-        self.ack_frequency |= rhs.ack_frequency;
-        self.handshake_done |= rhs.handshake_done;
-        self.new_tokens.extend_from_slice(&rhs.new_tokens);
-    }
-}
-
-impl ::std::ops::BitOrAssign<ThinRetransmits> for Retransmits {
-    fn bitor_assign(&mut self, rhs: ThinRetransmits) {
-        if let Some(retransmits) = rhs.retransmits {
-            self.bitor_assign(*retransmits)
-        }
-    }
-}
-
-impl ::std::iter::FromIterator<Self> for Retransmits {
-    fn from_iter<T>(iter: T) -> Self
-    where
-        T: IntoIterator<Item = Self>,
-    {
-        let mut result = Self::default();
-        for packet in iter {
-            result |= packet;
-        }
-        result
-    }
-}
-
-/// A variant of `Retransmits` which only allocates storage when required
-#[derive(Debug, Default, Clone)]
-pub(super) struct ThinRetransmits {
-    retransmits: Option<Box<Retransmits>>,
-}
-
-impl ThinRetransmits {
-    /// Returns `true` if no retransmits are necessary
-    pub(super) fn is_empty(&self, streams: &StreamsState) -> bool {
-        match &self.retransmits {
-            Some(retransmits) => retransmits.is_empty(streams),
-            None => true,
-        }
-    }
-
-    /// Returns a reference to the retransmits stored in this box
-    pub(super) fn get(&self) -> Option<&Retransmits> {
-        self.retransmits.as_deref()
-    }
-
-    /// Returns a mutable reference to the stored retransmits
-    ///
-    /// This function will allocate a backing storage if required.
-    pub(super) fn get_or_create(&mut self) -> &mut Retransmits {
-        if self.retransmits.is_none() {
-            self.retransmits = Some(Box::default());
-        }
-        self.retransmits.as_deref_mut().unwrap()
-    }
-}
+#[allow(unreachable_pub)] // fuzzing re-export
+pub use super::metadata_retransmits::Retransmits;
+pub(super) use super::metadata_retransmits::ThinRetransmits;
 
 /// RFC4303-style sliding window packet number deduplicator.
 ///

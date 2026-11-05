@@ -168,9 +168,11 @@ unblocking each negotiation/Retry/refusal case.
 
 The shared metadata ledger reserves `align_up(capacity,64)+64` before actual backing
 growth; old and new allocations overlap until the old backing is destroyed. The
-ledger is not doubled again and has no per-class item caps. Seven allocation
+ledger is not doubled again and has no per-class item caps. Nine send-side allocation
 classes now have dormant hooks: send-segment deque backing, STREAM frame metadata,
-packet record tables/builders, both send range sets, PendingAcks and ACK/loss scratch.
+packet record tables/builders, boxed retransmit owners and their eight child
+collections, pending retransmit storage/transfers, both send range sets, PendingAcks
+and ACK/loss scratch.
 Unique leases follow backing through packet retirement and owned iteration; empty
 retained capacity stays charged. Default mode retains the upstream tree containers.
 
@@ -191,10 +193,29 @@ STREAM packet numbers, observes two disjoint committed ranges and refusal of the
 third, then Close/Drained and retained-owner release. Range units compare the upstream
 tree's union/order and check both range sets sharing one credit and actual capacity.
 
-Five classes remain unimplemented: boxed retransmit owners and all allocating
-children, pending retransmit storage/transfers, STREAM receive assemblers, CRYPTO
+Three receive classes remain unimplemented: STREAM receive assemblers, CRYPTO
 receive assemblers and unordered receive history. Full receive per-packet preflight,
 mixed exhaustion/waiter matrix, production writer, supported envelope and allocation
-certificates remain unfinished. Production metadata configuration is intentionally
-absent; only the rejected-from-product `__control-test` feature instantiates this
-partial ledger. No startup certificate, activation or profile arithmetic changes.
+certificates belong to the next PR. Production metadata configuration remains absent;
+only the rejected-from-product `__control-test` feature instantiates these dormant
+hooks. No startup certificate, activation or profile arithmetic changes.
+
+The send-only dependency oracle is
+`rawq_tests::send_metadata_credit_covers_allocation_families`. The optional
+retransmit owner remains one thin pointer in a packet record. Its actual box and
+all eight allocating child collections are reserved before growth. Bounded set
+storage uses an allocation-visible vector with duplicate suppression; default mode
+retains the upstream hash set. Destination transfer capacity is reserved while the
+source box and child allocations remain charged. Owned iterators retain backing
+credit after dequeue; destroying the actual allocation returns its lease. Fallible
+producers/builders/loss/PTO/Retry and public/drop reset/stop paths stop on failure.
+
+The real Tokio oracle covers box/child refusal before RESET reaches the peer,
+pending-producer and receiver-drop refusal, and refused plus healthy PTO transfers
+with actual capacity, wire counts, ACK and destruction observations. Dependency units
+exercise all eight children in both owner/pending roles, exact-full/refused growth,
+box layout, source/destination overlap and owned iterator release. Protocol tests
+cover all three packet-space builder boundaries and transfers, key discard, a real
+Retry handshake and peer APPLICATION_ERROR conversion without ordinary CRYPTO.
+The original `metadata_credit_exhaustion_propagates_resource_limit` remains the
+next PR's complete twelve-class receive/mixed/handshake/waiter matrix ownership.

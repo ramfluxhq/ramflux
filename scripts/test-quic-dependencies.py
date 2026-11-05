@@ -38,6 +38,7 @@ for package in ("quinn", "quinn-proto"):
             "rawq_tests::control_credit_preserves_cid_close_and_drained",
             "rawq_tests::stateless_responses_bound_allocations_and_sender_tasks",
             "rawq_tests::metadata_credit_exhaustion_propagates_resource_limit",
+            "rawq_tests::send_metadata_credit_covers_allocation_families",
         }
         if missing := required.difference(tests):
             raise SystemExit(f"{package}: missing required raw/control/response/metadata tests: {sorted(missing)}")

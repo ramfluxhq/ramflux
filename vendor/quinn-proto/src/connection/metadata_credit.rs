@@ -53,7 +53,7 @@ pub struct MetadataStats {
     pub allocations: u64,
     /// Whether a producer requires terminal resource-close.
     pub exhausted: bool,
-    /// Family of the most recent refused growth.
+    /// Family of the first refused growth.
     pub failed_class: Option<MetadataClass>,
 }
 #[derive(Debug)]
@@ -99,16 +99,37 @@ impl MetadataProbe {
 impl super::Connection {
     /// Whether a fallible metadata producer has requested the terminal adapter.
     pub fn metadata_exhausted(&self) -> bool { self.metadata.as_ref().is_some_and(|m|m.stats().exhausted) }
-    /// Configure the partial send-segment hook in dependency tests only.
-    /// Other metadata classes have no activation API or certificate yet.
+    /// Configure dormant send metadata hooks in dependency tests only.
+    /// Receive classes remain unimplemented; no production activation or certificate.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_limit(&mut self, limit: usize) -> MetadataProbe {
         assert!(self.metadata.is_none());
         assert_eq!(self.streams.metadata_send_storage().0,0,"test hooks must precede send backing allocation");
         let credit=MetadataCredit::new(limit);
+        for space in self.spaces.iter_mut(){
+            if space.pending.is_empty(&self.streams){space.pending=super::spaces::Retransmits::with_metadata(Some(credit.clone()),MetadataClass::PendingRetransmits);}
+            else {let _=space.pending.bind(Some(credit.clone()),MetadataClass::PendingRetransmits);}
+        }
         self.streams.metadata=Some(credit.clone());
         self.metadata=Some(credit.clone());
         MetadataProbe(credit)
+    }
+    /// Actual pending descriptor backing across packet spaces, independent of the ledger.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_pending_storage(&self)->usize{self.spaces.iter().map(|s|s.pending.capacity_bytes()).sum()}
+    /// Actual sent boxed-owner and child backing sizes.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_retransmit_storage(&self)->(usize,usize){self.spaces.iter().flat_map(|s|s.sent_packets.values()).map(|p|p.retransmits.storage()).fold((0,0),|(a,b),(c,d)|(a+c,b+d))}
+    /// Layout-derived optional owner allocation charge.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_box_charge(&self)->usize{super::spaces::ThinRetransmits::box_charge()}
+    /// Destroy empty pending reset backing before forcing a real PTO transfer.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_release_empty_pending_reset(&mut self){
+        let pending=&mut self.spaces[super::SpaceId::Data].pending;
+        assert!(pending.reset_stream.is_empty());
+        pending.reset_stream=Default::default();
+        pending.reset_stream.bind(self.metadata.clone(),MetadataClass::PendingRetransmits).unwrap();
     }
     /// Actual retained send deque capacity and queued byte offsets, independent of credit counters.
     #[cfg(feature="__control-test")]

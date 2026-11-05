@@ -479,6 +479,18 @@ async fn stateless_responses_bound_allocations_and_sender_tasks() { stateless_re
 
 #[tokio::test]
 async fn metadata_credit_exhaustion_propagates_resource_limit() {
+    send_metadata_cases().await;
+}
+
+#[tokio::test]
+async fn send_metadata_credit_covers_allocation_families(){
+    metadata_retransmit_box_and_reset_children_refuse_before_wire().await;
+    send_metadata_cases().await;
+    metadata_pending_retransmit_transfer_refuses_in_real_pto().await;
+    metadata_receiver_drop_propagates_pending_refusal().await;
+}
+
+async fn send_metadata_cases(){
     metadata_send_ack_ranges_refuse_before_third_range().await;
     metadata_record_growth_refuses_before_ping_or_record_effects().await;
     metadata_scratch_and_ack_growth_use_real_driver_boundaries().await;
@@ -573,7 +585,8 @@ async fn metadata_frame_backing_follows_real_ack_and_release() {
     assert_eq!(connection.control_test(|p|p.metadata_test_send_storage()).0,256,"actual deque backing is retained after ACK");
     assert_eq!(probe.stats().used,384+record_charge,"empty send deques retain their actual capacity after ACK");
     first.reset(0u32.into()).unwrap();second.reset(0u32.into()).unwrap();
-    assert_eq!(probe.stats().used,record_charge);
+    assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),64);
+    assert_eq!(probe.stats().used,record_charge+128);
     assert!(connection.close_reason().is_none());
     connection.close(0u32.into(),b"done");
     drop((first,second,connection,peer,endpoint,peer_endpoint,receivers));
@@ -682,4 +695,92 @@ async fn metadata_send_ack_ranges_refuse_before_third_range() {
     assert!(probe.stats().peak<=1<<20);
     timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
     drop((stream,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+}
+
+
+async fn metadata_retransmit_box_and_reset_children_refuse_before_wire(){
+    // Pending producer refuses before growing its reset vector and wakes the real driver.
+    let(endpoint,peer_endpoint,connection,peer,gate,_)=pair(65536,64,524288,512,65536,128).await;
+    gate.closed.store(true,Ordering::SeqCst);
+    let probe=connection.control_test(|p|p.metadata_test_limit(0));
+    let mut stream=connection.open_uni().await.unwrap();let refused=stream.reset(0u32.into());
+    assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),0,"refused producer allocated pending reset backing");
+    assert!(refused.is_err());
+    assert_eq!(probe.stats().allocations,0);
+    gate.open();assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::PendingRetransmits));
+    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();drop((stream,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+    for child in [false,true] {
+        let(endpoint,peer_endpoint,connection,peer,gate,_)=pair(65536,64,524288,512,65536,128).await;
+        gate.closed.store(true,Ordering::SeqCst);
+        let record_charge=connection.control_test(|p|p.metadata_test_next_record_charge());
+        let box_charge=connection.control_test(|p|p.metadata_test_box_charge());
+        let probe=connection.control_test(|p|p.metadata_test_limit(128+record_charge+if child{box_charge}else{0}));
+        let mut stream=connection.open_uni().await.unwrap();
+        stream.reset(0u32.into()).unwrap();
+        assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),64);
+        let before=peer.stats().frame_rx.reset_stream;
+        gate.open();
+        assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+        assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+        assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::RetransmitOwners));
+        assert_eq!(peer.stats().frame_rx.reset_stream,before,"refused box/child never emits RESET");
+        assert_eq!(probe.stats().allocations,if child{3}else{2});
+        assert_eq!(connection.control_test(|p|p.metadata_test_retransmit_storage()),(0,0));
+        timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+        drop((stream,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+    }
+
+}
+
+async fn metadata_pending_retransmit_transfer_refuses_in_real_pto(){
+    for refuse in [true,false] {
+        let(endpoint,peer_endpoint,connection,peer,gate,wire)=pair(65536,64,524288,512,65536,128).await;
+        gate.closed.store(true,Ordering::SeqCst);wire.held.store(true,Ordering::SeqCst);
+        let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));
+        let mut stream=connection.open_uni().await.unwrap();stream.reset(0u32.into()).unwrap();gate.open();
+        until(||peer.stats().frame_rx.reset_stream>0).await;
+        until(||connection.control_test(|p|p.metadata_test_retransmit_storage()).1>0).await;
+        gate.closed.store(true,Ordering::SeqCst);
+        connection.control_test(|p|p.metadata_test_release_empty_pending_reset());
+        assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),0);
+        let reset_count=peer.stats().frame_rx.reset_stream;
+        if refuse {probe.freeze_at_live_allocations();}
+        gate.open();
+        if refuse {
+            assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+            assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+            assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::PendingRetransmits));
+            assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),0);
+            assert_eq!(peer.stats().frame_rx.reset_stream,reset_count,"refused PTO transfer emits no later reset");
+            timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+        } else {
+            until(||peer.stats().frame_rx.reset_stream>reset_count).await;
+            assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),64,"dequeued transfer retains its actual backing");
+            assert!(probe.stats().peak<=1<<20);assert_eq!(probe.stats().refusals,0);
+            wire.held.store(false,Ordering::SeqCst);if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}
+            until(||connection.control_test(|p|p.metadata_test_retransmit_storage())==(0,0)).await;
+            assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),64,"ACK does not free retained pending capacity");
+            connection.close(0u32.into(),b"done");
+        }
+        drop((stream,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+    }
+}
+
+
+async fn metadata_receiver_drop_propagates_pending_refusal(){
+    let(endpoint,peer_endpoint,connection,peer,gate,_)=pair(65536,64,524288,512,65536,128).await;
+    let mut remote_send=peer.open_uni().await.unwrap();remote_send.write_all(b"x").await.unwrap();
+    let recv=timeout(Duration::from_secs(5),connection.accept_uni()).await.unwrap().unwrap();
+    gate.closed.store(true,Ordering::SeqCst);
+    let probe=connection.control_test(|p|p.metadata_test_limit(0));
+    let before=peer.stats().frame_rx.stop_sending;
+    drop(recv);
+    assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),0);
+    assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::PendingRetransmits));
+    gate.open();
+    assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    assert_eq!(peer.stats().frame_rx.stop_sending,before,"refused drop producer emits no ordinary control");
+    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    drop((remote_send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
 }
