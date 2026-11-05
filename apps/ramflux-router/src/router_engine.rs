@@ -7,6 +7,14 @@ use std::time::Instant;
 thread_local! {
     static SUBMISSION_TIME: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
+#[cfg(test)]
+struct TestClock(Option<u64>);
+#[cfg(test)]
+impl Drop for TestClock {
+    fn drop(&mut self) {
+        SUBMISSION_TIME.set(self.0);
+    }
+}
 fn submission_now() -> u64 {
     #[cfg(test)]
     if let Some(now) = SUBMISSION_TIME.get() {
@@ -243,7 +251,11 @@ pub(crate) async fn submit_envelope_async(
     let client = forward.client.cloned();
     let semaphore = std::sync::Arc::clone(forward.semaphore);
     let timeout = forward.timeout;
+    #[cfg(test)]
+    let fixture_clock = SUBMISSION_TIME.get();
     let prepared = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _clock = TestClock(SUBMISSION_TIME.replace(fixture_clock));
         ramflux_node_core::publication::capture(|| {
             submit_envelope_inner(
                 &state,

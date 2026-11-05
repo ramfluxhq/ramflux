@@ -5,12 +5,14 @@
 //! finished. The returned operation awaits publication without retaining locks.
 use super::{AssignmentGuard, PublicationCore, PublicationWrite};
 use crate::{InboxEntry, NodeCoreError};
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, collections::BTreeSet, sync::Arc};
 
 #[derive(Default)]
 struct Scope {
     guards: Vec<AssignmentGuard>,
     resources: Vec<String>,
+    core: Option<Arc<PublicationCore>>,
+    assigned: BTreeSet<(String, u64)>,
 }
 thread_local! {
     static CURRENT: RefCell<Option<Scope>> = const { RefCell::new(None) };
@@ -46,7 +48,7 @@ impl<T> PublishedOperation<T> {
                             .get(&guard.descriptor.key)
                             .is_some_and(|inbox| inbox.published >= guard.sequence())
                     };
-                    if ready {
+                    if ready && crate::fatal_durability::check().is_ok() {
                         break;
                     }
                     notified.await;
@@ -59,6 +61,18 @@ impl<T> PublishedOperation<T> {
     /// # Errors
     /// Returns runtime creation errors.
     pub fn published_blocking(self) -> Result<T, NodeCoreError> {
+        if self.guards.iter().all(|guard| {
+            guard.shared.upgrade().is_none_or(|shared| {
+                let registry = super::lock(&shared);
+                crate::fatal_durability::check().is_ok()
+                    && registry
+                        .inboxes
+                        .get(&guard.descriptor.key)
+                        .is_some_and(|inbox| inbox.published >= guard.sequence())
+            })
+        }) {
+            return Ok(self.value);
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
@@ -89,12 +103,41 @@ pub fn capture<T>(f: impl FnOnce() -> T) -> Result<PublishedOperation<T>, NodeCo
     Ok(PublishedOperation { value, guards: scope.guards })
 }
 
-pub(crate) fn replay_resource(key: &str) {
+pub(crate) fn replay_resource(core: Option<&Arc<PublicationCore>>, key: &str) {
     CURRENT.with(|current| {
         if let Some(scope) = current.borrow_mut().as_mut() {
+            if let Some(core) = core {
+                core.mark_resource(key);
+                scope.core = Some(Arc::clone(core));
+            }
             scope.resources.push(key.into());
         }
     });
+}
+
+pub(crate) fn reserve_targets(
+    core: &Arc<PublicationCore>,
+    targets: &[(String, String)],
+) -> Result<(), NodeCoreError> {
+    CURRENT.with(|current| {
+        let mut current = current.borrow_mut();
+        let scope = current
+            .as_mut()
+            .ok_or_else(|| NodeCoreError::Redb("fanout requires publication scope".into()))?;
+        let requests = targets
+            .iter()
+            .map(|(target, id)| super::AssignmentReservation {
+                target,
+                incarnation: id,
+                resources: &scope.resources,
+            })
+            .collect::<Vec<_>>();
+        let guards = core
+            .reserve_batch(&requests)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        scope.guards.extend(guards);
+        Ok(())
+    })
 }
 
 pub(crate) fn allocate(
@@ -107,10 +150,19 @@ pub(crate) fn allocate(
         let scope = current
             .as_mut()
             .ok_or_else(|| NodeCoreError::Redb("allocation requires publication scope".into()))?;
+        if let Some(guard) = scope.guards.iter().find(|guard| {
+            guard.descriptor.key.target == target
+                && !scope.assigned.contains(&(target.into(), guard.sequence()))
+        }) {
+            let sequence = guard.sequence();
+            scope.assigned.insert((target.into(), sequence));
+            return Ok(sequence);
+        }
         let guard = core
             .reserve(target, id, &scope.resources)
             .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
         let sequence = guard.sequence();
+        scope.assigned.insert((target.into(), sequence));
         scope.guards.push(guard);
         Ok(sequence)
     })
@@ -138,4 +190,15 @@ pub(crate) fn hand_off(entries: &[&InboxEntry]) -> Result<Vec<PublicationWrite>,
             })
             .collect()
     })
+}
+
+pub(crate) fn complete_unassigned() {
+    CURRENT.with(|current| {
+        if let Some(scope) = current.borrow().as_ref()
+            && scope.guards.is_empty()
+            && let Some(core) = &scope.core
+        {
+            core.complete_unassigned(&scope.resources);
+        }
+    });
 }

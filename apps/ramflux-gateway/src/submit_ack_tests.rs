@@ -27,7 +27,7 @@ impl GatewaySessionFrameSink for Sink {
         })
     }
 }
-fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<GatewayServerFrame>>>) {
+pub(super) fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<GatewayServerFrame>>>) {
     let frames = Arc::new(Mutex::new(Vec::new()));
     (Arc::new(tokio::sync::Mutex::new(Box::new(Sink(frames.clone())))), frames)
 }
@@ -329,7 +329,7 @@ fn submit_confirmation_requires_an_accepted_outcome_matching_target_and_committe
     Ok(())
 }
 
-fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
+pub(super) fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
     let root = ramflux_crypto::create_identity_root("agent", [3; 32]);
     let branch = ramflux_crypto::create_device_branch("agent", "agent-device", 1, [4; 32]);
     Ok(crate::GatewaySessionRuntime {
@@ -446,7 +446,7 @@ impl GatewaySessionFrameSink for DelayedReply {
     }
 }
 
-fn signed_submit(
+pub(super) fn signed_submit(
     runtime: &super::GatewaySessionRuntime,
     now: i64,
 ) -> anyhow::Result<ramflux_node_core::GatewaySubmitFrame> {

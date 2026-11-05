@@ -1397,4 +1397,5 @@ pub(crate) mod tests {
             suffix
         )))
     }
+    mod publication;
 }

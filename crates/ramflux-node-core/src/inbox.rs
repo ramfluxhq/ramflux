@@ -821,6 +821,7 @@ impl OpaqueDeviceInbox {
 
     pub(crate) fn remove_target(&mut self, target_delivery_id: &str) -> usize {
         self.incarnations.remove(target_delivery_id);
+        self.aborted_ranges.remove(target_delivery_id);
         let pending_count =
             self.pending.remove(target_delivery_id).map_or(0, |entries| entries.len());
         if self.retain_until.remove(target_delivery_id).is_some() {

@@ -34,6 +34,7 @@ pub struct SubmissionLease {
     acquired: bool,
     admission: bool,
     root: Option<Box<SubmissionLease>>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl SubmissionLease {
     /// Retain source admission when a submission transfers to the durable writer.
@@ -86,6 +87,7 @@ impl TargetGates {
             acquired: false,
             admission: false,
             root: None,
+            permit: None,
         };
         let mut state = lease.gate.state.lock().map_err(|_| busy())?;
         if let Some(deadline) = deadline {
@@ -153,7 +155,11 @@ impl RouterRedbStore {
             .map_err(|e| NodeCoreError::Redb(e.to_string()))?
             .map(|(anchor, _)| self.acquire_home_operation(&anchor).map(Box::new))
             .transpose()?;
+        let permit = Arc::clone(&self.submission_admission).try_acquire_owned().map_err(|_| {
+            NodeCoreError::Redb("capacity_retry_after (retry_after_ms=1000)".into())
+        })?;
         let mut lease = self.submission_gates.acquire(target, None)?;
+        lease.permit = Some(permit);
         lease.root = root;
         if let Some(reason) = self
             .inactive_migration_targets

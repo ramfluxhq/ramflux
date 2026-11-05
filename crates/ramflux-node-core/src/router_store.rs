@@ -67,6 +67,7 @@ pub struct RouterRedbStore {
     commit_writer: Option<RouterCommitWriter>,
     pub(crate) submission_wal: Option<RouterWalStore>,
     submission_gates: submission_barrier::TargetGates,
+    submission_admission: Arc<tokio::sync::Semaphore>,
     migration_root_gates: submission_barrier::TargetGates,
     pub(crate) inactive_migration_roots:
         std::sync::RwLock<BTreeMap<String, ramflux_protocol::home_migration::Refusal>>,
@@ -540,6 +541,15 @@ impl RouterRedbStore {
             commit_writer,
             submission_wal,
             submission_gates: submission_barrier::TargetGates::default(),
+            submission_admission: Arc::new(tokio::sync::Semaphore::new(
+                router_usize_env("RAMFLUX_ROUTER_WAL_QUEUE_CAPACITY", 65_536).max(1).min(
+                    router_usize_env(
+                        ROUTER_COMMIT_QUEUE_CAPACITY_ENV,
+                        ROUTER_COMMIT_QUEUE_CAPACITY_DEFAULT,
+                    )
+                    .max(1),
+                ),
+            )),
             migration_root_gates: submission_barrier::TargetGates::default(),
             inactive_migration_roots: std::sync::RwLock::new(Self::load_inactive_migration_roots(
                 &db,
@@ -842,6 +852,7 @@ impl RouterRedbStore {
         }
         crate::record_router_save_replay_guard_us(elapsed_us(replay_started));
         crate::record_router_save_total_us(elapsed_us(save_started));
+        publication::operation::complete_unassigned();
         for write in writes {
             write.accepted_durable();
         }
@@ -1239,6 +1250,10 @@ impl RouterRedbStore {
         identity_registry: &IdentityRegistry,
         lifecycle_record: &AccountLifecycleRecord,
     ) -> Result<(), NodeCoreError> {
+        let core = self.publication.lock().map_err(incarnation::error)?.clone();
+        let retirement = target_delivery_id
+            .and_then(|target| core.as_ref().map(|core| core.retire_target(target)))
+            .transpose()?;
         crate::fatal_durability::run(|| {
             let lifecycle_bytes = serialize_value(lifecycle_record)?;
             let write_txn =
@@ -1257,6 +1272,7 @@ impl RouterRedbStore {
                     remove_key(&write_txn, ROUTER_SESSION_ENTRY_TABLE, target_delivery_id)?;
                     remove_key(&write_txn, ROUTER_CURSOR_STATE_TABLE, target_delivery_id)?;
                     remove_key(&write_txn, incarnation_state::TABLE, target_delivery_id)?;
+                    remove_key(&write_txn, publication::persistence::TABLE, target_delivery_id)?;
                     put_bool(
                         &write_txn,
                         ROUTER_DEACTIVATED_TARGET_TABLE,
@@ -1271,6 +1287,9 @@ impl RouterRedbStore {
                 write_txn.commit().map_err(std::io::Error::other)
             })
             .map_err(incarnation::error)?;
+            if let Some(retirement) = retirement {
+                retirement.commit();
+            }
             self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         })
@@ -1532,6 +1551,7 @@ impl RouterRedbStore {
                 inbox.restore_incarnation(&target, id);
             }
         }
+        publication::persistence::restore_ranges(self, &mut inbox)?;
         inbox.bound_retained_receipts();
         let mut replay_guard_state = if has_incremental_replay {
             NodeReplayGuardState::new()
@@ -1626,8 +1646,11 @@ impl RouterRedbStore {
     /// # Errors
     /// Refuses live imports and returns storage failures.
     pub fn bootstrap_router(&self, router: &RouterCore) -> Result<(), NodeCoreError> {
-        if router.publication_is_bound() {
-            return Err(NodeCoreError::Redb("bootstrap requires an offline router".into()));
+        let installed = self.publication.lock().map_err(incarnation::error)?;
+        if router.publication_is_bound() || installed.is_some() {
+            return Err(NodeCoreError::Redb(
+                "bootstrap requires an offline router and store".into(),
+            ));
         }
         self.save_router(router)?;
         self.replace_incremental_router_tables(&router.snapshot())
@@ -1658,6 +1681,7 @@ impl RouterRedbStore {
             .collect::<Result<Vec<_>, _>>()?;
         let write_txn =
             self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        publication::persistence::export_ranges(&write_txn, &router.inbox)?;
         let cursor_state_bytes = cursor_states
             .iter()
             .map(|cursor| {

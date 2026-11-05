@@ -23,21 +23,6 @@ pub(crate) fn submit(
     envelope: ramflux_protocol::Envelope,
     now: u64,
 ) -> Result<CustodyServerFrame, CustodyRefusal> {
-    crate::router_store::publication::capture(|| {
-        submit_inner(router, store, credentials, envelope, now)
-    })
-    .map_err(|_| CustodyRefusal::PersistenceUnavailable)?
-    .published_blocking()
-    .map_err(|_| CustodyRefusal::PersistenceUnavailable)?
-}
-
-fn submit_inner(
-    router: &RouterCore,
-    store: &RouterRedbStore,
-    credentials: DeliveryAuthority<'_>,
-    envelope: ramflux_protocol::Envelope,
-    now: u64,
-) -> Result<CustodyServerFrame, CustodyRefusal> {
     let DeliveryAuthority { authority, session, source } = credentials;
     let cert = authority.authorize(&session.device_ref, "message", now).map_err(invalid)?;
     if envelope.source_device_id != session.device_ref.device_id

@@ -5,7 +5,7 @@
 
 use super::incarnation_state as state;
 use super::{CursorAckState, InboxEntry, NodeCoreError, ROUTER_CURSOR_STATE_TABLE};
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 #[cfg(test)]
 pub(super) mod work;
 use serde::{Deserialize, Serialize};
@@ -158,8 +158,16 @@ impl super::RouterRedbStore {
     /// # Errors
     /// Returns an error for invalid stored metadata or conflicting redb/WAL incarnations.
     pub fn inbox_status(&self, target: &str) -> Result<(Option<String>, u64), NodeCoreError> {
-        use redb::ReadableDatabase;
         let txn = self.db.begin_read().map_err(error)?;
+        if txn
+            .open_table(crate::ROUTER_DELETED_TARGET_TABLE)
+            .map_err(error)?
+            .get(target)
+            .map_err(error)?
+            .is_some()
+        {
+            return Ok((None, 0));
+        }
         let table = txn.open_table(state::TABLE).map_err(error)?;
         let (mut id, mut issued) = table
             .get(target)
@@ -185,7 +193,18 @@ impl super::RouterRedbStore {
     pub fn initialize_inbox(&self, target: &str) -> Result<String, NodeCoreError> {
         let _lease = self.acquire_acknowledgement(target)?;
 
-        crate::fatal_durability::run(|| {
+        let read = self.db.begin_read().map_err(error)?;
+        if read
+            .open_table(crate::ROUTER_DELETED_TARGET_TABLE)
+            .map_err(error)?
+            .get(target)
+            .map_err(error)?
+            .is_some()
+        {
+            return Err(error("deleted inbox"));
+        }
+        drop(read);
+        let id = crate::fatal_durability::run(|| {
             let mut txn = self.begin_write().map_err(error)?;
             txn.set_durability(redb::Durability::Immediate).map_err(error)?;
             let id = if let Some(wal) = &self.submission_wal {
@@ -197,7 +216,11 @@ impl super::RouterRedbStore {
             };
             txn.commit().map_err(error)?;
             Ok(id)
-        })
+        })?;
+        if let Some(core) = self.publication.lock().map_err(error)?.as_ref() {
+            core.register(target, &id, self.inbox_status(target)?.1);
+        }
+        Ok(id)
     }
     pub(crate) fn checkpoint_incarnation(
         &self,
@@ -213,13 +236,14 @@ impl super::RouterRedbStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "durability-test-hooks"))]
 pub(crate) fn test_store(
     root: &std::path::Path,
     mode: u8,
     segment_bytes: u64,
 ) -> Result<super::RouterRedbStore, NodeCoreError> {
-    let mut store = super::RouterRedbStore::open_without_wal(root.join("db"))?;
+    let mut store =
+        super::RouterRedbStore::open_with_wal_root(root.join("db").as_path(), None, true)?;
     if mode != 0 {
         store.submission_wal = Some(crate::RouterWalStore::open_associated_config(
             &root.join("wal"),

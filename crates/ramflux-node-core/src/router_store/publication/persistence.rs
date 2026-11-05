@@ -12,7 +12,8 @@ use crate::router_store::{RouterRedbStore, incarnation, incarnation_state};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("router_aborted_ranges_v1");
+pub(crate) const TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("router_aborted_ranges_v1");
 
 #[derive(Deserialize, Serialize)]
 struct AbortedRanges {
@@ -45,6 +46,9 @@ impl RouterRedbStore {
         }
         let ranges = txn.open_table(TABLE).map_err(error)?;
         let mut registry = Registry::default();
+        let (_, replay) =
+            self.load_delivery_state(i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX))?;
+        registry.resources_unassigned.extend(replay.accepted_entries().map(|(key, _)| key.clone()));
         for target in targets {
             let (Some(incarnation), issued) = self.inbox_status(&target)? else {
                 continue;
@@ -134,4 +138,43 @@ pub(super) fn abort_batch(
     })
     .map_err(error)?;
     guard.complete()
+}
+
+pub(crate) fn restore_ranges(
+    store: &RouterRedbStore,
+    inbox: &mut crate::OpaqueDeviceInbox,
+) -> Result<(), NodeCoreError> {
+    let txn = store.db.begin_read().map_err(error)?;
+    let table = match txn.open_table(TABLE) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+        Err(source) => return Err(error(source)),
+    };
+    for row in table.iter().map_err(error)? {
+        let (target, bytes) = row.map_err(error)?;
+        let ranges: AbortedRanges = serde_json::from_slice(bytes.value()).map_err(error)?;
+        if inbox.incarnation_id(target.value()) == Some(ranges.incarnation.as_str()) {
+            inbox.aborted_ranges.insert(target.value().into(), ranges.ranges.into_iter().collect());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn export_ranges(
+    tx: &redb::WriteTransaction,
+    inbox: &crate::OpaqueDeviceInbox,
+) -> Result<(), NodeCoreError> {
+    let mut table = tx.open_table(TABLE).map_err(error)?;
+    for (target, ranges) in &inbox.aborted_ranges {
+        let Some(id) = inbox.incarnation_id(target) else {
+            return Err(error("aborted export lacks incarnation"));
+        };
+        let bytes = serde_json::to_vec(&AbortedRanges {
+            incarnation: id.into(),
+            ranges: ranges.iter().copied().collect(),
+        })
+        .map_err(error)?;
+        table.insert(target.as_str(), bytes.as_slice()).map_err(error)?;
+    }
+    Ok(())
 }

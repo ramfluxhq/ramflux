@@ -7,7 +7,7 @@
 //! and unparks the store thread; it never acquires a lock or writes storage.
 
 pub(crate) mod operation;
-mod persistence;
+pub(crate) mod persistence;
 pub(crate) use operation::allocate as operation_allocate;
 pub use operation::{PublishedOperation, capture};
 #[cfg(test)]
@@ -90,6 +90,7 @@ struct Descriptor {
 
 #[derive(Default)]
 struct Inbox {
+    retired: bool,
     allocated: u64,
     published: u64,
     in_flight: BTreeMap<u64, Arc<Descriptor>>,
@@ -105,6 +106,7 @@ struct Registry {
     resources: BTreeMap<String, BTreeSet<(Key, u64)>>,
     warnings: u64,
     resources_seen: BTreeSet<String>,
+    resources_unassigned: BTreeSet<String>,
 }
 
 pub(crate) type PublishedViews = BTreeMap<String, (String, u64, Vec<(u64, u64)>)>;
@@ -176,6 +178,7 @@ impl PublicationCore {
         let views = registry
             .inboxes
             .iter()
+            .filter(|(_, inbox)| !inbox.retired)
             .map(|(key, inbox)| {
                 (
                     key.target.clone(),
@@ -229,6 +232,9 @@ impl PublicationCore {
         }
         for (key, count) in &needed {
             let inbox = registry.inboxes.get(key).ok_or(PublicationRefusal::IncarnationMismatch)?;
+            if inbox.retired {
+                return Err(PublicationRefusal::IncarnationMismatch);
+            }
             if *count
                 > ABORTED_RANGE_CAPACITY.saturating_sub(inbox.aborted.len() + inbox.reservations)
             {
@@ -305,9 +311,17 @@ impl PublicationCore {
         }
     }
 
+    pub(crate) fn mark_resource(&self, resource: &str) {
+        lock(&self.shared).resources_seen.insert(resource.into());
+    }
+    pub(crate) fn complete_unassigned(&self, resources: &[String]) {
+        lock(&self.shared).resources_unassigned.extend(resources.iter().cloned());
+    }
+
     pub(crate) fn resource_visible(&self, resource: &str) -> bool {
         let registry = lock(&self.shared);
         !registry.resources_seen.contains(resource)
+            || registry.resources_unassigned.contains(resource)
             || registry.resources.get(resource).is_some_and(|owners| {
                 owners.iter().any(|(key, seq)| {
                     registry.inboxes.get(key).is_some_and(|inbox| {
@@ -395,6 +409,13 @@ impl PublicationWrite {
     /// Called by the writer only after its positive durable completion.
     pub fn accepted_durable(self) {
         self.descriptor.state.store(PersistenceState::AcceptedDurable as u8, Ordering::Release);
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        if crate::durability_test_hooks::notify(&self.shared.path, "accepted_assignment", true)
+            .is_err()
+        {
+            crate::fatal_durability::fence(false);
+            return;
+        }
         finish(&self.shared, &self.descriptor, false);
     }
 }
@@ -569,6 +590,78 @@ impl Drop for PublicationCore {
         }
         if let Some(worker) = self.worker.take() {
             let _result = worker.join();
+        }
+    }
+}
+
+/// Explicit storage modes for cross-crate durability fixtures (0=redb, 1=WAL, 2=pipeline WAL).
+/// # Errors
+/// Returns invalid fixture mode or storage initialization errors.
+#[cfg(any(test, feature = "durability-test-hooks"))]
+pub fn open_durability_fixture(
+    root: &std::path::Path,
+    mode: u8,
+) -> Result<crate::RouterRedbStore, NodeCoreError> {
+    if mode > 2 {
+        return Err(error("invalid durability fixture mode"));
+    }
+    crate::router_store::incarnation::test_store(root, mode, 1024 * 1024)
+}
+
+/// A deletion starts only once every assigned write/resolver has settled. Holding
+/// this gate through the atomic deletion prevents a late reservation/checkpoint.
+pub(crate) struct TargetRetirement {
+    shared: Arc<Shared>,
+    target: String,
+    committed: bool,
+}
+impl PublicationCore {
+    pub(crate) fn retire_target(&self, target: &str) -> Result<TargetRetirement, NodeCoreError> {
+        let mut registry = lock(&self.shared);
+        if registry
+            .inboxes
+            .iter()
+            .any(|(key, inbox)| key.target == target && !inbox.in_flight.is_empty())
+        {
+            return Err(error(
+                "capacity_retry_after (retry_after_ms=1000): inbox assignments pending",
+            ));
+        }
+        for (key, inbox) in &mut registry.inboxes {
+            if key.target == target {
+                inbox.retired = true;
+            }
+        }
+        Ok(TargetRetirement {
+            shared: Arc::clone(&self.shared),
+            target: target.into(),
+            committed: false,
+        })
+    }
+}
+impl TargetRetirement {
+    pub(crate) fn commit(mut self) {
+        let mut registry = lock(&self.shared);
+        for (key, inbox) in &mut registry.inboxes {
+            if key.target == self.target {
+                inbox.aborted.clear();
+            }
+        }
+        registry.resources.retain(|_, owners| {
+            owners.retain(|(key, _)| key.target != self.target);
+            !owners.is_empty()
+        });
+        self.committed = true;
+    }
+}
+impl Drop for TargetRetirement {
+    fn drop(&mut self) {
+        if !self.committed {
+            for (key, inbox) in &mut lock(&self.shared).inboxes {
+                if key.target == self.target {
+                    inbox.retired = false;
+                }
+            }
         }
     }
 }
