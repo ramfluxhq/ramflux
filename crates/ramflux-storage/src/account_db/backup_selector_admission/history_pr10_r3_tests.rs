@@ -86,7 +86,7 @@ fn registered_without_actor(imported: bool, witness: &str) -> TestResult {
     assert_eq!(
         source,
         (1, u64::from(witness != "binding"), u64::from(witness != "footprint")),
-        "source must hold its own independent registration"
+        "source distinguishes restriction footprint from ordinary binding"
     );
     let mut target = BackupDatabase::open_restore_input(
         &target_path,
@@ -100,9 +100,14 @@ fn registered_without_actor(imported: bool, witness: &str) -> TestResult {
     match result {
         Ok(_) => {
             let s = tomb_reg(&target.db)?;
-            assert_eq!((s.0, s.1), (1, 1), "incoming registered tombstone lost");
+            if witness == "binding" {
+                assert_eq!((s.0, s.1), (0, 0), "binding-only legacy input must be omitted");
+            } else {
+                assert_eq!((s.0, s.1), (1, 1), "incoming registered tombstone lost");
+            }
         }
         Err(StorageError::ObjectOwnershipUnverified { .. }) => {
+            assert_ne!(witness, "binding", "binding-only input is omittable");
             assert_eq!(tomb_reg(&target.db)?, before);
         }
         Err(e) => return Err(e.into()),
