@@ -47,3 +47,5 @@ mod registration_persistence;
 pub(crate) mod custody_sessions;
 
 mod sender_fanout;
+
+mod fanout_entry_bound;

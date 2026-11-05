@@ -84,6 +84,9 @@ pub(crate) fn submit(
         ),
         RouterSubmitOutcome::OfflineQueued(queued) => (queued.entry, "offline_queued"),
         RouterSubmitOutcome::RejectedSecurity { reason, .. } => {
+            if reason == "payload_too_large" {
+                return Err(CustodyRefusal::PayloadTooLarge);
+            }
             return Err(crate::sender_retry::refusal_from_reason(&reason)
                 .as_ref()
                 .map_or(CustodyRefusal::InvalidInput, crate::sender_retry::custody_refusal));
