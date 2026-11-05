@@ -43,6 +43,8 @@ INSERT INTO runtime_actor_state SELECT 'budget/'||i,x'7b7d' FROM budget_numbers;
 INSERT INTO message_footprint SELECT 'unrelated-'||i,'actor','budget/'||i FROM budget_numbers;
 INSERT INTO message_footprint SELECT 'unrelated-'||i,'revocation_selector',json_object('selector','alias-'||i,'wire','wire-'||i,'manifest','manifest','commitment','c-'||i) FROM budget_numbers;
 INSERT INTO group_message_tombstone_projection SELECT 'other','unrelated-'||i,'delete','device','all',1,'',1 FROM budget_numbers;
+INSERT INTO message_tombstone_projection SELECT 'dm-delete-'||i,'other-dm','unrelated-tombstone-'||i,'all',1 FROM budget_numbers;
+INSERT INTO direct_message_projection(conversation_id,message_id,sender_id,encrypted_body,metadata_json,deleted,is_own,scrub_version,created_at) SELECT 'other-dm','unrelated-deleted-'||i,'peer',x'',x'7b7d',1,0,0,1 FROM budget_numbers;
 DROP TABLE budget_numbers; COMMIT;")?;
         let source_before = std::fs::read(&path)?;
         target.db.execute(
@@ -59,6 +61,13 @@ DROP TABLE budget_numbers; COMMIT;")?;
             )?,
             n
         );
+        for sql in [
+            "SELECT count(*) FROM message_tombstone_projection WHERE message_id GLOB 'unrelated-tombstone-*'",
+            "SELECT count(*) FROM direct_message_projection WHERE message_id GLOB 'unrelated-deleted-*' AND deleted=1",
+        ] {
+            assert_eq!(target.db.query_row(sql, [], |r| r.get::<_, i64>(0))?, n);
+        }
+        assert_eq!(target.db.query_row("SELECT count(*) FROM backup_message_delete WHERE side='main' AND message_id GLOB 'unrelated-*'", [], |r| r.get::<_, i64>(0))?, 2 * n);
         for table in TABLES {
             assert!(!target.db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM temp.sqlite_master WHERE name=?1)",
