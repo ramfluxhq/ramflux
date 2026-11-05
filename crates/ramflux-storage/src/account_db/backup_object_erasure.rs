@@ -70,7 +70,7 @@ impl BackupDatabase {
             }
             self.db.execute_batch("INSERT INTO object_erasure_fence SELECT commitment FROM incoming.object_erasure_fence WHERE 1 ON CONFLICT DO NOTHING; INSERT INTO object_erasure_lookup SELECT lookup,commitment FROM incoming.object_erasure_lookup WHERE 1 ON CONFLICT DO NOTHING;")?;
             let unsafe_references:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM incoming.object_retention_reference r JOIN incoming.object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22)))",[],|r|r.get(0))?;
-            if unsafe_references && (!candidate || incoming_legacy_restriction(&self.db)?) {
+            if unsafe_references && !candidate {
                 return Err(StorageError::ObjectOwnershipUnverified { schema_version: version });
             }
             validate_payload_identities(&self.db, &root)?;
@@ -418,10 +418,4 @@ fn merge_graph(db: &Connection, candidate: bool) -> Result<(), StorageError> {
       INSERT INTO object_transport_actor SELECT * FROM incoming.object_transport_actor a WHERE NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=a.commitment) ON CONFLICT DO NOTHING;
       INSERT INTO object_identity_replacement SELECT * FROM incoming.object_identity_replacement WHERE 1 ON CONFLICT DO NOTHING;")?;
     Ok(())
-}
-
-// Refuse omission of registered legacy restrictions. A bare unresolved placeholder
-// has no revocation witness and remains omittable. Incoming evidence only restricts.
-fn incoming_legacy_restriction(db: &Connection) -> Result<bool, StorageError> {
-    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM incoming.object_retention_reference r JOIN incoming.object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22)) AND (EXISTS(SELECT 1 FROM incoming.object_index o JOIN incoming.message_copy_binding b ON b.copy_id='object:'||o.object_id WHERE o.object_id=substr(a.state_kind,22) AND o.tombstoned=1) OR EXISTS(SELECT 1 FROM incoming.message_footprint f WHERE f.kind='revocation_selector' AND json_extract(f.locator,'$.selector')=substr(a.state_kind,22))))", [], |r|r.get(0))?)
 }

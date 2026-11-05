@@ -220,3 +220,93 @@ fn unowned_reference_without_placeholder_omitted_full_native_fresh() -> TestResu
     }
     Ok(())
 }
+
+fn install_chain_fresh(
+    root: &Path,
+    source: &Path,
+    saved: &ramflux_storage::AccountBackupSnapshot,
+    identity: format::Identity,
+) -> TestResult<(AccountIndex, AccountDbKey)> {
+    let index = AccountIndex::open(root)?;
+    let jobs = BackupJobs::new(root, index.clone())?;
+    let job = jobs.start(crate::backup::BackupJobKind::Restore, "first.rfb".into())?;
+    let dir = jobs.directory(&job.job_id)?;
+    std::fs::copy(source, dir.join("account.db"))?;
+    let metadata = format::Metadata {
+        identity,
+        database_key: *saved.key.bytes(),
+        ca_pem: b"test-ca".to_vec(),
+    };
+    let master = [8; 32];
+    format::save_metadata(&dir.join("identity.sealed"), &master, &metadata)?;
+    let staging = crate::backup::VerifiedBackupStaging::new(
+        dir,
+        master,
+        crate::bus::backup_jobs::service::now(),
+    )?;
+    jobs.install_generation_mode(&job, staging, None, None, true)?;
+    let key = crate::bus::backup_jobs::install::existing_key(
+        &index,
+        root,
+        "alice",
+        b"account-test-secret",
+    )?;
+    Ok((index, key))
+}
+fn registration(db: &rusqlite::Connection) -> TestResult<(u64, u64, u64, u64)> {
+    Ok((
+        db.query_row("SELECT count(*) FROM object_index WHERE object_id='private-canary' AND tombstoned=1",[],|r|r.get(0))?,
+        db.query_row("SELECT count(*) FROM message_footprint WHERE kind='revocation_selector' AND json_extract(locator,'$.selector')='private-canary'",[],|r|r.get(0))?,
+        db.query_row("SELECT count(*) FROM message_copy_binding WHERE copy_id='object:private-canary'",[],|r|r.get(0))?,
+        db.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind='attachment/reference/private-canary'",[],|r|r.get(0))?,
+    ))
+}
+#[test]
+fn fresh_restore_backup_registered_placeholder_refuses_full_and_native_merge() -> TestResult {
+    let original = tempfile::tempdir()?;
+    let input = tempfile::tempdir()?;
+    let fresh = tempfile::tempdir()?;
+    let mut client = client(original.path(), false)?;
+    producers(&mut client)?;
+    let identity = crate::bus::backup_jobs::capture_identity(&client, original.path(), "alice")?;
+    let first = archive(&client, input.path(), "alice", true)?;
+    let first_path = input.path().join("archive.db");
+    let first_bytes = std::fs::read(&first_path)?;
+    let (index, key) = install_chain_fresh(fresh.path(), &first_path, &first, identity)?;
+    assert_eq!(std::fs::read(&first_path)?, first_bytes);
+    let installed = fresh.path().join(index.account("alice")?.db_relative_path);
+    assert_eq!(registration(&raw(&installed, &key)?)?, (1, 1, 1, 0));
+    let restored = AccountDb::open(&index, "alice", &key)?;
+    restored.checkpoint_retired_secrets()?;
+    let second_path = input.path().join("second-generation.db");
+    let second = restored.write_backup_snapshot(&second_path)?;
+    assert_eq!(registration(&raw(&second_path, &second.key)?)?, (1, 1, 1, 0));
+    let second_bytes = std::fs::read(&second_path)?;
+    let selected = client.account_index()?.account("alice")?;
+    for native in [false, true] {
+        let target_path =
+            input.path().join(if native { "native-target.db" } else { "full-target.db" });
+        let target = client.account_db()?.write_backup_snapshot(&target_path)?;
+        let mut stage = BackupDatabase::open_restore_input(
+            &target_path,
+            &target.key,
+            BackupOpenMode::PreNormalization,
+        )?;
+        let before = registration(&raw(&target_path, &target.key)?)?;
+        assert_eq!(before, (0, 0, 0, 0), "target must predate the revocation");
+        let result = if native {
+            stage.merge_native_backup_candidate(&second_path, &second.key, || Ok(()))
+        } else {
+            stage.merge_backup_candidate(&second_path, &second.key, || Ok(()))
+        };
+        assert!(
+            matches!(result, Err(ramflux_storage::StorageError::ObjectOwnershipUnverified { .. })),
+            "registered second-generation input must refuse: {result:?}"
+        );
+        assert_eq!(registration(&raw(&target_path, &target.key)?)?, before);
+        stage.check_integrity()?;
+        assert_eq!(std::fs::read(&second_path)?, second_bytes);
+        assert_eq!(client.account_index()?.account("alice")?, selected);
+    }
+    Ok(())
+}
