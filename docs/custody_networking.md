@@ -47,16 +47,19 @@ authenticated route for the requested group can hold those RPCs pending; unknown
 routes and unrelated conversations continue background refresh and retry.
 
 Within one account command, `group.read` and `group.receive` reuse a successfully
-completed admission sync instead of running it again during dispatch. This marker
-belongs to the command future: cancellation, lifecycle preemption, failure and
-completion discard it. A later request and direct dispatch perform their own sync.
+completed admission sync only when its first freshness check found no stale roots.
+If the command waits for head refresh, dispatch syncs again to admit ready entries.
+The marker belongs to the command future: cancellation, lifecycle preemption,
+failure and completion discard it. Later requests and direct dispatch sync again.
 The original admission deadline and fresh inbound authority checks still apply.
 At the timeout boundary, receive can have committed only part of a page. Each
 applied entry has a durable admission receipt before ACK. Inline receive advances
-its cursor after ACK, or after retaining an ACK retry on transport failure;
-deferred entries have durable hold/retry state before cursor advancement. An interrupted exchange can therefore replay through
-the same admission key without applying a committed message twice. Cancellation
-does not roll back messages already committed, nor mark an unfinished sync complete.
+its cursor after ACK, or after retaining an ACK retry on transport failure.
+Head-refresh tracking is an in-memory hold over a durable inbox retry row;
+deferred entries retain durable retry state before cursor advancement. An
+interrupted exchange can replay through the same admission key without applying
+a committed message twice. Cancellation does not roll back messages already
+committed, nor mark an unfinished sync complete.
 
 Background refresh runs on connect and demand, with periodic sweeps due every
 150 seconds while Live. Demand wakes cannot postpone a due sweep. Pending demands

@@ -109,6 +109,8 @@ impl AccountRuntime {
                 let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(receive_prepared));
                 return Ok(());
             }
+            // A refresh only makes held entries ready; dispatch must replay them.
+            receive_prepared = false;
             if Instant::now() >= deadline {
                 return Err(pending(account));
             }

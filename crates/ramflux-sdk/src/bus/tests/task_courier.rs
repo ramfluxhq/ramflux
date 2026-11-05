@@ -188,6 +188,7 @@ pub(super) fn runtime(
         shutdown,
         courier: Some(TaskCourier::start()),
         courier_events: Some(observations),
+        receive_gate_hook: None,
         networking_expiry_pending: None,
         networking_expiry_warned: false,
         networking_observation_warned: false,

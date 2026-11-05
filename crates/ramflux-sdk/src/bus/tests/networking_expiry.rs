@@ -116,6 +116,7 @@ impl Harness {
             networking_expiry_warned: false,
             networking_observation_warned: false,
             courier_events: None,
+            receive_gate_hook: None,
         };
         runtime.publish(&runtime.networking_expiry_request()).await?;
         observed.borrow_mut().clear();

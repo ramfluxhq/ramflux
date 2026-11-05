@@ -58,6 +58,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 shutdown,
                 courier: None,
                 courier_events: None,
+                receive_gate_hook: None,
                 networking_expiry_pending: None,
                 networking_expiry_warned: false,
                 networking_observation_warned: false,
