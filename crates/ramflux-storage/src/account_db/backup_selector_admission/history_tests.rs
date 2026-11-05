@@ -296,7 +296,7 @@ fn e8_reverse_incoming_partial_lookup_admits_source_survivor() -> TestResult {
     reverse_partial()
 }
 
-fn replacement(mode: &str) -> TestResult {
+fn replacement(mode: &str, replay_old: bool) -> TestResult {
     let (root, db) = crate::tests::test_db("replacement-restore")?;
     register(&db, "old-alias", "message")?;
     payload(&db, 1)?;
@@ -320,7 +320,16 @@ fn replacement(mode: &str) -> TestResult {
         &mut || Ok(()),
         |db| {
             if mode == "valid" {
+                let before = super::replacements::HASH_COUNT.get();
                 assert_replacement_access(db, &manifest)?;
+                let commitment = object_erasure_commitment("principal", "wire", &manifest);
+                assert!(super::replacements::checked(db, "incoming", &commitment)?);
+                assert!(super::replacements::checked(db, "incoming", &commitment)?);
+                assert_eq!(
+                    super::replacements::HASH_COUNT.get(),
+                    before + 1,
+                    "repeat copy checks must reuse the streamed hash"
+                );
             }
             Ok(())
         },
@@ -344,31 +353,33 @@ fn replacement(mode: &str) -> TestResult {
             1
         );
         assert_eq!(target.db.query_row("SELECT count(*) FROM object_identity_replacement WHERE commitment='unrelated-receipt'",[],|r|r.get::<_,u64>(0))?,0);
-        target.merge_backup_candidate(&old, &old_saved.key, || Ok(()))?;
-        assert_eq!(
-            target.db.query_row(
-                "SELECT count(*) FROM object_retention_reference WHERE selector='old-alias'",
-                [],
-                |r| r.get::<_, u64>(0)
-            )?,
-            0
-        );
-        assert_eq!(
-            target.db.query_row(
-                "SELECT count(*) FROM object_index WHERE object_id='old-alias'",
-                [],
-                |r| r.get::<_, u64>(0)
-            )?,
-            0
-        );
-        assert_eq!(
-            target.db.query_row(
-                "SELECT count(*) FROM object_erasure_fence WHERE commitment=?1",
-                [object_erasure_commitment("principal", "wire", "manifest")],
-                |r| r.get::<_, u64>(0)
-            )?,
-            1
-        );
+        if replay_old {
+            target.merge_backup_candidate(&old, &old_saved.key, || Ok(()))?;
+            assert_eq!(
+                target.db.query_row(
+                    "SELECT count(*) FROM object_retention_reference WHERE selector='old-alias'",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )?,
+                0
+            );
+            assert_eq!(
+                target.db.query_row(
+                    "SELECT count(*) FROM object_index WHERE object_id='old-alias'",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )?,
+                0
+            );
+            assert_eq!(
+                target.db.query_row(
+                    "SELECT count(*) FROM object_erasure_fence WHERE commitment=?1",
+                    [object_erasure_commitment("principal", "wire", "manifest")],
+                    |r| r.get::<_, u64>(0)
+                )?,
+                1
+            );
+        }
     } else {
         assert!(matches!(result, Err(StorageError::ObjectIdentityConflict)), "{result:?}");
         assert_eq!(
@@ -385,17 +396,17 @@ fn replacement(mode: &str) -> TestResult {
 }
 #[test]
 fn e9_checked_replacement_restores_new_wire() -> TestResult {
-    replacement("valid")
+    replacement("valid", false)
 }
 #[test]
 fn e9_old_aliases_cannot_return_and_old_fence_kept() -> TestResult {
-    replacement("valid")
+    replacement("valid", true)
 }
 #[test]
 fn e9_missing_or_forged_receipt_refuses() -> TestResult {
-    replacement("missing")?;
-    replacement("forged")?;
-    replacement("corrupt")
+    replacement("missing", false)?;
+    replacement("forged", false)?;
+    replacement("corrupt", false)
 }
 
 fn alter_receipt(input_db: &BackupDatabase, mode: &str) -> TestResult {
@@ -449,3 +460,6 @@ fn replace(db: &AccountDb) -> Result<String, StorageError> {
     )?;
     Ok(manifest)
 }
+
+#[path = "history_review_tests.rs"]
+mod review_probes;

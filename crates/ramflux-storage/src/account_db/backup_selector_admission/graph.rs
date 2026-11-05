@@ -48,9 +48,12 @@ SELECT wire_lookup,commitment FROM incoming.object_retention_payload WHERE commi
             ))
         })? {
             let (hash, message, selector, commitment) = row?;
-            let local_deleted = target_deleted(db, &message)?;
+            let local_deleted = deleted(db, "main", &message)?;
             let incoming_deleted = deleted(db, "incoming", &message)?;
-            if side == "target" && !local_deleted && incoming_deleted {
+            if side == "target"
+                && !target_deleted(db, &message)?
+                && (local_deleted || incoming_deleted)
+            {
                 db.execute(
                     "INSERT OR IGNORE INTO backup_target_delete VALUES(?1,?2,?3,?4)",
                     params![hash, message, selector, commitment],
@@ -95,7 +98,8 @@ pub(super) fn deleted(db: &Connection, schema: &str, message: &str) -> Result<bo
     )
 }
 
-// Incoming archive links cannot revoke the target's independently held veto.
+// Read existing target deletion state only to decide whether pending work is needed.
+// Admission restrictions above combine bindings from both inputs.
 pub(super) fn target_deleted(db: &Connection, message: &str) -> Result<bool, StorageError> {
     deleted_with_bindings(
         db,

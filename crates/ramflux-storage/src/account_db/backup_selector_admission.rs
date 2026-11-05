@@ -15,11 +15,12 @@ const TABLES: [&str; 4] = [
 ];
 
 pub(super) fn is_scratch(table: &str) -> bool {
-    TABLES.contains(&table) || table == "backup_preserved_copy"
+    TABLES.contains(&table) || matches!(table, "backup_preserved_copy" | "backup_replacement_hash")
 }
 
 pub(super) fn drop_scratch(db: &Connection) -> rusqlite::Result<()> {
-    for table in TABLES.into_iter().chain(["backup_preserved_copy"]) {
+    db.execute_batch("DROP TRIGGER IF EXISTS main.backup_replacement_hash_update; DROP TRIGGER IF EXISTS main.backup_replacement_hash_delete;")?;
+    for table in TABLES.into_iter().chain(["backup_preserved_copy", "backup_replacement_hash"]) {
         db.execute_batch(&format!("DROP TABLE IF EXISTS main.{table}"))?;
     }
     Ok(())
@@ -47,6 +48,7 @@ CREATE INDEX main.backup_target_message ON backup_target_delete(message_id,refer
 INSERT INTO main.backup_lookup_origin SELECT 'target',lookup,commitment FROM main.object_erasure_lookup;
 INSERT INTO main.backup_lookup_origin SELECT 'incoming',lookup,commitment FROM incoming.object_erasure_lookup;
 ")?;
+    replacements::prepare(db)?;
     Ok(())
 }
 
