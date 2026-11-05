@@ -195,7 +195,7 @@ WHERE commitment IN (SELECT commitment FROM object_erasure_fence) ON CONFLICT DO
             }
         }
         if modern {
-            merge_graph(&self.db)?;
+            merge_graph(&self.db, candidate)?;
         }
         Ok(())
     }
@@ -389,7 +389,10 @@ fn validate_payload_identities(db: &Connection, root: &str) -> Result<(), Storag
     }
     Ok(())
 }
-fn merge_graph(db: &Connection) -> Result<(), StorageError> {
+fn merge_graph(db: &Connection, candidate: bool) -> Result<(), StorageError> {
+    if candidate {
+        return super::backup_selector_admission::writer::merge(db);
+    }
     db.execute_batch("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class,hold_expires_at) SELECT commitment,wire_id,manifest_hash,wire_lookup,retention_class,hold_expires_at FROM incoming.object_retention_payload p WHERE NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=p.commitment) ON CONFLICT(commitment) DO NOTHING;
       INSERT INTO object_retention_reference SELECT * FROM incoming.object_retention_reference r WHERE NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=r.commitment) ON CONFLICT DO NOTHING;
       INSERT INTO object_message_reference SELECT * FROM incoming.object_message_reference m WHERE EXISTS(SELECT 1 FROM object_retention_reference r WHERE r.reference_hash=m.reference_hash) AND NOT EXISTS(SELECT 1 FROM direct_message_projection p WHERE p.message_id=m.message_id AND p.deleted=1) AND NOT EXISTS(SELECT 1 FROM incoming.direct_message_projection p WHERE p.message_id=m.message_id AND p.deleted=1) ON CONFLICT DO NOTHING;

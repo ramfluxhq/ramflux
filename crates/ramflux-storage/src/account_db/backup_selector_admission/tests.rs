@@ -8,7 +8,7 @@ use serde_json::json;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn fixture(
+pub(super) fn fixture(
     label: &str,
     run: impl FnOnce(
         &std::path::Path,

@@ -166,6 +166,10 @@ EXISTS(SELECT 1 FROM {database}.object_erasure_lookup l JOIN {database}.object_r
 
 pub(super) mod graph;
 pub(super) mod placeholders;
+pub(super) mod writer;
+
+#[cfg(test)]
+mod graph_writer_tests;
 
 #[cfg(test)]
 mod tests;
