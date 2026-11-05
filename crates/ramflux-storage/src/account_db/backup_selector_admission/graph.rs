@@ -87,6 +87,30 @@ SELECT 'incoming',r.selector,r.commitment,CASE WHEN EXISTS(SELECT 1 FROM backup_
 }
 
 pub(super) fn deleted(db: &Connection, schema: &str, message: &str) -> Result<bool, StorageError> {
+    deleted_with_bindings(
+        db,
+        schema,
+        message,
+        "SELECT copy_id,message_id FROM main.message_copy_binding UNION ALL SELECT copy_id,message_id FROM incoming.message_copy_binding",
+    )
+}
+
+// Incoming archive links cannot revoke the target's independently held veto.
+pub(super) fn target_deleted(db: &Connection, message: &str) -> Result<bool, StorageError> {
+    deleted_with_bindings(
+        db,
+        "main",
+        message,
+        "SELECT copy_id,message_id FROM main.message_copy_binding",
+    )
+}
+
+fn deleted_with_bindings(
+    db: &Connection,
+    schema: &str,
+    message: &str,
+    bindings: &str,
+) -> Result<bool, StorageError> {
     let projected: bool = db.query_row(
         &format!(
             r"SELECT
@@ -97,13 +121,13 @@ OR EXISTS(SELECT 1 FROM {schema}.group_message_tombstone_projection WHERE messag
         [message],
         |r| r.get(0),
     )?;
-    let group_deleted: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.group_message_tombstone_projection t WHERE EXISTS(SELECT 1 FROM main.message_copy_binding b WHERE b.message_id=?1 AND b.copy_id='group:'||t.group_id||':'||t.message_id) OR EXISTS(SELECT 1 FROM incoming.message_copy_binding b WHERE b.message_id=?1 AND b.copy_id='group:'||t.group_id||':'||t.message_id))"), [message], |r|r.get(0))?;
+    let group_deleted: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.group_message_tombstone_projection t WHERE EXISTS(SELECT 1 FROM ({bindings}) b WHERE b.message_id=?1 AND b.copy_id='group:'||t.group_id||':'||t.message_id))"), [message], |r|r.get(0))?;
     if projected || group_deleted || marker(db, schema, message)? {
         return Ok(true);
     }
-    // A known owner may also be named by an envelope id. Examine bindings
-    // from either graph, but match markers only against their own input's keys.
-    let mut query = db.prepare("SELECT substr(copy_id,10) FROM main.message_copy_binding WHERE message_id=?1 AND copy_id GLOB 'envelope:*' UNION SELECT substr(copy_id,10) FROM incoming.message_copy_binding WHERE message_id=?1 AND copy_id GLOB 'envelope:*'")?;
+    // Resolve envelope aliases only through the caller's binding authority;
+    // marker keys and rows always belong to the selected input schema.
+    let mut query = db.prepare(&format!("SELECT substr(copy_id,10) FROM ({bindings}) WHERE message_id=?1 AND copy_id GLOB 'envelope:*'"))?;
     for envelope in query.query_map([message], |r| r.get::<_, String>(0))? {
         if marker(db, schema, &envelope?)? {
             return Ok(true);

@@ -180,7 +180,7 @@ fn legacy_target_identity(
         || actor_manifest.bytes().all(|b| b == 0)
         || actor_manifest != manifest
         || record["manifest_hash"].as_str().is_some_and(|m| m != manifest)
-        || super::graph::deleted(db, "main", message)?
+        || super::graph::target_deleted(db, message)?
     {
         return Ok(None);
     }
