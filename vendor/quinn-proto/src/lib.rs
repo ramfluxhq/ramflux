@@ -71,6 +71,7 @@ use crate::frame::Frame;
 pub use crate::frame::{ApplicationClose, ConnectionClose, Datagram, FrameType};
 
 mod endpoint;
+pub use endpoint::response_credit::{Response, ResponseBuffer, ResponsePool, ResponseStats, RESPONSE_SLAB};
 pub use crate::endpoint::{
     AcceptError, ConnectError, ConnectionHandle, DatagramEvent, Endpoint, Incoming, RetryError,
 };

@@ -215,7 +215,13 @@ impl Token {
 
     /// Encode and encrypt
     pub(crate) fn encode(&self, key: &dyn HandshakeTokenKey) -> Vec<u8> {
-        let mut buf = Vec::new();
+        self.encode_with_capacity(key, 0)
+    }
+
+    pub(crate) fn encode_response(&self, key: &dyn HandshakeTokenKey) -> Vec<u8> { self.encode_with_capacity(key, 128) }
+
+    fn encode_with_capacity(&self, key: &dyn HandshakeTokenKey, capacity: usize) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(capacity);
 
         // Encode payload
         match self.payload {
