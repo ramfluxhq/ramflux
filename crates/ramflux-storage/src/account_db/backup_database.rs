@@ -143,7 +143,7 @@ impl BackupDatabase {
         let mut target = rusqlite::Connection::open(path)?;
         target.busy_timeout(std::time::Duration::from_secs(5))?;
         target.execute_batch(&format!(
-            "PRAGMA key=\"x'{}'\"; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048;",
+            "PRAGMA key=\"x'{}'\"; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA secure_delete=ON;",
             key.sqlcipher_hex()
         ))?;
         {
@@ -158,6 +158,7 @@ impl BackupDatabase {
                 }
             }
         }
+        super::backup_selector_admission::drop_scratch(&target)?;
         target.execute(
             "UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1",
             params![key.fingerprint()],

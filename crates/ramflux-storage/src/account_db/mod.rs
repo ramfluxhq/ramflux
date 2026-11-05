@@ -28,6 +28,7 @@ mod backup_object_erasure;
 mod backup_object_erasure_tests;
 mod backup_object_metadata;
 mod backup_retirement;
+mod backup_selector_admission;
 mod backup_shared_groups;
 pub mod bot;
 mod contact_consent;
