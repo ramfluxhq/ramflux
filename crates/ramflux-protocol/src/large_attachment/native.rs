@@ -22,6 +22,24 @@ pub struct ContentManifest {
     pub segment_digests: Vec<[u8; 32]>,
 }
 
+/// Signature-verified native bytes, with immutable fields. Current owner authority
+/// must still be checked by registration; decoding proves only key possession.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedContentManifest {
+    manifest: ContentManifest,
+    signature: [u8; 64],
+}
+impl VerifiedContentManifest {
+    #[must_use]
+    pub fn manifest(&self) -> &ContentManifest {
+        &self.manifest
+    }
+    #[must_use]
+    pub fn signature(&self) -> &[u8; 64] {
+        &self.signature
+    }
+}
+
 impl ContentManifest {
     /// Encodes the native signed container. This verifies possession of the
     /// claimed key; owner authority still requires authenticated registration.
@@ -41,7 +59,7 @@ impl ContentManifest {
     /// # Errors
     /// Rejects invalid framing, trailing bytes or a bad signature. Registration
     /// must additionally verify the claimed owner's current authority.
-    pub fn decode_signed(input: &[u8]) -> Result<(Self, [u8; 64]), FormatError> {
+    pub fn decode_signed(input: &[u8]) -> Result<VerifiedContentManifest, FormatError> {
         if input.len() > MAX_MANIFEST_BYTES + 72 {
             return Err(FormatError("signed manifest cap"));
         }
@@ -55,7 +73,7 @@ impl ContentManifest {
         if !c.0.is_empty() || manifest.signed_bytes(&signature)? != input {
             return Err(FormatError("signed manifest framing"));
         }
-        Ok((manifest, signature))
+        Ok(VerifiedContentManifest { manifest, signature })
     }
 
     /// Strict native MC decoder, bounded before any segment-list allocation.
