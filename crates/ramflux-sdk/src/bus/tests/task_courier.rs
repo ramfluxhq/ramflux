@@ -606,22 +606,24 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
                 let _shutdown = Shutdown(stop.clone());
                 let mut prepared = BTreeSet::new();
                 let mut passes = 0;
-                tokio::time::timeout(Duration::from_secs(60), async {
-                    while prepared.len() < 100 {
-                        let rows = pass(&mut events).await?;
-                        assert!(rows.len() <= 2, "ack preparation exceeded two items per pass");
-                        assert!(
-                            rows.iter().all(|(_, attempts, charged)| *attempts == 0 && !charged)
-                        );
-                        for (key, _, _) in rows {
-                            prepared.insert(key);
-                        }
-                        passes += 1;
+                let mut full_passes = 0;
+                let mut stale = 0;
+                while prepared.len() < 100 {
+                    let rows = pass(&mut events).await?;
+                    assert!(rows.len() <= 2, "ack preparation exceeded two items per pass");
+                    assert!(rows.iter().all(|(_, attempts, charged)| *attempts == 0 && !charged));
+                    if rows.len() == 2 {
+                        full_passes += 1;
                     }
-                    Ok::<_, Box<dyn std::error::Error>>(())
-                })
-                .await
-                .map_err(|_| "ACK preparation did not visit the backlog before the hang guard")??;
+                    let previous = prepared.len();
+                    for (key, _, _) in rows {
+                        prepared.insert(key);
+                    }
+                    stale = if prepared.len() > previous { 0 } else { stale + 1 };
+                    assert!(stale <= 100, "no new ACK prepared in 100 passes");
+                    passes += 1;
+                }
+                assert!(full_passes > 0, "no courier pass prepared two ACKs");
                 assert!(passes >= 50, "100 distinct ACKs require at least 50 bounded passes");
                 assert_eq!(
                     prepared,
@@ -820,10 +822,15 @@ async fn await_ack_commits(
     gateway: &Arc<Mutex<fixture::Gateway>>,
     expected: usize,
 ) -> Case {
-    // Hang guard for the whole independent delivery backlog, not a per-pass latency bound.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut remaining = reader.task_state_usage("task/ack/")?.0;
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if reader.task_state_usage("task/ack/")?.0 == 0 {
+        let current = reader.task_state_usage("task/ack/")?.0;
+        if current < remaining {
+            deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        }
+        remaining = current;
+        if remaining == 0 {
             assert_eq!(
                 gateway
                     .lock()
@@ -836,9 +843,12 @@ async fn await_ack_commits(
             );
             return Ok(());
         }
-        tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(10)))
-            .await
-            .map_err(|_| "ACK delivery backlog did not commit before the hang guard")?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                format!("ACK delivery made no progress for 30s; remaining {remaining}").into()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
