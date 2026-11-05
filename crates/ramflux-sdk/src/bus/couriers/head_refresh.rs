@@ -73,34 +73,38 @@ pub(crate) enum Work {
     },
 }
 
-fn eligible(account: &LocalBusAccountState, root: &str) -> Result<bool, SdkError> {
-    if account.principal_commitment == root {
-        return Ok(true);
-    }
-    if account.client.friend_links()?.iter().any(|link| {
-        link.state == "accepted" && (link.requester_id == root || link.target_id == root)
-    }) {
-        return Ok(true);
+fn eligible_roots(account: &LocalBusAccountState) -> Result<BTreeSet<String>, SdkError> {
+    let mut roots = BTreeSet::from([account.principal_commitment.clone()]);
+    for link in account.client.friend_links()? {
+        if link.state == "accepted" {
+            roots.insert(link.requester_id);
+            roots.insert(link.target_id);
+        }
     }
     let db = account.client.account_db()?;
     for group in account.client.groups()? {
-        if let Some(state) = db.shared_group_state(&group.group_id)?
-            && state.view().members.iter().any(|member| member.identity.root_commitment == root)
-        {
-            return Ok(true);
+        if let Some(state) = db.shared_group_state(&group.group_id)? {
+            roots.extend(
+                state.view().members.iter().map(|member| member.identity.root_commitment.clone()),
+            );
         }
     }
-    Ok(false)
+    Ok(roots)
 }
 
 fn prepare(account: &mut LocalBusAccountState, fence: Fence) -> Result<Option<Plan>, SdkError> {
     if !fence.current(account) || account.head_refresh.active.upgrade().is_some() {
         return Ok(None);
     }
+    if account.head_refresh.pending.is_empty() {
+        return Ok(None);
+    }
+    let eligible = eligible_roots(account)?;
     let mut roots = Vec::new();
     let mut removed = Vec::new();
+    // Periodic activation must replace prefix traversal with fair continuation.
     for root in &account.head_refresh.pending {
-        if eligible(account, root)? {
+        if eligible.contains(root) {
             roots.push(root.clone());
         } else {
             removed.push(root.clone());
@@ -130,14 +134,17 @@ fn apply(
     if !plan.fence.current(account)
         || !account.head_refresh.active.ptr_eq(&Arc::downgrade(&plan.lease))
         || !plan.roots.iter().any(|candidate| candidate == root)
-        || !eligible(account, root)?
     {
+        return Ok(false);
+    }
+    // Rebuild once for this writer turn; membership may have changed since Prepare.
+    if !eligible_roots(account)?.contains(root) {
         return Ok(false);
     }
     let manifest = outcome?;
     crate::client::identity_authority::verify_manifest_authority(&manifest, root)?;
     account.client.persist_fetched_identity_directory_at(&manifest, fetched_after)?;
-    let fresh = if let Some(native) = &manifest.custody {
+    let ready = if let Some(native) = &manifest.custody {
         account
             .client
             .require_fresh_custody_head(
@@ -147,12 +154,13 @@ fn apply(
             )
             .is_ok()
     } else {
-        false
+        // Verified legacy authority has no native observation clock to satisfy.
+        true
     };
-    if fresh {
+    if ready {
         account.head_refresh.pending.remove(root);
     }
-    Ok(fresh)
+    Ok(ready)
 }
 
 /// Invoked only on the account writer. All network inputs are owned values.
