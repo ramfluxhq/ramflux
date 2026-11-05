@@ -37,6 +37,7 @@ pub use custody_accounts::CustodyPublicationBudgetRow;
 mod custody_history;
 pub(crate) mod expiry_index;
 mod identity_registry;
+mod incarnation;
 mod migration_barrier;
 mod retention;
 mod submission_barrier;
@@ -390,6 +391,7 @@ fn record_inbox_entry_until_in_txn(
     entry: &InboxEntry,
     retain_until: i64,
 ) -> Result<(), NodeCoreError> {
+    incarnation::observe_entry(write_txn, entry)?;
     let entry_bytes = expiry_index::encode_entry(entry, retain_until)?;
     let key = inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq);
     expiry_index::remove_inbox_row(write_txn, &key)?;
@@ -1313,6 +1315,9 @@ impl RouterRedbStore {
         let identity_lineage_heads: BTreeMap<String, String> =
             load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_LINEAGE_HEADS_KEY)?
                 .unwrap_or_default();
+        if self.submission_wal.is_none() {
+            incarnation::upgrade_redb(&self.db, &self.path, &inbox)?;
+        }
         let router_is_empty = registry == SessionRegistry::default()
             && inbox == OpaqueDeviceInbox::default()
             && mvp1_identities == IdentityRegistry::default()
@@ -1499,14 +1504,23 @@ impl RouterRedbStore {
             .iter()
             .map(|(entry, deadline)| expiry_index::encode_entry(entry, *deadline))
             .collect::<Result<Vec<_>, _>>()?;
-        let cursor_state_bytes =
-            cursor_states.iter().map(serialize_value).collect::<Result<Vec<_>, _>>()?;
         let replay_tuple_bytes = replay_tuples
             .iter()
             .map(|(_key, expires_at)| serialize_value(expires_at))
             .collect::<Result<Vec<_>, _>>()?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let cursor_state_bytes = cursor_states
+            .iter()
+            .map(|cursor| {
+                incarnation::ensure_cursor(
+                    &write_txn,
+                    &cursor.target_delivery_id,
+                    cursor.issued_inbox_seq,
+                )?;
+                retention::cursor_bytes(&write_txn, cursor)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         {
             let mut inbox_table = write_txn
                 .open_table(ROUTER_INBOX_ENTRY_TABLE)

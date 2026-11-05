@@ -74,6 +74,7 @@ impl RouterRedbStore {
         {
             let mut table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(redb_error)?;
             for cursor in cursors {
+                let incarnation = super::incarnation::read_id(&table, &cursor.target_delivery_id)?;
                 let previous = table
                     .get(cursor.target_delivery_id.as_str())
                     .map_err(redb_error)?
@@ -84,7 +85,8 @@ impl RouterRedbStore {
                 table
                     .insert(
                         cursor.target_delivery_id.as_str(),
-                        serialize_value(&merged)?.as_slice(),
+                        super::incarnation::encode_cursor(&merged, incarnation.as_deref())?
+                            .as_slice(),
                     )
                     .map_err(redb_error)?;
             }
@@ -136,5 +138,6 @@ pub(super) fn cursor_bytes(
         .map(|value| serde_json::from_slice::<CursorAckState>(value.value()))
         .transpose()
         .map_err(redb_error)?;
-    serialize_value(&merge_cursor(previous, cursor))
+    let incarnation = super::incarnation::read_id(&table, &cursor.target_delivery_id)?;
+    super::incarnation::encode_cursor(&merge_cursor(previous, cursor), incarnation.as_deref())
 }
