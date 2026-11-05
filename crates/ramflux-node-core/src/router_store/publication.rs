@@ -13,6 +13,8 @@ pub use operation::{PublishedOperation, capture};
 #[cfg(test)]
 mod provisional_tests;
 #[cfg(test)]
+mod resource_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod view_tests;
@@ -97,6 +99,7 @@ struct Inbox {
     allocated: u64,
     published: u64,
     in_flight: BTreeMap<u64, Arc<Descriptor>>,
+    accepted: BTreeMap<u64, Vec<String>>,
     aborted: BTreeMap<u64, u64>,
     reservations: usize,
 }
@@ -108,8 +111,9 @@ struct Registry {
     // later assignment's reservation; accepted children retain their references.
     resources: BTreeMap<String, BTreeSet<(Key, u64)>>,
     warnings: u64,
-    resources_seen: BTreeSet<String>,
-    resources_unassigned: BTreeSet<String>,
+    resources_seen: BTreeMap<String, usize>,
+    // Visibility evidence is retained only while a shared resource has live owners.
+    resources_published: BTreeSet<String>,
 }
 
 pub(crate) type PublishedViews = BTreeMap<String, (Option<String>, u64, Vec<(u64, u64)>)>;
@@ -305,7 +309,7 @@ impl PublicationCore {
             inbox.reservations += 1;
             inbox.in_flight.insert(seq, Arc::clone(&descriptor));
             for resource in request.resources {
-                registry.resources_seen.insert(resource.clone());
+                registry.resources_seen.entry(resource.clone()).or_default();
                 registry.resources.entry(resource.clone()).or_default().insert((key.clone(), seq));
             }
             guards.push(AssignmentGuard {
@@ -354,23 +358,38 @@ impl PublicationCore {
     }
 
     pub(crate) fn mark_resource(&self, resource: &str) {
-        lock(&self.shared).resources_seen.insert(resource.into());
+        *lock(&self.shared).resources_seen.entry(resource.into()).or_default() += 1;
     }
     pub(crate) fn complete_unassigned(&self, resources: &[String]) {
-        lock(&self.shared).resources_unassigned.extend(resources.iter().cloned());
+        let mut registry = lock(&self.shared);
+        for resource in resources {
+            if registry.resources.contains_key(resource)
+                || registry.resources_seen.contains_key(resource)
+            {
+                registry.resources_published.insert(resource.clone());
+            }
+        }
+    }
+
+    pub(crate) fn release_unallocated(&self, resources: &[String]) {
+        let mut registry = lock(&self.shared);
+        for resource in resources {
+            if let Some(count) = registry.resources_seen.get_mut(resource) {
+                *count = count.saturating_sub(1);
+            }
+            if !registry.resources.contains_key(resource)
+                && registry.resources_seen.get(resource).is_none_or(|count| *count == 0)
+            {
+                registry.resources_seen.remove(resource);
+                registry.resources_published.remove(resource);
+            }
+        }
     }
 
     pub(crate) fn resource_visible(&self, resource: &str) -> bool {
         let registry = lock(&self.shared);
-        !registry.resources_seen.contains(resource)
-            || registry.resources_unassigned.contains(resource)
-            || registry.resources.get(resource).is_some_and(|owners| {
-                owners.iter().any(|(key, seq)| {
-                    registry.inboxes.get(key).is_some_and(|inbox| {
-                        *seq <= inbox.published && !inbox.in_flight.contains_key(seq)
-                    })
-                })
-            })
+        !registry.resources_seen.contains_key(resource)
+            || registry.resources_published.contains(resource)
     }
 
     /// Number of child references retaining a tentative or accepted identity.
@@ -499,30 +518,72 @@ fn finish(shared: &Shared, descriptor: &Descriptor, aborted: bool) {
     let Ok(publication_gate) = crate::fatal_durability::publication() else { return };
     if aborted {
         for resource in &descriptor.resources {
-            if let Some(owners) = registry.resources.get_mut(resource) {
-                owners.remove(&(descriptor.key.clone(), descriptor.seq));
-                if owners.is_empty() {
-                    registry.resources.remove(resource);
-                    if let Some(cleanup) = shared.replay_cleanup.get() {
-                        cleanup(resource);
-                    }
-                }
-            }
+            release_resource(
+                shared,
+                &mut registry,
+                resource,
+                &descriptor.key,
+                descriptor.seq,
+                false,
+            );
         }
     }
+    let mut published = Vec::new();
     if let Some(inbox) = registry.inboxes.get_mut(&descriptor.key) {
         inbox.identity_durable = true;
         if aborted {
             coalesce(&mut inbox.aborted, descriptor.seq, descriptor.seq);
+        } else {
+            inbox.accepted.insert(descriptor.seq, descriptor.resources.clone());
         }
         inbox.reservations -= 1;
         inbox.in_flight.remove(&descriptor.seq);
         inbox.published =
             inbox.in_flight.first_key_value().map_or(inbox.allocated, |(&seq, _)| seq - 1);
+        while inbox.accepted.first_key_value().is_some_and(|(&seq, _)| seq <= inbox.published) {
+            if let Some(entry) = inbox.accepted.pop_first() {
+                published.push(entry);
+            }
+        }
+    }
+    for (seq, resources) in published {
+        for resource in resources {
+            release_resource(shared, &mut registry, &resource, &descriptor.key, seq, true);
+        }
     }
     drop(registry);
     drop(publication_gate);
     shared.changed.notify_waiters();
+}
+
+fn release_resource(
+    shared: &Shared,
+    registry: &mut Registry,
+    resource: &str,
+    key: &Key,
+    seq: u64,
+    accepted: bool,
+) {
+    if let Some(owners) = registry.resources.get_mut(resource) {
+        owners.remove(&(key.clone(), seq));
+        if accepted {
+            registry.resources_published.insert(resource.into());
+        }
+        if owners.is_empty() {
+            registry.resources.remove(resource);
+            let published = registry.resources_published.contains(resource);
+            if registry.resources_seen.get(resource).is_none_or(|count| *count == 0) {
+                registry.resources_seen.remove(resource);
+                registry.resources_published.remove(resource);
+            }
+            if !accepted
+                && !published
+                && let Some(cleanup) = shared.replay_cleanup.get()
+            {
+                cleanup(resource);
+            }
+        }
+    }
 }
 
 fn coalesce(ranges: &mut BTreeMap<u64, u64>, mut start: u64, mut end: u64) {
@@ -666,9 +727,9 @@ impl PublicationCore {
             .iter()
             .any(|(key, inbox)| key.target == target && !inbox.in_flight.is_empty())
         {
-            return Err(error(
-                "capacity_retry_after (retry_after_ms=1000): inbox assignments pending",
-            ));
+            return Err(NodeCoreError::Publication(PublicationRefusal::CapacityRetryAfter {
+                retry_after_ms: 1000,
+            }));
         }
         for (key, inbox) in &mut registry.inboxes {
             if key.target == target {

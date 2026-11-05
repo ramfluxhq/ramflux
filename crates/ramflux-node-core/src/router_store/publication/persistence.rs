@@ -46,9 +46,6 @@ impl RouterRedbStore {
         }
         let ranges = txn.open_table(TABLE).map_err(error)?;
         let mut registry = Registry::default();
-        let (_, replay) =
-            self.load_delivery_state(i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX))?;
-        registry.resources_unassigned.extend(replay.accepted_entries().map(|(key, _)| key.clone()));
         for target in targets {
             let (Some(incarnation), issued) = self.inbox_status(&target)? else {
                 continue;

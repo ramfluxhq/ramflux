@@ -4,8 +4,23 @@
 //! Actual async mesh fanout must wait on P without occupying the sole worker.
 use super::*;
 
-#[tokio::test]
-async fn single_worker_reply_and_drop() -> anyhow::Result<()> {
+#[test]
+fn single_worker_reply_and_drop() -> anyhow::Result<()> {
+    let (done, result) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(anyhow::Error::from)
+            .and_then(|runtime| runtime.block_on(single_worker_reply_and_drop_inner()));
+        let _ = done.send(outcome);
+    });
+    result.recv_timeout(Duration::from_secs(40)).map_err(|_| {
+        anyhow::anyhow!("single-worker runtime blocked before publication continuation")
+    })?
+}
+
+async fn single_worker_reply_and_drop_inner() -> anyhow::Result<()> {
     for mode in 0..=2 {
         let root = temp_store_path(&format!("fanout-publication-{mode}"))?;
         let state = Arc::new(ramflux_node_core::RouterCore::new());
@@ -65,6 +80,62 @@ async fn single_worker_reply_and_drop() -> anyhow::Result<()> {
         let response = tokio::time::timeout(Duration::from_secs(30), second).await???;
         assert_eq!(response.body["delivered"][0]["inbox_seq"], 2);
         assert_eq!(state.resume("target_laptop", 0, 10).len(), 1);
+        drop(observer);
+        drop(state);
+        drop(core);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn async_mesh_submit_waits_for_publication() -> anyhow::Result<()> {
+    for mode in 0..3 {
+        let root = temp_store_path(&format!("mesh-submit-publication-{mode}"))?;
+        let state = Arc::new(ramflux_node_core::RouterCore::new());
+        let store = Arc::new(ramflux_node_core::publication::open_durability_fixture(&root, mode)?);
+        register_test_device(&state, "alice", "alice_phone", "target_alice", 1)?;
+        store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+        store.initialize_inbox("target_alice")?;
+        state.prepare_publication_target(&store, "target_alice")?;
+        let core = store.publication_core()?;
+        let id =
+            store.inbox_status("target_alice")?.0.ok_or_else(|| anyhow::anyhow!("identity"))?;
+        let predecessor = core.reserve("target_alice", &id, &[])?;
+        let durable = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&durable);
+        let observer = ramflux_node_core::durability_test_hooks::observe(
+            root.clone(),
+            Arc::new(move |_, op, done| {
+                if op == "accepted_assignment" && done {
+                    signal.notify_one();
+                }
+                Ok(())
+            }),
+        );
+        let handle = RouterHandle::tokio(Arc::clone(&state), Arc::clone(&store), None);
+        let envelope = current_envelope("held-mesh-submit", "target_alice")?;
+        let request = ramflux_transport::GatewayQuicRequest {
+            method: "POST".into(),
+            path: "/mvp0/envelope".into(),
+            body: serde_json::to_value(envelope)?,
+        };
+        let response = tokio::spawn(async move {
+            crate::handlers::handle_mesh_quic_request_value(&request, &handle, "ramflux-gateway")
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(30), durable.notified()).await?;
+        tokio::task::yield_now().await;
+        assert_eq!(store.inbox_status("target_alice")?.1, 2);
+        assert_eq!(core.view("target_alice", &id).0, 0);
+        assert_eq!(state.resume("target_alice", 0, 10), []);
+        assert!(!response.is_finished(), "async mesh reply escaped held predecessor");
+        predecessor.definite_non_write();
+        let response = tokio::time::timeout(Duration::from_secs(30), response).await???;
+        assert_eq!(response.body["inbox_seq"], 2);
+        assert_eq!(state.resume("target_alice", 0, 10).len(), 1);
+        drop(predecessor);
         drop(observer);
         drop(state);
         drop(core);

@@ -224,12 +224,29 @@ impl super::RouterRedbStore {
             return Err(error("deleted inbox"));
         }
         drop(read);
-        let provisional = self
-            .publication
-            .lock()
-            .map_err(error)?
-            .as_ref()
-            .and_then(|core| core.current_incarnation(target));
+        let installed = self.publication.lock().map_err(error)?;
+        let core = installed.as_ref().cloned();
+        let candidate = match self.inbox_status(target)?.0 {
+            Some(id) => id,
+            None => match &self.submission_wal {
+                Some(wal) => wal.reserve_incarnation(target)?,
+                None => new_id()?,
+            },
+        };
+        let provisional = match &core {
+            Some(core) => core.provisional_incarnation(target, candidate)?,
+            None => candidate,
+        };
+        // Without a core, keep its installation serialized with this first commit.
+        let installation = if core.is_none() {
+            Some(installed)
+        } else {
+            drop(installed);
+            None
+        };
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        crate::durability_test_hooks::notify(&self.path, "inbox_identity_reserved", true)
+            .map_err(error)?;
         let id = crate::fatal_durability::run(|| {
             let mut txn = self.begin_write().map_err(error)?;
             txn.set_durability(redb::Durability::Immediate).map_err(error)?;
@@ -237,18 +254,17 @@ impl super::RouterRedbStore {
                 let id = wal.reserve_incarnation(target)?;
                 set_cursor(&txn, target, 0, &id, false)?;
                 id
-            } else if let Some(id) = &provisional {
-                set_cursor(&txn, target, 0, id, false)?;
-                id.clone()
             } else {
-                ensure_cursor(&txn, target, 0)?
+                set_cursor(&txn, target, 0, &provisional, false)?;
+                provisional.clone()
             };
             txn.commit().map_err(error)?;
             Ok(id)
         })?;
-        if let Some(core) = self.publication.lock().map_err(error)?.as_ref() {
+        if let Some(core) = core {
             core.register(target, &id, self.inbox_status(target)?.1);
         }
+        drop(installation);
         Ok(id)
     }
     pub(crate) fn checkpoint_incarnation(

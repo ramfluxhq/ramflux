@@ -25,70 +25,47 @@ fn reservation(
 }
 
 #[test]
-fn timeout_branch_releases_reservation_and_worker_releases_permit() -> anyhow::Result<()> {
-    let runtime =
-        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+fn socket_timeout_uses_production_forward_completion() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let url = format!("http://{}/forward", listener.local_addr()?);
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let (handle, _) = migrated_test_handle("http://127.0.0.1:1/", 1, Duration::from_secs(20), now)?;
-    runtime.block_on(async {
-        let attempt = reservation(&handle, "timeout-branch")?;
-        let RouterHandle::Tokio(inner) = &handle;
-        let permit = Arc::clone(&inner.forward_semaphore).try_acquire_owned()?;
-        let (release, receiver) = mpsc::channel();
-        let worker = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let _ = receiver.recv_timeout(Duration::from_secs(2));
-            Err(ramflux_node_core::NodeCoreError::ForwardTimeout { phase: "socket" })
-        });
-        let result = crate::router_engine::complete_forward_worker(
-            handle.state(),
-            attempt,
-            Duration::from_millis(10),
-            worker,
-        )
-        .await;
-        assert!(matches!(result, ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }));
-        // The live blocking worker remains counted; cancellation cannot over-admit.
-        assert_eq!(inner.forward_semaphore.available_permits(), 0);
-        drop(reservation(&handle, "timeout-branch")?);
-        release.send(())?;
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while inner.forward_semaphore.available_permits() == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await?;
-        Ok::<(), anyhow::Error>(())
-    })
+    let (handle, _) = migrated_test_handle(&url, 1, Duration::from_secs(20), now)?;
+    let attempt = reservation(&handle, "timeout-branch")?;
+    let RouterHandle::Tokio(inner) = &handle;
+    let permit = Arc::clone(&inner.forward_semaphore).try_acquire_owned()?;
+    let (release, receiver) = mpsc::channel();
+    let server = thread::spawn(move || -> Result<(), String> {
+        let (_stream, _) = listener.accept().map_err(|e| e.to_string())?;
+        receiver.recv_timeout(Duration::from_secs(30)).map_err(|e| e.to_string())?;
+        Ok(())
+    });
+    let result = crate::router_engine::complete_forward_attempt(handle.state(), attempt, || {
+        let _permit = permit;
+        crate::forward_http::post(&url, &serde_json::json!({}), Duration::from_millis(100))
+    });
+    release.send(())?;
+    server.join().map_err(|_| anyhow::anyhow!("server panic"))?.map_err(anyhow::Error::msg)?;
+    assert!(matches!(result, ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }));
+    assert_eq!(inner.forward_semaphore.available_permits(), 1);
+    drop(reservation(&handle, "timeout-branch")?);
+    Ok(())
 }
 
 #[test]
-fn worker_join_failure_releases_reservation_and_permit() -> anyhow::Result<()> {
-    let runtime =
-        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+fn forward_panic_uses_production_completion_and_releases_permit() -> anyhow::Result<()> {
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
     let (handle, _) = migrated_test_handle("http://127.0.0.1:1/", 1, Duration::from_secs(20), now)?;
-    runtime.block_on(async {
-        let attempt = reservation(&handle, "join-failure")?;
-        let RouterHandle::Tokio(inner) = &handle;
-        let permit = Arc::clone(&inner.forward_semaphore).try_acquire_owned()?;
-        let worker = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            // A resumed unwind produces a real JoinError without a panic lint allowance.
-            std::panic::resume_unwind(Box::new("forward worker stopped"));
-        });
-        let result = crate::router_engine::complete_forward_worker(
-            handle.state(),
-            attempt,
-            Duration::from_secs(1),
-            worker,
-        )
-        .await;
-        assert!(matches!(result, ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }));
-        assert_eq!(inner.forward_semaphore.available_permits(), 1);
-        drop(reservation(&handle, "join-failure")?);
-        Ok::<(), anyhow::Error>(())
-    })
+    let attempt = reservation(&handle, "join-failure")?;
+    let RouterHandle::Tokio(inner) = &handle;
+    let permit = Arc::clone(&inner.forward_semaphore).try_acquire_owned()?;
+    let result = crate::router_engine::complete_forward_attempt(handle.state(), attempt, || {
+        let _permit = permit;
+        std::panic::resume_unwind(Box::new("forward worker stopped"));
+    });
+    assert!(matches!(result, ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }));
+    assert_eq!(inner.forward_semaphore.available_permits(), 1);
+    drop(reservation(&handle, "join-failure")?);
+    Ok(())
 }
 
 #[test]

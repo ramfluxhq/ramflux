@@ -225,8 +225,10 @@ fn complete_sync_forward(
                         None
                     };
                     let _peer_permit = peer_permit;
-                    let response = client.forward(plan, forward.timeout);
-                    state.complete_home_node_forward(reservation, response)
+                    let plan = plan.clone();
+                    complete_forward_attempt(state, reservation, || {
+                        client.forward(&plan, forward.timeout)
+                    })
                 }
                 Err(_full) => {
                     let target_delivery_id = reservation.target_delivery_id().to_owned();
@@ -335,6 +337,20 @@ fn submission_refusal(
     error: ramflux_node_core::NodeCoreError,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     match error {
+        ramflux_node_core::NodeCoreError::Publication(reason) => {
+            let text = reason.to_string();
+            let Some(outcome) = publication_reason(&text) else {
+                return Err(reason.into());
+            };
+            Ok(ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
+                outcome: outcome.into(),
+                target_delivery_id: envelope.target_delivery_id.clone(),
+                inbox_seq: None,
+                cursor: None,
+                nack: None,
+            })
+        }
         ramflux_node_core::NodeCoreError::HomeMigration(mut reason) => {
             if reason == ramflux_protocol::home_migration::Refusal::HomeMigrated
                 && store
@@ -349,36 +365,21 @@ fn submission_refusal(
     }
 }
 
-// Kept separate so both JoinError and elapsed branches can be exercised without
-// changing the production federation client or injecting network failures globally.
-#[cfg(test)]
-pub(crate) async fn complete_forward_worker(
+// Both ingress adapters use this completion path; a client panic releases the
+// reservation and owned permits without turning a retryable forward into HTTP failure.
+pub(crate) fn complete_forward_attempt(
     state: &ramflux_node_core::RouterCore,
     reservation: Box<ramflux_node_core::RouterForwardReservation>,
-    timeout: std::time::Duration,
-    worker: tokio::task::JoinHandle<
-        Result<
-            ramflux_node_core::FederatedEnvelopeForwardResponse,
-            ramflux_node_core::NodeCoreError,
-        >,
+    work: impl FnOnce() -> Result<
+        ramflux_node_core::FederatedEnvelopeForwardResponse,
+        ramflux_node_core::NodeCoreError,
     >,
 ) -> ramflux_node_core::RouterSubmitOutcome {
-    let target_delivery_id = reservation.target_delivery_id().to_owned();
-    match tokio::time::timeout(timeout, worker).await {
-        Ok(Ok(response)) => state.complete_home_node_forward(reservation, response),
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "federation forward worker stopped before completion");
-            drop(reservation);
-            ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id }
-        }
-        Err(_elapsed) => {
-            tracing::warn!(
-                timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                "federation forward exceeded its total wall-clock bound"
-            );
-            drop(reservation);
-            ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id }
-        }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(response) => state.complete_home_node_forward(reservation, response),
+        Err(_) => ramflux_node_core::RouterSubmitOutcome::ForwardInProgress {
+            target_delivery_id: reservation.target_delivery_id().to_owned(),
+        },
     }
 }
 
@@ -665,7 +666,8 @@ pub(crate) fn submit_response_from_outcome(
         ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { target_delivery_id, reason } => {
             ramflux_node_core::EnvelopeSubmitResponse {
                 migration_refusal: None,
-                outcome: format!("rejected_security:{reason}"),
+                outcome: publication_reason(&reason)
+                    .map_or_else(|| format!("rejected_security:{reason}"), str::to_owned),
                 target_delivery_id,
                 inbox_seq: None,
                 cursor: None,
@@ -678,6 +680,50 @@ pub(crate) fn submit_response_from_outcome(
 #[cfg(test)]
 mod tests {
     use super::should_persist_submission;
+
+    #[test]
+    fn publication_refusals_preserve_typed_outcomes() -> anyhow::Result<()> {
+        let root =
+            super::migration_tests::directory().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let store = ramflux_node_core::RouterRedbStore::open(root.0.join("refusals.db"))?;
+        let state = ramflux_node_core::RouterCore::new();
+        let envelope = super::migration_tests::envelope("target", "refusal")
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        for (reason, code) in [
+            (
+                ramflux_node_core::publication::PublicationRefusal::CapacityRetryAfter {
+                    retry_after_ms: 1000,
+                },
+                "capacity_retry_after",
+            ),
+            (
+                ramflux_node_core::publication::PublicationRefusal::IncarnationMismatch,
+                "incarnation_mismatch",
+            ),
+            (ramflux_node_core::publication::PublicationRefusal::SequenceExhausted, "invalid_seq"),
+        ] {
+            let response = super::submission_refusal(&state, &store, &envelope, reason.into())?;
+            assert_eq!(response.outcome, code);
+            let response = super::submit_response_from_outcome(
+                &state,
+                ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
+                    target_delivery_id: envelope.target_delivery_id.clone(),
+                    reason: reason.to_string(),
+                },
+            );
+            assert_eq!(response.outcome, code);
+        }
+        assert!(
+            super::submission_refusal(
+                &state,
+                &store,
+                &envelope,
+                ramflux_node_core::publication::PublicationRefusal::FatalUncertain.into()
+            )
+            .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn replayed_forward_ack_does_not_rewrite_the_router_wal() {
@@ -732,3 +778,15 @@ mod drain_tests;
 #[cfg(test)]
 #[path = "router_engine_drain_recovery_tests.rs"]
 mod drain_recovery_tests;
+
+fn publication_reason(reason: &str) -> Option<&'static str> {
+    if reason.starts_with("capacity_retry_after") {
+        Some("capacity_retry_after")
+    } else if reason == "incarnation_mismatch" {
+        Some("incarnation_mismatch")
+    } else if reason == "inbox sequence exhausted" {
+        Some("invalid_seq")
+    } else {
+        None
+    }
+}
