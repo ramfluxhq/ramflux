@@ -137,7 +137,7 @@ fn hold(root: PathBuf, abort: bool) -> Hold {
     let wait = Mutex::new(wait);
     let once = AtomicBool::new(false);
     let observer = crate::durability_test_hooks::observe(
-        root.clone(),
+        root,
         Arc::new(move |_, op, done| {
             if op == "retry_attached" && done {
                 let _ = attached.try_send(());

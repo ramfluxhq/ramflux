@@ -15,6 +15,7 @@ struct Scope {
     assigned: BTreeSet<(String, u64)>,
     retries: Vec<crate::router_store::sender_retry::SenderAssignment>,
     retry_owners: Vec<crate::router_store::sender_retry::RetryAbort>,
+    retry_admission: Vec<tokio::sync::OwnedSemaphorePermit>,
 }
 thread_local! {
     static CURRENT: RefCell<Option<Scope>> = const { RefCell::new(None) };
@@ -35,6 +36,7 @@ impl Drop for Reset {
 /// A completed store operation whose response still belongs behind the prefix gate.
 pub struct PublishedOperation<T> {
     value: T,
+    _retry_admission: Vec<tokio::sync::OwnedSemaphorePermit>,
     guards: Vec<AssignmentGuard>,
     retries: Vec<crate::router_store::sender_retry::SenderAssignment>,
     core: Option<Arc<PublicationCore>>,
@@ -118,7 +120,13 @@ pub fn capture<T>(f: impl FnOnce() -> T) -> Result<PublishedOperation<T>, NodeCo
     if let Some(core) = &scope.core {
         core.release_unallocated(&scope.resources);
     }
-    Ok(PublishedOperation { value, guards: scope.guards, retries: scope.retries, core: scope.core })
+    Ok(PublishedOperation {
+        value,
+        _retry_admission: scope.retry_admission,
+        guards: scope.guards,
+        retries: scope.retries,
+        core: scope.core,
+    })
 }
 
 #[cfg(test)]
@@ -251,18 +259,19 @@ pub(crate) fn complete_unassigned() {
 /// Add an accepted retry's original assignment to the current reply gate.
 /// # Errors
 /// Returns an error when called outside a publication preparation scope.
-pub fn await_sender_assignment(
+pub fn await_sender_retry(
     core: &Arc<PublicationCore>,
-    assignment: &crate::router_store::sender_retry::SenderAssignment,
-) -> Result<(), NodeCoreError> {
+    resolved: crate::sender_retry::ResolvedRetry,
+) -> Result<crate::sender_retry::SenderAssignment, NodeCoreError> {
     CURRENT.with(|current| {
         let mut current = current.borrow_mut();
         let scope = current
             .as_mut()
             .ok_or_else(|| NodeCoreError::Redb("retry requires publication scope".into()))?;
         scope.core = Some(Arc::clone(core));
-        scope.retries.push(assignment.clone());
-        Ok(())
+        scope.retries.push(resolved.assignment.clone());
+        scope.retry_admission.push(resolved.permit);
+        Ok(resolved.assignment)
     })
 }
 
@@ -282,8 +291,9 @@ fn attach_retry(scope: &Scope, guard: &AssignmentGuard) {
     let owners = scope
         .retry_owners
         .iter()
-        .filter(|owner| owner.bind(&guard.descriptor.key.target))
+        .find(|owner| owner.bind(&guard.descriptor.key.target))
         .cloned()
+        .into_iter()
         .collect();
     let _ = guard.descriptor.retry_abort.set(owners);
 }
@@ -322,4 +332,12 @@ pub fn proved_non_write() -> bool {
                 })
         })
     })
+}
+
+pub(crate) fn retain_retry_admission(permit: tokio::sync::OwnedSemaphorePermit) {
+    CURRENT.with(|current| {
+        if let Some(scope) = current.borrow_mut().as_mut() {
+            scope.retry_admission.push(permit);
+        }
+    });
 }

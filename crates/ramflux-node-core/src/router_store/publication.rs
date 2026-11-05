@@ -9,7 +9,7 @@
 pub(crate) mod operation;
 pub(crate) mod persistence;
 pub(crate) use operation::allocate as operation_allocate;
-pub use operation::{PublishedOperation, await_sender_assignment, capture, proved_non_write};
+pub use operation::{PublishedOperation, await_sender_retry, capture, proved_non_write};
 #[cfg(test)]
 mod lifetime_tests;
 #[cfg(test)]

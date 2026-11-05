@@ -181,3 +181,103 @@ async fn retry_waiter_admission_is_bounded_and_cancel_safe() -> Result {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn retry_admission_retains_capacity_until_publication() -> Result {
+    let root = fixture("retry-published-admission");
+    let mut store = test_store(&root, 0, 1 << 20)?;
+    store.submission_admission = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
+    let identity = ramflux_crypto::create_identity_root("sender", [0x91; 32]);
+    let branch = ramflux_crypto::create_device_branch("sender", "device", 1, [0x92; 32]);
+    let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&identity, &branch)?;
+    let id = store.initialize_inbox("target")?;
+    let core = store.publication_core()?;
+    let predecessor = core.reserve("target", &id, &[])?;
+    let guard = core.reserve("target", &id, &[])?;
+    let write = guard.hand_off().ok_or("handoff")?;
+    let row = entry(2);
+    store.record_submission_increment_for_sender(
+        "original",
+        row.envelope.created_at + 3600,
+        Some(&row),
+        Some(source.root_commitment()),
+    )?;
+    write.accepted_durable();
+    assert_eq!(core.view("target", &id).0, 0);
+    let mut replies = Vec::new();
+    for _ in 0..3 {
+        let RetryAdmission::Accepted(resolved) =
+            store.admit_sender_retry(&source, &row.envelope, row.envelope.created_at)?
+        else {
+            return Err("durable retry".into());
+        };
+        replies.push(crate::publication::capture(|| {
+            crate::publication::await_sender_retry(&core, resolved)
+        })?);
+    }
+    assert_eq!(store.submission_admission.available_permits(), 0);
+    assert!(matches!(
+        store.admit_sender_retry(&source, &row.envelope, row.envelope.created_at),
+        Err(NodeCoreError::Publication(
+            crate::publication::PublicationRefusal::CapacityRetryAfter { .. }
+        ))
+    ));
+    drop(replies.pop());
+    assert_eq!(store.submission_admission.available_permits(), 1);
+    let replacement = store.admit_sender_retry(&source, &row.envelope, row.envelope.created_at)?;
+    assert_eq!(store.submission_admission.available_permits(), 0);
+    drop(replacement);
+    predecessor.definite_non_write();
+    core.wait_published(&guard).await;
+    for reply in replies {
+        assert_eq!(reply.published().await?.inbox_seq, 2);
+    }
+    assert_eq!(store.submission_admission.available_permits(), 3);
+    drop(predecessor);
+    drop(guard);
+    drop(core);
+    drop(store);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn typed_sender_refusals_preserve_existing_native_variant_numbers() -> Result {
+    use ramflux_protocol::custody::CustodyRefusal::*;
+    for (index, reason) in [
+        Unsupported,
+        InvalidInput,
+        AuthorityUnavailable,
+        PrincipalIdTaken,
+        ChallengeUnknown,
+        ChallengeExpired,
+        Replay,
+        BindingRefused,
+        SessionRequired,
+        SessionExpired,
+        UpdateRequired,
+        Capacity,
+        Busy,
+        PersistenceUnavailable,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let bytes = postcard::to_allocvec(&reason)?;
+        assert_eq!(bytes, vec![u8::try_from(index)?]);
+        assert_eq!(
+            postcard::from_bytes::<ramflux_protocol::custody::CustodyRefusal>(&bytes)?,
+            reason
+        );
+    }
+    for reason in
+        [AbortedRetrySafe, CapacityRetryAfter { retry_after_ms: 1000 }, IdempotencyConflict]
+    {
+        let bytes = postcard::to_allocvec(&reason)?;
+        assert_eq!(
+            postcard::from_bytes::<ramflux_protocol::custody::CustodyRefusal>(&bytes)?,
+            reason
+        );
+    }
+    Ok(())
+}

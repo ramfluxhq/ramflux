@@ -47,11 +47,11 @@ pub(crate) fn submit(
                     .map_err(|error| crate::sender_retry::custody_refusal(&error))?,
                 crate::sender_retry::RetryAdmission::Owner(_) => unreachable!(),
             };
-            crate::publication::await_sender_assignment(
+            crate::publication::await_sender_retry(
                 &store
                     .publication_core()
                     .map_err(|error| crate::sender_retry::custody_refusal(&error))?,
-                &assignment,
+                assignment,
             )
             .map_err(|error| crate::sender_retry::custody_refusal(&error))?;
             return Ok(CustodyServerFrame::Submitted {

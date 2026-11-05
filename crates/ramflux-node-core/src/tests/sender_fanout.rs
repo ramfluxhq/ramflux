@@ -12,9 +12,11 @@ async fn fanout_mixed_retry_reuses_children_after_abort_and_restart() -> Result 
         let router = RouterCore::new();
         store.bootstrap_router(&router)?;
         for (device, seed) in [("source", 601), ("left", 602), ("right", 603)] {
-            router.mvp1_register_identity(&registration_request(
-                &router, "fanout", device, seed, None, device,
-            )?)?;
+            let mut registration =
+                registration_request(&router, "fanout", device, seed, None, device)?;
+            registration.target_delivery_id = format!("target_{device}");
+            registration.session_id = format!("session_{device}");
+            router.mvp1_register_identity(&registration)?;
         }
         store.record_identity_registry(&router.mvp1_identities_snapshot())?;
         let mut unsigned = envelope("mixed-parent", "unused", DeliveryClass::SelfDeviceControl);
@@ -62,7 +64,7 @@ async fn fanout_mixed_retry_reuses_children_after_abort_and_restart() -> Result 
                 .await?
                 .resolved()
                 .await?;
-        assert!(retried.delivered.iter().all(|child| child.inbox_seq == Some(1)));
+        assert!(retried.delivered.iter().all(|child| child.inbox_seq == Some(1)), "{retried:?}");
         for (_, target) in &targets {
             assert_eq!(router.resume(target, 0, 10).len(), 1);
             assert_eq!(store.inbox_status(target)?.1, 1);

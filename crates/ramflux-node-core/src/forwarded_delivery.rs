@@ -178,10 +178,8 @@ impl RouterCore {
                     }
                     crate::sender_retry::RetryAdmission::Owner(_) => unreachable!(),
                 };
-                crate::publication::await_sender_assignment(
-                    &store.publication_core()?,
-                    &assignment,
-                )?;
+                let assignment =
+                    crate::publication::await_sender_retry(&store.publication_core()?, assignment)?;
                 return Ok(crate::sender_retry::accepted_outcome(&assignment, envelope));
             }
         };

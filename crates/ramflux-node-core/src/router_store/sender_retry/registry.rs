@@ -30,7 +30,7 @@ struct Slot {
 pub enum RetryAdmission {
     Owner(RetryOwner),
     Waiting(RetryWaiter),
-    Accepted(SenderAssignment),
+    Accepted(ResolvedRetry),
 }
 /// Original request ownership. A non-write drop releases only this identity.
 pub struct RetryOwner {
@@ -42,7 +42,18 @@ pub struct RetryOwner {
 /// Cancellation-safe bounded waiter; no assignment or replay reservation ownership.
 pub struct RetryWaiter {
     slot: Arc<Slot>,
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
+}
+/// A resolved retry retains ingress admission through its original publication gate.
+pub struct ResolvedRetry {
+    pub(crate) assignment: SenderAssignment,
+    pub(crate) permit: OwnedSemaphorePermit,
+}
+impl std::ops::Deref for ResolvedRetry {
+    type Target = SenderAssignment;
+    fn deref(&self) -> &Self::Target {
+        &self.assignment
+    }
 }
 impl RetryWaiter {
     /// Original admission's retention horizon. Attaching a waiter never refreshes it.
@@ -54,7 +65,7 @@ impl RetryWaiter {
     /// Blocking compatibility adapter for native/TCP store threads.
     /// # Errors
     /// Returns runtime creation or the original typed non-write refusal.
-    pub fn resolved_blocking(self) -> Result<SenderAssignment, NodeCoreError> {
+    pub fn resolved_blocking(self) -> Result<ResolvedRetry, NodeCoreError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(super::incarnation::error)?;
@@ -63,14 +74,16 @@ impl RetryWaiter {
     /// Await the original persistence disposition without holding any router lock.
     /// # Errors
     /// Returns `aborted_retry_safe` after the original request proves non-write.
-    pub async fn resolved(self) -> Result<SenderAssignment, NodeCoreError> {
+    pub async fn resolved(self) -> Result<ResolvedRetry, NodeCoreError> {
         loop {
             let notified = self.slot.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             match self.slot.result.lock().map_err(super::incarnation::error)?.clone() {
                 Resolution::Pending => {}
-                Resolution::Accepted(assignment) => return Ok(assignment),
+                Resolution::Accepted(assignment) => {
+                    return Ok(ResolvedRetry { assignment, permit: self.permit });
+                }
                 Resolution::Aborted => {
                     return Err(super::SenderRetryRefusal::AbortedRetrySafe.into());
                 }
@@ -92,8 +105,14 @@ impl RetryAbort {
         if self.target != target {
             return false;
         }
-        self.bound.store(true, std::sync::atomic::Ordering::Release);
-        true
+        self.bound
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
     }
     pub(crate) fn aborted(&self) {
         finish(&self.registry, &self.key, &self.slot, None);
@@ -116,6 +135,11 @@ impl RetryOwner {
     /// Install the original durable result before releasing the registration.
     /// Persistent lookup and waiter attachment share the registry lock.
     pub fn accepted(self, assignment: SenderAssignment) {
+        if let Some(permit) =
+            self.slot.permit.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+        {
+            crate::router_store::publication::operation::retain_retry_admission(permit);
+        }
         self.finish(Some(assignment));
     }
     fn finish(&self, assignment: Option<SenderAssignment>) {
@@ -172,7 +196,7 @@ impl RouterRedbStore {
             if slot.digest != digest {
                 return Err(super::SenderRetryRefusal::IdempotencyConflict.into());
             }
-            let waiter = RetryWaiter { slot: Arc::clone(slot), _permit: permit };
+            let waiter = RetryWaiter { slot: Arc::clone(slot), permit };
             drop(entries);
             #[cfg(any(test, feature = "durability-test-hooks"))]
             crate::durability_test_hooks::notify(&self.path, "retry_attached", true)
@@ -180,7 +204,7 @@ impl RouterRedbStore {
             return Ok(RetryAdmission::Waiting(waiter));
         }
         if let Some(assignment) = self.sender_assignment(source.root_commitment(), envelope, now)? {
-            return Ok(RetryAdmission::Accepted(assignment));
+            return Ok(RetryAdmission::Accepted(ResolvedRetry { assignment, permit }));
         }
         let slot = Arc::new(Slot {
             digest,

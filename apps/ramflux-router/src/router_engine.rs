@@ -59,9 +59,9 @@ pub(crate) fn submit_envelope_inner(
             PreparedSubmit::Waiting(waiter) => {
                 let runtime = tokio::runtime::Builder::new_current_thread().build()?;
                 let assignment = runtime.block_on(waiter.resolved())?;
-                ramflux_node_core::publication::await_sender_assignment(
+                let assignment = ramflux_node_core::publication::await_sender_retry(
                     &store.publication_core()?,
-                    &assignment,
+                    assignment,
                 )?;
                 Ok(sender_retry_response(&assignment))
             }
@@ -795,7 +795,7 @@ mod drain_tests;
 #[path = "router_engine_drain_recovery_tests.rs"]
 mod drain_recovery_tests;
 
-fn publication_reason(reason: &str) -> Option<&'static str> {
+pub(crate) fn publication_reason(reason: &str) -> Option<&'static str> {
     if reason == "aborted_retry_safe" {
         Some("aborted_retry_safe")
     } else if reason == "idempotency_conflict" {
@@ -878,9 +878,9 @@ fn prepare_sender_retry(
                 RetryPreparation::Return(PreparedSubmit::Waiting(waiter))
             }
             ramflux_node_core::sender_retry::RetryAdmission::Accepted(assignment) => {
-                ramflux_node_core::publication::await_sender_assignment(
+                let assignment = ramflux_node_core::publication::await_sender_retry(
                     &store.publication_core()?,
-                    &assignment,
+                    assignment,
                 )?;
                 RetryPreparation::Return(complete_response(sender_retry_response(&assignment)))
             }

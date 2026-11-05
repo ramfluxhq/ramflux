@@ -109,6 +109,11 @@ async fn submit_after_recipient_ack(
     serving.await??;
     result?;
     let frames = frames.lock().map_err(|_| anyhow::anyhow!("sender mutex"))?;
+    if ["aborted_retry_safe", "capacity_retry_after", "idempotency_conflict"].contains(&outcome) {
+        assert_retry_nack(&frames, &received, outcome)?;
+        std::fs::remove_dir_all(root)?;
+        return Ok(());
+    }
     if outcome == "forwarded_home_node_migrated" {
         assert_eq!(frames.len(), 2);
         if supports_forward_ack {
@@ -255,7 +260,7 @@ async fn serve_connection(
                         200,
                         &EnvelopeSubmitResponse {
                             migration_refusal: None,
-                            outcome: "online".into(),
+                            outcome: outcome.into(),
                             target_delivery_id: entry.target_delivery_id,
                             inbox_seq: Some(entry.inbox_seq),
                             cursor: None,
@@ -530,4 +535,28 @@ impl ramflux_transport::GatewaySessionFrameSource for FrameSequence {
             async move { frame.ok_or_else(|| TransportError::Quic("test source ended".into())) },
         )
     }
+}
+
+fn assert_retry_nack(
+    frames: &[GatewayServerFrame],
+    received: &Arc<Mutex<Vec<GatewayServerFrame>>>,
+    outcome: &str,
+) -> anyhow::Result<()> {
+    assert_eq!(frames.len(), 1);
+    assert!(
+        matches!(&frames[0], GatewayServerFrame::Nack { reason } if reason == outcome),
+        "{frames:?}"
+    );
+    assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.len(), 0);
+    Ok(())
+}
+#[tokio::test]
+async fn sender_retry_refusals_keep_the_existing_nack_shape()
+-> Result<(), Box<dyn std::error::Error>> {
+    for reason in ["aborted_retry_safe", "capacity_retry_after", "idempotency_conflict"] {
+        for capable in [false, true] {
+            submit_after_recipient_ack(reason, false, false, reason, capable).await?;
+        }
+    }
+    Ok(())
 }

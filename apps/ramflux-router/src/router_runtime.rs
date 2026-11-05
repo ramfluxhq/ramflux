@@ -445,6 +445,16 @@ fn forwarded_error_reply(
         ramflux_node_core::NodeCoreError::HomeMigration(reason) => {
             Ok(forwarded_migration_reply(reason))
         }
+        error @ (ramflux_node_core::NodeCoreError::SenderRetry(_)
+        | ramflux_node_core::NodeCoreError::Publication(_)) => {
+            let text = error.to_string();
+            match crate::router_engine::publication_reason(&text) {
+                Some(reason) => Ok(serde_json::json!({"accepted": false,
+                    "retryable": matches!(reason, "aborted_retry_safe" | "capacity_retry_after"),
+                    "reason": reason})),
+                None => Err(error.into()),
+            }
+        }
         ramflux_node_core::NodeCoreError::Capacity { .. } => Ok(
             serde_json::json!({"accepted":false,"retryable":true,"reason":"foreign_pin_capacity","retry_after":5}),
         ),
@@ -580,8 +590,8 @@ pub(crate) mod tests {
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Gateway,
         )?;
-        assert!(replay.outcome.starts_with("rejected_security:"));
-        assert!(replay.outcome.contains("replay:"));
+        assert_eq!(replay.outcome, "offline_queued");
+        assert_eq!(replay.inbox_seq, via_handle.inbox_seq);
         Ok(())
     }
 
@@ -602,14 +612,13 @@ pub(crate) mod tests {
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Gateway,
         ))?;
-        assert!(replay.outcome.starts_with("rejected_security:"));
-        assert!(replay.outcome.contains("replay:"));
+        assert_eq!(replay.outcome, "offline_queued");
+        assert_eq!(replay.inbox_seq, via_handle.inbox_seq);
         Ok(())
     }
 
     #[test]
-    fn durable_local_delivery_rejects_old_home_retry_and_confirms_new_home_retry()
-    -> anyhow::Result<()> {
+    fn durable_local_delivery_retries_reuse_original_acceptance() -> anyhow::Result<()> {
         let envelope = current_envelope("env_runtime_durable_replay", "target_runtime_replay")?;
         let path = temp_store_path("durable_local_replay")?;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -647,15 +656,16 @@ pub(crate) mod tests {
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Gateway,
         ))?;
-        assert!(old_home_retry.outcome.starts_with("rejected_security:"));
+        assert_eq!(old_home_retry.outcome, "offline_queued");
+        assert_eq!(old_home_retry.inbox_seq, Some(1));
 
         let new_home_retry = runtime.block_on(handle.submit_envelope_async_from(
             envelope.clone(),
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Federation,
         ))?;
-        assert_eq!(new_home_retry.outcome, "duplicate_federated_forward");
-        assert_eq!(new_home_retry.inbox_seq, None);
+        assert_eq!(new_home_retry.outcome, "offline_queued");
+        assert_eq!(new_home_retry.inbox_seq, Some(1));
         assert_eq!(handle.state().resume(&envelope.target_delivery_id, 0, 10).len(), 1);
         let expires_at = envelope.created_at + i64::from(envelope.ttl);
         store.sweep_delivery_retention(expires_at, false)?;
