@@ -61,6 +61,7 @@ impl BackupDatabase {
         let db = rusqlite::Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(&format!("PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",key.sqlcipher_hex()))?;
+        crate::schema_generation::validate(&db)?;
         let fingerprint: String = db.query_row(
             "SELECT key_fingerprint FROM account_key_check WHERE singleton_id=1",
             [],

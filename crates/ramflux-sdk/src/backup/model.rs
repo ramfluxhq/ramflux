@@ -121,6 +121,7 @@ pub enum BackupFailureCode {
     Tampered,
     Truncated,
     UnsupportedVersion,
+    SchemaResetRequired,
     InsufficientSpace,
     Unreadable,
     NotWritable,

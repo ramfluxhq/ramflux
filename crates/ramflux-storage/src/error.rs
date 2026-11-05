@@ -10,6 +10,11 @@ pub enum StorageError {
     /// Authentication or integrity verification failed; never used for local I/O.
     #[error("{0}")]
     Integrity(&'static str),
+    /// Selected data belongs to a different application profile; preserve it unchanged.
+    #[error(
+        "SchemaResetRequired: storage generation {generation} differs from supported {supported}; preserve this path and create a fresh store for the matching profile"
+    )]
+    SchemaResetRequired { generation: i64, supported: i64 },
     #[error("object erased")]
     ObjectErased,
     #[error("object identity conflict; explicit verified replacement is required")]
@@ -100,7 +105,8 @@ impl StorageError {
     #[must_use]
     pub fn is_account_unusable(&self) -> bool {
         match self {
-            Self::AccountKeyMismatch
+            Self::SchemaResetRequired { .. }
+            | Self::AccountKeyMismatch
             | Self::EncryptionUnavailable { .. }
             | Self::KeyWrappingFailed(_)
             | Self::RekeyRollbackFailed(_)

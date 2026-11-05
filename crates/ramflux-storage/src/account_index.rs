@@ -46,6 +46,7 @@ impl AccountIndex {
         fs::create_dir_all(root.as_ref())?;
         let path = root.as_ref().join(ACCOUNT_INDEX_FILE);
         let connection = Connection::open(path)?;
+        crate::schema_generation::validate_worker(&connection)?;
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;",
         )?;

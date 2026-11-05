@@ -53,3 +53,6 @@ pub(crate) struct NativeRestoreSetup {
 
 #[cfg(test)]
 mod storage_error_tests;
+
+#[cfg(test)]
+mod schema_generation_tests;

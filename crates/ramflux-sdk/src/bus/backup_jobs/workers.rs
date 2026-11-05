@@ -43,6 +43,7 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         E::ObjectOwnershipUnverified { .. } => {
             failure(BackupFailureCode::ObjectOwnershipUnverified)
         }
+        E::SchemaResetRequired { .. } => failure(BackupFailureCode::SchemaResetRequired),
         E::AccountSchemaTooNew { .. } => failure(BackupFailureCode::UnsupportedVersion),
         E::Integrity(_) | E::HistoryBundleHashMismatch => failure(BackupFailureCode::Tampered),
         E::Sqlite(_) if error.is_insufficient_space() => {
@@ -102,6 +103,15 @@ fn stream_error(error: BackupStreamError, header: bool) -> BackupFailure {
         BackupStreamError::Derivation(_) => failure(BackupFailureCode::WrongPassphrase),
     }
 }
+pub(super) fn require_archive_generation(context: &BackupContext) -> Result<(), BackupFailure> {
+    use ramflux_protocol::schema_profile::{ACTIVE_STORAGE_GENERATION, ARCHIVE_GENERATION_KEY};
+    let generation = context.totals.get(ARCHIVE_GENERATION_KEY).copied().unwrap_or(0);
+    if i64::try_from(generation).ok() != Some(ACTIVE_STORAGE_GENERATION) {
+        return Err(failure(BackupFailureCode::SchemaResetRequired));
+    }
+    Ok(())
+}
+
 fn archive_totals(
     counts: &BackupCounts,
     size: u64,
@@ -114,6 +124,11 @@ fn archive_totals(
         .iter()
         .map(|(key, value)| (key.clone(), value.as_u64().unwrap_or(0)))
         .collect::<std::collections::BTreeMap<_, _>>();
+    totals.insert(
+        ramflux_protocol::schema_profile::ARCHIVE_GENERATION_KEY.into(),
+        u64::try_from(ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION)
+            .map_err(|_| failure(BackupFailureCode::Interrupted))?,
+    );
     totals.insert("database_bytes".into(), size);
     totals.insert("missing_attachments".into(), missing_count);
     Ok(totals)
@@ -361,6 +376,7 @@ impl BackupJobs {
             .map_err(|error| stream_error(error, true))?;
         drop(secret);
         let context = decoder.context().clone();
+        require_archive_generation(&context)?;
         let counts = archive_counts(&context)?;
         self.change(|registry| registry.authenticated_totals(&job.job_id, counts.clone()))
             .map_err(|_| failure(BackupFailureCode::Interrupted))?;

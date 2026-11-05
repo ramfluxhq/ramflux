@@ -103,6 +103,7 @@ impl AccountDb {
         let path = index.root().join(account.db_relative_path);
         let connection = Connection::open_account_writer(&path, writer)?;
         apply_key(&connection, key)?;
+        crate::schema_generation::validate_worker(&connection)?;
         connection.execute_batch("PRAGMA synchronous=FULL;")?;
         let mode = current_encryption_mode(&connection);
         if mode != EncryptionMode::SqlCipher && !insecure_test_sqlite_allowed() {

@@ -112,6 +112,9 @@ impl BackupJobs {
             SdkError::Storage(ramflux_storage::StorageError::ObjectOwnershipUnverified {
                 ..
             }) => BackupFailure::new(BackupFailureCode::ObjectOwnershipUnverified),
+            SdkError::Storage(ramflux_storage::StorageError::SchemaResetRequired { .. }) => {
+                BackupFailure::new(BackupFailureCode::SchemaResetRequired)
+            }
             SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. }) => {
                 BackupFailure::new(BackupFailureCode::UnsupportedVersion)
             }

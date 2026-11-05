@@ -47,6 +47,7 @@ pub enum RamfluxErrorCode {
     ObjectIdentityConflict = 20,
     ObjectOwnershipUnverified = 21,
     CustodyForkFenced = 22,
+    SchemaResetRequired = 23,
 }
 
 /// Retryable account writer contention (18). Existing `StorageFailed` (8) remains
@@ -78,6 +79,7 @@ impl RamfluxErrorCode {
             Self::ObjectIdentityConflict => "ObjectIdentityConflict",
             Self::ObjectOwnershipUnverified => "ObjectOwnershipUnverified",
             Self::CustodyForkFenced => "CustodyForkFenced",
+            Self::SchemaResetRequired => "SchemaResetRequired",
             Self::RateLimited => "RateLimited",
             Self::Internal => "Internal",
             Self::PanicAborted => "PanicAborted",
@@ -945,6 +947,7 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         E::ObjectErased => RamfluxErrorCode::ObjectErased,
         E::ObjectIdentityConflict => RamfluxErrorCode::ObjectIdentityConflict,
         E::ObjectOwnershipUnverified { .. } => RamfluxErrorCode::ObjectOwnershipUnverified,
+        E::SchemaResetRequired { .. } => RamfluxErrorCode::SchemaResetRequired,
         E::AccountSchemaTooNew { .. } => RamfluxErrorCode::UnsupportedVersion,
         E::Integrity(_)
         | E::Protocol(_)

@@ -104,6 +104,7 @@ impl AccountDb {
     fn open_query_only_connection(&self) -> Result<Connection, StorageError> {
         let connection = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         apply_key(&connection, &self.current_key)?;
+        crate::schema_generation::validate_worker(&connection)?;
         verify_or_install_key_fingerprint(&connection, &self.current_key)?;
         connection.execute_batch("PRAGMA query_only=ON; PRAGMA synchronous=FULL;")?;
         Ok(connection)

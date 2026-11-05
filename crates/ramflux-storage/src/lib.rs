@@ -34,6 +34,7 @@ mod row_mappers;
 mod schema;
 mod schema_contact_requests;
 mod schema_device_namespace;
+mod schema_generation;
 mod schema_group_control_identity;
 mod schema_group_sender_identity;
 mod schema_identity_keys;
