@@ -40,6 +40,7 @@ require(hashlib.sha256(REFERENCE.read_bytes()).hexdigest() == REFERENCE_HASH,
 spec = importlib.util.spec_from_file_location('dm_fs_blake3_reference', REFERENCE)
 reference = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = reference
+sys.dont_write_bytecode = True
 spec.loader.exec_module(reference)
 from cryptography.hazmat.backends.openssl.backend import backend
 from cryptography.hazmat.primitives import hashes, hmac, serialization
@@ -266,6 +267,12 @@ def check_wire(vectors):
             pass
         else:
             raise ValueError('negative accepted: ' + vector['name'])
+    distinguishing = [v for v in vectors['deadlines'] if v['name'].endswith('_start_limit_different_times')]
+    require({v['input']['mode'] for v in distinguishing} == {'opk','spk_only'}, 'missing independent mode start limits')
+    for v in distinguishing:
+        inp = v['input']
+        correct, wrong = (inp['leased_at'],inp['issued_at']) if inp['mode']=='opk' else (inp['issued_at'],inp['leased_at'])
+        require(correct + 604800 < inp['deadline'] <= wrong + 604800 and not v['accepted'], 'non-distinguishing start limit')
     for vector in vectors['deadlines']:
         v = vector['input']
         try:
@@ -299,6 +306,17 @@ def check_crypto(vectors):
         else:
             raise ValueError('tampered signature verified')
     require({v['mode'] for v in vectors['bootstrap']} == {'opk','spk_only'}, 'bootstrap coverage')
+    require(len(vectors['dh_refusals']) >= 2, 'missing DH refusal fixture')
+    for vector in vectors['dh_refusals']:
+        private = x25519.X25519PrivateKey.from_private_bytes(bytes.fromhex(vector['private_seed']))
+        try:
+            shared = private.exchange(x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(vector['peer_public'])))
+        except ValueError:
+            shared = bytes(32)  # OpenSSL refuses the all-zero DH result itself.
+        require(vector['reject'] and shared == bytes.fromhex(vector['shared_secret']) == bytes(32), 'DH refusal fixture')
+    ephemeral_keys = [v['public_keys']['ephemeral'] for v in vectors['bootstrap']]
+    ratchet_keys = [v['public_keys']['ratchet'] for v in vectors['bootstrap']]
+    require(len(set(ephemeral_keys + ratchet_keys)) == 4, 'cross-session E/R0 seed reuse')
     for vector in vectors['bootstrap']:
         keys = {n:x25519.X25519PrivateKey.from_private_bytes(bytes.fromhex(s)) for n,s in vector['seeds'].items()}
         pairs = [('initiator_identity','spk'), ('ephemeral','recipient_identity'), ('ephemeral','spk')]
@@ -341,19 +359,41 @@ def check_bindings(wire, crypto, custody):
         'transcript_hash_spk_only', 'custody_action_register',
         'custody_action_prekey_status', 'custody_action_register_update',
         'custody_object_register', 'custody_object_prekey_status',
-        'custody_object_register_update',
+        'custody_object_register_update', 'publication_snapshot_hash',
+        'frame_result_hash_result_opk', 'frame_result_hash_result_spk_only',
+        'frame_result_hash_result_status', 'frame_result_hash_result_busy',
     }
     require(set(slots) == required and len(slots) == len(crypto['hashes']), 'complete hash inventory')
     for v in slots.values():
         require(bytes.fromhex(v['preimage']) == v['domain'].encode() + b'\0' + bytes.fromhex(v['canonical']), 'hash framing: ' + v['name'])
     direct = {
         'branch_binding':'QualifiedBranch', 'base_hash':'SignedNativePrekeyBase',
-        'retirement_digest':'RetirementRef', 'lease_operation_id':'PrekeyLeaseIntent',
+        'publication_snapshot_hash':'PrekeyPublicationSnapshot', 'lease_operation_id':'PrekeyLeaseIntent',
         'request_argument':'PrekeyLeaseIntent', 'request_hash':'NativePrekeyRequest',
         'publish_argument':'OwnerPrekeyUpdate', 'status_argument':'OwnerStatusQuery',
         'bundle_hash_opk':'lease_opk', 'bundle_hash_spk_only':'lease_spk_only',
         'transcript_hash_opk':'transcript_opk', 'transcript_hash_spk_only':'transcript_spk_only',
     }
+    for name in ('result_opk','result_spk_only','result_status','result_busy'):
+        direct['frame_result_hash_'+name] = name
+    entries = by_name['PrekeyPublicationSnapshot']['input']['pending_retirements']
+    require(len(entries) >= 2 and crypto['retirement_list_vector']['entries'] == entries, 'complete retirement list fixture')
+    encoded_list = encode_value('list400@RetirementRef', entries).hex()
+    require(crypto['retirement_list_vector']['canonical'] == encoded_list == slots['retirement_digest']['canonical'], 'whole retirement list hash binding')
+    rules = SCHEMA['hash_rules']
+    require(set(rules) == {'branch_binding','base_hash','retirement_digest','lease_operation_id',
+        'request_argument','request_hash','bundle_hash','transcript_hash',
+        'publication_snapshot_hash','frame_result_hash','custody_action_hash','custody_object_hash'}, 'hash-role inventory')
+    require(len({r['domain'] for r in rules.values()}) == len(rules), 'hash role domain reuse')
+    signature_domains = {domain(TYPES[v['name']]['domain']).decode() for v in crypto['signatures'] if v['name'] in TYPES}
+    require(not signature_domains.intersection(r['domain'] for r in rules.values()), 'hash/signature domain reuse')
+    cases = [case for rule in rules.values() for case in rule['cases']]
+    require(len(cases) == len(slots) and {v['name'] for v in cases} == set(slots), 'hash rules coverage')
+    for rule in rules.values():
+        require(rule['framing'] == 'UTF8(domain) || 0x00 || canonical', 'hash-rule framing')
+        for case in rule['cases']:
+            actual = slots[case['name']]
+            require(rule['domain'] == actual['domain'] and case['canonical'] == actual['canonical'] and case['preimage'] == actual['preimage'], 'hash-rule preimage binding: '+case['name'])
     require(slots['status_request_hash']['canonical'] == encode('NativePrekeyRequest', by_name['NativePrekeyStatus']['input']['request']).hex(), 'status request hash binding')
     for slot, name in direct.items():
         require(slots[slot]['canonical'] == by_name[name]['bytes'], 'hash wire binding: ' + slot)
@@ -381,7 +421,7 @@ def check_bindings(wire, crypto, custody):
     for result_name, request_name in [('result_opk','NativePrekeyLease'), ('result_spk_only','NativePrekeyLease'), ('result_status','NativePrekeyStatus'), ('result_busy','NativePrekeyLease')]:
         result, request = by_name[result_name]['input'], by_name[request_name]['input']
         require(result['correlation_id'] == request['correlation_id'], 'result correlation binding')
-        expected = blake3(framed('request_argument', encode('NativePrekeyRequest',request['request']))).hex()
+        expected = blake3(framed('request_hash', encode('NativePrekeyRequest',request['request']))).hex()
         require(result['request_hash'] == expected, 'result request binding')
     for vector in crypto['bootstrap']:
         mode = vector['mode']
@@ -407,7 +447,7 @@ def main():
     parser.parse_args()
     manifest = load('oracle_sources.json')
     require(len({v['code'] for v in TYPES.values()}) == len(TYPES), 'duplicate type code')
-    require(len(set(SCHEMA['domains'])) == 21, 'domain inventory')
+    require(len(SCHEMA['domains']) == len(set(SCHEMA['domains'])) == 23, 'domain inventory')
     for layout in TYPES.values():
         require([f['id'] for f in layout['fields']] == list(range(1,len(layout['fields'])+1)), 'field ID ordering')
         require(all(f['required'] for f in layout['fields']), 'field presence grammar')
