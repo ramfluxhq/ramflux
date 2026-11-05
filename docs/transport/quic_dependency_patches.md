@@ -169,15 +169,15 @@ unblocking each negotiation/Retry/refusal case.
 The shared metadata ledger reserves `align_up(capacity,64)+64` before actual backing
 growth; old and new allocations overlap until the old backing is destroyed. The
 ledger is not doubled again and has no per-class item caps. This checkpoint hooks
-send-segment deque backing and STREAM frame metadata heap capacity only, preserving
+send-segment deque backing, STREAM frame metadata, packet record tables, PendingAcks and ACK/loss scratch, preserving
 inline/default representations. Unique leases follow backing through packet
 retirement and owned iteration; empty retained capacity stays charged.
 
-The owned metadata regression currently exercises only those two classes using
+The owned metadata regression currently exercises the implemented send/record/range/scratch classes using
 actual Tokio drivers, independent actual-capacity/source/payload/wire observations,
 exact-full versus attempted-overflow, local RESOURCE_LIMIT/peer application-close,
 and retained owners through Drained and final destruction. It does not certify the
-other ten census classes. Production metadata configuration is intentionally absent;
+other six census classes. Production metadata configuration is intentionally absent;
 only the rejected-from-product `__control-test` feature can instantiate this partial
 ledger. The remaining classes need fallible storage hooks before activation.
 
@@ -187,3 +187,22 @@ scratch. Std BTreeMap does not expose allocated-node capacity: an entry count or
 payload-size estimate is not an actual-capacity certificate. Receive/CRYPTO/history
 hooks, full mixed-exhaustion propagation, supported writer/envelope and all allocation
 certificates also remain future work. No profile arithmetic is changed here.
+
+
+The first B1 continuation replaces bounded sent-record BTreeMap storage with an
+ordered allocation-visible table. Packet builders reserve table backing before
+header/packet-number effects; sparse removals reuse tombstones and owned iteration
+retains the allocation lease. Default mode retains BTreeMap. ACK/loss scratch has
+fallible backing growth and terminal propagation. PendingAcks preflights the exact
+range growth before dedup/ACK/effects, including the transient 65th range and its
+retained spare capacity. Metadata terminal close emits no ACK for refused processing.
+Bounded send deques retain their charged backing rather than invoking an untracked
+shrink allocation. The enclosing loss algorithm was extracted by responsibility.
+
+Dependency tests freeze only the test ledger at actual live charges to force a
+specific subsequent allocation attempt, without fake allocation owners or class
+item caps. Actual map/capacity, packet numbers, delivered frames and peer error
+observations remain independent. Full receive-side allocation preflight, mixed
+exhaustion and all class coverage still belong to the unfinished metadata work.
+Remaining B1 hooks are send range sets, retransmit children and pending transfers;
+receive/CRYPTO/unordered ownership and activation certificates remain absent.

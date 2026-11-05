@@ -2,6 +2,14 @@
 //! Non-default dependency-test packet construction and state observation.
 use super::*;
 impl Connection {
+    /// Construct an authenticated ACK over actual transmitted packet numbers.
+    #[doc(hidden)]
+    pub fn control_test_ack_packet(&self,number:u64,acked:&[u64])->Vec<u8>{
+        let mut ranges=crate::range_set::ArrayRangeSet::new();for n in acked{ranges.insert_one(*n);}
+        let mut frames=Vec::new();crate::frame::Ack::encode(0,&ranges,None,&mut frames);
+        self.control_test_packet(number,false,&frames)
+    }
+
     /// Test observation: used directions, generation, retries, authenticated packets,
     /// pending packet, frame effects, ACK membership, closed state and timer waiter.
     #[doc(hidden)]
