@@ -84,6 +84,56 @@ pub(super) fn cursors(db: &redb::Database) -> Result<CursorInventory, NodeCoreEr
     }
     Ok((ids, issued))
 }
+/// Validate the exact post-quarantine active inventory without repair, sync or
+/// mutation. Ordinary recovery remains responsible for tolerable crash tails.
+pub(super) fn preflight(
+    root: &Path,
+    db: &redb::Database,
+    excluded: Option<&Path>,
+) -> Result<(), NodeCoreError> {
+    let metadata = load_metadata(db)?;
+    let mut state = super::RouterWalState::default();
+    for (key, mut segments) in inventory(root)? {
+        let directory = root.join(&key);
+        let chain = metadata.as_ref().and_then(|m| m.chains.get(&key));
+        segments.retain(|id| {
+            chain.is_none_or(|chain| *id >= chain.anchor)
+                && excluded != Some(router_wal_segment_path(&directory, *id).as_path())
+        });
+        for segment in &segments {
+            let path = router_wal_segment_path(&directory, *segment);
+            let bytes = fs::read(&path).map_err(error)?;
+            let newest = segments.last() == Some(segment);
+            let legacy = bytes.starts_with(ROUTER_WAL_MAGIC);
+            let expected_len = if chain.is_some_and(|chain| chain.legacy.contains(segment))
+                || (metadata.is_none() && legacy)
+            {
+                ROUTER_WAL_MAGIC.len()
+            } else {
+                HEADER_LEN
+            };
+            let repairable = newest
+                && (bytes.len() <= ROUTER_WAL_MAGIC.len()
+                    || (metadata.is_some()
+                        && expected_len == HEADER_LEN
+                        && bytes.len() <= HEADER_LEN
+                        && (bytes.starts_with(super::MAGIC) || bytes.iter().all(|b| *b == 0))));
+            if repairable {
+                continue;
+            }
+            let mut file = File::open(&path).map_err(error)?;
+            read_header(&mut file).map_err(|cause| super::segment_error(&path, cause))?;
+            while let Some((stored, _)) = read_router_wal_record(&mut file)
+                .map_err(|cause| super::segment_error(&path, cause))?
+            {
+                super::decode_payload(stored, &mut state)
+                    .map_err(|cause| super::segment_error(&path, cause))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_identity(root: &Path, id: &str) -> Result<(), NodeCoreError> {
     let path = root.join("identity");
     let temporary = root.join("identity.pending");

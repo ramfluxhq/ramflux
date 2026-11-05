@@ -3,6 +3,10 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error(
+        "{path}: {cause}; stop every gateway, stop the router, then run ramflux-router --config <path> --rotate-inbox-incarnations --quarantine-wal-segment {path} (never move or delete WAL segments by hand)"
+    )]
+    WalSegmentRequiresQuarantine { path: std::path::PathBuf, cause: String },
     #[error("forward {phase} deadline expired")]
     ForwardTimeout { phase: &'static str },
     #[error("home migration refused: {0:?}")]

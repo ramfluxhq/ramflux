@@ -102,6 +102,35 @@ fn move_segment(root: &Path, segment: &Quarantine) -> Result<(), NodeCoreError> 
     durability_io::sync_dir(&directory).map_err(error)
 }
 
+// A pending marker is authoritative, but a new quarantine argument is never
+// silently discarded. Completed moves remain in quarantine when the marker is
+// amended to repair another segment; no active frame is replayed from there.
+fn amend_quarantine(
+    db: &redb::Database,
+    path: &Path,
+    request: &mut Pending,
+    source: &Path,
+) -> Result<(), NodeCoreError> {
+    let root = request.wal_root.as_deref().ok_or_else(|| error("quarantine requires WAL mode"))?;
+    if let Some(previous) = &request.quarantine {
+        if source == previous.source {
+            return Ok(());
+        }
+        if previous.source.exists() || !previous.destination.exists() {
+            return Err(error(
+                "quarantine conflicts with an unfinished pending move; resume it first",
+            ));
+        }
+    }
+    let next = quarantine(root, source)?;
+    recovery::preflight(root, db, Some(&next.source))?;
+    request.quarantine = Some(next);
+    durability_io::boundary(path, "operator_quarantine_amend", || {
+        mark(db, request).map_err(io::Error::other)
+    })
+    .map_err(error)
+}
+
 /// Resume before enabling any store writer or listener. No TTL can clear this marker.
 pub(crate) fn resume(db: &Arc<redb::Database>, path: &Path) -> Result<(), NodeCoreError> {
     let Some(request) = pending(db)? else { return Ok(()) };
@@ -166,7 +195,7 @@ impl RouterRedbStore {
         segment: Option<&Path>,
     ) -> Result<usize, NodeCoreError> {
         let db = Arc::new(redb::Database::open(path).map_err(error)?);
-        let resume_pending = pending(&db)?.is_some();
+        let resume_pending = pending(&db)?;
         // Maintenance intentionally bypasses ordinary WAL open, which may refuse
         // the damaged segment. Import prior cursor-field E without replaying it.
         let mut tx = db.begin_write().map_err(error)?;
@@ -176,7 +205,10 @@ impl RouterRedbStore {
         }
         incarnation_state::import(&tx)?;
         tx.commit().map_err(error)?;
-        if resume_pending {
+        if let Some(mut request) = resume_pending {
+            if let Some(segment) = segment {
+                amend_quarantine(&db, path, &mut request, segment)?;
+            }
             resume(&db, path)?;
         } else {
             let wal_root = root
@@ -193,6 +225,12 @@ impl RouterRedbStore {
                     )
                 })
                 .transpose()?;
+            // D6 tolerates exactly the named segment. Refuse before marking if
+            // another active segment would prevent completion of the pass.
+            if let Some(root) = &wal_root {
+                recovery::preflight(root, &db, quarantine.as_ref().map(|q| q.source.as_path()))?;
+            }
+            let _inventory = recovery::cursors(&db)?;
             let request = Pending { version: 1, wal_root, quarantine };
             durability_io::boundary(path, "operator_rotation_pending", || {
                 mark(&db, &request).map_err(io::Error::other)
