@@ -68,6 +68,8 @@ fn redact(
                 inner["object_id"].as_str().ok_or_else(refuse)?,
                 inner["manifest_hash"].as_str().ok_or_else(refuse)?,
             );
+            // Input mappings only decode identities: side-specific keep/admission
+            // and the merged fence set still dominate; incoming rows cannot grant target authority.
             let legacy:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM backup_selector_admission a JOIN {schema}.object_index o ON o.object_id=a.selector WHERE a.side=?1 AND a.commitment=?2 AND a.decision='keep' AND o.tombstoned=1 AND length(o.ciphertext)=0 AND NOT EXISTS(SELECT 1 FROM {schema}.object_retention_reference r WHERE r.selector=a.selector))"),params![side,commitment],|r|r.get(0))?;
             let transport:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.object_retention_reference r JOIN {schema}.object_retention_payload p USING(commitment) JOIN backup_reference_admission a ON a.reference_hash=r.reference_hash AND a.side=?1 WHERE p.commitment=?2 AND r.selector=p.wire_id AND CAST(r.reference_json AS TEXT)='{{}}' AND NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=p.commitment))"),params![side,commitment],|r|r.get(0))?;
             let minimal = inner.as_object().is_some_and(|fields| fields.len() == 2)
@@ -112,7 +114,11 @@ fn redact(
     Ok(changed)
 }
 
-pub(in crate::account_db) fn prepare(db: &Connection, root: &str) -> Result<(), StorageError> {
+pub(in crate::account_db) fn prepare(
+    db: &Connection,
+    root: &str,
+    progress: &mut impl FnMut() -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
     db.execute_batch("CREATE TABLE backup_preserved_copy(table_name TEXT NOT NULL,row_id INTEGER NOT NULL,body BLOB NOT NULL,PRIMARY KEY(table_name,row_id));")?;
     for schema in ["main", "incoming"] {
         for (table, key, column) in [
@@ -132,15 +138,25 @@ pub(in crate::account_db) fn prepare(db: &Connection, root: &str) -> Result<(), 
             let mut query=db.prepare(&format!("SELECT rowid,{key},CASE WHEN length({column})<=1048576 THEN {column} END FROM {schema}.{table}"))?;
             let mut rows = query.query([])?;
             while let Some(row) = rows.next()? {
+                progress()?;
                 let id: i64 = row.get(0)?;
                 let key: String = row.get(1)?;
-                let bytes = Zeroizing::new(row.get::<_, Option<Vec<u8>>>(2)?.ok_or_else(refuse)?);
                 let actor = table.ends_with("actor_state");
                 let relevant = !actor
                     || key.starts_with("attachment/")
                     || key.starts_with("directory/object/")
                     || key.starts_with("sync/attachment/")
                     || key.starts_with("own-device/");
+                let bound_drop = actor && excluded_actor_binding(db, schema, &key)?;
+                if bound_drop {
+                    exclude_actor(db, schema, table, id, &key)?;
+                    continue;
+                }
+                let bytes = match row.get::<_, Option<Vec<u8>>>(2)? {
+                    Some(bytes) => Zeroizing::new(bytes),
+                    None if !relevant => continue,
+                    None => return Err(refuse()),
+                };
                 let mut value: Value = match serde_json::from_slice(&bytes) {
                     Ok(value) => value,
                     Err(_) if !relevant => continue,
@@ -160,7 +176,7 @@ pub(in crate::account_db) fn prepare(db: &Connection, root: &str) -> Result<(), 
                         .or_else(|| key.strip_prefix("directory/object/"))
                         .or_else(|| key.strip_prefix("sync/attachment/"))
                     {
-                        drop_copy = blocked(db, root, schema, selector, None)?;
+                        drop_copy |= blocked(db, root, schema, selector, None)?;
                     }
                     if key.starts_with("attachment/reference-by-")
                         && let Some(selector) = value.as_str()
@@ -171,25 +187,7 @@ pub(in crate::account_db) fn prepare(db: &Connection, root: &str) -> Result<(), 
                 let changed = if drop_copy { false } else { redact(db, root, schema, &mut value)? };
                 drop_copy |= value.is_null();
                 if drop_copy {
-                    db.execute(
-                        "INSERT OR IGNORE INTO backup_erased_copy VALUES(?1,?2,?3)",
-                        params![schema, table, id],
-                    )?;
-                    if schema == "main" {
-                        if actor {
-                            for binding in [
-                                "object_payload_actor",
-                                "object_reference_actor",
-                                "object_transport_actor",
-                            ] {
-                                db.execute(
-                                    &format!("DELETE FROM {binding} WHERE state_kind=?1"),
-                                    [&key],
-                                )?;
-                            }
-                        }
-                        db.execute(&format!("DELETE FROM main.{table} WHERE rowid=?1"), [id])?;
-                    }
+                    exclude_actor(db, schema, table, id, &key)?;
                 } else if changed {
                     let body = Zeroizing::new(serde_json::to_vec(&value)?);
                     if schema == "incoming" {
@@ -225,6 +223,38 @@ pub(in crate::account_db) fn checkpoint(db: &Connection) -> Result<(), StorageEr
                 > 0
         );
         return Err(StorageError::AuthorizationRejected);
+    }
+    Ok(())
+}
+
+// Retain the public scan_copies binding exclusions before any JSON projection.
+fn excluded_actor_binding(db: &Connection, schema: &str, key: &str) -> Result<bool, StorageError> {
+    let side = if schema == "main" { "target" } else { "incoming" };
+    Ok(db.query_row(&format!(r"SELECT
+        EXISTS(SELECT 1 FROM {schema}.object_transport_actor a JOIN main.object_erasure_fence f USING(commitment) WHERE a.state_kind=?1)
+        OR (EXISTS(SELECT 1 FROM {schema}.object_reference_actor WHERE state_kind=?1)
+            AND NOT EXISTS(SELECT 1 FROM {schema}.object_reference_actor a JOIN backup_reference_admission r USING(reference_hash) WHERE a.state_kind=?1 AND r.side=?2 AND NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=r.commitment)))"), params![key, side], |r| r.get(0))?)
+}
+fn exclude_actor(
+    db: &Connection,
+    schema: &str,
+    table: &str,
+    id: i64,
+    key: &str,
+) -> Result<(), StorageError> {
+    db.execute(
+        "INSERT OR IGNORE INTO backup_erased_copy VALUES(?1,?2,?3)",
+        params![schema, table, id],
+    )?;
+    if schema == "main" {
+        if table.ends_with("actor_state") {
+            for binding in
+                ["object_payload_actor", "object_reference_actor", "object_transport_actor"]
+            {
+                db.execute(&format!("DELETE FROM {binding} WHERE state_kind=?1"), [key])?;
+            }
+        }
+        db.execute(&format!("DELETE FROM main.{table} WHERE rowid=?1"), [id])?;
     }
     Ok(())
 }

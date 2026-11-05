@@ -89,7 +89,7 @@ impl BackupDatabase {
             super::backup_selector_admission::placeholders::classify(&self.db, &root)?;
         }
         if candidate {
-            super::backup_selector_admission::preservation::prepare(&self.db, &root)?;
+            super::backup_selector_admission::preservation::prepare(&self.db, &root, progress)?;
         }
         for database in ["main", "incoming"] {
             scan_objects(&self.db, database, &root, candidate, progress)?;

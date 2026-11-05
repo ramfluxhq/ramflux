@@ -24,29 +24,22 @@ impl BackupDatabase {
         } else {
             "r.state_json".into()
         };
-        let gate = |table: &str| {
-            if candidate {
-                format!(
-                    " AND (NOT EXISTS(SELECT 1 FROM backup_preserved_copy c WHERE c.table_name='{table}' AND c.row_id=r.rowid) OR EXISTS(SELECT 1 FROM backup_reference_admission a WHERE a.side='incoming' AND a.message_id=f.message_id AND NOT EXISTS(SELECT 1 FROM object_erasure_fence e WHERE e.commitment=a.commitment)))"
-                )
-            } else {
-                String::new()
-            }
-        };
+        // Message footprints restrict surviving copies, including redacted copies;
+        // attachment admission must never remove their message ownership.
         // A live opaque value inherits ownership only when its incoming projection won.
         // Local newer values retain their locally registered owners. Archive rows are copied
         // separately and addressed by their new rowid, never the incoming rowid.
-        self.db.execute_batch(&format!("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,'actor',l.state_kind FROM incoming.message_footprint f JOIN incoming.runtime_actor_state r ON r.state_kind=f.locator JOIN runtime_actor_state l ON l.state_kind=r.state_kind AND l.state_json={actor} WHERE f.kind='actor'{};",gate("runtime_actor_state")))?;
+        self.db.execute_batch(&format!("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,'actor',l.state_kind FROM incoming.message_footprint f JOIN incoming.runtime_actor_state r ON r.state_kind=f.locator JOIN runtime_actor_state l ON l.state_kind=r.state_kind AND l.state_json={actor} WHERE f.kind='actor';"))?;
         let source = key.fingerprint();
-        self.db.execute(&format!("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,'archived_actor',CAST(a.rowid AS TEXT) FROM incoming.message_footprint f JOIN incoming.runtime_actor_state r ON r.state_kind=f.locator JOIN backup_archived_actor_state a ON a.state_kind=f.locator AND a.source=?1 WHERE f.kind='actor'{}",gate("runtime_actor_state")),params![source])?;
-        self.db.execute(&format!("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,'archived_event',CAST(a.rowid AS TEXT) FROM incoming.message_footprint f JOIN incoming.local_event_log r ON r.event_id=f.locator JOIN backup_archived_local_event a ON a.event_id=f.locator AND a.source=?1 WHERE f.kind='event'{}",gate("local_event_log")),params![source])?;
+        self.db.execute("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,'archived_actor',CAST(a.rowid AS TEXT) FROM incoming.message_footprint f JOIN incoming.runtime_actor_state r ON r.state_kind=f.locator JOIN backup_archived_actor_state a ON a.state_kind=f.locator AND a.source=?1 WHERE f.kind='actor'",params![source])?;
+        self.db.execute("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,'archived_event',CAST(a.rowid AS TEXT) FROM incoming.message_footprint f JOIN incoming.local_event_log r ON r.event_id=f.locator JOIN backup_archived_local_event a ON a.event_id=f.locator AND a.source=?1 WHERE f.kind='event'",params![source])?;
         for (table, kind, key_column) in [
             ("backup_archived_actor_state", "archived_actor", "state_kind"),
             ("backup_archived_local_event", "archived_event", "event_id"),
         ] {
             let exists:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name=?1)",[table],|r|r.get(0))?;
             if exists {
-                self.db.execute(&format!("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,?1,CAST(a.rowid AS TEXT) FROM incoming.message_footprint f JOIN incoming.{table} r ON r.rowid=CAST(f.locator AS INTEGER) JOIN {table} a ON a.source=?2||'/'||r.source AND a.{key_column}=r.{key_column} WHERE f.kind=?1{}",gate(table)),params![kind,source])?;
+                self.db.execute(&format!("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,?1,CAST(a.rowid AS TEXT) FROM incoming.message_footprint f JOIN incoming.{table} r ON r.rowid=CAST(f.locator AS INTEGER) JOIN {table} a ON a.source=?2||'/'||r.source AND a.{key_column}=r.{key_column} WHERE f.kind=?1"),params![kind,source])?;
             }
         }
         Ok(())
