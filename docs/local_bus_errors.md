@@ -11,6 +11,7 @@ not prove that a remote mutation was never committed.
 | `Unavailable` | Transient QUIC or I/O failure, HTTP client timeout/connect/body failure, unopened transport, backpressure, draining/shutdown timeout, exhausted transport retries, or HTTP 408/429/5xx | Bounded retry after connectivity recovers |
 | `Unauthenticated` | Transport refused an unauthenticated session | Authenticate before retrying |
 | `TransportSecurity` | TLS verification or certificate pin failure | Stop; repair the trusted binding before retrying |
+| `SchemaResetRequired` | Unsupported store/archive schema profile; C ABI `SchemaResetRequired` (23), backup `schema_reset_required` | Stop; explicitly create a fresh store while preserving existing data |
 | `AttachmentDeleted` | The durable attachment deletion or sender-revocation fence forbids access | Stop; fetching cannot restore access |
 | `ValidationFailed` | Other HTTP 4xx, codec/protocol/oversized-frame failure, invalid DNS name, incompatible or nonproduction backend, unsupported operation, or another permanent transport failure | Correct the request/configuration first |
 

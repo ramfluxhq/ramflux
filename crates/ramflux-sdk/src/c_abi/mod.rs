@@ -1088,3 +1088,16 @@ fn custody_fork_fence_maps_to_c_abi_typed_refusal() {
     assert_eq!(error.code.name(), "CustodyForkFenced");
     assert_eq!(error.code as i32, 22);
 }
+
+#[cfg(test)]
+#[test]
+fn schema_reset_required_maps_to_c_abi_code_23() {
+    let error =
+        map_sdk_error(&SdkError::Storage(ramflux_storage::StorageError::SchemaResetRequired {
+            generation: 1,
+            supported: 0,
+        }));
+    assert_eq!(error.code, RamfluxErrorCode::SchemaResetRequired);
+    assert_eq!(error.code.name(), "SchemaResetRequired");
+    assert_eq!(error.code as i32, 23);
+}
