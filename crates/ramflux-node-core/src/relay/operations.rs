@@ -68,6 +68,9 @@ pub fn relay_store_put_candidate(
         Existing(RelayChunkEntry),
         New(RelayChunkEntry, u64),
     }
+    store
+        .ensure_generic_attachment_format(&candidate.object_id, Some(&candidate.manifest_hash))
+        .map_err(RelayStoreOpError::from)?;
     let meta = RelayChunkMeta::from(&candidate);
     let phase = {
         let mut guard = lock_relay_state(state);
@@ -135,6 +138,9 @@ pub fn relay_store_read_through(
     expected: &RelayChunkMeta,
     now: u64,
 ) -> Result<RelayChunkEntry, RelayStoreOpError> {
+    store
+        .ensure_generic_attachment_format(&expected.object_id, Some(&expected.manifest_hash))
+        .map_err(RelayStoreOpError::from)?;
     let entry = store
         .relay_chunk_entry(&expected.chunk_id)
         .map_err(|error| RelayStoreOpError::PayloadUnavailable(error.to_string()))?
@@ -178,6 +184,9 @@ pub fn relay_store_read_through(
         return Err(RelayStoreOpError::NotAvailable);
     }
     drop(guard);
+    store
+        .ensure_generic_attachment_format(&expected.object_id, Some(&expected.manifest_hash))
+        .map_err(RelayStoreOpError::from)?;
     Ok(entry)
 }
 
@@ -204,6 +213,9 @@ where
         (updated, id)
     };
     let reservation = RelayReservationGuard { state, id, consumed: false };
+    store
+        .ensure_generic_attachment_format(&updated.object_id, Some(&updated.manifest_hash))
+        .map_err(RelayStoreOpError::from)?;
     let stored = store
         .relay_chunk_entry(&updated.chunk_id)
         .map_err(|error| RelayStoreOpError::PayloadUnavailable(error.to_string()))?
@@ -244,12 +256,25 @@ where
         let mut guard = lock_relay_state(state);
         let mutation = plan(&guard)?;
         if !mutation.changed {
+            drop(guard);
+            store
+                .ensure_generic_attachment_format(
+                    &mutation.tombstone.object_id,
+                    mutation.tombstone.manifest_hash.as_deref(),
+                )
+                .map_err(RelayStoreOpError::from)?;
             return Ok(mutation);
         }
         let id = guard.reserve_tombstone(mutation.clone())?;
         (mutation, id)
     };
     let reservation = RelayReservationGuard { state, id, consumed: false };
+    store
+        .ensure_generic_attachment_format(
+            &mutation.tombstone.object_id,
+            mutation.tombstone.manifest_hash.as_deref(),
+        )
+        .map_err(RelayStoreOpError::from)?;
     store
         .record_relay_tombstone_mutation(&mutation)
         .map_err(|error| RelayStoreOpError::Persist(error.to_string()))?;

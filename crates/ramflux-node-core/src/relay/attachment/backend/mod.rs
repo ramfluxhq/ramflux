@@ -182,7 +182,7 @@ fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, BackendError> {
 fn decode<T: serde::de::DeserializeOwned>(v: &[u8]) -> Result<T, BackendError> {
     serde_json::from_slice(v).map_err(store)
 }
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {

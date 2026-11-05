@@ -5,7 +5,10 @@
 //! The service authenticates the original owner before constructing its context;
 //! this ledger is not a grant verifier or a local-reference retirement authority.
 pub mod backend;
+mod format;
+mod grants;
 mod identity;
+pub use grants::*;
 mod quota;
 mod retention;
 pub use retention::{AttachmentDebtPage, AttachmentPolicy};
@@ -114,6 +117,8 @@ pub(super) fn install(tx: &redb::WriteTransaction) -> Result<(), crate::NodeCore
     let _ = tx.open_table(DEADLINES).map_err(map)?;
     let _ = tx.open_table(DEBTS).map_err(map)?;
     identity::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
+    format::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
+    grants::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
     Ok(())
 }
 impl AttachmentLedger {

@@ -227,6 +227,7 @@ impl AttachmentLedger {
             debt.remove(record_key.as_slice()).map_err(store)?;
         }
         drop(debt);
+        super::format::bind(&tx, &record)?;
         records.insert(record_key.as_slice(), encode(&record)?.as_slice()).map_err(store)?;
         totals.insert(owner.0.as_str(), encode(&total)?.as_slice()).map_err(store)?;
         drop(index);

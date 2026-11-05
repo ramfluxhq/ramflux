@@ -108,3 +108,6 @@ pub fn digest(domain: &str, bytes: &[u8]) -> Result<[u8; 32], FormatError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod grant_tests;
