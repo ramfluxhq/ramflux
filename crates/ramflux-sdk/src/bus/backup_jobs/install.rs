@@ -86,6 +86,9 @@ impl BackupJobs {
     ) -> Result<(crate::backup::BackupInstalledAccount, BackupCounts, BackupCounts), SdkError> {
         let metadata =
             format::load_metadata(&staging.directory().join("identity.sealed"), staging.key())?;
+        if candidate {
+            validate_staged_observation(&staging, &metadata)?;
+        }
         if matches!(&metadata.identity, format::Identity::Native { .. }) {
             return self.install_native(
                 job,
@@ -250,6 +253,26 @@ impl BackupJobs {
         })?;
         Ok(())
     }
+}
+
+fn validate_staged_observation(
+    staging: &VerifiedBackupStaging,
+    metadata: &format::Metadata,
+) -> Result<(), SdkError> {
+    if let Some(original) = staging.input_observation() {
+        let db = open_stage(
+            &staging.directory().join("account.db"),
+            &AccountDbKey::from_bytes(metadata.database_key),
+            true,
+        )?;
+        let current = db.original_input();
+        if current.counts != original.counts
+            || current.unowned_legacy_actor_count != original.unowned_legacy_actor_count
+        {
+            return Err(ramflux_storage::StorageError::AuthorizationRejected.into());
+        }
+    }
+    Ok(())
 }
 
 fn prepare_fresh_restore(

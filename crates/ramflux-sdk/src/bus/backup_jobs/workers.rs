@@ -456,6 +456,7 @@ impl BackupJobs {
             return Err(failure(BackupFailureCode::Tampered));
         }
         let checks = self.verify_files_mode(job, &db, &cancel, &counts, candidate)?;
+        let original_input = db.original_input().clone();
         drop(db);
         let preview = if candidate {
             self.archive_preview_mode(
@@ -474,7 +475,8 @@ impl BackupJobs {
             .and_then(|file| file.sync_all())
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         let staging = VerifiedBackupStaging::new(directory, *master, now())
-            .map_err(|_| failure(BackupFailureCode::Interrupted))?;
+            .map_err(|_| failure(BackupFailureCode::Interrupted))?
+            .with_input_observation(original_input);
         guard.transferred = true;
         self.change(|registry| {
             registry.verified(

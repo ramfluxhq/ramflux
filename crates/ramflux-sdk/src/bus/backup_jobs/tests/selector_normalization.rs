@@ -635,6 +635,9 @@ fn worker_staging(
         .map_err(|e| format!("real check worker: {e:?}"))?;
     assert_eq!(std::fs::read(&job.path)?, original);
     let (_, staging) = jobs.begin_install(&job.job_id)?;
+    let observation = staging.input_observation().ok_or("original input observation")?;
+    assert_eq!(observation.unowned_legacy_actor_count, 1);
+    assert_eq!(observation.counts, counts);
     Ok(staging)
 }
 

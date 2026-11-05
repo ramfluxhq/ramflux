@@ -22,6 +22,7 @@ const RECENT_JOBS: usize = 32;
 /// It is never serializable or printable. The directory must contain encrypted files only.
 pub struct VerifiedBackupStaging {
     directory: PathBuf,
+    input_observation: Option<ramflux_storage::BackupInputObservation>,
     key: Zeroizing<[u8; 32]>,
     expires_at: u64,
     deadline: std::time::Instant,
@@ -39,12 +40,23 @@ impl VerifiedBackupStaging {
             now.checked_add(VERIFIED_LIFETIME_SECONDS).ok_or_else(|| refused("interrupted"))?;
         Ok(Self {
             directory,
+            input_observation: None,
             key: Zeroizing::new(key),
             privacy_registration: std::sync::Mutex::new(None),
             expires_at,
             deadline: std::time::Instant::now()
                 + std::time::Duration::from_secs(VERIFIED_LIFETIME_SECONDS),
         })
+    }
+    pub(crate) fn with_input_observation(
+        mut self,
+        observation: ramflux_storage::BackupInputObservation,
+    ) -> Self {
+        self.input_observation = Some(observation);
+        self
+    }
+    pub(crate) fn input_observation(&self) -> Option<&ramflux_storage::BackupInputObservation> {
+        self.input_observation.as_ref()
     }
     pub(crate) fn retain_privacy_registration(
         &self,
