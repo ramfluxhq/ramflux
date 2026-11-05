@@ -81,9 +81,7 @@ impl RamfluxClient {
         {
             Ok(())
         } else {
-            Err(SdkError::InboundPending(
-                "native current-head freshness expired; refresh directory".into(),
-            ))
+            Err(SdkError::FreshHeadRequired { root: root.to_owned() })
         }
     }
 }

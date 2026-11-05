@@ -37,7 +37,12 @@ async fn manifest_worker_capacity_is_the_only_retry_neutral_preparation_outcome(
         "charged preparation timeout",
     )
     .await;
-    assert!(matches!(charged, Err(SdkError::InboundPending(_))));
+    assert!(matches!(
+        charged,
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
+    ));
 }
 
 #[tokio::test]

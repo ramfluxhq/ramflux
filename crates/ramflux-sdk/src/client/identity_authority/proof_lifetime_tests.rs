@@ -179,7 +179,9 @@ fn one_dormant_device_never_invalidates_live_siblings_or_becomes_revoked() -> Te
         receiver.client.device_identity_for_root(&manifest.principal_commitment, "dormant")?;
     assert!(matches!(
         receiver.client.trusted_device(HeadUse::NewAuthorization, &stale_ref),
-        Err(SdkError::InboundPending(_))
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
     ));
     let future_ref = RamfluxClient::device_identity_from_manifest(&manifest, "future")?;
     assert!(receiver.client.trusted_device(HeadUse::NewAuthorization, &future_ref).is_err());
@@ -212,7 +214,9 @@ fn one_dormant_device_never_invalidates_live_siblings_or_becomes_revoked() -> Te
     )?;
     assert!(matches!(
         receiver.client.trusted_device(HeadUse::NewAuthorization, &stale_ref),
-        Err(SdkError::InboundPending(_))
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
     ));
     assert_served_ready_manifest(
         [(&live, now), (&stale, now - 31 * 86400), (&future, now + 3600)],

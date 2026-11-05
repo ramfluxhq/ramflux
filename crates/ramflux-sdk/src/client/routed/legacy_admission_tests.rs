@@ -19,7 +19,9 @@ fn forged_legacy_holds_release_admission_for_a_genuine_routed_first_contact() ->
         );
         assert!(matches!(
             bob.client.authenticated_envelope_sender(HeadUse::NewAuthorization, &genuine),
-            Err(SdkError::InboundPending(_))
+            Err(SdkError::InboundPending(_)
+                | SdkError::SenderManifestRequired { .. }
+                | SdkError::FreshHeadRequired { .. })
         ));
         alice.client.create_group("g", "alice")?;
         let payload = alice.client.encrypt_group_message("g", "alice", b"legacy ciphertext")?;

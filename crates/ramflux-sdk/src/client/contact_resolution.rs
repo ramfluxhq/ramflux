@@ -37,7 +37,7 @@ fn resolution_root<'a>(
         },
     )
 }
-fn manifest_failure(error: SdkError) -> SdkError {
+pub(crate) fn manifest_failure(error: SdkError) -> SdkError {
     match error {
         SdkError::Transport(_)
         | SdkError::GatewaySessionRejected(_)

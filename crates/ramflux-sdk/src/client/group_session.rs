@@ -533,7 +533,13 @@ impl RamfluxClient {
                     )
                 })
             {
-                if matches!(error, SdkError::InboundPending(_) | SdkError::InboundRejected(_)) {
+                if matches!(
+                    error,
+                    SdkError::InboundPending(_)
+                        | SdkError::SenderManifestRequired { .. }
+                        | SdkError::FreshHeadRequired { .. }
+                        | SdkError::InboundRejected(_)
+                ) {
                     continue;
                 }
                 return Err(error);
@@ -545,7 +551,13 @@ impl RamfluxClient {
             if let Err(error) =
                 self.require_group_payload_sender(group_id, &envelope.sender_id, &entry)
             {
-                if matches!(error, SdkError::InboundPending(_) | SdkError::InboundRejected(_)) {
+                if matches!(
+                    error,
+                    SdkError::InboundPending(_)
+                        | SdkError::SenderManifestRequired { .. }
+                        | SdkError::FreshHeadRequired { .. }
+                        | SdkError::InboundRejected(_)
+                ) {
                     continue;
                 }
                 return Err(error);

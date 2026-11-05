@@ -57,11 +57,7 @@ pub(super) async fn prepare(
                     .validate_own_sync_header(&account.client.own_account_anchor()?, &checked)
             })
             .await?;
-        let manifest = crate::client::contact::fetch_verified_device_manifest(
-            config,
-            &current.principal_commitment,
-        )
-        .await?;
+        let manifest = super::fetch_inbound_manifest(config, &current.principal_commitment).await?;
         let owned_writer = writer.clone();
         let page = writer
             .apply(move |account| {

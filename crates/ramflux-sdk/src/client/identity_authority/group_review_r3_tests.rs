@@ -42,7 +42,9 @@ fn copied_name_cannot_pin_first_claimer_and_signed_member_root_chooses_bob() -> 
     alice.client.create_group("g", "alice")?;
     assert!(matches!(
         alice.client.add_group_member("g", "shared", "member"),
-        Err(SdkError::InboundPending(_))
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
     ));
     assert!(!alice.client.group_state("g")?.members.contains("shared"));
     observe(&alice.client, &b)?;
@@ -65,11 +67,15 @@ fn copied_name_cannot_pin_first_claimer_and_signed_member_root_chooses_bob() -> 
     )?;
     assert!(matches!(
         observer.client.apply_group_control_event(&legacy_join(&alice, &event)?),
-        Err(SdkError::InboundPending(_))
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
     ));
     assert!(matches!(
         observer.client.apply_group_control_event(&event),
-        Err(SdkError::InboundPending(_))
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
     ));
     assert_eq!(observer.client.group_state("g")?.group_epoch, 1);
     observe(&observer.client, &b)?;
@@ -171,7 +177,9 @@ fn legacy_join_uses_its_groups_invite_root_and_ambiguous_invites_wait_for_v2() -
     )?;
     assert!(matches!(
         observer.client.apply_group_control_event(&legacy_join(&alice, &joined)?),
-        Err(SdkError::InboundPending(_))
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
     ));
     assert_eq!(observer.client.group_state("h")?.group_epoch, 1);
     observer.client.apply_group_control_event(&joined)?;

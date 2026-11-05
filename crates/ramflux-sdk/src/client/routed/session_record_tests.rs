@@ -243,7 +243,9 @@ async fn delayed_loser_bootstrap_behind_membership_keeps_both_directions_decrypt
     let mut we = GatewaySessionEngine::with_test_transport(winner.config()?, Box::new(NoNetwork));
     assert!(matches!(
         winner.client.apply_routed_entry(&mut we, &pool()?, &delayed, false).await,
-        Err(SdkError::InboundPending(_))
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
     ));
     membership(&loser, &winner, first_group)?;
     loser.client.apply_routed_entry(&mut le, &pool()?, &first, false).await?;

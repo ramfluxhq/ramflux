@@ -605,7 +605,9 @@ pub(super) fn quarantine_failure(
     let wire_error = crate::client::inbox_failure::wire_signature_error(entry);
     let error = wire_error.as_ref().unwrap_or(error);
     let kind = match error {
-        SdkError::InboundPending(_) => "InboundPending",
+        SdkError::InboundPending(_)
+        | SdkError::SenderManifestRequired { .. }
+        | SdkError::FreshHeadRequired { .. } => "InboundPending",
         SdkError::InboundRejected(_) => "InboundRejected",
         _ => local_bus_error_code(error),
     };

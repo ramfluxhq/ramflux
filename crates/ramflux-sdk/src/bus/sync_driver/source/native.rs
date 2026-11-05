@@ -71,7 +71,7 @@ async fn resolve(
     let manifest = if let Some(manifest) = candidate {
         manifest
     } else {
-        crate::client::contact::fetch_verified_device_manifest(config, root).await?
+        super::fetch_inbound_manifest(config, root).await?
     };
     let entry = entry.clone();
     let (history, entry, preview, manifest) = writer
@@ -114,7 +114,7 @@ pub(super) async fn contact(
             Ok((own, entry, manifest))
         })
         .await?;
-    let own_manifest = crate::client::contact::fetch_verified_device_manifest(config, &own).await?;
+    let own_manifest = super::fetch_inbound_manifest(config, &own).await?;
     let local = config.device_id.clone();
     let (preview, entry, manifest) = writer
         .apply(move |account| {

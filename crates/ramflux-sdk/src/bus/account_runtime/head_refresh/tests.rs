@@ -173,9 +173,7 @@ async fn stale_head_with_live_session_and_held_fetch_returns_networking_pending(
             Box::pin(case("peer404")).await?;
             Box::pin(case("held")).await?;
             // Exercise every serialized freshness escape, independently of the offline gate.
-            let error = SdkError::InboundPending(
-                "native current-head freshness expired; refresh directory".into(),
-            );
+            let error = SdkError::FreshHeadRequired { root: "test-root".into() };
             let body = crate::bus::io::local_bus_error_body(&error);
             assert_eq!(body.code, "NetworkingPending");
             assert!(body.retry_after_ms.is_some());

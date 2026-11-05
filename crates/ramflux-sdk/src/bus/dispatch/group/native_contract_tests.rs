@@ -296,8 +296,7 @@ fn routed_entry(
 
 fn assert_freshness_refusal<T>(result: &Result<T, SdkError>) {
     assert!(
-        matches!(result, Err(SdkError::InboundPending(reason)) if reason ==
-        "native current-head freshness expired; refresh directory"),
+        matches!(result, Err(SdkError::FreshHeadRequired { .. })),
         "{:?}",
         result.as_ref().err()
     );
@@ -873,7 +872,7 @@ async fn stored_group_history_degrades_sibling_and_revoked_senders_per_message()
 }
 
 #[tokio::test]
-async fn new_inbound_after_rename_with_expired_head_is_pending_then_applied() -> TestResult {
+async fn opaque_inbound_after_rename_refreshes_in_background_then_applies() -> TestResult {
     Box::pin(characterise_gateway_admission(true, false, false)).await
 }
 

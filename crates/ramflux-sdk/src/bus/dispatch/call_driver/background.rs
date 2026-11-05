@@ -489,3 +489,72 @@ async fn release(context: &SessionContext, writer: &Writer, id: &str) -> Result<
         })
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn transient_manifest_fetch_preserves_call_lease_and_contact_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (root, mut state, id) =
+            crate::bus::dispatch::call::tests::fixture("call-directory-retry")?;
+        let account = state.accounts.get_mut("alice").ok_or("account")?;
+        account.client.account_db()?.persist_client_record(
+            "conversation",
+            "thread",
+            &serde_json::json!({"id":"thread"}),
+        )?;
+        let call = account.client.voice_calls.get_mut(&id).ok_or("call")?;
+        call.next_lease_refresh = 0;
+        let original = call.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let certified = rcgen::generate_simple_self_signed(vec!["retry.test".into()])?;
+        let ca = root.join("retry-ca.pem");
+        std::fs::write(&ca, certified.cert.pem())?;
+        let mut config = account.gateway_config.clone();
+        config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
+        config.gateway_addr = address;
+        config.tcp_gateway_addr = Some(address);
+        config.server_name = "retry.test".into();
+        config.ca_cert = ca;
+        let (handle, _io) = crate::bus::connection_manager::tests::fixture().await?;
+        let outcome =
+            federation::manifest(&handle.test_context(), &config, "peer-root", None).await;
+        let error = outcome.as_ref().err().ok_or("fetch must fail")?;
+        assert!(
+            crate::error_policy::approval_retryable(error),
+            "shared manifest fetch must preserve transient classification: {error:?}"
+        );
+        let thread = account
+            .client
+            .account_db()?
+            .client_record("conversation", "thread")?
+            .ok_or("thread")?;
+        assert!(
+            prepare_lease(
+                account,
+                Plan { original: original.clone(), thread, config: config.clone() },
+                outcome
+            )?
+            .is_none()
+        );
+        let next = account.client.voice_calls.get(&id).ok_or("call")?;
+        assert_eq!(next.row.state, "active", "directory outage must not end an active call");
+        assert!(next.next_lease_refresh >= now_unix_timestamp() + 4);
+        let contact = crate::client::contact::fetch_verified_device_manifest(&config, "own-root")
+            .await
+            .err()
+            .ok_or("fetch must fail")?;
+        assert!(matches!(
+            crate::client::contact_resolution::manifest_failure(contact),
+            SdkError::ContactUnavailable(_)
+        ));
+        handle.stop().await;
+        drop(state);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

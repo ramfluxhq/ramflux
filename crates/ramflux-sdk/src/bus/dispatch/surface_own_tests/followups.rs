@@ -342,7 +342,9 @@ async fn a_full_live_replay_window_defers_new_copies_without_consuming_the_ratch
     })?;
     assert!(matches!(
         sibling.client.receive_own_device_message(&receiver, &entry(envelope.clone(), 1)).await,
-        Err(SdkError::InboundPending(_))
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
     ));
     assert!(sibling.client.surface_get("surface", 0, None)?.is_null());
     assert_eq!(db.actor_state_usage("own-device/committed-packet/")?.0, u64::from(limit));

@@ -41,6 +41,8 @@ fn transport_transient(error: &TransportError) -> bool {
 pub(crate) fn approval_retryable(error: &SdkError) -> bool {
     match error {
         SdkError::InboundPending(_)
+        | SdkError::SenderManifestRequired { .. }
+        | SdkError::FreshHeadRequired { .. }
         | SdkError::TaskDeliveryTimeout
         | SdkError::ContactRequestCapacity(_)
         | SdkError::TaskManifestWorkerCapacity

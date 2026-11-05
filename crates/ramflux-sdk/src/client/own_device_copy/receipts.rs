@@ -210,7 +210,12 @@ mod tests {
         })?;
         println!("remember at 18,000 markers (full): vm_steps={steps}, budget=2000");
         assert!(steps < 2000, "remember exceeded VM work budget: {steps} >= 2000");
-        assert!(matches!(result, Err(SdkError::InboundPending(_))));
+        assert!(matches!(
+            result,
+            Err(SdkError::InboundPending(_)
+                | SdkError::SenderManifestRequired { .. }
+                | SdkError::FreshHeadRequired { .. })
+        ));
         assert!(!db.actor_state_exists(&format!("{REPLAYS}new"))?);
         // Leave a slot so the same measurement also covers the actual insert/trigger path.
         db.remove_actor_state(&format!("{REPLAYS}00000"))?;

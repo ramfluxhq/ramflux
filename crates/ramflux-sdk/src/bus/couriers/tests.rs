@@ -50,7 +50,7 @@ async fn receipt_prekey_fetch_not_starved_by_bulk() -> Case {
         send(&io, &GatewayServerFrame::Prekey { response: crate::prekey::SdkPrekeyResponse {
             device_id: "receipt-peer".into(), bundle: None, principal_commitment: String::new(), target_delivery_id: None,
         } })?;
-        assert!(matches!(receipt.await?, Err(crate::SdkError::InboundPending(_))));
+        assert!(matches!(receipt.await?, Err(crate::SdkError::InboundPending(_) | crate::SdkError::SenderManifestRequired { .. } | crate::SdkError::FreshHeadRequired { .. })));
         assert!(bulk.iter().all(|call| !call.is_finished()));
         for call in bulk { call.abort(); let _ = call.await; }
         handle.stop().await;

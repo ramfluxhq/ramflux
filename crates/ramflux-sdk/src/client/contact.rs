@@ -940,21 +940,14 @@ pub(crate) async fn fetch_verified_device_manifest(
     gateway: &GatewaySessionConfig,
     identity_commitment: &str,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
-    let result = async {
-        let manifest: Option<SdkDeviceManifestResponse> =
-            sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{identity_commitment}"))
-                .await?;
-        let manifest = manifest.ok_or_else(|| {
-            SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
-        })?;
-        verify_device_manifest(&manifest, identity_commitment)?;
-        Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
-    }
-    .await;
-    result.map_err(|source| SdkError::DirectoryAuthorityUnavailable {
-        root: identity_commitment.to_owned(),
-        source: Box::new(source),
-    })
+    let manifest: Option<SdkDeviceManifestResponse> =
+        sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{identity_commitment}"))
+            .await?;
+    let manifest = manifest.ok_or_else(|| {
+        SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
+    })?;
+    verify_device_manifest(&manifest, identity_commitment)?;
+    Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }
 
 /// Fetch and verify a device manifest from an absolute federation HTTP base URL (the recipient's

@@ -32,8 +32,7 @@ pub(super) async fn prepare(
             .await?;
         return request.resolve(config).await;
     };
-    let actor =
-        crate::client::contact::fetch_verified_device_manifest(config, &plan.actor_root).await?;
+    let actor = super::fetch_inbound_manifest(config, &plan.actor_root).await?;
     // A fresh, active transport actor is required before it can cause an addition lookup.
     // Local membership and the selected route may also have changed during that request.
     let (addition, actor) = writer

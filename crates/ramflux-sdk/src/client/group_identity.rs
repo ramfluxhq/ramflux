@@ -14,7 +14,10 @@ impl RamfluxClient {
         match self.group_device_reference(group, raw) {
             Ok(reference) => Ok(self.account_db()?.client_record("device", &reference)?),
             Err(
-                SdkError::InboundPending(_) | SdkError::Storage(StorageError::AmbiguousDeviceId(_)),
+                SdkError::InboundPending(_)
+                | SdkError::SenderManifestRequired { .. }
+                | SdkError::FreshHeadRequired { .. }
+                | SdkError::Storage(StorageError::AmbiguousDeviceId(_)),
             ) => Ok(None),
             Err(error) => Err(error),
         }
