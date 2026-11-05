@@ -68,6 +68,10 @@ pub(super) struct TaskCourier {
     outcomes: mpsc::Receiver<Outcome>,
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    #[cfg(test)]
+    deadline_control: watch::Sender<Duration>,
+    #[cfg(test)]
+    pass_control: watch::Sender<u64>,
 }
 
 impl TaskCourier {
@@ -81,15 +85,25 @@ impl TaskCourier {
         let (prepare, mut work) = mpsc::channel::<Work>(1);
         let (outcome, outcomes) = mpsc::channel(8);
         let (stop, mut stopping) = watch::channel(false);
+        #[cfg(test)]
+        let (deadline_control, deadline_watch) = watch::channel(deadline);
+        #[cfg(test)]
+        let (pass_control, mut pass_limit) = watch::channel(u64::MAX);
         let task = tokio::task::spawn_local(async move {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
             let mut job_id = 0_u64;
             loop {
                 let pass = async {
                     signals.recv().await?;
+                    #[cfg(test)]
+                    while job_id >= *pass_limit.borrow_and_update() {
+                        pass_limit.changed().await.ok()?;
+                    }
                     job_id = job_id.wrapping_add(1);
                     outcome.send(Outcome::Requested { job_id }).await.ok()?;
                     let work = work.recv().await?;
+                    #[cfg(test)]
+                    let deadline = *deadline_watch.borrow();
                     let mut jobs = tokio::task::JoinSet::new();
                     let mut items = BTreeMap::new();
                     for item in work.items {
@@ -142,9 +156,29 @@ impl TaskCourier {
                 }
             }
         });
-        let result = Self { wake, prepare, outcomes, stop, task };
+        let result = Self {
+            wake,
+            prepare,
+            outcomes,
+            stop,
+            task,
+            #[cfg(test)]
+            deadline_control,
+            #[cfg(test)]
+            pass_control,
+        };
         result.signal();
         result
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_deadline_control(&self) -> watch::Sender<Duration> {
+        self.deadline_control.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_pass_control(&self) -> watch::Sender<u64> {
+        self.pass_control.clone()
     }
 
     pub(super) fn wake_sender(&self) -> mpsc::Sender<()> {

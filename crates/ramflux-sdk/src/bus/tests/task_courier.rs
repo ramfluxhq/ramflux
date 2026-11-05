@@ -494,6 +494,39 @@ async fn r6_real_preparation_charges_only_the_stalled_item_and_keeps_healthy_att
         .await
 }
 
+async fn lock_during_fresh_preparation(
+    sender: &mpsc::Sender<AccountCommand>,
+    events: &mut mpsc::UnboundedReceiver<CourierEvent>,
+    entered: &mut mpsc::Receiver<()>,
+    deadline: &watch::Sender<Duration>,
+    pass_control: &watch::Sender<u64>,
+) -> Case {
+    // The twentieth command can already have started pass 21. Retire it first.
+    pass(events).await?;
+    while entered.try_recv().is_ok() {}
+    while events.try_recv().is_ok() {}
+    // The final manifest request must outlive the lock's hang guard.
+    deadline.send(Duration::from_secs(60))?;
+    pass_control.send(22)?;
+    command(sender, "identity.directory", json!({"limit":16})).await?;
+    assert!(matches!(next(events).await?, CourierEvent::Requested));
+    tokio::time::timeout(Duration::from_secs(10), entered.recv())
+        .await?
+        .ok_or("fresh preparation never reached the stalled server")?;
+    assert!(
+        matches!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "fresh pass must have no buffered result before lock"
+    );
+    tokio::time::timeout(Duration::from_secs(3), command(sender, "account.lock", json!({})))
+        .await
+        .map_err(|_| "lock hang guard expired while preparation remained stalled")??;
+    assert!(
+        matches!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "lock must reply without awaiting a preparation result"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_and_lock() -> Case {
     LocalSet::new()
@@ -517,7 +550,12 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
             if let Some(courier) = actor.courier.take() {
                 courier.stop().await;
             }
-            actor.courier = Some(TaskCourier::with_limits(Duration::from_millis(750), 4));
+            let courier = TaskCourier::with_limits(Duration::from_millis(750), 4);
+            let deadline_control = courier.test_deadline_control();
+            let pass_control = courier.test_pass_control();
+            // Background delivery wakeups cannot begin the final pass during queue drain.
+            pass_control.send(21)?;
+            actor.courier = Some(courier);
             let driver = async {
                 let _shutdown = Shutdown(stop.clone());
                 tokio::time::timeout(Duration::from_secs(10), entered.recv())
@@ -542,33 +580,7 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
                     }
                 }
                 assert!(charged >= 20, "courier passes did not contain stalled work");
-                // Discard old connection notifications before observing the next pass.
-                while entered.try_recv().is_ok() {}
-                // Wait until another pass is in preparation, then lock through the normal mailbox.
-                loop {
-                    if matches!(next(&mut events).await?, CourierEvent::Requested) {
-                        break;
-                    }
-                }
-                tokio::time::timeout(Duration::from_secs(10), entered.recv())
-                    .await?.ok_or("next preparation never reached the stalled server")?;
-                // Lock must reply before the outstanding preparation produces a result.
-                // The server retains the unanswered sockets until after the reply.
-                let lock = command(&sender, "account.lock", json!({}));
-                tokio::pin!(lock);
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    loop {
-                        tokio::select! {
-                            biased;
-                            event = next(&mut events) => match event? {
-                                CourierEvent::Item { charged: true, .. } | CourierEvent::Finished =>
-                                    return Err("lock waited for stalled preparation to finish".into()),
-                                _ => {}
-                            },
-                            result = &mut lock => return result,
-                        }
-                    }
-                }).await??;
+                lock_during_fresh_preparation(&sender, &mut events, &mut entered, &deadline_control, &pass_control).await?;
                 Ok::<_, Box<dyn std::error::Error>>(())
             };
             let (served, result) = tokio::join!(serving(&mut actor), driver);

@@ -4,7 +4,9 @@
 //! Session retirement isolates late replies and joins generation-owned children.
 
 use super::*;
+use crate::bus::connection_manager::subscriptions::SessionEvent;
 use crate::bus::connection_manager::{ConnectionEvent, DisconnectReason, model::ConnectionPhase};
+use crate::gateway::frame_dispatch::FrameKind;
 use tokio::time::Instant;
 
 type Case = Result<(), Box<dyn std::error::Error>>;
@@ -70,17 +72,31 @@ async fn session_host_drain_fails_the_active_call_and_opens_a_fresh_session() ->
 #[tokio::test(start_paused = true)]
 async fn session_host_stop_and_lock_publish_stopped_and_retire_the_live_session() -> Case {
     watchdog(async {
-        for reason in [DisconnectReason::Stop, DisconnectReason::Lock] {
+        for (reason, active_rpc) in [(DisconnectReason::Stop, false), (DisconnectReason::Lock, false), (DisconnectReason::Lock, true)] {
             let (handle, mut sessions) = reconnecting_fixture(limits())?;
             let mut events = handle.events();
             let mut io = connected(&handle, &mut sessions).await?;
             let generation = handle.generation();
             assert!(matches!(events.recv().await?, ConnectionEvent::Connected { generation: g, .. } if g == generation));
             heartbeat(&handle, &mut io).await?;
+            let active = if active_rpc {
+                let caller = handle.clone();
+                let call = tokio::spawn(async move {
+                    caller.call(|engine| Box::pin(engine.cursor()), Instant::now() + Duration::from_secs(600)).await
+                });
+                assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Cursor { .. })));
+                Some(call)
+            } else { None };
+            let mut subscriber = handle.subscribe([FrameKind::Deliver]);
             handle.request_stop(reason);
             assert!(matches!(events.recv().await?, ConnectionEvent::Disconnected { reason: r, generation: g } if r == reason && g == generation));
             let snapshot = handle.snapshot();
             assert_eq!(snapshot.phase, ConnectionPhase::Stopped);
+            assert!(matches!(subscriber.recv().await,
+                Some(SessionEvent::Disconnected { reason: r, generation: g }) if r == reason && g == generation),
+                "hub terminal must preserve the requested reason");
+            assert_eq!(snapshot.last_reason, Some(format!("{reason:?}")));
+            if let Some(call) = active { assert!(call.await?.is_err()); }
             assert!(snapshot.session_id.is_none());
             assert!(snapshot.active_transport_kind.is_none());
             assert!(snapshot.retry_after_ms.is_none());

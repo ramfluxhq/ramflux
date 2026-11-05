@@ -501,6 +501,12 @@ async fn custody_expiry_tick_stays_within_sync_deadline() -> TestResult {
         .await
 }
 
+fn assert_one_child_test(output: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("1 passed"), "exact child filter must execute one test: {stdout}");
+}
+
 #[tokio::test]
 async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> TestResult {
     if std::env::var_os("RAMFLUX_OBSERVATION_LOG_CHILD").is_none() {
@@ -508,12 +514,7 @@ async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> 
             .args(["--exact", "bus::account_runtime::expiry_tests::observation_persistence_failure_keeps_actor_open_and_allows_retry", "--nocapture"])
             .env("RAMFLUX_OBSERVATION_LOG_CHILD", "1")
             .output()?;
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_one_child_test(&output);
         return Ok(());
     }
     let warnings = ExpiryWarnings::default();
