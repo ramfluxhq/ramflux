@@ -59,7 +59,7 @@ pub(super) fn set(
     Ok(chosen)
 }
 /// Imports the previous S6 cursor field once. E-less pre-S6 counters remain an upgrade.
-pub(super) fn import(tx: &redb::WriteTransaction) -> Result<(), NodeCoreError> {
+pub(crate) fn import(tx: &redb::WriteTransaction) -> Result<(), NodeCoreError> {
     let cursors = tx.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(error)?;
     for row in cursors.iter().map_err(error)? {
         let (target, bytes) = row.map_err(error)?;

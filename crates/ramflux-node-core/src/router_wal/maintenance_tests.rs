@@ -7,7 +7,7 @@ use super::*;
 use crate::{
     RouterRedbStore, durability_test_hooks::observe, router_store::incarnation::test_store,
 };
-use redb::ReadableDatabase;
+use redb::{ReadableDatabase, ReadableTable};
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 const MARKER: &str = "session_push_rotation_pending_v1";
 const T20: &str = "router_wal::durability_tests::interrupted_roll_empty_header";
@@ -56,13 +56,11 @@ fn rotate(root: &Path, mode: u8, quarantine: bool) -> std::result::Result<usize,
 fn raw(root: &Path) -> std::result::Result<(Vec<String>, bool), Box<dyn std::error::Error>> {
     let db = redb::Database::open(root.join("db"))?;
     let txn = db.begin_read()?;
-    let table = txn.open_table(crate::ROUTER_CURSOR_STATE_TABLE)?;
+    let table = txn.open_table(crate::router_store::incarnation_state::TABLE)?;
     let mut ids = Vec::new();
     for target in ["restore-target", "empty"] {
-        let bytes = table.get(target)?.expect("cursor");
-        let row: crate::router_store::incarnation::StoredCursor =
-            serde_json::from_slice(bytes.value())?;
-        ids.push(row.inbox_incarnation_id.expect("E"));
+        let bytes = table.get(target)?.expect("canonical inbox identity");
+        ids.push(crate::router_store::incarnation_state::decode(bytes.value())?.0);
     }
     let pending = txn.open_table(crate::ROUTER_SNAPSHOT_TABLE)?.get(MARKER)?.is_some();
     Ok((ids, pending))
@@ -73,6 +71,7 @@ fn wal_identity_and_restore_rotation() -> Result {
     for mode in 0..3 {
         let root = fixture();
         let old = seed(&root, mode)?;
+        prior_cursor_field_store(&root, mode, &old)?;
         assert_eq!(rotate(&root, mode, false)?, 2);
         let (new, pending) = raw(&root)?;
         assert!(!pending);
@@ -305,5 +304,27 @@ fn damaged_associations() -> Result {
             fs::remove_dir_all(root)?;
         }
     }
+    Ok(())
+}
+
+/// The operator entrypoint must work without an ordinary open to migrate the schema.
+fn prior_cursor_field_store(root: &Path, mode: u8, ids: &[String]) -> Result {
+    let store = test_store(root, mode, 1)?;
+    let router = store.load_router()?.expect("router");
+    store.save_router(&router)?;
+    drop(store);
+    let db = redb::Database::open(root.join("db"))?;
+    let tx = db.begin_write()?;
+    {
+        let cursors = tx.open_table(crate::ROUTER_CURSOR_STATE_TABLE)?;
+        for (target, id) in ["restore-target", "empty"].iter().zip(ids) {
+            let bytes = cursors.get(*target)?.expect("prior cursor field");
+            let stored: crate::router_store::incarnation::StoredCursor =
+                serde_json::from_slice(bytes.value())?;
+            assert_eq!(stored.inbox_incarnation_id.as_deref(), Some(id.as_str()));
+        }
+    }
+    assert!(tx.delete_table(crate::router_store::incarnation_state::TABLE)?);
+    tx.commit()?;
     Ok(())
 }

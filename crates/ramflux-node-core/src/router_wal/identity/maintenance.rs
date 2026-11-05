@@ -3,6 +3,7 @@
 
 //! Offline operator rotation and crash-resumable in-root quarantine.
 use super::{error, incarnation, recovery};
+use crate::router_store::incarnation_state;
 use crate::{NodeCoreError, RouterRedbStore, durability_io};
 use redb::ReadableDatabase;
 use serde::{Deserialize, Serialize};
@@ -165,7 +166,17 @@ impl RouterRedbStore {
         segment: Option<&Path>,
     ) -> Result<usize, NodeCoreError> {
         let db = Arc::new(redb::Database::open(path).map_err(error)?);
-        if pending(&db)?.is_some() {
+        let resume_pending = pending(&db)?.is_some();
+        // Maintenance intentionally bypasses ordinary WAL open, which may refuse
+        // the damaged segment. Import prior cursor-field E without replaying it.
+        let mut tx = db.begin_write().map_err(error)?;
+        tx.set_durability(redb::Durability::Immediate).map_err(error)?;
+        {
+            let _identities = tx.open_table(incarnation_state::TABLE).map_err(error)?;
+        }
+        incarnation_state::import(&tx)?;
+        tx.commit().map_err(error)?;
+        if resume_pending {
             resume(&db, path)?;
         } else {
             let wal_root = root
