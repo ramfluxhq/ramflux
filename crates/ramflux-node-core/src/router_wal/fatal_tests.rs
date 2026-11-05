@@ -49,8 +49,13 @@ fn wait_abort_kind(mut child: Child, marker: &str) -> TestResult {
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         if let Some(status) = child.try_wait()? {
-            assert_eq!(status.signal(), Some(6), "expected supervisor SIGABRT, got {status}");
             let output = child.wait_with_output()?;
+            assert_eq!(
+                status.signal(),
+                Some(6),
+                "expected supervisor SIGABRT, got {status}; child stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             assert!(
                 String::from_utf8_lossy(&output.stderr).contains(marker),
                 "fatal metadata log absent"
@@ -68,7 +73,13 @@ fn wait_abort_kind(mut child: Child, marker: &str) -> TestResult {
 fn wait_file(root: &Path, name: &str, child: &mut Child) -> TestResult {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !root.join(name).exists() {
-        assert!(child.try_wait()?.is_none(), "child exited before {name}");
+        if let Some(status) = child.try_wait()? {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_string(&mut stderr)?;
+            }
+            panic!("child exited before {name}: {status}; {stderr}");
+        }
         if Instant::now() >= deadline {
             child.kill()?;
             child.wait()?;
@@ -289,10 +300,15 @@ fn redb_child(root: &Path, case: &str, mode: u8) -> TestResult {
         _ => unreachable!(),
     };
     let panic = case == "redb_panic";
+    let panic_reached = Arc::new(AtomicBool::new(false));
+    let observed_panic = Arc::clone(&panic_reached);
     let _observer = observe(
         root.to_path_buf(),
         Arc::new(move |_, op, done| {
             if op == selected && !done {
+                if panic {
+                    observed_panic.store(true, Ordering::Release);
+                }
                 assert!(!panic, "panic inside held redb transaction");
                 return Err(io::Error::other("redb writer injected fault"));
             }
@@ -306,7 +322,14 @@ fn redb_child(root: &Path, case: &str, mode: u8) -> TestResult {
     cursor.inbox_seq = 1;
     cursor.issued_inbox_seq = 1;
     cursor.last_acknowledged_inbox_seq = Some(1);
-    match case {
+    if case == "rotation" {
+        drop(store);
+        let _ = RouterRedbStore::rotate_inbox_incarnations_at(&root.join("db"), None, None);
+        park();
+    }
+    // The deliberate panic must not let libtest win the process-exit race.
+    // WriteGuard owns the fence; only its real supervisor may terminate this child.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match case {
         "ack" => {
             let _ = store.record_ack_increment(&cursor, "fatal-1");
         }
@@ -319,16 +342,39 @@ fn redb_child(root: &Path, case: &str, mode: u8) -> TestResult {
         "startup" => {
             let _ = store.load_router();
         }
-        "rotation" => {
-            drop(store);
-            let _ = RouterRedbStore::rotate_inbox_incarnations_at(&root.join("db"), None, None);
-            park();
-        }
         _ => {
             let _ = store.record_submission_increment("fault", i64::MAX, Some(&entry(2)));
         }
+    }));
+    if panic {
+        assert!(panic_reached.load(Ordering::Acquire), "redb panic injection was not reached");
+        assert!(crate::fatal_durability::check().is_err(), "unwind did not fence");
+        fs::write(root.join("panic-returned"), [])?;
+    } else if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
     }
+
     park();
+}
+
+#[test]
+fn expected_redb_panic_waits_for_held_supervisor() -> TestResult {
+    let root = root("held-redb-panic");
+    fs::create_dir_all(&root)?;
+    let mut child = command("uncertain_write_fail_stop", &root, "redb_panic", 0)
+        .env("RAMFLUX_FATAL_HOLD", &root)
+        .env("RAMFLUX_ROUTER_GROUP_COMMIT", "0")
+        .spawn()?;
+    wait_file(&root, "fenced", &mut child)?;
+    wait_file(&root, "panic-returned", &mut child)?;
+    assert!(child.try_wait()?.is_none(), "libtest exited while supervisor was held");
+    fs::write(root.join("abort"), [])?;
+    wait_abort(child)?;
+    let store = RouterRedbStore::open_without_wal(root.join("db"))?;
+    assert!(store.load_delivery_state(0)?.0.pending_entries().any(|row| row.inbox_seq == 1));
+    drop(store);
+    fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]
