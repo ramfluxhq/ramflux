@@ -21,6 +21,8 @@ enum Resolution {
 }
 struct Slot {
     digest: String,
+    retain_until: i64,
+    permit: Mutex<Option<OwnedSemaphorePermit>>,
     result: Mutex<Resolution>,
     changed: Notify,
 }
@@ -36,7 +38,6 @@ pub struct RetryOwner {
     key: String,
     slot: Arc<Slot>,
     bound: Arc<std::sync::atomic::AtomicBool>,
-    _permit: OwnedSemaphorePermit,
 }
 /// Cancellation-safe bounded waiter; no assignment or replay reservation ownership.
 pub struct RetryWaiter {
@@ -44,6 +45,10 @@ pub struct RetryWaiter {
     _permit: OwnedSemaphorePermit,
 }
 impl RetryWaiter {
+    /// Original admission's retention horizon. Attaching a waiter never refreshes it.
+    #[must_use]
+    pub fn retain_until(&self) -> i64 { self.slot.retain_until }
+
     /// Await the original persistence disposition without holding any router lock.
     /// # Errors
     /// Returns `aborted_retry_safe` after the original request proves non-write.
@@ -55,7 +60,7 @@ impl RetryWaiter {
             match self.slot.result.lock().map_err(super::incarnation::error)?.clone() {
                 Resolution::Pending => {}
                 Resolution::Accepted(assignment) => return Ok(assignment),
-                Resolution::Aborted => return Err(super::incarnation::error("aborted_retry_safe")),
+                Resolution::Aborted => return Err(super::SenderRetryRefusal::AbortedRetrySafe.into()),
             }
             notified.await;
         }
@@ -118,6 +123,7 @@ fn finish(
             if entries.get(key).is_some_and(|current| Arc::ptr_eq(current, slot)) {
                 entries.remove(key);
             }
+            slot.permit.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
             slot.changed.notify_waiters();
         }
     }
@@ -143,13 +149,13 @@ impl RouterRedbStore {
     ) -> Result<RetryAdmission, NodeCoreError> {
         let permit = Arc::clone(&self.submission_admission)
             .try_acquire_owned()
-            .map_err(|_| super::incarnation::error("capacity_retry_after (retry_after_ms=1000)"))?;
+            .map_err(|_| NodeCoreError::Publication(crate::publication::PublicationRefusal::CapacityRetryAfter { retry_after_ms: 1000 }))?;
         let digest = content_digest(envelope)?;
         let key = crate::envelope_replay_tuple_key(source, envelope);
         let mut entries = self.sender_retries.0.lock().map_err(super::incarnation::error)?;
         if let Some(slot) = entries.get(&key) {
             if slot.digest != digest {
-                return Err(super::incarnation::error("idempotency_conflict"));
+                return Err(super::SenderRetryRefusal::IdempotencyConflict.into());
             }
             return Ok(RetryAdmission::Waiting(RetryWaiter {
                 slot: Arc::clone(slot),
@@ -161,6 +167,8 @@ impl RouterRedbStore {
         }
         let slot = Arc::new(Slot {
             digest,
+            retain_until: crate::inbox_retain_until(envelope, now),
+            permit: Mutex::new(Some(permit)),
             result: Mutex::new(Resolution::Pending),
             changed: Notify::new(),
         });
@@ -170,7 +178,11 @@ impl RouterRedbStore {
             key,
             slot,
             bound: Arc::default(),
-            _permit: permit,
         }))
     }
+}
+
+#[cfg(test)]
+impl RouterRedbStore {
+    pub(super) fn sender_retry_registry_size(&self) -> usize { self.sender_retries.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() }
 }
