@@ -1071,13 +1071,16 @@ impl RouterRedbStore {
         let _lease = lease;
         let save_started = Instant::now();
         let inbox_started = Instant::now();
+        // Installation may wait for a DB writer. Snapshot it before taking that
+        // writer, then read the captured core's P inside the transaction.
+        let core = self.publication.lock().map_err(incarnation::error)?.clone();
 
         let write_txn =
             self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
         let previous = retention::previous(&write_txn, cursor)?;
         let (cursor, incarnation) =
-            self.receiver_settlement(&write_txn, cursor, previous.as_ref())?;
+            self.receiver_settlement(&write_txn, cursor, previous.as_ref(), core.as_deref())?;
         let cursor = &cursor;
         let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor, previous)? else {
             return Ok(());
@@ -1105,7 +1108,6 @@ impl RouterRedbStore {
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
         }
-        let core = self.publication.lock().map_err(incarnation::error)?.clone();
         if let (Some(core), Some(id)) = (core, incarnation) {
             core.commit_settled(&cursor.target_delivery_id, &id, cursor.settled_inbox_seq);
         }
@@ -1132,13 +1134,16 @@ impl RouterRedbStore {
         let _lease = lease;
         let save_started = Instant::now();
         let inbox_started = Instant::now();
+        // Installation may wait for a DB writer. Snapshot it before taking that
+        // writer, then read the captured core's P inside the transaction.
+        let core = self.publication.lock().map_err(incarnation::error)?.clone();
 
         let write_txn =
             self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
         let previous = retention::previous(&write_txn, cursor)?;
         let (cursor, incarnation) =
-            self.receiver_settlement(&write_txn, cursor, previous.as_ref())?;
+            self.receiver_settlement(&write_txn, cursor, previous.as_ref(), core.as_deref())?;
         let cursor = &cursor;
         let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor, previous)? else {
             return Ok(());
@@ -1163,7 +1168,6 @@ impl RouterRedbStore {
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
         }
-        let core = self.publication.lock().map_err(incarnation::error)?.clone();
         if let (Some(core), Some(id)) = (core, incarnation) {
             core.commit_settled(&cursor.target_delivery_id, &id, cursor.settled_inbox_seq);
         }
