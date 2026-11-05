@@ -44,10 +44,9 @@ impl<'a> MutationIntent<'a> {
                 Err(SdkError::ObjectErased)
             }
             OperationLookup::Completed(body) => Ok(Some(body)),
-            OperationLookup::Pending => Err(StorageError::EventIdConflict(format!(
-                "operation requires reconciliation: {key}"
-            ))
-            .into()),
+            OperationLookup::Pending => {
+                Err(StorageError::OperationReconciliationRequired { key: key.to_owned() }.into())
+            }
             OperationLookup::Mismatch => Err(StorageError::EventIdConflict(key.to_owned()).into()),
         }
     }

@@ -86,6 +86,9 @@ pub enum StorageError {
     MessageIdConflict(String),
     #[error("event id conflict: {0}")]
     EventIdConflict(String),
+    /// A reserved operation has no committed response and requires reconciliation.
+    #[error("operation requires reconciliation: {key}")]
+    OperationReconciliationRequired { key: String },
     #[error("identity lifecycle blocks operation: {0}")]
     IdentityLifecycleBlocked(String),
     #[error("pending recovery {recovery_id} is not in expected state: {expected}")]

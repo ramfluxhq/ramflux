@@ -82,9 +82,7 @@ impl AccountIndex {
                 return Err(StorageError::EventIdConflict(operation.to_owned()));
             }
             let response = response.ok_or_else(|| {
-                StorageError::EventIdConflict(format!(
-                    "operation requires reconciliation: {operation}"
-                ))
+                StorageError::OperationReconciliationRequired { key: operation.to_owned() }
             })?;
             transaction.commit()?;
             return Ok(Some(serde_json::from_str(&response)?));
@@ -193,7 +191,9 @@ mod tests {
             OperationLookup::Mismatch
         ));
         // Existing reserve remains fail-closed for pending receipts.
-        assert!(index.reserve_supervisor_operation("alice", "key", "fp").is_err());
+        assert!(
+            matches!(index.reserve_supervisor_operation("alice", "key", "fp"), Err(StorageError::OperationReconciliationRequired { key }) if key == "key")
+        );
         drop(index);
         std::fs::remove_dir_all(root)?;
         Ok(())

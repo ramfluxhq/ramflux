@@ -248,9 +248,12 @@ async fn keyed_case() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(writes.load(Ordering::Acquire), index + 1);
         let lookup =
             crate::bus::mutation_intent::MutationIntent::new(&command.request)?.lookup(&reader);
-        assert!(
-            matches!(lookup, Err(SdkError::Storage(ramflux_storage::StorageError::EventIdConflict(ref reason))) if reason.contains("operation requires reconciliation"))
-        );
+        assert!(matches!(
+            lookup,
+            Err(SdkError::Storage(
+                ramflux_storage::StorageError::OperationReconciliationRequired { .. }
+            ))
+        ));
         assert!(crate::bus::mutations::execute(&mut state, "account", &command).await.is_err());
         assert_eq!(
             writes.load(Ordering::Acquire),

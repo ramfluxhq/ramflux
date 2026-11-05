@@ -56,7 +56,9 @@ The daemon shares its existing lease with its ceremonies. Startup reconciliation
 reaps account-local `.authority-*.tmp` regular files while holding that lease;
 live authority and vault credentials remain intact.
 
-`OperationReconciliationRequired`: a non-idempotent lifecycle operation has a
-pending receipt with no live holder. The message retains "operation requires
-reconciliation". Retry with a fresh key; the previous effect may have occurred.
-Only unlock, lock and switch permit same-key lost-holder takeover.
+`OperationReconciliationRequired`: a mutation (including `message.submit` and
+`grant.approve`) or non-idempotent lifecycle operation has a pending receipt
+requiring reconciliation. The message retains "operation requires reconciliation".
+Reconcile the previous effect before deciding whether to submit a fresh key; it
+may already have occurred. Only unlock, lock and switch permit same-key lost-holder
+takeover. Conflicting event IDs or changed intent retain `ValidationFailed`.
