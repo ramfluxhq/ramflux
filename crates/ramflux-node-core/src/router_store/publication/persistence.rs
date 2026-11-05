@@ -77,6 +77,8 @@ impl RouterRedbStore {
             changed: Notify::new(),
             db: Arc::downgrade(&self.db),
             path: self.path.clone(),
+            #[cfg(test)]
+            snapshot_hook: Mutex::new(None),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()

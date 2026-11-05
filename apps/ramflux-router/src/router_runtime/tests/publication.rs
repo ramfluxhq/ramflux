@@ -144,3 +144,32 @@ async fn async_mesh_submit_waits_for_publication() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn retired_preparation_is_a_typed_router_response() -> anyhow::Result<()> {
+    let root = temp_store_path("typed-retirement")?;
+    let state = Arc::new(ramflux_node_core::RouterCore::new());
+    let store = Arc::new(ramflux_node_core::publication::open_durability_fixture(&root, 0)?);
+    register_test_device(&state, "alice", "alice_phone", "target_alice", 1)?;
+    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    store.initialize_inbox("target_alice")?;
+    state.prepare_publication_target(&store, "target_alice")?;
+    store.publication_core()?.retire_fixture_target("target_alice")?;
+    let handle = RouterHandle::tokio(Arc::clone(&state), Arc::clone(&store), None);
+    let request = ramflux_transport::GatewayQuicRequest {
+        method: "POST".into(),
+        path: "/mvp0/envelope".into(),
+        body: serde_json::to_value(current_envelope("retired-submit", "target_alice")?)?,
+    };
+    let response =
+        crate::handlers::handle_mesh_quic_request_value(&request, &handle, "ramflux-gateway")
+            .await?;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body["outcome"], "incarnation_mismatch");
+    assert!(response.body["inbox_seq"].is_null());
+    drop(handle);
+    drop(state);
+    drop(store);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
