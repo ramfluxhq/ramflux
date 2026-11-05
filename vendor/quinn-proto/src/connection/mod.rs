@@ -1173,12 +1173,14 @@ impl Connection {
                 self.stats.udp_rx.datagrams += 1;
                 let data_len = first_decode.len() + remaining.as_ref().map_or(0, BytesMut::len);
                 self.stats.udp_rx.bytes += data_len as u64;
-                self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
-
                 if self.pending_control.is_some() || self.control_resource_closed {
+                    self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
                     return;
                 }
                 self.handle_decode(now, remote, ecn, first_decode);
+                // Decoding may migrate to a new path. Charge this datagram once
+                // to that path before returning for a parked head or tail.
+                self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
                 if let Some(pending) = self.pending_control.as_mut() {
                     pending.remaining = remaining;
                     return;
@@ -1186,10 +1188,6 @@ impl Connection {
                 if self.control_resource_closed {
                     return;
                 }
-                // The current `path` might have changed inside `handle_decode`,
-                // since the packet could have triggered a migration. Make sure
-                // the data received is accounted for the most recent path by accessing
-                // `path` after `handle_decode`.
                 if let Some(data) = remaining {
                     self.handle_coalesced(now, remote, ecn, data);
                 }

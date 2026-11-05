@@ -86,8 +86,8 @@
       },
       "src/endpoint.rs": {
         "upstream_sha256": "a63bf8516128c5dd7ac7fb2e63450886873990f2084ff91b39737c4cf41c6c32",
-        "patched_sha256": "f089f663a4c6826ff12c413c8d6dd69448a3c2556da2749e3a7f27e0d667458f",
-        "delta": "SPDX; Opt-in bounded handle-to-owner-slot map, typed capacity refusals before connection creation, independent test-only copy/delivery witnesses, gated idempotent close; upstream import order restored; cfg(test) endpoint consumer barrier while real socket ingress continues"
+        "patched_sha256": "b28292b73e3369763dd625cd01ceba15f7d30170ac93369632bd57348faefff4",
+        "delta": "SPDX; Opt-in bounded handle-to-owner-slot map, typed capacity refusals before connection creation, independent test-only copy/delivery witnesses, gated idempotent close; upstream import order restored; cfg(test) endpoint consumer barrier while real socket ingress continues; r3: classify an unbound routed protocol handle as InvalidOwner, reserving OwnerSlotsFull for actual capacity exhaustion"
       },
       "src/incoming.rs": {
         "upstream_sha256": "d10fcb0efd956d2d4f53e6600737520c04179d0c5850a8c89792c86a762eef98",
@@ -162,8 +162,8 @@
         "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix"
       },
       "src/rawq_tests/control_driver.rs": {
-        "patched_sha256": "0f4c138635e8d30349da8f53b7ef7d9eefa3e5645f918ab31f1fe6f715c5fdb7",
-        "delta": "Real Tokio endpoint/connection r10(a/b/c) matrix with 4096-byte/4-item binding limits, independent payload/frame/dedup/ACK/raw-dequeue/waker oracles; both directions full, pending producer, duplicate/retransmit, repeated-RETIRE oversize, terminal metadata adapter, independent drains and concurrent timer"
+        "patched_sha256": "0a5a1e4488b2be6baa8ccb17ae384a69632fc5f570f0b6ac3f96ae8e746de89e",
+        "delta": "Real Tokio endpoint/connection r10(a/b/c) matrix with 4096-byte/4-item binding limits, independent payload/frame/dedup/ACK/raw-dequeue/waker oracles; both directions full, pending producer, duplicate/retransmit, repeated-RETIRE oversize, terminal metadata adapter, independent drains and concurrent timer; r3: wait for independent consumers and the concurrent timer to drain before a later RETIRE retransmission, then assert unchanged local CID issuance for it and a duplicate"
       }
     },
     "formatting": {
@@ -220,8 +220,20 @@
           "vendor/quinn/src/rawq_tests/control_driver.rs"
         ]
       ],
-      "restoration": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth.",
-      "r2b_restoration": "Preserve existing import prefixes and restore whitespace-only replace hunks against pre-format text using difflib.SequenceMatcher(autojunk=False); semantic hunks remain formatted."
+      "restoration": "Restore unchanged upstream import prefixes from verified archive. r3 restores proto cid_state and endpoint prefixes byte-for-byte and tests/mod.rs layout/import order from the PR main baseline, retaining only pub(crate) utility visibility. Its 4182-line baseline is preserved.",
+      "r2b_restoration": "Preserve existing import prefixes and restore whitespace-only replace hunks against pre-format text using difflib.SequenceMatcher(autojunk=False); semantic hunks remain formatted.",
+      "r2_restoration_history": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth.",
+      "r3_command": [
+        "rustfmt",
+        "--edition",
+        "2021",
+        "--config-path",
+        "vendor/rustfmt.toml",
+        "--config",
+        "skip_children=true",
+        "vendor/quinn/src/rawq_tests/control_driver.rs"
+      ],
+      "r3_whitespace": "Restore whitespace-only changed hunks against the r2b file after scoped formatting; preserve new semantic hunks."
     }
   },
   "quinn-proto": {
@@ -326,8 +338,8 @@
       },
       "src/connection/cid_state.rs": {
         "upstream_sha256": "485b3821af4b706789b9ef6d78aaa60b1d49f54dbb2c6785daee801ad2696d24",
-        "patched_sha256": "b1f0f409b5e3531c50448d9469c5330406a07819f9934cb21e4f47a3e9a3925a",
-        "delta": "Prepend original-license SPDX header; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; Expose CID interval to the non-default dependency-test probe"
+        "patched_sha256": "594e0390ee5b5ba7ce13834f168be446f6322bb55c9b44b7a338ca2465d714c0",
+        "delta": "Prepend original-license SPDX header; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; Expose CID interval to the non-default dependency-test probe; r3: restore exact pinned upstream import order"
       },
       "src/connection/datagrams.rs": {
         "upstream_sha256": "8d17cb428f872f3cc9c0d33f56a140f08714e19ddc67d84841d0ce499cf1a8da",
@@ -336,8 +348,8 @@
       },
       "src/connection/mod.rs": {
         "upstream_sha256": "8b5665fa7dc83e2bb9154fceed34733768633756adc900bb8ec50f24be0ba2b7",
-        "patched_sha256": "a1b4fb9e08171549379d33ed096cc02f662dd94f8b2f73ff6c8a4c71c69e8308",
-        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored"
+        "patched_sha256": "0a751989a73faeea3462968f20a8bb6b8db2970ce70d942af74ba398f3d047dd",
+        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored; r3: charge the whole datagram exactly once on the path selected by handle_decode, or at the pending/closed early return; preserve default migration anti-amplification behavior"
       },
       "src/connection/mtud.rs": {
         "upstream_sha256": "3a2917c053a6ec79e277a2fc895cf20ba8cde2b1fe8b3b8b1c96584062acf782",
@@ -431,8 +443,8 @@
       },
       "src/endpoint.rs": {
         "upstream_sha256": "eb9cc82040621b95670e1d9ca9e82e902029766f7303b4329fcb169fb73d3bfc",
-        "patched_sha256": "54f0988b0aa7fb8b19cb581ce0d07fe00b0c0fca738cf5ab71971c00079dac11",
-        "delta": "SPDX; Bounded endpoint control emission census, typed outgoing endpoint-capacity error and shared ingress parser"
+        "patched_sha256": "6541c6e3669d0fde335fd5593c9c43fb5b38ed858a6ae6422aa39214cca17915",
+        "delta": "SPDX; Bounded endpoint control emission census, typed outgoing endpoint-capacity error and shared ingress parser; r3: restore exact pinned upstream import prefix"
       },
       "src/frame.rs": {
         "upstream_sha256": "ff9bc94eed5eaa96400c41f40dc0d73c68b71a60b98acbaf045885d0522341e3",
@@ -476,8 +488,8 @@
       },
       "src/tests/mod.rs": {
         "upstream_sha256": "a4f0907c8c39c02646602e628d0a7c9090db601bfb35edc4deb52b51d6245dd1",
-        "patched_sha256": "1c85d02a3526cb23bc7f39b038ac21141ff18583079d7f81ef539696a2257473",
-        "delta": "SPDX; Expose deterministic packet test utility module; preserve upstream import/whitespace layout with four blank lines removed to avoid growing a file above 4000 lines"
+        "patched_sha256": "368bdd2f6c1e5448a19f8644cf6a5949dace4511cdd5b382b6897c5e1466f918",
+        "delta": "SPDX and expose deterministic packet test utility module; r3 restores the reviewed import order and blank lines to the original PR main baseline (4182 lines), preserving baseline no-growth"
       },
       "src/tests/token.rs": {
         "upstream_sha256": "f648dd0c171d1f2c498e0363b68c6211d5e9ec2f2b305db4a262d3ec47ebbc79",
@@ -589,8 +601,20 @@
           "vendor/quinn/src/rawq_tests/control_driver.rs"
         ]
       ],
-      "restoration": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth.",
-      "r2b_restoration": "Preserve existing import prefixes and restore whitespace-only replace hunks against pre-format text using difflib.SequenceMatcher(autojunk=False); semantic hunks remain formatted."
+      "restoration": "Restore unchanged upstream import prefixes from verified archive. r3 restores proto cid_state and endpoint prefixes byte-for-byte and tests/mod.rs layout/import order from the PR main baseline, retaining only pub(crate) utility visibility. Its 4182-line baseline is preserved.",
+      "r2b_restoration": "Preserve existing import prefixes and restore whitespace-only replace hunks against pre-format text using difflib.SequenceMatcher(autojunk=False); semantic hunks remain formatted.",
+      "r2_restoration_history": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth.",
+      "r3_command": [
+        "rustfmt",
+        "--edition",
+        "2021",
+        "--config-path",
+        "vendor/rustfmt.toml",
+        "--config",
+        "skip_children=true",
+        "vendor/quinn/src/rawq_tests/control_driver.rs"
+      ],
+      "r3_whitespace": "Restore whitespace-only changed hunks against the r2b file after scoped formatting; preserve new semantic hunks."
     }
   }
 }

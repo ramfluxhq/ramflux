@@ -787,7 +787,7 @@ impl ConnectionSet {
                 {
                     Some(slot) => crate::rawq::Owner::Established(slot),
                     None => {
-                        pool.refused(crate::RawQueueRefusal::OwnerSlotsFull);
+                        pool.refused(crate::RawQueueRefusal::InvalidOwner);
                         return None;
                     }
                 },

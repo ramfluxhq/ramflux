@@ -93,7 +93,8 @@ traffic has a separate owner. Exhausted owner/source arenas return typed refusal
 classes. Credits surviving Drained prevent premature slot reuse. Control resume
 reads credit generations, counts emitted versus reserved controls and uses current
 runtime time. Receive bytes count each complete datagram once across head/tail
-parking. Eight-packet yield, control-first ordering, Close/Rebind coalescing and
+parking. Accounting follows `handle_decode` so a migrating datagram credits the
+new path; an already-pending/closed early return credits the current path once. Eight-packet yield, control-first ordering, Close/Rebind coalescing and
 idempotent endpoint close apply only with bounded admission enabled. Default
 mode retains its FIFO event semantics; channel/bookkeeping layout still differs
 from upstream and must be included in any later layout certificate.
@@ -110,3 +111,8 @@ exercises the terminal adapter; exhaustive allocation-class hooks remain later w
 The single-wake test exposed a stale waiter on successful retry; consumed waiters
 are disarmed, failed retries re-arm under the credit mutex and generation races
 schedule a new poll after releasing that mutex.
+
+The r3 review set adds the upstream migration and oversized-datagram path-change
+tests. An unbound routed handle is an `InvalidOwner` invariant refusal, distinct
+from an exhausted owner-slot arena. RETIRE retransmission/duplicate checks wait
+for consumer drain and assert that local CID issuance remains unchanged.
