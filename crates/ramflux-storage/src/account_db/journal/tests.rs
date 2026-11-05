@@ -923,7 +923,7 @@ fn migrating_a_removed_r5_member_does_not_reactivate_its_pin() -> Result<(), Sto
         db.connection
             .execute_batch(&format!("DROP TRIGGER \"{}\"", trigger.replace('"', "\"\"")))?;
     }
-    db.connection.execute_batch("ALTER TABLE group_member_projection DROP COLUMN principal_commitment; DROP TRIGGER IF EXISTS account_mac_marker_insert; DROP TRIGGER IF EXISTS account_mac_marker_delete; DROP TABLE IF EXISTS account_mac_marker_bundle; DROP TABLE IF EXISTS account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14; DELETE FROM schema_migration WHERE schema_version>=10; UPDATE schema_migration SET checksum='2026-06-14-account-core-v1' WHERE schema_version=1;")?;
+    db.connection.execute_batch("ALTER TABLE group_member_projection DROP COLUMN principal_commitment; DROP TABLE IF EXISTS account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14; DELETE FROM schema_migration WHERE schema_version>=10; UPDATE schema_migration SET checksum='2026-06-14-account-core-v1' WHERE schema_version=1;")?;
     drop(db);
     let db =
         AccountDb::open(&AccountIndex::open(&root)?, "a", &AccountDbKey::derive("a", b"secret"))?;

@@ -37,7 +37,6 @@ fn skip_merge_table(table: &str) -> bool {
     matches!(
         table,
         "account_mac_bundle"
-            | "account_mac_marker_bundle"
             | "account_erasure_generation"
             | "message_footprint"
             | "message_copy_binding"
@@ -191,7 +190,6 @@ impl BackupDatabase {
         let result = (|| {
             let tables = self.incoming_tables()?;
             self.begin_message_merge()?;
-            super::mac_subkeys::merge(&self.db)?;
             if candidate {
                 super::backup_selector_admission::prepare(&self.db)?;
                 after_capture(&self.db)?;
@@ -272,8 +270,6 @@ impl BackupDatabase {
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;
             self.link_imported_message_footprints(key)?;
-            // Generic replacement triggers may have re-associated an incoming marker.
-            self.db.execute_batch("INSERT INTO main.account_mac_marker_bundle SELECT m.state_kind,m.bundle_id FROM incoming.account_mac_marker_bundle m JOIN main.runtime_actor_state a USING(state_kind) WHERE 1 ON CONFLICT(state_kind) DO UPDATE SET bundle_id=excluded.bundle_id")?;
             self.finish_merge()?;
             Ok(report)
         })();

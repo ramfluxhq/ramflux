@@ -165,7 +165,7 @@ impl Receipt {
                 old_source == source && old_target == target
             }
             ReceiptScope::Private { private_scope } => {
-                db.own_sent_receipt_scopes(source, target)?.contains(private_scope)
+                *private_scope == db.own_sent_receipt_scope(source, target)?
             }
         };
         if self.valid_until < now || !matches {
@@ -500,3 +500,6 @@ mod receipt_compatibility {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod rekey_tests;

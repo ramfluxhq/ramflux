@@ -3,49 +3,158 @@
 
 use super::*;
 use crate::{AccountDb, AccountIndex};
-use std::fmt::Write;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-pub(crate) fn migrated_db(tag: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+fn legacy_db(tag: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
     let root = crate::tests::temp_root(tag);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", "principal")?;
     let key = AccountDbKey::from_bytes([0x42; 32]);
     let db = AccountDb::open(&index, "acct", &key)?;
-    // Recreate the pre-migration encrypted fixture, then use production migration.
-    db.connection.execute_batch(
-        "DROP TRIGGER account_mac_marker_insert; DROP TRIGGER account_mac_marker_delete; DROP TABLE account_mac_marker_bundle; DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14;",
-    )?;
-    drop(db);
-    let db = AccountDb::open(&index, "acct", &key)?;
+    // An explicit fixed test bundle reproduces the old writer's HKDF keys while
+    // seeding real caller rows. Remove it before handing off the v13 fixture.
+    db.connection.call(|raw| {
+        let bundle = Bundle::derive(&[0x42; 32]);
+        raw.execute(
+            "UPDATE account_mac_bundle SET bundle_id=?1,subkeys=?2",
+            params![bundle.id, bundle.keys.as_slice()],
+        )?;
+        Ok(())
+    })?;
     Ok((root, db))
 }
 
-#[test]
-fn mac_subkey_bundle_migration_preserves_all_caller_bytes_and_replays() -> TestResult {
-    let (root, db) = migrated_db("mac-migration")?;
-    for label in LABELS {
-        let mut derived = Zeroizing::new([0; 32]);
-        hkdf::Hkdf::<Sha256>::new(None, &[0x42; 32]).expand(label, derived.as_mut())?;
-        let mut old = HmacSha256::new_from_slice(derived.as_ref())?;
-        old.update(b"value");
-        assert_eq!(
-            db.account_mac(label, b"value")?,
-            ramflux_protocol::encode_base64url(old.finalize().into_bytes())
-        );
-    }
+fn remove_bundle_schema(db: &AccountDb) -> Result<(), StorageError> {
+    db.connection.execute_batch(
+        "DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14;",
+    )?;
+    Ok(())
+}
+
+pub(crate) fn migrated_db(tag: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+    let (root, db) = legacy_db(tag)?;
+    remove_bundle_schema(&db)?;
     drop(db);
     let db = AccountDb::open(
         &AccountIndex::open(&root)?,
         "acct",
         &AccountDbKey::from_bytes([0x42; 32]),
     )?;
+    Ok((root, db))
+}
+
+fn source() -> Result<ramflux_crypto::RootQualifiedDeviceRef, StorageError> {
+    Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+        &ramflux_crypto::create_identity_root("migration-principal", [7; 32]),
+        "migration-source",
+    )?)
+}
+
+fn canonical_envelope() -> Result<Vec<u8>, StorageError> {
+    Ok(ramflux_protocol::canonical_json_bytes(
+        &serde_json::json!({"envelope_id":"migration-envelope","payload_hash":"migration-hash","encrypted_payload":"cipher"}),
+    )?)
+}
+
+fn caller_inputs() -> Result<[Vec<u8>; 6], StorageError> {
+    use sha2::Digest;
+    Ok([
+        b"erased".to_vec(),
+        b"envelope".to_vec(),
+        ramflux_protocol::canonical_json_bytes(&("ciphertext", "migration-ciphertext"))?,
+        ramflux_protocol::canonical_json_bytes(&(source()?.storage_key(), "migration-copy"))?,
+        ramflux_protocol::canonical_json_bytes(&("migration-source", "migration-target"))?,
+        Sha256::digest(canonical_envelope()?).to_vec(),
+    ])
+}
+
+fn caller_outputs(db: &AccountDb) -> Result<[String; 6], StorageError> {
+    Ok([
+        db.account_mac(LABELS[0], b"erased")?,
+        db.account_mac(LABELS[1], b"envelope")?,
+        db.own_sent_index_digest("ciphertext", "migration-ciphertext")?,
+        db.own_sent_replay_claim(&source()?, "migration-copy")?,
+        db.own_sent_receipt_scope("migration-source", "migration-target")?,
+        db.routed_seen_key(&canonical_envelope()?)?.trim_start_matches("routed/seen/").to_owned(),
+    ])
+}
+
+type ActorRows = Vec<(String, Vec<u8>)>;
+fn persisted_rows(db: &AccountDb) -> Result<ActorRows, StorageError> {
+    Ok(db.connection.prepare("SELECT state_kind,state_json FROM runtime_actor_state WHERE state_kind GLOB 'message/deleted/*' OR state_kind GLOB 'message/deleted-envelope/*' OR state_kind GLOB 'own-device/sent-ciphertext/*' OR state_kind='own-device/message-receipt/migration-copy' OR state_kind GLOB 'routed/seen/*' ORDER BY state_kind")?.query_map([], |r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
+}
+
+#[test]
+fn mac_subkey_bundle_migration_preserves_all_caller_bytes_and_replays() -> TestResult {
+    let (root, db) = legacy_db("mac-migration")?;
+    seed_deleted(&db)?;
+    db.send_direct_message("thread", "migration-sent", "self", b"ciphertext")?;
+    let expected = caller_outputs(&db)?;
+    // Independent, unchanged historical HKDF implementation is the oracle for
+    // every label, not the new bundle's derivation or its stored bytes.
+    for ((label, input), output) in LABELS.iter().zip(caller_inputs()?).zip(&expected) {
+        let mut derived = Zeroizing::new([0; 32]);
+        hkdf::Hkdf::<Sha256>::new(None, &[0x42; 32]).expand(label, derived.as_mut())?;
+        let mut old = HmacSha256::new_from_slice(derived.as_ref())?;
+        old.update(&input);
+        assert_eq!(*output, ramflux_protocol::encode_base64url(old.finalize().into_bytes()));
+    }
+    db.persist_message_replay_reference(
+        &format!("own-device/sent-ciphertext/{}", expected[2]),
+        Some("migration-sent"),
+        Some(&expected[3]),
+        None,
+    )?;
+    db.persist_actor_state("own-device/message-receipt/migration-copy",&serde_json::json!({"fingerprint":"migration-fingerprint","private_scope":expected[4],"valid_until":2_000_000_000_i64,"expires_at":2_000_000_300_i64,"acknowledged":true}))?;
+    db.persist_actor_state(
+        &format!("routed/seen/{}", expected[5]),
+        &serde_json::json!({"payload_hash":"migration-hash"}),
+    )?;
+    let rows = persisted_rows(&db)?;
     assert_eq!(
-        db.account_mac(LABELS[0], b"message-golden")?,
-        "7tkgKbZENWssE__yM22Lxml0UyZPLzZFfPBKNe9YgSg"
+        rows.len(),
+        5,
+        "both deletion markers, sent index/claim, receipt scope and routed seen must be persisted"
+    );
+    for key in [
+        format!("message/deleted/{}", expected[0]),
+        format!("message/deleted-envelope/{}", expected[1]),
+        format!("own-device/sent-ciphertext/{}", expected[2]),
+        "own-device/message-receipt/migration-copy".into(),
+        format!("routed/seen/{}", expected[5]),
+    ] {
+        assert!(rows.iter().any(|(stored, _)| *stored == key), "old caller row missing: {key}");
+    }
+    remove_bundle_schema(&db)?;
+    assert_eq!(
+        db.connection
+            .query_row("SELECT MAX(schema_version) FROM schema_migration", [], |r| r
+                .get::<_, i64>(0))?,
+        13
     );
     drop(db);
+    let key = AccountDbKey::from_bytes([0x42; 32]);
+    for _ in 0..2 {
+        let db = AccountDb::open(&AccountIndex::open(&root)?, "acct", &key)?;
+        assert_eq!(caller_outputs(&db)?, expected);
+        assert_eq!(
+            persisted_rows(&db)?,
+            rows,
+            "migration/replay/reopen rewrote persisted caller bytes"
+        );
+        assert_deleted(&db)?;
+        assert_eq!(db.defer_inbox_entry("migration-seen", &canonical_envelope()?, 1)?, 0);
+        let index = db
+            .load_actor_state::<crate::MessageReplayReference>(&format!(
+                "own-device/sent-ciphertext/{}",
+                expected[2]
+            ))?
+            .ok_or("sent index")?;
+        assert_eq!(index.message_id(), Some("migration-sent"));
+        assert_eq!(index.binding(), Some(expected[3].as_str()));
+        drop(db);
+    }
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -54,7 +163,7 @@ fn mac_subkey_bundle_migration_preserves_all_caller_bytes_and_replays() -> TestR
 fn mac_subkey_bundle_migration_is_atomic_on_interruption() -> TestResult {
     let (root, db) = migrated_db("mac-atomic")?;
     db.connection.execute_batch(
-        "DROP TRIGGER account_mac_marker_insert; DROP TRIGGER account_mac_marker_delete; DROP TABLE account_mac_marker_bundle; DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14;",
+        "DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14;",
     )?;
     db.connection.call(|raw| {
         assert!(
@@ -91,23 +200,60 @@ fn mac_subkey_bundle_migration_is_atomic_on_interruption() -> TestResult {
 fn mac_subkey_bundle_new_accounts_use_independent_random_subkeys() -> TestResult {
     let (first_root, first) = crate::tests::test_db("mac-random-first")?;
     let (second_root, second) = crate::tests::test_db("mac-random-second")?;
-    for label in LABELS {
-        assert_ne!(first.account_mac(label, b"value")?, second.account_mac(label, b"value")?);
+    let first_outputs = caller_outputs(&first)?;
+    let second_outputs = caller_outputs(&second)?;
+    for (a, b) in first_outputs.iter().zip(&second_outputs) {
+        assert_ne!(a, b);
+    }
+    for db in [&first, &second] {
+        db.connection.call(|raw| {
+            let bundle=load(raw).map_err(|_|rusqlite::Error::InvalidQuery)?;
+            // Inventory the sole new key-material row. No root, seed, PRK or DB
+            // key column exists, and no application value contains DB unlock material.
+            let columns=raw.prepare("SELECT name FROM pragma_table_info('account_mac_bundle')")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            assert_eq!(columns,["bundle_id","subkeys","is_current"]);
+            let key=AccountDbKey::derive("acct",b"storage-test-secret");
+            let (prk,_)=hkdf::Hkdf::<Sha256>::extract(None,key.bytes());
+            let prk=Zeroizing::new(<[u8;32]>::from(prk));
+            assert!(!bundle.keys.windows(32).any(|part|part==key.bytes() || part==prk.as_ref()));
+            let tables=raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for table in tables {
+                let mut query=raw.prepare(&format!("SELECT * FROM \"{}\"",table.replace('"',"\"\"")))?;
+                let count=query.column_count();
+                let mut rows=query.query([])?;
+                while let Some(row)=rows.next()? {
+                    for column in 0..count {
+                        if let rusqlite::types::ValueRef::Blob(bytes)=row.get_ref(column)? {
+                            assert!(!bytes.windows(32).any(|part|part==key.bytes() || part==prk.as_ref()),"unlock material persisted in {table}");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?;
     }
     drop(first);
     drop(second);
+    for (root, expected) in [(&first_root, first_outputs), (&second_root, second_outputs)] {
+        let db = AccountDb::open(
+            &AccountIndex::open(root)?,
+            "acct",
+            &AccountDbKey::derive("acct", b"storage-test-secret"),
+        )?;
+        assert_eq!(caller_outputs(&db)?, expected, "new account authority changed on reopen");
+        drop(db);
+    }
     std::fs::remove_dir_all(first_root)?;
     std::fs::remove_dir_all(second_root)?;
     Ok(())
 }
 
 #[test]
-fn mac_subkey_bundle_debug_is_redacted_and_secret_lifecycle_is_zeroizing() -> TestResult {
+fn mac_subkey_bundle_debug_is_redacted_and_secret_lifecycle_is_zeroizing() {
     fn protected(_: &Zeroizing<[u8; 192]>) {}
-    let bundle = Bundle::derive(&[0x42; 32])?;
+    let bundle = Bundle::derive(&[0x42; 32]);
     protected(&bundle.keys);
     assert_eq!(format!("{bundle:?}"), "MacSubkeyBundle([redacted])");
-    Ok(())
 }
 
 fn assert_deleted(db: &AccountDb) -> Result<(), StorageError> {
@@ -154,20 +300,32 @@ fn seed_deleted(db: &AccountDb) -> Result<(), StorageError> {
 fn rekey_keeps_deleted_messages_deleted() -> TestResult {
     let (root, mut db) = crate::tests::test_db("mac-deletion-rekey")?;
     seed_deleted(&db)?;
-    let next = AccountDbKey::generate()?;
-    db.rekey(&next)?;
-    assert_deleted(&db)?;
+    let before = persisted_rows(&db)?;
     let mut provider = crate::LocalVaultKeyWrappingProvider::new([7; 32]);
-    let previous = db.wrap_current_db_key(&[7; 32])?;
-    provider.fail_next_wrap();
-    assert!(db.rekey_with_wrapping(&AccountDbKey::generate()?, &mut provider, &previous).is_err());
-    assert_deleted(&db)?;
-    let final_key = AccountDbKey::generate()?;
-    db.rekey_with_wrapping(&final_key, &mut provider, &previous)?;
-    assert_deleted(&db)?;
-    drop(db);
-    let db = AccountDb::open(&AccountIndex::open(&root)?, "acct", &final_key)?;
-    assert_deleted(&db)?;
+    let mut last_key = AccountDbKey::derive("acct", b"storage-test-secret");
+    for stage in 0..3 {
+        let next = AccountDbKey::generate()?;
+        let previous = db.wrap_current_db_key(&[7; 32])?;
+        match stage {
+            0 => {
+                db.rekey(&next)?;
+                last_key = next;
+            }
+            1 => {
+                provider.fail_next_wrap();
+                assert!(db.rekey_with_wrapping(&next, &mut provider, &previous).is_err());
+            }
+            _ => {
+                db.rekey_with_wrapping(&next, &mut provider, &previous)?;
+                last_key = next;
+            }
+        }
+        assert_deleted(&db)?;
+        drop(db);
+        db = AccountDb::open(&AccountIndex::open(&root)?, "acct", &last_key)?;
+        assert_deleted(&db)?;
+        assert_eq!(persisted_rows(&db)?, before, "rekey/failed wrapping rewrote marker rows");
+    }
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -179,6 +337,7 @@ fn mac_subkey_bundle_snapshot_restore_round_trip() -> TestResult {
     seed_deleted(&db)?;
     let expected: Vec<_> =
         LABELS.iter().map(|label| db.account_mac(label, b"value")).collect::<Result<_, _>>()?;
+    let source_bundle = db.connection.call(|raw| Ok(load(raw)))??;
     let snapshot_path = root.join("snapshot.db");
     let snapshot = db.write_backup_snapshot(&snapshot_path)?;
     let snapshot_db =
@@ -191,128 +350,12 @@ fn mac_subkey_bundle_snapshot_restore_round_trip() -> TestResult {
     copied.rekey(&rekeyed)?;
     drop(copied);
     let copied = super::super::backup_database::BackupDatabase::open(&copied_path, &rekeyed)?;
+    assert!(load(&copied.db)?.keys == source_bundle.keys, "snapshot/copy changed the bundle");
     for (label, expected) in LABELS.iter().zip(expected) {
         assert_eq!(current_mac(&copied.db, label, b"value")?, expected);
     }
     drop(copied);
     drop(snapshot_db);
-    drop(db);
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[test]
-fn native_archive_keeps_subkey_bundle_without_source_unlock_capability() -> TestResult {
-    let (root, db) = crate::tests::test_db("mac-native")?;
-    seed_deleted(&db)?;
-    db.persist_actor_state("account/credential", &serde_json::json!({"secret":"credential"}))?;
-    let path = root.join("native.db");
-    let snapshot = db.write_backup_snapshot(&path)?;
-    let archived = super::super::backup_database::BackupDatabase::open(&path, &snapshot.key)?;
-    archived.sanitize_native_backup()?;
-    drop(archived);
-    let archived = super::super::backup_database::BackupDatabase::open(&path, &snapshot.key)?;
-    assert!(!archived.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind='account/credential')",
-        [],
-        |r| r.get::<_, bool>(0)
-    )?);
-    let bundles = load(&archived.db, "main")?;
-    let source_path = db.path.clone();
-    for bundle in bundles {
-        for candidate in bundle.keys.as_chunks::<32>().0 {
-            let key = Zeroizing::new(*candidate);
-            let connection = rusqlite::Connection::open(&source_path)?;
-            let mut hex = Zeroizing::new(String::new());
-            for byte in key.iter() {
-                write!(&mut *hex, "{byte:02x}")?;
-            }
-            connection.execute_batch(&format!("PRAGMA key=\"x'{}'\"", hex.as_str()))?;
-            assert!(
-                connection
-                    .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
-                    .is_err()
-            );
-        }
-    }
-    // Positive control: the actual source key opens the same encrypted source.
-    let source = rusqlite::Connection::open(&source_path)?;
-    source.execute_batch(&format!("PRAGMA key=\"x'{}'\"", db.current_key.sqlcipher_hex()))?;
-    assert!(
-        source.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))? > 0
-    );
-    drop(source);
-    drop(archived);
-    drop(db);
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[test]
-fn marker_key_set_merge_preserves_foreign_message_and_envelope_markers() -> TestResult {
-    use super::super::backup_database::BackupDatabase;
-    for mode in 0..3 {
-        let (root, local) = crate::tests::test_db("mac-merge-local")?;
-        let (source_root, source) = crate::tests::test_db("mac-merge-source")?;
-        seed_deleted(&source)?;
-        let source_path = root.join("incoming.db");
-        let incoming = source.write_backup_snapshot(&source_path)?;
-        let target_path = root.join("target.db");
-        let target = local.write_backup_snapshot(&target_path)?;
-        let mut merged = BackupDatabase::open(&target_path, &target.key)?;
-        match mode {
-            0 => {
-                merged.merge_backup(&source_path, &incoming.key, || Ok(()))?;
-            }
-            1 => {
-                merged.merge_native_backup(&source_path, &incoming.key, || Ok(()))?;
-            }
-            _ => {
-                merged.merge_backup_candidate(&source_path, &incoming.key, || Ok(()))?;
-            }
-        }
-        assert_eq!(load(&merged.db, "main")?.len(), 2);
-        let keys = all_macs(&merged.db, LABELS[0], b"erased")?;
-        assert!(keys.iter().any(|mac| {
-            merged
-                .db
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=?1)",
-                    [format!("message/deleted/{mac}")],
-                    |r| r.get::<_, bool>(0),
-                )
-                .unwrap_or(false)
-        }));
-        merged.merge_backup(&source_path, &incoming.key, || Ok(()))?;
-        assert_eq!(load(&merged.db, "main")?.len(), 2);
-        drop(merged);
-        drop(local);
-        drop(source);
-        std::fs::remove_dir_all(root)?;
-        std::fs::remove_dir_all(source_root)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn marker_key_set_limit_refuses_atomically() -> TestResult {
-    let (root, db) = crate::tests::test_db("mac-merge-cap")?;
-    db.connection.call(|raw| {
-        raw.execute_batch("ATTACH DATABASE ':memory:' AS incoming; CREATE TABLE incoming.schema_migration AS SELECT * FROM main.schema_migration")?;
-        raw.execute_batch("CREATE TABLE incoming.account_mac_marker_bundle(state_kind TEXT PRIMARY KEY,bundle_id TEXT NOT NULL); CREATE TABLE incoming.account_mac_bundle(bundle_id TEXT PRIMARY KEY,subkeys BLOB NOT NULL,is_current INTEGER NOT NULL)")?;
-        for index in 0_u8..15 {
-            let bundle = Bundle::derive(&[index;32]).map_err(|_|rusqlite::Error::InvalidQuery)?;
-            raw.execute("INSERT INTO account_mac_bundle VALUES(?1,?2,0)", params![bundle.id,bundle.keys.as_slice()])?;
-        }
-        let extra = Bundle::derive(&[99;32]).map_err(|_|rusqlite::Error::InvalidQuery)?;
-        raw.execute("INSERT INTO incoming.account_mac_bundle VALUES(?1,?2,1)", params![extra.id,extra.keys.as_slice()])?;
-        assert!(merge(raw).is_err());
-        assert_eq!(raw.query_row("SELECT count(*) FROM account_mac_bundle",[],|r|r.get::<_,usize>(0))?,16);
-        raw.execute("UPDATE incoming.account_mac_bundle SET bundle_id='malformed'",[])?;
-        assert!(merge(raw).is_err());
-        raw.execute_batch("DETACH DATABASE incoming")?;
-        Ok(())
-    })?;
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

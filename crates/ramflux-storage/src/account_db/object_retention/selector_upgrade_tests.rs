@@ -9,7 +9,7 @@ use std::path::Path;
 pub(super) fn v12_fixture(db: &AccountDb) -> Result<(), StorageError> {
     // v13 introduces no table/column changes. Reconstruct the v12 ledger and
     // remove the new candidate index; leave existing user data untouched.
-    db.connection.execute_batch("DROP TRIGGER IF EXISTS account_mac_marker_insert; DROP TRIGGER IF EXISTS account_mac_marker_delete; DROP TABLE IF EXISTS account_mac_marker_bundle; DROP TABLE IF EXISTS account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14; DELETE FROM schema_migration WHERE schema_version=13; DROP INDEX IF EXISTS runtime_outbox_object_selector;")?;
+    db.connection.execute_batch("DROP TABLE IF EXISTS account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14; DELETE FROM schema_migration WHERE schema_version=13; DROP INDEX IF EXISTS runtime_outbox_object_selector;")?;
     db.connection.execute(
         "UPDATE schema_migration SET checksum=?1 WHERE schema_version=1",
         params![crate::schema_object_erasure::V12_SENTINEL],
@@ -62,7 +62,9 @@ fn e10_live_store_v12_to_v13_upgrade() -> Result<(), StorageError> {
 #[test]
 fn e10_old_writer_refuses_v13() -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("selector-v13-old-writer")?;
-    db.connection.execute_batch("DROP TRIGGER account_mac_marker_insert; DROP TRIGGER account_mac_marker_delete; DROP TABLE account_mac_marker_bundle; DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14;")?;
+    db.connection.execute_batch(
+        "DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14;",
+    )?;
     // Frozen v12 validation performs this maximum-version check before writes.
     let newest: i64 = db.connection.query_row(
         "SELECT COALESCE(MAX(schema_version),0) FROM schema_migration",
