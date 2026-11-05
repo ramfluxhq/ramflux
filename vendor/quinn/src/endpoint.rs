@@ -10,8 +10,8 @@ use std::{
     pin::Pin,
     str,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
 };
@@ -19,8 +19,9 @@ use std::{
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))]
 use crate::runtime::default_runtime;
 use crate::{
+    Instant,
     runtime::{AsyncUdpSocket, Runtime},
-    udp_transmit, Instant,
+    udp_transmit,
 };
 use bytes::{Bytes, BytesMut};
 use pin_project_lite::pin_project;
@@ -31,13 +32,13 @@ use proto::{
 use rustc_hash::FxHashMap;
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring"),))]
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::sync::{futures::Notified, mpsc, Notify};
+use tokio::sync::{Notify, futures::Notified, mpsc};
 use tracing::{Instrument, Span};
-use udp::{RecvMeta, BATCH_SIZE};
+use udp::{BATCH_SIZE, RecvMeta};
 
 use crate::{
-    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter, ConnectionEvent,
-    EndpointConfig, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND,
+    ConnectionEvent, EndpointConfig, IO_LOOP_BOUND, RECV_TIME_BOUND, VarInt,
+    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter,
 };
 
 /// A QUIC endpoint.
@@ -72,7 +73,10 @@ impl Endpoint {
         {
             return Err("endpoint already admitted work");
         }
-        state.recv_state.connections.raw_credit = Some(crate::rawq::Pool::new(limits)?);
+        let pool = crate::rawq::Pool::new(limits)?;
+        state.recv_state.connections.owner_slots =
+            vec![None; pool.owner_capacity()].into_boxed_slice();
+        state.recv_state.connections.raw_credit = Some(pool);
         Ok(())
     }
 
@@ -88,6 +92,30 @@ impl Endpoint {
             .as_ref()
             .unwrap()
             .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rawq_observed(&self) -> (usize, usize) {
+        let s = self.inner.state.lock().unwrap();
+        (
+            s.recv_state.connections.copied.load(Ordering::Relaxed),
+            s.recv_state.connections.delivered.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rawq_owner_bindings(&self) -> Vec<(usize, usize)> {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .recv_state
+            .connections
+            .owner_slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, handle)| handle.map(|h| (h.0, slot)))
+            .collect()
     }
 
     /// Helper to construct an endpoint for use with outgoing connections only
@@ -260,16 +288,24 @@ impl Endpoint {
             addr
         };
 
+        let owner_slot = endpoint
+            .recv_state
+            .connections
+            .available_owner()
+            .map_err(|_| ConnectError::EndpointCapacity)?;
         let (ch, conn) = endpoint
             .inner
             .connect(self.runtime.now(), config, addr, server_name)?;
 
         let socket = endpoint.socket.clone();
         endpoint.stats.outgoing_handshakes += 1;
-        Ok(endpoint
-            .recv_state
-            .connections
-            .insert(ch, conn, socket, self.runtime.clone()))
+        Ok(endpoint.recv_state.connections.insert(
+            ch,
+            conn,
+            socket,
+            self.runtime.clone(),
+            owner_slot,
+        ))
     }
 
     /// Switch to a new UDP socket
@@ -337,7 +373,9 @@ impl Endpoint {
     /// [`Connection::close()`]: crate::Connection::close
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
         let mut endpoint = self.inner.state.lock().unwrap();
-        if endpoint.recv_state.connections.close.is_some() {
+        if endpoint.recv_state.connections.raw_credit.is_some()
+            && endpoint.recv_state.connections.close.is_some()
+        {
             return;
         }
         let reason = if endpoint.recv_state.connections.raw_credit.is_some() {
@@ -471,6 +509,19 @@ impl EndpointInner {
         let mut state = self.state.lock().unwrap();
         let mut response_buffer = Vec::new();
         let now = state.runtime.now();
+        let owner_slot = match state.recv_state.connections.available_owner() {
+            Ok(slot) => slot,
+            Err(_) => {
+                let transmit = state.inner.refuse(incoming, &mut response_buffer);
+                respond(transmit, &response_buffer, &*state.socket);
+                return Err(ConnectionError::ApplicationClosed(
+                    proto::ApplicationClose {
+                        error_code: VarInt::from_u32(0x524c),
+                        reason: Bytes::from_static(b"rawq_owner_slots_full"),
+                    },
+                ));
+            }
+        };
         match state
             .inner
             .accept(incoming, now, &mut response_buffer, server_config)
@@ -482,7 +533,7 @@ impl EndpointInner {
                 Ok(state
                     .recv_state
                     .connections
-                    .insert(handle, conn, socket, runtime))
+                    .insert(handle, conn, socket, runtime, owner_slot))
             }
             Err(error) => {
                 if let Some(transmit) = error.response {
@@ -578,6 +629,7 @@ impl State {
 
             if event.is_drained() {
                 self.recv_state.connections.senders.remove(&ch);
+                self.recv_state.connections.retire_owner(ch);
                 if self.recv_state.connections.is_empty() {
                     shared.idle.notify_waiters();
                 }
@@ -647,6 +699,11 @@ struct ConnectionSet {
     /// Stored to give out clones to new ConnectionInners
     sender: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
     raw_credit: Option<Arc<crate::rawq::Pool>>,
+    owner_slots: Box<[Option<ConnectionHandle>]>,
+    #[cfg(test)]
+    copied: AtomicUsize,
+    #[cfg(test)]
+    delivered: AtomicUsize,
     /// Set if the endpoint has been manually closed
     close: Option<(VarInt, Bytes)>,
 }
@@ -658,7 +715,11 @@ impl ConnectionSet {
         conn: proto::Connection,
         socket: Arc<dyn AsyncUdpSocket>,
         runtime: Arc<dyn Runtime>,
+        owner_slot: Option<usize>,
     ) -> Connecting {
+        if let Some(slot) = owner_slot {
+            self.owner_slots[slot] = Some(handle);
+        }
         let (send, recv) = crate::rawq_mailbox::channel(
             self.raw_credit.is_some() || conn.control_credit_enabled(),
         );
@@ -673,6 +734,32 @@ impl ConnectionSet {
         Connecting::new(handle, conn, self.sender.clone(), recv, socket, runtime)
     }
 
+    fn available_owner(&self) -> Result<Option<usize>, crate::RawQueueRefusal> {
+        let Some(pool) = &self.raw_credit else {
+            return Ok(None);
+        };
+        match self
+            .owner_slots
+            .iter()
+            .enumerate()
+            .position(|(slot, handle)| handle.is_none() && pool.owner_free(slot))
+        {
+            Some(slot) => Ok(Some(slot)),
+            None => {
+                pool.refused(crate::RawQueueRefusal::OwnerSlotsFull);
+                Err(crate::RawQueueRefusal::OwnerSlotsFull)
+            }
+        }
+    }
+    fn retire_owner(&mut self, handle: ConnectionHandle) {
+        for slot in self.owner_slots.iter_mut() {
+            if *slot == Some(handle) {
+                *slot = None;
+                break;
+            }
+        }
+    }
+
     fn admit_datagram(
         &self,
         endpoint: &proto::Endpoint,
@@ -681,14 +768,28 @@ impl ConnectionSet {
         data: &[u8],
     ) -> Option<(BytesMut, Option<Arc<crate::rawq::Credit>>)> {
         let credit = if let Some(pool) = &self.raw_credit {
-            let owner = endpoint
-                .route_datagram(remote, local_ip, data)
-                .map_or(pool.incoming_owner(), |h| h.0);
-            Some(pool.reserve(owner, remote.ip(), data.len())?)
+            let owner = match endpoint.route_datagram(remote, local_ip, data) {
+                Some(handle) => match self
+                    .owner_slots
+                    .iter()
+                    .position(|bound| *bound == Some(handle))
+                {
+                    Some(slot) => crate::rawq::Owner::Established(slot),
+                    None => {
+                        pool.refused(crate::RawQueueRefusal::OwnerSlotsFull);
+                        return None;
+                    }
+                },
+                None => crate::rawq::Owner::Incoming,
+            };
+            Some(pool.reserve(owner, remote.ip(), data.len()).ok()?)
         } else {
             None
         };
-        Some((BytesMut::from(data), credit))
+        let bytes = BytesMut::from(data);
+        #[cfg(test)]
+        self.copied.fetch_add(1, Ordering::Relaxed);
+        Some((bytes, credit))
     }
 
     fn send_packet(
@@ -702,7 +803,12 @@ impl ConnectionSet {
             None => ConnectionEvent::Proto(event),
         };
         if let Some(sender) = self.senders.get(&handle) {
-            let _ = sender.send(event);
+            let sent = sender.send(event);
+            #[cfg(test)]
+            if sent.is_ok() {
+                self.delivered.fetch_add(1, Ordering::Relaxed);
+            }
+            let _ = sent;
         }
     }
 
@@ -846,6 +952,11 @@ impl RecvState {
                 sender,
                 close: None,
                 raw_credit: None,
+                owner_slots: Box::new([]),
+                #[cfg(test)]
+                copied: AtomicUsize::new(0),
+                #[cfg(test)]
+                delivered: AtomicUsize::new(0),
             },
             incoming: VecDeque::new(),
             recv_buf: recv_buf.into(),

@@ -67,15 +67,24 @@ fn pending_packet_reserves_both_directions_and_wakes_once_after_consumption() {
     let wake = Arc::new(WakeCount(AtomicUsize::new(0)));
     let waker = Waker::from(wake.clone());
     let mut cx = Context::from_waker(&waker);
-    assert!(conn.poll_control_resume(&mut cx));
+    let revalidated = conn.control.as_ref().unwrap().lock().unwrap().revalidations;
+    assert!(conn.poll_control_resume(&mut cx, now));
+    assert_eq!(
+        conn.control.as_ref().unwrap().lock().unwrap().revalidations,
+        revalidated
+    );
     let event = conn.poll_endpoint_events().unwrap();
     assert_eq!(wake.0.load(Ordering::SeqCst), 0);
     drop(event);
     assert_eq!(wake.0.load(Ordering::SeqCst), 1);
-    assert!(!conn.poll_control_resume(&mut cx));
+    assert!(!conn.poll_control_resume(&mut cx, now));
+    assert_eq!(
+        conn.control.as_ref().unwrap().lock().unwrap().revalidations,
+        revalidated + 1
+    );
     assert_eq!(conn.total_authed_packets, authenticated_before + 1);
     assert_eq!(conn.endpoint_events.len(), 2);
-    assert!(!conn.poll_control_resume(&mut cx));
+    assert!(!conn.poll_control_resume(&mut cx, now));
     assert_eq!(conn.total_authed_packets, authenticated_before + 1);
     let state = conn.control.as_ref().unwrap().lock().unwrap();
     assert_eq!(state.used.forward, 2);
@@ -151,6 +160,8 @@ fn coalesced_handshake_parks_tail_until_both_control_directions_return() {
         packets >= 2,
         "fixture must contain the real server crypto and CID flights"
     );
+    let flight_len = flight.len() as u64;
+    let received_before = pair.client_conn_mut(client).path.total_recvd;
     let now = pair.time;
     let remote = pair.server.addr;
     let mut response = Vec::new();
@@ -186,7 +197,7 @@ fn coalesced_handshake_parks_tail_until_both_control_directions_return() {
             "CID tail must fit total but not remaining credit"
         );
         assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert!(conn.poll_control_resume(&mut cx));
+        assert!(conn.poll_control_resume(&mut cx, now));
         let state = conn.control.as_ref().unwrap().lock().unwrap();
         assert!(state.used.forward <= 4 && state.used.reverse <= 4);
     }
@@ -206,15 +217,16 @@ fn coalesced_handshake_parks_tail_until_both_control_directions_return() {
     }
     assert_eq!(wake.0.load(Ordering::SeqCst), 1);
     let conn = pair.client_conn_mut(client);
-    assert!(!conn.poll_control_resume(&mut cx));
+    assert!(!conn.poll_control_resume(&mut cx, now));
     assert_eq!(conn.total_authed_packets, committed_heads + 1);
-    assert!(!conn.poll_control_resume(&mut cx));
+    assert!(!conn.poll_control_resume(&mut cx, now));
     assert_eq!(
         conn.total_authed_packets,
         committed_heads + 1,
         "no head replay or tail double commit"
     );
     assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(conn.path.total_recvd, received_before + flight_len);
 }
 
 #[test]
@@ -262,6 +274,16 @@ fn discarded_initial_head_allows_valid_tail_and_keeps_owner_until_stream_chunk_d
         before + 1,
         "only valid tail commits; old Initial keys are gone"
     );
+    {
+        let state = conn.control.as_ref().unwrap().lock().unwrap();
+        assert!(
+            state.used.forward <= state.limits.items && state.used.reverse <= state.limits.items
+        );
+        assert!(
+            state.used.forward * 512 <= state.limits.bytes
+                && state.used.reverse * 1024 <= state.limits.bytes
+        );
+    }
     let mut recv = conn.recv_stream(stream);
     let mut chunks = recv.read(true).unwrap();
     let chunk = chunks.next(usize::MAX).unwrap().unwrap();
@@ -426,4 +448,114 @@ fn metadata_terminal_adapter_preserves_committed_controls_and_cancels_pending_pa
     let close = conn.timers.get(Timer::Close).unwrap();
     conn.handle_timeout(close);
     assert!(conn.state.is_drained());
+}
+
+#[test]
+fn parked_head_counts_whole_datagram_once_and_resume_uses_current_generation() {
+    let mut pair = Pair::default();
+    let client = pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    let mut bytes = Vec::new();
+    while let Some((_, _, data)) = pair.client.inbound.pop_front() {
+        bytes.extend_from_slice(&data);
+    }
+    let len = bytes.len() as u64;
+    let now = pair.time;
+    let remote = pair.server.addr;
+    let mut response = Vec::new();
+    let Some(crate::DatagramEvent::ConnectionEvent(_, event)) = pair.client.handle(
+        now,
+        remote,
+        None,
+        None,
+        BytesMut::from(bytes.as_slice()),
+        &mut response,
+    ) else {
+        panic!("route");
+    };
+    let conn = pair.client_conn_mut(client);
+    conn.set_control_credit_limits(ControlLimits {
+        bytes: 4096,
+        items: 4,
+    })
+    .unwrap();
+    let block = match CreditState::reserve(
+        conn.control.as_ref().unwrap(),
+        Demand {
+            forward: 4,
+            reverse: 4,
+        },
+    ) {
+        Admission::Reserved(r) => r,
+        _ => panic!("reserve"),
+    };
+    let before = conn.path.total_recvd;
+    conn.handle_event(event);
+    assert!(conn.pending_control.is_some());
+    assert_eq!(conn.path.total_recvd, before + len);
+    let wake = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = Waker::from(wake);
+    let mut cx = Context::from_waker(&waker);
+    assert!(conn.poll_control_resume(&mut cx, now + Duration::from_millis(10)));
+    assert_eq!(conn.path.total_recvd, before + len);
+    assert_eq!(
+        conn.control.as_ref().unwrap().lock().unwrap().revalidations,
+        0
+    );
+    drop(block);
+    conn.poll_control_resume(&mut cx, now + Duration::from_millis(20));
+    assert_eq!(conn.path.total_recvd, before + len);
+    while let Some(event) = conn.poll_endpoint_events() {
+        drop(event);
+    }
+    conn.poll_control_resume(&mut cx, now + Duration::from_millis(30));
+    assert_eq!(conn.path.total_recvd, before + len);
+    assert!(conn.control.as_ref().unwrap().lock().unwrap().revalidations >= 1);
+}
+
+#[test]
+fn timer_credit_retry_uses_current_time_and_census_guard_records_overrun() {
+    let mut pair = Pair::default();
+    let (client, _) = pair.connect();
+    let now = pair.time;
+    let conn = pair.client_conn_mut(client);
+    conn.set_control_credit_limits(ControlLimits {
+        bytes: 4096,
+        items: 4,
+    })
+    .unwrap();
+    let block = match CreditState::reserve(
+        conn.control.as_ref().unwrap(),
+        Demand {
+            forward: 4,
+            reverse: 4,
+        },
+    ) {
+        Admission::Reserved(r) => r,
+        _ => panic!("reserve"),
+    };
+    conn.timers.set(Timer::PushNewCid, now);
+    conn.handle_timeout(now);
+    assert!(conn.control_timer_pending.is_some());
+    let wake = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = Waker::from(wake);
+    let mut cx = Context::from_waker(&waker);
+    drop(block);
+    let fresh = now + Duration::from_millis(100);
+    conn.poll_control_resume(&mut cx, fresh);
+    assert!(
+        matches!(conn.poll_endpoint_events(),Some(EndpointEvent(EndpointEventInner::NeedIdentifiers(at,_),_)) if at==fresh)
+    );
+    let state = CreditState::new(ControlLimits {
+        bytes: 4096,
+        items: 4,
+    });
+    let guard = match CreditState::reserve(&state, Demand::default()) {
+        Admission::Reserved(r) => r,
+        _ => panic!("reserve"),
+    };
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| guard.emit_reverse()));
+    assert!(rejected.is_err());
+    assert_eq!(state.lock().unwrap().overruns, 1);
 }

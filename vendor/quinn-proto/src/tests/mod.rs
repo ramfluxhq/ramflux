@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use std::{
+    convert::TryInto,
+    iter, mem,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::{Arc, Mutex},
+};
 use assert_matches::assert_matches;
 #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
 use aws_lc_rs::hmac;
@@ -12,31 +18,22 @@ use rustls::crypto::aws_lc_rs::default_provider;
 #[cfg(feature = "rustls-ring")]
 use rustls::crypto::ring::default_provider;
 use rustls::{
+    AlertDescription, RootCertStore,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     server::WebPkiClientVerifier,
-    AlertDescription, RootCertStore,
-};
-use std::{
-    convert::TryInto,
-    iter, mem,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::{Arc, Mutex},
 };
 use tracing::info;
-
 use super::*;
 use crate::{
+    Duration, Instant,
     cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
     crypto::rustls::QuicServerConfig,
     frame::FrameStruct,
     transport_parameters::TransportParameters,
-    Duration, Instant,
 };
 pub(crate) mod util;
 use util::*;
-
 mod token;
-
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
@@ -70,10 +67,11 @@ fn pending_incoming_survives_server_config_change() {
 
         pair.server.set_server_config(replacement);
         // Retransmitted Initials must still be buffered after the configuration changes.
-        assert!(pair
-            .server
-            .handle(received, pair.client.addr, None, ecn, data, &mut response)
-            .is_none());
+        assert!(
+            pair.server
+                .handle(received, pair.client.addr, None, ecn, data, &mut response)
+                .is_none()
+        );
         let server_ch = pair.server.try_accept(incoming, pair.time).unwrap();
         pair.drive();
         for (endpoint, ch) in [(&mut pair.client, client_ch), (&mut pair.server, server_ch)] {
@@ -4006,8 +4004,10 @@ fn path_changes_unblock_oversized_datagrams() {
             pair.server_datagrams(server_ch).send_buffer_space(),
             empty_space
         );
-        assert!(iter::from_fn(|| pair.server_conn_mut(server_ch).poll())
-            .any(|event| matches!(event, Event::DatagramsUnblocked)));
+        assert!(
+            iter::from_fn(|| pair.server_conn_mut(server_ch).poll())
+                .any(|event| matches!(event, Event::DatagramsUnblocked))
+        );
 
         let small = Bytes::from_static(b"small");
         pair.server_datagrams(server_ch)

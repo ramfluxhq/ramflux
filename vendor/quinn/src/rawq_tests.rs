@@ -261,6 +261,7 @@ async fn packet_credit_covers_enqueue_processing_and_backing_release() {
         let pool = server.rawq_pool();
         gate.closed.store(true, Ordering::SeqCst);
         let before = pool.snapshot();
+        let observed_before = server.rawq_observed();
         let mut send = client_conn.open_uni().await.unwrap();
         send.write_all(&[0x5a; 8192]).await.unwrap();
         send.finish().unwrap();
@@ -270,6 +271,12 @@ async fn packet_credit_covers_enqueue_processing_and_backing_release() {
         })
         .await;
         let full = pool.snapshot();
+        let observed_full = server.rawq_observed();
+        assert_eq!(
+            observed_full.1 - observed_before.1,
+            full.0.items,
+            "uncharged raw event delivered"
+        );
         assert!(
             full.0.items > 0 && full.0.items <= items,
             "real enqueue item ceiling violated"
@@ -298,6 +305,11 @@ async fn packet_credit_covers_enqueue_processing_and_backing_release() {
             pool.snapshot().1,
             full.1,
             "full raw queue allocated packet backing before admission"
+        );
+        assert_eq!(
+            server.rawq_observed(),
+            observed_full,
+            "refused raw packet was copied or delivered"
         );
         gate.open();
         let mut recv = timeout(Duration::from_secs(5), server_conn.accept_uni())
@@ -367,4 +379,65 @@ async fn control_credit_preserves_cid_close_and_drained() {
     drop((send, server_conn, client_conn));
     until(|| pool.snapshot().0.items == 0).await;
     drop((server, client));
+}
+
+#[tokio::test]
+async fn owner_slots_refuse_capacity_and_rebind_sparse_protocol_handles() {
+    // Retain real stream backing through protocol retirement so slot0 stays occupied.
+    let (server, client, server_conn, client_conn, _gate, _wire) =
+        pair(65536, 64, 524288, 512, 65536, 128).await;
+    let mut send = client_conn.open_uni().await.unwrap();
+    send.write_all(b"keep-owner-slot").await.unwrap();
+    send.finish().unwrap();
+    let mut recv = server_conn.accept_uni().await.unwrap();
+    let chunk = recv.read_chunk(usize::MAX, true).await.unwrap().unwrap();
+    assert_eq!(&chunk.bytes[..], b"keep-owner-slot");
+    server_conn.close(0u32.into(), b"retire");
+    timeout(Duration::from_secs(5), server.wait_idle())
+        .await
+        .unwrap();
+    assert!(server.rawq_pool().snapshot().0.items > 0);
+    let connect = client
+        .connect(server.local_addr().unwrap(), "localhost")
+        .unwrap();
+    let accept = async { server.accept().await.unwrap().await.unwrap() };
+    let (new_client, new_server) = tokio::join!(connect, accept);
+    let new_client = new_client.unwrap();
+    let bindings = server.rawq_owner_bindings();
+    assert_eq!(bindings.len(), 1);
+    assert_ne!(
+        bindings[0].0, bindings[0].1,
+        "protocol handle must map independently of a retained old raw slot"
+    );
+    drop((chunk, recv, send, server_conn, client_conn));
+    let mut clients = vec![new_client];
+    let mut servers = vec![new_server];
+    for _ in 1..8 {
+        let connect = client
+            .connect(server.local_addr().unwrap(), "localhost")
+            .unwrap();
+        let accept = async { server.accept().await.unwrap().await.unwrap() };
+        let (c, s) = tokio::join!(connect, accept);
+        clients.push(c.unwrap());
+        servers.push(s);
+    }
+    assert_eq!(server.open_connections(), 8);
+    let attempt = client
+        .connect(server.local_addr().unwrap(), "localhost")
+        .unwrap();
+    let incoming = timeout(Duration::from_secs(5), server.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(incoming.accept(),Err(ConnectionError::ApplicationClosed(ref reason)) if reason.error_code==VarInt::from_u32(0x524c))
+    );
+    let config = client.default_client_config.clone().unwrap();
+    assert!(matches!(
+        server.connect_with(config, client.local_addr().unwrap(), "localhost"),
+        Err(ConnectError::EndpointCapacity)
+    ));
+    assert!(server.rawq_pool().refusal_classes()[6] >= 2);
+    assert_eq!(server.open_connections(), 8);
+    drop((attempt, clients, servers, server, client));
 }

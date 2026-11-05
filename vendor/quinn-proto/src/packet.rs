@@ -5,8 +5,9 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use thiserror::Error;
 
 use crate::{
+    ConnectionId,
     coding::{self, BufExt, BufMutExt},
-    crypto, ConnectionId,
+    crypto,
 };
 
 /// Decodes a QUIC packet's invariant header

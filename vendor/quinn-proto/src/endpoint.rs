@@ -461,6 +461,9 @@ impl Endpoint {
         num: u64,
         credit: Option<Arc<crate::connection::control::Reservation>>,
     ) -> ConnectionEvent {
+        if let Some(reservation) = &credit {
+            reservation.emit_reverse();
+        }
         let mut ids = vec![];
         for _ in 0..num {
             let id = self.new_cid(ch);
@@ -1356,6 +1359,9 @@ pub enum ConnectError {
     /// Indicates that a necessary component of the endpoint has been dropped or otherwise disabled.
     #[error("endpoint stopping")]
     EndpointStopping,
+    /// The endpoint's bounded protocol-owner partition has no free slot.
+    #[error("bounded endpoint owner capacity exhausted")]
+    EndpointCapacity,
     /// The connection could not be created because not enough of the CID space is available
     ///
     /// Try using longer connection IDs

@@ -81,13 +81,13 @@
       },
       "src/connection.rs": {
         "upstream_sha256": "3c388c6b455c318728c869b1f121fcc7d03572a92a92abda792d0cd8a2a10166",
-        "patched_sha256": "5277418a66ac46c59c7895e9b974ecbd1732d546260dcb75591988979e9fedb2",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "7180908264cb8fbb8f14609f8015c1ea3e18095feddd6d8a916f53dd701543b0",
+        "delta": "SPDX; Fresh runtime time for control resume; eight-packet fairness yield only in bounded mode; upstream import order restored"
       },
       "src/endpoint.rs": {
         "upstream_sha256": "a63bf8516128c5dd7ac7fb2e63450886873990f2084ff91b39737c4cf41c6c32",
-        "patched_sha256": "2b97cebe88cede058e6453462f7ba0b730f24cf32ad69ffec3fdab6b0499f703",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "8379d1b9e8432f657a327c0bee5ba848b63ee7a3dca62dc0231df49bfb844f16",
+        "delta": "SPDX; Opt-in bounded handle-to-owner-slot map, typed capacity refusals before connection creation, independent test-only copy/delivery witnesses, gated idempotent close; upstream import order restored"
       },
       "src/incoming.rs": {
         "upstream_sha256": "d10fcb0efd956d2d4f53e6600737520c04179d0c5850a8c89792c86a762eef98",
@@ -96,8 +96,8 @@
       },
       "src/lib.rs": {
         "upstream_sha256": "36660f7859142bfa1777092c8eb3016c079cadaf1daf2c48b41186130b2fcaf8",
-        "patched_sha256": "357dca99cc318dd82d66d38ec8d2505f50c8e731f5a0ef013825639a7a6d98b0",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "5cd91a7420d0bb593062da0a8995e350f855b778c3c29efe23d64c42a4e2a70b",
+        "delta": "SPDX; Export typed raw queue refusal and opt-in configuration"
       },
       "src/mutex.rs": {
         "upstream_sha256": "9b78cec294b00b15768e2d97b74e3371a59ff9048ce1b2d970f43fcc3f1b7814",
@@ -107,7 +107,7 @@
       "src/recv_stream.rs": {
         "upstream_sha256": "f4982d0a827c296f98c1da25672a6504b54a548416f6e293c9c8d2f899a48b73",
         "patched_sha256": "c5c7dcfc77dedbcbe3d21f8b6926f5b9223fe35bf9501373fe2a25fc51267fc5",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; remove redundant formatting borrow for strict Rust 1.99 linting"
+        "delta": "Prepend original-license SPDX header; remove redundant formatting borrow for strict Rust 1.99 linting"
       },
       "src/runtime/async_io.rs": {
         "upstream_sha256": "bf2244735eb22438d1d0bedce0417d9d8553b3408d9922eb393cd87af8d21bb9",
@@ -150,20 +150,20 @@
         "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/rawq.rs": {
-        "patched_sha256": "69f1272d9ac1024903d5721efadb2aa8a08c33b8561e77876e98a650080f6810",
-        "delta": "Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "772366c6599275bc735985560d84d841621594cf7046efaeb06cd96a154c040d",
+        "delta": "SPDX; Separate incoming owner and bounded established slots, typed source/owner exhaustion and refusal counters; raw backing credits"
       },
       "src/rawq_mailbox.rs": {
-        "patched_sha256": "0904923fd42a10916a4b9d5f9c1001f074cc2dd5de8113977682ad2978a697c2",
-        "delta": "packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "a5874b7a31ef3f09a5140d9c568686d75c8827e13b86da232cede5c5eadb23f0",
+        "delta": "SPDX; Bounded-mode control-first lanes and coalesced Close/Rebind; default-mode events retain FIFO semantics"
       },
       "src/rawq_tests.rs": {
-        "patched_sha256": "44dd775eef378769dcc8e66b93de658d53981b6998afafc6aee9e61e10470788",
-        "delta": "packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "3f83bf70bf4ff8edee9f780a2bb1c209ae4dfb816254366adc44abcba7c5e068",
+        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; real-driver small-control-limit matrix remains pending"
       }
     },
     "formatting": {
-      "current_policy": "Upstream Rust bytes plus declared transformations; no bulk vendor rustfmt in r2",
+      "current_policy": "Scoped changed-module rustfmt, then restore upstream import prefixes and whitespace-only hunks; no whole-vendor formatting",
       "product_command": "cargo fmt --all",
       "vendor_command": "none (excluded from product workspace)",
       "rustfmt_version": "rustfmt 1.10.0-stable (b940084d7e 2026-09-28)",
@@ -197,7 +197,8 @@
           "vendor/quinn/src/rawq_mailbox.rs",
           "vendor/quinn/src/rawq_tests.rs"
         ]
-      ]
+      ],
+      "restoration": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth."
     }
   },
   "quinn-proto": {
@@ -253,7 +254,7 @@
       "src/config/mod.rs": {
         "upstream_sha256": "9d2de1a6a4f8957fac9cd565874385e2f86db285c6a51af85b7d9de6777dd294",
         "patched_sha256": "325c6c65f138738dc98d8b8e0ced584ccd1cf418561055fa73776eafc5c048c6",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "delta": "Prepend original-license SPDX header; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
       },
       "src/config/transport.rs": {
         "upstream_sha256": "67f8538b102d247c607ccfb55b86a05fa37290beab30dbca43f69d26a05f7cc4",
@@ -303,7 +304,7 @@
       "src/connection/cid_state.rs": {
         "upstream_sha256": "485b3821af4b706789b9ef6d78aaa60b1d49f54dbb2c6785daee801ad2696d24",
         "patched_sha256": "5b8e6ffe4bef65137e9c5384317c629b8acd3e5942378dd39a2b162dcb2a68c5",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "delta": "Prepend original-license SPDX header; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
       },
       "src/connection/datagrams.rs": {
         "upstream_sha256": "8d17cb428f872f3cc9c0d33f56a140f08714e19ddc67d84841d0ce499cf1a8da",
@@ -312,8 +313,8 @@
       },
       "src/connection/mod.rs": {
         "upstream_sha256": "8b5665fa7dc83e2bb9154fceed34733768633756adc900bb8ec50f24be0ba2b7",
-        "patched_sha256": "c0ccaec20329c06f20f924ee9f5e42c91a4679165171ef2bdfeef3263ad68292",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; extract unchanged idle timeout negotiation and its tests; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "a1b4fb9e08171549379d33ed096cc02f662dd94f8b2f73ff6c8a4c71c69e8308",
+        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored"
       },
       "src/connection/mtud.rs": {
         "upstream_sha256": "3a2917c053a6ec79e277a2fc895cf20ba8cde2b1fe8b3b8b1c96584062acf782",
@@ -407,8 +408,8 @@
       },
       "src/endpoint.rs": {
         "upstream_sha256": "eb9cc82040621b95670e1d9ca9e82e902029766f7303b4329fcb169fb73d3bfc",
-        "patched_sha256": "f29bdd6295218d3584c314fbc6abf262841fdf86452726c29e2dd6ceebcf1499",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "54f0988b0aa7fb8b19cb581ce0d07fe00b0c0fca738cf5ab71971c00079dac11",
+        "delta": "SPDX; Bounded endpoint control emission census, typed outgoing endpoint-capacity error and shared ingress parser"
       },
       "src/frame.rs": {
         "upstream_sha256": "ff9bc94eed5eaa96400c41f40dc0d73c68b71a60b98acbaf045885d0522341e3",
@@ -417,13 +418,13 @@
       },
       "src/lib.rs": {
         "upstream_sha256": "cf40840076b56b9b2c61b207604f60226157728d2af7b206bc3e4a2bebbb4488",
-        "patched_sha256": "bf46492210c14c4b852dc7da234391ba40a1fa36ce0284e162d69787302bfdc5",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "13e8dd1698109163ed7c4460be146884bb0c2b3aca203ad9f7998b8df4f4b236",
+        "delta": "SPDX; Export bounded control configuration/error types"
       },
       "src/packet.rs": {
         "upstream_sha256": "b73d99c36983c4c0cb47e6cc38ba7f723e2f924e397aedd63bf9b8e4cf6a57a9",
-        "patched_sha256": "150ce6e51a297278cb19ccb760bfe4f16ab1578d2ad3f8f49a94241d51c760c0",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "693bf3e95b26d3f0b6596fb61c450e60942234f71e7a3393852c50e30891c1bb",
+        "delta": "SPDX; Retained raw backing owner and packet split support; upstream import order restored"
       },
       "src/range_set/array_range_set.rs": {
         "upstream_sha256": "b8372411b941df99a8da2a9a2948f4f8fed8bd116ac7e4b7f7960da36991bc07",
@@ -447,13 +448,13 @@
       },
       "src/shared.rs": {
         "upstream_sha256": "126c72d2c933a8e27cb9264d6d973239fbde78620af7a91b9967a4481ec49599",
-        "patched_sha256": "01d99453277d6e49c8116209e4208bee81029a0d3ba97bf78f9cd17fc20c5615",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "09a84fd7ca7f7cf67f587a05577dee7e753732920e0eac311ace09398e63b8c8",
+        "delta": "SPDX; Control event reservation owners; upstream import order restored"
       },
       "src/tests/mod.rs": {
         "upstream_sha256": "a4f0907c8c39c02646602e628d0a7c9090db601bfb35edc4deb52b51d6245dd1",
-        "patched_sha256": "afdd98b57477a4ee43afcba5791ff4e0e2a44cd9b6c87629dffb1c3003c18f4a",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; remove one blank line to keep upstream line count; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "1c85d02a3526cb23bc7f39b038ac21141ff18583079d7f81ef539696a2257473",
+        "delta": "SPDX; Expose deterministic packet test utility module; preserve upstream import/whitespace layout with four blank lines removed to avoid growing a file above 4000 lines"
       },
       "src/tests/token.rs": {
         "upstream_sha256": "f648dd0c171d1f2c498e0363b68c6211d5e9ec2f2b305db4a262d3ec47ebbc79",
@@ -462,8 +463,8 @@
       },
       "src/tests/util.rs": {
         "upstream_sha256": "147b3c45aa083fc13fb72818eb098f1ec14548830612040e7a1c521c41f12a3d",
-        "patched_sha256": "ead24a16fcf01599fde08fb7b88a97edd07f76da2eb311db53dfa6f306a4da0d",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "b40823c9fb560b1aca1a9903fa2a5851e7704d1a5b2af84aaee9aa16bba733d0",
+        "delta": "SPDX; Expose deterministic packet test fixtures for control regressions; upstream import order restored"
       },
       "src/token.rs": {
         "upstream_sha256": "b0364bcc2aa821a85e66f476f2314c9dedf01e1a24c456a70f9f9e79bc31d18c",
@@ -495,20 +496,20 @@
         "delta": "Extract unchanged idle timeout negotiation and tests with pub(super) visibility and SPDX"
       },
       "src/connection/control.rs": {
-        "patched_sha256": "28475302bc21611221d317366bd054bd3e53339df3df4037d8e10ab5095aecc0",
-        "delta": "Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "c56d4e4e7ed3475c2cebdb56c4949b733c6c903baad64bf5e29bea800fe1f1c2",
+        "delta": "SPDX; Generation-gated pending packet/timer revalidation, aggregate emitted-control reservation census and debug assertion; fresh resume time"
       },
       "src/connection/packet_processing.rs": {
-        "patched_sha256": "b4764367791e1bc1e42078d38e854960341d04f3663b8eb2bc9f457b3d0e4e0a",
-        "delta": "Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "7aee8879c00237465e339347d8bf1ff8fdf848c4867bda6a282a437e561860cc",
+        "delta": "SPDX; Coalesced packet resume without duplicate UDP receive byte accounting"
       },
       "src/connection/control/tests.rs": {
-        "patched_sha256": "7d8d5a1618caae53d2c38b67ab425916a1b5f9534b1276ecc27aaccabfdd4b2d",
-        "delta": "Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+        "patched_sha256": "f53147a49bcfd5510d91559fd496f21e77c740d40bc3cfb6b43b818ede8addba",
+        "delta": "SPDX; Aggregate directional byte/item ceilings, generation retry gates, head/tail datagram accounting, fresh timer time and census overrun witnesses"
       }
     },
     "formatting": {
-      "current_policy": "Upstream Rust bytes plus declared transformations; no bulk vendor rustfmt in r2",
+      "current_policy": "Scoped changed-module rustfmt, then restore upstream import prefixes and whitespace-only hunks; no whole-vendor formatting",
       "product_command": "cargo fmt --all",
       "vendor_command": "none (excluded from product workspace)",
       "rustfmt_version": "rustfmt 1.10.0-stable (b940084d7e 2026-09-28)",
@@ -542,7 +543,8 @@
           "vendor/quinn/src/rawq_mailbox.rs",
           "vendor/quinn/src/rawq_tests.rs"
         ]
-      ]
+      ],
+      "restoration": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth."
     }
   }
 }

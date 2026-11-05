@@ -11,11 +11,14 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
 
-use rand::{rngs::StdRng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
+    Dir, Duration, EndpointConfig, Frame, INITIAL_MTU, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
+    MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
+    TransportErrorCode, VarInt,
     cid_generator::ConnectionIdGenerator,
     cid_queue::CidQueue,
     coding::BufMutExt,
@@ -33,9 +36,6 @@ use crate::{
     },
     token::{ResetToken, Token, TokenPayload},
     transport_parameters::TransportParameters,
-    Dir, Duration, EndpointConfig, Frame, Instant, Side, StreamId, TokenStore, Transmit,
-    TransportError, TransportErrorCode, VarInt, INITIAL_MTU, MAX_CID_SIZE, MAX_STREAM_COUNT,
-    MIN_INITIAL_SIZE, TIMER_GRANULARITY,
 };
 
 mod ack_frequency;
@@ -141,6 +141,7 @@ pub struct Connection {
     control_resource_closed: bool,
     raw_owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
     control_timer_pending: Option<Instant>,
+    control_timer_generation: u64,
     endpoint_config: Arc<EndpointConfig>,
     config: Arc<TransportConfig>,
     rng: StdRng,
@@ -331,6 +332,7 @@ impl Connection {
             control_resource_closed: false,
             raw_owner: None,
             control_timer_pending: None,
+            control_timer_generation: 0,
             spin_enabled: config.allow_spin && rng.random_ratio(7, 8),
             spin: false,
             spaces: [initial_space, PacketSpace::new(now), PacketSpace::new(now)],
@@ -1169,8 +1171,9 @@ impl Connection {
                 let was_anti_amplification_blocked = self.path.anti_amplification_blocked(1);
 
                 self.stats.udp_rx.datagrams += 1;
-                self.stats.udp_rx.bytes += first_decode.len() as u64;
-                let data_len = first_decode.len();
+                let data_len = first_decode.len() + remaining.as_ref().map_or(0, BytesMut::len);
+                self.stats.udp_rx.bytes += data_len as u64;
+                self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
 
                 if self.pending_control.is_some() || self.control_resource_closed {
                     return;
@@ -1187,10 +1190,7 @@ impl Connection {
                 // since the packet could have triggered a migration. Make sure
                 // the data received is accounted for the most recent path by accessing
                 // `path` after `handle_decode`.
-                self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
-
                 if let Some(data) = remaining {
-                    self.stats.udp_rx.bytes += data.len() as u64;
                     self.handle_coalesced(now, remote, ecn, data);
                 }
 
@@ -1824,8 +1824,7 @@ impl Connection {
             self.stats.path.lost_bytes += size_of_lost_packets;
             trace!(
                 "packets lost: {:?}, bytes lost: {}",
-                lost_packets,
-                size_of_lost_packets
+                lost_packets, size_of_lost_packets
             );
 
             for &packet in &lost_packets {
@@ -2078,7 +2077,7 @@ impl Connection {
         let _guard = span.enter();
         debug_assert!(self.side.is_server());
         let len = packet.header_data.len() + packet.payload.len();
-        self.path.total_recvd = len as u64;
+        self.path.total_recvd = len as u64 + remaining.as_ref().map_or(0, BytesMut::len) as u64;
 
         match self.state {
             State::Handshake(ref mut state) => {
@@ -2096,6 +2095,7 @@ impl Connection {
             key_update: None,
             remaining: None,
             owner: self.raw_owner.clone(),
+            generation: 0,
         };
         let Some(packet) = self.admit_control_packet(pending) else {
             if let Some(pending) = self.pending_control.as_mut() {
