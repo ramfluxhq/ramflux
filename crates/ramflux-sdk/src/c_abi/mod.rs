@@ -840,6 +840,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
         SdkError::LifecycleShared(source) => sdk_error_code(source),
+        SdkError::DirectoryAuthorityUnavailable { source, .. } => sdk_error_code(source),
         SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
         SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
@@ -849,17 +850,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::Storage(ramflux_storage::StorageError::ObjectOwnershipUnverified { .. }) => {
             RamfluxErrorCode::ObjectOwnershipUnverified
         }
-        SdkError::HomeMigrationRefused(reason) => match reason {
-            ramflux_protocol::home_migration::Refusal::RateLimited => RamfluxErrorCode::RateLimited,
-            ramflux_protocol::home_migration::Refusal::StorageUnavailable => {
-                RamfluxErrorCode::StorageFailed
-            }
-            ramflux_protocol::home_migration::Refusal::PeeringUnavailable
-            | ramflux_protocol::home_migration::Refusal::CommitOutcomeUnknown => {
-                RamfluxErrorCode::TransportUnavailable
-            }
-            _ => RamfluxErrorCode::PermissionDenied,
-        },
+        SdkError::HomeMigrationRefused(reason) => migration_error_code(*reason),
         SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
         | SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
@@ -937,6 +928,20 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::ReplayMismatch
         | SdkError::InboundPending(_)
         | SdkError::PairRecoveryRequired => RamfluxErrorCode::InvalidArgument,
+    }
+}
+
+fn migration_error_code(reason: ramflux_protocol::home_migration::Refusal) -> RamfluxErrorCode {
+    match reason {
+        ramflux_protocol::home_migration::Refusal::RateLimited => RamfluxErrorCode::RateLimited,
+        ramflux_protocol::home_migration::Refusal::StorageUnavailable => {
+            RamfluxErrorCode::StorageFailed
+        }
+        ramflux_protocol::home_migration::Refusal::PeeringUnavailable
+        | ramflux_protocol::home_migration::Refusal::CommitOutcomeUnknown => {
+            RamfluxErrorCode::TransportUnavailable
+        }
+        _ => RamfluxErrorCode::PermissionDenied,
     }
 }
 

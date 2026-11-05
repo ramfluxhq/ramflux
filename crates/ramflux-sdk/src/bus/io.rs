@@ -70,6 +70,9 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
 }
 
 pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
+    if let SdkError::DirectoryAuthorityUnavailable { source, .. } = error {
+        return local_bus_error_body(source);
+    }
     if super::account_runtime::head_refresh::is_freshness_refusal(error) {
         return local_bus_error_body(&SdkError::NetworkingPendingContext {
             retry_after_ms: Some(1_000),
@@ -164,6 +167,9 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 }
 
 pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
+    if let SdkError::DirectoryAuthorityUnavailable { source, .. } = error {
+        return local_bus_error_code(source);
+    }
     if super::account_runtime::head_refresh::is_freshness_refusal(error) {
         return "NetworkingPending";
     }

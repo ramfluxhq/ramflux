@@ -24,14 +24,17 @@ pub(crate) fn pending(account: &LocalBusAccountState) -> SdkError {
     }
 }
 
-fn stale_roots(
+pub(crate) fn stale_roots(
     account: &LocalBusAccountState,
     request: &crate::LocalBusFrame,
 ) -> Result<BTreeSet<String>, SdkError> {
     // Read/receive must retain their existing inline peer fetch and first-pass admission.
     let method = request.method.as_str();
     if matches!(method, "group.read" | "group.receive") {
-        return crate::bus::couriers::head_refresh::inbound::blocked_roots(account);
+        return crate::bus::couriers::head_refresh::inbound::blocked_roots(
+            account,
+            request.body.get("group_id").and_then(serde_json::Value::as_str).unwrap_or(""),
+        );
     }
     if account.client.born_v3_account.is_none()
         || !(method == "group.send"
