@@ -218,6 +218,7 @@ jobs:
       - name: Doctests
         run: |
           cargo build --workspace
+          cargo fetch --locked
           CARGO_NET_OFFLINE=true ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo test --workspace --doc
 
   build-sdk:
