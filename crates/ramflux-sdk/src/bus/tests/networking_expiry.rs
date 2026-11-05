@@ -387,44 +387,64 @@ async fn custody_expiry_publication_failure_warning_episode_resets_after_recover
 async fn custody_expiry_retry_attributes_only_the_expiry_entry() -> TestResult {
     LocalSet::new()
         .run_until(Box::pin(async {
-            let mut h = Harness::new().await?;
-            h.reject.set(1);
-            tokio::time::advance(Duration::from_secs(300)).await;
-            h.runtime.refresh_networking_expiry().await;
-            assert_eq!(h.failures.get(), 1);
-            let expiry_sequence =
-                h.runtime.networking_expiry_pending.ok_or("expiry not retained")?;
-            let account = h.runtime.state.accounts.get_mut("expiry-runtime").ok_or("account")?;
-            super::super::native_account::record_networking_at(
-                account,
-                Some(&SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::Busy)),
-                crate::custody::network_now()?,
-            )?;
-            let busy_sequence = account
-                .client
-                .account_db()?
-                .pending_actor_state_sequence("account/networking")?
-                .ok_or("Busy entry")?;
-            assert_ne!(expiry_sequence, busy_sequence);
-            let request = LocalBusFrame::request(
-                "new-attempt",
-                Some("expiry-runtime".into()),
-                "account",
-                "account.status",
-                json!({}),
-            );
-            h.runtime.publish(&request).await?;
-            let frames = h.observed.borrow();
-            let expiry_id = format!("outbox_{expiry_sequence}");
-            let busy_id = format!("outbox_{busy_sequence}");
-            assert_eq!(
-                frames.iter().find(|f| f.frame_id == expiry_id).ok_or("expiry frame")?.request_id,
-                "networking-expiry"
-            );
-            assert_eq!(
-                frames.iter().find(|f| f.frame_id == busy_id).ok_or("Busy frame")?.request_id,
-                "new-attempt"
-            );
+            for retry_drain in [false, true] {
+                let mut h = Harness::new().await?;
+                h.reject.set(1);
+                tokio::time::advance(Duration::from_secs(300)).await;
+                h.runtime.refresh_networking_expiry().await;
+                assert_eq!(h.failures.get(), 1);
+                let expiry_sequence = h.runtime.networking_expiry_pending.ok_or("expiry")?;
+                let account =
+                    h.runtime.state.accounts.get_mut("expiry-runtime").ok_or("account")?;
+                super::super::native_account::record_networking_at(
+                    account,
+                    Some(&SdkError::CustodyNetwork(
+                        ramflux_protocol::custody::CustodyRefusal::Busy,
+                    )),
+                    crate::custody::network_now()?,
+                )?;
+                let busy_sequence = account
+                    .client
+                    .account_db()?
+                    .pending_actor_state_sequence("account/networking")?
+                    .ok_or("busy")?;
+                assert_ne!(expiry_sequence, busy_sequence);
+                let request = LocalBusFrame::request(
+                    "new-attempt",
+                    Some("expiry-runtime".into()),
+                    "account",
+                    "account.status",
+                    json!({}),
+                );
+                if retry_drain {
+                    // Both rows remain pending after a failed router acceptance.
+                    h.reject.set(1);
+                    assert!(h.runtime.publish(&request).await.is_err());
+                }
+                h.observed.borrow_mut().clear();
+                if retry_drain {
+                    assert!(h.runtime.publish_networking_expiry().await?);
+                } else {
+                    h.runtime.publish(&request).await?;
+                }
+                let frames = h.observed.borrow();
+                assert_eq!(
+                    frames
+                        .iter()
+                        .find(|f| f.frame_id == format!("outbox_{expiry_sequence}"))
+                        .ok_or("expiry frame")?
+                        .request_id,
+                    "networking-expiry"
+                );
+                assert_eq!(
+                    frames
+                        .iter()
+                        .find(|f| f.frame_id == format!("outbox_{busy_sequence}"))
+                        .ok_or("busy frame")?
+                        .request_id,
+                    if retry_drain { "sync" } else { "new-attempt" }
+                );
+            }
             Ok(())
         }))
         .await
