@@ -4,8 +4,8 @@ The `server` and `client` examples demonstrate fetching files using a HTTP-like 
 
 1. Server (`server.rs`)
 
-The server listens for any client requesting a file. 
-If the file path is valid and allowed, it returns the contents. 
+The server listens for any client requesting a file.
+If the file path is valid and allowed, it returns the contents.
 
 Open up a terminal and execute:
 
@@ -15,8 +15,8 @@ $ cargo run --example server ./
 
 2. Client (`client.rs`)
 
-The client requests a file and prints it to the console. 
-If the file is on the server, it will receive the response. 
+The client requests a file and prints it to the console.
+If the file is on the server, it will receive the response.
 
 In a new terminal execute:
 
@@ -73,7 +73,7 @@ thousands of peers or if you have a
 Additionally, QUIC servers and clients can both operate on the same UDP socket.
 This example demonstrates how to make multiple outgoing connections on a single UDP socket.
 
-```text 
+```text
 $ cargo run --example single_socket
 ```
 
