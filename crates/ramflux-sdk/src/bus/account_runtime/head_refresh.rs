@@ -30,6 +30,9 @@ fn stale_roots(
 ) -> Result<BTreeSet<String>, SdkError> {
     // Read/receive must retain their existing inline peer fetch and first-pass admission.
     let method = request.method.as_str();
+    if matches!(method, "group.read" | "group.receive") {
+        return crate::bus::couriers::head_refresh::inbound::blocked_roots(account);
+    }
     if account.client.born_v3_account.is_none()
         || !(method == "group.send"
             || method.starts_with("group.member.")
@@ -71,6 +74,13 @@ impl AccountRuntime {
     ) -> Result<(), SdkError> {
         let deadline = admitted_at + self.timeouts.network_wait;
         let mut enqueued = BTreeSet::new();
+        if matches!(command.request.method.as_str(), "group.read" | "group.receive")
+            && let Some(account) = self.state.accounts.get_mut(&self.id)
+        {
+            tokio::time::timeout_at(deadline, crate::bus::sync_driver::run(account))
+                .await
+                .map_err(|_| pending(account))??;
+        }
         loop {
             let Some(account) = self.state.accounts.get_mut(&self.id) else {
                 return Ok(());

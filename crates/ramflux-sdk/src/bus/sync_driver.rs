@@ -6,6 +6,7 @@ use crate::prelude::*;
 use serde_json::json;
 
 pub(crate) mod source;
+use super::couriers::head_refresh::inbound as head_inbound;
 
 type PendingEntryId = (String, u64, String);
 
@@ -349,10 +350,13 @@ async fn prepare_entry(
     let mut replies = Vec::new();
     let already_seen = account.client.routed_seen_marker(&entry)?.is_some();
     let (key, committed_retry) = retry_context(&account.client, &entry, retry_keys)?;
-    if !account.client.account_db()?.inbox_retry_ready(&key, now)? {
+    if !head_inbound::eligible(account, &key)
+        && !account.client.account_db()?.inbox_retry_ready(&key, now)?
+    {
         advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
         return Ok(None);
     }
+    head_inbound::consume(account, &key);
     if replay && backpressure.saturated(&account.client, &entry, now)? {
         return Ok(None);
     }
@@ -416,6 +420,7 @@ async fn prepare_entry(
                 &error,
                 now,
             )? {
+                head_inbound::retain(account, &entry, &key, &error)?;
                 advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
                 return Ok(None);
             }
@@ -695,6 +700,14 @@ fn append_pending_entries(
         }
     }
     let mut retry_keys = BTreeMap::new();
+    for (key, entry) in head_inbound::entries(account) {
+        if account.client.account_db()?.has_inbox_retry(key)? {
+            retry_keys.insert(pending_entry_id(entry), key.clone());
+            if seen.insert(key.clone()) {
+                entries.push(entry.clone());
+            }
+        }
+    }
     for (key, bytes) in account.client.account_db()?.due_inbox_retry_rows(now)? {
         let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
         retry_keys.insert(pending_entry_id(&entry), key.clone());

@@ -235,10 +235,20 @@ async fn renamed_group_fixture() -> TestResult<(Fixture, Fixture, GatewayInboxEn
     alice.client.accept_shared_group_state(&renamed, &alice.config.target_delivery_id)?;
     let distribution = bob.client.export_group_sender_key_distribution("group", "bob-device")?;
     alice.client.import_group_sender_key_distribution(&distribution)?;
+    let entry = group_entry(&alice, &bob, "after-rename", 1)?;
+    Ok((alice, bob, entry))
+}
+
+fn group_entry(
+    alice: &Fixture,
+    bob: &Fixture,
+    id: &str,
+    sequence: u64,
+) -> TestResult<GatewayInboxEntry> {
     let mut message = GatewayDirectMessage {
         conversation_id: "thread".into(),
-        message_id: "after-rename".into(),
-        envelope_id: "after-rename".into(),
+        message_id: id.into(),
+        envelope_id: id.into(),
         source_principal_id: bob.config.principal_id.clone(),
         sender_id: "bob-device".into(),
         recipient_device_id: Some("alice-device".into()),
@@ -267,11 +277,11 @@ async fn renamed_group_fixture() -> TestResult<(Fixture, Fixture, GatewayInboxEn
     message.encrypted_body = serde_json::to_vec(&sealed)?;
     let entry = GatewayInboxEntry {
         forwarded: false,
-        inbox_seq: 1,
+        inbox_seq: sequence,
         target_delivery_id: alice.config.target_delivery_id.clone(),
         envelope: crate::dm::gateway_direct_message_envelope(&bob.config, &message, None)?,
     };
-    Ok((alice, bob, entry))
+    Ok(entry)
 }
 
 fn assert_freshness_refusal<T>(result: &Result<T, SdkError>) {
@@ -413,12 +423,84 @@ async fn assert_deferred_reason(
     Ok(())
 }
 
+async fn verify_refresh_redrive(
+    account: &mut LocalBusAccountState,
+    manifests: (&crate::SdkDeviceManifestResponse, &crate::SdkDeviceManifestResponse),
+    flags: (bool, bool, bool),
+    key: &str,
+    count: usize,
+    at: i64,
+) -> TestResult {
+    let (alice, bob) = manifests;
+    let (local_fresh, peer_fresh, serve_peer) = flags;
+    let handle = account.connection.as_ref().ok_or("connection")?.clone();
+    let refresh = crate::bus::couriers::head_refresh::test_apply;
+    let dependency = if !peer_fresh && !serve_peer { bob } else { alice };
+    let root = &dependency.principal_commitment;
+    assert!(
+        refresh(account, root, std::time::Instant::now(), Err(SdkError::NetworkingPending))
+            .is_err()
+    );
+    let old = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(301))
+        .ok_or("clock")?;
+    assert!(!refresh(account, root, old, Ok(dependency.clone()))?);
+    let mut invalid = dependency.clone();
+    invalid.principal_id = "invalid-authority".into();
+    assert!(refresh(account, root, std::time::Instant::now(), Ok(invalid)).is_err());
+    assert!(!crate::bus::couriers::head_refresh::inbound::eligible(account, key));
+    account.client.account_db()?.defer_inbox_entry("unrelated-backoff", b"{}", at)?;
+    if !local_fresh {
+        assert!(refresh(
+            account,
+            &alice.principal_commitment,
+            std::time::Instant::now(),
+            Ok(alice.clone())
+        )?);
+        if !peer_fresh && !serve_peer {
+            assert!(
+                !crate::bus::couriers::head_refresh::inbound::eligible(account, key),
+                "peer dependency remains"
+            );
+            assert_retry_retained(account, key)?;
+        }
+    }
+    if !peer_fresh && !serve_peer {
+        assert!(refresh(
+            account,
+            &bob.principal_commitment,
+            std::time::Instant::now(),
+            Ok(bob.clone())
+        )?);
+    }
+    assert!(crate::bus::couriers::head_refresh::inbound::eligible(account, key));
+    assert!(handle.resync_needed(), "existing receive courier must be notified");
+    assert!(!account.client.account_db()?.inbox_retry_ready("unrelated-backoff", at + 1)?);
+    // Run the existing receive loop with a one-hour tick; only the refresh wake can drive it.
+    crate::bus::connection_manager::receive::test_redrive(account, count).await?;
+    assert!(now_unix_timestamp() < at + 2, "must precede the old retry deadline");
+    assert_eq!(account.client.direct_messages("thread")?.len(), count);
+    assert!(!account.client.account_db()?.has_inbox_retry(key)?);
+    assert_eq!(
+        account.pending_deliveries.iter().map(|entry| entry.inbox_seq).collect::<Vec<_>>(),
+        (1..=count as u64).collect::<Vec<_>>()
+    );
+    assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
+    Ok(())
+}
+
 async fn characterise_gateway_admission(
     local_fresh: bool,
     peer_fresh: bool,
     serve_peer: bool,
 ) -> TestResult {
     let (alice, bob, entry) = renamed_group_fixture().await?;
+    let second = if !local_fresh && !peer_fresh && !serve_peer {
+        Some(group_entry(&alice, &bob, "second-after-rename", 2)?)
+    } else {
+        None
+    };
+    let count = 1 + usize::from(second.is_some());
     let manifests = if serve_peer {
         BTreeMap::from([(
             bob.manifest.principal_commitment.clone(),
@@ -465,7 +547,8 @@ async fn characterise_gateway_admission(
         (!peer_fresh).then(|| bob.manifest.principal_commitment.clone())
     );
     let key = account.client.inbox_admission_key(&entry)?;
-    install_gateway(&mut account, vec![entry.clone()]);
+    let entries = std::iter::once(entry.clone()).chain(second).collect();
+    install_gateway(&mut account, entries);
     // Same driver and quarantine path as the bus; only its existing receive clock is injected.
     let at = now_unix_timestamp() + 60;
     crate::bus::sync_driver::run_at(&mut account, at).await?;
@@ -477,27 +560,31 @@ async fn characterise_gateway_admission(
     assert_retry_retained(&account, &key)?;
     assert_deferred_reason(&mut account, &entry, !peer_fresh && !serve_peer).await?;
     assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 1)?.len(), 0);
-    assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 2)?.len(), 1);
+    assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 2)?.len(), count);
     let mut state = daemon(account, &alice.root.0);
     for method in ["group.read", "group.receive"] {
-        let result = read_group(&mut state, method).await?;
-        assert_eq!(result.response_body["decrypted_messages"], json!([]));
+        let error = read_group(&mut state, method).await.err().ok_or("must remain pending")?;
+        let wire = crate::bus::io::local_bus_error_body(&error);
+        assert_eq!(wire.code, "NetworkingPending");
+        assert!(wire.retry_after_ms.is_some());
+        assert!(wire.details.as_ref().ok_or("details")?.get("networking").is_some());
     }
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     assert_retry_retained(account, &key)?;
-    account.client.persist_fetched_identity_directory(&alice.manifest)?;
-    account.client.persist_fetched_identity_directory(&bob.manifest)?;
-    crate::bus::sync_driver::run_at(account, at + 1).await?;
-    assert_retry_retained(account, &key)?;
-    crate::bus::sync_driver::run_at(account, at + 2).await?;
-    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
-    assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
-    assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
+    verify_refresh_redrive(
+        account,
+        (&alice.manifest, &bob.manifest),
+        (local_fresh, peer_fresh, serve_peer),
+        &key,
+        count,
+        at,
+    )
+    .await?;
     let received = read_group(&mut state, "group.receive").await?;
     assert_eq!(received.response_body["decrypted_messages"][0]["body_utf8"], "after rename");
     assert_eq!(
         state.accounts.get("owner").ok_or("Alice")?.client.direct_messages("thread")?.len(),
-        1
+        count
     );
     directory.abort();
     Ok(())
@@ -563,8 +650,16 @@ async fn stale_head_new_inbound_stays_pending_until_verified_refresh() -> TestRe
     assert!(account.client.persist_fetched_identity_directory(&invalid).is_err());
     crate::bus::sync_driver::run_at(&mut account, at + 2).await?;
     assert_retry_retained(&account, &key)?;
-    account.client.persist_fetched_identity_directory(&bob.manifest)?;
-    crate::bus::sync_driver::run_at(&mut account, at + 6).await?;
+    let handle = account.connection.as_ref().ok_or("connection")?.clone();
+    crate::bus::couriers::head_refresh::test_apply(
+        &mut account,
+        &bob.manifest.principal_commitment,
+        std::time::Instant::now(),
+        Ok(bob.manifest.clone()),
+    )?;
+    assert!(handle.resync_needed());
+    crate::bus::sync_driver::run_at(&mut account, at + 3).await?;
+
     assert_eq!(account.client.direct_messages("thread")?.len(), 1);
     assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
     directory.abort();
@@ -715,4 +810,14 @@ async fn stored_group_history_degrades_sibling_and_revoked_senders_per_message()
     );
     assert!(state.accounts.get("owner").ok_or("Alice")?.engine.is_none());
     Ok(())
+}
+
+#[tokio::test]
+async fn new_inbound_after_rename_with_expired_head_is_pending_then_applied() -> TestResult {
+    Box::pin(characterise_gateway_admission(true, false, false)).await
+}
+
+#[tokio::test]
+async fn parked_inbound_is_applied_after_refresh_once() -> TestResult {
+    Box::pin(characterise_gateway_admission(false, false, false)).await
 }

@@ -149,7 +149,9 @@ async fn pass(
         }
         cursor = last;
     }
-    for entry in retries.into_values() {
+    let mut retries: Vec<_> = retries.into_values().collect();
+    retries.sort_by_key(|entry| entry.entry.inbox_seq);
+    for entry in retries {
         let (accepted, next) =
             apply_entry(handle, work, generation, entry, call_timeout, backpressure).await?;
         active |= accepted;
@@ -284,4 +286,67 @@ async fn apply_entry(
     .await
     .map_err(|_| handle.pending())?;
     response.await.map_err(|_| handle.pending())?
+}
+
+#[cfg(test)]
+pub(crate) async fn test_redrive(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    expected: usize,
+) -> Result<(), SdkError> {
+    let handle = account.connection.clone().ok_or(SdkError::NetworkingPending)?;
+    let (writer, mut work) = mpsc::channel(8);
+    let limits = RuntimeTimeouts {
+        receive_min: std::time::Duration::from_secs(3600),
+        receive_max: std::time::Duration::from_secs(3600),
+        ..account.timeouts.clone()
+    };
+    let completed = handle.test_receive_trace().iter().filter(|(_, completed)| *completed).count();
+    let child = tokio::spawn(run(handle.clone(), writer, limits));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let message = tokio::select! {
+                message = work.recv() => message.ok_or(SdkError::NetworkingPending)?,
+                () = tokio::task::yield_now() => {
+                    if handle.test_receive_trace().iter().filter(|(_, completed)| *completed).count() > completed {
+                        assert_eq!(account.client.direct_messages("thread")?.len(), expected, "receive pass must not drop or duplicate parked entries");
+                        break;
+                    }
+                    continue;
+                }
+            };
+            match message {
+                AccountWork::ReceivePrepare { reply, .. } => {
+                    let _ = reply.send(crate::bus::sync_driver::prepare_receive(account));
+                }
+                AccountWork::Courier(step) => step.apply(account),
+                AccountWork::ReceiveApply { entry, source, backpressure, reply, .. } => {
+                    let _ = reply.send(
+                        crate::bus::sync_driver::apply_prepared_receive(
+                            account,
+                            *entry,
+                            source,
+                            backpressure,
+                        )
+                        .await,
+                    );
+                }
+                AccountWork::ReceiveAck { state, cursor, mut backpressure, reply, .. } => {
+                    let result = crate::bus::sync_driver::finish_prepared_ack(
+                        account,
+                        &state,
+                        *cursor,
+                        &mut backpressure,
+                    );
+                    let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
+                }
+                _ => return Err(SdkError::NetworkingPending),
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| SdkError::NetworkingPending);
+    child.abort();
+    let _ = child.await;
+    result?
 }
