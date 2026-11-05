@@ -416,12 +416,8 @@ async fn custody_expiry_retry_attributes_only_the_expiry_entry() -> TestResult {
                     "account.status",
                     json!({}),
                 );
-                if retry_drain {
-                    // Both rows remain pending after a failed router acceptance.
-                    h.reject.set(1);
-                    assert!(h.runtime.publish(&request).await.is_err());
-                }
-                h.observed.borrow_mut().clear();
+                // The failed expiry publication retains its marker while the
+                // later Busy row awaits its first drain.
                 if retry_drain {
                     assert!(h.runtime.publish_networking_expiry().await?);
                 } else {
