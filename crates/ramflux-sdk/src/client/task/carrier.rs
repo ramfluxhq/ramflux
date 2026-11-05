@@ -3,6 +3,7 @@
 
 //! Exact signed task wire bytes with signed conversation, sender and content bindings.
 use super::invalid;
+use crate::client::identity_authority::HeadUse;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::{TaskEvent, TaskSigner};
 use serde::{Deserialize, Serialize};
@@ -114,7 +115,7 @@ impl RamfluxClient {
             ));
         }
         let identity = self.peer_device_identity(principal, device)?;
-        self.require_cached_root_authority(&identity)?;
+        self.require_cached_root_authority(HeadUse::NewAuthorization, &identity)?;
         let record = self
             .account_db()?
             .client_device_record(&identity)?

@@ -2,6 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-authenticated device authority, monotonic observation and local root publication.
+/// Distinguish display of admitted data from decisions that authorize new work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum HeadUse {
+    HistoricalRead,
+    #[default]
+    NewAuthorization,
+}
 mod custody_directory;
 mod custody_freshness;
 pub(crate) use custody_freshness::NativeHeadFreshness;
@@ -108,12 +115,13 @@ impl RamfluxClient {
 impl RamfluxClient {
     pub(crate) fn root_qualified_device_lookup(&self, device: &str) -> Result<String, SdkError> {
         let identity = self.device_identity(device)?;
-        self.require_cached_root_authority(&identity)?;
+        self.require_cached_root_authority(HeadUse::NewAuthorization, &identity)?;
         Ok(identity.storage_key().into())
     }
 
     pub(crate) fn require_cached_root_authority(
         &self,
+        purpose: HeadUse,
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), SdkError> {
         let device = identity.storage_key();
@@ -124,7 +132,7 @@ impl RamfluxClient {
         }
         let now = u64::try_from(crate::time::now_unix_timestamp())
             .map_err(|_| invalid("invalid authority clock"))?;
-        if self.require_custody_device(identity, now)? {
+        if self.require_custody_device(purpose, identity, now)? {
             return Ok(());
         }
         let row =
@@ -186,3 +194,6 @@ mod tests;
 
 #[cfg(test)]
 mod custody_directory_tests;
+
+#[cfg(test)]
+mod caller_classification_tests;

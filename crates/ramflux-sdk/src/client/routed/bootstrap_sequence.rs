@@ -3,6 +3,7 @@
 
 //! Durable sender allocation and authenticated receive high-water marks survive secret erasure.
 use super::{RamfluxClient, SdkDmX3dhHeader, SdkError, invalid};
+use crate::client::identity_authority::HeadUse;
 const MAX_SEQUENCE: u64 = 9_007_199_254_740_991;
 pub(crate) fn bootstrap_sequence_key(local: &ramflux_crypto::RootQualifiedDeviceRef) -> String {
     format!("dm-pair/bootstrap-sequence/{}", local.storage_key())
@@ -77,7 +78,7 @@ impl RamfluxClient {
         local: &ramflux_crypto::RootQualifiedDeviceRef,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<String, SdkError> {
-        let record = self.trusted_device(remote)?;
+        let record = self.trusted_device(HeadUse::NewAuthorization, remote)?;
         let principal = record["principal_id"]
             .as_str()
             .ok_or_else(|| invalid("bootstrap principal missing"))?;

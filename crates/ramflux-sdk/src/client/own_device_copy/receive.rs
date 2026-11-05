@@ -4,6 +4,7 @@
 //! Own-copy receipt lookup and local verification are shared by direct and background receive.
 
 use super::{DOMAIN, MAX_PACKET_BYTES, OwnDeviceMessage, PREFIX, RECEIPTS, TOO_LARGE, invalid};
+use crate::client::identity_authority::HeadUse;
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::{dm_device_id_hash, now_unix_timestamp};
 use crate::{
@@ -136,7 +137,7 @@ impl RamfluxClient {
             Err(SdkError::PairRecoveryRequired) => {
                 self.begin_pair_recovery(
                     &self.owned_device_identity()?,
-                    &self.authenticated_device_identity(entry)?,
+                    &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
                     now,
                 )?;
                 return Err(SdkError::PairRecoveryRequired);

@@ -3,6 +3,7 @@
 
 //! Malicious framed gateway response through the production TLS manifest-fetch path.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[tokio::test]
@@ -256,7 +257,9 @@ async fn own_device_import_rejects_a_revoked_siblings_replayed_manifest_before_h
                 &old.principal_commitment,
                 "one"
             )?)
-            .and_then(|identity| target.client.require_cached_root_authority(&identity))
+            .and_then(|identity| target
+                .client
+                .require_cached_root_authority(HeadUse::NewAuthorization, &identity))
             .is_err()
     );
     assert_eq!(

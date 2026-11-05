@@ -4,6 +4,7 @@
 //! Durable reset retry and encrypted acknowledgement, independent of inbox retry retention.
 use super::reset_policy::{MAX_RESET_LIFETIME, ResetWork};
 use super::{GatewaySessionAccess, Kind, Opened, PairControlKind, RamfluxClient, Route, SdkError};
+use crate::client::identity_authority::HeadUse;
 impl RamfluxClient {
     pub(super) async fn send_pair_reset(
         &self,
@@ -16,7 +17,7 @@ impl RamfluxClient {
         &self,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<String, SdkError> {
-        let record = self.trusted_device(remote)?;
+        let record = self.trusted_device(HeadUse::NewAuthorization, remote)?;
         if let Some(target) = record.get("target_delivery_id").and_then(serde_json::Value::as_str) {
             return Ok(target.to_owned());
         }

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use super::*;
+use crate::client::identity_authority::HeadUse;
 struct Fixture {
     root: PathBuf,
     client: RamfluxClient,
@@ -626,7 +627,7 @@ async fn compatibility_receive_acks_after_commit_and_returns_cached_plaintext()
         b.config()?,
         Box::new(ReceivingGateway {
             queued: VecDeque::new(),
-            receipt_key: b.client.authenticated_committed_key(&entry)?,
+            receipt_key: b.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?,
             entry: Some(entry),
             last: None,
             reader: b.client.account_db()?.open_reader()?,
@@ -816,7 +817,7 @@ fn r5_legacy_group_messages_have_a_seven_day_upgrade_window() -> Result<(), SdkE
     assert!(installed <= start);
     bob.client.account_db()?.persist_actor_state("group-message/upgrade-start", &start)?;
     let actual = bob.client.projection_id(&legacy, &route)?;
-    let source = bob.client.authenticated_device_identity(&legacy)?;
+    let source = bob.client.authenticated_device_identity(HeadUse::NewAuthorization, &legacy)?;
     assert_eq!(
         actual,
         ramflux_protocol::group_message_id(

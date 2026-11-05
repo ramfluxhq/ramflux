@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 #[cfg(test)]
 mod native_contract_tests;
@@ -121,6 +122,10 @@ async fn dispatch_group_bus_request_inner(
         "group.message.delete" => {
             let account = local_bus_account_mut(state, account_id)?;
             Box::pin(dispatch_group_message_delete_request(request, account)).await
+        }
+        "group.history" => {
+            let account = local_bus_account(state, account_id)?;
+            Ok(local_bus_ok(history::read(&account.client, request)?))
         }
         "group.members" => {
             let account = local_bus_account(state, account_id)?;
@@ -1607,11 +1612,12 @@ fn group_receive_compat(
         if crate::client::routed::decode(&entry.envelope).is_err() {
             continue;
         }
-        let source_key = account.client.inbox_admission_key(&entry)?;
+        let source_key =
+            account.client.authenticated_committed_key(HeadUse::HistoricalRead, &entry)?;
         if !seen.insert(source_key.clone()) {
             continue;
         }
-        let Some(route) = account.client.committed_routing(&entry)? else {
+        let Some(route) = account.client.committed_routing(HeadUse::HistoricalRead, &entry)? else {
             continue;
         };
         let id = &route.message_id;
@@ -1645,7 +1651,7 @@ fn group_receive_compat(
         let page_keys = page
             .0
             .iter()
-            .map(|value| account.client.inbox_admission_key(value))
+            .map(|value| account.client.authenticated_committed_key(HeadUse::HistoricalRead, value))
             .collect::<Result<BTreeSet<_>, _>>()?;
         if !page_keys.contains(&source_key) {
             page.0.push(entry);
@@ -1654,6 +1660,8 @@ fn group_receive_compat(
     append_native_group_history(&account.client, body, &mut page.1)?;
     Ok(page)
 }
+
+pub(crate) mod history;
 
 #[cfg(test)]
 mod tests {

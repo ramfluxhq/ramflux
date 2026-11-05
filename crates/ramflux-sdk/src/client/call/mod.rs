@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Pair-control authentication and public call projection; media secrets stay in RAM.
+use crate::client::identity_authority::HeadUse;
 mod lease;
 #[cfg(test)]
 mod native_tests;
@@ -118,7 +119,7 @@ impl RamfluxClient {
         }
         let identity = self.call_device_identity(&c.sender)?;
         self.require_native_operation(&identity, NativeOperation::Call)?;
-        let sender = self.trusted_device(&identity)?;
+        let sender = self.trusted_device(HeadUse::NewAuthorization, &identity)?;
         if sender["principal_id"] != c.sender.principal_id {
             return Err(invalid("sender principal differs from root authority"));
         }
@@ -172,7 +173,8 @@ impl RamfluxClient {
         if peer != &c.sender {
             return Err(invalid("control source is not peer"));
         }
-        let record = self.trusted_device(&self.call_device_identity(&c.sender)?)?;
+        let record =
+            self.trusted_device(HeadUse::NewAuthorization, &self.call_device_identity(&c.sender)?)?;
         let key =
             record["signing_public_key"].as_str().ok_or_else(|| invalid("sender key missing"))?;
         ramflux_crypto::verify_canonical_signature(&signing_bytes(c)?, &c.signature, key)?;
@@ -203,11 +205,13 @@ impl RamfluxClient {
                 return Err(invalid("call capacity or retired id"));
             }
             let mut incoming = LiveCall::incoming(c, self.call_local_endpoint()?, now)?;
-            let key =
-                self.trusted_device(&self.call_device_identity(&c.sender)?)?["signing_public_key"]
-                    .as_str()
-                    .ok_or_else(|| invalid("peer signing key missing"))?
-                    .to_owned();
+            let key = self.trusted_device(
+                HeadUse::NewAuthorization,
+                &self.call_device_identity(&c.sender)?,
+            )?["signing_public_key"]
+                .as_str()
+                .ok_or_else(|| invalid("peer signing key missing"))?
+                .to_owned();
             incoming.pin_peer(c.sender.clone(), key)?;
             if self.voice_calls.values().any(|call| call.row.state != "ended") {
                 incoming.busy(now)?;

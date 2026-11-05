@@ -4,6 +4,7 @@
 //! Principal participant gates and root-scoped receipt attribution resist literal device-name copies.
 use super::review::{pool, trust};
 use super::*;
+use crate::client::identity_authority::HeadUse;
 
 fn outgoing(sender: &Fixture, receiver: &Fixture, id: &str) -> GatewayDirectMessage {
     let mut message = super::r5::outgoing(sender, receiver, id);
@@ -51,12 +52,9 @@ async fn assert_copied_device_cannot_change_thread(victim_principal: &str) -> Re
         .err()
         .ok_or_else(|| invalid("attack accepted"))?;
     assert!(error.to_string().contains("not a direct conversation participant"), "{error}");
-    assert!(
-        !alice
-            .client
-            .account_db()?
-            .actor_state_exists(&alice.client.authenticated_committed_key(&attack)?)?
-    );
+    assert!(!alice.client.account_db()?.actor_state_exists(
+        &alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &attack)?
+    )?);
     let ack = seal_as(
         &mallory,
         &alice,
@@ -71,12 +69,9 @@ async fn assert_copied_device_cannot_change_thread(victim_principal: &str) -> Re
         .err()
         .ok_or_else(|| invalid("receipt accepted"))?;
     assert!(error.to_string().contains("not a conversation participant"), "{error}");
-    assert!(
-        !alice
-            .client
-            .account_db()?
-            .actor_state_exists(&alice.client.authenticated_committed_key(&ack)?)?
-    );
+    assert!(!alice.client.account_db()?.actor_state_exists(
+        &alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &ack)?
+    )?);
     assert_eq!(alice.client.direct_messages("alice-bob")?.len(), before);
     assert_eq!(
         alice

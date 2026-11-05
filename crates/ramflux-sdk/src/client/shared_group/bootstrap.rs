@@ -3,6 +3,7 @@
 
 //! Atomic signed group bootstrap and issuer-only current sender-key material.
 use super::invalid;
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_crypto::{VerifiedGroupState, verify_group_state_snapshot};
 use ramflux_protocol::group_state::GroupStateSnapshot;
@@ -161,7 +162,7 @@ impl RamfluxClient {
             }
             Err(error) => return Err(error.into()),
         }
-        self.authenticated_envelope_sender(entry)?;
+        self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         if needs_consent {
             return Ok(Some(PreparedSharedGroup::Invitation {
                 state,
@@ -190,7 +191,7 @@ impl RamfluxClient {
                 let issuer = &state.snapshot().issuer.identity;
                 let source =
                     self.device_identity_for_root(&issuer.root_commitment, &issuer.device_id)?;
-                let trusted = self.trusted_device(&source)?;
+                let trusted = self.trusted_device(HeadUse::NewAuthorization, &source)?;
                 if !matches!(
                     (parsed.schema.as_str(), parsed.version),
                     ("ramflux.sdk.group_sender_key.distribution.v3", 3)

@@ -3,6 +3,7 @@
 
 //! Authenticate and isolate one bound legacy group entry without aborting its page.
 use crate::client::group_quarantine::LegacyGroupDelivery;
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 pub(super) async fn apply(
     client: &RamfluxClient,
@@ -14,7 +15,7 @@ pub(super) async fn apply(
     if let Some(error) = crate::client::inbox_failure::wire_signature_error(entry) {
         return client.isolate_legacy_group_delivery(entry, Err(error));
     }
-    if let Err(error) = client.authenticated_envelope_sender(entry)
+    if let Err(error) = client.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)
         && crate::client::inbox_failure::deterministic(&error).is_some()
     {
         return client.isolate_legacy_group_delivery(entry, Err(error));
@@ -24,7 +25,8 @@ pub(super) async fn apply(
     }
     let result = async {
         if let Err(error) = client.ensure_inbound_device(gateway, entry).await {
-            if let Err(auth_error) = client.authenticated_envelope_sender(entry)
+            if let Err(auth_error) =
+                client.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)
                 && crate::client::inbox_failure::deterministic(&auth_error).is_some()
             {
                 return Err(auth_error);

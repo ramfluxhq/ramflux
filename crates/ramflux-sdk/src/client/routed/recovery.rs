@@ -3,6 +3,7 @@
 
 //! Authenticated fresh-X3DH recovery; a reset never travels outside the encrypted route.
 use super::{GatewayInboxEntry, GatewaySessionAccess, RamfluxClient, SdkError, now_unix_timestamp};
+use crate::client::identity_authority::HeadUse;
 impl RamfluxClient {
     pub(crate) fn finish_pair_retirement(&self) -> Result<(), SdkError> {
         self.account_db()?.finish_secret_retirement_if_committed()?;
@@ -67,9 +68,9 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         // The triggering packet must have a valid signature from the pinned device. A stranger
         // cannot induce key churn, prekey requests or outgoing traffic.
-        self.authenticated_envelope_sender(entry)?;
+        self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         let local = self.local_device_identity(&engine.config().device_id)?;
-        let remote = self.authenticated_device_identity(entry)?;
+        let remote = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if !self.pair_recovery_allowed(&local, &remote)? {
             return Ok(());
         }

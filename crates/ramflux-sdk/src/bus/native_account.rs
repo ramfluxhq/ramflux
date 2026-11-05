@@ -3,6 +3,7 @@
 
 //! Ordinary unlocked account state using public native authority and independent node pins.
 use super::state::{LocalBusAccountState, LocalBusDaemonState};
+use crate::client::identity_authority::HeadUse;
 use crate::{
     AccountNetworkingReason, GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig,
     LocalBusCreatedAccount, LocalBusCreatedAccountState, RamfluxClient, SdkError,
@@ -199,7 +200,11 @@ pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Res
     let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
     if account
         .client
-        .require_fresh_custody_head(&native.record().body.account_anchor, native.record())
+        .require_fresh_custody_head(
+            HeadUse::NewAuthorization,
+            &native.record().body.account_anchor,
+            native.record(),
+        )
         .is_err()
     {
         let anchor = native.record().body.account_anchor.clone();
@@ -244,7 +249,11 @@ pub(super) async fn refresh_public_authority(
         return Ok(());
     }
     let anchor = native.record().body.account_anchor.clone();
-    if account.client.require_fresh_custody_head(&anchor, native.record()).is_err() {
+    if account
+        .client
+        .require_fresh_custody_head(HeadUse::NewAuthorization, &anchor, native.record())
+        .is_err()
+    {
         let manifest = crate::prekey::sdk_gateway_get_json::<
             Option<crate::prekey::SdkDeviceManifestResponse>,
         >(

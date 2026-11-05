@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bind control attribution and lookup identities to verified roots, never payload device names.
+use crate::client::identity_authority::HeadUse;
 use crate::client::identity_authority::invalid;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use ramflux_crypto::RootQualifiedDeviceRef;
@@ -21,7 +22,7 @@ impl RamfluxClient {
         event: &mut A2iControlEvent,
         entry: &GatewayInboxEntry,
     ) -> Result<RootQualifiedDeviceRef, SdkError> {
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         bind(event, &entry.envelope.source_principal_id, &source)?;
         Ok(source)
     }

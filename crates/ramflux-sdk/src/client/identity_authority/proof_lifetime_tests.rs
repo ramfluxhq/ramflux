@@ -3,6 +3,7 @@
 
 //! Injectable registration clocks separate durable device authority from renewable session proofs.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 #[test]
 fn renewed_registration_at_two_hours_is_accepted_but_original_proof_replay_and_expiry_are_refused()
 -> TestResult {
@@ -170,12 +171,18 @@ fn one_dormant_device_never_invalidates_live_siblings_or_becomes_revoked() -> Te
     assert_eq!(ready.devices[0].device_id, "live");
     let live_ref =
         receiver.client.device_identity_for_root(&manifest.principal_commitment, "live")?;
-    assert_eq!(receiver.client.trusted_device(&live_ref)?["target_delivery_id"], "live");
+    assert_eq!(
+        receiver.client.trusted_device(HeadUse::NewAuthorization, &live_ref)?["target_delivery_id"],
+        "live"
+    );
     let stale_ref =
         receiver.client.device_identity_for_root(&manifest.principal_commitment, "dormant")?;
-    assert!(matches!(receiver.client.trusted_device(&stale_ref), Err(SdkError::InboundPending(_))));
+    assert!(matches!(
+        receiver.client.trusted_device(HeadUse::NewAuthorization, &stale_ref),
+        Err(SdkError::InboundPending(_))
+    ));
     let future_ref = RamfluxClient::device_identity_from_manifest(&manifest, "future")?;
-    assert!(receiver.client.trusted_device(&future_ref).is_err());
+    assert!(receiver.client.trusted_device(HeadUse::NewAuthorization, &future_ref).is_err());
     assert_eq!(
         receiver
             .client
@@ -203,7 +210,10 @@ fn one_dormant_device_never_invalidates_live_siblings_or_becomes_revoked() -> Te
         &format!("identity/manifest-root/{}", manifest.principal_commitment),
         &ready,
     )?;
-    assert!(matches!(receiver.client.trusted_device(&stale_ref), Err(SdkError::InboundPending(_))));
+    assert!(matches!(
+        receiver.client.trusted_device(HeadUse::NewAuthorization, &stale_ref),
+        Err(SdkError::InboundPending(_))
+    ));
     assert_served_ready_manifest(
         [(&live, now), (&stale, now - 31 * 86400), (&future, now + 3600)],
         &manifest,
@@ -235,7 +245,10 @@ fn an_omitted_stale_advertisement_preserves_fresh_pre_upgrade_cached_material() 
     )?;
     stale.devices[0].branch_proof = Some(request.proof);
     receiver.client.persist_identity_directory(&stale)?;
-    assert_eq!(receiver.client.trusted_device(&identity)?["device_id"], "phone");
+    assert_eq!(
+        receiver.client.trusted_device(HeadUse::NewAuthorization, &identity)?["device_id"],
+        "phone"
+    );
     assert_eq!(
         receiver.client.observed_device_set(&stale.principal_commitment)?.ok_or("set")?.devices[0]
             .status,

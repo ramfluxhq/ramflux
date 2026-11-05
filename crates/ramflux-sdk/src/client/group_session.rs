@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::HeadUse;
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 
@@ -344,7 +345,7 @@ impl RamfluxClient {
             )?
         };
         if identity.is_some() {
-            self.require_cached_root_authority(&source)?;
+            self.require_cached_root_authority(HeadUse::NewAuthorization, &source)?;
         }
         if self.account_db()?.group_member_device_key(&distribution.group_id, &source)?.as_ref()
             != Some(public_key)
@@ -522,13 +523,16 @@ impl RamfluxClient {
                 continue;
             }
             let (entry, encrypted_body) = super::group_pending::decode(&record.envelope_json)?;
-            if let Err(error) = self.authenticated_device_identity(&entry).and_then(|source| {
-                self.require_group_sender_pin(
-                    group_id,
-                    &entry.envelope.source_principal_id,
-                    &source,
-                )
-            }) {
+            if let Err(error) = self
+                .authenticated_device_identity(HeadUse::NewAuthorization, &entry)
+                .and_then(|source| {
+                    self.require_group_sender_pin(
+                        group_id,
+                        &entry.envelope.source_principal_id,
+                        &source,
+                    )
+                })
+            {
                 if matches!(error, SdkError::InboundPending(_) | SdkError::InboundRejected(_)) {
                     continue;
                 }
@@ -548,7 +552,7 @@ impl RamfluxClient {
             }
             if self.group_sender_key_counter_seen(
                 &envelope,
-                &self.authenticated_device_identity(&entry)?,
+                &self.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?,
             )? {
                 self.account_db()?.remove_group_pending_undecrypted(&record.message_id)?;
                 continue;

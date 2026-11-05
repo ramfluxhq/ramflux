@@ -10,6 +10,7 @@ use crate::bus::{
     couriers::writer::Writer,
     sync_driver::source::{PreparedSource, prepare},
 };
+use crate::client::identity_authority::HeadUse;
 
 #[tokio::test]
 async fn native_contact_background_bootstrap_decrypts_again_without_an_inline_lookup() -> TestResult
@@ -69,7 +70,9 @@ async fn native_contact_background_bootstrap_decrypts_again_without_an_inline_lo
             .state,
         "pending"
     );
-    assert!(db.actor_state_exists(&receiver.client.authenticated_committed_key(&entry)?)?);
+    assert!(db.actor_state_exists(
+        &receiver.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?
+    )?);
     assert_eq!(db.actor_state_keys("dm-pair/session/")?.len(), 1);
     receiver.install_test_session(engine);
     Ok(())

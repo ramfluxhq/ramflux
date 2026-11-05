@@ -3,6 +3,7 @@
 
 //! Bounded contact-control delivery through the ordinary authenticated device-pair transport.
 use super::{ContactRequestRecord, Decision, ENVELOPE_SCHEMA, TTL, conversation, invalid};
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 const PREFIX: &str = "contact-request/send/";
@@ -79,7 +80,7 @@ fn material_hash(
     client: &RamfluxClient,
     recipient: &ramflux_crypto::RootQualifiedDeviceRef,
 ) -> Result<String, SdkError> {
-    let record = client.trusted_device(recipient)?;
+    let record = client.trusted_device(HeadUse::NewAuthorization, recipient)?;
     Ok(ramflux_protocol::hash_base64url(
         "ramflux.contact_request.recipient_material.v1",
         &ramflux_protocol::canonical_json_bytes(&(

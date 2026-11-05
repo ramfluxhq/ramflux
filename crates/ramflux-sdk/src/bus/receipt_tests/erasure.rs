@@ -4,6 +4,7 @@
 //! Routed replay admission through the receiving daemon after message deletion.
 use super::*;
 use crate::bus::sync_driver;
+use crate::client::identity_authority::HeadUse::NewAuthorization;
 
 #[tokio::test(flavor = "current_thread")]
 async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_letter() -> TestResult
@@ -30,7 +31,7 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
     sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
-    let committed = recipient.client.authenticated_committed_key(&entry)?;
+    let committed = recipient.client.authenticated_committed_key(NewAuthorization, &entry)?;
     let marker = recipient
         .client
         .account_db()?
@@ -101,7 +102,7 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
     assert_conflict_quarantine(&mut recipient, &mut receiver, &pool, conflict, &committed, &marker)
         .await?;
     evict_identity_evidence(&recipient.client)?;
-    assert!(recipient.client.authenticated_committed_key(&entry).is_err());
+    assert!(recipient.client.authenticated_committed_key(NewAuthorization, &entry).is_err());
     sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
     let raw = super::erasure_audit::open(&b, &recipient.client)?;
     super::erasure_audit::assert_erased(&raw, &forbidden, "privacy-envelope-id")?;

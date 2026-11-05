@@ -3,6 +3,7 @@
 
 //! Group membership selects roots from signed controls and invite provenance, never directory names.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 fn legacy_join(
     author: &Actor,
     event: &ramflux_protocol::GroupEvent,
@@ -32,7 +33,9 @@ fn copied_name_cannot_pin_first_claimer_and_signed_member_root_chooses_bob() -> 
         alice
             .client
             .device_identity("shared")
-            .and_then(|identity| alice.client.require_cached_root_authority(&identity))
+            .and_then(|identity| alice
+                .client
+                .require_cached_root_authority(HeadUse::NewAuthorization, &identity))
             .is_err()
     );
 

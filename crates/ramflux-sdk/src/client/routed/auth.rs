@@ -6,6 +6,7 @@ use super::{
     GatewayInboxEntry, GatewaySessionConfig, RamfluxClient, SdkDmX3dhHeader, SdkError, decode,
     invalid, now_unix_timestamp,
 };
+use crate::client::identity_authority::HeadUse;
 use serde_json::Value;
 
 pub(crate) type InboundManifest =
@@ -71,7 +72,9 @@ impl RamfluxClient {
         }
         if self
             .device_identity(&reference)
-            .and_then(|identity| self.require_cached_root_authority(&identity))
+            .and_then(|identity| {
+                self.require_cached_root_authority(HeadUse::NewAuthorization, &identity)
+            })
             .is_ok()
         {
             return Ok(None);
@@ -136,7 +139,7 @@ impl RamfluxClient {
         let reference = self.inbound_device_reference(entry)?;
         let (commitment, _) = ramflux_protocol::parse_qualified_device_id(&reference)?
             .ok_or_else(|| invalid("sender root address required"))?;
-        self.authenticated_envelope_sender(entry)?;
+        self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         if matches!(observation, Observation::Commit) {
             self.account_db()?.upsert_device_directory_entry(
                 remote,
@@ -151,6 +154,7 @@ impl RamfluxClient {
 
     pub(crate) fn trusted_device(
         &self,
+        purpose: HeadUse,
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Value, SdkError> {
         if self
@@ -161,7 +165,7 @@ impl RamfluxClient {
             return Err(SdkError::InboundRejected("revoked device".to_owned()));
         }
 
-        self.require_cached_root_authority(identity).map_err(|error| {
+        self.require_cached_root_authority(purpose, identity).map_err(|error| {
             crate::client::inbox_failure::lookup_error(
                 error,
                 "cached sender directory is incomplete",
@@ -174,9 +178,10 @@ impl RamfluxClient {
 
     pub(crate) fn authenticated_envelope_sender(
         &self,
+        purpose: HeadUse,
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {
-        let record = self.authenticated_sender_record(entry)?;
+        let record = self.authenticated_sender_record(purpose, entry)?;
         Ok(record["principal_id"]
             .as_str()
             .ok_or_else(|| invalid("sender principal missing"))?
@@ -185,10 +190,13 @@ impl RamfluxClient {
 
     pub(crate) fn authenticated_sender_record(
         &self,
+        purpose: HeadUse,
         entry: &GatewayInboxEntry,
     ) -> Result<Value, SdkError> {
-        let record =
-            self.trusted_device(&self.device_identity(&self.inbound_device_reference(entry)?)?)?;
+        let record = self.trusted_device(
+            purpose,
+            &self.device_identity(&self.inbound_device_reference(entry)?)?,
+        )?;
         if let Some(hint) =
             decode(&entry.envelope).ok().and_then(|wrapper| wrapper.source_principal_commitment)
             && record["principal_commitment"] != hint
@@ -204,7 +212,7 @@ impl RamfluxClient {
         thread: &Value,
         entry: &GatewayInboxEntry,
     ) -> Result<bool, SdkError> {
-        let principal = self.authenticated_envelope_sender(entry)?;
+        let principal = self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         Ok(thread["participants"]
             .as_array()
             .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&principal))))
@@ -215,7 +223,7 @@ impl RamfluxClient {
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
         header: &SdkDmX3dhHeader,
     ) -> Result<(), SdkError> {
-        let record = self.trusted_device(remote)?;
+        let record = self.trusted_device(HeadUse::NewAuthorization, remote)?;
         let expected: [u8; 32] = serde_json::from_value(
             record
                 .get("x25519_identity_public")

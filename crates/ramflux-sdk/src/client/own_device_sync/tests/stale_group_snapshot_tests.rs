@@ -3,6 +3,7 @@
 
 //! Old same-root snapshots cannot undo membership removals or revive their pins.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 use crate::own_device_sync::SdkOwnDeviceGroupMemberPin;
 fn setup(
     name: &str,
@@ -108,7 +109,7 @@ fn stale_snapshot_preserves_removed_members_and_retired_pins_after_reopen() -> R
     assert_eq!(target.account_db()?.group_member_device_key("g", &bob_identity)?, None);
     assert!(target.require_group_sender_pin("g", "bob", &bob_identity).is_err());
     let after = member_packet(&bob, "after-removal", &bob_root)?;
-    assert!(target.authenticated_envelope_sender(&after).is_ok());
+    assert!(target.authenticated_envelope_sender(HeadUse::NewAuthorization, &after).is_ok());
     assert!(
         target
             .append_group_gateway_delivery_for_recipient(
@@ -700,7 +701,10 @@ fn freshly_activated_sibling_restores_foreign_authority_before_group_keys_and_of
         &envelope("source_device_sync", "target_device_sync"),
         &history,
     )?;
-    target.require_cached_root_authority(&target.device_identity_for_root(&commitment, "bob")?)?;
+    target.require_cached_root_authority(
+        HeadUse::NewAuthorization,
+        &target.device_identity_for_root(&commitment, "bob")?,
+    )?;
     drop(target);
     let mut reader = RamfluxClient::new();
     reader.open_account_index(&tr)?;

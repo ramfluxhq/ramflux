@@ -5,6 +5,7 @@
 
 use super::fixture::{Case, Fixture, GatewayHold};
 use super::receive_ack::{controls, start};
+use crate::client::identity_authority::HeadUse;
 use crate::client::routed::SendMaterial;
 use crate::prelude::*;
 use std::sync::Arc;
@@ -99,7 +100,8 @@ async fn held_inbound_reset_reply_follows_commit_and_keeps_local_mutations_avail
 async fn reply() -> Case {
     let mut fixture = Box::pin(Fixture::new("receive-reset-reply")).await?;
     let entry = incoming_reset(&mut fixture)?;
-    let committed = fixture.source.client.authenticated_committed_key(&entry)?;
+    let committed =
+        fixture.source.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
     let reader = fixture.source.client.account_db()?.open_reader()?;
     let hold = Arc::new(GatewayHold::default());
     {

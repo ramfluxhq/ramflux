@@ -3,6 +3,7 @@
 
 //! Account-owned bounded receipt courier; retries reuse the committed ciphertext.
 use crate::client::delivery_receipts::{PREFIX, Work};
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use serde_json::json;
 const SCAN: u32 = 256;
@@ -198,7 +199,7 @@ fn receipt_message(
     if work.receiver != receiver.storage_key() || receiver.device_id() != config.device_id {
         return Err(SdkError::InboundRejected("receipt receiving device changed".into()));
     }
-    let device = account.client.trusted_device(&source)?;
+    let device = account.client.trusted_device(HeadUse::NewAuthorization, &source)?;
     if work.root.as_deref() != Some(source.root_commitment())
         || device["principal_commitment"].as_str() != Some(source.root_commitment())
     {

@@ -8,6 +8,7 @@ use super::receive_ack::{command, limits, start};
 use crate::bus::connection_manager::{
     ConnectionHandle, ReceiveTrigger, subscriptions::SessionEvent,
 };
+use crate::client::identity_authority::HeadUse;
 use crate::gateway::frame_dispatch::FrameKind;
 use crate::prelude::*;
 use serde_json::json;
@@ -79,7 +80,12 @@ async fn run_mode(
             let receipts = if completion == Completion::Durable {
                 entries
                     .iter()
-                    .map(|entry| fixture.source.client.authenticated_committed_key(entry))
+                    .map(|entry| {
+                        fixture
+                            .source
+                            .client
+                            .authenticated_committed_key(HeadUse::NewAuthorization, entry)
+                    })
                     .collect::<Result<Vec<_>, _>>()?
             } else {
                 Vec::new()

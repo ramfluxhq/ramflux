@@ -3,6 +3,7 @@
 
 //! Legacy quarantine cannot starve a genuine first-contact routed deferral.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 #[test]
 fn forged_legacy_holds_release_admission_for_a_genuine_routed_first_contact() -> Result<(), SdkError>
 {
@@ -17,7 +18,7 @@ fn forged_legacy_holds_release_admission_for_a_genuine_routed_first_contact() ->
             b"private genuine text"
         );
         assert!(matches!(
-            bob.client.authenticated_envelope_sender(&genuine),
+            bob.client.authenticated_envelope_sender(HeadUse::NewAuthorization, &genuine),
             Err(SdkError::InboundPending(_))
         ));
         alice.client.create_group("g", "alice")?;
@@ -32,7 +33,7 @@ fn forged_legacy_holds_release_admission_for_a_genuine_routed_first_contact() ->
             forged.envelope.signed.signature = ramflux_protocol::encode_base64url([0; 64]);
             let error = bob
                 .client
-                .authenticated_envelope_sender(&forged)
+                .authenticated_envelope_sender(HeadUse::NewAuthorization, &forged)
                 .err()
                 .ok_or_else(|| invalid("forged source unexpectedly trusted"))?;
             assert!(crate::client::inbox_failure::deterministic(&error).is_none());

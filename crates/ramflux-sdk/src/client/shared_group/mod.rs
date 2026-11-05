@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Full authenticated group state, local actor certificates and root-qualified projections.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_crypto::{
     VerifiedGroupState, advance_group_state, advance_native_group_state, certify_group_state_actor,
@@ -229,7 +230,10 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         self.verify_group_actor_source(gateway, &state.snapshot().issuer, entry).await?;
-        self.ensure_shared_group_device(state, &self.authenticated_device_identity(entry)?)
+        self.ensure_shared_group_device(
+            state,
+            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
+        )
     }
     pub(crate) async fn verify_group_actor_source(
         &self,
@@ -249,7 +253,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {
         self.confirm_group_actor_transport(issuer, entry)?;
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if !self.account_db()?.charge_contact_request(
             &format!("group-control:{}", source.root_commitment()),
             32,
@@ -266,7 +270,7 @@ impl RamfluxClient {
         issuer: &GroupStateActor,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if issuer.identity.root_commitment != source.root_commitment()
             || issuer.identity.device_id != source.device_id()
             || issuer.identity.principal_id != entry.envelope.source_principal_id

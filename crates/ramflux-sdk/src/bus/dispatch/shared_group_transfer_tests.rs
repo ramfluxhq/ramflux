@@ -3,6 +3,7 @@
 
 //! Real encrypted head checks, transferee countersignatures and stale-owner repair.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 use crate::client::shared_group::{TRANSFER_SEND_PREFIX, TransferBody, TransferDelivery};
 
 type Capture = Arc<Mutex<Vec<ramflux_protocol::Envelope>>>;
@@ -99,7 +100,7 @@ impl Rig {
             [&mut self.phone, &mut self.laptop, &mut self.next].into_iter().zip(gateways)
         {
             let own = account.client.owned_device_identity()?;
-            let row = account.client.trusted_device(&own)?;
+            let row = account.client.trusted_device(HeadUse::NewAuthorization, &own)?;
             let mut config = self.config.clone();
             config.principal_id = account
                 .client

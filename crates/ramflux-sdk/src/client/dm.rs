@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 pub(crate) struct LegacyReceive<'a> {
     pub conversation_id: &'a str,
@@ -413,7 +414,7 @@ impl RamfluxClient {
         if self
             .apply_receipt_event_plaintext(
                 &body,
-                &self.authenticated_device_identity(&entry)?,
+                &self.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?,
                 conversation_id,
             )?
             .is_some()
@@ -676,7 +677,7 @@ impl RamfluxClient {
         conversation_id: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
-        let route = self.committed_routing(entry)?;
+        let route = self.committed_routing(HeadUse::NewAuthorization, entry)?;
         let message_id =
             route.as_ref().map_or(&entry.envelope.envelope_id, |route| &route.message_id);
         let Some(message) = self

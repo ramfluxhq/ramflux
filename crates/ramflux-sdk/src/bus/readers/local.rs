@@ -131,6 +131,7 @@ pub(super) fn read(
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
             json!({"rejected":client.rejected_inbox(&body.conversation_id)?})
         }
+        "group.history" => super::super::dispatch::group::history::read(client, request)?,
         "group.members" => {
             let body: LocalBusGroupRequest = serde_json::from_value(request.body.clone())?;
             match client.shared_group_metadata(&body.group_id)? {

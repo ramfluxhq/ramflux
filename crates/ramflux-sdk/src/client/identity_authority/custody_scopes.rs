@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Ordinary feature permissions recheck each native branch's certified operation scope.
+use crate::client::identity_authority::HeadUse;
 use crate::{RamfluxClient, SdkError};
 use ramflux_crypto::RootQualifiedDeviceRef;
 #[derive(Clone, Copy)]
@@ -48,7 +49,7 @@ impl RamfluxClient {
             }
             return Ok(());
         };
-        self.require_cached_root_authority(device)?;
+        self.require_cached_root_authority(HeadUse::NewAuthorization, device)?;
         let entry = current
             .envelope()
             .body

@@ -7,6 +7,7 @@ use super::{
     SdkGroupEncryptedEnvelope, SdkGroupSenderKeyDistribution,
     SdkGroupSenderKeyDistributionEnvelope, invalid, now_unix_timestamp,
 };
+use crate::client::identity_authority::HeadUse;
 impl RamfluxClient {
     pub(super) fn project_routed(
         &self,
@@ -22,7 +23,7 @@ impl RamfluxClient {
                 self.authorize_routed_receipt(opened, entry, body)?;
                 self.apply_receipt_event_plaintext(
                     body,
-                    &self.authenticated_device_identity(entry)?,
+                    &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
                     &opened.routing.conversation_id,
                 )?
                 .ok_or_else(|| invalid("invalid routed receipt"))?;
@@ -66,7 +67,7 @@ impl RamfluxClient {
         metadata: Option<&MessageMetadata>,
         released_at: i64,
     ) -> Result<Option<Vec<u8>>, SdkError> {
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if let Some(reason) = self.friend_rejection_reason(source.root_commitment())? {
             self.account_db()?.reject_inbox_message(
                 &route.conversation_id,
@@ -161,7 +162,7 @@ impl RamfluxClient {
             self.require_routed_group_member(&distribution.group_id, entry)?;
             self.import_group_key_for_identity(
                 &bytes,
-                &self.authenticated_device_identity(entry)?,
+                &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
                 true,
             )?;
             self.account_db()?.store_message_content(

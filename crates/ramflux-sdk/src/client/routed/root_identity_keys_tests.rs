@@ -4,6 +4,7 @@
 //! Copied literal device names cannot reserve another root's replay or control identities.
 use super::review::{pool, trust};
 use super::*;
+use crate::client::identity_authority::HeadUse;
 
 #[tokio::test]
 async fn copied_device_name_cannot_preclaim_an_honest_envelope_id_in_another_thread()
@@ -30,18 +31,15 @@ async fn copied_device_name_cannot_preclaim_an_honest_envelope_id_in_another_thr
     let honest = seal(&bob, &alice, honest, b"second honest message")?;
     alice.client.apply_routed_entry(&mut engine, &pool()?, &honest, false).await?;
     assert_ne!(
-        alice.client.authenticated_committed_key(&attack)?,
-        alice.client.authenticated_committed_key(&honest)?
+        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &attack)?,
+        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest)?
     );
 
     assert_eq!(alice.client.direct_messages("alice-bob")?.len(), 2);
     assert_eq!(alice.client.direct_messages("alice-mallory")?.len(), 1);
-    assert!(
-        alice
-            .client
-            .account_db()?
-            .actor_state_exists(&alice.client.authenticated_committed_key(&honest)?)?
-    );
+    assert!(alice.client.account_db()?.actor_state_exists(
+        &alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest)?
+    )?);
     Ok(())
 }
 
@@ -153,8 +151,8 @@ async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_r
         GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     let entry = seal(&bob, &alice, super::r5::outgoing(&bob, &alice, "migrate-id"), b"body")?;
     alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
-    let source = alice.client.authenticated_device_identity(&entry)?;
-    let key = alice.client.authenticated_committed_key(&entry)?;
+    let source = alice.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?;
+    let key = alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
     let db = alice.client.account_db()?;
     let receipt =
         db.load_actor_state::<serde_json::Value>(&key)?.ok_or_else(|| invalid("receipt"))?;

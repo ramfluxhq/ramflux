@@ -4,6 +4,7 @@
 //! Shared-state sender-key controls must use the conversation authenticated by their snapshot.
 use super::*;
 use crate::bus::runtime_tests;
+use crate::client::identity_authority::HeadUse;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -84,7 +85,7 @@ async fn sender_key_snapshot_uses_signed_group_conversation_instead_of_legacy_co
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
     peer.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await?;
-    assert!(peer.client.committed_routing(&entry)?.is_some());
+    assert!(peer.client.committed_routing(HeadUse::NewAuthorization, &entry)?.is_some());
     directory.abort();
     drop((source, peers));
     std::fs::remove_dir_all(root)?;

@@ -7,6 +7,7 @@ use super::{
     committed::{Committed, committed_key},
     control::a2i_key,
 };
+use crate::client::identity_authority::HeadUse;
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_sync::A2iControlEvent;
 use serde_json::Value;
@@ -35,7 +36,9 @@ impl RamfluxClient {
                     if receipt.entry.envelope.source_device_id != source.device_id() {
                         continue;
                     }
-                    let Ok(verified) = self.authenticated_device_identity(&receipt.entry) else {
+                    let Ok(verified) = self
+                        .authenticated_device_identity(HeadUse::NewAuthorization, &receipt.entry)
+                    else {
                         if prefix == "routed/committed/" {
                             quarantine(self, &key, "committed", &value)?;
                         }

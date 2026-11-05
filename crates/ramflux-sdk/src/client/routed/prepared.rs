@@ -7,6 +7,7 @@ use super::{
     GatewayDirectMessage, GatewaySessionConfig, RamfluxClient, Route, SdkDeviceManifestResponse,
     SdkDmEncryptedEnvelope, SdkDmX3dhHeader, SdkError, SealPair, invalid,
 };
+use crate::client::identity_authority::HeadUse;
 
 pub(crate) struct SendMaterialRequest {
     pub root: Option<String>,
@@ -27,7 +28,8 @@ impl RamfluxClient {
         self.require_pair_device_active(&local)?;
         let recipient = Self::qualified_recipient(message)?;
         let remote = self.device_identity(&recipient)?;
-        let authority = self.require_cached_root_authority(&remote).is_ok();
+        let authority =
+            self.require_cached_root_authority(HeadUse::NewAuthorization, &remote).is_ok();
         let pair = self.active_pair(&local, &remote)?;
         let reusable = if let Some((session, _)) = pair {
             let inactive = self

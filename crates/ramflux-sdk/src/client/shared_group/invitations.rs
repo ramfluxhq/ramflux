@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Unknown groups stay outside joined projections until contact consent or explicit acceptance.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_crypto::VerifiedGroupState;
 use serde::{Deserialize, Serialize};
@@ -173,7 +174,7 @@ impl RamfluxClient {
             db.remove_actor_state(&key(group))?;
             let own = self.owned_device_identity()?;
             if state.view().effective_role(own.root_commitment(), own.device_id()).is_some() {
-                let local = self.trusted_device(&own)?;
+                let local = self.trusted_device(HeadUse::NewAuthorization, &own)?;
                 let target = local["target_delivery_id"]
                     .as_str()
                     .ok_or_else(|| super::invalid("own group target is unavailable"))?;

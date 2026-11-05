@@ -4,6 +4,7 @@
 //! Per-event own-device delivery has no history upload and retries independently of peers.
 use super::*;
 use crate::bus::runtime_tests;
+use crate::client::identity_authority::HeadUse;
 use ramflux_protocol::{A2uiConversationCommand, StreamAppendCommand};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 #[path = "surface_own_tests/followups.rs"]
@@ -828,6 +829,7 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
         assert!(sibling.client.receive_own_device_message(&receiver, &entry(packet, 1)).await?);
     }
     sibling.client.require_cached_root_authority(
+        HeadUse::NewAuthorization,
         &sibling.client.device_identity_for_root(&peer_root, "device-peer-one")?,
     )?;
     let mut peer_config = config;
@@ -981,22 +983,24 @@ async fn receive_first_bootstrap(
     );
     let reader = account.client.account_db()?.open_reader()?;
     let receipt: serde_json::Value = reader
-        .load_actor_state(&account.client.authenticated_committed_key(&retry)?)?
+        .load_actor_state(
+            &account.client.authenticated_committed_key(HeadUse::NewAuthorization, &retry)?,
+        )?
         .ok_or("receipt after reopen")?;
     assert_eq!(receipt["projected"], true, "projection claim survives DB reopen");
     let mut old_receipt = receipt;
     old_receipt.as_object_mut().ok_or("receipt object")?.remove("projected");
-    account
-        .client
-        .account_db()?
-        .persist_actor_state(&account.client.authenticated_committed_key(&retry)?, &old_receipt)?;
+    account.client.account_db()?.persist_actor_state(
+        &account.client.authenticated_committed_key(HeadUse::NewAuthorization, &retry)?,
+        &old_receipt,
+    )?;
     assert!(
         !account.client.claim_inbox_projection(&retry)?,
         "pre-upgrade receipts default to already projected"
     );
     let account = state.accounts.get_mut("sender").ok_or("account")?;
     account.pending_deliveries.clear();
-    let key = account.client.authenticated_committed_key(&retry)?;
+    let key = account.client.authenticated_committed_key(HeadUse::NewAuthorization, &retry)?;
     let mut malformed = old_receipt.clone();
     malformed["projected"] = json!("invalid stored claim flag");
     account.client.account_db()?.persist_actor_state(&key, &malformed)?;

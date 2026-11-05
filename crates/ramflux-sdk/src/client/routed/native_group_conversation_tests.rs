@@ -3,6 +3,7 @@
 
 //! Authenticated native group envelopes must retain their signed conversation binding.
 use super::*;
+use crate::client::identity_authority::HeadUse;
 use crate::client::native_test_support::{Fixture, TestResult};
 
 fn carrier(
@@ -110,7 +111,7 @@ async fn native_group_envelope_rejects_divergent_conversation_and_accepts_resolv
         matches!(&error, SdkError::InboundRejected(reason) if reason == "authenticated group conversation conflicts with local binding"),
         "{error:?}"
     );
-    assert!(peer.client.committed_routing(&wrong)?.is_none());
+    assert!(peer.client.committed_routing(HeadUse::NewAuthorization, &wrong)?.is_none());
     // This is the same resolver used before sealing CLI sends and before read-model capture.
     let resolved =
         crate::bus::group_conversation::resolve(&owner.client, "group", "operator-thread")?;
@@ -118,7 +119,7 @@ async fn native_group_envelope_rejects_divergent_conversation_and_accepts_resolv
     let delivered = peer.client.apply_routed_entry(&mut engine, &pool, &correct, false).await?;
     assert_eq!(delivered.routing.ok_or("routing")?.conversation_id, "signed-thread");
     assert!(delivered.plaintext.is_some());
-    assert!(peer.client.committed_routing(&correct)?.is_some());
+    assert!(peer.client.committed_routing(HeadUse::NewAuthorization, &correct)?.is_some());
     assert_eq!(peer.client.direct_messages("operator-thread")?.len(), 0);
     Ok(())
 }

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Best-effort plain-copy admission, local membership and confirmation-gated release.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use serde_json::json;
 impl RamfluxClient {
@@ -28,7 +29,7 @@ impl RamfluxClient {
                     "own-device local manifest needs refresh".into(),
                 ));
             }
-            self.require_cached_root_authority(&local)?;
+            self.require_cached_root_authority(HeadUse::NewAuthorization, &local)?;
         } else if manifest.signed_device_set != self.observed_device_set(local.root_commitment())? {
             return Err(SdkError::InboundPending("own-device local manifest needs refresh".into()));
         }

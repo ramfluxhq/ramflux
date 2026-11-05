@@ -7,6 +7,7 @@ use super::{
     GatewayDirectMessage, GatewayInboxEntry, GatewaySessionConfig, RamfluxClient, Route,
     SdkDmEncryptedEnvelope, SdkError, SendMaterial, SendMaterialRequest,
 };
+use crate::client::identity_authority::HeadUse;
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_protocol::Envelope;
 
@@ -65,9 +66,9 @@ impl RamfluxClient {
         config: &GatewaySessionConfig,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<PairControlDraft>, SdkError> {
-        self.authenticated_envelope_sender(entry)?;
+        self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         let local = self.local_device_identity(&config.device_id)?;
-        let remote = self.authenticated_device_identity(entry)?;
+        let remote = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if !self.pair_recovery_allowed(&local, &remote)?
             || !self.begin_pair_recovery(&local, &remote, super::now_unix_timestamp())?
         {

@@ -3,6 +3,7 @@
 
 //! Own-history pages use local authorization and import checkpoints around owned relay work.
 
+use crate::client::identity_authority::HeadUse;
 use crate::client::object::fetch_job::{FetchCipher, FetchInput};
 use crate::own_device_sync::{SdkOwnDeviceSyncEnvelope, SdkOwnDeviceSyncImportResponse};
 use crate::prekey::SdkDeviceManifestResponse;
@@ -90,6 +91,7 @@ impl RamfluxClient {
         )?;
         for device in [&envelope.source_device_id, &envelope.target_device_id] {
             self.require_cached_root_authority(
+                HeadUse::NewAuthorization,
                 &self.device_identity_for_root(&envelope.principal_commitment, device)?,
             )?;
         }
@@ -144,14 +146,20 @@ impl RamfluxClient {
             &envelope.source_device_id,
             &envelope.target_device_id,
         )?;
-        let source = self.trusted_device(&self.device_identity_for_root(
-            &envelope.principal_commitment,
-            &envelope.source_device_id,
-        )?)?;
-        self.trusted_device(&self.device_identity_for_root(
-            &envelope.principal_commitment,
-            &envelope.target_device_id,
-        )?)?;
+        let source = self.trusted_device(
+            HeadUse::NewAuthorization,
+            &self.device_identity_for_root(
+                &envelope.principal_commitment,
+                &envelope.source_device_id,
+            )?,
+        )?;
+        self.trusted_device(
+            HeadUse::NewAuthorization,
+            &self.device_identity_for_root(
+                &envelope.principal_commitment,
+                &envelope.target_device_id,
+            )?,
+        )?;
         let key = source["signing_public_key"]
             .as_str()
             .ok_or_else(|| SdkError::InboundPending("own history signer missing".into()))?;

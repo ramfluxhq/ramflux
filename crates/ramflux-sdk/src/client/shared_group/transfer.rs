@@ -5,6 +5,7 @@
 use super::transfer_wire::{
     TransferBody, TransferControl, TransferDevice, TransferHead, TransferProbe,
 };
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_crypto::VerifiedGroupState;
 use ramflux_protocol::{GroupStateActor, GroupTransferAcceptance};
@@ -387,8 +388,8 @@ impl RamfluxClient {
             let Some(reply) = pending.replies.get(&device_key(&identity)?) else {
                 return Err(requires_sync());
             };
-            self.require_cached_root_authority(&identity)?;
-            if self.trusted_device(&identity)?["signing_public_key"]
+            self.require_cached_root_authority(HeadUse::NewAuthorization, &identity)?;
+            if self.trusted_device(HeadUse::NewAuthorization, &identity)?["signing_public_key"]
                 != reply.actor.identity.signing_public_key
                 || reply.requires_sync
                 || reply.expires_at < now_unix_timestamp().saturating_sub(300)
@@ -826,7 +827,7 @@ impl RamfluxClient {
             && reply.expires_at < now_unix_timestamp().saturating_add(60)
         {
             let own = self.owned_device_identity()?;
-            let local = self.trusted_device(&own)?;
+            let local = self.trusted_device(HeadUse::NewAuthorization, &own)?;
             let target =
                 local["target_delivery_id"].as_str().ok_or(StorageError::AuthorizationRejected)?;
             reply.actor = self.owned_group_actor(target)?;

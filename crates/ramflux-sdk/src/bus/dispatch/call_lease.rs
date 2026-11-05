@@ -4,6 +4,7 @@
 //! Each account claims its own relay secrets; only public offers/consent travel to the peer.
 use super::{invalid, scope};
 use crate::client::call::state::LiveCall;
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_protocol::{CallAction, VoiceCallFailureReason, VoiceLeaseConsent};
 use ramflux_protocol::{VoiceLeaseRequest, VoiceLeaseResponse};
@@ -45,7 +46,9 @@ pub(super) async fn maintain_lease(
         }
     };
     let peer = if next.local == next.caller { &next.callee } else { &next.caller };
-    let record = account.client.trusted_device(&account.client.call_device_identity(peer)?)?;
+    let record = account
+        .client
+        .trusted_device(HeadUse::NewAuthorization, &account.client.call_device_identity(peer)?)?;
     if !targets.iter().any(|t| t.device == peer.device_id)
         || !record["signing_public_key"]
             .as_str()

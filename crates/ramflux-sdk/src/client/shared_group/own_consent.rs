@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account decisions replicate inside current-root authenticated own-device packets.
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_crypto::{RootQualifiedDeviceRef, VerifiedGroupState};
 use ramflux_protocol::{GroupStateActor, GroupStateSnapshot};
@@ -179,11 +180,12 @@ impl RamfluxClient {
         let own = self.owned_device_identity()?;
         let actor = &consent.actor.identity;
         let now = now_unix_timestamp();
-        self.require_cached_root_authority(source)?;
+        self.require_cached_root_authority(HeadUse::NewAuthorization, source)?;
         if source.root_commitment() != own.root_commitment()
             || actor.root_commitment != source.root_commitment()
             || actor.device_id != source.device_id()
-            || self.trusted_device(source)?["signing_public_key"] != actor.signing_public_key
+            || self.trusted_device(HeadUse::NewAuthorization, source)?["signing_public_key"]
+                != actor.signing_public_key
             || consent.schema != DOMAIN
             || consent.issued_at < 0
             || consent.issued_at > now.saturating_add(300)

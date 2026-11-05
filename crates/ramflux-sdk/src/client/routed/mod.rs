@@ -3,6 +3,7 @@
 
 //! Envelope v2: private authenticated routing and device-pair session selection.
 
+use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 mod federated_async;
@@ -264,11 +265,11 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         local: &str,
     ) -> Result<Opened, SdkError> {
-        self.authenticated_envelope_sender(entry)?;
+        self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         let envelope = decode(&entry.envelope)?;
         let (mut session, bundle) = self.recv_pair_session(
             &self.local_device_identity(local)?,
-            &self.authenticated_device_identity(entry)?,
+            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
             &entry.envelope.envelope_id,
             &envelope,
         )?;
@@ -312,7 +313,7 @@ impl RamfluxClient {
             session,
             bundle_hash: bundle,
             local_device: self.local_device_identity(local)?,
-            remote_device: self.authenticated_device_identity(entry)?,
+            remote_device: self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
         })
     }
     #[cfg(test)]

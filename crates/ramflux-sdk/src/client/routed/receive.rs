@@ -9,6 +9,7 @@ use super::{
     SdkGroupSenderKeyDistributionEnvelope, associated_data, decode, invalid,
 };
 use crate::client::dm::{decode_dm_attachment_body, franking_report_metadata_for_delivery};
+use crate::client::identity_authority::HeadUse;
 
 pub(crate) struct Delivery {
     pub routing: Option<Routing>,
@@ -246,7 +247,7 @@ impl RamfluxClient {
         let history = prepared.as_mut().and_then(|prepared| prepared.history.take());
         let (native_prepared, directory) =
             self.prepare_routed_authority(engine, entry, prepared).await?;
-        let commit = self.authenticated_committed_key(entry)?;
+        let commit = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
         if let Some(delivery) = self.committed_routed_delivery(&commit, entry)? {
             return Ok(delivery);
         }
@@ -281,7 +282,7 @@ impl RamfluxClient {
         let mut consumed_slots = Vec::new();
         let mut references = Vec::new();
         let accepted = self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none();
-        let source = self.authenticated_device_identity(entry)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let held = opened.routing.kind == Kind::Direct
             && self.pending_contact_root(source.root_commitment())?
             && !self.accepted_contact_source(
@@ -383,7 +384,9 @@ impl RamfluxClient {
             prepared.map(|value| Ok(value.manifest)),
         )
         .await?;
-        self.upgrade_replay_identity(&self.authenticated_device_identity(entry)?)?;
+        self.upgrade_replay_identity(
+            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
+        )?;
         Ok((native_prepared, directory))
     }
 
@@ -694,7 +697,7 @@ impl RamfluxClient {
                     key,
                 )?;
             }
-            let source=self.authenticated_device_identity(entry)?;
+            let source=self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
             if opened.routing.kind == Kind::Direct
                 && self.friend_rejection_reason(source.root_commitment())?.is_none()
                 && !self.pending_contact_root(source.root_commitment())?

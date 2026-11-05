@@ -5,6 +5,7 @@
 use super::{
     Deserialize, GatewayInboxEntry, Kind, RamfluxClient, Routing, SdkError, Serialize, invalid,
 };
+use crate::client::identity_authority::HeadUse;
 #[derive(Serialize, Deserialize)]
 pub(super) struct Committed {
     pub routing: Routing,
@@ -64,9 +65,13 @@ impl RamfluxClient {
 
     pub(crate) fn authenticated_committed_key(
         &self,
+        purpose: HeadUse,
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {
-        committed_key(&self.authenticated_device_identity(entry)?, &entry.envelope.envelope_id)
+        committed_key(
+            &self.authenticated_device_identity(purpose, entry)?,
+            &entry.envelope.envelope_id,
+        )
     }
     /// Unauthenticated inputs have no device identity and cannot reserve a device's retry bucket.
     /// They use an opaque, globally bounded quarantine key until manifest discovery authenticates them.
@@ -74,7 +79,7 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {
-        if let Ok(key) = self.authenticated_committed_key(entry) {
+        if let Ok(key) = self.authenticated_committed_key(HeadUse::NewAuthorization, entry) {
             return Ok(key);
         }
         Ok(format!(
@@ -107,7 +112,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
-        let key = self.authenticated_committed_key(entry)?;
+        let key = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
         db.write_transaction(|| {
             if let Some(mut receipt) = db.load_actor_state::<Committed>(&key)? {
                 if receipt.projected {
@@ -131,11 +136,12 @@ impl RamfluxClient {
     }
     pub(crate) fn committed_routing(
         &self,
+        purpose: HeadUse,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<Routing>, SdkError> {
         Ok(self
             .account_db()?
-            .load_actor_state::<Committed>(&self.authenticated_committed_key(entry)?)?
+            .load_actor_state::<Committed>(&self.authenticated_committed_key(purpose, entry)?)?
             .map(|receipt| receipt.routing))
     }
 
@@ -193,7 +199,7 @@ impl RamfluxClient {
         route: &Routing,
     ) -> Result<String, SdkError> {
         if route.kind == Kind::GroupMessage {
-            let source = self.authenticated_device_identity(entry)?;
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
             let logical = if let Some(logical) = route.group_message_id.as_deref() {
                 logical
             } else {
@@ -228,7 +234,8 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let scoped = format!(
             "routed:{}",
-            self.authenticated_committed_key(entry)?.trim_start_matches("routed/committed/")
+            self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
+                .trim_start_matches("routed/committed/")
         );
         let key = format!("routed/projection/{scoped}");
         if let Some(id) = db.load_actor_state::<String>(&key)? {
@@ -260,12 +267,13 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let scoped = format!(
             "routed:{}",
-            self.authenticated_committed_key(entry)?.trim_start_matches("routed/committed/")
+            self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
+                .trim_start_matches("routed/committed/")
         );
         db.persist_actor_state(&format!("routed/projection/{scoped}"), &id)?;
         db.persist_actor_state(
             &format!("routed/message-owner/{id}"),
-            &self.authenticated_device_identity(entry)?.storage_key(),
+            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?.storage_key(),
         )?;
         Ok(())
     }
@@ -276,7 +284,7 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<(String, String)>, SdkError> {
-        if let Some(route) = self.committed_routing(entry)? {
+        if let Some(route) = self.committed_routing(HeadUse::NewAuthorization, entry)? {
             return Ok((route.kind == super::Kind::Direct)
                 .then_some((route.conversation_id, route.message_id)));
         }
@@ -290,6 +298,9 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {
-        Ok(format!("legacy/committed-root/{}", self.authenticated_committed_key(entry)?))
+        Ok(format!(
+            "legacy/committed-root/{}",
+            self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
+        ))
     }
 }

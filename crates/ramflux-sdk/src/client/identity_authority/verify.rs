@@ -3,6 +3,7 @@
 
 //! Exact bundle-to-branch-to-root and signed active-set verification.
 use super::invalid;
+use crate::client::identity_authority::HeadUse;
 use crate::{SdkError, prekey::SdkDeviceManifestResponse};
 use ramflux_protocol::{DeviceKeyBinding, DeviceSetStatus};
 pub(crate) fn verify_manifest(
@@ -167,7 +168,7 @@ impl crate::RamfluxClient {
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), SdkError> {
         // Registration-proof expiry cannot retire a device authorized by the latest signed set.
-        self.require_cached_root_authority(identity)
+        self.require_cached_root_authority(HeadUse::NewAuthorization, identity)
     }
     pub(crate) fn verify_root_bound_prekey(
         &self,
@@ -201,7 +202,7 @@ impl crate::RamfluxClient {
         }
         let remote = identity.storage_key();
         let record = {
-            self.require_cached_root_authority(identity)?;
+            self.require_cached_root_authority(HeadUse::NewAuthorization, identity)?;
             self.account_db()?
                 .client_record("device", remote)?
                 .ok_or_else(|| invalid("recipient missing"))?

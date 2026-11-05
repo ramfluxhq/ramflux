@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Monotonic current-head observations are process-local and never restored with account data.
+use crate::client::identity_authority::HeadUse;
 use crate::{RamfluxClient, SdkError, prekey::SdkDeviceManifestResponse};
 use std::{
     collections::BTreeMap,
@@ -70,11 +71,14 @@ impl RamfluxClient {
     }
     pub(crate) fn require_fresh_custody_head(
         &self,
+        purpose: HeadUse,
         root: &str,
         record: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
     ) -> Result<(), SdkError> {
         let hash = ramflux_protocol::custody::object_hash(record)?;
-        if self.native_head_freshness.borrow().contains(root, &hash, Instant::now()) {
+        if purpose == HeadUse::HistoricalRead
+            || self.native_head_freshness.borrow().contains(root, &hash, Instant::now())
+        {
             Ok(())
         } else {
             Err(SdkError::InboundPending(
@@ -98,13 +102,27 @@ mod tests {
         let root = &remote.manifest.principal_commitment;
         local.client.persist_fetched_identity_directory_at(&remote.manifest, old)?;
         assert!(
-            local.client.require_fresh_custody_head(root, &native.publication.record).is_err(),
+            local
+                .client
+                .require_fresh_custody_head(
+                    HeadUse::NewAuthorization,
+                    root,
+                    &native.publication.record
+                )
+                .is_err(),
             "queued public evidence cannot renew the directory permission clock"
         );
         local.client.persist_fetched_identity_directory(&remote.manifest)?;
         local.client.persist_fetched_identity_directory_at(&remote.manifest, old)?;
         assert!(
-            local.client.require_fresh_custody_head(root, &native.publication.record).is_ok(),
+            local
+                .client
+                .require_fresh_custody_head(
+                    HeadUse::NewAuthorization,
+                    root,
+                    &native.publication.record
+                )
+                .is_ok(),
             "an older queued copy cannot overwrite a newer network observation"
         );
         Ok(())
