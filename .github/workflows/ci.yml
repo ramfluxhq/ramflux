@@ -36,6 +36,32 @@ jobs:
           python3 -B scripts/test_device_identity.py
           python3 -B scripts/check-device-identity.py
 
+  compose-preflight:
+    name: Compose input preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Podman Compose renderer
+        run: |
+          python3 -m venv "$RUNNER_TEMP/compose-preflight"
+          "$RUNNER_TEMP/compose-preflight/bin/python" -m pip install --disable-pip-version-check 'podman-compose==1.3.0'
+
+      - name: Config-only preflight regressions
+        env:
+          DEMO_TEST_PODMAN_COMPOSE: ${{ runner.temp }}/compose-preflight/bin/podman-compose
+          COMPOSE_TEST_DOCKER_COMPOSE: docker compose
+        # These tests render config only; no containers are started.
+        run: |
+          "$DEMO_TEST_PODMAN_COMPOSE" --version
+          docker compose version
+          "$RUNNER_TEMP/compose-preflight/bin/python" -B -m unittest discover \
+            -s deploy/scripts/tests -p test_compose_preflight.py -v
+
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
