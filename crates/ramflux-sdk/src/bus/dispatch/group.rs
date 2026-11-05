@@ -1397,7 +1397,9 @@ pub(crate) async fn dispatch_group_receive_request(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let mut body: LocalBusGroupReceiveRequest = serde_json::from_value(request.body.clone())?;
-    super::super::sync_driver::run(account).await?;
+    if !crate::bus::account_runtime::head_refresh::take_receive_preparation() {
+        super::super::sync_driver::run(account).await?;
+    }
     if !crate::bus::couriers::head_refresh::inbound::blocked_roots(account, &body.group_id)?
         .is_empty()
     {

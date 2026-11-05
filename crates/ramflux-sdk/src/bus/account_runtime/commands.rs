@@ -129,7 +129,13 @@ impl AccountRuntime {
         }
         Ok(())
     }
-    pub(super) async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
+    pub(super) async fn apply(&mut self, command: AccountCommand) -> Result<bool, SdkError> {
+        super::head_refresh::RECEIVE_PREPARED
+            .scope(std::cell::Cell::new(false), self.apply_command(command))
+            .await
+    }
+
+    async fn apply_command(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
         self.refresh_networking_expiry().await;
         if command.admission.as_ref().is_some_and(|admission| !admission.claim()) {
             return Ok(false);
