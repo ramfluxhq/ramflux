@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+pub mod attachment;
+pub use attachment::*;
 mod legacy;
 pub use legacy::*;
 mod chunk;

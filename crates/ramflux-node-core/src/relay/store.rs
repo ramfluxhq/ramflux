@@ -19,6 +19,16 @@ pub struct RelayRedbStore {
 }
 
 impl RelayRedbStore {
+    /// Opens dormant native attachment accounting on the existing relay database.
+    /// # Errors
+    /// Refuses invalid operator policy. No serving path is activated.
+    pub fn attachment_ledger(
+        &self,
+        policy: super::AttachmentPolicy,
+    ) -> Result<super::AttachmentLedger, super::AttachmentLedgerError> {
+        super::AttachmentLedger::new(std::sync::Arc::clone(&self.db), policy)
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
@@ -45,6 +55,7 @@ impl RelayRedbStore {
                 .open_table(RELAY_TOMBSTONE_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
+        super::attachment::install(&write_txn)?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let commit_writer = RelayCommitWriter::start(std::sync::Arc::clone(&db))?;
         Ok(Self { db, commit_writer })
