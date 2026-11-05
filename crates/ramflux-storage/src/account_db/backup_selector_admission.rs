@@ -172,6 +172,9 @@ pub(super) mod writer;
 mod graph_writer_tests;
 
 #[cfg(test)]
+mod review_regression_tests;
+
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

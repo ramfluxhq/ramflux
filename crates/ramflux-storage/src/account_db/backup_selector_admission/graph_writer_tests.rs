@@ -14,7 +14,7 @@ fn admitted_graph_writer_excludes_unadmitted_reference_edges()
         for selector in ["rejected-alias", "accepted-alias"] {
             let message = format!("message-{selector}");
             live.send_direct_message("thread", &message, "peer", b"body")?;
-            let reference = json!({"object_id":"wire","manifest_hash":"manifest","slot":selector});
+            let reference = json!({"object_id":"wire","manifest_hash":"manifest","slot":selector,"key_slot":{"object_id":"wire","slot_id":selector},"total_chunks":2});
             let hash = blake3_256_base64url(
                 "ramflux.attachment.reference.v1",
                 &ramflux_protocol::canonical_json_bytes(&reference)?,
@@ -31,7 +31,14 @@ fn admitted_graph_writer_excludes_unadmitted_reference_edges()
                     metadata: &json!({"message_id":message}),
                 },
             )?;
-            live.register_object_reference_actor(&hash, &format!("shared/{selector}"))?;
+            let slot = blake3_256_base64url(
+                "ramflux.received.slot.selector.v2",
+                &ramflux_protocol::canonical_json_bytes(&reference["key_slot"])?,
+            );
+            live.register_object_reference_actor(
+                &hash,
+                &format!("attachment/reference-by-slot/{slot}"),
+            )?;
             if selector == "accepted-alias" {
                 live.send_direct_message("thread", "deleted-owner", "peer", b"body")?;
                 live.register_object_reference(
@@ -77,11 +84,14 @@ CREATE TRIGGER graph_insert_observer AFTER INSERT ON object_retention_reference 
                     assert_eq!(db.query_row("SELECT count(*) FROM object_retention_reference WHERE selector=?1",[selector],|r|r.get::<_,u64>(0))?,count,"reference {selector}");
                     assert_eq!(db.query_row("SELECT count(*) FROM object_message_reference m JOIN object_retention_reference r USING(reference_hash) WHERE r.selector=?1",[selector],|r|r.get::<_,u64>(0))?,count,"owner {selector}");
                     assert_eq!(db.query_row("SELECT count(*) FROM message_copy_binding WHERE copy_id='object:'||?1",[selector],|r|r.get::<_,u64>(0))?,if selector == "wire" {2} else {count},"binding {selector}");
-                    assert_eq!(db.query_row("SELECT count(*) FROM message_footprint WHERE kind='revocation_selector' AND json_extract(locator,'$.selector')=?1",[selector],|r|r.get::<_,u64>(0))?,count,"footprint {selector}");
+                    assert_eq!(db.query_row("SELECT count(*) FROM message_footprint WHERE kind='revocation_selector' AND json_extract(locator,'$.selector')=?1",[selector],|r|r.get::<_,u64>(0))?,0,"modern registration never creates legacy footprint {selector}");
                 }
                 for (selector, count) in [("rejected-alias",0_u64),("accepted-alias",1)] {
-                    assert_eq!(db.query_row("SELECT count(*) FROM object_reference_actor WHERE state_kind='shared/'||?1",[selector],|r|r.get::<_,u64>(0))?,count,"reference actor {selector}");
-                    assert_eq!(db.query_row("SELECT count(*) FROM message_footprint WHERE kind='actor' AND locator='shared/'||?1",[selector],|r|r.get::<_,u64>(0))?,count,"actor footprint {selector}");
+                    let slot = blake3_256_base64url("ramflux.received.slot.selector.v2",
+                        &ramflux_protocol::canonical_json_bytes(&json!({"object_id":"wire","slot_id":selector}))?);
+                    let actor = format!("attachment/reference-by-slot/{slot}");
+                    assert_eq!(db.query_row("SELECT count(*) FROM object_reference_actor WHERE state_kind=?1",[&actor],|r|r.get::<_,u64>(0))?,count,"reference actor {selector}");
+                    assert_eq!(db.query_row("SELECT count(*) FROM message_footprint WHERE kind='actor' AND locator=?1",[&actor],|r|r.get::<_,u64>(0))?,count,"actor footprint {selector}");
                 }
                 assert_eq!(db.query_row("SELECT count(*) FROM object_retention_payload WHERE commitment=?1",[&commitment],|r|r.get::<_,u64>(0))?,1,"shared unfenced payload survives");
                 assert_eq!(db.query_row("SELECT owner_count FROM object_retention_payload WHERE commitment=?1",[&commitment],|r|r.get::<_,u64>(0))?,2,"only admitted owner edges are charged");

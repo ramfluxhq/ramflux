@@ -194,6 +194,10 @@ WHERE commitment IN (SELECT commitment FROM object_erasure_fence) ON CONFLICT DO
                 self.db.execute(&format!("DELETE FROM {table} WHERE rowid IN (SELECT row_id FROM backup_erased_copy WHERE database_name='main' AND table_name=?1)"),[table])?;
             }
         }
+        #[cfg(test)]
+        if candidate {
+            super::backup_selector_admission::writer::late_fence_checkpoint(&self.db)?;
+        }
         if modern {
             merge_graph(&self.db, candidate)?;
         }
