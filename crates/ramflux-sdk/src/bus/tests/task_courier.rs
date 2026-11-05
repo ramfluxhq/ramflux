@@ -188,7 +188,7 @@ fn runtime(
         shutdown,
         courier: Some(TaskCourier::start()),
         courier_events: Some(observations),
-        networking_expiry_pending: false,
+        networking_expiry_pending: None,
         networking_expiry_warned: false,
     };
     (runtime, sender, stop, observed)

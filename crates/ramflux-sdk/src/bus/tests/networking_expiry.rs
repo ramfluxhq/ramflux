@@ -18,6 +18,7 @@ struct Harness {
     observed: Rc<RefCell<Vec<LocalBusFrame>>>,
     reject: Rc<Cell<usize>>,
     failures: Rc<Cell<usize>>,
+    delay: Rc<Cell<Duration>>,
     _root: crate::custody::tests::Root,
 }
 
@@ -64,6 +65,8 @@ impl Harness {
         let observed = Rc::new(RefCell::new(Vec::new()));
         let reject = Rc::new(Cell::new(0_usize));
         let failures = Rc::new(Cell::new(0_usize));
+        let delay = Rc::new(Cell::new(Duration::ZERO));
+        let publish_delay = delay.clone();
         let (frames, remaining, failed) = (observed.clone(), reject.clone(), failures.clone());
         tokio::task::spawn_local(async move {
             while let Some(batch) = batches.recv().await {
@@ -75,6 +78,7 @@ impl Harness {
                     failed.set(failed.get() + 1);
                     continue;
                 }
+                tokio::time::sleep(publish_delay.get()).await;
                 let _ = batch.accepted.send(());
             }
         });
@@ -108,13 +112,13 @@ impl Harness {
             events,
             shutdown,
             courier: None,
-            networking_expiry_pending: false,
+            networking_expiry_pending: None,
             networking_expiry_warned: false,
             courier_events: None,
         };
         runtime.publish(&runtime.networking_expiry_request()).await?;
         observed.borrow_mut().clear();
-        Ok(Self { runtime, commands, stop, observed, reject, failures, _root: fixture.root })
+        Ok(Self { runtime, commands, stop, observed, reject, failures, delay, _root: fixture.root })
     }
 
     fn account(&self) -> TestResult<&LocalBusAccountState> {
@@ -361,7 +365,7 @@ async fn custody_expiry_publication_failure_warning_episode_resets_after_recover
             );
             h.runtime.refresh_networking_expiry().await;
             assert!(!h.runtime.networking_expiry_warned);
-            assert!(!h.runtime.networking_expiry_pending);
+            assert!(h.runtime.networking_expiry_pending.is_none());
             h.reject.set(1);
             h.account()?
                 .client
@@ -373,6 +377,103 @@ async fn custody_expiry_publication_failure_warning_episode_resets_after_recover
                 2,
                 "a new failure episode may warn after recovery"
             );
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn custody_expiry_retry_attributes_only_the_expiry_entry() -> TestResult {
+    LocalSet::new()
+        .run_until(Box::pin(async {
+            let mut h = Harness::new().await?;
+            h.reject.set(1);
+            tokio::time::advance(Duration::from_secs(300)).await;
+            h.runtime.refresh_networking_expiry().await;
+            assert_eq!(h.failures.get(), 1);
+            let expiry_sequence =
+                h.runtime.networking_expiry_pending.ok_or("expiry not retained")?;
+            let account = h.runtime.state.accounts.get_mut("expiry-runtime").ok_or("account")?;
+            super::super::native_account::record_networking_at(
+                account,
+                Some(&SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::Busy)),
+                crate::custody::network_now()?,
+            )?;
+            let busy_sequence = account
+                .client
+                .account_db()?
+                .pending_actor_state_sequence("account/networking")?
+                .ok_or("Busy entry")?;
+            assert_ne!(expiry_sequence, busy_sequence);
+            let request = LocalBusFrame::request(
+                "new-attempt",
+                Some("expiry-runtime".into()),
+                "account",
+                "account.status",
+                json!({}),
+            );
+            h.runtime.publish(&request).await?;
+            let frames = h.observed.borrow();
+            let expiry_id = format!("outbox_{expiry_sequence}");
+            let busy_id = format!("outbox_{busy_sequence}");
+            assert_eq!(
+                frames.iter().find(|f| f.frame_id == expiry_id).ok_or("expiry frame")?.request_id,
+                "networking-expiry"
+            );
+            assert_eq!(
+                frames.iter().find(|f| f.frame_id == busy_id).ok_or("Busy frame")?.request_id,
+                "new-attempt"
+            );
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn custody_expiry_successful_noop_resets_warning_latch() -> TestResult {
+    LocalSet::new()
+        .run_until(Box::pin(async {
+            let mut h = Harness::new().await?;
+            h.reject.set(1);
+            tokio::time::advance(Duration::from_secs(300)).await;
+            h.runtime.refresh_networking_expiry().await;
+            assert_eq!(h.failures.get(), 1);
+            assert!(h.runtime.networking_expiry_warned);
+            // Complete publication first, then let a no-op refresh observe recovery.
+            assert!(h.runtime.publish_networking_expiry().await?);
+            assert!(h.runtime.networking_expiry_warned);
+            assert!(!h.runtime.publish_networking_expiry().await?);
+            h.runtime.refresh_networking_expiry().await;
+            assert!(!h.runtime.networking_expiry_warned);
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn custody_expiry_tick_stays_within_sync_deadline() -> TestResult {
+    LocalSet::new()
+        .run_until(Box::pin(async {
+            let mut h = Harness::new().await?;
+            tokio::time::advance(Duration::from_secs(300)).await;
+            h.delay.set(Duration::from_secs(30));
+            let start = tokio::time::Instant::now();
+            let result = h.runtime.sync().await;
+            assert!(matches!(result, Err(SdkError::LocalBus(ref message))
+            if message == "background sync deadline exceeded"));
+            assert!(
+                tokio::time::Instant::now() - start
+                    <= Duration::from_secs(20) + Duration::from_millis(1),
+                "expiry publication escaped the sync deadline"
+            );
+            assert!(
+                h.runtime.networking_expiry_pending.is_some(),
+                "cancelled publish must remain retryable"
+            );
+            assert!(h.observed.borrow().iter().any(networking), "expiry publish must be reached");
+            h.delay.set(Duration::ZERO);
+            h.runtime.refresh_networking_expiry().await;
+            assert!(h.runtime.networking_expiry_pending.is_none());
             Ok(())
         }))
         .await

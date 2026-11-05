@@ -58,7 +58,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 shutdown,
                 courier: None,
                 courier_events: None,
-                networking_expiry_pending: false,
+                networking_expiry_pending: None,
                 networking_expiry_warned: false,
             };
             private_unlock(&mut runtime).await?;

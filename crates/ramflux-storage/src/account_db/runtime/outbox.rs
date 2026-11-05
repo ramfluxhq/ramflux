@@ -39,6 +39,17 @@ impl AccountDb {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Finds the newest unpublished change for one actor-state key.
+    /// # Errors
+    /// Returns an error when the outbox cannot be read.
+    pub fn pending_actor_state_sequence(&self, kind: &str) -> Result<Option<i64>, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT max(sequence) FROM runtime_outbox WHERE published=0 AND table_name='runtime_actor_state' AND json_extract(keys_json,'$.state_kind')=?1",
+            params![kind],
+            |row| row.get(0),
+        )?)
+    }
+
     /// # Errors
     /// Returns an error when an acknowledged outbox page cannot be marked published.
     pub fn mark_outbox_published(&self, sequence: i64) -> Result<(), StorageError> {
@@ -46,6 +57,40 @@ impl AccountDb {
             "UPDATE runtime_outbox SET published=1 WHERE published=0 AND sequence<=?1",
             params![sequence],
         )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_actor_sequence_selects_latest_matching_unpublished_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "rf-outbox-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let index = crate::AccountIndex::open(&root)?;
+        index.create_account("a", "root")?;
+        let db = AccountDb::open(&index, "a", &crate::AccountDbKey::derive("a", b"secret"))?;
+        assert_eq!(db.pending_actor_state_sequence("account/networking")?, None);
+        db.persist_actor_state("account/networking", &1)?;
+        let first = db.pending_actor_state_sequence("account/networking")?.ok_or("first")?;
+        db.persist_actor_state("account/networking", &2)?;
+        let second = db.pending_actor_state_sequence("account/networking")?.ok_or("second")?;
+        assert!(second > first);
+        db.persist_actor_state("account/other", &3)?;
+        assert_eq!(db.pending_actor_state_sequence("account/networking")?, Some(second));
+        db.mark_outbox_published(first)?;
+        assert_eq!(db.pending_actor_state_sequence("account/networking")?, Some(second));
+        db.mark_outbox_published(second)?;
+        assert_eq!(db.pending_actor_state_sequence("account/networking")?, None);
+        drop(db);
+        drop(index);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

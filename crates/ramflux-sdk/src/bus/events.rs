@@ -32,7 +32,7 @@ pub(super) async fn publish(
     client: &RamfluxClient,
     account_id: &str,
     request: &LocalBusFrame,
-    networking_expiry: Option<&LocalBusFrame>,
+    networking_expiry: Option<(i64, &LocalBusFrame)>,
     sender: &mpsc::Sender<EventBatch>,
 ) -> Result<(), SdkError> {
     client.expire_surface_pending()?;
@@ -54,10 +54,10 @@ pub(super) async fn publish(
             let projected = super::journal::project(client, &entry)?;
             db.journal_outbox(entry.sequence, &projected, now_unix_timestamp())?;
             // Expiry retries keep runtime correlation without changing command acknowledgements.
-            let attribution = if entry.table_name == "runtime_actor_state"
-                && entry.keys["state_kind"] == "account/networking"
+            let attribution = if let Some((_, expiry)) =
+                networking_expiry.filter(|(sequence, _)| *sequence == entry.sequence)
             {
-                networking_expiry.unwrap_or(request)
+                expiry
             } else {
                 request
             };

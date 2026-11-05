@@ -47,7 +47,7 @@ struct AccountRuntime {
     events: mpsc::Sender<EventBatch>,
     shutdown: watch::Receiver<bool>,
     courier: Option<super::task_courier::TaskCourier>,
-    networking_expiry_pending: bool,
+    networking_expiry_pending: Option<i64>,
     networking_expiry_warned: bool,
     transfers: uploads::Transfers,
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
@@ -117,7 +117,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         events,
         shutdown,
         courier: None,
-        networking_expiry_pending: false,
+        networking_expiry_pending: None,
         networking_expiry_warned: false,
         transfers: uploads::Transfers::start(),
         connection_sender,
@@ -157,8 +157,7 @@ impl AccountRuntime {
 
     async fn refresh_networking_expiry(&mut self) {
         match self.publish_networking_expiry().await {
-            Ok(true) => self.networking_expiry_warned = false,
-            Ok(false) => {}
+            Ok(_) => self.networking_expiry_warned = false,
             Err(error) => {
                 if !self.networking_expiry_warned {
                     tracing::warn!(account_id = %self.id,
@@ -174,14 +173,15 @@ impl AccountRuntime {
         if let Some(account) = self.state.accounts.get(&self.id)
             && super::networking_events::refresh_expired(account)?
         {
-            self.networking_expiry_pending = true;
+            self.networking_expiry_pending =
+                account.client.account_db()?.pending_actor_state_sequence("account/networking")?;
         }
-        if !self.networking_expiry_pending {
+        if self.networking_expiry_pending.is_none() {
             return Ok(false);
         }
         // Project expiry before another attempt can replace the actor-state snapshot.
         self.publish(&self.networking_expiry_request()).await?;
-        self.networking_expiry_pending = false;
+        self.networking_expiry_pending = None;
         Ok(true)
     }
 
@@ -373,6 +373,13 @@ impl AccountRuntime {
     }
 
     async fn sync(&mut self) -> Result<bool, SdkError> {
+        let deadline = tokio::time::Instant::now() + self.timeouts.sync;
+        tokio::time::timeout_at(deadline, self.sync_pass())
+            .await
+            .map_err(|_| SdkError::LocalBus("background sync deadline exceeded".into()))?
+    }
+
+    async fn sync_pass(&mut self) -> Result<bool, SdkError> {
         self.refresh_networking_expiry().await;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
