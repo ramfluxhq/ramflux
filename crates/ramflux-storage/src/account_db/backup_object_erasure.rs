@@ -346,9 +346,13 @@ fn scan_copies(
         {
             drop_copy = fenced(db, &object_erasure_commitment(root, wire, manifest))?;
         }
-        if table.ends_with("actor_state") && exists(db, database, "object_transport_actor")? {
-            let retired:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {database}.object_transport_actor a JOIN object_erasure_fence f USING(commitment) WHERE a.state_kind=?1)"),[&key],|r|r.get(0))?;
-            drop_copy |= retired;
+        // Bindings carry erasure authority even when the body uses an opaque JSON shape.
+        // Read each copy's own input bindings; the unioned fences can only restrict it.
+        for binding in ["object_payload_actor", "object_transport_actor"] {
+            if table.ends_with("actor_state") && exists(db, database, binding)? {
+                let retired:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {database}.{binding} a JOIN main.object_erasure_fence f USING(commitment) WHERE a.state_kind=?1)"),[&key],|r|r.get(0))?;
+                drop_copy |= retired;
+            }
         }
         if table.ends_with("actor_state") && exists(db, database, "object_reference_actor")? {
             let bound:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {database}.object_reference_actor WHERE state_kind=?1)"),[&key],|r|r.get(0))?;

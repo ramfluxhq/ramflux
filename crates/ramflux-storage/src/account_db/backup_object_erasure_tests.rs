@@ -257,3 +257,104 @@ fn backup_replacement_receipt_allows_new_identity_and_refuses_unapproved_reuse()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+// Regression: payload bindings must exclude copies even when the JSON uses wire_object_id.
+#[test]
+fn backup_payload_bound_wire_object_actor_is_not_preserved_after_erasure()
+-> Result<(), Box<dyn std::error::Error>> {
+    for candidate in [false, true] {
+        for incoming_fence in [false, true] {
+            for fenced in [false, true] {
+                let (root, db) = crate::tests::test_db(&format!(
+                    "preserve-payload-{candidate}-{incoming_fence}-{fenced}"
+                ))?;
+                let canary = "payload-preservation-secret-canary";
+                let actor = "attachment/upload/opaque";
+                db.persist_actor_state(
+                    actor,
+                    &json!({
+                        "wire_object_id":"victim", "manifest_hash":"vm", "content_key":canary
+                    }),
+                )?;
+                let incoming_path = root.join("incoming.db");
+                let incoming_key = db.write_backup_snapshot(&incoming_path)?.key;
+                let target_path = root.join("target.db");
+                let target_key = db.write_backup_snapshot(&target_path)?.key;
+                let incoming = BackupDatabase::open(&incoming_path, &incoming_key)?;
+                let mut target = BackupDatabase::open(&target_path, &target_key)?;
+                for copy in [&incoming, &target] {
+                    assert_eq!(
+                        copy.db.query_row(
+                            "SELECT count(*) FROM object_payload_actor WHERE state_kind=?1",
+                            [actor],
+                            |r| r.get::<_, i64>(0)
+                        )?,
+                        1
+                    );
+                    copy.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind));")?;
+                    copy.db.execute("INSERT INTO backup_archived_actor_state SELECT 'prior',state_kind,state_json FROM runtime_actor_state WHERE state_kind=?1", [actor])?;
+                }
+                if fenced {
+                    let authority = if incoming_fence { &incoming } else { &target };
+                    let principal: String = authority.db.query_row(
+                        "SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1",
+                        [], |r| r.get(0)
+                    )?;
+                    authority.db.execute(
+                        "INSERT INTO object_erasure_fence VALUES(?1)",
+                        [ramflux_crypto::object_erasure_commitment(&principal, "victim", "vm")],
+                    )?;
+                }
+                drop(incoming);
+                let source_before = std::fs::read(&incoming_path)?;
+                if candidate {
+                    target.merge_backup_candidate(&incoming_path, &incoming_key, || Ok(()))?;
+                } else {
+                    target.merge_backup(&incoming_path, &incoming_key, || Ok(()))?;
+                }
+                assert_eq!(std::fs::read(&incoming_path)?, source_before);
+                assert_payload_canary(&target.db, canary, fenced)?;
+                let copied_path = root.join("reopened.db");
+                let copied_key = AccountDbKey::generate()?;
+                target.copy_to(&copied_path, &copied_key)?;
+                let reopened = BackupDatabase::open(&copied_path, &copied_key)?;
+                assert_payload_canary(&reopened.db, canary, fenced)?;
+                drop(reopened);
+                drop(target);
+                drop(db);
+                std::fs::remove_dir_all(root)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn assert_payload_canary(
+    db: &rusqlite::Connection,
+    canary: &str,
+    erased: bool,
+) -> rusqlite::Result<()> {
+    let tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut found = false;
+    for table in tables {
+        let mut query = db.prepare(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))?;
+        let columns = query.column_count();
+        let mut rows = query.query([])?;
+        while let Some(row) = rows.next()? {
+            for column in 0..columns {
+                if let rusqlite::types::ValueRef::Text(bytes)
+                | rusqlite::types::ValueRef::Blob(bytes) = row.get_ref(column)?
+                    && bytes.windows(canary.len()).any(|part| part == canary.as_bytes())
+                {
+                    assert!(!erased, "erased payload copy remains in {table}");
+                    found = true;
+                }
+            }
+        }
+    }
+    assert_eq!(found, !erased, "live payload control must retain its copy");
+    Ok(())
+}
