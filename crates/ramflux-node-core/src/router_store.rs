@@ -43,6 +43,7 @@ pub(crate) mod incarnation_state;
 mod migration_barrier;
 pub mod publication;
 mod retention;
+pub mod sender_retry;
 mod submission_barrier;
 mod tuple_upgrade;
 pub use identity_registry::IdentityJournalDiscardReport;
@@ -73,6 +74,7 @@ pub struct RouterRedbStore {
         std::sync::RwLock<BTreeMap<String, ramflux_protocol::home_migration::Refusal>>,
     pub(crate) inactive_migration_targets:
         std::sync::RwLock<BTreeMap<String, ramflux_protocol::home_migration::Refusal>>,
+    sender_retries: Arc<sender_retry::Registry>,
     identity_registry_writes: std::sync::atomic::AtomicU64,
     custody_publication_writes: std::sync::atomic::AtomicU64,
     foreign_authority_writes: std::sync::atomic::AtomicU64,
@@ -146,6 +148,8 @@ enum RouterCommitOp {
 struct LocalDeliveryEnvelopeRecord {
     target_delivery_id: String,
     expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assignment: Option<sender_retry::SenderAssignment>,
 }
 
 impl RouterCommitWriter {
@@ -300,7 +304,13 @@ fn router_apply_commit_op(
         RouterCommitOp::Forwarded { replay_key, replay_expires_at, entry, root, retain_until } => {
             record_replay_tuple_in_txn(write_txn, replay_key, *replay_expires_at)?;
             record_inbox_entry_until_in_txn(write_txn, entry, *retain_until)?;
-            record_local_delivery_envelope_in_txn(write_txn, entry, *replay_expires_at, Some(root))
+            record_local_delivery_envelope_in_txn(
+                write_txn,
+                entry,
+                *replay_expires_at,
+                Some(root),
+            )?;
+            sender_retry::constrain_assignment(write_txn, root, entry, *retain_until)
         }
         RouterCommitOp::Submission { replay_key, replay_expires_at, entry, local_delivery } => {
             record_replay_tuple_in_txn(write_txn, replay_key, *replay_expires_at)?;
@@ -351,6 +361,19 @@ fn record_local_delivery_envelope_in_txn(
     let record = LocalDeliveryEnvelopeRecord {
         target_delivery_id: entry.target_delivery_id.clone(),
         expires_at,
+        assignment: incarnation::read_id(write_txn, &entry.target_delivery_id)?
+            .map(|id| {
+                let table =
+                    write_txn.open_table(ROUTER_INBOX_ENTRY_TABLE).map_err(incarnation::error)?;
+                let key = inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq);
+                let row =
+                    table.get(key.as_str()).map_err(incarnation::error)?.ok_or_else(|| {
+                        incarnation::error("sender index requires accepted inbox row")
+                    })?;
+                let (_, deadline) = expiry_index::decode_entry(row.value())?;
+                sender_retry::SenderAssignment::new(entry, id, deadline)
+            })
+            .transpose()?,
     };
     let bytes = serialize_value(&record)?;
     let mut table = write_txn
@@ -571,6 +594,7 @@ impl RouterRedbStore {
             inactive_migration_targets: std::sync::RwLock::new(
                 Self::load_inactive_migration_targets(&db)?,
             ),
+            sender_retries: Arc::default(),
             identity_registry_writes: std::sync::atomic::AtomicU64::new(0),
             custody_publication_writes: std::sync::atomic::AtomicU64::new(0),
             foreign_authority_writes: std::sync::atomic::AtomicU64::new(0),

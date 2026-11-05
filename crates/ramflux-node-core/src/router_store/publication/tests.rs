@@ -15,7 +15,7 @@ use tracing_subscriber::prelude::*;
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-pub(super) fn fixture(name: &str) -> PathBuf {
+pub(crate) fn fixture(name: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     std::env::temp_dir().join(format!(
         "publication-{name}-{}-{}",
@@ -24,7 +24,7 @@ pub(super) fn fixture(name: &str) -> PathBuf {
     ))
 }
 
-pub(super) fn entry(seq: u64) -> InboxEntry {
+pub(crate) fn entry(seq: u64) -> InboxEntry {
     let envelope = ramflux_protocol::Envelope {
         schema: ramflux_protocol::domain::ENVELOPE.into(),
         version: 1,
@@ -347,6 +347,7 @@ fn seed_capacity(store: &RouterRedbStore, core: &PublicationCore, id: &str) -> R
     let descriptors = (0..ABORTED_RANGE_CAPACITY - 1)
         .map(|index| {
             Arc::new(Descriptor {
+                retry_abort: OnceLock::new(),
                 key: Key { target: "target".into(), incarnation: id.into() },
                 seq: 3 + 2 * u64::try_from(index).expect("fixture index"),
                 state: AtomicU8::new(PersistenceState::DefiniteNonWrite as u8 | ABORT_CLAIM),

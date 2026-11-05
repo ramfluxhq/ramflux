@@ -341,6 +341,7 @@ struct RouterWalLocalDeliveryIndex {
     replay_key: String,
     target_delivery_id: String,
     replay_expires_at: i64,
+    assignment: Option<crate::router_store::sender_retry::SenderAssignment>,
 }
 
 impl RouterWalState {
@@ -409,6 +410,23 @@ impl RouterWalState {
                         replay_key: record.replay_key.clone(),
                         target_delivery_id: delivery.target_delivery_id.clone(),
                         replay_expires_at: record.replay_expires_at,
+                        assignment: record
+                            .entry
+                            .as_ref()
+                            .and_then(|entry| {
+                                self.incarnations.get(&entry.target_delivery_id).map(|id| {
+                                    crate::router_store::sender_retry::SenderAssignment::new(
+                                        entry,
+                                        id.clone(),
+                                        record.retain_until(),
+                                    )
+                                })
+                            })
+                            .transpose()
+                            .unwrap_or_else(|_| {
+                                crate::fatal_durability::fence(false);
+                                None
+                            }),
                     },
                 );
         }
@@ -593,6 +611,7 @@ impl RouterWalStore {
         entry: Option<&InboxEntry>,
         local_delivery: Option<RouterWalLocalDelivery>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
+        self.prepare_sender_identity(entry)?;
         self.writer.append(RouterWalPayload::Submission {
             replay_key: replay_key.to_owned(),
             replay_expires_at,
@@ -638,6 +657,7 @@ impl RouterWalStore {
         local_delivery: Option<RouterWalLocalDelivery>,
         lease: Option<crate::SubmissionLease>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
+        self.prepare_sender_identity(entry)?;
         self.writer
             .append_async(
                 RouterWalPayload::Submission {
@@ -650,6 +670,35 @@ impl RouterWalStore {
                 lease,
             )
             .await
+    }
+
+    fn prepare_sender_identity(&self, entry: Option<&InboxEntry>) -> Result<(), NodeCoreError> {
+        if let (Some(association), Some(entry)) = (&self.association, entry) {
+            let id = association.reserve(&entry.target_delivery_id)?;
+            self.state
+                .lock()
+                .map_err(identity::error)?
+                .incarnations
+                .insert(entry.target_delivery_id.clone(), id);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn sender_assignment(
+        &self,
+        root: &str,
+        envelope: &ramflux_protocol::Envelope,
+        now: i64,
+    ) -> Result<Option<crate::router_store::sender_retry::SenderAssignment>, NodeCoreError> {
+        let state = self.state.lock().map_err(identity::error)?;
+        Ok(state
+            .local_delivery_by_sender_envelope
+            .get(root)
+            .and_then(|entries| {
+                entries.get(&(envelope.envelope_id.clone(), envelope.target_delivery_id.clone()))
+            })
+            .filter(|index| index.replay_expires_at > now)
+            .and_then(|index| index.assignment.clone()))
     }
 
     /// # Errors

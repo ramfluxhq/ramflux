@@ -9,7 +9,7 @@
 pub(crate) mod operation;
 pub(crate) mod persistence;
 pub(crate) use operation::allocate as operation_allocate;
-pub use operation::{PublishedOperation, capture};
+pub use operation::{PublishedOperation, await_sender_assignment, capture};
 #[cfg(test)]
 mod lifetime_tests;
 #[cfg(test)]
@@ -17,7 +17,7 @@ mod provisional_tests;
 #[cfg(test)]
 mod resource_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
 mod view_tests;
 
@@ -95,6 +95,7 @@ struct Descriptor {
     created: Instant,
     warned: AtomicBool,
     resources: Vec<String>,
+    retry_abort: OnceLock<Vec<crate::router_store::sender_retry::RetryAbort>>,
 }
 
 #[derive(Default)]
@@ -175,6 +176,30 @@ impl std::fmt::Debug for PublicationCore {
 }
 
 impl PublicationCore {
+    /// Await the original accepted assignment, including a retry recovered above P.
+    pub async fn wait_sender_assignment(
+        &self,
+        assignment: &crate::router_store::sender_retry::SenderAssignment,
+    ) {
+        let key = Key {
+            target: assignment.target_delivery_id.clone(),
+            incarnation: assignment.inbox_incarnation_id.clone(),
+        };
+        loop {
+            let notified = self.shared.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if lock(&self.shared)
+                .inboxes
+                .get(&key)
+                .is_some_and(|inbox| inbox.published >= assignment.inbox_seq)
+                && crate::fatal_durability::check().is_ok()
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
     pub(crate) fn install_cleanup(&self, entry: EntryCleanup, replay: ReplayCleanup) {
         let _ = self.shared.entry_cleanup.set(entry);
         let _ = self.shared.replay_cleanup.set(replay);
@@ -325,6 +350,7 @@ impl PublicationCore {
                 registry.inboxes.get_mut(&key).ok_or(PublicationRefusal::IncarnationMismatch)?;
             let seq = inbox.allocated + 1;
             let descriptor = Arc::new(Descriptor {
+                retry_abort: OnceLock::new(),
                 key: key.clone(),
                 seq,
                 state: AtomicU8::new(PersistenceState::ReservedNoWrite as u8),
@@ -596,6 +622,11 @@ fn finish(shared: &Shared, descriptor: &Descriptor, aborted: bool) {
     drop(registry);
     drop(publication_gate);
     shared.changed.notify_waiters();
+    if aborted && let Some(owners) = descriptor.retry_abort.get() {
+        for owner in owners {
+            owner.aborted();
+        }
+    }
 }
 
 fn release_resource(

@@ -48,15 +48,46 @@ pub(crate) fn submit_envelope_inner(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
     forward: AsyncForwardContext<'_>,
-    mut envelope: ramflux_protocol::Envelope,
+    envelope: ramflux_protocol::Envelope,
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    match prepare_submission(state, store, forward, envelope, total_started, origin)? {
+        PreparedSubmit::Complete(response) => Ok(*response),
+        PreparedSubmit::Waiting(waiter) => {
+            let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+            let assignment = runtime.block_on(waiter.resolved())?;
+            ramflux_node_core::publication::await_sender_assignment(
+                &store.publication_core()?,
+                &assignment,
+            )?;
+            Ok(sender_retry_response(&assignment))
+        }
+    }
+}
+
+fn complete_response(response: ramflux_node_core::EnvelopeSubmitResponse) -> PreparedSubmit {
+    PreparedSubmit::Complete(Box::new(response))
+}
+
+enum PreparedSubmit {
+    Complete(Box<ramflux_node_core::EnvelopeSubmitResponse>),
+    Waiting(ramflux_node_core::sender_retry::RetryWaiter),
+}
+
+fn prepare_submission(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    forward: AsyncForwardContext<'_>,
+    mut envelope: ramflux_protocol::Envelope,
+    total_started: Instant,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+) -> anyhow::Result<PreparedSubmit> {
     record_decoded(&envelope);
     let (source, mut source_lease) = match authenticate_submission(state, store, &envelope, origin)?
     {
         SourceAdmission::Admitted(source, lease) => (source, lease),
-        SourceAdmission::Refused(response) => return Ok(*response),
+        SourceAdmission::Refused(response) => return Ok(complete_response(*response)),
     };
     let submission = match store.acquire_submission(&envelope.target_delivery_id) {
         Ok(mut lease) => {
@@ -70,15 +101,22 @@ pub(crate) fn submit_envelope_inner(
         )) if forward.client.is_some() => {
             let preparation =
                 committed_preparation(state, store, &source, envelope, forward.timeout);
-            return Ok(submit_response_from_outcome(
+            return Ok(complete_response(submit_response_from_outcome(
                 state,
                 complete_sync_forward(state, forward, preparation)?,
-            ));
+            )));
         }
-        Err(error) => return submission_refusal(state, store, &envelope, error),
+        Err(error) => {
+            return submission_refusal(state, store, &envelope, error).map(complete_response);
+        }
     };
+    let retry_owner = match prepare_sender_retry(store, &source, &envelope)? {
+        RetryPreparation::Owner(owner) => owner,
+        RetryPreparation::Return(response) => return Ok(response),
+    };
+    retry_owner.bind(&envelope.target_delivery_id)?;
     if let Err(error) = state.prepare_publication_target(store, &envelope.target_delivery_id) {
-        return submission_refusal(state, store, &envelope, error);
+        return submission_refusal(state, store, &envelope, error).map(complete_response);
     }
     state.refresh_registered_envelope_authority(&mut envelope)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
@@ -98,7 +136,7 @@ pub(crate) fn submit_envelope_inner(
         replay_key: &replay_key,
         now_unix_seconds,
     })? {
-        return Ok(response);
+        return Ok(complete_response(response));
     }
     let outcome = if forward.client.is_some() {
         let preparation = state.prepare_envelope_with_home_node_forward_at(
@@ -115,21 +153,19 @@ pub(crate) fn submit_envelope_inner(
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
     let save_started = Instant::now();
     let persistent_entry = persistent_entry_from_outcome(&outcome);
-    if should_persist_submission(&outcome)
-        && let Err(error) = store.record_leased_submission(
-            &replay_key,
-            replay_expires_at,
-            persistent_entry.as_ref(),
-            Some(&sender_root_commitment),
-            Some(submission),
-        )
-    {
-        tracing::error!(
-            error = %error,
-            replay_key = %replay_key,
-            "router submit persistence failed after in-memory accept; aborting to avoid state fork"
-        );
-        std::process::abort();
+    persist_submission_outcome(
+        store,
+        &replay_key,
+        replay_expires_at,
+        &sender_root_commitment,
+        submission,
+        (&outcome, persistent_entry.as_ref()),
+    );
+    if let Some(entry) = &persistent_entry {
+        let assignment = store
+            .sender_assignment(&sender_root_commitment, &entry.envelope, now_unix_seconds)?
+            .ok_or_else(|| anyhow::anyhow!("accepted sender index missing"))?;
+        retry_owner.accepted(assignment);
     }
     ramflux_node_core::record_router_submit_completed();
     ramflux_node_core::record_router_submit_save_us(elapsed_us(save_started));
@@ -143,7 +179,7 @@ pub(crate) fn submit_envelope_inner(
     );
     ramflux_node_core::record_router_submit_response_us(elapsed_us(response_started));
     ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));
-    Ok(response)
+    Ok(complete_response(response))
 }
 
 enum SourceAdmission {
@@ -250,6 +286,7 @@ pub(crate) async fn submit_envelope_async(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    let publication = store.publication_core()?;
     let state = std::sync::Arc::clone(state);
     let store = std::sync::Arc::clone(store);
     let client = forward.client.cloned();
@@ -261,7 +298,7 @@ pub(crate) async fn submit_envelope_async(
         #[cfg(test)]
         let _clock = TestClock(SUBMISSION_TIME.replace(fixture_clock));
         ramflux_node_core::publication::capture(|| {
-            submit_envelope_inner(
+            prepare_submission(
                 &state,
                 &store,
                 AsyncForwardContext { client: client.as_ref(), semaphore: &semaphore, timeout },
@@ -272,7 +309,14 @@ pub(crate) async fn submit_envelope_async(
         })
     })
     .await??;
-    prepared.published().await
+    match prepared.published().await? {
+        PreparedSubmit::Complete(response) => Ok(*response),
+        PreparedSubmit::Waiting(waiter) => {
+            let assignment = waiter.resolved().await?;
+            publication.wait_sender_assignment(&assignment).await;
+            Ok(sender_retry_response(&assignment))
+        }
+    }
 }
 
 fn record_decoded(envelope: &ramflux_protocol::Envelope) {
@@ -791,4 +835,78 @@ fn publication_reason(reason: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn sender_retry_response(
+    assignment: &ramflux_node_core::sender_retry::SenderAssignment,
+) -> ramflux_node_core::EnvelopeSubmitResponse {
+    ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
+        outcome: "offline_queued".into(),
+        target_delivery_id: assignment.target_delivery_id.clone(),
+        inbox_seq: Some(assignment.inbox_seq),
+        cursor: None,
+        nack: None,
+    }
+}
+
+fn persist_submission_outcome(
+    store: &ramflux_node_core::RouterRedbStore,
+    replay_key: &str,
+    replay_expires_at: i64,
+    root: &str,
+    lease: ramflux_node_core::SubmissionLease,
+    (outcome, entry): (
+        &ramflux_node_core::RouterSubmitOutcome,
+        Option<&ramflux_node_core::InboxEntry>,
+    ),
+) {
+    if should_persist_submission(outcome)
+        && let Err(error) = store.record_leased_submission(
+            replay_key,
+            replay_expires_at,
+            entry,
+            Some(root),
+            Some(lease),
+        )
+    {
+        tracing::error!(
+            error = %error,
+            replay_key = %replay_key,
+            "router submit persistence failed after in-memory accept; aborting to avoid state fork"
+        );
+        std::process::abort();
+    }
+}
+
+enum RetryPreparation {
+    Owner(ramflux_node_core::sender_retry::RetryOwner),
+    Return(PreparedSubmit),
+}
+fn prepare_sender_retry(
+    store: &ramflux_node_core::RouterRedbStore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: &ramflux_protocol::Envelope,
+) -> anyhow::Result<RetryPreparation> {
+    Ok(
+        match store.admit_sender_retry(
+            source,
+            envelope,
+            i64::try_from(submission_now()).unwrap_or(i64::MAX),
+        )? {
+            ramflux_node_core::sender_retry::RetryAdmission::Owner(owner) => {
+                RetryPreparation::Owner(owner)
+            }
+            ramflux_node_core::sender_retry::RetryAdmission::Waiting(waiter) => {
+                RetryPreparation::Return(PreparedSubmit::Waiting(waiter))
+            }
+            ramflux_node_core::sender_retry::RetryAdmission::Accepted(assignment) => {
+                ramflux_node_core::publication::await_sender_assignment(
+                    &store.publication_core()?,
+                    &assignment,
+                )?;
+                RetryPreparation::Return(complete_response(sender_retry_response(&assignment)))
+            }
+        },
+    )
 }

@@ -118,6 +118,7 @@ mod tests {
             table.insert(
                 "s:4:rootid",
                 serde_json::to_vec(&LocalDeliveryEnvelopeRecord {
+                    assignment: None,
                     target_delivery_id: "target".into(),
                     expires_at: 200,
                 })?
@@ -161,6 +162,7 @@ mod tests {
             txn.open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)?.insert(
                 key.as_str(),
                 serde_json::to_vec(&LocalDeliveryEnvelopeRecord {
+                    assignment: None,
                     target_delivery_id: "target".into(),
                     expires_at: 200,
                 })?
