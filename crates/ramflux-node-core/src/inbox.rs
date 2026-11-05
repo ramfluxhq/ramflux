@@ -233,6 +233,10 @@ impl OpaqueDeviceInbox {
         views: &crate::router_store::publication::PublishedViews,
     ) {
         for (target, (id, limit, aborted)) in views {
+            let Some(id) = id else {
+                self.remove_target(target);
+                continue;
+            };
             self.incarnations.insert(target.clone(), id.clone());
             self.aborted_ranges.insert(target.clone(), aborted.clone());
             if let Some(entries) = self.pending.get_mut(target) {

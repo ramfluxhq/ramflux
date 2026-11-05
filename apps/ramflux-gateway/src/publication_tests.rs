@@ -11,6 +11,7 @@ async fn durable_view_publication() -> Result<(), Box<dyn std::error::Error>> {
         let root = crate::clients::tests::temp_cert_root(&format!("published-push-{mode}"))?;
         let store = Arc::new(publication::open_durability_fixture(&root, mode)?);
         let router = Arc::new(RouterCore::new());
+        store.initialize_inbox("alice-target")?;
         router.prepare_publication_target(&store, "alice-target")?;
         let id =
             store.inbox_status("alice-target")?.0.ok_or_else(|| anyhow::anyhow!("identity"))?;

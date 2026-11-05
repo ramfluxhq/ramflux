@@ -10,7 +10,7 @@ use crate::{RouterCore, RouterRedbStore, RouterSubmitOutcome};
 use std::sync::mpsc;
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-fn source() -> ramflux_crypto::RootQualifiedDeviceRef {
+pub(super) fn source() -> ramflux_crypto::RootQualifiedDeviceRef {
     let root = ramflux_crypto::create_identity_root("sender", [0x91; 32]);
     let branch = ramflux_crypto::create_device_branch(
         "sender",
@@ -20,7 +20,7 @@ fn source() -> ramflux_crypto::RootQualifiedDeviceRef {
     );
     ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch).expect("source")
 }
-fn submit(
+pub(super) fn submit(
     router: &RouterCore,
     store: &RouterRedbStore,
     seq: u64,
@@ -71,6 +71,7 @@ fn ordering(abort: bool) -> Result {
             let root = fixture(&format!("view-{mode}-{abort}"));
             let store = Arc::new(test_store(&root, mode, 1024 * 1024)?);
             let router = Arc::new(RouterCore::new());
+            store.initialize_inbox("target")?;
             router.prepare_publication_target(&store, "target")?;
             if online {
                 install_online(&router)?;
