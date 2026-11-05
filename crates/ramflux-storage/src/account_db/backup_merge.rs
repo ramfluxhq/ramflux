@@ -31,6 +31,9 @@ struct RowSelection<'a> {
     filter: &'a str,
 }
 fn skip_merge_table(table: &str) -> bool {
+    if super::backup_selector_admission::is_scratch(table) {
+        return true;
+    }
     matches!(
         table,
         "account_erasure_generation"
@@ -147,6 +150,35 @@ impl BackupDatabase {
         mode: BackupMergeMode<'_>,
         mut progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
+        self.merge_backup_pipeline(path, key, (mode, false), &mut progress, |_| Ok(()))
+    }
+    /// Runs the candidate restore pipeline in a private generation.
+    /// # Errors
+    /// Refuses malformed authenticated graphs before any union or import.
+    #[doc(hidden)]
+    pub fn merge_backup_candidate(
+        &mut self,
+        path: &Path,
+        key: &AccountDbKey,
+        mut progress: impl FnMut() -> Result<(), StorageError>,
+    ) -> Result<BackupMergeReport, StorageError> {
+        self.merge_backup_pipeline(
+            path,
+            key,
+            (BackupMergeMode::FullAccount(None), true),
+            &mut progress,
+            |_| Ok(()),
+        )
+    }
+    pub(super) fn merge_backup_pipeline(
+        &mut self,
+        path: &Path,
+        key: &AccountDbKey,
+        selection: (BackupMergeMode<'_>, bool),
+        progress: &mut impl FnMut() -> Result<(), StorageError>,
+        after_capture: impl FnOnce(&rusqlite::Connection) -> Result<(), StorageError>,
+    ) -> Result<BackupMergeReport, StorageError> {
+        let (mode, candidate) = selection;
         let native_data_only = matches!(mode, BackupMergeMode::NativeDataOnly);
         let local = match mode {
             BackupMergeMode::FullAccount(local) => local,
@@ -157,7 +189,11 @@ impl BackupDatabase {
         let result = (|| {
             let tables = self.incoming_tables()?;
             self.begin_message_merge()?;
-            self.merge_object_erasure(&mut progress)?;
+            if candidate {
+                super::backup_selector_admission::prepare(&self.db)?;
+                after_capture(&self.db)?;
+            }
+            self.merge_object_erasure(progress)?;
             let legacy_verifications = self.begin_legacy_verification_import(native_data_only)?;
             let shared_groups = self.select_backup_shared_groups(mode)?;
             // A restored generation starts fresh handshakes, never archived reservations.
@@ -169,7 +205,7 @@ impl BackupDatabase {
             for table in tables {
                 progress()?;
                 if table == "object_index" {
-                    self.merge_objects(&mut report, &mut progress)?;
+                    self.merge_objects(&mut report, progress)?;
                     continue;
                 }
                 if skip_merge_table(&table)
@@ -251,6 +287,7 @@ impl BackupDatabase {
     fn finish_merge(&self) -> Result<(), StorageError> {
         self.db.execute_batch("UPDATE direct_message_projection SET is_own=1 WHERE deleted=1 AND EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1); UPDATE direct_message_projection SET is_own=CASE WHEN is_own=1 OR EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1) OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND direct_message_projection.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END,sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DELETE FROM runtime_message_content WHERE message_id IN (SELECT message_id FROM direct_message_projection WHERE deleted=1); UPDATE direct_message_projection SET deleted=1 WHERE deleted=1; ")?;
         self.remove_deleted_message_origins()?;
+        super::backup_selector_admission::drop_scratch(&self.db)?;
         self.db.execute_batch("DROP TABLE backup_local_message_own; DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; DROP TABLE backup_local_consent; DROP TABLE backup_source_consent; DROP TABLE backup_local_link_consent; DROP TABLE backup_source_link_consent; COMMIT;")?;
         Ok(())
     }
