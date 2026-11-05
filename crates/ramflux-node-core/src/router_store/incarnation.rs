@@ -227,3 +227,21 @@ pub(crate) fn test_store(
     }
     Ok(store)
 }
+
+impl super::RouterRedbStore {
+    /// Persist a capable ACK only if its captured incarnation is still current.
+    /// # Errors
+    /// Returns `incarnation_mismatch` before any mutation for stale or unknown inboxes.
+    pub fn record_ack_for_incarnation(
+        &self,
+        cursor: &CursorAckState,
+        envelope_id: &str,
+        incarnation: &str,
+    ) -> Result<(), NodeCoreError> {
+        let lease = self.acquire_acknowledgement(&cursor.target_delivery_id)?;
+        if self.inbox_status(&cursor.target_delivery_id)?.0.as_deref() != Some(incarnation) {
+            return Err(error("incarnation_mismatch"));
+        }
+        self.record_leased_ack(cursor, envelope_id, lease)
+    }
+}

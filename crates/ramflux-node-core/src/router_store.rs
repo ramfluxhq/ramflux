@@ -495,6 +495,7 @@ impl RouterRedbStore {
         )?;
         identity_registry::replay(&db, &mut legacy_registry)?;
         identity_registry::initialize_budgets(&db, &legacy_registry)?;
+        crate::router_wal::identity::maintenance::resume(&db, path)?;
         let commit_writer = if router_group_commit_enabled() {
             Some(RouterCommitWriter::start(Arc::clone(&db), path.to_path_buf())?)
         } else {
@@ -1873,7 +1874,7 @@ fn router_group_commit_enabled() -> bool {
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
-fn router_wal_enabled() -> bool {
+pub(crate) fn router_wal_enabled() -> bool {
     crate::environment::var(ROUTER_WAL_ENABLED_ENV).map_or(true, |value| {
         let trimmed = value.trim();
         !(trimmed == "0"
@@ -1883,7 +1884,7 @@ fn router_wal_enabled() -> bool {
     })
 }
 
-fn router_wal_root_for_redb_path(redb_path: &Path) -> PathBuf {
+pub(crate) fn router_wal_root_for_redb_path(redb_path: &Path) -> PathBuf {
     if let Ok(path) = crate::environment::var(ROUTER_WAL_DIR_ENV)
         && !path.trim().is_empty()
     {

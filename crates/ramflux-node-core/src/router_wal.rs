@@ -5,9 +5,11 @@ use crate::{InboxEntry, NodeCoreError, durability_io};
 
 #[cfg(test)]
 mod durability_tests;
-mod identity;
+pub(crate) mod identity;
 #[cfg(test)]
 pub(crate) mod identity_tests;
+#[cfg(test)]
+mod maintenance_tests;
 #[cfg(test)]
 mod segment_tests;
 #[cfg(test)]
@@ -1474,8 +1476,10 @@ fn recover_router_wal_segment(
             file.rewind().map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         }
     }
-    identity::repair_empty_header(&mut file, &path, newest)?;
-    let mut offset = read_router_wal_magic(&mut file)?;
+    identity::repair_empty_header(&mut file, &path, newest)
+        .map_err(|cause| identity::segment_error(&path, cause))?;
+    let mut offset =
+        read_router_wal_magic(&mut file).map_err(|cause| identity::segment_error(&path, cause))?;
     loop {
         let record_offset = offset;
         let Some((stored, len)) = read_router_wal_record(&mut file)? else {

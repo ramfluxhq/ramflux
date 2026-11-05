@@ -13,6 +13,7 @@ use super::{
 };
 use crate::router_store::incarnation;
 use redb::{ReadableDatabase, ReadableTable};
+pub(crate) mod maintenance;
 mod recovery;
 const KEY: &str = "session_push_wal_v1";
 const MAGIC: &[u8] = b"ramflux-router-wal-v2\n";
@@ -41,6 +42,13 @@ pub(super) struct Association {
 pub(super) fn error(value: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(value.to_string())
 }
+pub(super) fn segment_error(path: &Path, cause: impl std::fmt::Display) -> NodeCoreError {
+    error(format!(
+        "{}: {cause}; stop every gateway, stop the router, then run ramflux-router --config <path> --rotate-inbox-incarnations --quarantine-wal-segment {} (never move or delete WAL segments by hand)",
+        path.display(),
+        path.display()
+    ))
+}
 fn directory_key(root: &Path, directory: &Path) -> Result<String, NodeCoreError> {
     Ok(directory.strip_prefix(root).map_err(error)?.to_string_lossy().into_owned())
 }
@@ -68,7 +76,7 @@ impl Association {
         let path = router_wal_segment_path(directory, head);
         // The actual Immediate commit must complete before the first frame append.
         durability_io::boundary(&path, "head_commit", || {
-            commit(&self.db, &next, &BTreeMap::new(), &BTreeMap::new(), false)
+            commit(&self.db, &next, &BTreeMap::new(), &BTreeMap::new(), false, false)
                 .map_err(io::Error::other)
         })
         .map_err(error)?;
@@ -93,7 +101,7 @@ impl Association {
         chain.anchor = anchor;
         chain.anchor_lsn = 0;
         chain.legacy.retain(|id| *id >= anchor);
-        commit(&self.db, &next, &BTreeMap::new(), &BTreeMap::new(), false)?;
+        commit(&self.db, &next, &BTreeMap::new(), &BTreeMap::new(), false, false)?;
         *metadata = next;
         Ok(true)
     }
@@ -104,6 +112,7 @@ fn commit(
     ids: &BTreeMap<String, String>,
     issued: &BTreeMap<String, u64>,
     rotate: bool,
+    finish_operator: bool,
 ) -> Result<(), NodeCoreError> {
     let mut txn = db.begin_write().map_err(error)?;
     txn.set_durability(redb::Durability::Immediate).map_err(error)?;
@@ -118,6 +127,9 @@ fn commit(
     }
     {
         let mut table = txn.open_table(crate::ROUTER_SNAPSHOT_TABLE).map_err(error)?;
+        if finish_operator {
+            table.remove(maintenance::KEY).map_err(error)?;
+        }
         table
             .insert(KEY, serde_json::to_vec(metadata).map_err(error)?.as_slice())
             .map_err(error)?;

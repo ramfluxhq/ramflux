@@ -37,7 +37,7 @@ fn load_metadata(db: &redb::Database) -> Result<Option<Metadata>, NodeCoreError>
     }
     Ok(metadata)
 }
-fn cursors(db: &redb::Database) -> Result<CursorInventory, NodeCoreError> {
+pub(super) fn cursors(db: &redb::Database) -> Result<CursorInventory, NodeCoreError> {
     let txn = db.begin_read().map_err(error)?;
     let table = txn.open_table(crate::ROUTER_CURSOR_STATE_TABLE).map_err(error)?;
     let mut ids = BTreeMap::new();
@@ -162,7 +162,8 @@ fn inspect(
             }
             if bytes.len() >= MAGIC.len() && bytes.starts_with(MAGIC) {
                 let mut file = File::open(&path).map_err(error)?;
-                let (_, header) = read_header(&mut file)?;
+                let (_, header) =
+                    read_header(&mut file).map_err(|cause| super::segment_error(&path, cause))?;
                 if let Some((identity, id, parent)) = header {
                     if let Some(metadata) = metadata {
                         mismatch |= identity != metadata.directory_id;
@@ -252,10 +253,18 @@ pub(super) fn prepare(
     db: Arc<redb::Database>,
     db_path: &Path,
 ) -> Result<(Association, RouterWalRecovery), NodeCoreError> {
+    prepare_forced(root, db, db_path, false)
+}
+pub(super) fn prepare_forced(
+    root: &Path,
+    db: Arc<redb::Database>,
+    db_path: &Path,
+    force: bool,
+) -> Result<(Association, RouterWalRecovery), NodeCoreError> {
     durability_io::create_dir_all(root).map_err(error)?;
     let old = load_metadata(&db)?;
     let inventory = inventory(root)?;
-    let mut rotate = inspect(root, old.as_ref(), &inventory)?;
+    let mut rotate = inspect(root, old.as_ref(), &inventory)? || force;
     let anchors = old
         .as_ref()
         .map(|metadata| {
@@ -300,7 +309,7 @@ pub(super) fn prepare(
     if rotate || pending {
         metadata.rotation_pending = true;
         durability_io::boundary(db_path, "rotation_pending", || {
-            commit(&db, &metadata, &ids, &issued, true).map_err(io::Error::other)
+            commit(&db, &metadata, &ids, &issued, true, false).map_err(io::Error::other)
         })
         .map_err(error)?;
         let mut active = inventory.clone();
@@ -320,7 +329,7 @@ pub(super) fn prepare(
         write_identity(root, &metadata.directory_id)?;
     }
     durability_io::boundary(db_path, "association_commit", || {
-        commit(&db, &metadata, &ids, &issued, false).map_err(io::Error::other)
+        commit(&db, &metadata, &ids, &issued, false, true).map_err(io::Error::other)
     })
     .map_err(error)?;
     Ok((

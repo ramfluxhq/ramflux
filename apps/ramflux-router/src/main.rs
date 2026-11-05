@@ -6,6 +6,7 @@ mod forward_http;
 mod handlers;
 mod home_migration;
 mod identity_authority;
+mod inbox_maintenance;
 mod lifecycle;
 mod migration_courier;
 mod migration_drain;
@@ -36,6 +37,10 @@ fn main() {
 }
 
 fn run_service(service: &'static str) -> anyhow::Result<()> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if let Some(command) = inbox_maintenance::parse(&args)? {
+        return inbox_maintenance::run(&args, &command, &mut std::io::stdout());
+    }
     ramflux_node_core::home_migration_enabled()?;
     if std::env::args().any(|arg| arg == "--health-check") {
         println!("{service}:healthy");
