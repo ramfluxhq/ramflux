@@ -71,7 +71,16 @@ impl RouterRedbStore {
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
             .name("ramflux-publication-resolver".into())
-            .spawn(move || resolver(&worker_shared))
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    resolver(&worker_shared);
+                }));
+                if result.is_err() {
+                    tracing::error!("fatal_tombstone_persistence");
+                    eprintln!("fatal_tombstone_persistence");
+                    std::process::abort();
+                }
+            })
             .map_err(error)?;
         let _installed = shared.worker.set(worker.thread().clone());
         let core = Arc::new(PublicationCore { shared, worker: Some(worker) });

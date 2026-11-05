@@ -65,11 +65,25 @@ fn accept(store: &RouterRedbStore, guard: &AssignmentGuard) -> Result {
 }
 
 fn await_p(core: &PublicationCore, id: &str, seq: u64) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while core.view("target", id).0 < seq {
-        assert!(Instant::now() < deadline, "resolver publication watchdog");
-        thread::yield_now();
-    }
+    let runtime =
+        tokio::runtime::Builder::new_current_thread().enable_time().build().expect("runtime");
+    runtime.block_on(async {
+        // Publication notification is causal progress. This timeout only guards
+        // a lost wake or hung resolver; it is not a storage speed assertion.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let notified = core.shared.changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if core.view("target", id).0 >= seq {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("resolver publication hang guard");
+    });
 }
 
 #[test]
@@ -168,26 +182,39 @@ fn aborted_slot_capacity() -> Result {
         let head = core.reserve("target", &id, &[])?;
         accept(&store, &head)?;
         drop(head);
-        let mut remaining = ABORTED_RANGE_CAPACITY;
-        while remaining > 0 {
-            // Reserve complete bounded batches before issuing any writes. Near
-            // capacity the batch shrinks so in-flight reservations also fit.
-            let count = (remaining / 2).clamp(1, 32);
-            let mut aborted = Vec::new();
-            let mut accepted = Vec::new();
-            for _ in 0..count {
-                aborted.push(core.reserve("target", &id, &[])?);
-                if remaining > 1 {
-                    accepted.push(core.reserve("target", &id, &[])?);
+        // Seed the large durable fixture in ONE real tombstone transaction,
+        // rather than 4,096 wake/fsync cycles over a growing JSON row.
+        seed_capacity(&store, &core, &id)?;
+        drop(core);
+        drop(store);
+        let store = test_store(&root, mode, 1024 * 1024)?;
+        let core = store.publication_core()?;
+        assert_eq!(core.view("target", &id).1.len(), ABORTED_RANGE_CAPACITY - 1);
+        let last = core.reserve("target", &id, &[])?;
+        assert!(
+            matches!(
+                core.reserve("target", &id, &[]),
+                Err(PublicationRefusal::CapacityRetryAfter { .. })
+            ),
+            "the final in-flight reservation already consumes the last slot"
+        );
+        let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = Arc::clone(&commits);
+        let observer = crate::durability_test_hooks::observe(
+            root.clone(),
+            Arc::new(move |_, op, done| {
+                if op == "tombstone_commit" && done {
+                    captured.fetch_add(1, Ordering::Relaxed);
                 }
-            }
-            accept_separators(&store, &accepted)?;
-            drop(accepted);
-            let last = aborted.last().expect("nonempty batch").sequence();
-            drop(aborted);
-            await_p(&core, &id, last);
-            remaining -= count;
-        }
+                Ok(())
+            }),
+        );
+        last.definite_non_write();
+        await_p(&core, &id, last.sequence());
+        assert_eq!(last.state(), PersistenceState::AbortedDurable);
+        assert_eq!(commits.load(Ordering::Relaxed), 1, "one real resolver commit crosses capacity");
+        drop(last);
+        drop(observer);
         let before = core.view("target", &id);
         assert_eq!(before.1.len(), ABORTED_RANGE_CAPACITY);
         let allocated_before = lock(&core.shared).inboxes.values().next().expect("inbox").allocated;
@@ -314,22 +341,23 @@ fn abort_claim_race(core: &PublicationCore, root: &std::path::Path, id: &str) ->
     Ok(())
 }
 
-fn accept_separators(store: &RouterRedbStore, guards: &[AssignmentGuard]) -> Result {
-    if guards.is_empty() {
-        return Ok(());
-    }
-    let writes: Vec<_> =
-        guards.iter().map(|guard| guard.hand_off().expect("separator hand-off")).collect();
-    let entries: Vec<_> = guards.iter().map(|guard| entry(guard.sequence())).collect();
-    store.record_fanout_increment(
-        &format!("separators/{}", entries[0].inbox_seq),
-        entries[0].envelope.created_at + 3600,
-        "sender",
-        &entries,
-    )?;
-    for write in writes {
-        write.accepted_durable();
-    }
+fn seed_capacity(store: &RouterRedbStore, core: &PublicationCore, id: &str) -> Result {
+    let descriptors = (0..ABORTED_RANGE_CAPACITY - 1)
+        .map(|index| {
+            Arc::new(Descriptor {
+                key: Key { target: "target".into(), incarnation: id.into() },
+                seq: 3 + 2 * u64::try_from(index).expect("fixture index"),
+                state: AtomicU8::new(PersistenceState::DefiniteNonWrite as u8 | ABORT_CLAIM),
+                detached: AtomicBool::new(true),
+                created: Instant::now(),
+                warned: AtomicBool::new(false),
+                resources: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    persistence::abort_batch(&core.shared, &descriptors)?;
+    // A durable accepted separator keeps the final real abort non-coalescing.
+    store.record_inbox_entry(&entry(2 * u64::try_from(ABORTED_RANGE_CAPACITY)?))?;
     Ok(())
 }
 
@@ -411,5 +439,61 @@ fn request_guard_does_not_own_storage_shutdown() -> Result {
     assert_eq!(store.publication_core()?.view("target", &id), (1, vec![(1, 1)]));
     drop(store);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn resolver_panic_fail_stops() -> Result {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(root) = std::env::var_os("RAMFLUX_RESOLVER_PANIC_CHILD") {
+        let root = PathBuf::from(root);
+        let mode = std::env::var("RAMFLUX_RESOLVER_PANIC_MODE")?.parse()?;
+        let store = test_store(&root, mode, 1024 * 1024)?;
+        let id = store.initialize_inbox("target")?;
+        let core = store.publication_core()?;
+        let _observer = crate::durability_test_hooks::observe(
+            root,
+            Arc::new(|_, op, done| {
+                assert!(op != "tombstone_checkpoint" || done, "injected resolver panic");
+                Ok(())
+            }),
+        );
+        drop(core.reserve("target", &id, &[])?);
+        loop {
+            thread::park();
+        }
+    }
+    for mode in 0..=2 {
+        let root = fixture(&format!("resolver-panic-{mode}"));
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "router_store::publication::tests::resolver_panic_fail_stops",
+                "--nocapture",
+            ])
+            .env("RAMFLUX_RESOLVER_PANIC_CHILD", &root)
+            .env("RAMFLUX_RESOLVER_PANIC_MODE", mode.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                assert_eq!(status.signal(), Some(6), "resolver failure must SIGABRT");
+                let output = child.wait_with_output()?;
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("fatal_tombstone_persistence")
+                );
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                child.wait()?;
+                panic!("resolver abort hang guard");
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        std::fs::remove_dir_all(root)?;
+    }
     Ok(())
 }
