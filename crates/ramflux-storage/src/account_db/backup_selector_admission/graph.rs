@@ -28,16 +28,6 @@ SELECT wire_lookup,commitment FROM main.object_retention_payload WHERE commitmen
 INSERT OR IGNORE INTO main.object_erasure_lookup
 SELECT wire_lookup,commitment FROM incoming.object_retention_payload WHERE commitment IN (SELECT commitment FROM main.object_erasure_fence);
 ";
-pub(super) const DECISIONS: &str = r"
-DELETE FROM backup_reference_admission AS a WHERE side='incoming'
-AND EXISTS(SELECT 1 FROM incoming.object_retention_reference r JOIN backup_lookup_origin o ON o.lookup=r.selector_lookup AND o.side='target' WHERE r.reference_hash=a.reference_hash)
-AND NOT EXISTS(SELECT 1 FROM backup_reference_admission t WHERE t.side='target' AND t.selector=a.selector AND t.commitment=a.commitment);
-INSERT INTO backup_selector_admission
-SELECT 'target',r.selector,r.commitment,CASE WHEN EXISTS(SELECT 1 FROM backup_reference_admission a WHERE a.side='target' AND a.selector=r.selector AND a.commitment=r.commitment) THEN 'keep' ELSE 'erase' END FROM main.object_retention_reference r GROUP BY r.selector,r.commitment;
-INSERT INTO backup_selector_admission
-SELECT 'incoming',r.selector,r.commitment,CASE WHEN EXISTS(SELECT 1 FROM backup_reference_admission a WHERE a.side='incoming' AND a.selector=r.selector AND a.commitment=r.commitment) THEN 'keep' ELSE 'erase' END FROM incoming.object_retention_reference r GROUP BY r.selector,r.commitment;
-";
-
 pub(in crate::account_db) fn classify(db: &Connection) -> Result<(), StorageError> {
     // Authenticated identities must agree even when one side would later be erased.
     let conflict: bool = db.query_row(CONFLICT, [], |r| r.get(0))?;
@@ -60,36 +50,66 @@ pub(in crate::account_db) fn classify(db: &Connection) -> Result<(), StorageErro
             ))
         })? {
             let (hash, message, selector, commitment) = row?;
-            let local_deleted = deleted(db, "main", &message)?;
-            let incoming_deleted = deleted(db, "incoming", &message)?;
-            if side == "target"
-                && !target_deleted(db, &message)?
-                && (local_deleted || incoming_deleted)
-            {
-                db.execute(
-                    "INSERT OR IGNORE INTO backup_target_delete VALUES(?1,?2,?3,?4)",
-                    params![hash, message, selector, commitment],
-                )?;
-            }
-            let fenced: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?1)",
-                [&commitment],
-                |r| r.get(0),
-            )?;
-            if !local_deleted && !incoming_deleted && !fenced {
-                db.execute(
-                    "INSERT INTO backup_reference_admission VALUES(?1,?2,?3,?4,?5)",
-                    params![side, hash, message, selector, commitment],
-                )?;
-            }
+            classify_owner(db, side, &hash, &message, &selector, &commitment)?;
         }
     }
-    // Only pre-union target origin vetoes incoming same-identity owners. A
-    // surviving target witness keeps a partial lookup live. Incoming-only
-    // history may retain its own independently surviving owners.
-    db.execute_batch(DECISIONS)?;
+    for (schema, side) in [("main", "target"), ("incoming", "incoming")] {
+        let mut query = db.prepare(&format!(
+            "SELECT DISTINCT selector,commitment FROM {schema}.object_retention_reference"
+        ))?;
+        for row in query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (selector, commitment) = row?;
+            classify_selector(db, side, &selector, &commitment)?;
+        }
+    }
     #[cfg(test)]
     checkpoint(db, "graph_admission")?;
+    Ok(())
+}
+
+// Point operations are shared by traversal and the isolated candidate work meter.
+pub(super) const VETO: &str = "SELECT EXISTS(SELECT 1 FROM incoming.object_retention_reference r JOIN backup_lookup_origin o ON o.lookup=r.selector_lookup AND o.side='target' WHERE r.reference_hash=?1) AND NOT EXISTS(SELECT 1 FROM backup_reference_admission t WHERE t.side='target' AND t.selector=?2 AND t.commitment=?3)";
+pub(super) const SELECTOR: &str = "INSERT INTO backup_selector_admission SELECT ?1,?2,?3,CASE WHEN EXISTS(SELECT 1 FROM backup_reference_admission a WHERE a.side=?1 AND a.selector=?2 AND a.commitment=?3) THEN 'keep' ELSE 'erase' END";
+
+pub(super) fn classify_owner(
+    db: &Connection,
+    side: &str,
+    hash: &str,
+    message: &str,
+    selector: &str,
+    commitment: &str,
+) -> Result<(), StorageError> {
+    let local_deleted = deleted(db, "main", message)?;
+    let incoming_deleted = deleted(db, "incoming", message)?;
+    if side == "target" && !target_deleted(db, message)? && (local_deleted || incoming_deleted) {
+        db.execute(
+            "INSERT OR IGNORE INTO backup_target_delete VALUES(?1,?2,?3,?4)",
+            params![hash, message, selector, commitment],
+        )?;
+    }
+    let fenced: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?1)",
+        [commitment],
+        |r| r.get(0),
+    )?;
+    let vetoed = side == "incoming"
+        && db.query_row(VETO, params![hash, selector, commitment], |r| r.get::<_, bool>(0))?;
+    if !local_deleted && !incoming_deleted && !fenced && !vetoed {
+        db.execute(
+            "INSERT INTO backup_reference_admission VALUES(?1,?2,?3,?4,?5)",
+            params![side, hash, message, selector, commitment],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn classify_selector(
+    db: &Connection,
+    side: &str,
+    selector: &str,
+    commitment: &str,
+) -> rusqlite::Result<()> {
+    db.execute(SELECTOR, params![side, selector, commitment])?;
     Ok(())
 }
 
