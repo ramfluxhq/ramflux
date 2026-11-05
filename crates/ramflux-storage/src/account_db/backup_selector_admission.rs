@@ -190,3 +190,8 @@ mod preservation_tests;
 
 #[cfg(test)]
 mod review_preservation_tests;
+
+pub(super) mod final_deletion;
+
+#[cfg(test)]
+mod final_deletion_tests;
