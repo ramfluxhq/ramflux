@@ -193,8 +193,7 @@ impl super::RouterRedbStore {
     ) -> Result<String, NodeCoreError> {
         let core = self.publication_core()?;
         if let (Some(id), issued) = self.inbox_status(target)? {
-            core.provisional_incarnation(target, id.clone())?;
-            core.register(target, &id, issued);
+            core.register(target, &id, issued)?;
             return Ok(id);
         }
         if let Some(id) = core.current_incarnation(target) {
@@ -227,7 +226,8 @@ impl super::RouterRedbStore {
         drop(read);
         let installed = self.publication.lock().map_err(error)?;
         let core = installed.as_ref().cloned();
-        let candidate = match self.inbox_status(target)?.0 {
+        let (durable, issued) = self.inbox_status(target)?;
+        let candidate = match durable.clone() {
             Some(id) => id,
             None => match &self.submission_wal {
                 Some(wal) => wal.reserve_incarnation(target)?,
@@ -235,6 +235,10 @@ impl super::RouterRedbStore {
             },
         };
         let provisional = match &core {
+            Some(core) if durable.is_some() => {
+                core.register(target, &candidate, issued)?;
+                candidate
+            }
             Some(core) => core.provisional_incarnation(target, candidate)?,
             None => candidate,
         };
@@ -263,7 +267,7 @@ impl super::RouterRedbStore {
             Ok(id)
         })?;
         if let Some(core) = core {
-            core.register(target, &id, self.inbox_status(target)?.1);
+            core.register(target, &id, self.inbox_status(target)?.1)?;
         }
         drop(installation);
         Ok(id)

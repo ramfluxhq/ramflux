@@ -65,6 +65,9 @@ pub enum PublicationRefusal {
     /// Allocation may not wrap the durable counter.
     #[error("inbox sequence exhausted")]
     SequenceExhausted,
+    /// The store has stopped its resolver and no longer accepts allocation.
+    #[error("store_closed")]
+    StoreClosed,
     /// The process is fail-stopping after an uncertain storage operation.
     #[error("fatal_durability_uncertain")]
     FatalUncertain,
@@ -131,6 +134,8 @@ struct Shared {
     changed: Notify,
     db: Weak<redb::Database>,
     path: PathBuf,
+    #[cfg(test)]
+    snapshot_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// Store-owned resolver and synchronized published view. Not restored as live state.
@@ -175,17 +180,35 @@ impl PublicationCore {
         let _ = self.shared.replay_cleanup.set(replay);
     }
 
-    pub(crate) fn register(&self, target: &str, incarnation: &str, issued: u64) {
-        lock(&self.shared)
+    pub(crate) fn register(
+        &self,
+        target: &str,
+        incarnation: &str,
+        issued: u64,
+    ) -> Result<(), NodeCoreError> {
+        let mut registry = lock(&self.shared);
+        if self.shared.stopping.load(Ordering::Acquire) {
+            return Err(NodeCoreError::Publication(PublicationRefusal::StoreClosed));
+        }
+        if registry
+            .inboxes
+            .range(Key { target: target.into(), incarnation: String::new() }..)
+            .next()
+            .filter(|(key, _)| key.target == target)
+            .is_some_and(|(key, inbox)| inbox.retired || key.incarnation != incarnation)
+        {
+            return Err(NodeCoreError::Publication(PublicationRefusal::IncarnationMismatch));
+        }
+        let inbox = registry
             .inboxes
             .entry(Key { target: target.into(), incarnation: incarnation.into() })
-            .and_modify(|inbox| inbox.identity_durable = true)
-            .or_insert_with(|| Inbox {
-                identity_durable: true,
-                allocated: issued,
-                published: issued,
-                ..Inbox::default()
-            });
+            .or_default();
+        inbox.identity_durable = true;
+        inbox.allocated = inbox.allocated.max(issued);
+        if inbox.in_flight.is_empty() {
+            inbox.published = inbox.allocated;
+        }
+        Ok(())
     }
 
     pub(crate) fn current_incarnation(&self, target: &str) -> Option<String> {
@@ -271,7 +294,7 @@ impl PublicationCore {
     ) -> Result<Vec<AssignmentGuard>, PublicationRefusal> {
         let mut registry = lock(&self.shared);
         if self.shared.stopping.load(Ordering::Acquire) {
-            return Err(PublicationRefusal::IncarnationMismatch);
+            return Err(PublicationRefusal::StoreClosed);
         }
         let _gate = crate::fatal_durability::publication()
             .map_err(|_| PublicationRefusal::FatalUncertain)?;
@@ -651,12 +674,27 @@ fn resolver(shared: &Shared) {
         if crate::fatal_durability::check().is_err() {
             return;
         }
-        let descriptors: Vec<_> = lock(shared)
-            .inboxes
-            .values()
-            .flat_map(|inbox| inbox.in_flight.values().cloned())
-            .collect();
-        let stopping = shared.stopping.load(Ordering::Acquire);
+        let (stopping, descriptors): (_, Vec<_>) = {
+            let registry = lock(shared);
+            let stopping = shared.stopping.load(Ordering::Acquire);
+            let descriptors = registry
+                .inboxes
+                .values()
+                .flat_map(|inbox| inbox.in_flight.values().cloned())
+                .collect();
+            (stopping, descriptors)
+        };
+        #[cfg(test)]
+        {
+            let hook = shared
+                .snapshot_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let mut claimed = Vec::new();
         for descriptor in descriptors {
             if !stopping && !descriptor.detached.load(Ordering::Acquire) {
@@ -706,8 +744,20 @@ fn resolver(shared: &Shared) {
 }
 
 impl PublicationCore {
+    /// Retire a fixture target through the same registry barrier as deletion.
+    /// # Errors
+    /// Returns an error while assignments still own the target.
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    pub fn retire_fixture_target(&self, target: &str) -> Result<(), NodeCoreError> {
+        self.retire_target(target)?.commit();
+        Ok(())
+    }
+
     pub(crate) fn shutdown(&self) {
-        self.shared.stopping.store(true, Ordering::Release);
+        {
+            let _registry = lock(&self.shared);
+            self.shared.stopping.store(true, Ordering::Release);
+        }
         if let Some(worker) = self.shared.worker.get() {
             worker.unpark();
         }
