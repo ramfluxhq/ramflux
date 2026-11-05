@@ -54,6 +54,9 @@ pub enum PublicationRefusal {
     /// Allocation may not wrap the durable counter.
     #[error("inbox sequence exhausted")]
     SequenceExhausted,
+    /// The process is fail-stopping after an uncertain storage operation.
+    #[error("fatal_durability_uncertain")]
+    FatalUncertain,
 }
 
 /// Diagnostic observations; age never expires a descriptor or grants publication.
@@ -161,6 +164,8 @@ impl PublicationCore {
         &self,
         requests: &[AssignmentReservation<'_>],
     ) -> Result<Vec<AssignmentGuard>, PublicationRefusal> {
+        let _gate = crate::fatal_durability::publication()
+            .map_err(|_| PublicationRefusal::FatalUncertain)?;
         let mut registry = lock(&self.shared);
         let mut needed = BTreeMap::<Key, usize>::new();
         for request in requests {
@@ -273,6 +278,7 @@ impl AssignmentGuard {
     /// None means the resolver already claimed this descriptor: never issue a write.
     #[must_use]
     pub fn hand_off(&self) -> Option<PublicationWrite> {
+        crate::fatal_durability::check().ok()?;
         let shared = self.shared.upgrade()?;
         self.descriptor
             .state
@@ -321,6 +327,9 @@ impl Drop for AssignmentGuard {
 impl PublicationWrite {
     /// Called by the writer only after its positive durable completion.
     pub fn accepted_durable(self) {
+        if crate::fatal_durability::check().is_err() {
+            return;
+        }
         self.descriptor.state.store(PersistenceState::AcceptedDurable as u8, Ordering::Release);
         finish(&self.shared, &self.descriptor, false);
     }
@@ -339,10 +348,7 @@ impl Drop for PublicationWrite {
             )
             .is_ok()
         {
-            // An unwound writer cannot fabricate a proved-non-write outcome.
-            // P5 installs the shared writer fence and dedicated fatal supervisor.
-            tracing::error!("fatal_durability_uncertain");
-            std::process::abort();
+            crate::fatal_durability::fence(false);
         }
     }
 }
@@ -359,6 +365,7 @@ fn descriptor_state(descriptor: &Descriptor) -> PersistenceState {
 }
 
 fn finish(shared: &Shared, descriptor: &Descriptor, aborted: bool) {
+    let Ok(_gate) = crate::fatal_durability::publication() else { return };
     let mut registry = lock(shared);
     if aborted {
         for resource in &descriptor.resources {
@@ -426,6 +433,9 @@ fn diagnostics(shared: &Shared, now: Instant) -> PublicationMetrics {
 
 fn resolver(shared: &Shared) {
     loop {
+        if crate::fatal_durability::check().is_err() {
+            return;
+        }
         let descriptors: Vec<_> = lock(shared)
             .inboxes
             .values()
@@ -459,8 +469,9 @@ fn resolver(shared: &Shared) {
         }
         if !claimed.is_empty() {
             if let Err(error) = persistence::abort_batch(shared, &claimed) {
-                tracing::error!(%error, "fatal_tombstone_persistence");
-                std::process::abort();
+                let _ = error;
+                crate::fatal_durability::fence(true);
+                return;
             }
             for descriptor in claimed {
                 descriptor.state.store(PersistenceState::AbortedDurable as u8, Ordering::Release);
@@ -470,8 +481,8 @@ fn resolver(shared: &Shared) {
         let _metrics = diagnostics(shared, Instant::now());
         if stopping {
             if lock(shared).inboxes.values().any(|inbox| !inbox.in_flight.is_empty()) {
-                tracing::error!("fatal_durability_uncertain during publication shutdown");
-                std::process::abort();
+                crate::fatal_durability::fence(false);
+                return;
             }
             return;
         }

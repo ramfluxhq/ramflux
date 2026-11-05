@@ -39,14 +39,17 @@ fn pending(db: &redb::Database) -> Result<Option<Pending>, NodeCoreError> {
     }
     Ok(request)
 }
-fn mark(db: &redb::Database, request: &Pending) -> Result<(), NodeCoreError> {
-    let mut txn = db.begin_write().map_err(error)?;
-    txn.set_durability(redb::Durability::Immediate).map_err(error)?;
-    txn.open_table(crate::ROUTER_SNAPSHOT_TABLE)
-        .map_err(error)?
-        .insert(KEY, serde_json::to_vec(request).map_err(error)?.as_slice())
-        .map_err(error)?;
-    txn.commit().map_err(error)
+fn mark(db: &redb::Database, path: &Path, request: &Pending) -> Result<(), NodeCoreError> {
+    crate::fatal_durability::run(|| {
+        let mut txn = db.begin_write().map_err(error)?;
+        txn.set_durability(redb::Durability::Immediate).map_err(error)?;
+        txn.open_table(crate::ROUTER_SNAPSHOT_TABLE)
+            .map_err(error)?
+            .insert(KEY, serde_json::to_vec(request).map_err(error)?.as_slice())
+            .map_err(error)?;
+        durability_io::boundary(path, "rotation_commit", || txn.commit().map_err(io::Error::other))
+            .map_err(error)
+    })
 }
 fn quarantine(
     db: &redb::Database,
@@ -133,7 +136,7 @@ fn amend_quarantine(
     recovery::preflight(root, db, Some(&next.source))?;
     request.quarantine = Some(next);
     durability_io::boundary(path, "operator_quarantine_amend", || {
-        mark(db, request).map_err(io::Error::other)
+        mark(db, path, request).map_err(io::Error::other)
     })
     .map_err(error)
 }
@@ -235,7 +238,7 @@ impl RouterRedbStore {
             let _inventory = recovery::cursors(&db)?;
             let request = Pending { version: 1, wal_root, quarantine };
             durability_io::boundary(path, "operator_rotation_pending", || {
-                mark(&db, &request).map_err(io::Error::other)
+                mark(&db, path, &request).map_err(io::Error::other)
             })
             .map_err(error)?;
             resume(&db, path)?;

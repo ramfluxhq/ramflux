@@ -144,7 +144,7 @@ impl RouterRedbStore {
         if expired.is_empty() {
             return Ok(());
         }
-        let tx = self.db.begin_write().map_err(error)?;
+        let tx = self.begin_write().map_err(error)?;
         {
             let mut records = tx.open_table(RECORDS).map_err(error)?;
             let mut expiry = tx.open_table(EXPIRY).map_err(error)?;

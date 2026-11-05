@@ -244,7 +244,7 @@ impl RouterRedbStore {
         session: &SessionDescriptor,
     ) -> Result<(), NodeCoreError> {
         let session_bytes = serialize_value(session)?;
-        let txn = self.db.begin_write().map_err(error)?;
+        let txn = self.begin_write().map_err(error)?;
         let delta = budget_delta(&txn, delta, registry)?;
         let base_snapshot_hash = {
             let snapshots = txn.open_table(ROUTER_SNAPSHOT_TABLE).map_err(error)?;

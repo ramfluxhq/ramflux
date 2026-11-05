@@ -113,27 +113,29 @@ fn commit(
     rotate: bool,
     finish_operator: bool,
 ) -> Result<(), NodeCoreError> {
-    let mut txn = db.begin_write().map_err(error)?;
-    txn.set_durability(redb::Durability::Immediate).map_err(error)?;
-    for (target, id) in ids {
-        incarnation::set_cursor(
-            &txn,
-            target,
-            issued.get(target).copied().unwrap_or(0),
-            id,
-            rotate,
-        )?;
-    }
-    {
-        let mut table = txn.open_table(crate::ROUTER_SNAPSHOT_TABLE).map_err(error)?;
-        if finish_operator {
-            table.remove(maintenance::KEY).map_err(error)?;
+    crate::fatal_durability::run(|| {
+        let mut txn = db.begin_write().map_err(error)?;
+        txn.set_durability(redb::Durability::Immediate).map_err(error)?;
+        for (target, id) in ids {
+            incarnation::set_cursor(
+                &txn,
+                target,
+                issued.get(target).copied().unwrap_or(0),
+                id,
+                rotate,
+            )?;
         }
-        table
-            .insert(KEY, serde_json::to_vec(metadata).map_err(error)?.as_slice())
-            .map_err(error)?;
-    }
-    txn.commit().map_err(error)
+        {
+            let mut table = txn.open_table(crate::ROUTER_SNAPSHOT_TABLE).map_err(error)?;
+            if finish_operator {
+                table.remove(maintenance::KEY).map_err(error)?;
+            }
+            table
+                .insert(KEY, serde_json::to_vec(metadata).map_err(error)?.as_slice())
+                .map_err(error)?;
+        }
+        txn.commit().map_err(error)
+    })
 }
 pub(super) fn header(
     association: Option<&Association>,

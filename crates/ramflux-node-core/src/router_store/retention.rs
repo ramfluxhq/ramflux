@@ -17,40 +17,45 @@ impl RouterRedbStore {
         now: i64,
         dry_run: bool,
     ) -> Result<usize, NodeCoreError> {
-        let txn = self.db.begin_write().map_err(redb_error)?;
-        let mut removed = super::expiry_index::sweep(&txn, now, dry_run)?;
-        {
-            let mut table = txn.open_table(ROUTER_SNAPSHOT_TABLE).map_err(redb_error)?;
-            let bytes = table
-                .get(ROUTER_INBOX_SLICE_KEY)
-                .map_err(redb_error)?
-                .map(|value| value.value().to_vec());
-            // Pre-incremental databases keep one legacy slice; it disappears once drained.
-            if let Some(bytes) = bytes {
-                let mut inbox: OpaqueDeviceInbox =
-                    serde_json::from_slice(&bytes).map_err(redb_error)?;
-                removed += inbox.expire(now);
-                if !dry_run {
-                    if inbox.pending_entries().next().is_none() {
-                        table.remove(ROUTER_INBOX_SLICE_KEY).map_err(redb_error)?;
-                    } else {
-                        table
-                            .insert(ROUTER_INBOX_SLICE_KEY, serialize_value(&inbox)?.as_slice())
-                            .map_err(redb_error)?;
+        crate::fatal_durability::run(|| {
+            let txn = self.begin_write().map_err(redb_error)?;
+            let mut removed = super::expiry_index::sweep(&txn, now, dry_run)?;
+            {
+                let mut table = txn.open_table(ROUTER_SNAPSHOT_TABLE).map_err(redb_error)?;
+                let bytes = table
+                    .get(ROUTER_INBOX_SLICE_KEY)
+                    .map_err(redb_error)?
+                    .map(|value| value.value().to_vec());
+                // Pre-incremental databases keep one legacy slice; it disappears once drained.
+                if let Some(bytes) = bytes {
+                    let mut inbox: OpaqueDeviceInbox =
+                        serde_json::from_slice(&bytes).map_err(redb_error)?;
+                    removed += inbox.expire(now);
+                    if !dry_run {
+                        if inbox.pending_entries().next().is_none() {
+                            table.remove(ROUTER_INBOX_SLICE_KEY).map_err(redb_error)?;
+                        } else {
+                            table
+                                .insert(ROUTER_INBOX_SLICE_KEY, serialize_value(&inbox)?.as_slice())
+                                .map_err(redb_error)?;
+                        }
                     }
                 }
             }
-        }
-        if dry_run {
-            txn.abort().map_err(redb_error)?;
-        } else {
-            txn.commit().map_err(redb_error)?;
-        }
-        if let Some(wal) = &self.submission_wal {
-            removed +=
-                if dry_run { wal.retention_candidate_count(now)? } else { wal.prune_expired(now)? };
-        }
-        Ok(removed)
+            if dry_run {
+                txn.abort().map_err(redb_error)?;
+            } else {
+                txn.commit().map_err(redb_error)?;
+            }
+            if let Some(wal) = &self.submission_wal {
+                removed += if dry_run {
+                    wal.retention_candidate_count(now)?
+                } else {
+                    wal.prune_expired(now)?
+                };
+            }
+            Ok(removed)
+        })
     }
     /// # Errors
     /// Persists an expiry watermark without regressing a newer ACK checkpoint.
@@ -67,33 +72,36 @@ impl RouterRedbStore {
         if cursors.is_empty() {
             return Ok(());
         }
-        let txn = crate::durability_io::boundary(&self.path, "checkpoint_begin", || {
-            self.db.begin_write().map_err(std::io::Error::other)
-        })
-        .map_err(redb_error)?;
-        for cursor in cursors {
-            self.checkpoint_incarnation(&txn, cursor)?;
-        }
-        for cursor in cursors {
-            let bytes = cursor_bytes(&txn, cursor)?;
-            txn.open_table(ROUTER_CURSOR_STATE_TABLE)
-                .map_err(redb_error)?
-                .insert(cursor.target_delivery_id.as_str(), bytes.as_slice())
-                .map_err(redb_error)?;
-        }
-        for cursor in cursors {
-            crate::home_migration_store::drain::receiver_settled(&txn, cursor)?;
-            for sequence in &cursor.retired_inbox_seqs {
-                super::expiry_index::remove_inbox_row(
-                    &txn,
-                    &super::inbox_entry_storage_key(&cursor.target_delivery_id, *sequence),
-                )?;
+
+        crate::fatal_durability::run(|| {
+            let txn = crate::durability_io::boundary(&self.path, "checkpoint_begin", || {
+                self.begin_write().map_err(std::io::Error::other)
+            })
+            .map_err(redb_error)?;
+            for cursor in cursors {
+                self.checkpoint_incarnation(&txn, cursor)?;
             }
-        }
-        crate::durability_io::boundary(&self.path, "checkpoint_commit", || {
-            txn.commit().map_err(std::io::Error::other)
+            for cursor in cursors {
+                let bytes = cursor_bytes(&txn, cursor)?;
+                txn.open_table(ROUTER_CURSOR_STATE_TABLE)
+                    .map_err(redb_error)?
+                    .insert(cursor.target_delivery_id.as_str(), bytes.as_slice())
+                    .map_err(redb_error)?;
+            }
+            for cursor in cursors {
+                crate::home_migration_store::drain::receiver_settled(&txn, cursor)?;
+                for sequence in &cursor.retired_inbox_seqs {
+                    super::expiry_index::remove_inbox_row(
+                        &txn,
+                        &super::inbox_entry_storage_key(&cursor.target_delivery_id, *sequence),
+                    )?;
+                }
+            }
+            crate::durability_io::boundary(&self.path, "checkpoint_commit", || {
+                txn.commit().map_err(std::io::Error::other)
+            })
+            .map_err(redb_error)
         })
-        .map_err(redb_error)
     }
 }
 pub(super) fn merge_cursor(

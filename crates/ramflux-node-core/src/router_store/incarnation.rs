@@ -113,20 +113,22 @@ pub(super) fn upgrade_redb(
     path: &std::path::Path,
     inbox: &crate::OpaqueDeviceInbox,
 ) -> Result<(), NodeCoreError> {
-    crate::durability_io::boundary(path, "incarnation_upgrade", || {
-        let mut txn = db.begin_write().map_err(std::io::Error::other)?;
-        txn.set_durability(redb::Durability::Immediate).map_err(std::io::Error::other)?;
-        for cursor in inbox.cursor_states() {
-            ensure_cursor(
-                &txn,
-                &cursor.target_delivery_id,
-                inbox.issued_sequence(&cursor.target_delivery_id),
-            )
-            .map_err(std::io::Error::other)?;
-        }
-        txn.commit().map_err(std::io::Error::other)
+    crate::fatal_durability::run(|| {
+        crate::durability_io::boundary(path, "incarnation_upgrade", || {
+            let mut txn = db.begin_write().map_err(std::io::Error::other)?;
+            txn.set_durability(redb::Durability::Immediate).map_err(std::io::Error::other)?;
+            for cursor in inbox.cursor_states() {
+                ensure_cursor(
+                    &txn,
+                    &cursor.target_delivery_id,
+                    inbox.issued_sequence(&cursor.target_delivery_id),
+                )
+                .map_err(std::io::Error::other)?;
+            }
+            txn.commit().map_err(std::io::Error::other)
+        })
+        .map_err(error)
     })
-    .map_err(error)
 }
 
 /// Write a canonical E and its counter together, refusing an incompatible durable cursor.
@@ -182,17 +184,20 @@ impl super::RouterRedbStore {
     /// Returns admission, entropy or storage errors without acknowledging initialization.
     pub fn initialize_inbox(&self, target: &str) -> Result<String, NodeCoreError> {
         let _lease = self.acquire_acknowledgement(target)?;
-        let mut txn = self.db.begin_write().map_err(error)?;
-        txn.set_durability(redb::Durability::Immediate).map_err(error)?;
-        let id = if let Some(wal) = &self.submission_wal {
-            let id = wal.reserve_incarnation(target)?;
-            set_cursor(&txn, target, 0, &id, false)?;
-            id
-        } else {
-            ensure_cursor(&txn, target, 0)?
-        };
-        txn.commit().map_err(error)?;
-        Ok(id)
+
+        crate::fatal_durability::run(|| {
+            let mut txn = self.begin_write().map_err(error)?;
+            txn.set_durability(redb::Durability::Immediate).map_err(error)?;
+            let id = if let Some(wal) = &self.submission_wal {
+                let id = wal.reserve_incarnation(target)?;
+                set_cursor(&txn, target, 0, &id, false)?;
+                id
+            } else {
+                ensure_cursor(&txn, target, 0)?
+            };
+            txn.commit().map_err(error)?;
+            Ok(id)
+        })
     }
     pub(crate) fn checkpoint_incarnation(
         &self,
