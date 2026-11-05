@@ -278,6 +278,23 @@ impl CustodyService {
         request: CustodyMeshRequest,
         scope: Scope<'_>,
     ) -> Result<CustodyServerFrame, CustodyRefusal> {
+        if matches!(
+            &request,
+            CustodyMeshRequest::Request { action: CustodySessionAction::Submit { .. }, .. }
+        ) {
+            return crate::publication::capture(|| self.dispatch_prepared(request, scope))
+                .map_err(persistence)?
+                .published_blocking()
+                .map_err(persistence)?;
+        }
+        self.dispatch_prepared(request, scope)
+    }
+
+    fn dispatch_prepared(
+        &self,
+        request: CustodyMeshRequest,
+        scope: Scope<'_>,
+    ) -> Result<CustodyServerFrame, CustodyRefusal> {
         let admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Queueing behind another writer must never extend authentication deadlines.
         let scope = Scope {

@@ -158,7 +158,7 @@ fn migrated_forward_remains_enabled_after_restart() -> anyhow::Result<()> {
     let url = format!("http://{}/forward", listener.local_addr()?);
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
     let (handle, path) = migrated_test_handle(&url, 1, Duration::from_secs(20), now)?;
-    handle.store().bootstrap_router(handle.state())?;
+    handle.store().save_router(handle.state())?;
     drop(handle);
     let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
     let state =

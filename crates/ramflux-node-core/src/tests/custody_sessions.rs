@@ -710,3 +710,123 @@ fn custody_direct_prove_busy_and_revoked_grants_never_establish_a_session() -> R
 }
 #[path = "custody_migration.rs"]
 mod migration;
+
+fn publication_session(
+    router: &RouterCore,
+    store: &RouterRedbStore,
+) -> Result<(Driver, std::sync::Arc<crate::CustodyService>, CustodySession)> {
+    use std::sync::Arc;
+    let driver = Driver::new("alice", 10)?;
+    let service = Arc::new(crate::CustodyService::new(driver.node.clone(), false, store, NOW)?);
+    driver.run(&service, router, store, driver.publish())?;
+    driver.run(
+        &service,
+        router,
+        store,
+        CustodyProofAction::Register { prekey_bundle: driver.bundle(10)? },
+    )?;
+    let CustodyServerFrame::SessionEstablished { session } =
+        driver.run(&service, router, store, CustodyProofAction::OpenSession)?
+    else {
+        return Err("session".into());
+    };
+    Ok((driver, service, session))
+}
+
+#[test]
+fn durable_view_publication() -> Result {
+    use std::sync::{Arc, mpsc};
+    for mode in 0..=2 {
+        let root = temp_store_path(&format!("custody-published-{mode}"))?;
+        let store = Arc::new(crate::publication::open_durability_fixture(&root, mode)?);
+        let router = Arc::new(RouterCore::new());
+        store.bootstrap_router(&router)?;
+        let (driver, service, session) = publication_session(&router, &store)?;
+        let target = session.target_delivery_id.clone();
+        router.prepare_publication_target(&store, &target)?;
+        let core = store.publication_core()?;
+        let id = store.inbox_status(&target)?.0.ok_or("identity")?;
+        let first = core.reserve(&target, &id, &[])?;
+        let mut envelope = envelope("native-held-publication", &target, DeliveryClass::OpaqueEvent);
+        envelope.source_principal_id = "alice".into();
+        envelope.source_device_id = "primary".into();
+        envelope.created_at = i64::try_from(NOW)?;
+        envelope.ext.ext.insert(
+            "source_root_commitment".into(),
+            serde_json::json!(driver.reference.account_anchor),
+        );
+        envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+            &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+            [12; 32],
+        );
+        let action = CustodySessionAction::Submit { envelope: Box::new(envelope) };
+        let request = signed_request(
+            &driver,
+            &session,
+            &action,
+            &ramflux_protocol::encode_base64url([22; 32]),
+        )?;
+        let (accepted, durable) = mpsc::sync_channel(1);
+        let observer = crate::durability_test_hooks::observe(
+            root.clone(),
+            Arc::new(move |_, op, done| {
+                if op == "accepted_assignment" && done {
+                    let _ = accepted.try_send(());
+                }
+                Ok(())
+            }),
+        );
+        let worker_router = Arc::clone(&router);
+        let worker_store = Arc::clone(&store);
+        let worker_service = Arc::clone(&service);
+        let mesh = CustodyMeshRequest::Request {
+            session_id: session.session_id.clone(),
+            request: Box::new(request),
+            action,
+            connection_id: driver.connection.clone(),
+        };
+        let (respond, response) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let _ =
+                respond.send(worker_service.mesh(&worker_router, &worker_store, mesh, PEER, NOW));
+        });
+        durable.recv_timeout(Duration::from_secs(30))?;
+        assert_eq!(store.inbox_status(&target)?.1, 2);
+        assert!(matches!(response.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        let action = CustodySessionAction::Inbox { after_seq: 0, limit: 10 };
+        let request = signed_request(
+            &driver,
+            &session,
+            &action,
+            &ramflux_protocol::encode_base64url([23; 32]),
+        )?;
+        let inbox = service.mesh(
+            &router,
+            &store,
+            CustodyMeshRequest::Request {
+                session_id: session.session_id.clone(),
+                request: Box::new(request),
+                action,
+                connection_id: driver.connection.clone(),
+            },
+            PEER,
+            NOW,
+        );
+        assert!(
+            matches!(inbox, CustodyServerFrame::Inbox { ref entries } if entries.is_empty()),
+            "{inbox:?}"
+        );
+        drop(first);
+        let reply = response.recv_timeout(Duration::from_secs(30))?;
+        assert!(matches!(reply, CustodyServerFrame::Submitted { .. }), "{reply:?}");
+        worker.join().map_err(|_| "custody worker")?;
+        assert_eq!(router.resume(&target, 0, 10).len(), 1);
+        drop(observer);
+        drop(service);
+        drop(router);
+        drop(core);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}

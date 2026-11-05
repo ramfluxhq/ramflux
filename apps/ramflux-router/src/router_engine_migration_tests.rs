@@ -261,6 +261,7 @@ fn new_source_submission_after_commit_is_forwarded_or_refused_never_spooled() ->
         .outcome,
         "offline_queued"
     );
+    drop(state);
     drop(store);
     // Install the durable source gate and retained proof independently of target routing.
     let home: serde_json::Value = serde_json::from_str(include_str!(
@@ -280,6 +281,7 @@ fn new_source_submission_after_commit_is_forwarded_or_refused_never_spooled() ->
         tx.commit()?;
     }
     let store = Arc::new(RouterRedbStore::open(&path)?);
+    let state = Arc::new(store.load_router()?.ok_or("reopened router")?);
     state.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([8; 32])));
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let client = crate::router_runtime::LocalFederationForwardClient {
