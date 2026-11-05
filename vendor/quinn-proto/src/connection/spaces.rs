@@ -484,6 +484,13 @@ type Window = u128;
 const WINDOW_SIZE: u64 = 1 + mem::size_of::<Window>() as u64 * 8;
 
 impl Dedup {
+    #[cfg(feature = "__control-test")]
+    pub(super) fn control_test_seen(&self, number: u64) -> bool {
+        if number >= self.next { return false; }
+        let delta = self.highest() - number;
+        delta == 0 || (delta <= 128 && self.window & (1 << (delta - 1)) != 0)
+    }
+
     /// Construct an empty window positioned at the start.
     pub(super) fn new() -> Self {
         Self { window: 0, next: 0 }

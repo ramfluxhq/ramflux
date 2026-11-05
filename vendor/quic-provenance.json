@@ -15,8 +15,8 @@
       },
       "Cargo.toml": {
         "upstream_sha256": "d399537966b571462de862af3cfe03318286d67b300c0db6b87fedfd5189a540",
-        "patched_sha256": "377749a5f8985ced8fa36225ba8e4099723b330377f99ed1874d1621ace9665c",
-        "delta": "Isolate dependency-test workspace and optimize its dependencies; Quinn also patches sibling quinn-proto for standalone tests; freeze proto requirement to =0.11.18 so standalone tests cannot retain older registry proto"
+        "patched_sha256": "66092e9b298a8238da41238625e524d34b5193cc5aec3c6610bfc1292b30d17e",
+        "delta": "Isolate dependency-test workspace and optimize its dependencies; Quinn also patches sibling quinn-proto for standalone tests; freeze proto requirement to =0.11.18 so standalone tests cannot retain older registry proto; Enable sibling proto __control-test only in this isolated workspace dev-dependency graph"
       },
       "Cargo.toml.orig": {
         "upstream_sha256": "29016319840371d2c56e6d584e641d9b42136fdd6623438882416b6bde423f94",
@@ -81,13 +81,13 @@
       },
       "src/connection.rs": {
         "upstream_sha256": "3c388c6b455c318728c869b1f121fcc7d03572a92a92abda792d0cd8a2a10166",
-        "patched_sha256": "7180908264cb8fbb8f14609f8015c1ea3e18095feddd6d8a916f53dd701543b0",
-        "delta": "SPDX; Fresh runtime time for control resume; eight-packet fairness yield only in bounded mode; upstream import order restored"
+        "patched_sha256": "af6d3925b5c832f6f587db0271819156c858777299fc91a2d72b861668a7c7a2",
+        "delta": "SPDX; Fresh runtime time for control resume; eight-packet fairness yield only in bounded mode; upstream import order restored; cfg(test) forward/reverse consumer barriers, actual raw dequeue count and forwarding credit-Waker witness; production wrapper preserves resume behavior"
       },
       "src/endpoint.rs": {
         "upstream_sha256": "a63bf8516128c5dd7ac7fb2e63450886873990f2084ff91b39737c4cf41c6c32",
-        "patched_sha256": "8379d1b9e8432f657a327c0bee5ba848b63ee7a3dca62dc0231df49bfb844f16",
-        "delta": "SPDX; Opt-in bounded handle-to-owner-slot map, typed capacity refusals before connection creation, independent test-only copy/delivery witnesses, gated idempotent close; upstream import order restored"
+        "patched_sha256": "f089f663a4c6826ff12c413c8d6dd69448a3c2556da2749e3a7f27e0d667458f",
+        "delta": "SPDX; Opt-in bounded handle-to-owner-slot map, typed capacity refusals before connection creation, independent test-only copy/delivery witnesses, gated idempotent close; upstream import order restored; cfg(test) endpoint consumer barrier while real socket ingress continues"
       },
       "src/incoming.rs": {
         "upstream_sha256": "d10fcb0efd956d2d4f53e6600737520c04179d0c5850a8c89792c86a762eef98",
@@ -154,12 +154,16 @@
         "delta": "SPDX; Separate incoming owner and bounded established slots, typed source/owner exhaustion and refusal counters; raw backing credits"
       },
       "src/rawq_mailbox.rs": {
-        "patched_sha256": "a5874b7a31ef3f09a5140d9c568686d75c8827e13b86da232cede5c5eadb23f0",
-        "delta": "SPDX; Bounded-mode control-first lanes and coalesced Close/Rebind; default-mode events retain FIFO semantics"
+        "patched_sha256": "b83e3876bd0a7d3600617a2286d2aaf92342039fbec7de95c611a348730e729c",
+        "delta": "SPDX; Bounded-mode control-first lanes and coalesced Close/Rebind; default-mode events retain FIFO semantics; cfg(test) reverse consumer barrier while raw pause/resume is driven normally"
       },
       "src/rawq_tests.rs": {
-        "patched_sha256": "3f83bf70bf4ff8edee9f780a2bb1c209ae4dfb816254366adc44abcba7c5e068",
-        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; real-driver small-control-limit matrix remains pending"
+        "patched_sha256": "67063209277d149c197ca9db3f5bc50cfd6bf5a0a3ee00510d407aec230c6de0",
+        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix"
+      },
+      "src/rawq_tests/control_driver.rs": {
+        "patched_sha256": "0f4c138635e8d30349da8f53b7ef7d9eefa3e5645f918ab31f1fe6f715c5fdb7",
+        "delta": "Real Tokio endpoint/connection r10(a/b/c) matrix with 4096-byte/4-item binding limits, independent payload/frame/dedup/ACK/raw-dequeue/waker oracles; both directions full, pending producer, duplicate/retransmit, repeated-RETIRE oversize, terminal metadata adapter, independent drains and concurrent timer"
       }
     },
     "formatting": {
@@ -196,9 +200,28 @@
           "vendor/quinn/src/rawq.rs",
           "vendor/quinn/src/rawq_mailbox.rs",
           "vendor/quinn/src/rawq_tests.rs"
+        ],
+        [
+          "rustfmt",
+          "--edition",
+          "2021",
+          "--config-path",
+          "vendor/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/quinn-proto/src/connection/cid_state.rs",
+          "vendor/quinn-proto/src/connection/control.rs",
+          "vendor/quinn-proto/src/connection/control/probe.rs",
+          "vendor/quinn-proto/src/connection/spaces.rs",
+          "vendor/quinn/src/connection.rs",
+          "vendor/quinn/src/endpoint.rs",
+          "vendor/quinn/src/rawq_mailbox.rs",
+          "vendor/quinn/src/rawq_tests.rs",
+          "vendor/quinn/src/rawq_tests/control_driver.rs"
         ]
       ],
-      "restoration": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth."
+      "restoration": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth.",
+      "r2b_restoration": "Preserve existing import prefixes and restore whitespace-only replace hunks against pre-format text using difflib.SequenceMatcher(autojunk=False); semantic hunks remain formatted."
     }
   },
   "quinn-proto": {
@@ -216,8 +239,8 @@
       },
       "Cargo.toml": {
         "upstream_sha256": "739f19627faef023b9c24932441d4e23b82b5786c8c57e37a1419d93189ef5c5",
-        "patched_sha256": "1589f62fae399c4f30d9179ddf39ce270097dde129a76796c0ad6745f5522f8a",
-        "delta": "Isolate dependency-test workspace and optimize its dependencies; Quinn also patches sibling quinn-proto for standalone tests"
+        "patched_sha256": "8c46232f4a3998c09816a652acf70e73e8f99d378ebd41f73f08c87110faef29",
+        "delta": "Isolate dependency-test workspace and optimize its dependencies; Quinn also patches sibling quinn-proto for standalone tests; Declare non-default __control-test feature for dependency tests only"
       },
       "Cargo.toml.orig": {
         "upstream_sha256": "b51200a74958e34fa6581ea6a7a349354eb3d68506e42d135baf251cc62eda3a",
@@ -303,8 +326,8 @@
       },
       "src/connection/cid_state.rs": {
         "upstream_sha256": "485b3821af4b706789b9ef6d78aaa60b1d49f54dbb2c6785daee801ad2696d24",
-        "patched_sha256": "5b8e6ffe4bef65137e9c5384317c629b8acd3e5942378dd39a2b162dcb2a68c5",
-        "delta": "Prepend original-license SPDX header; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "b1f0f409b5e3531c50448d9469c5330406a07819f9934cb21e4f47a3e9a3925a",
+        "delta": "Prepend original-license SPDX header; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; Expose CID interval to the non-default dependency-test probe"
       },
       "src/connection/datagrams.rs": {
         "upstream_sha256": "8d17cb428f872f3cc9c0d33f56a140f08714e19ddc67d84841d0ce499cf1a8da",
@@ -353,8 +376,8 @@
       },
       "src/connection/spaces.rs": {
         "upstream_sha256": "a1b44aa9c1ff38a545741fff5546552b9650ae9381a6fdf5f9ef9ea62ef6a45c",
-        "patched_sha256": "c1229b21e4754b50f16dc83e056bfe0a8a1caefec049cd093ec2443c21486ad0",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
+        "patched_sha256": "4b3eca844ca10834793d6312217f10072f59d0df45b200f3ef0c78f3f218e8be",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Non-mutating dedup observation behind non-default dependency-test feature"
       },
       "src/connection/stats.rs": {
         "upstream_sha256": "f420ca4132973cdcfd0625a68fe79333891bb8bd91072dff70997c76472970d5",
@@ -496,8 +519,8 @@
         "delta": "Extract unchanged idle timeout negotiation and tests with pub(super) visibility and SPDX"
       },
       "src/connection/control.rs": {
-        "patched_sha256": "c56d4e4e7ed3475c2cebdb56c4949b733c6c903baad64bf5e29bea800fe1f1c2",
-        "delta": "SPDX; Generation-gated pending packet/timer revalidation, aggregate emitted-control reservation census and debug assertion; fresh resume time"
+        "patched_sha256": "e69a53312c09fa72cae8b182be8446783dc39e1c01e3d7d25b8494b37c7788a0",
+        "delta": "SPDX; Generation-gated pending packet/timer revalidation, aggregate emitted-control reservation census and debug assertion; fresh resume time; Disarm the consumed waiter before retry; re-arm atomically and schedule if a concurrent release changed the generation; avoid duplicate wake on successful resume"
       },
       "src/connection/packet_processing.rs": {
         "patched_sha256": "7aee8879c00237465e339347d8bf1ff8fdf848c4867bda6a282a437e561860cc",
@@ -506,6 +529,10 @@
       "src/connection/control/tests.rs": {
         "patched_sha256": "f53147a49bcfd5510d91559fd496f21e77c740d40bc3cfb6b43b818ede8addba",
         "delta": "SPDX; Aggregate directional byte/item ceilings, generation retry gates, head/tail datagram accounting, fresh timer time and census overrun witnesses"
+      },
+      "src/connection/control/probe.rs": {
+        "patched_sha256": "ed808be94bdf7a57cbaf355c98fe26388f24820e54fb33b066214dd3ea87d47e",
+        "delta": "Non-default test-only negotiated-key encrypted packet construction, directional census, dedup/ACK/effect observations and real timer arming; no product activation"
       }
     },
     "formatting": {
@@ -542,9 +569,28 @@
           "vendor/quinn/src/rawq.rs",
           "vendor/quinn/src/rawq_mailbox.rs",
           "vendor/quinn/src/rawq_tests.rs"
+        ],
+        [
+          "rustfmt",
+          "--edition",
+          "2021",
+          "--config-path",
+          "vendor/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/quinn-proto/src/connection/cid_state.rs",
+          "vendor/quinn-proto/src/connection/control.rs",
+          "vendor/quinn-proto/src/connection/control/probe.rs",
+          "vendor/quinn-proto/src/connection/spaces.rs",
+          "vendor/quinn/src/connection.rs",
+          "vendor/quinn/src/endpoint.rs",
+          "vendor/quinn/src/rawq_mailbox.rs",
+          "vendor/quinn/src/rawq_tests.rs",
+          "vendor/quinn/src/rawq_tests/control_driver.rs"
         ]
       ],
-      "restoration": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth."
+      "restoration": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth.",
+      "r2b_restoration": "Preserve existing import prefixes and restore whitespace-only replace hunks against pre-format text using difflib.SequenceMatcher(autojunk=False); semantic hunks remain formatted."
     }
   }
 }

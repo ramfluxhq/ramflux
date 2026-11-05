@@ -344,8 +344,8 @@ impl Connection {
             return true;
         }
         self.control.as_ref().unwrap().lock().unwrap().revalidations += 1;
-        // Register before retry so a concurrent final consumer cannot lose the wakeup.
-        CreditState::register(self.control.as_ref().unwrap(), cx);
+        // The old waiter was consumed; successful retry must not arm a second wake.
+        self.control.as_ref().unwrap().lock().unwrap().wake = None;
         let pending = self.pending_control.take().unwrap();
         let PendingPacket {
             now: _,
@@ -368,6 +368,22 @@ impl Connection {
             }
         }
         self.raw_owner = None;
+        if self.pending_control.is_some() || self.control_timer_pending.is_some() {
+            // Re-arm atomically after a failed retry. A release racing the retry
+            // must schedule another poll rather than strand the pending producer.
+            let mut state = self.control.as_ref().unwrap().lock().unwrap();
+            state.wake = Some(cx.waker().clone());
+            let changed = self
+                .pending_control
+                .as_ref()
+                .is_some_and(|p| p.generation != state.generation)
+                || (self.control_timer_pending.is_some()
+                    && self.control_timer_generation != state.generation);
+            drop(state);
+            if changed {
+                cx.waker().wake_by_ref();
+            }
+        }
         self.pending_control.is_some()
     }
 
@@ -420,6 +436,9 @@ impl AsRef<[u8]> for RawBacking {
         &self.bytes
     }
 }
+
+#[cfg(feature = "__control-test")]
+mod probe;
 
 #[cfg(test)]
 mod tests;

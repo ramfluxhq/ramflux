@@ -55,6 +55,13 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    #[cfg(test)]
+    pub(crate) fn control_test_forward(&self, hold: bool) {
+        let mut state = self.inner.state.lock().unwrap();
+        state.hold_controls = hold;
+        if let Some(wake) = state.driver.take() { wake.wake(); }
+    }
+
     /// Freeze dormant raw queue limits before admitting any incoming or outgoing owner.
     ///
     /// # Errors
@@ -569,6 +576,8 @@ impl EndpointInner {
 
 #[derive(Debug)]
 pub(crate) struct State {
+    #[cfg(test)]
+    hold_controls: bool,
     socket: Arc<dyn AsyncUdpSocket>,
     /// During an active migration, abandoned_socket receives traffic
     /// until the first packet arrives on the new socket.
@@ -618,6 +627,8 @@ impl State {
     }
 
     fn handle_events(&mut self, cx: &mut Context, shared: &Shared) -> bool {
+        #[cfg(test)]
+        if self.hold_controls { return false; }
         for _ in 0..IO_LOOP_BOUND {
             let (ch, event) = match self.events.poll_recv(cx) {
                 Poll::Ready(Some(x)) => x,
@@ -889,6 +900,8 @@ impl EndpointRef {
                 events,
                 driver: None,
                 driver_lost: false,
+                #[cfg(test)]
+                hold_controls: false,
                 recv_state,
                 runtime,
                 stats: EndpointStats::default(),

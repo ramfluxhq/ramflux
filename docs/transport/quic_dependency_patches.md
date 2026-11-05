@@ -80,8 +80,11 @@ The named dependency tests run real Quinn endpoint/connection drivers over a
 bounded deterministic datagram socket, with driver and consumer barriers. They
 cover independent owner/source/endpoint byte and item ceilings, pool-independent
 copy/delivery counts, retained backing, sparse handle mapping and typed capacity
-refusal. The existing control-progress test uses generous control limits; it does
-not prove the small-limit real-driver parking/wakeup matrix, which remains pending.
+refusal. The card-named control test also runs the complete real-driver matrix
+with binding 4096-byte/4-item limits: discarded head/valid tail, committed heads
+with one parked tail and one credit wake, independent directional drain, full
+forward/reverse credit, raw-input pause, duplicate/later retransmission, concurrent
+CID timer, repeated-RETIRE oversize and terminal metadata-adapter propagation.
 The proto packet tests cover the three packet outcomes across actual coalesced
 TLS flights, aggregate directional ceilings and metadata terminal delivery.
 
@@ -94,3 +97,16 @@ parking. Eight-packet yield, control-first ordering, Close/Rebind coalescing and
 idempotent endpoint close apply only with bounded admission enabled. Default
 mode retains its FIFO event semantics; channel/bookkeeping layout still differs
 from upstream and must be included in any later layout certificate.
+
+The dependency-test matrix uses actual Tokio endpoint/connection futures and
+socket ingress. Its non-default proto `__control-test` feature constructs encrypted
+adversarial wire packets from negotiated keys and observes dedup/ACK membership,
+frame counters and directional usage. Quinn's barriers and dequeue/waker witnesses
+are `cfg(test)`. Synthetic packet numbers are not in the sending peer's sent map;
+those cases retain receiver transmissions in bounded wire history while suppressing
+delivery to that peer. Handshake recovery uses normal generated packets. The root
+resolution guard rejects this feature in the product graph. Metadata coverage here
+exercises the terminal adapter; exhaustive allocation-class hooks remain later work.
+The single-wake test exposed a stale waiter on successful retry; consumed waiters
+are disarmed, failed retries re-arm under the credit mutex and generation races
+schedule a new poll after releasing that mutex.

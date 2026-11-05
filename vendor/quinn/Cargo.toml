@@ -202,6 +202,12 @@ package = "quinn-udp"
 [dev-dependencies.anyhow]
 version = "1.0.22"
 
+[dev-dependencies.proto]
+version = "=0.11.18"
+package = "quinn-proto"
+features = ["__control-test"]
+default-features = false
+
 [dev-dependencies.bencher]
 version = "0.1.5"
 

@@ -84,6 +84,9 @@ def check_resolution():
         ).resolve(), f"{name}: wrong path"
         ids[name] = package["id"]
     nodes = {n["id"]: n for n in metadata["resolve"]["nodes"]}
+    assert "__control-test" not in nodes[ids["quinn-proto"]]["features"], (
+        "dependency-test packet hooks leaked into product resolution"
+    )
     # Includes the Linux optional graph even when this guard runs on another OS.
     consumers = [p for p in metadata["packages"] if p["name"] in ("quinn", "compio-quic")]
     assert {p["name"] for p in consumers} == {"quinn", "compio-quic"}
