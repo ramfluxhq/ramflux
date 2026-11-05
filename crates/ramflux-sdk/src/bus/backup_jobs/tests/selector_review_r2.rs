@@ -324,7 +324,10 @@ fn native_fresh_target(
     let directory = root.join("accounts/account/fresh-normalized");
     std::fs::create_dir_all(&directory)?;
     let target = directory.join("account.db");
-    BackupDatabase::open_restore_input(source, &saved.key, BackupOpenMode::PreNormalization)?
+    let private = tempfile::tempdir()?;
+    let staged = private.path().join("source.db");
+    std::fs::copy(source, &staged)?;
+    BackupDatabase::open_restore_input(&staged, &saved.key, BackupOpenMode::PreNormalization)?
         .copy_to(&target, key)?;
     let mut stage =
         BackupDatabase::open_restore_input(&target, key, BackupOpenMode::PreNormalization)?;
@@ -426,8 +429,8 @@ fn restored_target_older_install(native: bool) -> TestResult {
     let second_path = older_dir.path().join("second-generation.db");
     let second = restored.write_backup_snapshot(&second_path)?;
     assert_eq!(registration(&raw(&second_path, &second.key)?)?, (1, 1, 1, 0));
-    assert_eq!(std::fs::read(&older_path)?, older_bytes);
-    assert_eq!(std::fs::read(&revoked_path)?, revoked_bytes);
+    assert!(std::fs::read(&older_path)? == older_bytes, "older archive bytes changed");
+    assert!(std::fs::read(&revoked_path)? == revoked_bytes, "revoked archive bytes changed");
     Ok(())
 }
 
