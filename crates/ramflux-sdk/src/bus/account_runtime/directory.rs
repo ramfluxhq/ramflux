@@ -17,6 +17,9 @@ impl AccountRuntime {
         };
         let generation = connection.generation();
         match work {
+            DirectoryWork::HeadRefresh(work) => {
+                crate::bus::couriers::head_refresh::apply_work(account, work);
+            }
             DirectoryWork::PrepareBackfill { generation: requested, reply } => {
                 if requested != generation || reply.is_closed() {
                     return Ok(());
