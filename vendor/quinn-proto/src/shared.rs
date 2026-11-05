@@ -3,18 +3,35 @@ use std::{fmt, net::SocketAddr};
 
 use bytes::{Buf, BufMut, BytesMut};
 
-use crate::{Instant, MAX_CID_SIZE, ResetToken, coding::BufExt, packet::PartialDecode};
+use crate::{coding::BufExt, packet::PartialDecode, Instant, ResetToken, MAX_CID_SIZE};
 
 /// Events sent from an Endpoint to a Connection
 #[derive(Debug)]
 pub struct ConnectionEvent(pub(crate) ConnectionEventInner);
+
+impl ConnectionEvent {
+    /// Datagram backing length, excluding allocation alignment/header charge.
+    pub fn datagram_size(&self) -> Option<usize> {
+        match &self.0 {
+            ConnectionEventInner::Datagram(d) => d
+                .first_decode
+                .len()
+                .checked_add(d.remaining.as_ref().map_or(0, BytesMut::len)),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum ConnectionEventInner {
     /// A datagram has been received for the Connection
     Datagram(DatagramConnectionEvent),
     /// New connection identifiers have been issued for the Connection
-    NewIdentifiers(Vec<IssuedCid>, Instant, Option<std::sync::Arc<crate::connection::control::Reservation>>),
+    NewIdentifiers(
+        Vec<IssuedCid>,
+        Instant,
+        Option<std::sync::Arc<crate::connection::control::Reservation>>,
+    ),
 }
 
 /// Variant of [`ConnectionEventInner`].
@@ -29,7 +46,10 @@ pub(crate) struct DatagramConnectionEvent {
 
 /// Events sent from a Connection to an Endpoint
 #[derive(Debug)]
-pub struct EndpointEvent(pub(crate) EndpointEventInner, pub(crate) Option<std::sync::Arc<crate::connection::control::Reservation>>);
+pub struct EndpointEvent(
+    pub(crate) EndpointEventInner,
+    pub(crate) Option<std::sync::Arc<crate::connection::control::Reservation>>,
+);
 
 impl EndpointEvent {
     /// Construct an event that indicating that a `Connection` will no longer emit events

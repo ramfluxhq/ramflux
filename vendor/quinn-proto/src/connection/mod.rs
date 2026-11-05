@@ -11,14 +11,11 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
 
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-    Dir, Duration, EndpointConfig, Frame, INITIAL_MTU, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
-    MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
-    TransportErrorCode, VarInt,
     cid_generator::ConnectionIdGenerator,
     cid_queue::CidQueue,
     coding::BufMutExt,
@@ -36,6 +33,9 @@ use crate::{
     },
     token::{ResetToken, Token, TokenPayload},
     transport_parameters::TransportParameters,
+    Dir, Duration, EndpointConfig, Frame, Instant, Side, StreamId, TokenStore, Transmit,
+    TransportError, TransportErrorCode, VarInt, INITIAL_MTU, MAX_CID_SIZE, MAX_STREAM_COUNT,
+    MIN_INITIAL_SIZE, TIMER_GRANULARITY,
 };
 
 mod ack_frequency;
@@ -57,6 +57,8 @@ mod pacing;
 mod packet_builder;
 use packet_builder::PacketBuilder;
 
+pub(crate) mod control;
+pub use control::ControlLimits;
 mod packet_crypto;
 mod packet_processing;
 use packet_crypto::{PrevCrypto, ZeroRttCrypto};
@@ -132,14 +134,13 @@ use timer::{Timer, TimerTable};
 /// with events of the same [`Instant`] may be interleaved in any order with a
 /// call to [`handle_event`](Self::handle_event) at that same instant; however
 /// events or timeouts with different instants must not be interleaved.
-pub(crate) mod control;
-pub use control::ControlLimits;
-
 pub struct Connection {
     control: Option<Arc<std::sync::Mutex<control::CreditState>>>,
     active_control: Option<Arc<control::Reservation>>,
     pending_control: Option<control::PendingPacket>,
     control_resource_closed: bool,
+    raw_owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    control_timer_pending: Option<Instant>,
     endpoint_config: Arc<EndpointConfig>,
     config: Arc<TransportConfig>,
     rng: StdRng,
@@ -287,6 +288,9 @@ impl Connection {
             client_hello: None,
         });
         let mut rng = StdRng::from_seed(rng_seed);
+        let control = endpoint_config
+            .control_limits
+            .map(control::CreditState::new);
         let mut this = Self {
             endpoint_config,
             crypto,
@@ -321,7 +325,12 @@ impl Connection {
             retry_src_cid: None,
             events: VecDeque::new(),
             endpoint_events: VecDeque::new(),
-            control: None, active_control: None, pending_control: None, control_resource_closed: false,
+            control,
+            active_control: None,
+            pending_control: None,
+            control_resource_closed: false,
+            raw_owner: None,
+            control_timer_pending: None,
             spin_enabled: config.allow_spin && rng.random_ratio(7, 8),
             spin: false,
             spaces: [initial_space, PacketSpace::new(now), PacketSpace::new(now)],
@@ -1152,10 +1161,17 @@ impl Connection {
                 self.stats.udp_rx.bytes += first_decode.len() as u64;
                 let data_len = first_decode.len();
 
-                if self.pending_control.is_some() || self.control_resource_closed { return; }
+                if self.pending_control.is_some() || self.control_resource_closed {
+                    return;
+                }
                 self.handle_decode(now, remote, ecn, first_decode);
-                if let Some(pending) = self.pending_control.as_mut() { pending.remaining = remaining; return; }
-                if self.control_resource_closed { return; }
+                if let Some(pending) = self.pending_control.as_mut() {
+                    pending.remaining = remaining;
+                    return;
+                }
+                if self.control_resource_closed {
+                    return;
+                }
                 // The current `path` might have changed inside `handle_decode`,
                 // since the packet could have triggered a migration. Make sure
                 // the data received is accounted for the most recent path by accessing
@@ -1208,6 +1224,9 @@ impl Connection {
             if !self.timers.is_expired(timer, now) {
                 continue;
             }
+            if timer == Timer::PushNewCid && !self.reserve_control_timer(now) {
+                continue;
+            }
             self.timers.stop(timer);
             trace!(timer = ?timer, "timeout");
             match timer {
@@ -1253,7 +1272,10 @@ impl Connection {
                             "push a new cid to peer RETIRE_PRIOR_TO field {}",
                             self.local_cid_state.retire_prior_to()
                         );
-                        self.queue_endpoint_event(EndpointEventInner::NeedIdentifiers(now, num_new_cid));
+                        self.queue_endpoint_event(EndpointEventInner::NeedIdentifiers(
+                            now,
+                            num_new_cid,
+                        ));
                     }
                 }
                 Timer::MaxAckDelay => {
@@ -1264,6 +1286,7 @@ impl Connection {
                         .on_max_ack_delay_timeout()
                 }
             }
+            self.active_control = None;
         }
     }
 
@@ -1785,7 +1808,8 @@ impl Connection {
             self.stats.path.lost_bytes += size_of_lost_packets;
             trace!(
                 "packets lost: {:?}, bytes lost: {}",
-                lost_packets, size_of_lost_packets
+                lost_packets,
+                size_of_lost_packets
             );
 
             for &packet in &lost_packets {
@@ -2037,7 +2061,7 @@ impl Connection {
         let span = trace_span!("first recv");
         let _guard = span.enter();
         debug_assert!(self.side.is_server());
-        let len = packet.header_data.len() + packet.payload_len();
+        let len = packet.header_data.len() + packet.payload.len();
         self.path.total_recvd = len as u64;
 
         match self.state {
@@ -2047,6 +2071,22 @@ impl Connection {
             _ => unreachable!("first packet must be delivered in Handshake state"),
         }
 
+        let pending = control::PendingPacket {
+            now,
+            remote,
+            ecn,
+            packet: packet.into(),
+            number: Some(packet_number),
+            key_update: None,
+            remaining: None,
+            owner: self.raw_owner.clone(),
+        };
+        let Some(packet) = self.admit_control_packet(pending) else {
+            if let Some(pending) = self.pending_control.as_mut() {
+                pending.remaining = remaining;
+            }
+            return Ok(());
+        };
         self.on_packet_authenticated(
             now,
             SpaceId::Initial,
@@ -2055,10 +2095,13 @@ impl Connection {
             false,
             false,
         );
-
-        self.process_decrypted_packet(now, remote, Some(packet_number), packet.into())?;
-        if let Some(data) = remaining {
-            self.handle_coalesced(now, remote, ecn, data);
+        let processed = self.process_decrypted_packet(now, remote, Some(packet_number), packet);
+        self.active_control = None;
+        processed?;
+        if !self.control_resource_closed {
+            if let Some(data) = remaining {
+                self.handle_coalesced(now, remote, ecn, data);
+            }
         }
 
         self.config.qlog_sink.emit_recovery_metrics(
@@ -2418,7 +2461,10 @@ impl Connection {
                         }
                     }
                     if let Some(token) = params.stateless_reset_token {
-                        self.queue_endpoint_event(EndpointEventInner::ResetToken(self.path.remote, token));
+                        self.queue_endpoint_event(EndpointEventInner::ResetToken(
+                            self.path.remote,
+                            token,
+                        ));
                     }
                     self.handle_peer_params(params)?;
                     self.issue_first_cids(now);
@@ -2715,14 +2761,17 @@ impl Connection {
                     self.streams.received_stop_sending(id, error_code);
                 }
                 Frame::RetireConnectionId { sequence } => {
+                    if self.control.is_some() && self.local_cid_state.was_retired(sequence) {
+                        continue;
+                    }
                     let allow_more_cids = self
                         .local_cid_state
                         .on_cid_retirement(sequence, self.peer_params.issue_cids_limit())?;
                     self.queue_endpoint_event(EndpointEventInner::RetireConnectionId(
-                            now,
-                            sequence,
-                            allow_more_cids,
-                        ));
+                        now,
+                        sequence,
+                        allow_more_cids,
+                    ));
                 }
                 Frame::NewConnectionId(frame) => {
                     trace!(
@@ -2940,9 +2989,9 @@ impl Connection {
 
     fn set_reset_token(&mut self, reset_token: ResetToken) {
         self.queue_endpoint_event(EndpointEventInner::ResetToken(
-                self.path.remote,
-                reset_token,
-            ));
+            self.path.remote,
+            reset_token,
+        ));
         self.peer_params.stateless_reset_token = Some(reset_token);
     }
 

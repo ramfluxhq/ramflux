@@ -10,8 +10,8 @@ use std::{
     pin::Pin,
     str,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     task::{Context, Poll, Waker},
 };
@@ -19,9 +19,8 @@ use std::{
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))]
 use crate::runtime::default_runtime;
 use crate::{
-    Instant,
     runtime::{AsyncUdpSocket, Runtime},
-    udp_transmit,
+    udp_transmit, Instant,
 };
 use bytes::{Bytes, BytesMut};
 use pin_project_lite::pin_project;
@@ -32,13 +31,13 @@ use proto::{
 use rustc_hash::FxHashMap;
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring"),))]
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::sync::{Notify, futures::Notified, mpsc};
+use tokio::sync::{futures::Notified, mpsc, Notify};
 use tracing::{Instrument, Span};
-use udp::{BATCH_SIZE, RecvMeta};
+use udp::{RecvMeta, BATCH_SIZE};
 
 use crate::{
-    ConnectionEvent, EndpointConfig, IO_LOOP_BOUND, RECV_TIME_BOUND, VarInt,
-    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter,
+    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter, ConnectionEvent,
+    EndpointConfig, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND,
 };
 
 /// A QUIC endpoint.
@@ -55,6 +54,28 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    /// Freeze dormant raw queue limits before admitting any incoming or outgoing owner.
+    ///
+    /// # Errors
+    /// Rejects invalid limits, repeat configuration or an endpoint with admitted work.
+    pub fn set_packet_queue_limits(
+        &mut self,
+        limits: crate::PacketQueueLimits,
+    ) -> Result<(), &'static str> {
+        let mut state = self.inner.state.lock().unwrap();
+        if state.socket.max_receive_segments() != 1 {
+            return Err("raw queue policy requires GRO disabled");
+        }
+        if !state.recv_state.connections.is_empty()
+            || !state.recv_state.incoming.is_empty()
+            || state.recv_state.connections.raw_credit.is_some()
+        {
+            return Err("endpoint already admitted work");
+        }
+        state.recv_state.connections.raw_credit = Some(crate::rawq::Pool::new(limits)?);
+        Ok(())
+    }
+
     /// Helper to construct an endpoint for use with outgoing connections only
     ///
     /// Note that `addr` is the *local* address to bind to, which should usually be a wildcard
@@ -600,6 +621,7 @@ struct ConnectionSet {
     senders: FxHashMap<ConnectionHandle, mpsc::UnboundedSender<ConnectionEvent>>,
     /// Stored to give out clones to new ConnectionInners
     sender: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
+    raw_credit: Option<Arc<crate::rawq::Pool>>,
     /// Set if the endpoint has been manually closed
     close: Option<(VarInt, Bytes)>,
 }
@@ -622,6 +644,28 @@ impl ConnectionSet {
         }
         self.senders.insert(handle, send);
         Connecting::new(handle, conn, self.sender.clone(), recv, socket, runtime)
+    }
+
+    fn send_packet(
+        &self,
+        handle: ConnectionHandle,
+        event: proto::ConnectionEvent,
+        remote: SocketAddr,
+    ) {
+        let event = if let Some(pool) = &self.raw_credit {
+            let Some(size) = event.datagram_size() else {
+                return;
+            };
+            let Some(credit) = pool.reserve(handle.0, remote.ip(), size) else {
+                return;
+            };
+            ConnectionEvent::RawProto { event, credit }
+        } else {
+            ConnectionEvent::Proto(event)
+        };
+        if let Some(sender) = self.senders.get(&handle) {
+            let _ = sender.send(event);
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -763,6 +807,7 @@ impl RecvState {
                 senders: FxHashMap::default(),
                 sender,
                 close: None,
+                raw_credit: None,
             },
             incoming: VecDeque::new(),
             recv_buf: recv_buf.into(),
@@ -820,12 +865,7 @@ impl RecvState {
                                 Some(DatagramEvent::ConnectionEvent(handle, event)) => {
                                     // Ignoring errors from dropped connections that haven't yet been cleaned up
                                     received_connection_packet = true;
-                                    let _ = self
-                                        .connections
-                                        .senders
-                                        .get_mut(&handle)
-                                        .unwrap()
-                                        .send(ConnectionEvent::Proto(event));
+                                    self.connections.send_packet(handle, event, meta.addr);
                                 }
                                 Some(DatagramEvent::Response(transmit)) => {
                                     respond(transmit, &response_buffer, socket);

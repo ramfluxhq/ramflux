@@ -22,8 +22,13 @@ impl Connection {
                 Ok((partial_decode, rest)) => {
                     remaining = rest;
                     self.handle_decode(now, remote, ecn, partial_decode);
-                    if let Some(pending) = self.pending_control.as_mut() { pending.remaining = remaining; return; }
-                    if self.control_resource_closed { return; }
+                    if let Some(pending) = self.pending_control.as_mut() {
+                        pending.remaining = remaining;
+                        return;
+                    }
+                    if self.control_resource_closed {
+                        return;
+                    }
                 }
                 Err(e) => {
                     trace!("malformed header: {}", e);
@@ -33,7 +38,7 @@ impl Connection {
         }
     }
 
-    fn handle_decode(
+    pub(super) fn handle_decode(
         &mut self,
         now: Instant,
         remote: SocketAddr,
@@ -76,16 +81,37 @@ impl Connection {
 
         let decrypted = match packet {
             None => Err(None),
-            Some(mut packet) => packet_crypto::decrypt_packet_body(&mut packet, &self.spaces,
-                self.zero_rtt_crypto.as_ref(), self.key_phase, self.prev_crypto.as_ref(), self.next_crypto.as_ref())
-                .map(|key_update| { let number = key_update.as_ref().map(|r| r.number); (packet, number, key_update) }),
+            Some(mut packet) => packet_crypto::decrypt_packet_body(
+                &mut packet,
+                &self.spaces,
+                self.zero_rtt_crypto.as_ref(),
+                self.key_phase,
+                self.prev_crypto.as_ref(),
+                self.next_crypto.as_ref(),
+            )
+            .map(|key_update| {
+                let number = key_update.as_ref().map(|r| r.number);
+                (packet, number, key_update)
+            }),
         };
         self.handle_authenticated_packet(now, remote, ecn, decrypted, stateless_reset);
     }
 
-    pub(super) fn handle_authenticated_packet(&mut self, now: Instant, remote: SocketAddr, ecn: Option<EcnCodepoint>,
-        decrypted: Result<(Packet, Option<u64>, Option<packet_crypto::DecryptPacketResult>), Option<TransportError>>,
-        stateless_reset: bool) {
+    pub(super) fn handle_authenticated_packet(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        ecn: Option<EcnCodepoint>,
+        decrypted: Result<
+            (
+                Packet,
+                Option<u64>,
+                Option<packet_crypto::DecryptPacketResult>,
+            ),
+            Option<TransportError>,
+        >,
+        stateless_reset: bool,
+    ) {
         let was_closed = self.state.is_closed();
         let was_drained = self.state.is_drained();
         let result = match decrypted {
@@ -114,8 +140,19 @@ impl Connection {
                 }
             }
             Ok((packet, number, key_update)) => {
-                let pending = control::PendingPacket { now, remote, ecn, packet, number, key_update, remaining: None };
-                let Some(packet) = self.admit_control_packet(pending) else { return; };
+                let pending = control::PendingPacket {
+                    now,
+                    remote,
+                    ecn,
+                    packet,
+                    number,
+                    key_update,
+                    remaining: None,
+                    owner: self.raw_owner.clone(),
+                };
+                let Some(packet) = self.admit_control_packet(pending) else {
+                    return;
+                };
                 let span = match number {
                     Some(pn) => trace_span!("recv", space = ?packet.header.space(), pn),
                     None => trace_span!("recv", space = ?packet.header.space()),
@@ -125,10 +162,12 @@ impl Connection {
                 let is_duplicate = |n| self.spaces[packet.header.space()].dedup.insert(n);
                 if number.is_some_and(is_duplicate) {
                     debug!("discarding possible duplicate packet");
+                    self.active_control = None;
                     return;
                 } else if self.state.is_handshake() && packet.header.is_short() {
                     // TODO: SHOULD buffer these to improve reordering tolerance.
                     trace!("dropping short packet during handshake");
+                    self.active_control = None;
                     return;
                 } else {
                     if let Header::Initial(InitialHeader { ref token, .. }) = packet.header {
@@ -138,6 +177,7 @@ impl Connection {
                                 // packets can be spoofed, so we discard rather than killing the
                                 // connection.
                                 warn!("discarding Initial with invalid retry token");
+                                self.active_control = None;
                                 return;
                             }
                         }
@@ -211,5 +251,4 @@ impl Connection {
             self.close = remote == self.path.remote;
         }
     }
-
 }
