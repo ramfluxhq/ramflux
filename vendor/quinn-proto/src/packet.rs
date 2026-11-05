@@ -144,6 +144,7 @@ impl PartialDecode {
                 }),
                 header_data,
                 payload: bytes,
+                plaintext: None,
             });
         }
 
@@ -198,6 +199,7 @@ impl PartialDecode {
             header,
             header_data: bytes.split_to(header_len).freeze(),
             payload: bytes,
+                plaintext: None,
         })
     }
 
@@ -224,9 +226,17 @@ pub(crate) struct Packet {
     pub(crate) header: Header,
     pub(crate) header_data: Bytes,
     pub(crate) payload: BytesMut,
+    pub(crate) plaintext: Option<Bytes>,
 }
 
 impl Packet {
+    pub(crate) fn take_payload(&mut self) -> Bytes {
+        self.plaintext.take().unwrap_or_else(|| std::mem::take(&mut self.payload).freeze())
+    }
+
+    pub(crate) fn payload_len(&self) -> usize {
+        self.plaintext.as_ref().map_or(self.payload.len(), Bytes::len)
+    }
     pub(crate) fn reserved_bits_valid(&self) -> bool {
         let mask = match self.header {
             Header::Short { .. } => SHORT_RESERVED_BITS,
@@ -248,6 +258,7 @@ impl From<InitialPacket> for Packet {
             header: Header::Initial(x.header),
             header_data: x.header_data,
             payload: x.payload,
+            plaintext: None,
         }
     }
 }
