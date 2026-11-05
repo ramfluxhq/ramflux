@@ -115,7 +115,9 @@ pub fn capture<T>(f: impl FnOnce() -> T) -> Result<PublishedOperation<T>, NodeCo
     for guard in &scope.guards {
         guard.definite_non_write();
     }
-    if let Some(core) = &scope.core { core.release_unallocated(&scope.resources); }
+    if let Some(core) = &scope.core {
+        core.release_unallocated(&scope.resources);
+    }
     Ok(PublishedOperation { value, guards: scope.guards, retries: scope.retries, core: scope.core })
 }
 
@@ -168,7 +170,9 @@ pub(crate) fn reserve_targets(
             })
             .collect::<Vec<_>>();
         let guards = core.reserve_batch(&requests).map_err(NodeCoreError::Publication)?;
-        for guard in &guards { attach_retry(scope, guard); }
+        for guard in &guards {
+            attach_retry(scope, guard);
+        }
         scope.guards.extend(guards);
         Ok(())
     })
@@ -192,7 +196,8 @@ pub(crate) fn allocate(
             scope.assigned.insert((target.into(), sequence));
             return Ok(sequence);
         }
-        let guard = core.reserve(target, id, &scope.resources).map_err(NodeCoreError::Publication)?;
+        let guard =
+            core.reserve(target, id, &scope.resources).map_err(NodeCoreError::Publication)?;
         attach_retry(scope, &guard);
         let sequence = guard.sequence();
         scope.assigned.insert((target.into(), sequence));

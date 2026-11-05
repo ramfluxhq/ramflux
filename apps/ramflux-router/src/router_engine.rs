@@ -52,7 +52,8 @@ pub(crate) fn submit_envelope_inner(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-    match prepare_submission(state, store, forward, envelope, total_started, origin)? {
+    let target = envelope.target_delivery_id.clone();
+    let result = (|| { match prepare_submission(state, store, forward, envelope, total_started, origin)? {
         PreparedSubmit::Complete(response) => Ok(*response),
         PreparedSubmit::Waiting(waiter) => {
             let runtime = tokio::runtime::Builder::new_current_thread().build()?;
@@ -63,7 +64,8 @@ pub(crate) fn submit_envelope_inner(
             )?;
             Ok(sender_retry_response(&assignment))
         }
-    }
+    } })();
+    typed_sender_result(result, &target)
 }
 
 fn complete_response(response: ramflux_node_core::EnvelopeSubmitResponse) -> PreparedSubmit {
@@ -286,6 +288,7 @@ pub(crate) async fn submit_envelope_async(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    let target = envelope.target_delivery_id.clone();
     let publication = store.publication_core()?;
     let state = std::sync::Arc::clone(state);
     let store = std::sync::Arc::clone(store);
@@ -309,14 +312,15 @@ pub(crate) async fn submit_envelope_async(
         })
     })
     .await??;
-    match prepared.published().await? {
+    let result = async { match prepared.published().await? {
         PreparedSubmit::Complete(response) => Ok(*response),
         PreparedSubmit::Waiting(waiter) => {
             let assignment = waiter.resolved().await?;
             publication.wait_sender_assignment(&assignment).await;
             Ok(sender_retry_response(&assignment))
         }
-    }
+    } }.await;
+    typed_sender_result(result, &target)
 }
 
 fn record_decoded(envelope: &ramflux_protocol::Envelope) {
@@ -909,4 +913,22 @@ fn prepare_sender_retry(
             }
         },
     )
+}
+
+fn typed_sender_result(result: anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse>, target: &str) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let code = error.downcast_ref::<ramflux_node_core::NodeCoreError>().and_then(|error| match error {
+                ramflux_node_core::NodeCoreError::SenderRetry(reason) => Some(reason.to_string()),
+                ramflux_node_core::NodeCoreError::Publication(reason) => publication_reason(&reason.to_string()).map(str::to_owned),
+                _ => None,
+            });
+            match code {
+                Some(outcome) => Ok(ramflux_node_core::EnvelopeSubmitResponse { migration_refusal: None, outcome,
+                    target_delivery_id: target.into(), inbox_seq: None, cursor: None, nack: None }),
+                None => Err(error),
+            }
+        }
+    }
 }

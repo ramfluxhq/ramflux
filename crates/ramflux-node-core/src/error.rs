@@ -4,6 +4,8 @@
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
     #[error(transparent)]
+    SenderRetry(#[from] crate::sender_retry::SenderRetryRefusal),
+    #[error(transparent)]
     Publication(#[from] crate::publication::PublicationRefusal),
     #[error(
         "{path}: {cause}; stop every gateway, stop the router, then run ramflux-router --config <path> --rotate-inbox-incarnations --quarantine-wal-segment {path} (never move or delete WAL segments by hand)"

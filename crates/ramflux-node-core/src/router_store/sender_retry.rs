@@ -11,6 +11,15 @@ use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Stable sender refusal codes, independent of storage failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SenderRetryRefusal {
+    #[error("aborted_retry_safe")]
+    AbortedRetrySafe,
+    #[error("idempotency_conflict")]
+    IdempotencyConflict,
+}
+
 /// Original durable acceptance, retained until the original replay deadline.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SenderAssignment {
@@ -77,7 +86,7 @@ impl RouterRedbStore {
         }
         if let Some(assignment) = &assignment {
             if assignment.digest != content_digest(envelope)? {
-                return Err(incarnation::error("idempotency_conflict"));
+                return Err(SenderRetryRefusal::IdempotencyConflict.into());
             }
             if self.inbox_status(&assignment.target_delivery_id)?.0.as_deref()
                 != Some(assignment.inbox_incarnation_id.as_str())
