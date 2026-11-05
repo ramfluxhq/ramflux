@@ -282,7 +282,7 @@ impl OpaqueDeviceInbox {
     }
 
     /// Removes one pending delivery and its deadline bookkeeping.
-    fn retire_pending(&mut self, target: &str, seq: u64) -> Option<InboxEntry> {
+    pub(crate) fn retire_pending(&mut self, target: &str, seq: u64) -> Option<InboxEntry> {
         let entries = self.pending.get_mut(target)?;
         let position = entries.iter().position(|entry| entry.inbox_seq == seq)?;
         let entry = entries.remove(position);

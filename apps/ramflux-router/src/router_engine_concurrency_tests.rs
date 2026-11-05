@@ -49,9 +49,15 @@ fn drain_and_new_forwards_share_peer_limit_of_four_in_flight()
                     timeout: Duration::from_secs(5),
                 };
                 if i == 0 {
-                    crate::migration_drain::tick(&store, &mut String::new(), now, |row, now| {
-                        crate::migration_drain::forward(&state, &store, forward, row, now)
-                    })?;
+                    crate::migration_drain::tick(
+                        &state,
+                        &store,
+                        &mut String::new(),
+                        now,
+                        |row, now| {
+                            crate::migration_drain::forward(&state, &store, forward, row, now)
+                        },
+                    )?;
                 } else if i % 2 == 0 {
                     submit_envelope(
                         &state,

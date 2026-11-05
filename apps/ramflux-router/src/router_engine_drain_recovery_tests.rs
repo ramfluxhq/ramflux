@@ -15,7 +15,7 @@ fn run(
     now: u64,
 ) -> Result<usize> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
-    let count = crate::migration_drain::tick(store, &mut String::new(), now, |row, now| {
+    let count = crate::migration_drain::tick(state, store, &mut String::new(), now, |row, now| {
         crate::migration_drain::forward(
             state,
             store,
@@ -258,10 +258,15 @@ fn permanent_drain_refusal_requires_destination_signature_and_matching_tuple() -
         [9; 32],
     );
     assert!(!crate::migration_drain::signed_permanent_refusal(plan, &retryable));
-    store.settle_migration_drain(&row, ramflux_node_core::MigrationDrainOutcome::Rejected, now)?;
+    store.settle_migration_drain(
+        &state,
+        &row,
+        ramflux_node_core::MigrationDrainOutcome::Rejected,
+        now,
+    )?;
     let mut attempted = false;
     assert_eq!(
-        crate::migration_drain::tick(&store, &mut String::new(), now + 1, |_, _| {
+        crate::migration_drain::tick(&state, &store, &mut String::new(), now + 1, |_, _| {
             attempted = true;
             Ok(ramflux_node_core::MigrationDrainOutcome::Held)
         })?,
@@ -312,9 +317,13 @@ fn idle_drain_page_of_backoff_and_rejected_rows_opens_no_write_transaction() -> 
     }
     let store = RouterRedbStore::open(path)?;
     assert_eq!(
-        crate::migration_drain::tick(&store, &mut String::new(), now, |_, _| Err(
-            ramflux_node_core::NodeCoreError::Redb("unexpected idle IO".into())
-        ))?,
+        crate::migration_drain::tick(
+            &ramflux_node_core::RouterCore::new(),
+            &store,
+            &mut String::new(),
+            now,
+            |_, _| Err(ramflux_node_core::NodeCoreError::Redb("unexpected idle IO".into()))
+        )?,
         0
     );
     Ok(())
@@ -347,10 +356,16 @@ fn corrupt_drain_row_is_isolated_and_other_accounts_keep_draining() -> Result {
     let store = RouterRedbStore::open(&path)?;
     let mut sends = 0;
     assert_eq!(
-        crate::migration_drain::tick(&store, &mut String::new(), now, |_, _| {
-            sends += 1;
-            Ok(ramflux_node_core::MigrationDrainOutcome::BAck)
-        })?,
+        crate::migration_drain::tick(
+            &ramflux_node_core::RouterCore::new(),
+            &store,
+            &mut String::new(),
+            now,
+            |_, _| {
+                sends += 1;
+                Ok(ramflux_node_core::MigrationDrainOutcome::BAck)
+            }
+        )?,
         1
     );
     assert_eq!(sends, 1);

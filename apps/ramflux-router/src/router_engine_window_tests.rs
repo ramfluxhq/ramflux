@@ -172,7 +172,7 @@ fn clock_rollback_after_observed_closure_never_reopens_forwarding_after_restart(
     let mut position = String::new();
     let mut forwarded = false;
     assert_eq!(
-        crate::migration_drain::tick(&store, &mut position, end - 100, |_, _| {
+        crate::migration_drain::tick(&state, &store, &mut position, end - 100, |_, _| {
             forwarded = true;
             Ok(ramflux_node_core::MigrationDrainOutcome::Held)
         })?,

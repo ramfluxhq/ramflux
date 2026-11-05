@@ -81,13 +81,21 @@ fn drain_pages_at_most_64_entries_and_128_transitions_per_tick() -> Result {
     let store = RouterRedbStore::open(path)?;
     assert_eq!(store.migration_drain_work_page("")?.len(), 64);
     let mut position = String::new();
-    let count = crate::migration_drain::tick(&store, &mut position, now, |_, _| {
-        Ok(MigrationDrainOutcome::Held)
-    })?;
+    let count = crate::migration_drain::tick(
+        &ramflux_node_core::RouterCore::new(),
+        &store,
+        &mut position,
+        now,
+        |_, _| Ok(MigrationDrainOutcome::Held),
+    )?;
     assert_eq!(count, 128);
-    let count = crate::migration_drain::tick(&store, &mut position, now, |_, _| {
-        Ok(MigrationDrainOutcome::Held)
-    })?;
+    let count = crate::migration_drain::tick(
+        &ramflux_node_core::RouterCore::new(),
+        &store,
+        &mut position,
+        now,
+        |_, _| Ok(MigrationDrainOutcome::Held),
+    )?;
     assert_eq!(count, 12);
     assert_eq!(position, "");
     let page = store.migration_drain_page("moving", 0)?;
@@ -112,10 +120,16 @@ fn drain_store_error_stops_tick_without_advancing_or_releasing() -> Result {
     let mut position = String::new();
     let mut forwarded = false;
     assert!(
-        crate::migration_drain::tick(&store, &mut position, now, |_, _| {
-            forwarded = true;
-            Ok(MigrationDrainOutcome::Held)
-        })
+        crate::migration_drain::tick(
+            &ramflux_node_core::RouterCore::new(),
+            &store,
+            &mut position,
+            now,
+            |_, _| {
+                forwarded = true;
+                Ok(MigrationDrainOutcome::Held)
+            }
+        )
         .is_err()
     );
     assert!(!forwarded);
@@ -129,9 +143,13 @@ fn drain_store_error_stops_tick_without_advancing_or_releasing() -> Result {
     drop(db);
     let store = RouterRedbStore::open(path)?;
     assert_eq!(
-        crate::migration_drain::tick(&store, &mut position, now, |_, _| Ok(
-            MigrationDrainOutcome::Held
-        ))?,
+        crate::migration_drain::tick(
+            &ramflux_node_core::RouterCore::new(),
+            &store,
+            &mut position,
+            now,
+            |_, _| Ok(MigrationDrainOutcome::Held)
+        )?,
         1
     );
     Ok(())
@@ -154,7 +172,7 @@ fn poison_entry_does_not_stop_later_entries_drain() -> Result {
     };
     let server = std::thread::spawn(move || listener.accept());
     let mut attempted = 0;
-    crate::migration_drain::tick(&store, &mut String::new(), now, |row, now| {
+    crate::migration_drain::tick(&state, &store, &mut String::new(), now, |row, now| {
         let mut row = row.clone();
         if row.entry.inbox_seq == 1 {
             row.entry.envelope.signed.signature = "poison".into();
@@ -276,7 +294,7 @@ fn durable_destination_retry(lose_reply: bool) -> Result {
         timeout: std::time::Duration::from_secs(2),
     };
     let run = |at| {
-        crate::migration_drain::tick(&store, &mut String::new(), at, |row, now| {
+        crate::migration_drain::tick(&state, &store, &mut String::new(), at, |row, now| {
             crate::migration_drain::forward(&state, &store, forward, row, now)
         })
     };
@@ -348,7 +366,7 @@ fn expired_lease_sender_entry_is_held_evidence_required_without_blocking_others(
         destination_reply(&listener, &b_worker, &destination_worker, false)
     });
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
-    crate::migration_drain::tick(&store, &mut String::new(), now, |row, now| {
+    crate::migration_drain::tick(&state, &store, &mut String::new(), now, |row, now| {
         crate::migration_drain::forward(
             &state,
             &store,
@@ -434,6 +452,41 @@ pub(super) fn install_expired_authority(path: &std::path::Path) -> Result {
         entries.insert(key.as_str(), serde_json::to_vec(&row)?.as_slice())?;
         drop(entries);
         tx.commit()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn drain_tick_publishes_terminal_settlement_to_live_inbox() -> Result {
+    for expired in [false, true] {
+        let dir = migration_tests::directory()?;
+        let path = dir.0.join("live-projection.redb");
+        // Populate the mailbox before installing the committed source-home fixture.
+        let pending = ramflux_node_core::InboxEntry {
+            inbox_seq: 1,
+            target_delivery_id: "moving".into(),
+            envelope: migration_tests::envelope("moving", "drain-1")?,
+        };
+        RouterRedbStore::open(&path)?.record_inbox_entry(&pending)?;
+        let now = seed(&path, 1)?;
+        let store = RouterRedbStore::open(&path)?;
+        let row = store.migration_drain_page("moving", 0)?.remove(0);
+        let state = store.load_router()?.ok_or("router snapshot")?;
+        assert_eq!(state.resume("moving", 0, 10), vec![pending.clone()]);
+        let at = if expired { u64::try_from(row.retain_until)? } else { now };
+        let mut sent = false;
+        assert_eq!(
+            crate::migration_drain::tick(&state, &store, &mut String::new(), at, |_, _| {
+                assert!(!expired, "expired entries must not be sent");
+                assert_eq!(state.resume("moving", 0, 10), vec![pending.clone()]);
+                sent = true;
+                Ok(MigrationDrainOutcome::BAck)
+            },)?,
+            1
+        );
+        assert_eq!(sent, !expired);
+        assert_eq!(state.resume("moving", 0, 10), []);
+        assert_eq!(store.load_router()?.ok_or("rebuilt router")?.resume("moving", 0, 10), []);
     }
     Ok(())
 }

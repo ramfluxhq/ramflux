@@ -49,6 +49,7 @@ impl MigrationDrain {
                         break;
                     };
                     let result = tick(
+                        &state,
                         &store,
                         &mut position,
                         ramflux_node_core::now_unix_seconds(),
@@ -90,6 +91,7 @@ impl MigrationDrain {
 
 /// Two pages per tick bound both decoded rows and state transitions, including poison rows.
 pub(crate) fn tick(
+    state: &RouterCore,
     store: &RouterRedbStore,
     position: &mut String,
     now: u64,
@@ -131,7 +133,7 @@ pub(crate) fn tick(
                         Err(_) => MigrationDrainOutcome::Held,
                     }
                 };
-                match store.settle_migration_drain(&row, outcome, now) {
+                match store.settle_migration_drain(state, &row, outcome, now) {
                     Ok(()) => {}
                     Err(NodeCoreError::MigrationDrainCorrupt(error)) => {
                         tracing::warn!(%error, %key, "corrupt drain obligation retained");

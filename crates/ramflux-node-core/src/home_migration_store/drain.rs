@@ -192,24 +192,31 @@ impl RouterRedbStore {
             })
             .collect()
     }
-    /// Apply a classified reply to the current obligation; repeated replies are idempotent.
+    /// Apply a classified reply and update the matching live router only after durable commit.
+    /// Repeated replies are idempotent.
     /// # Errors
     /// Refuses premature expiry, stale obligations, overflow and storage failures.
     pub fn settle_migration_drain(
         &self,
+        core: &crate::RouterCore,
         row: &MigrationDrainEntry,
         outcome: MigrationDrainOutcome,
         now: u64,
     ) -> Result<(), NodeCoreError> {
-        self.settle_drain_inner(row, outcome, now, false)
+        self.settle_drain_inner(core, row, outcome, now, false)
     }
     fn settle_drain_inner(
         &self,
+        core: &crate::RouterCore,
         row: &MigrationDrainEntry,
         outcome: MigrationDrainOutcome,
         now: u64,
         fail: bool,
     ) -> Result<(), NodeCoreError> {
+        // Serialize terminal projection changes with other mutations of this target.
+        let mut shard =
+            matches!(outcome, MigrationDrainOutcome::BAck | MigrationDrainOutcome::Expired)
+                .then(|| core.target_shard(&row.entry.target_delivery_id));
         let tx = self.migration_db().begin_write().map_err(storage)?;
         let now = clock(&tx, now)?;
         let key = inbox_entry_storage_key(&row.entry.target_delivery_id, row.entry.inbox_seq);
@@ -228,7 +235,17 @@ impl RouterRedbStore {
             return Err(storage("injected AfterBAckBeforeACommit"));
         }
         apply(&tx, current, outcome, now, false)?;
+        let cursor: Option<CursorAckState> = if shard.is_some() {
+            read(&tx, ROUTER_CURSOR_STATE_TABLE, &row.entry.target_delivery_id)?
+        } else {
+            None
+        };
         commit_transition(self, tx)?;
+        // Publish only after the durable commit, even if later WAL observation fails.
+        if let (Some(shard), Some(cursor)) = (shard.as_mut(), cursor) {
+            shard.inbox.retire_pending(&row.entry.target_delivery_id, row.entry.inbox_seq);
+            shard.inbox.restore_cursor_state(cursor);
+        }
         if let Some(wal) = &self.submission_wal {
             let tx = self.migration_db().begin_read().map_err(storage)?;
             let table = tx.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(storage)?;
@@ -243,11 +260,12 @@ impl RouterRedbStore {
     #[cfg(test)]
     pub(super) fn fail_drain(
         &self,
+        core: &crate::RouterCore,
         row: &MigrationDrainEntry,
         _: DrainFailPoint,
         now: u64,
     ) -> Result<(), NodeCoreError> {
-        self.settle_drain_inner(row, MigrationDrainOutcome::BAck, now, true)
+        self.settle_drain_inner(core, row, MigrationDrainOutcome::BAck, now, true)
     }
 }
 fn sub(value: &mut u64) -> Result<(), NodeCoreError> {
