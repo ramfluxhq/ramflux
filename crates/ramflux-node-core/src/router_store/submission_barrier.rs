@@ -188,12 +188,17 @@ impl RouterRedbStore {
     }
     /// Serialize receiver settlement with the same mailbox cutover boundary.
     /// # Errors
-    /// Returns a retryable migration refusal when a cutover is queued.
+    /// Returns retryable busy when a cutover is queued or settlement waits 250ms.
     pub fn acquire_acknowledgement(&self, target: &str) -> Result<SubmissionLease, NodeCoreError> {
+        let deadline = Instant::now() + Duration::from_millis(250);
         let mut lease = self.submission_gates.acquire(target, None)?;
         let mut state = lease.gate.state.lock().map_err(|_| busy())?;
         while state.settlement == Settlement::Held {
-            state = lease.gate.changed.wait(state).map_err(|_| busy())?;
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                drop(state);
+                return Err(busy());
+            };
+            state = lease.gate.changed.wait_timeout(state, left).map_err(|_| busy())?.0;
         }
         state.settlement = Settlement::Held;
         drop(state);
@@ -318,27 +323,27 @@ mod acknowledgement_tests {
     #[test]
     fn acknowledgement_lease_serializes_only_its_target() -> Result<(), Box<dyn std::error::Error>>
     {
-        let root = crate::router_store::publication::tests::fixture("ack-lease");
+        let root = crate::router_store::publication::tests::fixture("ack-bounded-lease");
         let store = Arc::new(crate::router_store::incarnation::test_store(&root, 0, 1 << 20)?);
-        let first = store.acquire_acknowledgement("target")?;
-        let gate = Arc::clone(&first.gate);
         let (tx, rx) = std::sync::mpsc::channel();
-        let other = store.clone();
+        let worker_store = store.clone();
         let task = std::thread::spawn(move || {
-            tx.send(other.acquire_acknowledgement("target")).map_err(|e| e.to_string())
+            let result = (|| {
+                let first = worker_store.acquire_acknowledgement("target")?;
+                drop(worker_store.acquire_acknowledgement("other")?);
+                let nested = worker_store.acquire_acknowledgement("target");
+                let busy = matches!(
+                    nested,
+                    Err(NodeCoreError::HomeMigration(Refusal::MigrationInProgress))
+                );
+                drop(first);
+                drop(worker_store.acquire_acknowledgement("target")?);
+                Ok::<_, NodeCoreError>(busy)
+            })();
+            let _ = tx.send(result);
         });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while gate.state.lock().map_err(|_| "gate state")?.readers < 2 {
-            assert!(Instant::now() < deadline, "second lease admission watchdog");
-            std::thread::yield_now();
-        }
-        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
-        drop(store.acquire_acknowledgement("other")?);
-        drop(first);
-        drop(rx.recv_timeout(Duration::from_secs(5))??);
-        task.join().map_err(|_| "lease thread")??;
-        drop(gate);
-        drop(store.acquire_acknowledgement("target")?);
+        assert!(rx.recv_timeout(Duration::from_secs(5))??, "nested wait must return typed busy");
+        task.join().map_err(|_| "lease thread")?;
         assert!(store.submission_gates.0.lock().map_err(|_| "gates")?.is_empty());
         Ok(())
     }

@@ -462,7 +462,7 @@ fn concurrent_ack_during_settlement_preserves_live_cursor_and_restart_state() ->
             cursor_after: None,
         };
         let store = s.a.store()?;
-        let lease = store.acquire_acknowledgement(&s.target)?;
+        let mut lease = Some(store.acquire_acknowledgement(&s.target)?);
         // Park the real ACK path after its memory update, before the durable write.
         let ack_cursor = s.a.core.apply_ack_for_target(&s.target, &ack)?;
         let now = if outcome == MigrationDrainOutcome::Expired {
@@ -470,13 +470,32 @@ fn concurrent_ack_during_settlement_preserves_live_cursor_and_restart_state() ->
         } else {
             NOW + 4
         };
-        // ACK leases share the cutover boundary; settlement can finish during this ACK.
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| store.settle_migration_drain(&s.a.core, &rows[1], outcome, now))
-                .join()
-                .map_err(|_| "settlement thread panicked")
-        })??;
+        // Settlement cannot overtake this ACK. A bounded attempt reports busy;
+        // retry only after the ACK's durable write releases its settlement ticket.
+        let core = &s.a.core;
+        let settlement_row = &rows[1];
+        std::thread::scope(|scope| -> TestResult {
+            let (tx, rx) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let result = store.settle_migration_drain(core, settlement_row, outcome, now);
+                let _ = tx.send(result);
+            });
+            let blocked = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(result) => result,
+                Err(error) => {
+                    // Even a broken unbounded wait must unblock before scoped join.
+                    drop(lease.take());
+                    return Err(error.into());
+                }
+            };
+            assert!(matches!(
+                blocked,
+                Err(NodeCoreError::HomeMigration(Refusal::MigrationInProgress))
+            ));
+            Ok(())
+        })?;
+        store.record_leased_ack(&ack_cursor, &ack.envelope_id, lease.take().ok_or("ACK lease")?)?;
+        store.settle_migration_drain(&s.a.core, &rows[1], outcome, now)?;
         let live_cursor = s.a.core.cursor_state(&s.target).ok_or("live cursor")?;
         assert!(live_cursor.acked_inbox_seqs.contains(&ack_entry.inbox_seq));
         assert!(live_cursor.acked_inbox_seqs.contains(&rows[1].entry.inbox_seq));
@@ -484,7 +503,6 @@ fn concurrent_ack_during_settlement_preserves_live_cursor_and_restart_state() ->
         assert_eq!(live_cursor.acked_envelope_ids, ack_cursor.acked_envelope_ids);
         assert!(live_cursor.issued_inbox_seq >= ack_cursor.issued_inbox_seq);
         assert!(live_cursor.settled_inbox_seq >= ack_cursor.settled_inbox_seq);
-        store.record_leased_ack(&ack_cursor, &ack.envelope_id, lease)?;
         // A duplicate must still be recognized in memory before restart.
         s.a.core.apply_ack_for_target(&s.target, &ack)?;
         let live = s.a.core.resume(&s.target, 0, 10);

@@ -692,14 +692,23 @@ impl OpaqueDeviceInbox {
             .ok_or_else(|| NodeCoreError::EnvelopeNotFound(nack.envelope_id.clone()))
     }
 
-    fn advance_settled(&mut self, target: &str) {
+    pub(crate) fn settlement_boundary(&self, target: &str) -> u64 {
         let issued = self.next_seq.get(target).copied().unwrap_or(1).saturating_sub(1);
         // P is a finalized durable boundary: a guard with no pending row still
         // stops the walk. Offline fixtures/recovery use their finalized issued view.
         // Lock order is shard -> publication; neither data lock crosses storage I/O.
-        let boundary = self.publication.as_ref().map_or(issued, |core| {
+        self.publication.as_ref().map_or(issued, |core| {
             self.incarnation_id(target).map_or(0, |id| core.settled_view(target, id).0)
-        });
+        })
+    }
+
+    fn advance_settled(&mut self, target: &str) {
+        let boundary = self.settlement_boundary(target);
+        self.advance_settled_through(target, boundary);
+    }
+
+    fn advance_settled_through(&mut self, target: &str, boundary: u64) {
+        let issued = self.issued_sequence(target);
         let settled = self
             .pending
             .get(target)

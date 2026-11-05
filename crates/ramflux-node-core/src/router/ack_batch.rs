@@ -22,10 +22,16 @@ impl RouterCore {
         self.bind_publication(store)?;
         let lease = store.acquire_acknowledgement(target)?;
         let mut candidate = self.target_shard(target).inbox.clone_ack_target(target);
+        let previous_dead_letters = candidate
+            .cursor_state(target)
+            .into_iter()
+            .flat_map(|cursor| cursor.dead_letters.iter().map(|record| record.inbox_seq))
+            .collect::<BTreeSet<_>>();
         let mut results = Vec::with_capacity(acks.len());
         let mut retired = BTreeSet::new();
         let mut acknowledged = Vec::new();
         for ack in acks {
+            crate::record_router_ack();
             if !ack.ext.ext.contains_key("inbox_seq") {
                 let actual = self.indexed_target_for_envelope(&ack.envelope_id);
                 match actual {
@@ -63,8 +69,9 @@ impl RouterCore {
             cursor.retired_inbox_seqs = retired.iter().copied().collect();
             store.record_leased_ack_batch(&cursor, &acknowledged, &lease)?;
             let mut shard = self.target_shard(target);
+            let boundary = shard.inbox.settlement_boundary(target);
             let _publication = crate::fatal_durability::publication()?;
-            shard.inbox.publish_ack_cursor(cursor, &acknowledged);
+            shard.inbox.publish_ack_cursor(cursor, &acknowledged, &previous_dead_letters, boundary);
         }
         Ok(results)
     }
@@ -75,3 +82,6 @@ mod tests;
 
 #[cfg(test)]
 mod concurrency_tests;
+
+#[cfg(test)]
+mod retention_tests;
