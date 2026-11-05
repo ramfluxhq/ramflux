@@ -22,6 +22,12 @@ options. Object deletion is also conditional: a local tombstone works offline,
 while a selected relay requires Live before an operation receipt is reserved.
 Lock and daemon shutdown cancel background work before returning.
 
+For a group authority freshness refusal, `details.networking` carries the current
+session snapshot when the command waited for refresh (or `null` without a handle).
+A residual freshness refusal from dispatch instead carries
+`{"phase":"pending","reason":"authority_refresh"}` with a retry hint; this is a
+refresh reason, independent of the session's transport phase.
+
 Native group mutations enqueue refreshes for stale own and group-member authority
 roots and wait against the same five-second budget measured from command admission.
 A successful verified fetch permits the command to continue. Held or unavailable

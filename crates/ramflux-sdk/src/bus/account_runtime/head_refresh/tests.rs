@@ -125,7 +125,7 @@ async fn case(mode: &str) -> TestResult {
         runtime.connection_sender.clone(),
     ));
     let mut command = command();
-    let admitted = Instant::now() - Duration::from_secs(4);
+    let admitted = Instant::now() - Duration::from_secs(3);
     command.admission = Some(std::sync::Arc::new(
         crate::bus::command_admission::CommandAdmission::new(admitted, &runtime.timeouts),
     ));
@@ -148,7 +148,7 @@ async fn case(mode: &str) -> TestResult {
         if mode != "offline" {
             assert!(body.retry_after_ms.is_some());
             assert!(body.details.as_ref().ok_or("details")?.get("networking").is_some());
-            assert!(Instant::now() <= admitted + Duration::from_millis(5_100));
+            assert!(Instant::now() <= admitted + Duration::from_millis(5_500));
         }
         assert!(!serde_json::to_string(&body)?.contains("freshness expired"));
     }

@@ -66,6 +66,10 @@ fn sender_verification(
     state: &ramflux_crypto::VerifiedGroupState,
     message: &ramflux_storage::DirectMessageRecord,
 ) -> Result<SenderVerification, SdkError> {
+    // This list follows device_identity[_for_root], current_custody_authority,
+    // require_cached_root_authority and trusted_device(HistoricalRead). Recheck
+    // it when those sources change: missing authority is unknown, rejected
+    // authority is unverified, and storage/DB/JSON errors remain fatal.
     match verify_sender(client, state, message) {
         Ok(()) => Ok(SenderVerification::Verified),
         Err(SdkError::InboundPending(_) | SdkError::IdentityRootMissing) => {
