@@ -10,6 +10,9 @@ impl Connection {
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
     ) {
+        if self.control_resource_closed {
+            return;
+        }
         self.path.total_recvd = self.path.total_recvd.saturating_add(data.len() as u64);
         let mut remaining = Some(data);
         while let Some(data) = remaining {

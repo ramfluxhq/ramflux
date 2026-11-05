@@ -81,13 +81,13 @@
       },
       "src/connection.rs": {
         "upstream_sha256": "3c388c6b455c318728c869b1f121fcc7d03572a92a92abda792d0cd8a2a10166",
-        "patched_sha256": "dc5b35cc62034f5685f2d6a2483cc7039d763212983f5bd1bf1e7db204ff1f94",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only"
+        "patched_sha256": "5277418a66ac46c59c7895e9b974ecbd1732d546260dcb75591988979e9fedb2",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       },
       "src/endpoint.rs": {
         "upstream_sha256": "a63bf8516128c5dd7ac7fb2e63450886873990f2084ff91b39737c4cf41c6c32",
-        "patched_sha256": "2b490f4f077642e2ef531c1a6e6b43debe25f7d7686c003ba5f5721ce8002e73",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only"
+        "patched_sha256": "2b97cebe88cede058e6453462f7ba0b730f24cf32ad69ffec3fdab6b0499f703",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       },
       "src/incoming.rs": {
         "upstream_sha256": "d10fcb0efd956d2d4f53e6600737520c04179d0c5850a8c89792c86a762eef98",
@@ -96,8 +96,8 @@
       },
       "src/lib.rs": {
         "upstream_sha256": "36660f7859142bfa1777092c8eb3016c079cadaf1daf2c48b41186130b2fcaf8",
-        "patched_sha256": "08a9d1dbc52ef231dcd05a14e7b60e144256ea5b8cd143451ba6149dcc3b5bf3",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only"
+        "patched_sha256": "357dca99cc318dd82d66d38ec8d2505f50c8e731f5a0ef013825639a7a6d98b0",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       },
       "src/mutex.rs": {
         "upstream_sha256": "9b78cec294b00b15768e2d97b74e3371a59ff9048ce1b2d970f43fcc3f1b7814",
@@ -150,8 +150,16 @@
         "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/rawq.rs": {
-        "patched_sha256": "2765682720a20987e46e0dedd8253dec8c0897e19ae9e51c541ecc137640fb48",
-        "delta": "Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only"
+        "patched_sha256": "69f1272d9ac1024903d5721efadb2aa8a08c33b8561e77876e98a650080f6810",
+        "delta": "Dormant bounded raw enqueue/backing credits and proto control resume; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+      },
+      "src/rawq_mailbox.rs": {
+        "patched_sha256": "0904923fd42a10916a4b9d5f9c1001f074cc2dd5de8113977682ad2978a697c2",
+        "delta": "packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
+      },
+      "src/rawq_tests.rs": {
+        "patched_sha256": "44dd775eef378769dcc8e66b93de658d53981b6998afafc6aee9e61e10470788",
+        "delta": "packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       }
     },
     "formatting": {
@@ -185,7 +193,9 @@
           "vendor/quinn/src/connection.rs",
           "vendor/quinn/src/endpoint.rs",
           "vendor/quinn/src/lib.rs",
-          "vendor/quinn/src/rawq.rs"
+          "vendor/quinn/src/rawq.rs",
+          "vendor/quinn/src/rawq_mailbox.rs",
+          "vendor/quinn/src/rawq_tests.rs"
         ]
       ]
     }
@@ -302,8 +312,8 @@
       },
       "src/connection/mod.rs": {
         "upstream_sha256": "8b5665fa7dc83e2bb9154fceed34733768633756adc900bb8ec50f24be0ba2b7",
-        "patched_sha256": "3b0e203aa965111cbab50dd7bff9d5992ab29b940c37de4e476fa0f89b21d962",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; extract unchanged idle timeout negotiation and its tests; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "c0ccaec20329c06f20f924ee9f5e42c91a4679165171ef2bdfeef3263ad68292",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; extract unchanged idle timeout negotiation and its tests; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       },
       "src/connection/mtud.rs": {
         "upstream_sha256": "3a2917c053a6ec79e277a2fc895cf20ba8cde2b1fe8b3b8b1c96584062acf782",
@@ -397,8 +407,8 @@
       },
       "src/endpoint.rs": {
         "upstream_sha256": "eb9cc82040621b95670e1d9ca9e82e902029766f7303b4329fcb169fb73d3bfc",
-        "patched_sha256": "06adaa3bd9944215d051b52c9da3e98087188957058ca184b6fbd115197fa704",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "f29bdd6295218d3584c314fbc6abf262841fdf86452726c29e2dd6ceebcf1499",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       },
       "src/frame.rs": {
         "upstream_sha256": "ff9bc94eed5eaa96400c41f40dc0d73c68b71a60b98acbaf045885d0522341e3",
@@ -412,8 +422,8 @@
       },
       "src/packet.rs": {
         "upstream_sha256": "b73d99c36983c4c0cb47e6cc38ba7f723e2f924e397aedd63bf9b8e4cf6a57a9",
-        "patched_sha256": "6fe7b828ca44a0f10fc6c6fee31a3c2531c0aac8b8dba2647b97cf4f65fe092f",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "150ce6e51a297278cb19ccb760bfe4f16ab1578d2ad3f8f49a94241d51c760c0",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       },
       "src/range_set/array_range_set.rs": {
         "upstream_sha256": "b8372411b941df99a8da2a9a2948f4f8fed8bd116ac7e4b7f7960da36991bc07",
@@ -437,8 +447,8 @@
       },
       "src/shared.rs": {
         "upstream_sha256": "126c72d2c933a8e27cb9264d6d973239fbde78620af7a91b9967a4481ec49599",
-        "patched_sha256": "52bf7e389b5cd2686ae4708a4abed72b1e96d417f69fa2a86bc6cbcc3ecd9dbd",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "01d99453277d6e49c8116209e4208bee81029a0d3ba97bf78f9cd17fc20c5615",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       },
       "src/tests/mod.rs": {
         "upstream_sha256": "a4f0907c8c39c02646602e628d0a7c9090db601bfb35edc4deb52b51d6245dd1",
@@ -485,16 +495,16 @@
         "delta": "Extract unchanged idle timeout negotiation and tests with pub(super) visibility and SPDX"
       },
       "src/connection/control.rs": {
-        "patched_sha256": "accc8044fdc81792f47dde25bebd81f4f128f4d29a7079a63fbcbc97ff45fb0a",
-        "delta": "Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "28475302bc21611221d317366bd054bd3e53339df3df4037d8e10ab5095aecc0",
+        "delta": "Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       },
       "src/connection/packet_processing.rs": {
-        "patched_sha256": "12437ab7cc644d654eea1e8e9a91ff9543c65f013bc58c53eedd7a62dccb7301",
-        "delta": "Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "b4764367791e1bc1e42078d38e854960341d04f3663b8eb2bc9f457b3d0e4e0a",
+        "delta": "Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       },
       "src/connection/control/tests.rs": {
-        "patched_sha256": "7f095f1c71b95f1a7073f381b4bb675ef7ab1c05011685e5b5982cfe0d23649c",
-        "delta": "Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only"
+        "patched_sha256": "7d8d5a1618caae53d2c38b67ab425916a1b5f9534b1276ecc27aaccabfdd4b2d",
+        "delta": "Dormant packet-atomic control credits, retained backing ownership and focused tests; format changed modules only; packet-atomic A2 ingress ownership, separate bounded control/raw delivery and real-driver regression coverage"
       }
     },
     "formatting": {
@@ -528,7 +538,9 @@
           "vendor/quinn/src/connection.rs",
           "vendor/quinn/src/endpoint.rs",
           "vendor/quinn/src/lib.rs",
-          "vendor/quinn/src/rawq.rs"
+          "vendor/quinn/src/rawq.rs",
+          "vendor/quinn/src/rawq_mailbox.rs",
+          "vendor/quinn/src/rawq_tests.rs"
         ]
       ]
     }

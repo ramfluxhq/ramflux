@@ -76,6 +76,20 @@ impl Endpoint {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn rawq_pool(&self) -> Arc<crate::rawq::Pool> {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .recv_state
+            .connections
+            .raw_credit
+            .as_ref()
+            .unwrap()
+            .clone()
+    }
+
     /// Helper to construct an endpoint for use with outgoing connections only
     ///
     /// Note that `addr` is the *local* address to bind to, which should usually be a wildcard
@@ -275,6 +289,9 @@ impl Endpoint {
     pub fn rebind_abstract(&self, socket: Arc<dyn AsyncUdpSocket>) -> io::Result<()> {
         let addr = socket.local_addr()?;
         let mut inner = self.inner.state.lock().unwrap();
+        if inner.recv_state.connections.raw_credit.is_some() {
+            return Err(io::Error::other("bounded endpoint rebind is disabled"));
+        }
         inner.prev_socket = Some(mem::replace(&mut inner.socket, socket));
         inner.ipv6 = addr.is_ipv6();
 
@@ -319,8 +336,16 @@ impl Endpoint {
     ///
     /// [`Connection::close()`]: crate::Connection::close
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
-        let reason = Bytes::copy_from_slice(reason);
         let mut endpoint = self.inner.state.lock().unwrap();
+        if endpoint.recv_state.connections.close.is_some() {
+            return;
+        }
+        let reason = if endpoint.recv_state.connections.raw_credit.is_some() {
+            &reason[..reason.len().min(256)]
+        } else {
+            reason
+        };
+        let reason = Bytes::copy_from_slice(reason);
         endpoint.recv_state.connections.close = Some((error_code, reason.clone()));
         for sender in endpoint.recv_state.connections.senders.values() {
             // Ignoring errors from dropped connections
@@ -618,7 +643,7 @@ fn proto_ecn(ecn: udp::EcnCodepoint) -> proto::EcnCodepoint {
 #[derive(Debug)]
 struct ConnectionSet {
     /// Senders for communicating with the endpoint's connections
-    senders: FxHashMap<ConnectionHandle, mpsc::UnboundedSender<ConnectionEvent>>,
+    senders: FxHashMap<ConnectionHandle, crate::rawq_mailbox::Sender>,
     /// Stored to give out clones to new ConnectionInners
     sender: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
     raw_credit: Option<Arc<crate::rawq::Pool>>,
@@ -634,7 +659,9 @@ impl ConnectionSet {
         socket: Arc<dyn AsyncUdpSocket>,
         runtime: Arc<dyn Runtime>,
     ) -> Connecting {
-        let (send, recv) = mpsc::unbounded_channel();
+        let (send, recv) = crate::rawq_mailbox::channel(
+            self.raw_credit.is_some() || conn.control_credit_enabled(),
+        );
         if let Some((error_code, ref reason)) = self.close {
             send.send(ConnectionEvent::Close {
                 error_code,
@@ -646,22 +673,33 @@ impl ConnectionSet {
         Connecting::new(handle, conn, self.sender.clone(), recv, socket, runtime)
     }
 
+    fn admit_datagram(
+        &self,
+        endpoint: &proto::Endpoint,
+        remote: SocketAddr,
+        local_ip: Option<std::net::IpAddr>,
+        data: &[u8],
+    ) -> Option<(BytesMut, Option<Arc<crate::rawq::Credit>>)> {
+        let credit = if let Some(pool) = &self.raw_credit {
+            let owner = endpoint
+                .route_datagram(remote, local_ip, data)
+                .map_or(pool.incoming_owner(), |h| h.0);
+            Some(pool.reserve(owner, remote.ip(), data.len())?)
+        } else {
+            None
+        };
+        Some((BytesMut::from(data), credit))
+    }
+
     fn send_packet(
         &self,
         handle: ConnectionHandle,
         event: proto::ConnectionEvent,
-        remote: SocketAddr,
+        credit: Option<Arc<crate::rawq::Credit>>,
     ) {
-        let event = if let Some(pool) = &self.raw_credit {
-            let Some(size) = event.datagram_size() else {
-                return;
-            };
-            let Some(credit) = pool.reserve(handle.0, remote.ip(), size) else {
-                return;
-            };
-            ConnectionEvent::RawProto { event, credit }
-        } else {
-            ConnectionEvent::Proto(event)
+        let event = match credit {
+            Some(credit) => ConnectionEvent::RawProto { event, credit },
+            None => ConnectionEvent::Proto(event),
         };
         if let Some(sender) = self.senders.get(&handle) {
             let _ = sender.send(event);
@@ -841,18 +879,50 @@ impl RecvState {
                 Poll::Ready(Ok(msgs)) => {
                     self.recv_limiter.record_work(msgs);
                     for (meta, buf) in metas.iter().zip(iovs.iter()).take(msgs) {
-                        let mut data: BytesMut = buf[0..meta.len].into();
-                        while !data.is_empty() {
-                            let buf = data.split_to(meta.stride.min(data.len()));
+                        let mut offset = 0;
+                        let mut shared = if self.connections.raw_credit.is_none() {
+                            Some(BytesMut::from(&buf[0..meta.len]))
+                        } else {
+                            None
+                        };
+                        while offset < meta.len {
+                            let end = offset.saturating_add(meta.stride.max(1)).min(meta.len);
+                            let admitted = if let Some(data) = &mut shared {
+                                Some((data.split_to((end - offset).min(data.len())), None))
+                            } else {
+                                self.connections.admit_datagram(
+                                    endpoint,
+                                    meta.addr,
+                                    meta.dst_ip,
+                                    &buf[offset..end],
+                                )
+                            };
+                            offset = end;
+                            let Some((buf, credit)) = admitted else {
+                                continue;
+                            };
                             let mut response_buffer = Vec::new();
-                            match endpoint.handle(
-                                now,
-                                meta.addr,
-                                meta.dst_ip,
-                                meta.ecn.map(proto_ecn),
-                                buf,
-                                &mut response_buffer,
-                            ) {
+                            let outcome = if let Some(credit) = &credit {
+                                endpoint.handle_with_owner(
+                                    now,
+                                    meta.addr,
+                                    meta.dst_ip,
+                                    meta.ecn.map(proto_ecn),
+                                    buf,
+                                    &mut response_buffer,
+                                    credit.clone(),
+                                )
+                            } else {
+                                endpoint.handle(
+                                    now,
+                                    meta.addr,
+                                    meta.dst_ip,
+                                    meta.ecn.map(proto_ecn),
+                                    buf,
+                                    &mut response_buffer,
+                                )
+                            };
+                            match outcome {
                                 Some(DatagramEvent::NewConnection(incoming)) => {
                                     if self.connections.close.is_none() {
                                         self.incoming.push_back(incoming);
@@ -865,7 +935,7 @@ impl RecvState {
                                 Some(DatagramEvent::ConnectionEvent(handle, event)) => {
                                     // Ignoring errors from dropped connections that haven't yet been cleaned up
                                     received_connection_packet = true;
-                                    self.connections.send_packet(handle, event, meta.addr);
+                                    self.connections.send_packet(handle, event, credit);
                                 }
                                 Some(DatagramEvent::Response(transmit)) => {
                                     respond(transmit, &response_buffer, socket);

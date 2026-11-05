@@ -276,3 +276,154 @@ fn discarded_initial_head_allows_valid_tail_and_keeps_owner_until_stream_chunk_d
         "last stream backing releases the admitted datagram owner"
     );
 }
+
+#[test]
+fn authenticated_oversize_head_cancels_key_ready_coalesced_tail() {
+    use crate::shared::{ConnectionEventInner, DatagramConnectionEvent};
+    let mut pair = Pair::default();
+    let client = pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    let server = pair.server.assert_accept();
+    let (now, ecn, data) = pair.client.inbound.pop_front().unwrap();
+    let remote = pair.server.addr;
+    let mut response = Vec::new();
+    let Some(crate::DatagramEvent::ConnectionEvent(
+        _,
+        ConnectionEvent(ConnectionEventInner::Datagram(d)),
+    )) = pair
+        .client
+        .handle(now, remote, None, ecn, data, &mut response)
+    else {
+        panic!("initial route");
+    };
+    let dst = *d.first_decode.dst_cid();
+    let (src, version) = match d.first_decode.protected_header() {
+        crate::packet::ProtectedHeader::Initial(h) => (h.src_cid, h.version),
+        _ => panic!("Initial head"),
+    };
+    let tail = d.remaining.unwrap();
+    let event = ConnectionEvent(ConnectionEventInner::Datagram(DatagramConnectionEvent {
+        now,
+        remote,
+        ecn,
+        first_decode: d.first_decode,
+        remaining: None,
+        owner: None,
+    }));
+    pair.client_conn_mut(client).handle_event(event);
+    let mut encoded = Vec::new();
+    {
+        let conn = pair.server_conn_mut(server);
+        let keys = conn.spaces[SpaceId::Handshake].crypto.as_ref().unwrap();
+        let h = Header::Long {
+            ty: LongType::Handshake,
+            dst_cid: dst,
+            src_cid: src,
+            number: PacketNumber::U8(99),
+            version,
+        };
+        let partial = h.encode(&mut encoded);
+        encoded.extend_from_slice(&[0x19, 0, 0x19, 0, 0x19, 0]);
+        encoded.resize(encoded.len() + keys.packet.local.tag_len(), 0);
+        partial.finish(
+            &mut encoded,
+            &*keys.header.local,
+            Some((99, &*keys.packet.local)),
+        );
+    }
+    encoded.extend_from_slice(&tail);
+    let Some(crate::DatagramEvent::ConnectionEvent(_, event)) = pair.client.handle(
+        now,
+        remote,
+        None,
+        ecn,
+        BytesMut::from(encoded.as_slice()),
+        &mut response,
+    ) else {
+        panic!("coalesced route");
+    };
+    let conn = pair.client_conn_mut(client);
+    conn.set_control_credit_limits(ControlLimits {
+        bytes: 2048,
+        items: 2,
+    })
+    .unwrap();
+    let before = conn.total_authed_packets;
+    conn.handle_event(event);
+    assert!(conn.control_resource_closed);
+    assert_eq!(
+        conn.total_authed_packets, before,
+        "oversize head and valid tail both remain uncommitted"
+    );
+    assert!(
+        matches!(conn.error.as_ref(), Some(ConnectionError::TransportError(e)) if e.code == TransportErrorCode::INTERNAL_ERROR && e.reason == "control_packet_oversize")
+    );
+    let state = conn.control.as_ref().unwrap().lock().unwrap();
+    assert_eq!(state.used.forward, 0);
+    assert_eq!(state.used.reverse, 0);
+    drop(state);
+    let close = conn.timers.get(Timer::Close).unwrap();
+    conn.handle_timeout(close);
+    assert!(conn.state.is_drained());
+    assert!(conn.poll_endpoint_events().unwrap().is_drained());
+}
+
+#[test]
+fn metadata_terminal_adapter_preserves_committed_controls_and_cancels_pending_packet() {
+    let mut pair = Pair::default();
+    let client = pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    let mut data = Vec::new();
+    while let Some((_, _, bytes)) = pair.client.inbound.pop_front() {
+        data.extend_from_slice(&bytes);
+    }
+    let now = pair.time;
+    let remote = pair.server.addr;
+    let mut response = Vec::new();
+    let Some(crate::DatagramEvent::ConnectionEvent(_, event)) = pair.client.handle(
+        now,
+        remote,
+        None,
+        None,
+        BytesMut::from(data.as_slice()),
+        &mut response,
+    ) else {
+        panic!("route");
+    };
+    let conn = pair.client_conn_mut(client);
+    conn.set_control_credit_limits(ControlLimits {
+        bytes: 4096,
+        items: 4,
+    })
+    .unwrap();
+    conn.handle_event(event);
+    assert!(conn.pending_control.is_some());
+    let before = conn.total_authed_packets;
+    let controls = conn.endpoint_events.len();
+    assert_eq!(controls, 2);
+    conn.resource_exhausted(now);
+    conn.resource_exhausted(now);
+    assert!(conn.pending_control.is_none());
+    assert_eq!(conn.endpoint_events.len(), controls);
+    assert_eq!(conn.total_authed_packets, before);
+    assert!(
+        matches!(conn.state, State::Closed(ref closed) if matches!(closed.reason, Close::Application(ref reason) if reason.error_code == VarInt::from_u32(0x524c)))
+    );
+    let mut failures = 0;
+    while let Some(event) = conn.poll() {
+        if matches!(event, Event::ConnectionLost { .. }) {
+            failures += 1;
+        }
+    }
+    assert_eq!(failures, 1);
+    {
+        let state = conn.control.as_ref().unwrap().lock().unwrap();
+        assert!(state.used.forward * 512 <= 4096 && state.used.reverse * 1024 <= 4096);
+        assert!(state.used.forward > 0);
+    }
+    let close = conn.timers.get(Timer::Close).unwrap();
+    conn.handle_timeout(close);
+    assert!(conn.state.is_drained());
+}

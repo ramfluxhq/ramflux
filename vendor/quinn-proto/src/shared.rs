@@ -35,13 +35,13 @@ pub(crate) enum ConnectionEventInner {
 }
 
 /// Variant of [`ConnectionEventInner`].
-#[derive(Debug)]
 pub(crate) struct DatagramConnectionEvent {
     pub(crate) now: Instant,
     pub(crate) remote: SocketAddr,
     pub(crate) ecn: Option<EcnCodepoint>,
     pub(crate) first_decode: PartialDecode,
     pub(crate) remaining: Option<BytesMut>,
+    pub(crate) owner: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// Events sent from a Connection to an Endpoint
@@ -198,4 +198,13 @@ pub(crate) struct IssuedCid {
     pub(crate) sequence: u64,
     pub(crate) id: ConnectionId,
     pub(crate) reset_token: ResetToken,
+}
+
+impl fmt::Debug for DatagramConnectionEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DatagramConnectionEvent")
+            .field("remote", &self.remote)
+            .field("len", &self.first_decode.len())
+            .finish_non_exhaustive()
+    }
 }

@@ -45,7 +45,7 @@ impl Connecting {
         handle: ConnectionHandle,
         conn: proto::Connection,
         endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
-        conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
+        conn_events: crate::rawq_mailbox::Receiver,
         socket: Arc<dyn AsyncUdpSocket>,
         runtime: Arc<dyn Runtime>,
     ) -> Self {
@@ -422,6 +422,11 @@ impl Connection {
     /// [`close()`]: Connection::close
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
         let conn = &mut *self.0.state.lock("close");
+        let reason = if conn.inner.control_credit_enabled() {
+            &reason[..reason.len().min(256)]
+        } else {
+            reason
+        };
         conn.close(error_code, Bytes::copy_from_slice(reason), &self.0.shared);
     }
 
@@ -882,7 +887,7 @@ impl ConnectionRef {
         handle: ConnectionHandle,
         conn: proto::Connection,
         endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
-        conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
+        conn_events: crate::rawq_mailbox::Receiver,
         on_handshake_data: oneshot::Sender<()>,
         on_connected: oneshot::Sender<bool>,
         socket: Arc<dyn AsyncUdpSocket>,
@@ -980,7 +985,7 @@ pub(crate) struct State {
     connected: bool,
     timer: Option<Pin<Box<dyn AsyncTimer>>>,
     timer_deadline: Option<Instant>,
-    conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
+    conn_events: crate::rawq_mailbox::Receiver,
     endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
     pub(crate) blocked_writers: FxHashMap<StreamId, Waker>,
     pub(crate) blocked_readers: FxHashMap<StreamId, Waker>,
@@ -1077,19 +1082,28 @@ impl State {
         shared: &Shared,
         cx: &mut Context,
     ) -> Result<(), ConnectionError> {
-        self.inner.poll_control_resume(cx);
+        let mut raw_count = 0;
         loop {
-            match self.conn_events.poll_recv(cx) {
+            let paused = self.inner.poll_control_resume(cx);
+            if raw_count == 8 {
+                cx.waker().wake_by_ref();
+                return Ok(());
+            }
+            match self.conn_events.poll_recv(cx, !paused) {
                 Poll::Ready(Some(ConnectionEvent::Rebind(socket))) => {
                     self.socket = socket;
                     self.io_poller = self.socket.clone().create_io_poller();
                     self.inner.local_address_changed();
                 }
                 Poll::Ready(Some(ConnectionEvent::RawProto { event, credit })) => {
+                    raw_count += 1;
                     self.inner.handle_event_with_owner(event, credit);
                     self.inner.poll_control_resume(cx);
                 }
                 Poll::Ready(Some(ConnectionEvent::Proto(event))) => {
+                    if event.datagram_size().is_some() {
+                        raw_count += 1;
+                    }
                     self.inner.handle_event(event);
                     self.inner.poll_control_resume(cx);
                 }

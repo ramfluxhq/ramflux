@@ -61,15 +61,23 @@ The controller owns upstream reproducer/benchmark/issues/PR publication and
 removes patches only after an audited upstream version reproduces all bounds.
 
 
-## Dormant packet-control checkpoint
+## Dormant packet-control hooks
 
-The next local checkpoint adds packet-atomic proto admission, a single parked
-remainder, aggregate directional reservations retained through endpoint replies,
-control-credit wakeups and raw backing owners propagated into stream chunks.
-Quinn has opt-in raw enqueue counters and a proto resume hook. None of these
-options is enabled by product services. This checkpoint is incomplete: socket
-pre-allocation admission, complete separate control/terminal lanes and the full
-named runtime proofs remain outstanding. It is not an allocation certificate or
-an activation-ready bounded endpoint. Source hashes include the exact scoped
-rustfmt argument list in the formatting record; untouched upstream modules are
-not bulk formatted.
+The opt-in endpoint reserves raw owner/source/global bytes and items from borrowed
+socket scratch, before copying or enqueueing. The original invariant parser and
+routing precedence are shared by the borrowed and owning paths. Incoming and
+buffered Initial owners retain admission credit through acceptance and backing
+release, including header/token backing. Ordinary controls have a separate lane;
+local Close and latest rebind use fixed coalesced slots, with bounded close reasons.
+Packet preflight reserves both ordinary directions before dedup/ACK/effects;
+parked remainders keep the datagram owner and retry without replaying heads.
+Metadata failure has a terminal RESOURCE_LIMIT adapter; the exhaustive allocation
+hooks and certificates remain the later metadata work. Services enable none of
+this before the remaining runtime/certificate/activation prerequisites.
+
+The named dependency tests run real Quinn endpoint/connection drivers over a
+bounded deterministic datagram socket, with driver and consumer barriers. They
+cover independent owner/source/endpoint byte and item ceilings, rejected-copy
+accounting, retained stream backing, saturated raw/control progress and Drained.
+The proto packet tests cover the three packet outcomes across actual coalesced
+TLS flights, aggregate directional ceilings and metadata terminal delivery.
