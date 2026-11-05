@@ -710,9 +710,14 @@ impl RouterCore {
             .map(|(_, target)| store.acquire_submission(target))
             .collect::<Result<Vec<_>, _>>()?;
         let source = self.authenticated_envelope_source(&request.envelope)?;
-        crate::router_store::publication::operation::replay_resource(
+        let replay_key = envelope_replay_tuple_key(&source, &request.envelope);
+        crate::router_store::publication::operation::replay_resource_if_new(
             self.publication.get(),
-            &envelope_replay_tuple_key(&source, &request.envelope),
+            &replay_key,
+            || {
+                lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])
+                    .holds_envelope(&source, &request.envelope, now)
+            },
         );
         let identities = targets
             .iter()
@@ -1540,9 +1545,13 @@ impl RouterCore {
         crate::record_router_replay_guard_check();
         let replay_check_started = Instant::now();
         let replay_key = envelope_replay_tuple_key(source, envelope);
-        crate::router_store::publication::operation::replay_resource(
+        crate::router_store::publication::operation::replay_resource_if_new(
             self.publication.get(),
             &replay_key,
+            || {
+                lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])
+                    .holds_envelope(source, envelope, now_unix_seconds)
+            },
         );
         let replay_check =
             lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])
@@ -1560,9 +1569,13 @@ impl RouterCore {
         crate::record_router_replay_guard_check();
         let replay_check_started = Instant::now();
         let replay_key = envelope_replay_tuple_key(source, envelope);
-        crate::router_store::publication::operation::replay_resource(
+        crate::router_store::publication::operation::replay_resource_if_new(
             self.publication.get(),
             &replay_key,
+            || {
+                lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])
+                    .holds_envelope(source, envelope, now_unix_seconds)
+            },
         );
         let replay_check =
             lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])

@@ -75,7 +75,7 @@ impl RouterRedbStore {
             worker: OnceLock::new(),
             stopping: AtomicBool::new(false),
             changed: Notify::new(),
-            db: Arc::clone(&self.db),
+            db: Arc::downgrade(&self.db),
             path: self.path.clone(),
         });
         let worker_shared = Arc::clone(&shared);
@@ -91,7 +91,7 @@ impl RouterRedbStore {
             })
             .map_err(error)?;
         let _installed = shared.worker.set(worker.thread().clone());
-        let core = Arc::new(PublicationCore { shared, worker: Some(worker) });
+        let core = Arc::new(PublicationCore { shared, worker: Mutex::new(Some(worker)) });
         *installed = Some(Arc::clone(&core));
         Ok(core)
     }
@@ -101,10 +101,11 @@ pub(super) fn abort_batch(
     shared: &Shared,
     descriptors: &[Arc<Descriptor>],
 ) -> Result<(), NodeCoreError> {
+    let db = shared.db.upgrade().ok_or_else(|| error("publication store closed"))?;
     let guard = crate::fatal_durability::WriteGuard::new(true)?;
     crate::durability_io::boundary(&shared.path, "tombstone_checkpoint", || {
         let mut tx = crate::durability_io::boundary(&shared.path, "begin_write", || {
-            shared.db.begin_write().map_err(std::io::Error::other)
+            db.begin_write().map_err(std::io::Error::other)
         })?;
         tx.set_durability(redb::Durability::Immediate).map_err(std::io::Error::other)?;
         let mut groups: BTreeMap<&Key, Vec<u64>> = BTreeMap::new();

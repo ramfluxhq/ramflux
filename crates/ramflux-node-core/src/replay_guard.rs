@@ -126,6 +126,24 @@ impl NodeReplayGuardState {
         Ok(true)
     }
 
+    pub(crate) fn holds_envelope(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: &ramflux_protocol::Envelope,
+        now: i64,
+    ) -> bool {
+        let key = envelope_replay_tuple_key(source, envelope);
+        let legacy = format!(
+            "envelope/v2/{}/{}",
+            source.storage_key(),
+            ramflux_protocol::encode_base64url(&envelope.envelope_id)
+        );
+        let isolated = format!("legacy/replay/{}", ramflux_protocol::encode_base64url(&legacy));
+        [key, legacy, isolated]
+            .iter()
+            .any(|key| self.accepted_by_key.get(key).is_some_and(|expiry| *expiry >= now))
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.accepted_by_key.len()

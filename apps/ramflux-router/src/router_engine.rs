@@ -77,7 +77,9 @@ pub(crate) fn submit_envelope_inner(
         }
         Err(error) => return submission_refusal(state, store, &envelope, error),
     };
-    state.prepare_publication_target(store, &envelope.target_delivery_id)?;
+    if let Err(error) = state.prepare_publication_target(store, &envelope.target_delivery_id) {
+        return submission_refusal(state, store, &envelope, error);
+    }
     state.refresh_registered_envelope_authority(&mut envelope)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let sender_root_commitment = source.root_commitment().to_owned();
