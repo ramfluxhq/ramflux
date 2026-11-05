@@ -977,6 +977,7 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         | E::GroupEpochAccessDenied
         | E::MessageNotFound(_)
         | E::MessageIdConflict(_)
+        | E::OperationReconciliationRequired { .. }
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
         | E::InvalidRecoveryState { .. } => RamfluxErrorCode::StorageFailed,

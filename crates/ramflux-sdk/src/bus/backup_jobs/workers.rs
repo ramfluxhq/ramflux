@@ -77,6 +77,7 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         | E::GroupEpochAccessDenied
         | E::MessageNotFound(_)
         | E::MessageIdConflict(_)
+        | E::OperationReconciliationRequired { .. }
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
         | E::InvalidRecoveryState { .. } => failure(BackupFailureCode::Unreadable),

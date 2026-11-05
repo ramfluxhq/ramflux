@@ -67,7 +67,7 @@ impl AccountDb {
                 return Err(StorageError::EventIdConflict(id.to_owned()));
             }
             let response = response.ok_or_else(|| {
-                StorageError::EventIdConflict(format!("operation requires reconciliation: {id}"))
+                StorageError::OperationReconciliationRequired { key: id.to_owned() }
             })?;
             transaction.commit()?;
             let response: serde_json::Value = serde_json::from_str(&response)?;
@@ -133,7 +133,9 @@ mod tests {
         assert_eq!(db.reserve_operation("new", "a")?, None);
         assert_eq!(reader.lookup_operation("new", "a")?, OperationLookup::Pending);
         assert_eq!(reader.lookup_operation("new", "b")?, OperationLookup::Mismatch);
-        assert!(matches!(db.reserve_operation("new", "a"), Err(StorageError::EventIdConflict(_))));
+        assert!(
+            matches!(db.reserve_operation("new", "a"), Err(StorageError::OperationReconciliationRequired { key }) if key == "new")
+        );
         let response = json!({"value":"committed"});
         db.complete_operation("new", &response)?;
         assert_eq!(

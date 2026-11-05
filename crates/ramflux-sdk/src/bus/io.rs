@@ -242,6 +242,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
 fn storage_error_code(error: &StorageError) -> &'static str {
     use StorageError as E;
     match error {
+        E::OperationReconciliationRequired { .. } => "OperationReconciliationRequired",
         E::AccountWriterBusy(_) => "account_busy",
         E::ObjectErased => "ObjectErased",
         E::ObjectIdentityConflict => "ObjectIdentityConflict",

@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- All pending mutation receipts now return the bus code
+  `OperationReconciliationRequired`, preserving the reconciliation message.
+  Ordinary event ID and changed-intent conflicts retain `ValidationFailed`.
+
 - Native `account.networking.changed` events now include resident session state,
   publishing disconnect/reconnect transitions while preserving custody admission
   state. New connection managers reset persisted session state to connecting.

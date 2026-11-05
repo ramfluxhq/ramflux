@@ -502,7 +502,7 @@ async fn keyed_replay_and_conflicts_resolve_locally_while_offline() -> Case {
         let error = fixture.actor.request(conflict).await.err().ok_or("mismatch replayed")?;
         assert!(matches!(error,SdkError::Storage(StorageError::EventIdConflict(ref key)) if key=="completed"));
         let error = fixture.actor.request(pending).await.err().ok_or("pending key was accepted")?;
-        assert!(matches!(error,SdkError::Storage(StorageError::EventIdConflict(ref reason)) if reason.contains("operation requires reconciliation")));
+        assert!(matches!(error,SdkError::Storage(StorageError::OperationReconciliationRequired { .. })));
         assert!(matches!(fixture.actor.request(erased).await,Err(SdkError::ObjectErased)));
         assert!(wall.elapsed() < Duration::from_secs(1),"local receipt resolution must bypass admission");
         assert_eq!(fixture.actor.connection_for_test().ok_or("manager")?.test_live_waiters(),0);
