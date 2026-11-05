@@ -27,6 +27,9 @@ struct Claim {
     file: File,
     slot: usize,
     digest: [u8; 32],
+    start: u64,
+    end: u64,
+    pid: u64,
 }
 
 struct Locked<'a>(&'a File);
@@ -128,10 +131,11 @@ pub fn reserve_host_slice(
     let offset = HEADER + slot * RECORD_SIZE;
     store(&mut bytes, offset, start);
     store(&mut bytes, offset + 8, end);
-    store(&mut bytes, offset + 16, u64::from(std::process::id()));
+    let pid = u64::from(std::process::id());
+    store(&mut bytes, offset + 16, pid);
     bytes[offset + 24..offset + 56].copy_from_slice(&budget.digest);
     write(&mut file, &mut bytes)?;
-    Ok(HostReservation(Arc::new(Claim { file, slot, digest: budget.digest })))
+    Ok(HostReservation(Arc::new(Claim { file, slot, digest: budget.digest, start, end, pid })))
 }
 impl HostReservation {
     /// Number of retained final-owner references, useful for lifetime assertions.
@@ -147,7 +151,11 @@ impl Drop for Claim {
             let _guard = lock(&locking)?;
             let mut bytes = read(&mut self.file)?;
             let offset = HEADER + self.slot * RECORD_SIZE;
-            if bytes[offset + 24..offset + 56] != self.digest {
+            if bytes[offset + 24..offset + 56] != self.digest
+                || number(&bytes, offset)? != self.start
+                || number(&bytes, offset + 8)? != self.end
+                || number(&bytes, offset + 16)? != self.pid
+            {
                 return Err(BudgetError::Invalid("changed host claim"));
             }
             bytes[offset..offset + RECORD_SIZE].fill(0);

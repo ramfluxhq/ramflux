@@ -57,8 +57,24 @@ pub enum AllocationClass {
     Crypto,
     /// TLS session, certificate chains, verification temporaries and crypto provider.
     Tls,
-    /// Sent packets, ACK ranges, retransmit/loss/congestion/path/MTU state.
+    /// Sent-record and ACK-range credits, with payload vectors charged separately.
     Protocol,
+    /// Fixed loss/congestion/path/MTU/timer state; never packet-count-dependent.
+    ProtocolFixed,
+    /// Aggregate bounded STREAM/retransmit descriptors per tracked packet.
+    SentFrameMetadata,
+    /// Boxed retransmit collection owner/header per tracked packet.
+    RetransmitOwner,
+    /// Per-stream ACK and loss range nodes retained beyond sent-record retirement.
+    SendRanges,
+    /// Retained send-buffer segment descriptors.
+    SendSegments,
+    /// Receive reassembly and unordered-read range nodes.
+    ReceiveRanges,
+    /// Receive reassembly heap/buffer descriptors.
+    ReceiveSegments,
+    /// Shared simultaneous ACK/loss scratch entries.
+    AckLossScratch,
     /// Stream send/receive payload, frame vectors and assembler segments.
     StreamPayload,
     /// Stream maps, wakers, handles and stream-local state.
@@ -87,6 +103,8 @@ pub struct CensusEntry {
     pub compio_owner: u8,
     /// Pinned source scope to inventory, including transitive provider allocations.
     pub source: &'static str,
+    /// Required bounded exhaustion behavior; later runtime owners implement it.
+    pub exhaustion: &'static str,
 }
 use AllocationClass as A;
 use Pool as P;
@@ -98,6 +116,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "q runtime.rs/endpoint.rs; c socket.rs; quinn-udp; OS effective SO_RCVBUF/SO_SNDBUF",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::EndpointState,
@@ -105,6 +124,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "p endpoint.rs/config/token_memory_cache/bloom_token_log; q endpoint.rs; c endpoint.rs/builder.rs",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::Runtime,
@@ -112,6 +132,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "q runtime.rs; tokio runtime/time/task; c endpoint.rs; compio-runtime/driver/net/io completion registries",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::Incoming,
@@ -119,6 +140,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "p endpoint.rs Incoming; q incoming.rs/endpoint.rs; c incoming.rs/endpoint.rs",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::RawEvents,
@@ -126,6 +148,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "q endpoint.rs/connection.rs; p shared.rs; c endpoint.rs/connection.rs; bytes backing/reference headers",
+        exhaustion: "Drop newest before allocation on raw byte/item exhaustion",
     },
     CensusEntry {
         class: A::Controls,
@@ -133,6 +156,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "p shared.rs/connection/cid_state.rs/cid_queue.rs; q connection.rs; c connection.rs",
+        exhaustion: "Atomic preflight; pause on temporary shortage; resource-close oversize via reserved terminal",
     },
     CensusEntry {
         class: A::Terminal,
@@ -140,6 +164,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "p connection/mod.rs/token.rs; q connection.rs; c connection.rs",
+        exhaustion: "Coalesce first cause and final Drained in independent reserved slots",
     },
     CensusEntry {
         class: A::Crypto,
@@ -147,6 +172,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "p crypto/rustls.rs/connection/spaces.rs/assembler.rs; rustls quic.rs",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::Tls,
@@ -154,13 +180,79 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "rustls 0.23.46 common_state/conn/msgs/client/server/verify; webpki/ring certificate verification and keys",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::Protocol,
+        pool: P::Windows,
+        tokio_owner: 1,
+        compio_owner: 7,
+        source: "p connection/spaces.rs sent_packets/PendingAcks; packet_builder.rs; R1/R7 shared builder/sent credit, ACK-only allowance inside C_pkt, PTO overshoot6 outside; 64 ACK ranges per space with65 transient entries; payload vectors retain payload credit",
+        exhaustion: "Ordinary ack-eliciting builders pause at C_pkt; ACK-only/untracked close continue; PTO overshoot <=2 per round for3 rounds; T_np closes without ACK progress; PendingAcks prunes oldest after transient65",
+    },
+    CensusEntry {
+        class: A::ProtocolFixed,
         pool: P::Residual,
         tokio_owner: 1,
         compio_owner: 7,
-        source: "p connection/{mod,spaces,paths,packet_builder,timer,ack_frequency,mtud}/range_set/congestion/frame/packet; congestion controller clones",
+        source: "p connection/{mod,paths,timer,ack_frequency,mtud}/congestion; finite fixed loss/congestion/path/MTU/timer state only",
+        exhaustion: "Resource-close on impossible fixed layout; no borrowing from count-dependent pools",
+    },
+    CensusEntry {
+        class: A::SentFrameMetadata,
+        pool: P::Windows,
+        tokio_owner: 1,
+        compio_owner: 7,
+        source: "p frame.rs StreamMetaVec; spaces.rs boxed Retransmits children: aggregate <=32 descriptors per tracked packet",
+        exhaustion: "Stop adding frames before descriptor growth; unused builder reservations release on discard",
+    },
+    CensusEntry {
+        class: A::RetransmitOwner,
+        pool: P::Windows,
+        tokio_owner: 1,
+        compio_owner: 7,
+        source: "p spaces.rs ThinRetransmits/boxed Retransmits: <=C_pkt+6 owners, 512-byte owner shape; children charged separately",
+        exhaustion: "Reserve before boxing; stop packet building at record credit; retain through retransmit transfer/final destruction",
+    },
+    CensusEntry {
+        class: A::SendRanges,
+        pool: P::Windows,
+        tokio_owner: 1,
+        compio_owner: 7,
+        source: "p connection/send_buffer.rs acks/retransmits: each <=64 ranges per stream",
+        exhaustion: "Coalesce to covering range before growth; resend covered acknowledged bytes if needed; retain transferred charges",
+    },
+    CensusEntry {
+        class: A::SendSegments,
+        pool: P::Windows,
+        tokio_owner: 1,
+        compio_owner: 7,
+        source: "p connection/send_buffer.rs unacked_segments: <=64 descriptors per stream",
+        exhaustion: "Backpressure application writes before descriptor growth; merge adjacent segments only with existing payload credit",
+    },
+    CensusEntry {
+        class: A::ReceiveRanges,
+        pool: P::Windows,
+        tokio_owner: 1,
+        compio_owner: 7,
+        source: "p connection/assembler.rs unordered recvd/ranges: <=64 per stream",
+        exhaustion: "Drop excess out-of-order STREAM data unacknowledged before growth; peer retransmits",
+    },
+    CensusEntry {
+        class: A::ReceiveSegments,
+        pool: P::Windows,
+        tokio_owner: 1,
+        compio_owner: 7,
+        source: "p connection/assembler.rs BinaryHeap<Buffer>: <=64 descriptors per stream",
+        exhaustion: "Drop excess out-of-order STREAM data unacknowledged before descriptor growth; preserve retained payload credit",
+    },
+    CensusEntry {
+        class: A::AckLossScratch,
+        pool: P::Windows,
+        tokio_owner: 1,
+        compio_owner: 7,
+        source: "p connection/mod.rs ACK processing/loss detection scratch: shared <=C_pkt+6 simultaneous entries",
+        exhaustion: "Reserve shared scratch before growth; process bounded chunks sequentially, never allocate overflow scratch",
     },
     CensusEntry {
         class: A::StreamPayload,
@@ -168,6 +260,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "p connection/streams/{send,recv,state,mod}/send_buffer/assembler; q/c send_stream.rs/recv_stream.rs",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::StreamState,
@@ -175,6 +268,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "p connection/streams/state.rs; q/c connection.rs stream wakers/maps, handle clones",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::Sources,
@@ -182,6 +276,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "mesh_quic_admission.rs; candidate primary/alternative/idle map hooks and normalized keys",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::Tasks,
@@ -189,6 +284,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "mesh_quic_admission.rs; q/c connection driver futures; ready/channel/JoinSet/results/handshake and final handles",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::Responses,
@@ -196,6 +292,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 6,
         source: "p endpoint.rs response vectors; q/c endpoint.rs stateless send; c socket.rs completion buffers",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::Preauth,
@@ -203,6 +300,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "gateway_frame_reader.rs/quic_gateway.rs/types.rs; serde_json/postcard/base64 conversion temporaries",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
     CensusEntry {
         class: A::SharedConfig,
@@ -210,6 +308,7 @@ pub const CENSUS: &[CensusEntry] = &[
         tokio_owner: 1,
         compio_owner: 7,
         source: "tls_config.rs/mesh_quic_admission.rs; rustls trust roots/session caches/config Arc; frozen config identities/digest/reservation records; fixed-label diagnostics",
+        exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
     },
 ];
 

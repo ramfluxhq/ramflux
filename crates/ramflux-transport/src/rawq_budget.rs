@@ -5,10 +5,12 @@
 //! Runtime integration must obtain all allocation certificates before using these ceilings.
 
 mod census;
+mod metadata;
 mod reservation;
 pub use census::{
     AllocationCertificate, AllocationClass, AllocationLayout, CENSUS, CensusEntry, Pool,
 };
+pub use metadata::{MetadataBudget, MetadataCharge, NoProgressDeadline};
 pub use reservation::{HostReservation, reserve_host_slice};
 
 /// Configuration or reservation refusal, always before runtime construction.
@@ -58,6 +60,46 @@ pub(crate) fn platform_size(value: u64, maximum: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| BudgetError::Overflow)
 }
 
+fn slab_and_frame(slice: u64, frame: Option<u64>) -> Result<(u64, u64)> {
+    let base = slice / 512;
+    if base == 0 {
+        return Err(BudgetError::Invalid("zero slab"));
+    }
+    let z = (1u64 << base.ilog2()).min(MIB);
+    if z < 128 * KIB {
+        return Err(BudgetError::Invalid("minimum slab"));
+    }
+    let frame = frame.unwrap_or(z);
+    if frame == 0 || frame > z {
+        return Err(BudgetError::Invalid("frame override"));
+    }
+    Ok((z, frame))
+}
+
+fn owner_cost(
+    crypto: u64,
+    window: u64,
+    delta_unit: u64,
+    streams: u64,
+    raw: u64,
+    control: u64,
+) -> Result<u64> {
+    sum(&[
+        crypto,
+        window,
+        window,
+        delta_unit,
+        256 * KIB,
+        mul(streams, 4 * KIB)?,
+        raw,
+        control,
+        2048,
+        4 * 512,
+        8 * 4 * KIB,
+        64 * KIB,
+    ])
+}
+
 /// Each enabled runtime endpoint needs a separate listener slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ListenerRole {
@@ -88,6 +130,30 @@ pub struct Profile {
     pub crypto: u64,
     /// Receive and send windows (each).
     pub window: u64,
+    /// Shared tracked-record credit, including two ACK-only records; builders count.
+    pub sent_records: u64,
+    /// PTO records per round (`S_pto`), above ordinary shared credit.
+    pub s_pto: u64,
+    /// Consecutive PTO overshoot rounds (`K_pto`).
+    pub k_pto: u64,
+    /// Fixed ACK-only allowance inside ordinary credit; ACK service never blocks.
+    pub ack_only_records: u64,
+    /// Independent no-progress policy (`T_np`), reset only by record-freeing ACKs.
+    pub t_np: NoProgressDeadline,
+    /// Total record backing including `S_pto`*`K_pto` overshoot.
+    pub tracked_records: u64,
+    /// Item-3 metadata capacities and charged shapes.
+    pub metadata: MetadataBudget,
+    /// Exact `DeltaUnit` added to the original Unit before deriving N.
+    pub delta_unit: u64,
+    /// Sent-record backing allowance before the factor two.
+    pub sent_record_bytes: u64,
+    /// Steady ACK ranges per space; transient insertion also reserves one entry.
+    pub ack_ranges_per_space: u64,
+    /// ACK-range backing allowance across all packet-number spaces.
+    pub ack_range_bytes: u64,
+    /// Complete doubled window pool: both payload windows and packet/range metadata.
+    pub window_pool: u64,
     /// Per-stream receive window.
     pub stream_window: u64,
     /// Bidirectional streams per owner; unidirectional streams are disabled.
@@ -137,39 +203,28 @@ impl Profile {
     /// # Errors
     /// Refuses impossible minima, over-budget layouts and platform conversion overflow.
     pub fn derive(slice: u64, role: ListenerRole, frame: Option<u64>) -> Result<Self> {
-        let base = slice / 512;
-        if base == 0 {
-            return Err(BudgetError::Invalid("zero slab"));
-        }
-        let z = (1u64 << base.ilog2()).min(MIB);
-        if z < 128 * KIB {
-            return Err(BudgetError::Invalid("minimum slab"));
-        }
-        let frame = frame.unwrap_or(z);
-        if frame == 0 || frame > z {
-            return Err(BudgetError::Invalid("frame override"));
-        }
+        let (z, frame) = slab_and_frame(slice, frame)?;
         let crypto = z / 4;
         let window = mul(4, z)?;
+        let sent_records = add(window / 600, u64::from(!window.is_multiple_of(600)))?;
         let streams = (z / (32 * KIB)).min(64);
+        let s_pto = 2;
+        let k_pto = 3;
+        let ack_only_records = 2;
+        let t_np = NoProgressDeadline { pto_multiple: 3, minimum_ms: 10_000 };
+        let tracked_records = add(sent_records, mul(s_pto, k_pto)?)?;
+        let sent_record_bytes = mul(tracked_records, 256)?;
+        let ack_ranges_per_space = 64;
+        let ack_range_bytes = mul(mul(3, add(ack_ranges_per_space, 1)?)?, 32)?;
+        let metadata = MetadataBudget::derive(tracked_records, streams)?;
+        let delta_unit = sum(&[sent_record_bytes, ack_range_bytes, metadata.total])?;
+        let window_pool = mul(2, add(mul(2, window)?, delta_unit)?)?;
         let output = (z / 4).min(64 * KIB);
         let raw_items = (z / (4 * KIB)).min(64);
         let control_items = (crypto / 512).min(256);
         let raw = add(z, mul(256, raw_items)?)?;
         let control = add(crypto, mul(512, control_items)?)?;
-        let owner = sum(&[
-            crypto,
-            window,
-            window,
-            256 * KIB,
-            mul(streams, 4 * KIB)?,
-            raw,
-            control,
-            2048,
-            4 * 512,
-            8 * 4 * KIB,
-            64 * KIB,
-        ])?;
+        let owner = owner_cost(crypto, window, delta_unit, streams, raw, control)?;
         let incoming = sum(&[65_535, crypto, 1024])?;
         let response = 65_536 + 512;
         let gateway = role == ListenerRole::Gateway;
@@ -194,6 +249,18 @@ impl Profile {
             z,
             crypto,
             window,
+            sent_records,
+            s_pto,
+            k_pto,
+            ack_only_records,
+            t_np,
+            tracked_records,
+            metadata,
+            delta_unit,
+            sent_record_bytes,
+            ack_ranges_per_space,
+            ack_range_bytes,
+            window_pool,
             stream_window: z,
             streams,
             frame,
@@ -227,14 +294,30 @@ impl Profile {
             responses: [mul(owners, 65_536)?, owners],
             derived,
         };
-        for value in [slice, z, crypto, window, owner, incoming, response, preauth, unit, derived]
-            .into_iter()
-            .chain(profile.queues)
-            .chain(profile.responses)
+        profile.validate_platform()?;
+        Ok(profile)
+    }
+    fn validate_platform(&self) -> Result<()> {
+        for value in [
+            self.slice,
+            self.z,
+            self.crypto,
+            self.window,
+            self.window_pool,
+            self.owner,
+            self.incoming,
+            self.response,
+            self.preauth,
+            self.unit,
+            self.derived,
+        ]
+        .into_iter()
+        .chain(self.queues)
+        .chain(self.responses)
         {
             platform_size(value, usize::MAX as u64)?;
         }
-        Ok(profile)
+        Ok(())
     }
 }
 
@@ -279,10 +362,17 @@ impl FrozenBudget {
             return Err(BudgetError::Invalid("mixed slices"));
         }
         let default = host / u64::try_from(requests.len()).map_err(|_| BudgetError::Overflow)?;
-        let mut reserved = 0;
+        // Sum every slice before comparing against B, so overflow at this entrypoint
+        // is distinguished from an individually over-budget but representable sum.
+        let reserved = requests
+            .iter()
+            .try_fold(0, |total, request| add(total, request.slice.unwrap_or(default)))?;
+        if reserved > host {
+            return Err(BudgetError::Invalid("listener sum"));
+        }
         let mut listeners = Vec::with_capacity(requests.len());
         let mut digest = blake3::Hasher::new();
-        digest.update(b"rawq-budget-v1");
+        digest.update(b"rawq-budget-v2-r6");
         for component in ENDPOINT_COMPONENTS {
             digest.update(&component.to_le_bytes());
         }
@@ -290,8 +380,7 @@ impl FrozenBudget {
         digest.update(&host.to_le_bytes());
         for request in requests {
             let slice = request.slice.unwrap_or(default);
-            reserved = add(reserved, slice)?;
-            if slice == 0 || reserved > host {
+            if slice == 0 {
                 return Err(BudgetError::Invalid("listener sum"));
             }
             let profile = Profile::derive(slice, request.role, request.frame_ceiling)?;
@@ -305,6 +394,18 @@ impl FrozenBudget {
                 profile.z,
                 profile.crypto,
                 profile.window,
+                profile.sent_records,
+                profile.s_pto,
+                profile.k_pto,
+                profile.ack_only_records,
+                profile.t_np.pto_multiple,
+                profile.t_np.minimum_ms,
+                profile.tracked_records,
+                profile.delta_unit,
+                profile.sent_record_bytes,
+                profile.ack_ranges_per_space,
+                profile.ack_range_bytes,
+                profile.window_pool,
                 profile.stream_window,
                 profile.streams,
                 profile.frame,
@@ -324,6 +425,7 @@ impl FrozenBudget {
                 profile.derived,
             ]
             .into_iter()
+            .chain(profile.metadata.scalars())
             .chain(profile.phases.into_iter().flat_map(|(total, source)| [total, source]))
             .chain(profile.sources)
             .chain(profile.queues)
