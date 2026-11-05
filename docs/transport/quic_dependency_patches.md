@@ -153,3 +153,12 @@ the length without accounting, and already-counted tails carry zero. The bounded
 migration regression asserts new-path anti-amplification credit and exactly-once
 accounting. The final requested upstream blank line in tests/mod.rs is restored;
 its sole added line over upstream is the mandatory SPDX header.
+
+
+Sender cancellation seals response construction. Requests received during endpoint
+drain are counted as `stateless_response_closed`, separately from capacity-full
+drops. Whether teardown should suppress responses or retain drain-time refusals
+is an R4 service-scope policy decision; this hook exposes the distinction without
+changing that policy. The response test also counts actual delivered wire datagrams
+independently of response permits and requires exactly the reserved capacity after
+unblocking each negotiation/Retry/refusal case.

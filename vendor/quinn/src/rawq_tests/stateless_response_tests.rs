@@ -82,6 +82,7 @@ pub(super) async fn run() {
  for (items,bytes) in [(2,2*65536),(4,2*65536)] {
   for mode in 0..3 {
    let f=fixture(items,bytes,false).await;
+   let wire_before=f.outgoing.delivered.load(Ordering::SeqCst);
    f.outgoing.write_blocked.store(true,Ordering::SeqCst);
    let mut attempts=Vec::new();
    for _ in 0..9 {
@@ -102,6 +103,7 @@ pub(super) async fn run() {
    drop(attempts);
    writable(&f.outgoing);
    until(||f.sender.stats().items==0).await;
+   assert_eq!(f.outgoing.delivered.load(Ordering::SeqCst)-wire_before,2,"exactly the reserved response capacity reaches the wire after unblock");
    timeout(Duration::from_secs(5),f.client.wait_idle()).await.unwrap();
    loop {
        let mut accept=std::pin::pin!(f.server.accept());
@@ -115,6 +117,9 @@ pub(super) async fn run() {
    drop((c,s));
    f.server.close(0u32.into(),b"cancel");
    timeout(Duration::from_secs(5),f.sender.join()).await.unwrap();
+   let full_before=f.sender.stats().full;
+   inject(&f.incoming,negotiation());until(||f.sender.stats().closed==1).await;
+   assert_eq!(f.sender.stats().full,full_before,"drain-time suppression is closed, not full");
    assert_eq!(f.sender.ownership(),(0,0,0));assert_eq!(f.sender.stats().bytes,0);
   }
  }

@@ -20,6 +20,7 @@ struct Wire {
     write_blocked: AtomicBool,
     write_wake: Mutex<Option<Waker>>,
     send_attempts: AtomicUsize,
+    delivered: AtomicUsize,
     held: AtomicBool,
     pause_after_recv: AtomicBool,
     suppress_send: AtomicBool,
@@ -65,6 +66,7 @@ impl AsyncUdpSocket for Socket {
         let mut packets = self.outbound.packets.lock().unwrap();
         if packets.len() < 128 {
             packets.push_back(t.contents.to_vec());
+            self.outbound.delivered.fetch_add(1, Ordering::SeqCst);
         }
         if t.contents.len() > self.outbound.last.lock().unwrap().len() {
             *self.outbound.last.lock().unwrap() = t.contents.to_vec();
