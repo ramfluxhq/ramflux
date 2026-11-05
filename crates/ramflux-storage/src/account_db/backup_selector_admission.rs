@@ -67,20 +67,20 @@ fn validate(db: &Connection, database: &str, root: &str) -> Result<(), StorageEr
         [],
         |r| r.get(0),
     )?;
-    if version > crate::schema_object_erasure::VERSION {
+    if version > super::mac_subkeys::VERSION {
         return Err(StorageError::AccountSchemaTooNew {
             schema_version: version,
-            supported: crate::schema_object_erasure::VERSION,
+            supported: super::mac_subkeys::VERSION,
         });
     }
     let (checksum, sentinel) = match version {
         12 => {
             (crate::schema_object_erasure::V12_CHECKSUM, crate::schema_object_erasure::V12_SENTINEL)
         }
-        13 => (crate::schema_object_erasure::CHECKSUM, crate::schema_object_erasure::SENTINEL),
+        13 | 14 => (crate::schema_object_erasure::CHECKSUM, crate::schema_object_erasure::SENTINEL),
         _ => return Err(refuse()),
     };
-    let valid: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {database}.schema_migration WHERE schema_version=?1 AND checksum=?2) AND EXISTS(SELECT 1 FROM {database}.schema_migration WHERE schema_version=1 AND checksum=?3)"), params![version, checksum, sentinel], |r| r.get(0))?;
+    let valid: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {database}.schema_migration WHERE schema_version=?1 AND checksum=?2) AND EXISTS(SELECT 1 FROM {database}.schema_migration WHERE schema_version=1 AND checksum=?3)"), params![version.min(13), checksum, sentinel], |r| r.get(0))?;
     if !valid {
         return Err(refuse());
     }

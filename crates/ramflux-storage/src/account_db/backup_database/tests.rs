@@ -24,7 +24,7 @@ fn legacy_input(db: &AccountDb) -> Result<(), StorageError> {
     })?;
     db.connection.execute("UPDATE object_index SET manifest_hash=zeroblob(32),chunk_manifest_hash=zeroblob(32) WHERE object_id='legacy'", [])?;
     db.persist_actor_state("attachment/reference/legacy", &json!({"legacy":true}))?;
-    db.connection.execute_batch("DELETE FROM schema_migration WHERE schema_version=13; DROP INDEX IF EXISTS runtime_outbox_object_selector;")?;
+    db.connection.execute_batch("DROP TRIGGER IF EXISTS account_mac_marker_insert; DROP TRIGGER IF EXISTS account_mac_marker_delete; DROP TABLE IF EXISTS account_mac_marker_bundle; DROP TABLE IF EXISTS account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14; DELETE FROM schema_migration WHERE schema_version=13; DROP INDEX IF EXISTS runtime_outbox_object_selector;")?;
     db.connection.execute(
         "UPDATE schema_migration SET checksum=?1 WHERE schema_version=1",
         params![crate::schema_object_erasure::V12_SENTINEL],
@@ -50,7 +50,7 @@ fn pre_normalization_preserves_original_counts_until_strict_validation() -> Test
         assert!(opened.is_ok(), "pre-normalization input must reach the normalizer");
         let input = opened?;
         let original = input.original_input().clone();
-        assert_eq!(original.schema_version, if inherited_v13 { 13 } else { 12 });
+        assert_eq!(original.schema_version, if inherited_v13 { 14 } else { 12 });
         assert_eq!(original.unowned_legacy_actor_count, 1);
         assert_eq!(original.counts.attachments, 1);
         assert_eq!(input.counts()?, original.counts);

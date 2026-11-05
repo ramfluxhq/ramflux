@@ -36,6 +36,14 @@ pub(super) fn replay_key(
         &entry.envelope.source_device_id,
         id,
     ))?;
+    for marker in db.routed_seen_keys(&binding)? {
+        let digest =
+            marker.strip_prefix("routed/seen/").ok_or_else(|| invalid("own-copy replay key"))?;
+        let key = format!("{REPLAYS}{digest}");
+        if db.actor_state_exists(&key)? {
+            return Ok(key);
+        }
+    }
     Ok(format!("{REPLAYS}{}", private_digest(db, &binding)?))
 }
 
@@ -44,7 +52,20 @@ fn private_digest(db: &AccountDb, binding: &[u8]) -> Result<String, SdkError> {
     Ok(key.strip_prefix("routed/seen/").ok_or_else(|| invalid("own-copy replay key"))?.to_owned())
 }
 
-pub(super) fn packet_fingerprint(db: &AccountDb, fingerprint: &str) -> Result<String, SdkError> {
+pub(super) fn packet_fingerprint(
+    db: &AccountDb,
+    fingerprint: &str,
+    key: &str,
+) -> Result<String, SdkError> {
+    let binding =
+        ramflux_protocol::canonical_json_bytes(&("ramflux.own_copy.fingerprint.v1", fingerprint))?;
+    if let Some(existing) = db.load_actor_state::<Committed>(key)? {
+        for marker in db.routed_seen_keys(&binding)? {
+            if marker.strip_prefix("routed/seen/") == Some(existing.fingerprint.as_str()) {
+                return Ok(existing.fingerprint);
+            }
+        }
+    }
     private_digest(
         db,
         &ramflux_protocol::canonical_json_bytes(&("ramflux.own_copy.fingerprint.v1", fingerprint))?,
@@ -118,7 +139,7 @@ impl RamfluxClient {
         let target = self.owned_device_identity()?;
         let key = replay_key(db, &target, entry, &packet.id)?;
         let wire_fingerprint = ramflux_protocol::hash_base64url(DOMAIN, bytes);
-        let fingerprint = packet_fingerprint(db, &wire_fingerprint)?;
+        let fingerprint = packet_fingerprint(db, &wire_fingerprint, &key)?;
         let committed = if committed(db, &key, &fingerprint, now)? {
             true
         } else if let Some(old) =
@@ -163,7 +184,7 @@ impl RamfluxClient {
             return Ok(());
         };
         let fingerprint =
-            packet_fingerprint(db, &ramflux_protocol::hash_base64url(DOMAIN, &bytes))?;
+            packet_fingerprint(db, &ramflux_protocol::hash_base64url(DOMAIN, &bytes), &key)?;
         if committed.fingerprint != fingerprint {
             return Ok(());
         }

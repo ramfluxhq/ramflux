@@ -5,13 +5,9 @@
 
 use super::AccountDb;
 use crate::StorageError;
-use hmac::{Hmac, KeyInit, Mac};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
-use sha2::Sha256;
 use std::collections::BTreeSet;
-
-type HmacSha256 = Hmac<Sha256>;
 
 impl AccountDb {
     pub(super) fn scrub_message_for_deletion(
@@ -76,16 +72,27 @@ impl AccountDb {
         {
             return Ok(true);
         }
-        Ok(self.actor_state_exists(&self.deletion_marker_key(message)?)?
-            || self.actor_state_exists(&legacy_deletion_marker_key(message))?)
+        for mac in self.account_macs(b"ramflux/tombstone-key/v1", message.as_bytes())? {
+            if self.actor_state_exists(&format!("message/deleted/{mac}"))? {
+                return Ok(true);
+            }
+        }
+        self.actor_state_exists(&legacy_deletion_marker_key(message))
     }
 
     pub(crate) fn envelope_refers_to_deleted_message(
         &self,
         envelope: &str,
     ) -> Result<bool, StorageError> {
-        Ok(self.message_is_deleted(envelope)?
-            || self.actor_state_exists(&self.deleted_envelope_marker_key(envelope)?)?)
+        if self.message_is_deleted(envelope)? {
+            return Ok(true);
+        }
+        for mac in self.account_macs(b"ramflux/deleted-envelope/v1", envelope.as_bytes())? {
+            if self.actor_state_exists(&format!("message/deleted-envelope/{mac}"))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn persist_deleted_envelope_markers(&self, message: &str) -> Result<(), StorageError> {
@@ -149,14 +156,19 @@ impl AccountDb {
     }
 
     pub(super) fn account_mac(&self, info: &[u8], value: &[u8]) -> Result<String, StorageError> {
-        let mut derived = zeroize::Zeroizing::new([0_u8; 32]);
-        hkdf::Hkdf::<Sha256>::new(None, self.current_key.bytes())
-            .expand(info, derived.as_mut())
-            .map_err(|_| StorageError::AuthorizationRejected)?;
-        let mut mac = HmacSha256::new_from_slice(derived.as_ref())
-            .map_err(|_| StorageError::AuthorizationRejected)?;
-        mac.update(value);
-        Ok(ramflux_protocol::encode_base64url(mac.finalize().into_bytes()))
+        let info = info.to_vec();
+        let value = value.to_vec();
+        self.connection.call(move |raw| Ok(super::mac_subkeys::current_mac(raw, &info, &value)))?
+    }
+
+    pub(super) fn account_macs(
+        &self,
+        info: &[u8],
+        value: &[u8],
+    ) -> Result<Vec<String>, StorageError> {
+        let info = info.to_vec();
+        let value = value.to_vec();
+        self.connection.call(move |raw| Ok(super::mac_subkeys::all_macs(raw, &info, &value)))?
     }
 
     fn deletion_hash(&self, message: &str) -> Result<String, StorageError> {
@@ -200,10 +212,7 @@ mod tests {
 
     #[test]
     fn account_mac_golden_preserves_persisted_marker_bytes() -> Result<(), StorageError> {
-        let root = crate::tests::temp_root("account-mac-golden");
-        let index = AccountIndex::open(&root)?;
-        index.create_account("acct", "principal")?;
-        let db = AccountDb::open(&index, "acct", &AccountDbKey::from_bytes([0x42; 32]))?;
+        let (root, db) = super::super::mac_subkeys::tests::migrated_db("account-mac-golden")?;
         assert_eq!(
             db.account_mac(b"ramflux/tombstone-key/v1", b"message-golden")?,
             "7tkgKbZENWssE__yM22Lxml0UyZPLzZFfPBKNe9YgSg"

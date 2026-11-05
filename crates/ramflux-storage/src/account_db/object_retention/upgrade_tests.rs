@@ -67,12 +67,12 @@ fn erasure_writer_floor_refuses_old_checksum_rules_and_future_or_torn_schema_ver
     assert_eq!(before, after);
     drop(reader);
     db.connection
-        .execute("INSERT INTO schema_migration VALUES(14,0,'future','future','future')", [])?;
+        .execute("INSERT INTO schema_migration VALUES(15,0,'future','future','future')", [])?;
     assert!(matches!(
         reopen(&root),
-        Err(StorageError::AccountSchemaTooNew { schema_version: 14, supported: 13 })
+        Err(StorageError::AccountSchemaTooNew { schema_version: 15, supported: 14 })
     ));
-    db.connection.execute("DELETE FROM schema_migration WHERE schema_version=14", [])?;
+    db.connection.execute("DELETE FROM schema_migration WHERE schema_version=15", [])?;
     db.connection.execute(
         "UPDATE schema_migration SET checksum='2026-06-14-account-core-v1' WHERE schema_version=1",
         [],

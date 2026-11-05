@@ -18,10 +18,10 @@ pub(crate) fn validate(db: &Connection) -> Result<(), StorageError> {
         db.query_row("SELECT COALESCE(MAX(schema_version),0) FROM schema_migration", [], |row| {
             row.get(0)
         })?;
-    if newest > VERSION {
+    if newest > crate::account_db::mac_subkeys::VERSION {
         return Err(StorageError::AccountSchemaTooNew {
             schema_version: newest,
-            supported: VERSION,
+            supported: crate::account_db::mac_subkeys::VERSION,
         });
     }
     let first: Option<String> = db

@@ -69,12 +69,74 @@ impl AccountDb {
         Ok(format!("routed/seen/{}", self.account_mac(b"ramflux/replay-key/v1", &digest)?))
     }
 
+    /// Returns retained-bundle selectors for replay lookup, current bundle first.
+    /// # Errors
+    /// Returns storage or canonical encoding errors.
+    pub fn own_sent_index_digests(
+        &self,
+        kind: &str,
+        value: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        self.account_macs(
+            b"ramflux/own-sent-index/v1",
+            &ramflux_protocol::canonical_json_bytes(&(kind, value))?,
+        )
+    }
+
+    /// Returns retained replay claim bindings for an authenticated source.
+    /// # Errors
+    /// Returns storage or canonical encoding errors.
+    pub fn own_sent_replay_claims(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        self.account_macs(
+            b"ramflux/own-sent-replay/v1",
+            &ramflux_protocol::canonical_json_bytes(&(source.storage_key(), envelope))?,
+        )
+    }
+
+    /// Returns retained scope bindings without importing native replay state.
+    /// # Errors
+    /// Returns storage or canonical encoding errors.
+    pub fn own_sent_receipt_scopes(
+        &self,
+        source: &str,
+        target: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        self.account_macs(
+            b"ramflux/own-sent-receipt/v1",
+            &ramflux_protocol::canonical_json_bytes(&(source, target))?,
+        )
+    }
+
+    /// Returns every retained routed replay selector for canonical envelope bytes.
+    /// # Errors
+    /// Returns storage errors or refuses invalid bundles.
+    pub fn routed_seen_keys(&self, canonical_envelope: &[u8]) -> Result<Vec<String>, StorageError> {
+        use sha2::Digest;
+        Ok(self
+            .account_macs(b"ramflux/replay-key/v1", &sha2::Sha256::digest(canonical_envelope))?
+            .into_iter()
+            .map(|mac| format!("routed/seen/{mac}"))
+            .collect())
+    }
+
     /// Extracts a canonical-envelope marker from a retained wire entry without identity lookup.
     ///
     /// # Errors
     /// Returns canonical encoding or key derivation errors.
     pub fn inbox_envelope_marker(&self, entry: &[u8]) -> Result<Option<String>, StorageError> {
-        canonical_envelope(entry)?.map(|(_, envelope)| self.routed_seen_key(&envelope)).transpose()
+        let Some((_, envelope)) = canonical_envelope(entry)? else {
+            return Ok(None);
+        };
+        for marker in self.routed_seen_keys(&envelope)? {
+            if self.actor_state_exists(&marker)? {
+                return Ok(Some(marker));
+            }
+        }
+        Ok(Some(self.routed_seen_key(&envelope)?))
     }
 
     /// Returns canonical bytes only when the entry names a deleted message.
@@ -111,10 +173,7 @@ mod tests {
 
     #[test]
     fn routed_seen_key_golden_preserves_persisted_marker_bytes() -> Result<(), StorageError> {
-        let root = crate::tests::temp_root("routed-seen-golden");
-        let index = AccountIndex::open(&root)?;
-        index.create_account("acct", "principal")?;
-        let db = AccountDb::open(&index, "acct", &AccountDbKey::from_bytes([0x42; 32]))?;
+        let (root, db) = super::super::mac_subkeys::tests::migrated_db("routed-seen-golden")?;
         assert_eq!(
             db.routed_seen_key(br#"{"envelope_id":"golden","payload_hash":"fixed"}"#)?,
             "routed/seen/9Ibmcnnv8KOnPdS8zGqhCIcBSJ7FHZKDlIr_wIxYMto"

@@ -52,6 +52,7 @@ pub mod history;
 pub(crate) mod home_migration;
 pub mod identity_verification;
 pub mod journal;
+pub(crate) mod mac_subkeys;
 pub mod mcp;
 pub(crate) mod message_footprint;
 pub mod messages;
@@ -101,6 +102,7 @@ impl AccountDb {
         let writer = crate::account_writer::AccountWriter::acquire(index.root(), local_account_id)?;
         let account = index.account(local_account_id)?;
         let path = index.root().join(account.db_relative_path);
+        let fresh = !path.exists();
         let connection = Connection::open_account_writer(&path, writer)?;
         apply_key(&connection, key)?;
         crate::schema_generation::validate_worker(&connection)?;
@@ -128,6 +130,7 @@ impl AccountDb {
         crate::schema_contact_requests::upgrade(&db.connection)?;
         crate::schema_shared_group::upgrade(&db.connection)?;
         db.enable_runtime()?;
+        mac_subkeys::initialize_managed(&db.connection, key, fresh)?;
         crate::schema_device_namespace::upgrade(&db.connection)?;
         crate::schema_identity_keys::upgrade(&db.connection)?;
         crate::schema_receipt_identity::upgrade(&db.connection)?;

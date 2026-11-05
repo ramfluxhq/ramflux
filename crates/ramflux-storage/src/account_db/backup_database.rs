@@ -58,7 +58,7 @@ impl BackupDatabase {
         key: &AccountDbKey,
         mode: BackupOpenMode,
     ) -> Result<Self, StorageError> {
-        let db = rusqlite::Connection::open(path)?;
+        let mut db = rusqlite::Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(&format!("PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",key.sqlcipher_hex()))?;
         crate::schema_generation::validate(&db)?;
@@ -81,6 +81,7 @@ impl BackupDatabase {
             crate::encryption::apply_key(&writer, key)?;
             crate::schema_object_erasure::upgrade_private(&writer)?;
         }
+        super::mac_subkeys::initialize(&mut db, key, false)?;
         db.execute_batch(super::event_counter::SCHEMA)?;
         super::message_footprint::install(&db)?;
         // P1's schema-only private upgrade never omits rows. Capture before any

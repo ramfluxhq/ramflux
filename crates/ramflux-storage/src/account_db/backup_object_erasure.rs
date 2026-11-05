@@ -31,10 +31,10 @@ impl BackupDatabase {
             [],
             |r| r.get(0),
         )?;
-        if input_version > crate::schema_object_erasure::VERSION {
+        if input_version > super::mac_subkeys::VERSION {
             return Err(StorageError::AccountSchemaTooNew {
                 schema_version: input_version,
-                supported: crate::schema_object_erasure::VERSION,
+                supported: super::mac_subkeys::VERSION,
             });
         }
         let modern = exists(&self.db, "incoming", "object_erasure_fence")?;
@@ -44,17 +44,17 @@ impl BackupDatabase {
                 [],
                 |r| r.get(0),
             )?;
-            if version > crate::schema_object_erasure::VERSION {
+            if version > super::mac_subkeys::VERSION {
                 return Err(StorageError::AccountSchemaTooNew {
                     schema_version: version,
-                    supported: crate::schema_object_erasure::VERSION,
+                    supported: super::mac_subkeys::VERSION,
                 });
             }
             let checksum: Option<String> = self
                 .db
                 .query_row(
                     "SELECT checksum FROM incoming.schema_migration WHERE schema_version=?1",
-                    [version],
+                    [version.min(13)],
                     |r| r.get(0),
                 )
                 .optional()?;
