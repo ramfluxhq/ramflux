@@ -153,7 +153,7 @@ async fn refresh_rejects_wrong_root_removed_membership_and_failed_fetch() -> Tes
     );
     assert!(!fresh(&account, &native)?);
     account.client.remove_friend_link("refresh-link", "me")?;
-    assert!(!eligible(&account, root)?);
+    assert!(!eligible_roots(&account)?.contains(root));
     assert!(!apply(&mut account, &plan, root, Instant::now(), Ok(peer.manifest.clone()))?);
     assert!(
         account
@@ -179,4 +179,94 @@ fn pending_refresh_is_bounded_and_deduplicated() {
     assert!(state.enqueue("root-0".into()));
     assert!(!state.enqueue("overflow".into()));
     assert_eq!(state.pending.len(), MAX_PENDING);
+}
+
+#[tokio::test]
+async fn eligibility_storage_reads_are_independent_of_pending_root_count() -> TestResult {
+    let native = Fixture::new("eligibility-reads").await?;
+    let primary = native
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or("native")?
+        .group_primary(native.vault.as_ref())?;
+    for index in 0..4 {
+        native.client.shared_group_create_with_primary(
+            &format!("group-{index}"),
+            &format!("thread-{index}"),
+            None,
+            &native.config.target_delivery_id,
+            Some(&primary),
+        )?;
+    }
+    for index in 0..32 {
+        native.client.establish_friend_link(
+            &format!("link-{index}"),
+            &native.manifest.principal_commitment,
+            &format!("peer-{index}"),
+        )?;
+    }
+    let mut account = LocalBusAccountState::disconnected(
+        native.client,
+        native.config,
+        native.manifest.principal_commitment,
+    );
+    let (handle, _io) = fixture().await?;
+    account.connection = Some(handle);
+    let requested = fence(&account)?;
+    let own = account.principal_commitment.clone();
+    account.head_refresh.enqueue(own.clone());
+    let probe = account.client.account_db()?.observe_sql_work();
+    let plan = prepare(&mut account, requested.clone())?.ok_or("small plan")?;
+    let small = probe.snapshot().read_statements;
+    assert!(small > 0, "counter must observe real roster reads");
+    assert!(small <= 2 + 5 * 4, "one contact load and linear group reads: {small}");
+    drop(plan);
+    for index in 0..MAX_PENDING - 1 {
+        assert!(account.head_refresh.enqueue(format!("absent-{index:04}")));
+    }
+    assert_eq!(account.head_refresh.pending.len(), MAX_PENDING);
+    let before = probe.snapshot().read_statements;
+    let plan = prepare(&mut account, requested)?.ok_or("large plan")?;
+    let large = probe.snapshot().read_statements - before;
+    assert_eq!(large, small, "pending roots must not multiply storage reads");
+    assert_eq!(plan.roots, vec![own.clone()]);
+    assert_eq!(account.head_refresh.pending.len(), 1, "ineligible roots removed");
+    let before = probe.snapshot().read_statements;
+    assert!(
+        apply(
+            &mut account,
+            &plan,
+            &own,
+            Instant::now(),
+            Err(SdkError::InboundPending("404".into()))
+        )
+        .is_err()
+    );
+    assert_eq!(
+        probe.snapshot().read_statements - before,
+        small,
+        "Apply must rebuild one current eligibility set per writer turn"
+    );
+    account.connection.take().ok_or("connection")?.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn verified_legacy_authority_does_not_remain_pending() -> TestResult {
+    let (mut account, _native, _io) = account().await?;
+    let manifest = crate::client::identity_authority::test_support::remote_manifest(
+        "legacy", "device", [99; 32],
+    )?;
+    let root = manifest.principal_commitment.clone();
+    assert!(manifest.custody.is_none());
+    account.client.establish_friend_link("legacy-link", &account.principal_commitment, &root)?;
+    account.head_refresh.enqueue(root.clone());
+    let requested = fence(&account)?;
+    let plan = prepare(&mut account, requested)?.ok_or("plan")?;
+    assert!(apply(&mut account, &plan, &root, Instant::now(), Ok(manifest))?);
+    assert!(!account.head_refresh.pending.contains(&root));
+    assert!(account.head_refresh.pending.contains(&account.principal_commitment));
+    account.connection.take().ok_or("connection")?.stop().await;
+    Ok(())
 }
