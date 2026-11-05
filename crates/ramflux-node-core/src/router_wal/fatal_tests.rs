@@ -41,7 +41,10 @@ fn command(name: &str, root: &Path, case: &str, mode: u8) -> Command {
         .stderr(Stdio::piped());
     cmd
 }
-fn wait_abort(mut child: Child) -> TestResult {
+fn wait_abort(child: Child) -> TestResult {
+    wait_abort_kind(child, "fatal_")
+}
+fn wait_abort_kind(mut child: Child, marker: &str) -> TestResult {
     use std::os::unix::process::ExitStatusExt;
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
@@ -49,7 +52,7 @@ fn wait_abort(mut child: Child) -> TestResult {
             assert_eq!(status.signal(), Some(6), "expected supervisor SIGABRT, got {status}");
             let output = child.wait_with_output()?;
             assert!(
-                String::from_utf8_lossy(&output.stderr).contains("fatal_"),
+                String::from_utf8_lossy(&output.stderr).contains(marker),
                 "fatal metadata log absent"
             );
             return Ok(());
@@ -110,11 +113,56 @@ fn uncertain_write_fail_stop() -> TestResult {
             },
         )?;
         store.record_submission_increment("before", i64::MAX, Some(&entry(1)))?;
+        if case == "writer_channel_loss" {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            drop(receiver);
+            let writer = RouterWalWriter {
+                shards: vec![RouterWalWriterShard {
+                    sender: Some(sender),
+                    thread: None,
+                    fsync_thread: None,
+                }],
+            };
+            let _ = writer.append(payload(2));
+            park();
+        }
+        if case == "index_lock" {
+            let wal = store.submission_wal.as_ref().expect("wal");
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _held = wal.state.lock().expect("state");
+                panic!("poison the real index mutex");
+            }));
+            let _response = enqueue(&store, entry(2), mode)?;
+            park();
+        }
+        if case == "fsync_channel_loss" {
+            let wal = store.submission_wal.as_ref().expect("wal");
+            let recovered = recover_router_wal(&root.join("wal"))?;
+            let shard = recovered.shards.get(&0).expect("shard");
+            let writer = RouterWalWriterState::open_associated(
+                router_wal_shard_root(&root.join("wal"), 0),
+                shard.last_segment_id.expect("segment"),
+                shard.current_offset,
+                u64::MAX,
+                wal.association.clone(),
+            )?;
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let (reply, _response) = mpsc::sync_channel(1);
+            sender.send(RouterWalAppendRequest {
+                payload: payload(2),
+                reply: RouterWalAppendReply::Sync(reply),
+            })?;
+            let (fsync_sender, fsync_receiver) = mpsc::sync_channel(1);
+            drop(fsync_receiver);
+            router_wal_pipeline_writer_loop(writer, &receiver, fsync_sender, 1, Duration::ZERO);
+            park();
+        }
         let count = AtomicUsize::new(0);
-        let selected = case.clone();
+        let selected = if case == "wal_panic" { "wal_serialize".to_owned() } else { case.clone() };
+        let inject_panic = case == "wal_panic";
         let _observer = observe(
             root.clone(),
-            Arc::new(move |_, op, done| {
+            Arc::new(move |path, op, done| {
                 if op == selected
                     && !done
                     && (count.fetch_add(1, Ordering::SeqCst)
@@ -124,6 +172,11 @@ fn uncertain_write_fail_stop() -> TestResult {
                             0
                         })
                 {
+                    assert!(!inject_panic, "panic after earlier batch members wrote");
+                    if selected.starts_with("record_") {
+                        let mut file = OpenOptions::new().append(true).open(path)?;
+                        file.write_all(&[0xA5, 0x5A])?;
+                    }
                     return Err(io::Error::other("in-writer injected fault"));
                 }
                 Ok(())
@@ -143,11 +196,13 @@ fn uncertain_write_fail_stop() -> TestResult {
                 wal.association.clone(),
             )?;
             let batch = [payload(2), payload(3), payload(4)];
-            if mode == 2 {
-                let _ = writer.append_batch_no_sync(&batch);
-            } else {
-                let _ = writer.append_batch(&batch);
-            }
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if mode == 2 {
+                    let _ = writer.append_batch_no_sync(&batch);
+                } else {
+                    let _ = writer.append_batch(&batch);
+                }
+            }));
             // If a mutation classifies the failed conversion as definite non-write,
             // returning normally is observable by the parent instead of a fake abort.
             if crate::fatal_durability::check().is_err() {
@@ -163,6 +218,10 @@ fn uncertain_write_fail_stop() -> TestResult {
             "wal_convert",
             "wal_serialize",
             "wal_frame_len",
+            "wal_panic",
+            "writer_channel_loss",
+            "index_lock",
+            "fsync_channel_loss",
             "record_length",
             "record_crc",
             "record_payload",
@@ -175,7 +234,7 @@ fn uncertain_write_fail_stop() -> TestResult {
             "writer_reply",
             "fsync_enqueue",
         ] {
-            if case == "fsync_enqueue" && mode == 1 {
+            if matches!(case, "fsync_enqueue" | "fsync_channel_loss") && mode == 1 {
                 continue;
             }
             let root = root(&format!("{mode}-{case}"));
@@ -292,7 +351,10 @@ fn guard_tombstone_storage_fault() -> TestResult {
     }
     for mode in 0..=2 {
         let root = root(&format!("tombstone-{mode}"));
-        wait_abort(command("guard_tombstone_storage_fault", &root, "tombstone", mode).spawn()?)?;
+        wait_abort_kind(
+            command("guard_tombstone_storage_fault", &root, "tombstone", mode).spawn()?,
+            "fatal_tombstone_persistence",
+        )?;
         let store = crate::router_store::incarnation::test_store(&root, mode, u64::MAX)?;
         store.load_router()?;
         assert_eq!(store.inbox_status("fatal-target")?.1, 0);
@@ -303,6 +365,7 @@ fn guard_tombstone_storage_fault() -> TestResult {
 }
 
 #[test]
+#[allow(clippy::too_many_lines, reason = "queued and pipeline fence child plus disk oracle")]
 fn writer_fence_blocks_later_batch() -> TestResult {
     if let Some((root, _, mode)) = child_config() {
         fs::create_dir_all(&root)?;
@@ -314,22 +377,61 @@ fn writer_fence_blocks_later_batch() -> TestResult {
         let success = first.hand_off().expect("handoff");
         store.record_submission_increment("held-success", i64::MAX, Some(&entry(2)))?;
         let op = if mode == 0 { "commit" } else { "sync_all" };
+        let (entered, reached) = mpsc::sync_channel(1);
+        let (release, resume) = mpsc::sync_channel(1);
+        let resume = Mutex::new(resume);
         let faulted = Arc::new(AtomicBool::new(false));
         let mark = Arc::clone(&faulted);
+        let (appended, appended_rx) = mpsc::channel();
+        let writes = AtomicUsize::new(0);
         let _observer = observe(
             root.clone(),
             Arc::new(move |_, operation, done| {
                 assert!(crate::fatal_durability::check().is_ok(), "physical operation after fence");
-                if operation == op && !done {
-                    mark.store(true, Ordering::SeqCst);
+                if operation == "record_write" && done && writes.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    appended.send(()).map_err(io::Error::other)?;
+                }
+                if operation == op && !done && !mark.swap(true, Ordering::SeqCst) {
+                    entered.send(()).map_err(io::Error::other)?;
+                    resume
+                        .lock()
+                        .expect("release receiver")
+                        .recv_timeout(Duration::from_secs(10))
+                        .map_err(io::Error::other)?;
                     return Err(io::Error::other("batch1 fault"));
                 }
                 Ok(())
             }),
         );
-        let _ = store.record_submission_increment("fault", i64::MAX, Some(&entry(3)));
+        // Both operations are handed to the actual bounded production queue.
+        // No request task is needed to observe or classify the failed completion.
+        let response1 = enqueue(&store, entry(3), mode)?;
+        reached.recv_timeout(Duration::from_secs(10))?;
+        let mut later = entry(4);
+        later.target_delivery_id = "other-target".into();
+        later.envelope.target_delivery_id = later.target_delivery_id.clone();
+        let response2 = enqueue(&store, later, mode)?;
+        if mode == 2 {
+            appended_rx.recv_timeout(Duration::from_secs(10))?;
+        }
+        release.send(())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::fatal_durability::check().is_ok() {
+            assert!(Instant::now() < deadline, "writer fence watchdog");
+            thread::yield_now();
+        }
         assert!(faulted.load(Ordering::SeqCst));
-        assert!(crate::fatal_durability::check().is_err(), "writer must fence before error reply");
+        // Park both notifications until after the writer has already fenced.
+        assert!(!response1.recv_timeout(Duration::from_secs(1)).is_ok_and(|result| result.is_ok()));
+        assert!(
+            !response2.recv_timeout(Duration::from_millis(50)).is_ok_and(|result| result.is_ok())
+        );
+        assert_eq!(
+            store.inbox_status("other-target")?.1,
+            0,
+            "queued completion advanced issued view"
+        );
         success.accepted_durable();
         assert_eq!(core.view("fatal-target", &id).0, 1, "stale Ok crossed final gate");
         assert!(store.record_submission_increment("later", i64::MAX, Some(&entry(4))).is_err());
@@ -342,6 +444,8 @@ fn writer_fence_blocks_later_batch() -> TestResult {
         fs::create_dir_all(&root)?;
         let mut child = command("writer_fence_blocks_later_batch", &root, "fence", mode)
             .env("RAMFLUX_FATAL_HOLD", &root)
+            .env("RAMFLUX_ROUTER_GROUP_COMMIT", if mode == 0 { "1" } else { "0" })
+            .env("RAMFLUX_ROUTER_COMMIT_WINDOW_US", "0")
             .spawn()?;
         wait_file(&root, "fenced", &mut child)?;
         wait_file(&root, "checked", &mut child)?;
@@ -350,7 +454,12 @@ fn writer_fence_blocks_later_batch() -> TestResult {
         let store = crate::router_store::incarnation::test_store(&root, mode, u64::MAX)?;
         store.load_router()?;
         assert!(store.load_delivery_state(0)?.0.pending_entries().any(|row| row.inbox_seq == 1));
-        assert!(!store.load_delivery_state(0)?.0.pending_entries().any(|row| row.inbox_seq == 4));
+        assert!(store.load_delivery_state(0)?.0.pending_entries().any(|row| row.inbox_seq == 2));
+        if mode != 2 {
+            assert!(
+                !store.load_delivery_state(0)?.0.pending_entries().any(|row| row.inbox_seq == 4)
+            );
+        }
         drop(store);
         fs::remove_dir_all(root)?;
     }
@@ -362,4 +471,79 @@ pub(crate) fn panic_in_write() -> TestResult {
     wait_abort(command("uncertain_write_fail_stop", &root, "redb_panic", 0).spawn()?)?;
     fs::remove_dir_all(root)?;
     Ok(())
+}
+
+pub(super) fn first_segment_failures() -> TestResult {
+    if let Some((root, case, mode)) = child_config() {
+        let selected = case.strip_prefix("first_").expect("first case").to_owned();
+        fs::create_dir_all(&root)?;
+        let _observer = observe(
+            root.clone(),
+            Arc::new(move |path, op, done| {
+                let segment =
+                    path.file_name().is_some_and(|name| name.to_string_lossy().ends_with(".wal"));
+                if op == selected && !done && (segment || op == "directory_sync") {
+                    return Err(io::Error::other("first segment failure"));
+                }
+                Ok(())
+            }),
+        );
+        let _ = crate::router_store::incarnation::test_store(&root, mode, u64::MAX);
+        park();
+    }
+    for mode in [1, 2] {
+        for case in
+            ["first_header_write", "first_sync_all", "first_directory_sync", "first_head_commit"]
+        {
+            let root = root(&format!("{case}-{mode}"));
+            let mut cmd = Command::new(std::env::current_exe()?);
+            cmd.args([
+                "--exact",
+                "router_wal::durability_tests::segment_directory_before_ack",
+                "--nocapture",
+            ])
+            .env("RAMFLUX_FATAL_CHILD", &root)
+            .env("RAMFLUX_FATAL_CASE", case)
+            .env("RAMFLUX_FATAL_MODE", mode.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+            wait_abort(cmd.spawn()?)?;
+            let store = crate::router_store::incarnation::test_store(&root, mode, u64::MAX)?;
+            store.load_router()?;
+            drop(store);
+            fs::remove_dir_all(root)?;
+        }
+    }
+    Ok(())
+}
+
+fn enqueue(
+    store: &RouterRedbStore,
+    entry: InboxEntry,
+    mode: u8,
+) -> Result<mpsc::Receiver<Result<(), NodeCoreError>>, NodeCoreError> {
+    if mode == 0 {
+        return store.enqueue_fence_test(entry);
+    }
+    let wal = store.submission_wal.as_ref().expect("wal");
+    let payload = RouterWalPayload::Submission {
+        replay_key: entry.envelope.envelope_id.clone(),
+        replay_expires_at: i64::MAX,
+        entry: Some(Box::new(entry)),
+        accepted_at: None,
+        local_delivery: None,
+    };
+    let shard = wal.writer.shard_for_payload(&payload)?;
+    let (reply, response) = mpsc::sync_channel(1);
+    wal.writer.submit(
+        shard,
+        RouterWalAppendRequest { payload, reply: RouterWalAppendReply::Sync(reply) },
+    )?;
+    let (done, normalized) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        if let Ok(value) = response.recv() {
+            let _ = done.send(value.map(|_| ()));
+        }
+    });
+    Ok(normalized)
 }

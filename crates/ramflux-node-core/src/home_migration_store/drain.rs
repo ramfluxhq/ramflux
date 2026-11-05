@@ -221,7 +221,7 @@ impl RouterRedbStore {
         } else {
             None
         };
-        let tx = self.migration_db().begin_write().map_err(storage)?;
+        let tx = self.begin_write().map_err(storage)?;
         let now = clock(&tx, now)?;
         let key = inbox_entry_storage_key(&row.entry.target_delivery_id, row.entry.inbox_seq);
         let Some(current) = read_drain::<MigrationDrainEntry>(&tx, ENTRIES, &key)? else {

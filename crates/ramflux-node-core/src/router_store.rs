@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod custody;
 mod custody_accounts;
-mod direct_write;
+pub(crate) mod direct_write;
 pub(crate) use custody_accounts::CustodyAccountWrite;
 mod custody_budget_policy;
 pub use custody_accounts::CustodyPublicationBudgetRow;
@@ -628,8 +628,7 @@ impl RouterRedbStore {
             let save_started = Instant::now();
             crate::record_router_snapshot_save();
             let snapshot = router.snapshot();
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_SESSION_CHECKPOINT_KEY,
                 &snapshot.registry,
@@ -646,56 +645,47 @@ impl RouterRedbStore {
                 crate::foreign_device_store::Namespace::Router,
                 &snapshot.foreign_device_heads,
             )?;
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_LIFECYCLE_STATE_KEY,
                 &snapshot.lifecycle_by_principal,
             )?;
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_LIFECYCLE_TOMBSTONE_KEY,
                 &snapshot.lifecycle_tombstones,
             )?;
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_DEACTIVATED_TARGETS_KEY,
                 &snapshot.deactivated_delivery_targets,
             )?;
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_DELETED_TARGETS_KEY,
                 &snapshot.deleted_delivery_targets,
             )?;
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_ABUSE_REPORT_KEY,
                 &snapshot.abuse_reports,
             )?;
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_HOME_NODE_MIGRATION_KEY,
                 &snapshot.home_node_migrations,
             )?;
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_HOME_NODE_ROUTE_KEY,
                 &snapshot.home_node_routes,
             )?;
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
                 &snapshot.identity_lineage_events,
             )?;
-            save_snapshot(
-                &self.db,
+            self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
                 ROUTER_IDENTITY_LINEAGE_HEADS_KEY,
                 &snapshot.identity_lineage_heads,
@@ -2149,5 +2139,36 @@ impl RouterRedbStore {
             root: root.into(),
             retain_until,
         })
+    }
+}
+
+#[cfg(test)]
+impl RouterRedbStore {
+    /// Enqueue directly so the fence fixture can park notification independently
+    /// of the detecting commit thread. The real group writer owns the operation.
+    pub(crate) fn enqueue_fence_test(
+        &self,
+        entry: InboxEntry,
+    ) -> Result<mpsc::Receiver<Result<(), NodeCoreError>>, NodeCoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        let writer = self
+            .commit_writer
+            .as_ref()
+            .ok_or_else(|| incarnation::error("group writer required"))?;
+        writer
+            .sender
+            .as_ref()
+            .ok_or_else(|| incarnation::error("group writer stopped"))?
+            .send(RouterCommitRequest {
+                op: RouterCommitOp::Submission {
+                    replay_key: entry.envelope.envelope_id.clone(),
+                    replay_expires_at: i64::MAX,
+                    entry: Some(Box::new(entry)),
+                    local_delivery: None,
+                },
+                reply,
+            })
+            .map_err(incarnation::error)?;
+        Ok(response)
     }
 }

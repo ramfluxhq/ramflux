@@ -64,7 +64,7 @@ pub(super) fn fence_authorization(
     if a.old_node != node.node_id() {
         return Err(refusal(Refusal::BaseMismatch));
     }
-    let tx = store.migration_db().begin_write().map_err(storage)?;
+    let tx = store.begin_write().map_err(storage)?;
     let now = clock(&tx, now)?;
     let key = authorization_key(auth)?;
     // Permanent proof wins even after terminal operation rows were compacted.

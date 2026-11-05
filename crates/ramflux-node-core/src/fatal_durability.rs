@@ -58,8 +58,9 @@ pub(crate) fn fence(tombstone: bool) {
     // Only this short gate is shared with publication. Never held across I/O.
     {
         let _gate = GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !FENCED.swap(true, Ordering::AcqRel) {
-            REASON.store(if tombstone { 2 } else { 1 }, Ordering::Release);
+        if !FENCED.load(Ordering::Relaxed) {
+            REASON.store(if tombstone { 2 } else { 1 }, Ordering::Relaxed);
+            FENCED.store(true, Ordering::Release);
         }
     }
     if let Some(supervisor) = SUPERVISOR.get() {
@@ -108,6 +109,16 @@ fn supervisor_test_barrier() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !root.join("abort").exists() && std::time::Instant::now() < deadline {
             thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+/// Signal before teardown of a caller-owned uncommitted transaction on panic.
+pub(crate) struct UnwindGuard;
+impl Drop for UnwindGuard {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            fence(false);
         }
     }
 }

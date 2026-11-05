@@ -359,7 +359,7 @@ impl RouterRedbStore {
 
 pub(crate) fn commit_transition(
     store: &RouterRedbStore,
-    tx: redb::WriteTransaction,
+    tx: crate::router_store::direct_write::DirectWrite<'_>,
 ) -> Result<(), NodeCoreError> {
     #[cfg(test)]
     if store.fail_next_migration_commit.swap(false, std::sync::atomic::Ordering::SeqCst) {

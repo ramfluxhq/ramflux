@@ -78,7 +78,8 @@ pub(crate) fn initialize(
         TableDefinition::new("federated_source_device_sets_v1");
     const OLD_CACHE: TableDefinition<&str, &[u8]> =
         TableDefinition::new("bounded_foreign_device_heads_v1");
-    let txn = db.begin_write().map_err(error)?;
+    let txn = crate::fatal_durability::run(|| db.begin_write().map_err(error))?;
+    let _panic = crate::fatal_durability::UnwindGuard;
     let mut migrated = txn.open_table(MIGRATED).map_err(error)?;
     if migrated.get(namespace.name()).map_err(error)?.is_some() {
         return Ok(());
@@ -134,7 +135,7 @@ pub(crate) fn initialize(
     drop(fences);
     drop(sets);
     drop(migrated);
-    txn.commit().map_err(error)
+    crate::fatal_durability::run(|| txn.commit().map_err(error))
 }
 pub(crate) fn load(
     db: &redb::Database,
@@ -180,7 +181,8 @@ fn observe_inner(
     peer: Option<(&str, u64)>,
 ) -> Result<HeadObservation, NodeCoreError> {
     let (fence_table, set_table) = namespace.tables();
-    let txn = db.begin_write().map_err(error)?;
+    let txn = crate::fatal_durability::run(|| db.begin_write().map_err(error))?;
+    let _panic = crate::fatal_durability::UnwindGuard;
     let mut fences = txn.open_table(fence_table).map_err(error)?;
     let mut sets = txn.open_table(set_table).map_err(error)?;
     let root = record.principal_commitment.as_str();
@@ -212,7 +214,7 @@ fn observe_inner(
     }
     drop(fences);
     drop(sets);
-    txn.commit().map_err(error)?;
+    crate::fatal_durability::run(|| txn.commit().map_err(error))?;
     Ok(observation)
 }
 
@@ -223,7 +225,8 @@ pub(crate) fn save_fences(
     heads: &ForeignDeviceHeads,
 ) -> Result<(), NodeCoreError> {
     let (table, _) = namespace.tables();
-    let txn = db.begin_write().map_err(error)?;
+    let txn = crate::fatal_durability::run(|| db.begin_write().map_err(error))?;
+    let _panic = crate::fatal_durability::UnwindGuard;
     let mut fences = txn.open_table(table).map_err(error)?;
     let mut changed = false;
     for (root, next) in &heads.fences {
@@ -239,7 +242,7 @@ pub(crate) fn save_fences(
     }
     drop(fences);
     if changed {
-        txn.commit().map_err(error)?;
+        crate::fatal_durability::run(|| txn.commit().map_err(error))?;
     }
     Ok(())
 }

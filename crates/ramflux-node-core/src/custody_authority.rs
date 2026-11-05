@@ -428,7 +428,7 @@ impl RouterCore {
         if outcome != PinOutcome::Unchanged {
             store.prune_custody_history(now)?;
         }
-        let tx = store.migration_db().begin_write().map_err(|e| reject(&e.to_string()))?;
+        let tx = store.begin_write().map_err(|e| reject(&e.to_string()))?;
         let offer = crate::home_migration_store::destination::prepare_in_transaction(
             &tx, node, input, &verified, now,
         )?;

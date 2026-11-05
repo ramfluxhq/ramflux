@@ -76,6 +76,7 @@ impl TargetGates {
         target: &str,
         deadline: Option<Instant>,
     ) -> Result<SubmissionLease, NodeCoreError> {
+        crate::fatal_durability::check()?;
         let gate = self.0.lock().map_err(|_| busy())?.entry(target.into()).or_default().clone();
         let mut lease = SubmissionLease {
             target: target.into(),

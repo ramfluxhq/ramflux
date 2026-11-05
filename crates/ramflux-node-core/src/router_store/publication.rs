@@ -164,9 +164,9 @@ impl PublicationCore {
         &self,
         requests: &[AssignmentReservation<'_>],
     ) -> Result<Vec<AssignmentGuard>, PublicationRefusal> {
+        let mut registry = lock(&self.shared);
         let _gate = crate::fatal_durability::publication()
             .map_err(|_| PublicationRefusal::FatalUncertain)?;
-        let mut registry = lock(&self.shared);
         let mut needed = BTreeMap::<Key, usize>::new();
         for request in requests {
             let key =
@@ -327,9 +327,6 @@ impl Drop for AssignmentGuard {
 impl PublicationWrite {
     /// Called by the writer only after its positive durable completion.
     pub fn accepted_durable(self) {
-        if crate::fatal_durability::check().is_err() {
-            return;
-        }
         self.descriptor.state.store(PersistenceState::AcceptedDurable as u8, Ordering::Release);
         finish(&self.shared, &self.descriptor, false);
     }
@@ -365,8 +362,8 @@ fn descriptor_state(descriptor: &Descriptor) -> PersistenceState {
 }
 
 fn finish(shared: &Shared, descriptor: &Descriptor, aborted: bool) {
-    let Ok(_gate) = crate::fatal_durability::publication() else { return };
     let mut registry = lock(shared);
+    let Ok(publication_gate) = crate::fatal_durability::publication() else { return };
     if aborted {
         for resource in &descriptor.resources {
             if let Some(owners) = registry.resources.get_mut(resource) {
@@ -387,6 +384,7 @@ fn finish(shared: &Shared, descriptor: &Descriptor, aborted: bool) {
             inbox.in_flight.first_key_value().map_or(inbox.allocated, |(&seq, _)| seq - 1);
     }
     drop(registry);
+    drop(publication_gate);
     shared.changed.notify_waiters();
 }
 

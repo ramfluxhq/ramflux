@@ -15,7 +15,7 @@ impl Drop for PanicGuard {
         }
     }
 }
-pub(super) struct DirectWrite<'a> {
+pub(crate) struct DirectWrite<'a> {
     // Signal before redb transaction teardown during unwind.
     _panic: PanicGuard,
     txn: redb::WriteTransaction,
@@ -33,7 +33,7 @@ impl DerefMut for DirectWrite<'_> {
     }
 }
 impl DirectWrite<'_> {
-    pub(super) fn commit(self) -> Result<(), NodeCoreError> {
+    pub(crate) fn commit(self) -> Result<(), NodeCoreError> {
         let guard = fatal_durability::WriteGuard::new(false)?;
         crate::durability_io::boundary(self.path, "direct_commit", || {
             self.txn.commit().map_err(std::io::Error::other)
@@ -46,7 +46,7 @@ impl DirectWrite<'_> {
     }
 }
 impl super::RouterRedbStore {
-    pub(super) fn begin_write(&self) -> Result<DirectWrite<'_>, NodeCoreError> {
+    pub(crate) fn begin_write(&self) -> Result<DirectWrite<'_>, NodeCoreError> {
         let guard = fatal_durability::WriteGuard::new(false)?;
         let txn = crate::durability_io::boundary(&self.path, "direct_begin", || {
             self.db.begin_write().map_err(std::io::Error::other)
