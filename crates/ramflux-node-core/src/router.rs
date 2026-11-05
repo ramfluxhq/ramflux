@@ -781,8 +781,18 @@ impl RouterCore {
             RouterSubmitOutcome::RejectedDeleted { .. } => {
                 ("rejected_deleted".to_owned(), None, None)
             }
-            RouterSubmitOutcome::RejectedSecurity { .. } => {
-                ("rejected_security".to_owned(), None, None)
+            RouterSubmitOutcome::RejectedSecurity { reason, .. } => {
+                let outcome = crate::sender_retry::refusal_from_reason(&reason).map_or_else(
+                    || "rejected_security".to_owned(),
+                    |error| {
+                        if matches!(error, NodeCoreError::Publication(_)) {
+                            "capacity_retry_after".into()
+                        } else {
+                            error.to_string()
+                        }
+                    },
+                );
+                (outcome, None, None)
             }
             RouterSubmitOutcome::ForwardedHomeNodeMigrated(_) => {
                 ("forwarded_home_node_migrated".to_owned(), None, None)

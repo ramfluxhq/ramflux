@@ -831,3 +831,6 @@ fn durable_view_publication() -> Result {
     }
     Ok(())
 }
+
+#[path = "custody_sender_retry.rs"]
+mod sender_retry;

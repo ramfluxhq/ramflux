@@ -84,6 +84,41 @@ impl RouterCore {
         request: &ItestMvp10OwnDeviceFanoutRequest,
         now: i64,
     ) -> Result<PreparedFanout, NodeCoreError> {
+        match self.prepare_sender_fanout_inner(store, request, now) {
+            Ok(prepared) => Ok(prepared),
+            Err(error @ (NodeCoreError::SenderRetry(_) | NodeCoreError::Publication(_))) => {
+                let outcome = if matches!(
+                    error,
+                    NodeCoreError::Publication(
+                        crate::publication::PublicationRefusal::CapacityRetryAfter { .. }
+                    )
+                ) {
+                    "capacity_retry_after".into()
+                } else {
+                    error.to_string()
+                };
+                Ok(PreparedFanout {
+                    principal_id: request.principal_id.clone(),
+                    source_device_id: request.source_device_id.clone(),
+                    children: self
+                        .mvp10_own_device_targets(request)?
+                        .into_iter()
+                        .map(|(device, target)| {
+                            Child::Complete(delivery(device, target, &outcome, None))
+                        })
+                        .collect(),
+                    core: store.publication_core()?,
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+    fn prepare_sender_fanout_inner(
+        &self,
+        store: &crate::RouterRedbStore,
+        request: &ItestMvp10OwnDeviceFanoutRequest,
+        now: i64,
+    ) -> Result<PreparedFanout, NodeCoreError> {
         let source = self.authenticated_envelope_source_durable(&request.envelope, store)?;
         let targets = self.mvp10_own_device_targets(request)?;
         let leases = targets
@@ -107,14 +142,19 @@ impl RouterCore {
         let replay = envelope_replay_tuple_key(&source, &request.envelope);
         let has_owners =
             candidates.iter().any(|child| matches!(child.admission, RetryAdmission::Owner(_)));
-        if has_owners {
-            self.reserve_sender_fanout(store, &core, &candidates, &replay, now)?;
-        }
+        let identities = if has_owners {
+            self.prepare_sender_fanout_targets(store, &core, &candidates, &replay, now)?
+        } else {
+            Vec::new()
+        };
         if has_owners
             && !self.accept_envelope_replay_once(&source, &request.envelope, now)?
             && !has_retry
         {
             return Err(NodeCoreError::ReplayGuard(format!("replay: {replay}")));
+        }
+        if has_owners {
+            crate::router_store::publication::operation::reserve_targets(&core, &identities)?;
         }
         let (children, entries, owners) = self.assign_sender_fanout(store, candidates, now)?;
         if !entries.is_empty() {
@@ -124,13 +164,19 @@ impl RouterCore {
                     .created_at
                     .checked_add(i64::from(request.envelope.ttl))
                     .ok_or_else(|| NodeCoreError::ReplayGuard("fanout expiry overflow".into()))?;
-            store.record_leased_fanout(
+            if let Err(error) = store.record_leased_fanout(
                 &replay,
                 expiry,
                 source.root_commitment(),
                 &entries,
                 leases,
-            )?;
+            ) {
+                if crate::publication::proved_non_write() {
+                    return Err(crate::sender_retry::SenderRetryRefusal::AbortedRetrySafe.into());
+                }
+                tracing::error!(%error, "fanout persistence failed after hand-off");
+                std::process::abort();
+            }
             for (owner, entry) in owners {
                 let assignment = store
                     .sender_assignment(source.root_commitment(), &entry.envelope, now)?
@@ -146,14 +192,14 @@ impl RouterCore {
         })
     }
 
-    fn reserve_sender_fanout(
+    fn prepare_sender_fanout_targets(
         &self,
         store: &crate::RouterRedbStore,
         core: &Arc<crate::publication::PublicationCore>,
         candidates: &[Candidate],
         replay: &str,
         now: i64,
-    ) -> Result<(), NodeCoreError> {
+    ) -> Result<Vec<(String, String)>, NodeCoreError> {
         let mut identities = Vec::new();
         for child in candidates {
             if let RetryAdmission::Owner(owner) = &child.admission {
@@ -172,8 +218,7 @@ impl RouterCore {
                 .accepted_entries()
                 .any(|(key, expiry)| key == replay && *expiry >= now)
         })?;
-        crate::router_store::publication::operation::reserve_targets(core, &identities)?;
-        Ok(())
+        Ok(identities)
     }
 
     fn assign_sender_fanout(

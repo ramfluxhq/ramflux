@@ -45,3 +45,5 @@ mod custody_registration;
 mod registration_persistence;
 
 pub(crate) mod custody_sessions;
+
+mod sender_fanout;

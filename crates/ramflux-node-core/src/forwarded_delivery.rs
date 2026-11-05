@@ -28,6 +28,44 @@ pub struct ForwardedEnvelopeRequest {
 // Serialize pin eviction with inbox acceptance so a newly verified pin cannot be
 // evicted between its authority transaction and its durable inbox receipt.
 pub(crate) static FOREIGN_PIN_ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PIN_REFERENCES: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+struct PinReferences(Vec<String>);
+impl PinReferences {
+    fn new(envelope: &ramflux_protocol::Envelope) -> Result<Self, NodeCoreError> {
+        let (authority, source) =
+            crate::DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
+        let mut anchors = vec![source.root_commitment().to_owned()];
+        if let Some(evidence) = authority.custody_authority
+            && let Some(custodian) = evidence.custodian_publication
+        {
+            anchors.push(custodian.record.body.account_anchor);
+        }
+        let mut references =
+            PIN_REFERENCES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for anchor in &anchors {
+            *references.entry(anchor.clone()).or_default() += 1;
+        }
+        Ok(Self(anchors))
+    }
+}
+impl Drop for PinReferences {
+    fn drop(&mut self) {
+        let mut references =
+            PIN_REFERENCES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for anchor in &self.0 {
+            if let Some(count) = references.get_mut(anchor) {
+                *count -= 1;
+                if *count == 0 {
+                    references.remove(anchor);
+                }
+            }
+        }
+    }
+}
+pub(crate) fn pin_referenced(anchor: &str) -> bool {
+    PIN_REFERENCES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(anchor)
+}
 
 impl RouterCore {
     /// Accept an envelope from an authenticated federation peer without rewriting it.
@@ -124,11 +162,15 @@ impl RouterCore {
         if deadline <= now {
             return Err(NodeCoreError::Unauthorized("forwarded entry expired".into()));
         }
-        let retry_owner = match store.admit_sender_retry(&source, &envelope, now)? {
+        // Transfer eviction protection from the global authentication lock to
+        // bounded live references before persistence or waiting on an original.
+        let _pins = PinReferences::new(&envelope)?;
+        let admission = store.admit_sender_retry(&source, &envelope, now)?;
+        drop(pin_admission);
+        let retry_owner = match admission {
             crate::sender_retry::RetryAdmission::Owner(owner) => owner,
             retry => {
                 drop(lease);
-                drop(pin_admission);
                 let assignment = match retry {
                     crate::sender_retry::RetryAdmission::Accepted(assignment) => assignment,
                     crate::sender_retry::RetryAdmission::Waiting(waiter) => {
@@ -175,6 +217,9 @@ impl RouterCore {
                 deadline,
                 lease,
             ) {
+                if crate::publication::proved_non_write() {
+                    return Err(crate::sender_retry::SenderRetryRefusal::AbortedRetrySafe.into());
+                }
                 tracing::error!(%error, "forwarded inbox persistence failed after acceptance; terminating to avoid a state fork");
                 std::process::abort();
             }
