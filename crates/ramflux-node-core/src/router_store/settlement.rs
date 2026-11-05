@@ -24,7 +24,7 @@ impl RouterRedbStore {
         previous: Option<&CursorAckState>,
         core: Option<&super::publication::PublicationCore>,
     ) -> Result<(CursorAckState, Option<String>), NodeCoreError> {
-        self.checkpoint_settlement(txn, incoming, previous, None)
+        self.checkpoint_settlement(txn, incoming, previous, core, None)
     }
 
     pub(super) fn checkpoint_settlement(
@@ -32,6 +32,7 @@ impl RouterRedbStore {
         txn: &redb::WriteTransaction,
         incoming: &CursorAckState,
         previous: Option<&CursorAckState>,
+        core: Option<&super::publication::PublicationCore>,
         expired_at: Option<i64>,
     ) -> Result<(CursorAckState, Option<String>), NodeCoreError> {
         let mut cursor = incoming.clone();
@@ -42,6 +43,7 @@ impl RouterRedbStore {
         if let Some(wal) = &self.submission_wal {
             issued = issued.max(wal.issued_sequence(&cursor.target_delivery_id)?);
         }
+        cursor.issued_inbox_seq = cursor.issued_inbox_seq.max(issued);
         let previous_r = previous.map_or(0, |old| old.settled_inbox_seq);
         // Keep independently committed out-of-order dispositions during concurrent
         // receiver updates. Other checkpoint writers share the persisted cursor.
@@ -67,8 +69,16 @@ impl RouterRedbStore {
                 break;
             }
         }
+        // WAL recovery omits entries past their fixed deadline. Its live head
+        // must use the same rule; redb rows remain live until the explicit sweep.
         if let Some(wal) = &self.submission_wal
-            && let Some(seq) = wal.settlement_head(&cursor, previous_r, expired_at)?
+            && let Some(seq) = wal.settlement_head(
+                &cursor,
+                previous_r,
+                expired_at.unwrap_or_else(|| {
+                    i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX)
+                }),
+            )?
         {
             settled = settled.min(seq.saturating_sub(1));
         }

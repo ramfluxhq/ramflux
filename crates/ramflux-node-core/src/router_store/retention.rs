@@ -17,8 +17,10 @@ impl RouterRedbStore {
         now: i64,
         dry_run: bool,
     ) -> Result<usize, NodeCoreError> {
+        let core = self.publication.lock().map_err(redb_error)?.clone();
         crate::fatal_durability::run(|| {
-            let txn = self.begin_write().map_err(redb_error)?;
+            let mut txn = self.begin_write().map_err(redb_error)?;
+            txn.set_durability(redb::Durability::Immediate).map_err(redb_error)?;
             let (mut removed, mut targets) = super::expiry_index::sweep(&txn, now, dry_run)?;
             if let Some(wal) = &self.submission_wal {
                 targets.extend(wal.retention_targets(now)?);
@@ -28,7 +30,13 @@ impl RouterRedbStore {
                 for target in targets {
                     let candidate =
                         CursorAckState { target_delivery_id: target, ..CursorAckState::default() };
-                    committed.push(self.write_retention_checkpoint(&txn, &candidate, Some(now))?);
+                    let candidate = previous(&txn, &candidate)?.unwrap_or(candidate);
+                    committed.push(self.write_retention_checkpoint(
+                        &txn,
+                        &candidate,
+                        core.as_deref(),
+                        Some(now),
+                    )?);
                 }
             }
             {
@@ -57,7 +65,6 @@ impl RouterRedbStore {
                 txn.abort().map_err(redb_error)?;
             } else {
                 txn.commit().map_err(redb_error)?;
-                self.publish_retention_checkpoints(&committed)?;
             }
             if let Some(wal) = &self.submission_wal {
                 removed += if dry_run {
@@ -65,6 +72,9 @@ impl RouterRedbStore {
                 } else {
                     wal.prune_expired(now)?
                 };
+            }
+            if !dry_run {
+                self.publish_retention_checkpoints(&committed, core.as_deref())?;
             }
             Ok(removed)
         })
@@ -85,21 +95,28 @@ impl RouterRedbStore {
             return Ok(());
         }
 
+        let core = self.publication.lock().map_err(redb_error)?.clone();
         crate::fatal_durability::run(|| {
-            let txn = crate::durability_io::boundary(&self.path, "checkpoint_begin", || {
+            let mut txn = crate::durability_io::boundary(&self.path, "checkpoint_begin", || {
                 self.begin_write().map_err(std::io::Error::other)
             })
             .map_err(redb_error)?;
+            txn.set_durability(redb::Durability::Immediate).map_err(redb_error)?;
             let mut committed = Vec::with_capacity(cursors.len());
             for cursor in cursors {
                 self.checkpoint_incarnation(&txn, cursor)?;
-                committed.push(self.write_retention_checkpoint(&txn, cursor, None)?);
+                committed.push(self.write_retention_checkpoint(
+                    &txn,
+                    cursor,
+                    core.as_deref(),
+                    None,
+                )?);
             }
             crate::durability_io::boundary(&self.path, "checkpoint_commit", || {
                 txn.commit().map_err(std::io::Error::other)
             })
             .map_err(redb_error)?;
-            self.publish_retention_checkpoints(&committed)
+            self.publish_retention_checkpoints(&committed, core.as_deref())
         })
     }
 
@@ -107,11 +124,20 @@ impl RouterRedbStore {
         &self,
         txn: &redb::WriteTransaction,
         incoming: &CursorAckState,
+        core: Option<&super::publication::PublicationCore>,
         expired_at: Option<i64>,
     ) -> Result<CursorAckState, NodeCoreError> {
         let previous = previous(txn, incoming)?;
+        let retired = incoming
+            .retired_inbox_seqs
+            .iter()
+            .chain(&incoming.acked_inbox_seqs)
+            .copied()
+            .chain(incoming.last_acknowledged_inbox_seq)
+            .chain(previous.iter().flat_map(|old| old.acked_inbox_seqs.iter().copied()))
+            .collect::<std::collections::BTreeSet<_>>();
         let (cursor, _) =
-            self.checkpoint_settlement(txn, incoming, previous.as_ref(), expired_at)?;
+            self.checkpoint_settlement(txn, incoming, previous.as_ref(), core, expired_at)?;
         let bytes = merged_bytes(
             txn,
             &cursor,
@@ -123,7 +149,7 @@ impl RouterRedbStore {
             .insert(cursor.target_delivery_id.as_str(), bytes.as_slice())
             .map_err(redb_error)?;
         crate::home_migration_store::drain::receiver_settled(txn, &cursor)?;
-        for sequence in &cursor.retired_inbox_seqs {
+        for sequence in &retired {
             super::expiry_index::remove_inbox_row(
                 txn,
                 &super::inbox_entry_storage_key(&cursor.target_delivery_id, *sequence),
@@ -138,13 +164,13 @@ impl RouterRedbStore {
     fn publish_retention_checkpoints(
         &self,
         cursors: &[CursorAckState],
+        core: Option<&super::publication::PublicationCore>,
     ) -> Result<(), NodeCoreError> {
-        let core = self.publication.lock().map_err(redb_error)?.clone();
         for cursor in cursors {
             if let Some(wal) = &self.submission_wal {
                 wal.observe_settlement(cursor)?;
             }
-            if let Some(core) = &core
+            if let Some(core) = core
                 && let Some(id) = core.current_incarnation(&cursor.target_delivery_id)
             {
                 core.commit_settled(&cursor.target_delivery_id, &id, cursor.settled_inbox_seq);
@@ -183,6 +209,8 @@ pub(super) fn previous(
         .get(cursor.target_delivery_id.as_str())
         .map_err(redb_error)?
         .map(|row| {
+            #[cfg(test)]
+            super::incarnation::work::read(row.value().len());
             let stored: super::incarnation::StoredCursor =
                 serde_json::from_slice(row.value()).map_err(redb_error)?;
             if let Some(id) = &stored.inbox_incarnation_id
@@ -218,13 +246,18 @@ fn merged_bytes(
     super::incarnation::encode_cursor(&merged, metadata.as_ref().map(|(id, _)| id.as_str()))
 }
 pub(super) fn cursor_bytes(
+    store: &RouterRedbStore,
     txn: &redb::WriteTransaction,
-    cursor: &CursorAckState,
+    incoming: &CursorAckState,
 ) -> Result<Vec<u8>, NodeCoreError> {
+    // Offline bootstrap has installed its pending rows before deriving R.
+    // The same durable-head validation applies before any monotonic merge.
+    let previous = previous(txn, incoming)?;
+    let (cursor, _) = store.receiver_settlement(txn, incoming, previous.as_ref(), None)?;
     merged_bytes(
         txn,
-        cursor,
-        previous(txn, cursor)?,
+        &cursor,
+        previous,
         super::incarnation_state::read(txn, &cursor.target_delivery_id)?.as_ref(),
     )
 }
@@ -252,4 +285,59 @@ pub(super) fn ack_cursor_bytes(
         return Ok(None);
     }
     merged_bytes(txn, cursor, previous, metadata.as_ref()).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::router_store::{
+        incarnation,
+        publication::tests::{entry, fixture},
+    };
+
+    #[test]
+    fn checkpoint_merge_validates_epoch_and_committed_floor()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = fixture("checkpoint-merge");
+        let store = incarnation::test_store(&root, 0, 1 << 20)?;
+        store.record_inbox_entry(&entry(1))?;
+        let mut cursor = CursorAckState {
+            target_delivery_id: "target".into(),
+            issued_inbox_seq: 1,
+            settled_inbox_seq: 1,
+            ..Default::default()
+        };
+        store.retain_cursor_checkpoint(&cursor)?;
+        let tx = store.db.begin_write()?;
+        assert_eq!(
+            previous(&tx, &cursor)?.ok_or("cursor")?.settled_inbox_seq,
+            0,
+            "a raw candidate is not committed authority"
+        );
+        tx.abort()?;
+        cursor.last_acknowledged_inbox_seq = Some(1);
+        cursor.acked_inbox_seqs.insert(1);
+        store.retain_cursor_checkpoint(&cursor)?;
+        cursor.last_acknowledged_inbox_seq = None;
+        cursor.acked_inbox_seqs.clear();
+        cursor.settled_inbox_seq = 0;
+        store.retain_cursor_checkpoint(&cursor)?;
+        let tx = store.db.begin_write()?;
+        assert_eq!(
+            previous(&tx, &cursor)?.ok_or("cursor")?.settled_inbox_seq,
+            1,
+            "stale candidates cannot regress committed R"
+        );
+        let other = incarnation::new_id()?;
+        tx.open_table(ROUTER_CURSOR_STATE_TABLE)?
+            .insert("target", incarnation::encode_cursor(&cursor, Some(&other))?.as_slice())?;
+        assert!(
+            previous(&tx, &cursor).is_err(),
+            "never merge a committed prefix from a different E"
+        );
+        tx.abort()?;
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

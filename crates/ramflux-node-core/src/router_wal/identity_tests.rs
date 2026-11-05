@@ -128,7 +128,8 @@ pub(crate) fn upgrade() -> Result {
                     .cursor_state("p2-target")
                     .expect("cursor")
                     .settled_inbox_seq,
-                30
+                49,
+                "finalized legacy WAL merge stops the sparse prefix below live row50"
             );
             assert_eq!(router.inbox_snapshot().pull_after("p2-target", 30, 10), vec![entry(50)]);
             row(&store, 71)?; // Existing legacy tail, no roll.

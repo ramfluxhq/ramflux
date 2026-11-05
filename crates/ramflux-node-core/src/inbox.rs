@@ -713,8 +713,11 @@ impl OpaqueDeviceInbox {
     pub(crate) fn finalize_recovered_settlement(&mut self) {
         let targets: Vec<_> = self.cursors.keys().cloned().collect();
         for target in targets {
+            let previous = self.cursors.get(&target).map(|cursor| cursor.settled_inbox_seq);
             self.advance_settled(&target);
-            self.checkpoint_due.insert(target);
+            if self.cursors.get(&target).map(|cursor| cursor.settled_inbox_seq) != previous {
+                self.checkpoint_due.insert(target);
+            }
         }
     }
 

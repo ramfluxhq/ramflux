@@ -1755,28 +1755,6 @@ impl RouterRedbStore {
         let write_txn =
             self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         publication::persistence::export_ranges(&write_txn, &router.inbox)?;
-        let cursor_state_bytes = cursor_states
-            .iter()
-            .map(|cursor| {
-                if let Some(wal) = &self.submission_wal {
-                    let id = wal.reserve_incarnation(&cursor.target_delivery_id)?;
-                    incarnation::set_cursor(
-                        &write_txn,
-                        &cursor.target_delivery_id,
-                        cursor.issued_inbox_seq,
-                        &id,
-                        false,
-                    )?;
-                } else {
-                    incarnation::ensure_cursor(
-                        &write_txn,
-                        &cursor.target_delivery_id,
-                        cursor.issued_inbox_seq,
-                    )?;
-                }
-                retention::cursor_bytes(&write_txn, cursor)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         {
             let mut inbox_table = write_txn
                 .open_table(ROUTER_INBOX_ENTRY_TABLE)
@@ -1794,6 +1772,29 @@ impl RouterRedbStore {
                     .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
             }
 
+            drop(inbox_table);
+            let cursor_state_bytes = cursor_states
+                .iter()
+                .map(|cursor| {
+                    if let Some(wal) = &self.submission_wal {
+                        let id = wal.reserve_incarnation(&cursor.target_delivery_id)?;
+                        incarnation::set_cursor(
+                            &write_txn,
+                            &cursor.target_delivery_id,
+                            cursor.issued_inbox_seq,
+                            &id,
+                            false,
+                        )?;
+                    } else {
+                        incarnation::ensure_cursor(
+                            &write_txn,
+                            &cursor.target_delivery_id,
+                            cursor.issued_inbox_seq,
+                        )?;
+                    }
+                    retention::cursor_bytes(self, &write_txn, cursor)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let mut cursor_table = write_txn
                 .open_table(ROUTER_CURSOR_STATE_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;

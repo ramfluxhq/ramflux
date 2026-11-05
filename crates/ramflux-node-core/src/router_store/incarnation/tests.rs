@@ -160,12 +160,16 @@ fn pre_s6_store_upgrade() -> Result {
     let before = stored(&store, "target")?.expect("upgraded cursor");
     let id = before.inbox_incarnation_id.expect("persisted E");
     assert_eq!(before.cursor.issued_inbox_seq, 70);
-    assert_eq!(before.cursor.settled_inbox_seq, 30);
+    assert_eq!(
+        before.cursor.settled_inbox_seq, 49,
+        "finalized sparse recovery stops below live row50"
+    );
     assert_eq!(router.snapshot().inbox.pull_after("target", 0, 10), vec![row]);
     drop(store);
     let store = reopen(&path)?;
     store.load_router()?;
     assert_eq!(stored(&store, "target")?.expect("cursor").inbox_incarnation_id, Some(id));
+    assert_eq!(stored(&store, "target")?.expect("cursor").cursor.settled_inbox_seq, 49);
     drop(store);
     std::fs::remove_dir_all(root)?;
     Ok(())

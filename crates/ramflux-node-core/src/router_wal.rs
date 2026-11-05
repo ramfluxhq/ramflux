@@ -829,20 +829,18 @@ impl RouterWalStore {
         &self,
         cursor: &crate::CursorAckState,
         previous: u64,
-        expired_at: Option<i64>,
+        expired_at: i64,
     ) -> Result<Option<u64>, NodeCoreError> {
         let state = self.state.lock().map_err(identity::error)?;
         Ok(state.submissions_by_target.get(&cursor.target_delivery_id).and_then(|sequences| {
             sequences
                 .range((std::ops::Bound::Excluded(previous), std::ops::Bound::Unbounded))
                 .filter(|(_, keys)| {
-                    !expired_at.is_some_and(|now| {
-                        keys.iter().all(|key| {
-                            state
-                                .submissions_by_replay_key
-                                .get(key)
-                                .is_some_and(|record| record.retain_until() <= now)
-                        })
+                    !keys.iter().all(|key| {
+                        state
+                            .submissions_by_replay_key
+                            .get(key)
+                            .is_some_and(|record| record.retain_until() <= expired_at)
                     })
                 })
                 .map(|(&seq, _)| seq)

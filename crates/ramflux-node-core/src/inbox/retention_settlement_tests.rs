@@ -156,3 +156,8 @@ fn retention_mode_oracles() -> Result {
     }
     Ok(())
 }
+
+#[test]
+fn startup_checkpoint_after_wal_merge() -> Result {
+    startup_after_wal_merge()
+}
