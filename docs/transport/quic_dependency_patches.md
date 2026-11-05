@@ -168,41 +168,33 @@ unblocking each negotiation/Retry/refusal case.
 
 The shared metadata ledger reserves `align_up(capacity,64)+64` before actual backing
 growth; old and new allocations overlap until the old backing is destroyed. The
-ledger is not doubled again and has no per-class item caps. This checkpoint hooks
-send-segment deque backing, STREAM frame metadata, packet record tables, PendingAcks and ACK/loss scratch, preserving
-inline/default representations. Unique leases follow backing through packet
-retirement and owned iteration; empty retained capacity stays charged.
+ledger is not doubled again and has no per-class item caps. Seven allocation
+classes now have dormant hooks: send-segment deque backing, STREAM frame metadata,
+packet record tables/builders, both send range sets, PendingAcks and ACK/loss scratch.
+Unique leases follow backing through packet retirement and owned iteration; empty
+retained capacity stays charged. Default mode retains the upstream tree containers.
 
-The owned metadata regression currently exercises the implemented send/record/range/scratch classes using
-actual Tokio drivers, independent actual-capacity/source/payload/wire observations,
-exact-full versus attempted-overflow, local RESOURCE_LIMIT/peer application-close,
-and retained owners through Drained and final destruction. It does not certify the
-other six census classes. Production metadata configuration is intentionally absent;
-only the rejected-from-product `__control-test` feature can instantiate this partial
-ledger. The remaining classes need fallible storage hooks before activation.
+Bounded sent records use an ordered allocation-visible table with tombstone reuse.
+Packet builders reserve table backing before header/packet-number effects. PendingAcks
+preflights growth before dedup/ACK/effects, including transient insertion of the 65th
+range and its retained spare capacity. ACK/loss scratch propagates fallible growth;
+metadata terminal close emits no ACK for refused processing. Bounded send deques
+retain charged backing instead of invoking an untracked shrink allocation. Bounded
+send ACK/retransmit ranges use allocation-visible arrays; refused growth returns
+through ACK/loss processing to terminal close before later frames are processed.
 
-Still unimplemented on the send side: sent-record/map/builders, retransmit owners
-and children, both send range sets, pending transfers, PendingAcks and ACK/loss
-scratch. Std BTreeMap does not expose allocated-node capacity: an entry count or
-payload-size estimate is not an actual-capacity certificate. Receive/CRYPTO/history
-hooks, full mixed-exhaustion propagation, supported writer/envelope and all allocation
-certificates also remain future work. No profile arithmetic is changed here.
+Dependency tests use real Tokio drivers, actual capacities/packet numbers/source/
+payload/wire observations and peer RESOURCE_LIMIT errors. Test-only ceiling freezes
+at actual live charges force specific allocation attempts without fake allocation
+owners or class item caps. The send-ACK range case injects encrypted ACKs for actual
+STREAM packet numbers, observes two disjoint committed ranges and refusal of the
+third, then Close/Drained and retained-owner release. Range units compare the upstream
+tree's union/order and check both range sets sharing one credit and actual capacity.
 
-
-The first B1 continuation replaces bounded sent-record BTreeMap storage with an
-ordered allocation-visible table. Packet builders reserve table backing before
-header/packet-number effects; sparse removals reuse tombstones and owned iteration
-retains the allocation lease. Default mode retains BTreeMap. ACK/loss scratch has
-fallible backing growth and terminal propagation. PendingAcks preflights the exact
-range growth before dedup/ACK/effects, including the transient 65th range and its
-retained spare capacity. Metadata terminal close emits no ACK for refused processing.
-Bounded send deques retain their charged backing rather than invoking an untracked
-shrink allocation. The enclosing loss algorithm was extracted by responsibility.
-
-Dependency tests freeze only the test ledger at actual live charges to force a
-specific subsequent allocation attempt, without fake allocation owners or class
-item caps. Actual map/capacity, packet numbers, delivered frames and peer error
-observations remain independent. Full receive-side allocation preflight, mixed
-exhaustion and all class coverage still belong to the unfinished metadata work.
-Remaining B1 hooks are send range sets, retransmit children and pending transfers;
-receive/CRYPTO/unordered ownership and activation certificates remain absent.
+Five classes remain unimplemented: boxed retransmit owners and all allocating
+children, pending retransmit storage/transfers, STREAM receive assemblers, CRYPTO
+receive assemblers and unordered receive history. Full receive per-packet preflight,
+mixed exhaustion/waiter matrix, production writer, supported envelope and allocation
+certificates remain unfinished. Production metadata configuration is intentionally
+absent; only the rejected-from-product `__control-test` feature instantiates this
+partial ledger. No startup certificate, activation or profile arithmetic changes.

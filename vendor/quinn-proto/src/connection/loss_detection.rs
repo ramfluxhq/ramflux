@@ -99,6 +99,7 @@ impl Connection {
                 self.remove_in_flight(&info);
                 for frame in info.stream_frames {
                     self.streams.retransmit(frame);
+                    if self.metadata_exhausted(){return Err(metadata_credit::ResourceExhausted{class:metadata_credit::MetadataClass::SendRanges});}
                 }
                 self.spaces[pn_space].pending |= info.retransmits;
                 self.path.mtud.on_non_probe_lost(packet, info.size);
