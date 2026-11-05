@@ -344,6 +344,10 @@ class ProviderBypassTests(unittest.TestCase):
             if not command:
                 self.skipTest("set COMPOSE_TEST_DOCKER_COMPOSE for Docker Compose config tests")
             parts = shlex.split(command)
+            # Resolve before the wrapper shadows docker on the subprocess PATH.
+            executable = shutil.which(parts[0])
+            self.assertIsNotNone(executable, f"Compose provider is unavailable: {command}")
+            parts[0] = str(Path(executable).resolve())
             wrapper = self.bin / "docker"
             wrapper.write_text("#!/bin/sh\n[ \"$1\" = compose ] || exit 64\nshift\nexec "
                                + " ".join(shlex.quote(part) for part in parts) + " \"$@\"\n")
@@ -358,6 +362,23 @@ class ProviderBypassTests(unittest.TestCase):
                                + " ".join(shlex.quote(part) for part in parts) + " \"$@\"\n")
             wrapper.chmod(0o700)
         return environment
+
+    def test_docker_cli_command_does_not_reenter_path_wrapper(self):
+        real_bin = self.root / "real-bin"
+        real_bin.mkdir()
+        docker = real_bin / "docker"
+        docker.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        docker.chmod(0o700)
+        with mock.patch.dict(os.environ, {
+            "PATH": str(real_bin) + os.pathsep + os.environ["PATH"],
+            "COMPOSE_TEST_DOCKER_COMPOSE": "docker compose",
+        }):
+            environment = self.provider_environment("docker")
+        result = subprocess.run(
+            [str(self.bin / "docker"), "compose", "version"],
+            env=environment, text=True, capture_output=True, check=True, timeout=2,
+        )
+        self.assertEqual(result.stdout.splitlines(), ["compose", "version"])
 
     def run_preflight(
         self, provider, cwd, arguments=(), environment=None, stdin=None,
