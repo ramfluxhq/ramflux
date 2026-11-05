@@ -368,9 +368,9 @@ impl Connection {
         } else {
             self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
             if !self.control_resource_closed {
-            if let Some(remaining) = remaining {
-                self.handle_coalesced(now, remote, ecn, remaining);
-            }
+                if let Some(remaining) = remaining {
+                    self.handle_coalesced(now, remote, ecn, remaining);
+                }
             }
         }
         self.raw_owner = None;

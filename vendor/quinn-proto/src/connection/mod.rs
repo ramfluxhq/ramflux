@@ -1178,8 +1178,8 @@ impl Connection {
                     return;
                 }
                 self.handle_decode(now, remote, ecn, first_decode);
-                // Decoding may migrate to a new path. Charge this datagram once
-                // to that path before returning for a parked head or tail.
+                // Decode may migrate immediately; a parked head defers the charge
+                // until resume selects its path. Count other datagrams here once.
                 if let Some(pending) = self.pending_control.as_mut() {
                     pending.data_len = data_len;
                     pending.remaining = remaining;

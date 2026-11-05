@@ -632,19 +632,18 @@ impl Endpoint {
         }))
     }
 
-    /// Attempt to accept this incoming connection (an error may still occur)
     /// Accept with bounded stateless failure responses.
     #[allow(clippy::result_large_err)]
     pub fn accept_buffered(&mut self, incoming: Incoming, now: Instant, buf: &mut ResponseBuffer, server_config: Option<Arc<ServerConfig>>) -> Result<(ConnectionHandle, Connection), AcceptError> {
         self.accept_output(incoming, now, &mut Output::Bounded(buf), server_config)
     }
-    /// Accept using the legacy unbounded response buffer.
+    /// Attempt to accept this incoming connection (an error may still occur)
+    // AcceptError cannot be made smaller without semver breakage
     #[allow(clippy::result_large_err)]
     pub fn accept(&mut self, incoming: Incoming, now: Instant, buf: &mut Vec<u8>, server_config: Option<Arc<ServerConfig>>) -> Result<(ConnectionHandle, Connection), AcceptError> {
         self.accept_output(incoming, now, &mut Output::Legacy(buf), server_config)
     }
 
-    // AcceptError cannot be made smaller without semver breakage
     #[allow(clippy::result_large_err)]
     fn accept_output(
         &mut self,

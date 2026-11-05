@@ -560,7 +560,6 @@ fn timer_credit_retry_uses_current_time_and_census_guard_records_overrun() {
     assert_eq!(state.lock().unwrap().overruns, 1);
 }
 
-
 #[test]
 fn bounded_migration_parked_head_credits_the_new_path_once() {
     let mut pair = Pair::default();

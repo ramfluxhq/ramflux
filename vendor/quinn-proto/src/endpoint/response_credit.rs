@@ -21,6 +21,8 @@ pub struct ResponseStats {
     pub allocations: u64,
     /// stateless_response_full drops.
     pub full: u64,
+    /// stateless_response_closed drops after sender cancellation.
+    pub closed: u64,
     /// stateless_response_oversize drops.
     pub oversize: u64,
 }
@@ -43,7 +45,8 @@ impl ResponsePool {
     pub fn close(&self) { self.closed.store(true, std::sync::atomic::Ordering::SeqCst); }
     fn reserve(self: &Arc<Self>) -> Option<Permit> {
         let mut s=self.state.lock().unwrap();
-        if self.closed.load(std::sync::atomic::Ordering::SeqCst) || s.items==self.items || RESPONSE_SLAB > self.bytes-s.bytes { s.full=s.full.saturating_add(1); return None; }
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) { s.closed=s.closed.saturating_add(1); return None; }
+        if s.items==self.items || RESPONSE_SLAB > self.bytes-s.bytes { s.full=s.full.saturating_add(1); return None; }
         s.items+=1; s.bytes+=RESPONSE_SLAB; s.metadata_bytes+=512;
         Some(Permit {pool:self.clone()})
     }

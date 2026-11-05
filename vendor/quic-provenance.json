@@ -158,8 +158,8 @@
         "delta": "SPDX; Bounded-mode control-first lanes and coalesced Close/Rebind; default-mode events retain FIFO semantics; cfg(test) reverse consumer barrier while raw pause/resume is driven normally"
       },
       "src/rawq_tests.rs": {
-        "patched_sha256": "5273d3ee212b48491e6f25e33695ddc3c11dbbd320d175a8ab08fb7a869fc0fe",
-        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix; Real blocked socket write/poller barriers and card-named stateless response test registration"
+        "patched_sha256": "7d6c30f6bc9971e73d02c603ecb98a9779319e0137a7774d95726bd8ef8215ed",
+        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix; Real blocked socket write/poller barriers and card-named stateless response test registration; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       },
       "src/rawq_tests/control_driver.rs": {
         "patched_sha256": "0a5a1e4488b2be6baa8ccb17ae384a69632fc5f570f0b6ac3f96ae8e746de89e",
@@ -170,8 +170,8 @@
         "delta": "Pre-sized ring, exactly one endpoint worker, queued plus active proto permits until completion/error/cancel-and-drop, no per-response spawn/completion list; expose cancellation/join and ownership diagnostics"
       },
       "src/rawq_tests/stateless_response_tests.rs": {
-        "patched_sha256": "24b4c8ac57be461304a6f00a687e2f646251aec4f007f6f301c61f6e31e74e2d",
-        "delta": "Zero-admitted-connection negotiation/Retry/refusal floods with independent item/byte ceilings, actual runtime spawn counts, full/oversize allocation suppression, recovery/healthy TLS admission; full protocol arena, blocked cancellation, endpoint-drop join and buffer release"
+        "patched_sha256": "c55942facbfec14b8f4bc650d8e064cdc0c1a7f80eea960712dd7a67fd819cb9",
+        "delta": "Zero-admitted-connection negotiation/Retry/refusal floods with independent item/byte ceilings, actual runtime spawn counts, full/oversize allocation suppression, recovery/healthy TLS admission; full protocol arena, blocked cancellation, endpoint-drop join and buffer release; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       }
     },
     "formatting": {
@@ -356,8 +356,8 @@
       },
       "src/connection/mod.rs": {
         "upstream_sha256": "8b5665fa7dc83e2bb9154fceed34733768633756adc900bb8ec50f24be0ba2b7",
-        "patched_sha256": "f29a9a0b3c71df7f45656feef3c63ed098a12718fdbd1d88ab797692d8438cba",
-        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored; r3: charge the whole datagram exactly once on the path selected by handle_decode, or at the pending/closed early return; preserve default migration anti-amplification behavior; A3 first commit: defer whole-datagram accounting when head parks before migration, storing its length in PendingPacket"
+        "patched_sha256": "978ee37327c1f92716fb207806c9b2269f2b3538f0d54890f3bbce73fbb543cb",
+        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored; r3: charge the whole datagram exactly once on the path selected by handle_decode, or at the pending/closed early return; preserve default migration anti-amplification behavior; A3 first commit: defer whole-datagram accounting when head parks before migration, storing its length in PendingPacket; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       },
       "src/connection/mtud.rs": {
         "upstream_sha256": "3a2917c053a6ec79e277a2fc895cf20ba8cde2b1fe8b3b8b1c96584062acf782",
@@ -451,8 +451,8 @@
       },
       "src/endpoint.rs": {
         "upstream_sha256": "eb9cc82040621b95670e1d9ca9e82e902029766f7303b4329fcb169fb73d3bfc",
-        "patched_sha256": "8565736e50472812034d4a698c719ba176880e0a2b199c78e2a79bf0c7bfeb10",
-        "delta": "SPDX; Bounded endpoint control emission census, typed outgoing endpoint-capacity error and shared ingress parser; r3: restore exact pinned upstream import prefix; Typed legacy/bounded stateless output adapter and bounded handle/accept/refuse/retry APIs; preflight all negotiation/reset/Initial-close/Retry bounds before response backing grows; legacy default behavior retained"
+        "patched_sha256": "896ea7ea11210143c72d770b03d58c21442e667443412aa759eba8ba9e21edaa",
+        "delta": "SPDX; Bounded endpoint control emission census, typed outgoing endpoint-capacity error and shared ingress parser; r3: restore exact pinned upstream import prefix; Typed legacy/bounded stateless output adapter and bounded handle/accept/refuse/retry APIs; preflight all negotiation/reset/Initial-close/Retry bounds before response backing grows; legacy default behavior retained; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       },
       "src/frame.rs": {
         "upstream_sha256": "ff9bc94eed5eaa96400c41f40dc0d73c68b71a60b98acbaf045885d0522341e3",
@@ -539,24 +539,24 @@
         "delta": "Extract unchanged idle timeout negotiation and tests with pub(super) visibility and SPDX"
       },
       "src/connection/control.rs": {
-        "patched_sha256": "75b4fba4540ab2dd2d6887d996367f458f8d1de092a8246146770a7c7d7afc6e",
-        "delta": "SPDX; Generation-gated pending packet/timer revalidation, aggregate emitted-control reservation census and debug assertion; fresh resume time; Disarm the consumed waiter before retry; re-arm atomically and schedule if a concurrent release changed the generation; avoid duplicate wake on successful resume; A3 first commit: carry uncredited whole-datagram length across parked migrating heads and retry transfers; count only after successful head resume selects its path"
+        "patched_sha256": "825cb00c300240c882f73091494599b53539f2617d29cb21c19a039dd74cef86",
+        "delta": "SPDX; Generation-gated pending packet/timer revalidation, aggregate emitted-control reservation census and debug assertion; fresh resume time; Disarm the consumed waiter before retry; re-arm atomically and schedule if a concurrent release changed the generation; avoid duplicate wake on successful resume; A3 first commit: carry uncredited whole-datagram length across parked migrating heads and retry transfers; count only after successful head resume selects its path; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       },
       "src/connection/packet_processing.rs": {
         "patched_sha256": "526dc82c1510297f98cc82f98b2de6ad8424b322c08c4daca316a4d5c571d393",
         "delta": "SPDX; Coalesced packet resume without duplicate UDP receive byte accounting; Initialize pending packet deferred path-byte ownership; coalesced tails use zero because their datagram was already counted"
       },
       "src/connection/control/tests.rs": {
-        "patched_sha256": "187236ea61240ae13b61129714dcfc5cff14094907943bb6629a5f126a6e1fe0",
-        "delta": "SPDX; Aggregate directional byte/item ceilings, generation retry gates, head/tail datagram accounting, fresh timer time and census overrun witnesses; A3 first commit: bounded authenticated migration parks with zero free control credit, preserves old path until resume, then credits new path once and unblocks anti-amplification"
+        "patched_sha256": "674cd5f5bf55f6bf57da984dccdc4d22f3cbfd2ae3c3455e02bea5dcb3e548ed",
+        "delta": "SPDX; Aggregate directional byte/item ceilings, generation retry gates, head/tail datagram accounting, fresh timer time and census overrun witnesses; A3 first commit: bounded authenticated migration parks with zero free control credit, preserves old path until resume, then credits new path once and unblocks anti-amplification; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       },
       "src/connection/control/probe.rs": {
         "patched_sha256": "ed808be94bdf7a57cbaf355c98fe26388f24820e54fb33b066214dd3ea87d47e",
         "delta": "Non-default test-only negotiated-key encrypted packet construction, directional census, dedup/ACK/effect observations and real timer arming; no product activation"
       },
       "src/endpoint/response_credit.rs": {
-        "patched_sha256": "1b75a4470f2e8fdaf491e880a43667af46916d926e45abb1232035e5a21d162a",
-        "delta": "Separate endpoint response item/slab/512-byte metadata permits, held through builder/queue/active send destruction; nonblocking full/oversize suppression, frozen overrides and cancellation seal"
+        "patched_sha256": "8cfd880d8ae309caac6710677be51f70d350d67be5879de36d10e3edb784a2c6",
+        "delta": "Separate endpoint response item/slab/512-byte metadata permits, held through builder/queue/active send destruction; nonblocking full/oversize suppression, frozen overrides and cancellation seal; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       }
     },
     "formatting": {
