@@ -1684,8 +1684,18 @@ pub(crate) async fn handle_gateway_ack(
         target_delivery_id: runtime.target_delivery_id.clone(),
         ack: ack.clone(),
     };
-    let cursor: ramflux_node_core::InboxCursorResponse =
+    let response: ramflux_node_core::RouterAckResponse =
         router_post_json(&context.router, "/mvp0/ack-bound", &request)?;
+    let cursor = match response {
+        ramflux_node_core::RouterAckResponse::Cursor(cursor) => cursor,
+        ramflux_node_core::RouterAckResponse::Rejected { reason } => {
+            return write_gateway_handle(
+                send,
+                &ramflux_node_core::GatewayServerFrame::Nack { reason },
+            )
+            .await;
+        }
+    };
     write_gateway_handle(
         send,
         &ramflux_node_core::GatewayServerFrame::Ack { cursor: cursor.clone() },

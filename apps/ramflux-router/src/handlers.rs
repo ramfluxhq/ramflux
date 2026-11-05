@@ -821,17 +821,36 @@ fn elapsed_us(started: Instant) -> u64 {
 fn handle_mvp0_ack(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
-) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
+) -> anyhow::Result<ramflux_node_core::RouterAckResponse> {
     let ack: ramflux_protocol::Ack = serde_json::from_slice(body)?;
-    router.apply_ack(&ack)
+    ack_response(router.apply_ack(&ack))
 }
 
 fn handle_mvp0_ack_bound(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
-) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
+) -> anyhow::Result<ramflux_node_core::RouterAckResponse> {
     let request: ramflux_node_core::TargetAckRequest = serde_json::from_slice(body)?;
-    router.apply_bound_ack(&request)
+    ack_response(router.apply_bound_ack(&request))
+}
+
+fn ack_response(
+    result: anyhow::Result<ramflux_node_core::InboxCursorResponse>,
+) -> anyhow::Result<ramflux_node_core::RouterAckResponse> {
+    match result {
+        Ok(cursor) => Ok(ramflux_node_core::RouterAckResponse::Cursor(cursor)),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<ramflux_node_core::NodeCoreError>(),
+                Some(ramflux_node_core::NodeCoreError::AckBackpressureRetry)
+            ) =>
+        {
+            Ok(ramflux_node_core::RouterAckResponse::Rejected {
+                reason: "ack_backpressure_retry".into(),
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(feature = "itest-http")]
@@ -1690,6 +1709,30 @@ mod tests {
 
         let _removed = std::fs::remove_file(&path);
         let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));
+        Ok(())
+    }
+
+    #[test]
+    fn ack_backpressure_is_a_typed_legacy_refusal() -> anyhow::Result<()> {
+        let response =
+            ack_response(Err(ramflux_node_core::NodeCoreError::AckBackpressureRetry.into()))?;
+        let json = serde_json::to_value(&response)?;
+        assert_eq!(json, serde_json::json!({"reason": "ack_backpressure_retry"}));
+        assert!(matches!(serde_json::from_value::<ramflux_node_core::RouterAckResponse>(json)?,
+            ramflux_node_core::RouterAckResponse::Rejected { reason } if reason == "ack_backpressure_retry"));
+        let cursor = ramflux_node_core::InboxCursorResponse::from(
+            &ramflux_node_core::CursorAckState::default(),
+        );
+        let json = serde_json::to_value(&cursor)?;
+        assert_eq!(
+            serde_json::to_value(ack_response(Ok(cursor))?)?,
+            json,
+            "legacy successful cursor JSON stays unchanged"
+        );
+        assert!(
+            ack_response(Err(anyhow::anyhow!("ack_backpressure_retry"))).is_err(),
+            "only a typed refusal may take the retry branch"
+        );
         Ok(())
     }
 

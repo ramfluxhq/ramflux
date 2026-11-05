@@ -1067,6 +1067,21 @@ impl RouterRedbStore {
         _envelope_id: &str,
         lease: SubmissionLease,
     ) -> Result<(), NodeCoreError> {
+        let sequence = cursor.last_acknowledged_inbox_seq.ok_or_else(|| {
+            NodeCoreError::ItestHttp("ACK lacks a mailbox delivery sequence".into())
+        })?;
+        self.record_leased_ack_batch(cursor, &[sequence], lease)
+    }
+
+    pub(crate) fn record_leased_ack_batch(
+        &self,
+        cursor: &CursorAckState,
+        sequences: &[u64],
+        lease: SubmissionLease,
+    ) -> Result<(), NodeCoreError> {
+        let mut candidate = cursor.clone();
+        candidate.retired_inbox_seqs.extend(sequences.iter().copied());
+        let cursor = &candidate;
         self.validate_target_lease(&cursor.target_delivery_id, &lease)?;
         let _lease = lease;
         let save_started = Instant::now();
@@ -1093,19 +1108,17 @@ impl RouterRedbStore {
                 .insert(cursor.target_delivery_id.as_str(), cursor_bytes.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
-        let sequence = cursor.last_acknowledged_inbox_seq.ok_or_else(|| {
-            NodeCoreError::ItestHttp("ACK lacks a mailbox delivery sequence".into())
-        })?;
         crate::home_migration_store::drain::receiver_settled(&write_txn, cursor)?;
-        for sequence in std::iter::once(sequence).chain(cursor.retired_inbox_seqs.iter().copied()) {
+        for sequence in sequences.iter().copied().chain(cursor.retired_inbox_seqs.iter().copied()) {
             let key = inbox_entry_storage_key(&cursor.target_delivery_id, sequence);
             expiry_index::remove_inbox_row(&write_txn, &key)?;
         }
         publication::persistence::prune_ranges(&write_txn, cursor)?;
-        crate::durability_io::boundary(&self.path, "direct_commit", || {
-            write_txn.commit().map_err(std::io::Error::other)
-        })
-        .map_err(incarnation::error)?;
+        // A failure here is proved absent: the caller still owns an uncommitted txn.
+        #[cfg(test)]
+        crate::durability_test_hooks::notify(&self.path, "ack_candidate", false)
+            .map_err(incarnation::error)?;
+        write_txn.commit()?;
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
         }

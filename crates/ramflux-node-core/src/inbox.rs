@@ -140,6 +140,14 @@ pub struct InboxCursorResponse {
     pub nacked_envelope_ids: BTreeMap<String, ramflux_protocol::NackReason>,
 }
 
+/// Legacy ACK replies retain their cursor shape; temporary refusal has an explicit code.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum RouterAckResponse {
+    Cursor(InboxCursorResponse),
+    Rejected { reason: String },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TargetAckRequest {
     pub target_delivery_id: String,
@@ -489,6 +497,7 @@ impl OpaqueDeviceInbox {
         }) {
             return Err(NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()));
         }
+        self.check_ack_window_room(target, entry_seq)?;
         let cursor = self.cursors.entry(target.into()).or_insert(CursorAckState {
             target_delivery_id: target.into(),
             ..CursorAckState::default()
@@ -516,6 +525,24 @@ impl OpaqueDeviceInbox {
         self.retire_pending(target, entry_seq);
         self.advance_settled(target);
         Ok(self.cursors.get(target).cloned().unwrap_or(result))
+    }
+
+    // Refuse before touching the cursor or pending rows. A live pending head may
+    // still be dead-lettered, but never to make room behind an unresolved guard.
+    fn check_ack_window_room(&self, target: &str, entry_seq: u64) -> Result<(), NodeCoreError> {
+        if let Some(cursor) = self.cursors.get(target)
+            && cursor.acked_inbox_seqs.len() >= ROUTER_ACK_WINDOW
+            && entry_seq > cursor.settled_inbox_seq.saturating_add(1)
+            && !cursor.acked_inbox_seqs.contains(&entry_seq)
+            && let Some(core) = &self.publication
+            && let Some(id) = self.incarnation_id(target)
+            && let Some(guard) = core.first_in_flight(target, id)
+            && guard < entry_seq
+            && cursor.acked_inbox_seqs.first().is_none_or(|seq| *seq >= guard)
+        {
+            return Err(NodeCoreError::AckBackpressureRetry);
+        }
+        Ok(())
     }
 
     /// One stuck delivery must not stall later ACKs: once the out-of-order window is full,

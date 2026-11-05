@@ -448,9 +448,11 @@ pub(crate) fn apply_ack(
     let target = state
         .target_for_envelope_id(&ack.envelope_id)
         .ok_or_else(|| anyhow::anyhow!("ACK envelope unavailable"))?;
-    let lease = store.acquire_acknowledgement(&target)?;
-    let cursor = state.apply_ack(ack)?;
-    store.record_leased_ack(&cursor, &ack.envelope_id, lease)?;
+    let cursor = state
+        .apply_ack_batch(store, &target, std::slice::from_ref(ack))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing ACK result"))??;
     Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
@@ -459,9 +461,11 @@ pub(crate) fn apply_bound_ack(
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::TargetAckRequest,
 ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
-    let lease = store.acquire_acknowledgement(&request.target_delivery_id)?;
-    let cursor = state.apply_ack_for_target(&request.target_delivery_id, &request.ack)?;
-    store.record_leased_ack(&cursor, &request.ack.envelope_id, lease)?;
+    let cursor = state
+        .apply_ack_batch(store, &request.target_delivery_id, std::slice::from_ref(&request.ack))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing ACK result"))??;
     Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
