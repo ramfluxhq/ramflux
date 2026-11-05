@@ -542,18 +542,33 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
                     }
                 }
                 assert!(charged >= 20, "courier passes did not contain stalled work");
+                // Discard old connection notifications before observing the next pass.
+                while entered.try_recv().is_ok() {}
                 // Wait until another pass is in preparation, then lock through the normal mailbox.
                 loop {
                     if matches!(next(&mut events).await?, CourierEvent::Requested) {
                         break;
                     }
                 }
-                let start = std::time::Instant::now();
-                command(&sender, "account.lock", json!({})).await?;
-                assert!(
-                    start.elapsed() < Duration::from_secs(3),
-                    "lock waited for off-loop preparation"
-                );
+                tokio::time::timeout(Duration::from_secs(10), entered.recv())
+                    .await?.ok_or("next preparation never reached the stalled server")?;
+                // Lock must reply before the outstanding preparation produces a result.
+                // The server retains the unanswered sockets until after the reply.
+                let lock = command(&sender, "account.lock", json!({}));
+                tokio::pin!(lock);
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        tokio::select! {
+                            biased;
+                            event = next(&mut events) => match event? {
+                                CourierEvent::Item { charged: true, .. } | CourierEvent::Finished =>
+                                    return Err("lock waited for stalled preparation to finish".into()),
+                                _ => {}
+                            },
+                            result = &mut lock => return result,
+                        }
+                    }
+                }).await??;
                 Ok::<_, Box<dyn std::error::Error>>(())
             };
             let (served, result) = tokio::join!(serving(&mut actor), driver);

@@ -68,6 +68,35 @@ async fn session_host_drain_fails_the_active_call_and_opens_a_fresh_session() ->
 }
 
 #[tokio::test(start_paused = true)]
+async fn session_host_stop_and_lock_publish_stopped_and_retire_the_live_session() -> Case {
+    watchdog(async {
+        for reason in [DisconnectReason::Stop, DisconnectReason::Lock] {
+            let (handle, mut sessions) = reconnecting_fixture(limits())?;
+            let mut events = handle.events();
+            let mut io = connected(&handle, &mut sessions).await?;
+            let generation = handle.generation();
+            assert!(matches!(events.recv().await?, ConnectionEvent::Connected { generation: g, .. } if g == generation));
+            heartbeat(&handle, &mut io).await?;
+            handle.request_stop(reason);
+            assert!(matches!(events.recv().await?, ConnectionEvent::Disconnected { reason: r, generation: g } if r == reason && g == generation));
+            let snapshot = handle.snapshot();
+            assert_eq!(snapshot.phase, ConnectionPhase::Stopped);
+            assert!(snapshot.session_id.is_none());
+            assert!(snapshot.active_transport_kind.is_none());
+            assert!(snapshot.retry_after_ms.is_none());
+            assert!(snapshot.next_retry_at_ms.is_none());
+            assert!(io.output.recv().await.is_none(), "retired stream must close");
+            assert!(send(&io, &GatewayServerFrame::Cursor { cursor: None }).is_err(), "late replies have no reader");
+            handle.stop_with_reason(reason).await;
+            assert!(handle.test_finished());
+            tokio::time::advance(Duration::from_secs(600)).await;
+            assert!(sessions.try_recv().is_err(), "terminal disconnect must not reconnect");
+        }
+        Ok(())
+    }).await
+}
+
+#[tokio::test(start_paused = true)]
 async fn session_host_stray_reply_retires_the_session_instead_of_answering_the_next_call() -> Case {
     watchdog(async {
         let (handle, mut sessions) = reconnecting_fixture(limits())?;
