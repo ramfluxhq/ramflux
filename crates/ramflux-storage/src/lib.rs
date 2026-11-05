@@ -38,6 +38,7 @@ mod schema_generation;
 mod schema_group_control_identity;
 mod schema_group_sender_identity;
 mod schema_identity_keys;
+mod schema_large_segments;
 mod schema_object_erasure;
 mod schema_receipt_identity;
 #[cfg(any(test, feature = "test-instrumentation"))]

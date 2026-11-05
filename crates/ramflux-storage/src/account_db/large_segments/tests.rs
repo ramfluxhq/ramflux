@@ -154,6 +154,8 @@ fn large_segment_checkpoint_survives_crash_without_phantom_bytes() {
     assert_eq!(raw_progress(&db, "transfer").0, 1);
     let directory = store.directory("transfer", 1).unwrap();
     fs::write(directory.join("0.part"), [1, 2]).unwrap();
+    drop(store);
+    let mut store = db.segment_store().unwrap();
     assert_eq!(store.page("transfer", 1, 0, 1).unwrap()[0].received_bitmap, 0);
     assert_eq!(raw_progress(&db, "transfer").2, 0);
     for (index, bytes) in ciphertexts.iter().enumerate() {
@@ -199,4 +201,152 @@ fn large_segment_checkpoint_survives_crash_without_phantom_bytes() {
     drop(store);
     drop(db);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn large_partial_restart_rejects_same_length_corruption_and_invalid_lengths() {
+    let (manifest, ciphertexts) = fixture(4);
+    let (root, db) = crate::tests::test_db("large-part-restart").unwrap();
+    let mut store = db.segment_store().unwrap();
+    store.admit("transfer", 1, SegmentDirection::Download, &manifest).unwrap();
+    let chunk = manifest.manifest().layout.network_chunk_bytes as usize;
+    store.checkpoint("transfer", 1, 0, 0, &ciphertexts[0][..chunk]).unwrap();
+    let path = store.location("transfer", 1).join("0.part");
+    let mut corrupt = fs::read(&path).unwrap();
+    corrupt[17] ^= 1;
+    fs::write(&path, &corrupt).unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().len(), chunk as u64);
+    drop(store);
+    drop(db);
+    let db = reopen(&root);
+    let store = db.segment_store().unwrap();
+    assert_eq!(raw_progress(&db, "transfer").0, 0);
+    assert_eq!(raw_progress(&db, "transfer").2, 0);
+    drop(store);
+    // Ignore SQL CHECK only to model at-rest corruption, not a supported writer.
+    db.connection.execute_batch("PRAGMA ignore_check_constraints=ON;").unwrap();
+    for len in [-1_i64, 0, 15, 4_194_305, i64::MAX] {
+        db.connection
+            .execute(
+                "UPDATE object_segment_file SET expected_length=?1 WHERE segment_index=0",
+                params![len],
+            )
+            .unwrap();
+        assert!(matches!(
+            db.segment_store(),
+            Err(StorageError::Integrity("segment expected length"))
+        ));
+    }
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn large_transfer_lease_protects_inflight_part_and_reads_only_requested_chunk() {
+    let (manifest, ciphertexts) = fixture(4);
+    let (root, db) = crate::tests::test_db("large-transfer-owner").unwrap();
+    let observed = std::cell::Cell::new(false);
+    let mut store = db.segment_store().unwrap();
+    store.admit("transfer", 1, SegmentDirection::Download, &manifest).unwrap();
+    let path = store.directory("transfer", 1).unwrap().join("0.part");
+    store.during_write = Some(Box::new(|| {
+        assert!(matches!(db.segment_store(), Err(StorageError::AccountWriterBusy(_))));
+        observed.set(true);
+    }));
+    let chunk = manifest.manifest().layout.network_chunk_bytes as usize;
+    store.checkpoint("transfer", 1, 0, 0, &ciphertexts[0][..chunk]).unwrap();
+    assert!(observed.get());
+    assert!(path.exists());
+    store.during_write = None;
+    for (index, bytes) in ciphertexts[0].chunks(chunk).enumerate().skip(1) {
+        store.checkpoint("transfer", 1, 0, u32::try_from(index).unwrap(), bytes).unwrap();
+    }
+    let final_path = store.location("transfer", 1).join("0.segment");
+    let mut bytes = fs::read(&final_path).unwrap();
+    bytes[chunk + 11] ^= 1;
+    fs::write(&final_path, &bytes).unwrap();
+    // A chunk-0 read neither rehashes nor repairs chunk 1. Its own digest still verifies.
+    assert_eq!(store.read_chunk("transfer", 1, 0, 0).unwrap(), ciphertexts[0][..chunk]);
+    assert!(matches!(
+        store.read_chunk("transfer", 1, 0, 1),
+        Err(StorageError::Integrity("segment chunk hash"))
+    ));
+    assert_eq!(fs::read(final_path).unwrap(), bytes);
+    drop(store);
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn historical_segment_schema(db: &AccountDb) {
+    let mut stmt=db.connection.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='object_transfer_state'").unwrap();
+    let names = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for name in names {
+        db.connection
+            .execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")))
+            .unwrap();
+    }
+    db.connection.execute_batch("DROP TABLE object_segment_file; DROP INDEX idx_segment_transfer_identity; ALTER TABLE object_transfer_state DROP COLUMN segment_generation; ALTER TABLE object_transfer_state DROP COLUMN segment_sequence; ALTER TABLE object_transfer_state DROP COLUMN segment_manifest;").unwrap();
+}
+
+#[test]
+fn large_backup_merge_upgrades_old_shapes_without_importing_physical_progress() {
+    let (manifest, ciphertexts) = fixture(1);
+    for source_new in [false, true] {
+        for target_new in [false, true] {
+            let (source_root, source) = crate::tests::test_db("large-backup-source").unwrap();
+            let (target_root, target) = crate::tests::test_db("large-backup-target").unwrap();
+            for (db, new, id) in
+                [(&source, source_new, "source-transfer"), (&target, target_new, "target-transfer")]
+            {
+                let present:bool=db.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='object_segment_file')",[],|r|r.get(0)).unwrap();
+                assert!(present, "normal open must install the additive schema");
+                if new {
+                    let mut store = db.segment_store().unwrap();
+                    store.admit(id, 1, SegmentDirection::Download, &manifest).unwrap();
+                    store.checkpoint(id, 1, 0, 0, &ciphertexts[0]).unwrap();
+                } else {
+                    historical_segment_schema(db);
+                }
+            }
+            source.connection.execute_batch("INSERT INTO object_transfer_state(transfer_id,object_id,peer_device_id,manifest_hash,missing_chunk_bitmap,completed_chunk_bitmap,state,updated_at) VALUES('generic-source','generic-object','peer',x'01',x'5b5d',x'5b5d','idle',1);").unwrap();
+            let incoming = source_root.join("incoming.db");
+            let source_snapshot = source.write_backup_snapshot(&incoming).unwrap();
+            let merged_path = target_root.join("merged.db");
+            let target_snapshot = target.write_backup_snapshot(&merged_path).unwrap();
+            let mut merged =
+                crate::BackupDatabase::open(&merged_path, &target_snapshot.key).unwrap();
+            merged.merge_backup(&incoming, &source_snapshot.key, || Ok(())).unwrap();
+            let imported: u64 = merged
+                .db
+                .query_row(
+                    "SELECT count(*) FROM object_segment_file WHERE transfer_id='source-transfer'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(imported, 0);
+            let local: u64 = merged
+                .db
+                .query_row(
+                    "SELECT count(*) FROM object_segment_file WHERE transfer_id='target-transfer'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(local, u64::from(target_new));
+            let active:u64=merged.db.query_row("SELECT count(*) FROM object_transfer_state WHERE transfer_id='source-transfer'",[],|r|r.get(0)).unwrap();
+            assert_eq!(active, 0);
+            let generic:(Option<u64>,Option<Vec<u8>>,u64)=merged.db.query_row("SELECT segment_generation,segment_manifest,segment_sequence FROM object_transfer_state WHERE transfer_id='generic-source'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            assert_eq!(generic, (None, None, 0));
+            drop(merged);
+            drop(source);
+            drop(target);
+            fs::remove_dir_all(source_root).unwrap();
+            fs::remove_dir_all(target_root).unwrap();
+        }
+    }
 }

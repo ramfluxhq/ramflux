@@ -98,6 +98,7 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "object_manifest",
     "object_key_slot",
     "object_chunk",
+    "object_segment_file",
     "object_transfer_state",
     "object_tombstone",
     "object_share_grant_projection",
@@ -212,7 +213,7 @@ fn client_local_db_design_tables_are_present() -> Result<(), StorageError> {
         assert!(table_exists(&db.connection, table)?, "missing ramflux_local table {table}");
     }
     assert_eq!(ACCOUNT_INDEX_TABLES.len(), 4);
-    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 49);
+    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 50);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }

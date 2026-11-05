@@ -5,7 +5,7 @@
 //! account actor. Activation, resource retirement and restore admission are
 //! separate prerequisites; this module provides no remote grant authority.
 mod files;
-mod schema;
+mod lease;
 #[cfg(test)]
 mod tests;
 use super::AccountDb;
@@ -36,7 +36,6 @@ pub struct SegmentPageEntry {
     pub expected_length: u64,
     pub received_bitmap: u8,
     pub cipher_verified: bool,
-    pub authenticated: bool,
 }
 
 /// Borrows the account's single metadata owner; does not open another database.
@@ -46,22 +45,28 @@ pub struct SegmentStore<'a> {
     root: PathBuf,
     #[cfg(test)]
     crash: Option<files::CrashPoint>,
+    #[cfg(test)]
+    during_write: Option<Box<dyn Fn() + 'a>>,
 }
 
 impl AccountDb {
-    /// Explicit dormant entry point; existing account opens never install this schema.
+    /// Opens the dormant I/O owner and reconciles its existing transfers once.
     /// # Errors
     /// Returns schema or private-directory I/O failures.
     pub fn segment_store(&self) -> Result<SegmentStore<'_>, StorageError> {
-        schema::install(self)?;
         let root = self.path.with_extension("segments");
         files::private_dir(&root)?;
-        Ok(SegmentStore {
+        let root = std::fs::canonicalize(root)?;
+        let mut store = SegmentStore {
             db: self,
             root,
             #[cfg(test)]
             crash: None,
-        })
+            #[cfg(test)]
+            during_write: None,
+        };
+        store.recover_startup()?;
+        Ok(store)
     }
 }
 
@@ -80,6 +85,7 @@ impl SegmentStore<'_> {
         if transfer_id.is_empty() || transfer_id.len() > 256 || generation == 0 {
             return Err(StorageError::Integrity("segment transfer identity"));
         }
+        let _lease = self.lease(transfer_id)?;
         let manifest = verified.manifest();
         let generation = integer(generation)?;
         let canonical =
@@ -138,41 +144,39 @@ impl SegmentStore<'_> {
             return Err(StorageError::Integrity("segment page limit"));
         }
         self.current(transfer_id, generation)?;
-        let mut stmt = self.db.connection.prepare("SELECT segment_index,expected_digest,expected_length,received_bitmap,cipher_verified,authenticated FROM object_segment_file WHERE transfer_id=?1 AND generation=?2 AND segment_index>=?3 ORDER BY segment_index LIMIT ?4")?;
+        let mut stmt = self.db.connection.prepare("SELECT segment_index,expected_digest,expected_length,received_bitmap,cipher_verified FROM object_segment_file WHERE transfer_id=?1 AND generation=?2 AND segment_index>=?3 ORDER BY segment_index LIMIT ?4")?;
         let rows = stmt
             .query_map(params![transfer_id, integer(generation)?, start, limit], |r| {
                 Ok((
                     r.get::<_, u32>(0)?,
                     r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, u64>(2)?,
+                    r.get::<_, i64>(2)?,
                     r.get::<_, u8>(3)?,
                     r.get::<_, bool>(4)?,
-                    r.get::<_, bool>(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(
-                |(
+            .map(|(index, hash, expected_length, received_bitmap, cipher_verified)| {
+                if !(16..=4_194_304).contains(&expected_length) {
+                    return Err(StorageError::Integrity("segment expected length"));
+                }
+                let expected_length = u64::try_from(expected_length)
+                    .map_err(|_| StorageError::Integrity("segment expected length"))?;
+                let chunk = self.current(transfer_id, generation)?;
+                if expected_length.div_ceil(u64::from(chunk)) > 8 {
+                    return Err(StorageError::Integrity("segment expected length"));
+                }
+                Ok(SegmentPageEntry {
                     index,
-                    hash,
+                    expected_digest: hash
+                        .try_into()
+                        .map_err(|_| StorageError::Integrity("segment digest length"))?,
                     expected_length,
                     received_bitmap,
                     cipher_verified,
-                    authenticated,
-                )| {
-                    Ok(SegmentPageEntry {
-                        index,
-                        expected_digest: hash
-                            .try_into()
-                            .map_err(|_| StorageError::Integrity("segment digest length"))?,
-                        expected_length,
-                        received_bitmap,
-                        cipher_verified,
-                        authenticated,
-                    })
-                },
-            )
+                })
+            })
             .collect()
     }
 
@@ -199,7 +203,7 @@ impl SegmentStore<'_> {
         Ok(row.3)
     }
 
-    /// Returns a bounded keyset page only after reconciling its file bytes.
+    /// Returns a bounded keyset page after the store's startup reconciliation.
     /// # Errors
     /// Refuses invalid bounds, stale identity or unreadable persistence.
     pub fn page(
@@ -209,7 +213,52 @@ impl SegmentStore<'_> {
         start: u32,
         limit: u32,
     ) -> Result<Vec<SegmentPageEntry>, StorageError> {
-        self.reconcile_page(id, generation, start, limit)
+        self.metadata_page(id, generation, start, limit)
+    }
+
+    fn lease(&self, id: &str) -> Result<lease::Lease, StorageError> {
+        let name = ramflux_protocol::encode_base64url(blake3::hash(id.as_bytes()).as_bytes());
+        lease::Lease::acquire(self.root.join(name))
+    }
+
+    fn recover_startup(&mut self) -> Result<(), StorageError> {
+        let mut after = String::new();
+        loop {
+            let mut stmt=self.db.connection.prepare("SELECT transfer_id,segment_generation FROM object_transfer_state WHERE segment_generation IS NOT NULL AND state='segmented' AND transfer_id>?1 ORDER BY transfer_id LIMIT 128")?;
+            let transfers = stmt
+                .query_map(params![after], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            if transfers.is_empty() {
+                break;
+            }
+            for (id, generation) in transfers {
+                after.clone_from(&id);
+                let _lease = self.lease(&id)?;
+                if matches!(self.current(&id, generation), Err(StorageError::ObjectErased)) {
+                    continue;
+                }
+                let mut start = 0;
+                loop {
+                    let rows = self.recover_page(&id, generation, start, PAGE_LIMIT)?;
+                    let Some(last) = rows.last() else {
+                        break;
+                    };
+                    start = last
+                        .index
+                        .checked_add(1)
+                        .ok_or(StorageError::Integrity("segment page cursor"))?;
+                    if rows.len() < PAGE_LIMIT as usize {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn location(&self, id: &str, generation: u64) -> PathBuf {
+        let name = ramflux_protocol::encode_base64url(blake3::hash(id.as_bytes()).as_bytes());
+        self.root.join(name).join(generation.to_string())
     }
 
     fn directory(&self, id: &str, generation: u64) -> Result<PathBuf, StorageError> {

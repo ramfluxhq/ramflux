@@ -36,7 +36,8 @@ fn skip_merge_table(table: &str) -> bool {
     }
     matches!(
         table,
-        "account_mac_bundle"
+        "object_segment_file"
+            | "account_mac_bundle"
             | "account_mac_marker_bundle"
             | "account_mac_legacy_origin"
             | "account_erasure_generation"
@@ -225,11 +226,7 @@ impl BackupDatabase {
                 }
                 let incoming = columns(&self.db, "incoming", &table)?;
                 let columns = columns(&self.db, "main", &table)?;
-                if columns != incoming {
-                    return Err(StorageError::AuthorizationRejected);
-                }
-                let names =
-                    columns.iter().map(|(name, _)| quoted(name)).collect::<Vec<_>>().join(",");
+                let names = merge_column_names(&table, &columns, &incoming)?;
                 let selected = projected_columns(&table, &columns, candidate);
                 let keys = columns
                     .iter()
@@ -243,7 +240,11 @@ impl BackupDatabase {
                     .collect::<Vec<_>>()
                     .join(" AND ");
                 let newer = newer_expression(&table, &columns);
-                let filter = merge_filter(&table, native_data_only);
+                let filter = segment_transfer_filter(
+                    &table,
+                    &incoming,
+                    merge_filter(&table, native_data_only),
+                );
                 let kept:u64=self.db.query_row(&format!("SELECT count(*) FROM incoming.{t} r JOIN main.{t} l ON {join} WHERE {filter} AND NOT ({newer})",t=quoted(&table)),[],|row|row.get(0))?;
                 if table == "runtime_actor_state" {
                     self.count_actor_states(&filter, &join, &newer, &mut report)?;
@@ -752,11 +753,52 @@ fn add_count(counts: &mut BackupCounts, table: &str, n: u64) {
     }
 }
 
+fn merge_column_names(
+    table: &str,
+    local: &[(String, u32)],
+    incoming: &[(String, u32)],
+) -> Result<String, StorageError> {
+    let comparable = |columns: &[(String, u32)]| {
+        columns
+            .iter()
+            .filter(|(name, _)| {
+                table != "object_transfer_state"
+                    || !matches!(
+                        name.as_str(),
+                        "segment_generation" | "segment_sequence" | "segment_manifest"
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if comparable(local) != comparable(incoming) {
+        return Err(StorageError::AuthorizationRejected);
+    }
+    Ok(local.iter().map(|(name, _)| quoted(name)).collect::<Vec<_>>().join(","))
+}
+fn segment_transfer_filter(table: &str, incoming: &[(String, u32)], filter: String) -> String {
+    // Archived physical transfers are not live work. K2 restores authenticated
+    // reference metadata and re-admits payloads independently of saved progress.
+    if table == "object_transfer_state"
+        && incoming.iter().any(|(name, _)| name == "segment_generation")
+    {
+        format!("({filter}) AND r.segment_generation IS NULL")
+    } else {
+        filter
+    }
+}
+
 fn projected_columns(table: &str, columns: &[(String, u32)], candidate: bool) -> String {
     columns
         .iter()
         .map(|(name, _)| {
-            if candidate {
+            if table == "object_transfer_state"
+                && matches!(name.as_str(), "segment_generation" | "segment_manifest")
+            {
+                "NULL".to_owned()
+            } else if table == "object_transfer_state" && name == "segment_sequence" {
+                "0".to_owned()
+            } else if candidate {
                 super::backup_selector_admission::preservation::expression(table, name)
             } else {
                 format!("r.{}", quoted(name))
