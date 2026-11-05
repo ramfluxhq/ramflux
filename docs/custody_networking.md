@@ -628,4 +628,5 @@ response. If the holder was lost with a pending receipt, only `account.unlock`,
 `OperationReconciliationRequired` (message: "operation requires reconciliation");
 retry with a fresh key. This can repeat an earlier effect whose result was lost.
 Changed intent under the same key remains a conflict. Startup restore is unkeyed
-and does not adopt pending receipts. Account mutation receipts remain fail-closed.
+and does not adopt pending receipts. Account mutation receipts remain fail-closed
+with the same `OperationReconciliationRequired` code.

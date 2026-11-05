@@ -1,9 +1,29 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Exercise the exported unlock entrypoint, including its serialized error buffer.
+//! Storage error mapping and the exported unlock entrypoint's serialized error buffer.
 use super::*;
 use crate::storage_failure_fixture::{Fault, Fixture, TestResult};
+
+#[test]
+fn reconciliation_errors_share_c_abi_invalid_argument_code() {
+    for error in [
+        SdkError::OperationReconciliationRequired("lifecycle-key".into()),
+        SdkError::Storage(ramflux_storage::StorageError::OperationReconciliationRequired {
+            key: "mutation-key".into(),
+        }),
+    ] {
+        let mapped = map_sdk_error(&error);
+        assert_eq!(mapped.code, RamfluxErrorCode::InvalidArgument);
+        assert_eq!(mapped.code as i32, 1);
+        assert_eq!(mapped.code.name(), "InvalidArgument");
+        assert!(mapped.message.contains("operation requires reconciliation"));
+    }
+    let conflict = SdkError::Storage(ramflux_storage::StorageError::EventIdConflict(
+        "operation requires reconciliation: ordinary-conflict".into(),
+    ));
+    assert_eq!(map_sdk_error(&conflict).code, RamfluxErrorCode::StorageFailed);
+}
 
 fn check(fault: Fault, expected: RamfluxErrorCode) -> TestResult {
     let fixture = Fixture::new(fault)?;
