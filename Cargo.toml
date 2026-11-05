@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "vendor/quinn",
+    "vendor/quinn-proto",
     "crates/ramflux-core",
     "crates/ramflux-protocol",
     "crates/ramflux-crypto",
@@ -130,3 +132,7 @@ panic = "abort"
 # debug assertions and overflow checks.
 [profile.dev.package."*"]
 opt-level = 3
+
+[patch.crates-io]
+quinn = { path = "vendor/quinn" }
+quinn-proto = { path = "vendor/quinn-proto" }

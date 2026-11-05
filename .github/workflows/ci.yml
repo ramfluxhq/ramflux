@@ -508,3 +508,19 @@ jobs:
           name: junit-graceful-shutdown
           path: target/nextest/shutdown/junit.xml
           if-no-files-found: ignore
+
+  quic-dependencies:
+    name: Patched QUIC dependency tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+      - name: Verify patches and unique resolution
+        run: python3 -B scripts/check-quic-patches.py
+      - name: Run dependency libraries explicitly
+        run: python3 -B scripts/test-quic-dependencies.py

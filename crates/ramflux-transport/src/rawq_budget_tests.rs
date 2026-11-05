@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Copyright (c) 2_026 Span Brain
+// Copyright (c) 2026 Span Brain
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use crate::rawq_budget::{
@@ -620,7 +620,46 @@ fn metadata_census_covers_all_r8_classes() {
         let e = found[0];
         assert_eq!(e.metadata_multiplicity, Some(multiplicity));
         assert_eq!((e.pool, e.tokio_owner, e.compio_owner), (Pool::Metadata, 1, 7));
-        assert!(e.source.contains("p 0.11.18 src/"));
+        let source = match class {
+            A::SentRecords => {
+                "p 0.11.18 src/connection/spaces.rs:20-54,218-255,283-305; src/connection/packet_builder.rs:32-44,184-216; all tracked packets and outstanding builders"
+            }
+            A::SentFrameMetadata => {
+                "p 0.11.18 src/frame.rs:468-509; src/connection/spaces.rs:283-305; variable StreamMetaVec capacity per retained packet/builder"
+            }
+            A::RetransmitOwners => {
+                "p 0.11.18 src/connection/spaces.rs:309-338,383-408,428-454; boxed owners and all vector/set/deque children including transfer overlap"
+            }
+            A::SendSegments => {
+                "p 0.11.18 src/connection/send_buffer.rs:9-40,43-77,147-174; every retained deque cell/backing capacity across S send halves"
+            }
+            A::SendRanges => {
+                "p 0.11.18 src/connection/send_buffer.rs:21-27,43-77,171-174; src/range_set/btree_range_set.rs:13-15,26-38; ACK/retransmit nodes survive record removal"
+            }
+            A::StreamAssemblers => {
+                "p 0.11.18 src/connection/streams/recv.rs:15-27,274-300; src/connection/assembler.rs:13-23,105-147,153-219,255-280; chunks, descriptors, backing and compaction peaks"
+            }
+            A::CryptoAssemblers => {
+                "p 0.11.18 src/connection/spaces.rs:20-54,80-91; src/connection/mod.rs:2128-2137; src/connection/assembler.rs:13-23,105-147,153-219,255-280; three additional CRYPTO assemblers"
+            }
+            A::UnorderedHistory => {
+                "p 0.11.18 src/connection/assembler.rs:40-55,85-97,166-182,332-340; q 0.11.11 src/recv_stream.rs:163-180; c 0.8.0 src/recv_stream.rs:279-296; recvd trees persist after chunk consumption"
+            }
+            A::PendingRetransmits => {
+                "p 0.11.18 src/connection/spaces.rs:20-28,383-408; src/connection/mod.rs:1779-1793; pending collections plus transferred backing until actual free"
+            }
+            A::PendingAcks => {
+                "p 0.11.18 src/connection/spaces.rs:610-654,794-803,924; src/range_set/array_range_set.rs:20-38; preserve steady64/transient65 pruning, charge actual capacity"
+            }
+            A::AckScratch => {
+                "p 0.11.18 src/connection/mod.rs:1493-1501; src/range_set/array_range_set.rs:20-38; every simultaneous ACK allocation and replacement backing"
+            }
+            A::LossScratch => {
+                "p 0.11.18 src/connection/mod.rs:1695-1696,1730-1735,1779-1793; lost_packets capacity plus simultaneous pending transfers"
+            }
+            _ => unreachable!("non-metadata class in exhaustive fixture"),
+        };
+        assert_eq!(e.source, source, "{class:?} pinned citation changed");
         for policy in [
             "ResourceExhausted before growth",
             "abort frame/coalesced/build",

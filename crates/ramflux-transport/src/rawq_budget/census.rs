@@ -344,7 +344,7 @@ pub const CENSUS: &[CensusEntry] = &[
     metadata_entry(
         A::CryptoAssemblers,
         MetadataMultiplicity::PacketSpaces(3),
-        "p 0.11.18 src/connection/spaces.rs:20-54,80-91; src/connection/mod.rs:2128-2137; src/connection/assembler.rs:105-219; three additional CRYPTO assemblers",
+        "p 0.11.18 src/connection/spaces.rs:20-54,80-91; src/connection/mod.rs:2128-2137; src/connection/assembler.rs:13-23,105-147,153-219,255-280; three additional CRYPTO assemblers",
     ),
     metadata_entry(
         A::UnorderedHistory,
