@@ -639,9 +639,13 @@ fn finish(shared: &Shared, descriptor: &Descriptor, aborted: bool) {
     drop(registry);
     drop(publication_gate);
     shared.changed.notify_waiters();
-    if aborted && let Some(owners) = descriptor.retry_abort.get() {
+    if let Some(owners) = descriptor.retry_abort.get() {
         for owner in owners {
-            owner.aborted();
+            if aborted {
+                owner.aborted();
+            } else {
+                owner.durable();
+            }
         }
     }
 }

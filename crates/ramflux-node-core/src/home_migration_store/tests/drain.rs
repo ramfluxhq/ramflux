@@ -111,11 +111,14 @@ fn drain_releases_entry_only_after_b_commit_or_duplicate_ack() -> TestResult {
     s.a.store()?.settle_migration_drain(&s.a.core, &row, MigrationDrainOutcome::Held, NOW + 3)?;
     assert!(finish(&s, NOW + 3).is_err());
     assert_eq!(progress(&s)?.remaining, 1);
-    assert!(matches!(accept(&s, request.clone())?, crate::RouterSubmitOutcome::OfflineQueued(_)));
-    assert!(matches!(
-        accept(&s, request)?,
-        crate::RouterSubmitOutcome::DuplicateFederatedForward { .. }
-    ));
+    let crate::RouterSubmitOutcome::OfflineQueued(original) = accept(&s, request.clone())? else {
+        return Err("original acceptance".into());
+    };
+    let crate::RouterSubmitOutcome::OfflineQueued(retry) = accept(&s, request)? else {
+        return Err("retry acceptance".into());
+    };
+    assert_eq!(retry.entry.inbox_seq, original.entry.inbox_seq);
+    assert_eq!(s.b.core.resume(&s.target, 0, 10), vec![original.entry]);
     s.a.store()?.settle_migration_drain(&s.a.core, &row, MigrationDrainOutcome::BAck, NOW + 4)?;
     assert_eq!(s.a.store()?.migration_drain_page(&s.target, 0)?, []);
     assert_eq!(progress(&s)?.forwarded, 1);
@@ -125,7 +128,9 @@ fn drain_releases_entry_only_after_b_commit_or_duplicate_ack() -> TestResult {
 fn drain_crash_after_b_commit_before_a_ack_replays_same_entry_and_b_keeps_one_copy() -> TestResult {
     let (mut s, request, row) = setup()?;
     let before = cursor(&s)?;
-    assert!(matches!(accept(&s, request.clone())?, crate::RouterSubmitOutcome::OfflineQueued(_)));
+    let crate::RouterSubmitOutcome::OfflineQueued(original) = accept(&s, request.clone())? else {
+        return Err("original acceptance".into());
+    };
     assert!(
         s.a.store()?
             .fail_drain(&s.a.core, &row, DrainFailPoint::AfterBAckBeforeACommit, NOW + 3)
@@ -137,10 +142,11 @@ fn drain_crash_after_b_commit_before_a_ack_replays_same_entry_and_b_keeps_one_co
     assert_eq!(cursor(&s)?, before);
     assert_eq!(s.a.core.resume(&s.target, 0, 10), vec![row.entry.clone()]);
     assert_eq!(s.b.core.resume(&s.target, 0, 10).len(), 1);
-    assert!(matches!(
-        accept(&s, request)?,
-        crate::RouterSubmitOutcome::DuplicateFederatedForward { .. }
-    ));
+    let crate::RouterSubmitOutcome::OfflineQueued(retry) = accept(&s, request)? else {
+        return Err("retry acceptance".into());
+    };
+    assert_eq!(retry.entry.inbox_seq, original.entry.inbox_seq);
+    assert_eq!(s.b.core.resume(&s.target, 0, 10), vec![original.entry]);
     assert_eq!(s.b.core.resume(&s.target, 0, 10).len(), 1);
     s.a.store()?.settle_migration_drain(&s.a.core, &row, MigrationDrainOutcome::BAck, NOW + 4)?;
     s.a.restart()?;

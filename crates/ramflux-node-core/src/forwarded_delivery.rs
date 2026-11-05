@@ -221,10 +221,7 @@ impl RouterCore {
                 tracing::error!(%error, "forwarded inbox persistence failed after acceptance; terminating to avoid a state fork");
                 std::process::abort();
             }
-            let assignment = store
-                .sender_assignment(source.root_commitment(), &entry.envelope, now)?
-                .ok_or_else(|| NodeCoreError::Redb("accepted sender index missing".into()))?;
-            retry_owner.accepted(assignment);
+            retry_owner.accepted_entry(store, source.root_commitment(), &entry, now);
         }
         Ok(outcome)
     }

@@ -103,15 +103,12 @@ pub(crate) fn submit(
         tracing::error!(%error,"custody inbox persistence failed after acceptance; terminating to avoid a state fork");
         std::process::abort();
     }
-    let assignment = store
-        .sender_assignment(
-            source.root_commitment(),
-            &entry.envelope,
-            i64::try_from(now).map_err(invalid)?,
-        )
-        .map_err(|error| crate::sender_retry::custody_refusal(&error))?
-        .ok_or(CustodyRefusal::PersistenceUnavailable)?;
-    retry_owner.accepted(assignment);
+    retry_owner.accepted_entry(
+        store,
+        source.root_commitment(),
+        &entry,
+        i64::try_from(now).unwrap_or(i64::MAX),
+    );
     Ok(CustodyServerFrame::Submitted { envelope_id: id, outcome: status.into() })
 }
 

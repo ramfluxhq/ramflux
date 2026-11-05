@@ -737,6 +737,37 @@ impl RouterWalStore {
             .and_then(|index| index.assignment.clone()))
     }
 
+    pub(crate) fn retry_lookup(
+        &self,
+        root: &str,
+        envelope: &ramflux_protocol::Envelope,
+        now: i64,
+    ) -> crate::router_store::sender_retry::RetryLookup {
+        let state = std::sync::Arc::downgrade(&self.state);
+        let root = root.to_owned();
+        let key = (envelope.envelope_id.clone(), envelope.target_delivery_id.clone());
+        Box::new(move || {
+            let state = state.upgrade().ok_or(NodeCoreError::Publication(
+                crate::publication::PublicationRefusal::StoreClosed,
+            ))?;
+            let state = state.lock().map_err(identity::error)?;
+            let assignment = state
+                .local_delivery_by_sender_envelope
+                .get(&root)
+                .and_then(|rows| rows.get(&key))
+                .filter(|row| row.replay_expires_at > now)
+                .and_then(|row| row.assignment.clone());
+            if let Some(assignment) = &assignment
+                && state.incarnations.get(&key.1) != Some(&assignment.inbox_incarnation_id)
+            {
+                return Err(NodeCoreError::Publication(
+                    crate::publication::PublicationRefusal::IncarnationMismatch,
+                ));
+            }
+            Ok(assignment)
+        })
+    }
+
     /// # Errors
     /// Counts logical WAL retention candidates without changing delivery recovery state.
     pub fn retention_candidate_count(&self, now: i64) -> Result<usize, NodeCoreError> {

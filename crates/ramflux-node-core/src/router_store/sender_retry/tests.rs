@@ -281,3 +281,154 @@ fn typed_sender_refusals_preserve_existing_native_variant_numbers() -> Result {
     }
     Ok(())
 }
+
+fn fail_reply_lookup(
+    root: &std::path::Path,
+) -> (std::sync::Arc<std::sync::atomic::AtomicUsize>, crate::durability_test_hooks::Registration) {
+    let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&reached);
+    let registration = crate::durability_test_hooks::observe(
+        root.to_path_buf(),
+        std::sync::Arc::new(move |_, operation, _| {
+            if operation == "sender_reply_lookup" {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(std::io::Error::other("injected read failure after durable commit"));
+            }
+            Ok(())
+        }),
+    );
+    (reached, registration)
+}
+
+#[test]
+fn post_commit_retry_owner_rechecks_index() -> Result {
+    for mode in 0..3 {
+        for writer in 0..3 {
+            let root = fixture(&format!("post-commit-{mode}-{writer}"));
+            let store = test_store(&root, mode, 1 << 20)?;
+            let router = crate::RouterCore::new();
+            router.prepare_publication_target(&store, "target")?;
+            let identity = ramflux_crypto::create_identity_root("sender", [0x91; 32]);
+            let branch = ramflux_crypto::create_device_branch("sender", "device", 1, [0x92; 32]);
+            let source =
+                ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&identity, &branch)?;
+            let row = entry(1);
+            let now = row.envelope.created_at;
+            let available = store.submission_admission.available_permits();
+            let (reached, registration) = fail_reply_lookup(&root);
+            let operation =
+                crate::publication::capture(|| -> std::result::Result<_, NodeCoreError> {
+                    let RetryAdmission::Owner(owner) =
+                        store.admit_sender_retry(&source, &row.envelope, now)?
+                    else {
+                        return Err(incarnation::error("owner"));
+                    };
+                    owner.bind("target")?;
+                    let crate::RouterSubmitOutcome::OfflineQueued(queued) =
+                        router.submit_envelope_at(&source, row.envelope.clone(), now)
+                    else {
+                        return Err(incarnation::error("entry"));
+                    };
+                    let RetryAdmission::Waiting(waiter) =
+                        store.admit_sender_retry(&source, &row.envelope, now)?
+                    else {
+                        return Err(incarnation::error("waiter"));
+                    };
+                    let replay = crate::envelope_replay_tuple_key(&source, &row.envelope);
+                    match writer {
+                        0 => store.record_submission_increment_for_sender(
+                            &replay,
+                            now + 3600,
+                            Some(&queued.entry),
+                            Some(source.root_commitment()),
+                        )?,
+                        1 => store.record_leased_fanout(
+                            &replay,
+                            now + 3600,
+                            source.root_commitment(),
+                            std::slice::from_ref(&queued.entry),
+                            vec![store.acquire_submission("target")?],
+                        )?,
+                        _ => store.record_forwarded_submission(
+                            &replay,
+                            &queued.entry,
+                            source.root_commitment(),
+                            now + 123,
+                            store.acquire_submission("target")?,
+                        )?,
+                    }
+                    owner.accepted_entry(&store, source.root_commitment(), &queued.entry, now);
+                    assert_eq!(
+                        store.sender_retry_registry_size(),
+                        0,
+                        "post-commit error must release bound owner"
+                    );
+                    Ok((queued.entry, waiter))
+                })?;
+            let (original, waiter) = operation.published_blocking()??;
+            assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let resolved = waiter.resolved_blocking()?;
+            assert_eq!(resolved.inbox_seq, original.inbox_seq);
+            if writer == 2 {
+                assert_eq!(resolved.retain_until, now + 123);
+            }
+            drop(resolved);
+            assert!(matches!(
+                store.admit_sender_retry(&source, &row.envelope, now)?,
+                RetryAdmission::Accepted(_)
+            ));
+            assert_eq!(store.submission_admission.available_permits(), available);
+            assert_eq!(router.resume("target", 0, 10).len(), 1);
+            drop(registration);
+            drop(router);
+            drop(store);
+            std::fs::remove_dir_all(root)?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn store_drop_and_remote_forward_wake_retry_waiters() -> Result {
+    for remote in [false, true] {
+        let root = fixture("retry-owner-lifecycle");
+        let store = test_store(&root, 0, 1 << 20)?;
+        let identity = ramflux_crypto::create_identity_root("sender", [0x91; 32]);
+        let branch = ramflux_crypto::create_device_branch("sender", "device", 1, [0x92; 32]);
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&identity, &branch)?;
+        let row = entry(1);
+        let RetryAdmission::Owner(owner) = store.admit_sender_retry(&source, &row.envelope, 0)?
+        else {
+            return Err("owner".into());
+        };
+        let RetryAdmission::Waiting(waiter) =
+            store.admit_sender_retry(&source, &row.envelope, 0)?
+        else {
+            return Err("waiter".into());
+        };
+        if remote {
+            owner.forwarded();
+            drop(store);
+        } else {
+            drop(store);
+            drop(owner);
+        }
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), waiter.resolved()).await?;
+        if remote {
+            assert!(matches!(
+                result,
+                Err(NodeCoreError::SenderRetry(SenderRetryRefusal::ForwardInProgress))
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(NodeCoreError::Publication(
+                    crate::publication::PublicationRefusal::StoreClosed
+                ))
+            ));
+        }
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
