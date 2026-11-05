@@ -320,8 +320,11 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
 ];
 
 #[test]
-fn caller_classification_is_exhaustive() {
+fn caller_classification_is_exhaustive() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(HeadUse::default(), HeadUse::NewAuthorization);
+    scan_historical_consumers(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+    )?;
     let names = [
         "trusted_device",
         "require_cached_root_authority",
@@ -349,4 +352,40 @@ fn caller_classification_is_exhaustive() {
             }
         }
     }
+    Ok(())
+}
+
+// Inspect all source files, including files absent from the static call inventory.
+fn scan_historical_consumers(
+    directory: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let needle = ["HeadUse::", "HistoricalRead"].concat();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            scan_historical_consumers(&path)?;
+            continue;
+        }
+        if path.extension().is_none_or(|extension| extension != "rs")
+            || path.ends_with("client/identity_authority/caller_classification_tests.rs")
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path)?;
+        for (offset, _) in source.match_indices(&needle) {
+            let allowed = if path.ends_with("bus/dispatch/group/history.rs") {
+                true
+            } else if path.ends_with("bus/dispatch/group.rs") {
+                let start = source.find("fn group_receive_compat(").ok_or("reviewed projection")?;
+                let end = start + source[start..].find("\n}\n").ok_or("projection end")?;
+                (start..end).contains(&offset)
+            } else {
+                // The terminal comparison defines the clock-only bypass; it is not a consumer.
+                path.ends_with("client/identity_authority/custody_freshness.rs")
+                    && source[..offset].ends_with("if purpose == ")
+            };
+            assert!(allowed, "unreviewed historical authority consumer: {}", path.display());
+        }
+    }
+    Ok(())
 }

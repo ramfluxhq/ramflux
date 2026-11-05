@@ -629,10 +629,14 @@ async fn historical_read_ignores_clock_but_not_revocation() -> TestResult {
         .client
         .account_db()?
         .persist_actor_state(&RamfluxClient::device_revocation_key(&identity), &true)?;
-    for method in ["group.history", "group.read", "group.receive"] {
+    let history = read_group(&mut state, "group.history").await?.response_body;
+    assert_eq!(history["decrypted_messages"][0]["sender_verification"], "unverified");
+    assert_eq!(history["messages"][0]["sender_verification"], "unverified");
+    for method in ["group.read", "group.receive"] {
         assert!(
-            read_group(&mut state, method).await.is_err(),
-            "revoked sender readable via {method}"
+            matches!(read_group(&mut state, method).await,
+            Err(SdkError::InboundRejected(reason)) if reason == "revoked device"),
+            "unexpected revoked-sender outcome via {method}"
         );
     }
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
@@ -646,5 +650,69 @@ async fn historical_read_ignores_clock_but_not_revocation() -> TestResult {
         let body = read_group(&mut state, method).await?.response_body;
         assert_eq!(body["decrypted_messages"], json!([]), "erased content via {method}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn stored_group_history_degrades_sibling_and_revoked_senders_per_message() -> TestResult {
+    let (alice, bob, entry) = renamed_group_fixture().await?;
+    let mut account = LocalBusAccountState::disconnected(
+        alice.client,
+        alice.config,
+        alice.manifest.principal_commitment,
+    );
+    install_gateway(&mut account, vec![entry]);
+    let mut state = daemon(account, &alice.root.0);
+    read_group(&mut state, "group.receive").await?;
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    account.engine = None;
+    // Own-sent projections have no routed/message-owner row. A second device's
+    // raw sender ID cannot prove its root locally and must not become trusted.
+    for (id, sender, content) in [
+        ("own-primary", "alice-device", "healthy primary"),
+        ("own-sibling", "alice-sibling-device", "second device"),
+    ] {
+        account.client.send_direct_message("thread", id, sender, b"stored ciphertext")?;
+        account.client.account_db()?.store_message_content("thread", id, content.as_bytes())?;
+    }
+    account.client.account_db()?.persist_actor_state(
+        &RamfluxClient::device_revocation_key(&bob.client.owned_device_identity()?),
+        &true,
+    )?;
+    *account.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    let frame = LocalBusFrame::request(
+        "mixed-history",
+        Some("owner".into()),
+        "group",
+        "group.history",
+        json!({"group_id":"group","conversation_id":"thread","limit":32}),
+    );
+    let body = read_group(&mut state, "group.history").await?.response_body;
+    assert_eq!(crate::bus::readers::read_account(&state, "owner", &frame)?, body);
+    for field in ["messages", "decrypted_messages"] {
+        let rows = body[field].as_array().ok_or("message rows")?;
+        assert_eq!(rows.len(), 3, "one sender must not hide any stored message");
+        for (id, marker) in [("own-primary", "verified"), ("own-sibling", "unknown")] {
+            let row = rows.iter().find(|row| row["message_id"] == id).ok_or("own message")?;
+            assert_eq!(row["sender_verification"], marker);
+        }
+        let revoked = rows
+            .iter()
+            .find(|row| row["sender_verification"] == "unverified")
+            .ok_or("revoked message")?;
+        assert_ne!(revoked["message_id"], "own-primary");
+        assert_ne!(revoked["message_id"], "own-sibling");
+    }
+    let rows = body["decrypted_messages"].as_array().ok_or("plaintext rows")?;
+    assert!(rows.iter().any(
+        |row| row["body_utf8"] == "after rename" && row["sender_verification"] == "unverified"
+    ));
+    assert!(
+        rows.iter()
+            .any(|row| row["body_utf8"] == "second device"
+                && row["sender_verification"] == "unknown")
+    );
+    assert!(state.accounts.get("owner").ok_or("Alice")?.engine.is_none());
     Ok(())
 }
