@@ -201,6 +201,35 @@ content. Push providers still learn destination and timing metadata. The
 feature-gated `itest-http` registration/credential APIs are synthetic fixtures;
 they are not the production registration boundary.
 
+## Restoring router inbox state
+
+After restoring a whole router volume, rotate inbox incarnations offline:
+
+1. Stop every gateway serving the restored router. This discards old registrations,
+   queued deliveries, and resync slots.
+2. Stop the router.
+3. Run `ramflux-router --config <path> --rotate-inbox-incarnations` with the
+   router's usual storage settings, including its WAL mode and WAL directory.
+4. Start the router.
+5. Start the gateways. Clients re-establish sessions with the new incarnation.
+
+The command requires an existing, unlocked store, prints this procedure before
+starting, and reports counts without target IDs or incarnation values. Restored
+rows and issued high-water marks are preserved; clients reset their settlement
+continuity for the new incarnation. A durable pending marker has no timeout:
+startup completes an interrupted recovery before admitting traffic.
+
+Ordinary startup refuses a torn WAL header followed by data and names the
+segment. Follow steps 1–2 above, then run
+`ramflux-router --config <path> --rotate-inbox-incarnations --quarantine-wal-segment <segment-path>`.
+The command records the source and destination before moving anything, creates
+or validates `<wal-root>/quarantine/`, syncs the WAL root, atomically renames the
+segment into that directory, and syncs both directories. It rotates all inboxes
+conservatively and rewrites the remaining WAL association before clearing the
+marker. Quarantined files remain for forensics and are never replayed; frames
+only present in the damaged segment are lost. Continue with steps 4–5. Never
+move or delete WAL segments by hand.
+
 ## Known limitations
 
 - Secret-store compaction after a migration is best effort. Federation and notify

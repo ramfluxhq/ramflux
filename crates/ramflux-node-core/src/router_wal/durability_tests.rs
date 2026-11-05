@@ -232,6 +232,9 @@ fn failed_recovery_sync_refuses_open() -> TestResult {
 
 #[test]
 fn interrupted_roll_empty_header() -> TestResult {
+    if std::env::var_os("RAMFLUX_P3_QUARANTINE_CHILD").is_some() {
+        return super::maintenance_tests::quarantine_matrix();
+    }
     if std::env::var_os("RAMFLUX_P2_ROTATION_CHILD").is_some() {
         return super::identity_tests::loss_matrix();
     }
@@ -250,6 +253,7 @@ fn interrupted_roll_empty_header() -> TestResult {
         fs::write(router_wal_segment_path(&root, 1), residue)?;
         std::process::abort();
     }
+    super::maintenance_tests::quarantine_matrix()?;
     super::identity_tests::loss_matrix()?;
     for kind in ["empty", "partial", "zero", "torn"] {
         let root = fixture("residue");
