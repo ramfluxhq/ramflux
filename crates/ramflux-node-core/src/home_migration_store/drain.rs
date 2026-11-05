@@ -213,10 +213,14 @@ impl RouterRedbStore {
         now: u64,
         fail: bool,
     ) -> Result<(), NodeCoreError> {
-        // Serialize terminal projection changes with other mutations of this target.
-        let mut shard =
-            matches!(outcome, MigrationDrainOutcome::BAck | MigrationDrainOutcome::Expired)
-                .then(|| core.target_shard(&row.entry.target_delivery_id));
+        let terminal =
+            matches!(outcome, MigrationDrainOutcome::BAck | MigrationDrainOutcome::Expired);
+        // Join the ACK/cutover boundary before storage, without holding a target shard.
+        let _lease = if terminal {
+            Some(self.acquire_acknowledgement(&row.entry.target_delivery_id)?)
+        } else {
+            None
+        };
         let tx = self.migration_db().begin_write().map_err(storage)?;
         let now = clock(&tx, now)?;
         let key = inbox_entry_storage_key(&row.entry.target_delivery_id, row.entry.inbox_seq);
@@ -235,16 +239,12 @@ impl RouterRedbStore {
             return Err(storage("injected AfterBAckBeforeACommit"));
         }
         apply(&tx, current, outcome, now, false)?;
-        let cursor: Option<CursorAckState> = if shard.is_some() {
-            read(&tx, ROUTER_CURSOR_STATE_TABLE, &row.entry.target_delivery_id)?
-        } else {
-            None
-        };
         commit_transition(self, tx)?;
         // Publish only after the durable commit, even if later WAL observation fails.
-        if let (Some(shard), Some(cursor)) = (shard.as_mut(), cursor) {
-            shard.inbox.retire_pending(&row.entry.target_delivery_id, row.entry.inbox_seq);
-            shard.inbox.restore_cursor_state(cursor);
+        if terminal {
+            core.target_shard(&row.entry.target_delivery_id)
+                .inbox
+                .settle_pending(&row.entry.target_delivery_id, row.entry.inbox_seq);
         }
         if let Some(wal) = &self.submission_wal {
             let tx = self.migration_db().begin_read().map_err(storage)?;
@@ -342,6 +342,9 @@ fn apply(
                     ..Default::default()
                 },
             );
+        // The sealed backlog already proves this allocation floor. Keep restart from
+        // replacing the pending entries' issued watermark with an older stored cursor.
+        settled.issued_inbox_seq = settled.issued_inbox_seq.max(cursor.high_water);
         settled.acked_inbox_seqs.insert(row.entry.inbox_seq);
         write(tx, ROUTER_CURSOR_STATE_TABLE, &row.entry.target_delivery_id, &settled)?;
     } else {

@@ -702,6 +702,18 @@ impl OpaqueDeviceInbox {
         }
     }
 
+    /// Publish one durable migration retirement without replacing ACK/WAL-owned fields.
+    pub(crate) fn settle_pending(&mut self, target: &str, seq: u64) {
+        self.retire_pending(target, seq);
+        let cursor = self.cursors.entry(target.to_owned()).or_insert_with(|| CursorAckState {
+            target_delivery_id: target.to_owned(),
+            ..CursorAckState::default()
+        });
+        if seq > cursor.settled_inbox_seq {
+            cursor.acked_inbox_seqs.insert(seq);
+        }
+    }
+
     pub(crate) fn restore_cursor_state(&mut self, mut cursor: CursorAckState) {
         cursor.bound_receipts();
         cursor.retired_inbox_seqs.clear();

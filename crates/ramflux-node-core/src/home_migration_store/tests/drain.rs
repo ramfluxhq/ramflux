@@ -417,3 +417,93 @@ fn settled_live_inbox_projection_matches_restart() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn concurrent_ack_during_settlement_preserves_live_cursor_and_restart_state() -> TestResult {
+    for outcome in [MigrationDrainOutcome::BAck, MigrationDrainOutcome::Expired] {
+        let (mut s, _, _) = setup_count(3)?;
+        s.a.restart()?;
+        let rows = s.a.store()?.migration_drain_page(&s.target, 0)?;
+        let ack_entry = &rows[2].entry;
+        let ack = ramflux_protocol::Ack {
+            schema: "ramflux.ack.v1".into(),
+            version: 1,
+            domain: "ramflux.ack.v1".into(),
+            ext: ramflux_protocol::Ext {
+                ext: [("inbox_seq".into(), json!(ack_entry.inbox_seq))].into(),
+            },
+            signed: ack_entry.envelope.signed.clone(),
+            ack_id: "concurrent-receiver-ack".into(),
+            envelope_id: ack_entry.envelope.envelope_id.clone(),
+            receiver_device_id: s.target.clone(),
+            received_at: i64::try_from(NOW + 3)?,
+            cursor_after: None,
+        };
+        let store = s.a.store()?;
+        let lease = store.acquire_acknowledgement(&s.target)?;
+        // Park the real ACK path after its memory update, before the durable write.
+        let ack_cursor = s.a.core.apply_ack_for_target(&s.target, &ack)?;
+        let now = if outcome == MigrationDrainOutcome::Expired {
+            u64::try_from(rows[1].retain_until)?
+        } else {
+            NOW + 4
+        };
+        // ACK leases share the cutover boundary; settlement can finish during this ACK.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| store.settle_migration_drain(&s.a.core, &rows[1], outcome, now))
+                .join()
+                .map_err(|_| "settlement thread panicked")
+        })??;
+        let live_cursor = s.a.core.cursor_state(&s.target).ok_or("live cursor")?;
+        assert!(live_cursor.acked_inbox_seqs.contains(&ack_entry.inbox_seq));
+        assert!(live_cursor.acked_inbox_seqs.contains(&rows[1].entry.inbox_seq));
+        assert_eq!(live_cursor.last_acknowledged_inbox_seq, ack_cursor.last_acknowledged_inbox_seq);
+        assert_eq!(live_cursor.acked_envelope_ids, ack_cursor.acked_envelope_ids);
+        assert!(live_cursor.issued_inbox_seq >= ack_cursor.issued_inbox_seq);
+        assert!(live_cursor.settled_inbox_seq >= ack_cursor.settled_inbox_seq);
+        store.record_leased_ack(&ack_cursor, &ack.envelope_id, lease)?;
+        // A duplicate must still be recognized in memory before restart.
+        s.a.core.apply_ack_for_target(&s.target, &ack)?;
+        let live = s.a.core.resume(&s.target, 0, 10);
+        let cursor = s.a.core.cursor_state(&s.target);
+        assert_eq!(live, vec![rows[0].entry.clone()]);
+        s.a.restart()?;
+        assert_eq!(s.a.core.resume(&s.target, 0, 10), live);
+        assert_eq!(s.a.core.cursor_state(&s.target), cursor);
+    }
+    Ok(())
+}
+
+#[test]
+fn settlement_preserves_memory_only_issued_and_settled_marks() -> TestResult {
+    for outcome in [MigrationDrainOutcome::BAck, MigrationDrainOutcome::Expired] {
+        let (mut s, _, _) = setup_count(3)?;
+        s.a.restart()?;
+        let rows = s.a.store()?.migration_drain_page(&s.target, 0)?;
+        {
+            let mut shard = s.a.core.target_shard(&s.target);
+            shard.inbox.observe_issued_seq(&s.target, 50);
+            let mut cursor = shard.inbox.cursor_state(&s.target).cloned().ok_or("cursor")?;
+            cursor.settled_inbox_seq = rows[0].entry.inbox_seq - 1;
+            cursor.acked_inbox_seqs.insert(49);
+            shard.inbox.restore_cursor_state(cursor);
+        }
+        let before = s.a.core.cursor_state(&s.target).ok_or("cursor")?;
+        let now = if outcome == MigrationDrainOutcome::Expired {
+            u64::try_from(rows[1].retain_until)?
+        } else {
+            NOW + 4
+        };
+        s.a.store()?.settle_migration_drain(&s.a.core, &rows[1], outcome, now)?;
+        let after = s.a.core.cursor_state(&s.target).ok_or("cursor")?;
+        let mut expected = before;
+        expected.acked_inbox_seqs.insert(rows[1].entry.inbox_seq);
+        assert_eq!(after, expected);
+        assert_eq!(
+            s.a.core.resume(&s.target, 0, 10),
+            vec![rows[0].entry.clone(), rows[2].entry.clone()]
+        );
+    }
+    Ok(())
+}
