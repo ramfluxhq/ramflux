@@ -136,8 +136,7 @@ async fn failed_pending_roots_continue_fairly_and_periodic_roots_do_not_fill_dem
     let mut seen = BTreeSet::new();
     for _ in 0..expected.len().div_ceil(PASS_ROOTS) {
         let requested = fence(&account)?;
-        let plan =
-            prepare_due(&mut account, requested.clone(), true, &BTreeSet::new())?.ok_or("plan")?;
+        let plan = prepare_due(&mut account, requested.clone(), true, &seen)?.ok_or("plan")?;
         assert!(plan.roots.len() <= PASS_ROOTS);
         assert!(
             prepare_due(&mut account, requested, true, &BTreeSet::new())?.is_none(),
