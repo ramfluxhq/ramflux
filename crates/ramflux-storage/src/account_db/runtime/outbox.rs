@@ -44,7 +44,7 @@ impl AccountDb {
     /// Returns an error when the outbox cannot be read.
     pub fn pending_actor_state_sequence(&self, kind: &str) -> Result<Option<i64>, StorageError> {
         Ok(self.connection.query_row(
-            "SELECT max(sequence) FROM runtime_outbox WHERE published=0 AND table_name='runtime_actor_state' AND json_extract(keys_json,'$.state_kind')=?1",
+            "SELECT max(sequence) FROM runtime_outbox WHERE published=0 AND table_name='runtime_actor_state' AND actor_state_kind=?1",
             params![kind],
             |row| row.get(0),
         )?)
@@ -76,6 +76,17 @@ mod tests {
         let index = crate::AccountIndex::open(&root)?;
         index.create_account("a", "root")?;
         let db = AccountDb::open(&index, "a", &crate::AccountDbKey::derive("a", b"secret"))?;
+        let mut plan = db.connection.prepare(
+            "EXPLAIN QUERY PLAN SELECT max(sequence) FROM runtime_outbox WHERE published=0 AND table_name='runtime_actor_state' AND actor_state_kind=?1",
+        )?;
+        let details = plan
+            .query_map(params!["account/networking"], |row| row.get::<_, String>(3))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(
+            details.iter().any(|line| line.contains("runtime_outbox_actor_kind")),
+            "{details:?}"
+        );
+        drop(plan);
         assert_eq!(db.pending_actor_state_sequence("account/networking")?, None);
         db.persist_actor_state("account/networking", &1)?;
         let first = db.pending_actor_state_sequence("account/networking")?.ok_or("first")?;

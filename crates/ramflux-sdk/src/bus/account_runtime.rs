@@ -183,7 +183,14 @@ impl AccountRuntime {
             return Ok(false);
         }
         // Project expiry before another attempt can replace the actor-state snapshot.
-        self.publish(&self.networking_expiry_request()).await?;
+        let request = LocalBusFrame::request(
+            "sync",
+            Some(self.id.clone()),
+            "runtime",
+            "sync.run",
+            serde_json::json!({}),
+        );
+        self.publish(&request).await?;
         self.networking_expiry_pending = None;
         Ok(true)
     }
