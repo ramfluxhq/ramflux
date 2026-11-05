@@ -526,3 +526,154 @@ fn completed_move_can_amend(root: &Path, mode: u8) -> Result {
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn review_low_l1_refuses_healthy_and_anchor_quarantine() -> Result {
+    for mode in [1, 2] {
+        let root = fixture();
+        let old = seed(&root, mode)?;
+        let shard = router_wal_shard_root(&root.join("wal"), 0);
+        let paths: Vec<_> = router_wal_segment_ids(&shard)?
+            .into_iter()
+            .map(|id| router_wal_segment_path(&shard, id))
+            .collect();
+        assert!(paths.len() >= 2, "anchor and another healthy segment");
+        let originals: Vec<_> = paths.iter().map(fs::read).collect::<io::Result<_>>()?;
+        for path in &paths {
+            let store = test_store(&root, mode, 1)?;
+            store.load_router()?;
+            drop(store);
+            RouterRedbStore::rotate_inbox_incarnations_at(
+                &root.join("db"),
+                Some(&root.join("wal")),
+                Some(path),
+            )
+            .expect_err("ordinary open accepts this healthy segment, including the anchor");
+            assert_eq!(raw(&root)?, (old.clone(), false));
+            for (path, bytes) in paths.iter().zip(&originals) {
+                assert_eq!(&fs::read(path)?, bytes);
+            }
+            assert!(!root.join("wal/quarantine").exists());
+        }
+        // A plain pending marker cannot bypass quarantine admission either.
+        crash_repair_command(&root, mode, "operator_rotation_pending", false)?;
+        RouterRedbStore::rotate_inbox_incarnations_at(
+            &root.join("db"),
+            Some(&root.join("wal")),
+            Some(&paths[0]),
+        )
+        .expect_err("pending rotation must also refuse a healthy quarantine source");
+        assert!(operator_marker_exists(&root)?);
+        for (path, bytes) in paths.iter().zip(&originals) {
+            assert_eq!(&fs::read(path)?, bytes);
+        }
+        rotate(&root, mode, false)?;
+        assert!(!operator_marker_exists(&root)?);
+        fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+const LEGACY_E: &str = "0123456789abcdef0123456789abcdef";
+fn legacy_maintenance_image(root: &Path, corrupt_tuple: bool) -> Result {
+    fs::create_dir_all(root)?;
+    let db = redb::Database::create(root.join("db"))?;
+    let tx = db.begin_write()?;
+    let cursor = crate::router_store::incarnation::StoredCursor {
+        cursor: crate::CursorAckState {
+            target_delivery_id: "restore-target".into(),
+            issued_inbox_seq: 7,
+            ..crate::CursorAckState::default()
+        },
+        inbox_incarnation_id: Some(LEGACY_E.into()),
+    };
+    tx.open_table(crate::ROUTER_CURSOR_STATE_TABLE)?
+        .insert("restore-target", serde_json::to_vec(&cursor)?.as_slice())?;
+    if corrupt_tuple {
+        // This older image already has expiry indexes. Isolate failure in the
+        // tuple upgrade, after schema initialization and incarnation import.
+        let format: redb::TableDefinition<&str, u8> =
+            redb::TableDefinition::new("router_expiry_index_format_v1");
+        tx.open_table(format)?.insert("version", 3)?;
+    }
+    let payload = if corrupt_tuple {
+        b"broken".to_vec()
+    } else {
+        serde_json::to_vec(
+            &serde_json::json!({"target_delivery_id":"restore-target","expires_at":1_900_000_000}),
+        )?
+    };
+    tx.open_table(crate::ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)?
+        .insert("s:4:rootid", payload.as_slice())?;
+    let source = ramflux_protocol::qualified_device_id("root", "device")?;
+    let replay = format!("envelope/v2/{source}/{}", ramflux_protocol::encode_base64url("id"));
+    tx.open_table(crate::ROUTER_REPLAY_TUPLE_TABLE)?
+        .insert(replay.as_str(), b"1900000000".as_slice())?;
+    tx.commit()?;
+    Ok(())
+}
+
+#[test]
+fn review_low_l2_maintenance_runs_ordinary_open_prelude() -> Result {
+    for mode in 0..=2 {
+        for corrupt in [false, true] {
+            let root = fixture();
+            legacy_maintenance_image(&root, corrupt)?;
+            let result = rotate(&root, mode, false);
+            if corrupt {
+                assert!(result.is_err(), "tuple upgrade must fail before reading pending/marking");
+            } else {
+                assert_eq!(result?, 1, "maintenance must initialize a legacy schema itself");
+            }
+            assert_maintenance_upgrades(&root, corrupt)?;
+            if !corrupt {
+                let store = test_store(&root, mode, 1)?;
+                assert_eq!(store.inbox_status("restore-target")?.1, 7);
+                store.load_router()?;
+                drop(store);
+            }
+            fs::remove_dir_all(root)?;
+        }
+    }
+    Ok(())
+}
+
+fn assert_maintenance_upgrades(root: &Path, corrupt: bool) -> Result {
+    let db = redb::Database::open(root.join("db"))?;
+    let tx = db.begin_read()?;
+    // These tables were absent, proving schema initialization ran before pending.
+    tx.open_table(crate::ROUTER_SESSION_ENTRY_TABLE)?;
+    let snapshots = tx.open_table(crate::ROUTER_SNAPSHOT_TABLE)?;
+    assert!(snapshots.get(MARKER)?.is_none());
+    let row = tx
+        .open_table(crate::router_store::incarnation_state::TABLE)?
+        .get("restore-target")?
+        .expect("cursor-field incarnation imported before tuple upgrade");
+    let (id, issued) = crate::router_store::incarnation_state::decode(row.value())?;
+    assert_eq!(issued, 7);
+    if corrupt {
+        assert_eq!(id, LEGACY_E, "import precedes failed tuple upgrade without rotating");
+        assert!(snapshots.get("router_envelope_tuple_v3")?.is_none());
+        assert!(!root.join("wal").exists());
+    } else {
+        assert_ne!(id, LEGACY_E);
+        assert!(snapshots.get("router_envelope_tuple_v3")?.is_some());
+        let deliveries = tx.open_table(crate::ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)?;
+        assert!(deliveries.get("s:4:rootid")?.is_none());
+        let target = ramflux_protocol::encode_base64url("restore-target");
+        let key = format!(
+            "v3/{}/{}/{target}",
+            ramflux_protocol::encode_base64url("root"),
+            ramflux_protocol::encode_base64url("id")
+        );
+        assert!(deliveries.get(key.as_str())?.is_some());
+        let source = ramflux_protocol::qualified_device_id("root", "device")?;
+        let old = format!("envelope/v2/{source}/{}", ramflux_protocol::encode_base64url("id"));
+        let new =
+            format!("envelope/v3/{source}/{}/{target}", ramflux_protocol::encode_base64url("id"));
+        let replay = tx.open_table(crate::ROUTER_REPLAY_TUPLE_TABLE)?;
+        assert!(replay.get(old.as_str())?.is_none());
+        assert!(replay.get(new.as_str())?.is_some());
+    }
+    Ok(())
+}

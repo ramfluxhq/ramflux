@@ -134,6 +134,21 @@ pub(super) fn preflight(
     Ok(())
 }
 
+/// Only the exact segment refused by ordinary recovery may be quarantined.
+pub(super) fn require_quarantine_source(
+    root: &Path,
+    db: &redb::Database,
+    source: &Path,
+) -> Result<(), NodeCoreError> {
+    match preflight(root, db, None) {
+        Err(NodeCoreError::WalSegmentRequiresQuarantine { path, .. }) if path == source => Ok(()),
+        Err(cause) => Err(cause),
+        Ok(()) => {
+            Err(error("quarantine refused: ordinary recovery accepts the named healthy segment"))
+        }
+    }
+}
+
 fn write_identity(root: &Path, id: &str) -> Result<(), NodeCoreError> {
     let path = root.join("identity");
     let temporary = root.join("identity.pending");
