@@ -197,7 +197,7 @@ async fn read_group(
     Box::pin(crate::bus::daemon::dispatch_local_bus_request(&frame, state, &mut connection)).await
 }
 
-async fn renamed_group_fixture() -> TestResult<(Fixture, Fixture, GatewayInboxEntry)> {
+pub(crate) async fn renamed_group_fixture() -> TestResult<(Fixture, Fixture, GatewayInboxEntry)> {
     use ramflux_protocol::group_state::GroupStateChange;
     let alice = Fixture::with_device("freshness-alice", "alice-device").await?;
     let bob = Fixture::with_device("freshness-bob", "bob-device").await?;

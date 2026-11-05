@@ -17,6 +17,9 @@ pub(crate) mod head_refresh;
 mod readers;
 pub(super) mod uploads;
 
+#[cfg(test)]
+type ReceiveGateHook = (tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>);
+
 type ReaderSlot = Arc<RoutingMutex<Option<AccountReaders>>>;
 
 // Two five-second directory attempts plus local backfill staging.
@@ -54,6 +57,8 @@ struct AccountRuntime {
     transfers: uploads::Transfers,
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
+    #[cfg(test)]
+    receive_gate_hook: Option<ReceiveGateHook>,
     #[cfg(test)]
     courier_events: Option<mpsc::UnboundedSender<tests::CourierEvent>>,
 }
@@ -125,6 +130,8 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         transfers: uploads::Transfers::start(),
         connection_sender,
         connection_work,
+        #[cfg(test)]
+        receive_gate_hook: None,
         #[cfg(test)]
         courier_events: None,
     };

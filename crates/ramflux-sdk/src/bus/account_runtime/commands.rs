@@ -7,6 +7,14 @@ use super::{AccountRuntime, stopped};
 use crate::bus::actor::AccountCommand;
 use crate::prelude::*;
 
+#[cfg(test)]
+async fn wait_receive_gate(hook: Option<super::ReceiveGateHook>) {
+    if let Some((entered, release)) = hook {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
 impl AccountRuntime {
     async fn cancel_native_unlock(&mut self) {
         self.stop_connection().await;
@@ -187,6 +195,8 @@ impl AccountRuntime {
             self.start_upload(command, reply).await?;
             return Ok(false);
         }
+        #[cfg(test)]
+        let receive_gate_hook = self.receive_gate_hook.take();
         let mut stopping = false;
         let mut cancelled = false;
         let mut preempted = false;
@@ -199,6 +209,8 @@ impl AccountRuntime {
                 _ = self.preempt.changed() => {cancelled = true;preempted=true;Err(stopped())},
                 () = reply.closed() => { cancelled = true; Err(stopped()) },
                 result = async {
+                    #[cfg(test)]
+                    wait_receive_gate(receive_gate_hook).await;
                     let deadline=command.admission.as_ref().map_or_else(||tokio::time::Instant::now()+self.timeouts.command,|admission|admission.command_deadline);
                     super::super::command_admission::COMMAND_CONTEXT.scope(deadline, tokio::time::timeout_at(deadline,super::super::mutations::execute(&mut self.state,&self.id,&command))).await
                         .map_err(|_|super::super::command_admission::unavailable("account command deadline expired"))?

@@ -6,7 +6,7 @@
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 #[cfg(test)]
-mod native_contract_tests;
+pub(crate) mod native_contract_tests;
 #[cfg(test)]
 mod native_selector_tests;
 
