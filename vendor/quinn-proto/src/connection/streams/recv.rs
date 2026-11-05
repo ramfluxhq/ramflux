@@ -365,8 +365,9 @@ impl<'a> Chunks<'a> {
         if let ChunksState::Readable(mut rs) = state {
             let (_, max_stream_data) = rs.max_stream_data(self.streams.stream_receive_window);
             should_transmit |= max_stream_data.0;
-            if max_stream_data.0 {
-                self.pending.max_stream_data.insert(self.id);
+            if max_stream_data.0 && self.pending.max_stream_data.insert(self.id).is_err(){
+                self.streams.recv.insert(self.id,Some(StreamRecv::Open(rs)));
+                return ShouldTransmit(true);
             }
             // Return the stream to storage for future use
             self.streams

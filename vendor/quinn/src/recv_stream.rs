@@ -278,7 +278,9 @@ impl RecvStream {
         if self.is_0rtt && conn.check_0rtt().is_err() {
             return Ok(());
         }
-        conn.inner.recv_stream(self.stream).stop(error_code)?;
+        let result=conn.inner.recv_stream(self.stream).stop(error_code);
+        if conn.inner.metadata_exhausted(){conn.fail_metadata();}
+        result?;
         conn.wake();
         self.all_data_read = true;
         // Clean up shared state that might be left over from a cancalled read
@@ -533,6 +535,7 @@ impl Drop for RecvStream {
 
         // Ignore ClosedStream errors
         let _ = conn.inner.recv_stream(self.stream).stop(0u32.into());
+        if conn.inner.metadata_exhausted(){conn.fail_metadata();return;}
         conn.wake();
     }
 }

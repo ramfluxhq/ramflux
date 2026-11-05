@@ -211,7 +211,9 @@ impl SendStream {
         if self.is_0rtt && conn.check_0rtt().is_err() {
             return Ok(());
         }
-        conn.inner.send_stream(self.stream).reset(error_code)?;
+        let result=conn.inner.send_stream(self.stream).reset(error_code);
+        if conn.inner.metadata_exhausted(){conn.fail_metadata();}
+        result?;
         conn.wake();
         Ok(())
     }
@@ -360,9 +362,9 @@ impl Drop for SendStream {
         match conn.inner.send_stream(self.stream).finish() {
             Ok(()) => conn.wake(),
             Err(FinishError::Stopped(reason)) => {
-                if conn.inner.send_stream(self.stream).reset(reason).is_ok() {
-                    conn.wake();
-                }
+                let reset=conn.inner.send_stream(self.stream).reset(reason);
+                if conn.inner.metadata_exhausted(){conn.fail_metadata();return;}
+                if reset.is_ok(){conn.wake();}
             }
             // Already finished or reset, which is fine.
             Err(FinishError::ClosedStream) => {}
