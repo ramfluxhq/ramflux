@@ -120,7 +120,7 @@ fn run_review(kind: PathKind, revoke: bool) -> TestResult {
         .clone(),
     );
     drop(client);
-    let result = jobs.install_generation_mode(&job, staging, native_key, None, true);
+    let result = jobs.install_generation(&job, staging, native_key, None);
     assert_eq!(std::fs::read(&source)?, source_bytes);
     if revoke {
         assert!(
@@ -262,7 +262,7 @@ fn install_chain_fresh(
         .original_input()
         .clone(),
     );
-    jobs.install_generation_mode(&job, staging, None, None, true)?;
+    jobs.install_generation(&job, staging, None, None)?;
     let key = crate::bus::backup_jobs::install::existing_key(
         &index,
         root,
@@ -439,7 +439,7 @@ fn restored_target_older_install(native: bool) -> TestResult {
     );
     let native_key =
         native.then(|| crate::bus::backup_jobs::NativeInstallKey { account_id: id.into(), key });
-    jobs.install_generation_mode(&job, staging, native_key, None, true)?;
+    jobs.install_generation(&job, staging, native_key, None)?;
     let selected = index.account(id)?;
     assert_ne!(selected.db_relative_path, before.db_relative_path);
     let selected_key = crate::bus::backup_jobs::install::existing_key(

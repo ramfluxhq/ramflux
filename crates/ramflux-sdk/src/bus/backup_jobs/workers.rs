@@ -85,6 +85,15 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
     }
 }
 
+// Restore admission failures retain their typed job code; export keeps its existing policy.
+pub(super) fn restore_storage_error(error: &ramflux_storage::StorageError) -> BackupFailure {
+    if matches!(error, ramflux_storage::StorageError::AuthorizationRejected) {
+        failure(BackupFailureCode::AuthorizationRejected)
+    } else {
+        storage_error(error)
+    }
+}
+
 fn stream_error(error: BackupStreamError, header: bool) -> BackupFailure {
     match error {
         BackupStreamError::Authentication => failure(if header {
@@ -169,7 +178,9 @@ impl BackupJobs {
         } else {
             db.verify_attachments(progress)
         }
-        .map_err(|error| storage_error(&error))?;
+        .map_err(|error| {
+            if candidate { restore_storage_error(&error) } else { storage_error(&error) }
+        })?;
         if candidate
             && checks.verified.checked_add(checks.placeholders_checked) != Some(counts.attachments)
         {
@@ -385,7 +396,7 @@ impl BackupJobs {
         job: &BackupJob,
         secret: Zeroizing<String>,
     ) -> Result<(), BackupFailure> {
-        self.verify_archive_mode(job, secret, false)
+        self.verify_archive_mode(job, secret, true)
     }
     pub(super) fn verify_archive_mode(
         &self,
@@ -454,9 +465,9 @@ impl BackupJobs {
             input_mode(candidate),
         )?;
         check_opened_input(&db)?;
-        db.rekey(&key).map_err(|error| storage_error(&error))?;
+        db.rekey(&key).map_err(|error| restore_storage_error(&error))?;
         metadata.database_key = *key.bytes();
-        if db.approved_missing_count().map_err(|error| storage_error(&error))?
+        if db.approved_missing_count().map_err(|error| restore_storage_error(&error))?
             != context.totals.get("missing_attachments").copied().unwrap_or(0)
         {
             return Err(failure(BackupFailureCode::Tampered));
@@ -502,7 +513,7 @@ impl BackupJobs {
         created_at: u64,
         job_id: &str,
     ) -> Result<BackupArchivePreview, BackupFailure> {
-        self.archive_preview_mode(metadata, incoming, key, (created_at, job_id), false)
+        self.archive_preview_mode(metadata, incoming, key, (created_at, job_id), true)
     }
     fn archive_preview_mode(
         &self,
@@ -551,7 +562,7 @@ impl BackupJobs {
         incoming: &std::path::Path,
         key: &AccountDbKey,
     ) -> Result<bool, BackupFailure> {
-        self.check_existing_identity_mode(metadata, incoming, key, false)
+        self.check_existing_identity_mode(metadata, incoming, key, true)
     }
     pub(super) fn check_existing_identity_mode(
         &self,
@@ -567,9 +578,12 @@ impl BackupJobs {
             Err(ramflux_storage::StorageError::AccountNotFound(_)) => Ok(false),
             Err(_) => Err(failure(BackupFailureCode::Unreadable)),
             Ok(_) => {
-                let _writer =
-                    self.index.acquire_account_writer(id).map_err(|error| storage_error(&error))?;
-                let record = self.index.account(id).map_err(|error| storage_error(&error))?;
+                let _writer = self
+                    .index
+                    .acquire_account_writer(id)
+                    .map_err(|error| restore_storage_error(&error))?;
+                let record =
+                    self.index.account(id).map_err(|error| restore_storage_error(&error))?;
                 if record.principal_commitment != manifest.principal_commitment {
                     return Err(failure(BackupFailureCode::RootConflict));
                 }
@@ -593,11 +607,11 @@ impl BackupJobs {
                     local.account_secret.as_bytes(),
                 )
                 .map_err(|error| match error {
-                    crate::SdkError::Storage(error) => storage_error(&error),
+                    crate::SdkError::Storage(error) => restore_storage_error(&error),
                     _ => failure(BackupFailureCode::Unreadable),
                 })?;
                 super::install::open_live_stage(&path, &local_key, candidate)
-                    .map_err(|error| storage_error(&error))?
+                    .map_err(|error| restore_storage_error(&error))?
                     .check_backup_pins(incoming, key)
                     .map_err(|_| failure(BackupFailureCode::RootConflict))?;
                 Ok(true)
@@ -611,14 +625,16 @@ impl BackupJobs {
     ) -> Result<Option<String>, BackupFailure> {
         let lookup = || {
             self.native_restore_target(native).map_err(|error| match error {
-                SdkError::Storage(error) => storage_error(&error),
+                SdkError::Storage(error) => restore_storage_error(&error),
                 SdkError::Io(_) => failure(BackupFailureCode::Unreadable),
                 _ => failure(BackupFailureCode::RootConflict),
             })
         };
         let Some(id) = lookup()? else { return Ok(None) };
-        let _writer =
-            self.index.acquire_account_writer(&id).map_err(|error| storage_error(&error))?;
+        let _writer = self
+            .index
+            .acquire_account_writer(&id)
+            .map_err(|error| restore_storage_error(&error))?;
         if lookup()?.as_deref() != Some(id.as_str()) {
             return Err(failure(BackupFailureCode::RootConflict));
         }
@@ -668,7 +684,7 @@ fn archive_metadata(
     Ok(metadata)
 }
 
-/// Candidate mode is selected only by internal callers until restore normalization is complete.
+/// Authenticated restore inputs retain their original observations before normalization.
 pub(super) fn open_checked_input(
     path: &std::path::Path,
     key: &AccountDbKey,
@@ -678,7 +694,7 @@ pub(super) fn open_checked_input(
     #[cfg(test)]
     super::tests::selector_normalization_tests::record_open("worker-input");
     let db = BackupDatabase::open_original_restore_input(path, key, mode)
-        .map_err(|error| storage_error(&error))?;
+        .map_err(|error| restore_storage_error(&error))?;
     if &db.original_input().counts != authenticated_counts {
         return Err(failure(BackupFailureCode::Tampered));
     }
@@ -716,5 +732,5 @@ fn check_opened_input(db: &BackupDatabase) -> Result<(), BackupFailure> {
     if FAIL_AFTER_INPUT.get() {
         return Err(failure(BackupFailureCode::Interrupted));
     }
-    db.check_integrity().map_err(|error| storage_error(&error))
+    db.check_integrity().map_err(|error| restore_storage_error(&error))
 }

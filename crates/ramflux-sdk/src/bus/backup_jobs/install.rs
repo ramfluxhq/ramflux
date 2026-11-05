@@ -74,7 +74,7 @@ impl BackupJobs {
         native_key: Option<super::NativeInstallKey>,
         native_setup: Option<super::NativeRestoreSetup>,
     ) -> Result<(crate::backup::BackupInstalledAccount, BackupCounts, BackupCounts), SdkError> {
-        self.install_generation_mode(job, staging, native_key, native_setup, false)
+        self.install_generation_mode(job, staging, native_key, native_setup, true)
     }
     pub(super) fn install_generation_mode(
         &self,

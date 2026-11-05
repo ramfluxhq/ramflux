@@ -56,7 +56,7 @@ pub(super) fn assert_observation_refused(change: &str) -> TestResult {
     if change != "missing" {
         staging = staging.with_input_observation(observation);
     }
-    let result = jobs.install_generation_mode(&job, staging, None, None, true);
+    let result = jobs.install_generation(&job, staging, None, None);
     assert!(
         matches!(
             result,

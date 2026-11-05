@@ -8,7 +8,7 @@ use crate::storage_failure_fixture::{Fault, Fixture, TestResult};
 fn check(fault: Fault, code: BackupFailureCode) -> TestResult {
     let fixture = Fixture::new(fault)?;
     let jobs = super::BackupJobs::new(fixture.root(), fixture.index.clone())?;
-    let metadata = super::format::Metadata {
+    let mut metadata = super::format::Metadata {
         identity: super::format::Identity::Legacy { manifest: Box::new(fixture.manifest.clone()) },
         database_key: [0; 32],
         ca_pem: Vec::new(),
@@ -33,9 +33,25 @@ fn check(fault: Fault, code: BackupFailureCode) -> TestResult {
     let job = jobs.start(BackupJobKind::Restore, "archive.rfb".into())?;
     let directory = jobs.directory(&job.job_id)?;
     let staging_key = [7; 32];
+    // Keep the stage valid so the independently faulted local account remains the failing boundary.
+    let source_root = tempfile::tempdir()?;
+    let source_index = ramflux_storage::AccountIndex::open(source_root.path())?;
+    source_index.create_account("acct", &fixture.manifest.principal_commitment)?;
+    let source_key = ramflux_storage::AccountDbKey::from_bytes([0; 32]);
+    let source = ramflux_storage::AccountDb::open(&source_index, "acct", &source_key)?;
+    let saved = source.write_backup_snapshot(&directory.join("account.db"))?;
+    metadata.database_key = *saved.key.bytes();
+    let stage = ramflux_storage::BackupDatabase::open_restore_input(
+        &directory.join("account.db"),
+        &saved.key,
+        ramflux_storage::BackupOpenMode::PreNormalization,
+    )?;
+    let observation = stage.original_input().clone();
+    drop(stage);
     super::format::save_metadata(&directory.join("identity.sealed"), &staging_key, &metadata)?;
     let staging =
-        crate::backup::VerifiedBackupStaging::new(directory, staging_key, super::service::now())?;
+        crate::backup::VerifiedBackupStaging::new(directory, staging_key, super::service::now())?
+            .with_input_observation(observation);
     let Err(install_error) = jobs.install_generation(&job, staging, None, None) else {
         return Err("faulted installation unexpectedly succeeded".into());
     };
@@ -86,5 +102,14 @@ fn restore_preservation_refusal_keeps_ownership_failure_code() -> TestResult {
         .ok_or("failure")?;
     assert_eq!(failure.code, BackupFailureCode::ObjectOwnershipUnverified);
     assert!(!failure.retryable);
+    let authorization = super::workers::restore_storage_error(
+        &ramflux_storage::StorageError::AuthorizationRejected,
+    );
+    assert_eq!(authorization.code, BackupFailureCode::AuthorizationRejected);
+    assert!(!authorization.retryable);
+    assert_eq!(
+        super::workers::storage_error(&ramflux_storage::StorageError::AuthorizationRejected).code,
+        BackupFailureCode::Unreadable
+    );
     Ok(())
 }

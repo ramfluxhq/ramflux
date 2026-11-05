@@ -126,7 +126,7 @@ fn run(
     let archive_before = std::fs::read(&job.path)?;
     let previous = target_index.account(id).ok().map(|r| r.db_relative_path);
     let seen = install_hook(&jobs, &target_index, id, fault)?;
-    let result = jobs.install_generation_mode(&job, staging, None, None, true);
+    let result = jobs.install_generation(&job, staging, None, None);
     assert_eq!(std::fs::read(&job.path)?, archive_before);
     if invalid.is_some() {
         assert!(matches!(
@@ -287,7 +287,7 @@ fn run_native(
     let previous = index.account("account")?.db_relative_path;
     drop(client);
     let seen = install_hook(&jobs, &index, "account", fault)?;
-    let result = jobs.install_generation_mode(&job, staging, key, None, true);
+    let result = jobs.install_generation(&job, staging, key, None);
     assert_eq!(std::fs::read(&job.path)?, archive_before);
     assert_eq!(std::fs::read(snapshot)?, before);
     if invalid.is_some() {
@@ -644,7 +644,7 @@ fn worker_staging(
     std::fs::remove_dir_all(dir)?;
     if observation_tests::RETRY_UPGRADE.get() {
         crate::bus::backup_jobs::workers::FAIL_AFTER_INPUT.set(true);
-        let failed = jobs.verify_archive_mode(job, zeroize::Zeroizing::new(secret.into()), true);
+        let failed = jobs.verify_archive(job, zeroize::Zeroizing::new(secret.into()));
         crate::bus::backup_jobs::workers::FAIL_AFTER_INPUT.set(false);
         assert!(matches!(
             failed,
@@ -656,7 +656,7 @@ fn worker_staging(
         assert!(!dir.exists(), "production PrivateDirectory must discard failed stage");
         assert!(std::fs::read(&job.path)? == original, "source archive changed on failure");
     }
-    jobs.verify_archive_mode(job, zeroize::Zeroizing::new(secret.into()), true)
+    jobs.verify_archive(job, zeroize::Zeroizing::new(secret.into()))
         .map_err(|e| format!("real check worker: {e:?}"))?;
     assert_eq!(std::fs::read(&job.path)?, original);
     let (_, staging) = jobs.begin_install(&job.job_id)?;
