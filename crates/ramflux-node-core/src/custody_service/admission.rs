@@ -436,6 +436,11 @@ impl CustodyService {
                 Some(home_operation(scope, &session.device_ref, &request.nonce, now)?)
             };
         self.leases().request(session_id, &request.nonce)?;
+        // Authenticated submit persistence and retry waits use mailbox ownership;
+        // they must not retain the service-wide admission lock.
+        if matches!(action, CustodySessionAction::Submit { .. }) {
+            drop(admission);
+        }
         self.perform_action(scope, &session, &authority, &source, attempt.action)
     }
     fn perform_action(

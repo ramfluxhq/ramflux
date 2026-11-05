@@ -163,7 +163,7 @@ fn prepare_submission(
         &sender_root_commitment,
         submission,
         (&outcome, persistent_entry.as_ref()),
-    );
+    )?;
     if let Some(entry) = &persistent_entry {
         let assignment = store
             .sender_assignment(&sender_root_commitment, &entry.envelope, now_unix_seconds)?
@@ -494,59 +494,21 @@ pub(crate) fn own_device_fanout(
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
 ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
-    ramflux_node_core::publication::capture(|| own_device_fanout_inner(state, store, request))?
-        .published_blocking()?
+    Ok(ramflux_node_core::publication::capture(|| own_device_fanout_inner(state, store, request))?
+        .published_blocking()??
+        .resolved_blocking()?)
 }
 
 pub(crate) fn own_device_fanout_inner(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
-) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
-    let now = i64::try_from(submission_now()).unwrap_or(i64::MAX);
-    let (plan, leases) = state.accept_leased_fanout(request.clone(), store, now)?;
-    let response = ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse {
-        principal_id: plan.principal_id,
-        source_device_id: plan.source_device_id,
-        delivered: plan
-            .deliveries
-            .into_iter()
-            .map(|delivery| state.submit_replay_accepted_fanout_delivery(delivery, now).0)
-            .collect(),
-    };
-    let entries = response
-        .delivered
-        .iter()
-        .filter_map(|delivery| {
-            delivery.inbox_seq.map(|inbox_seq| {
-                let mut envelope = request.envelope.clone();
-                envelope.target_delivery_id.clone_from(&delivery.target_delivery_id);
-                envelope.envelope_id = ramflux_node_core::mvp10_fanout_envelope_id(
-                    &request.envelope.envelope_id,
-                    &delivery.device_id,
-                );
-                ramflux_node_core::InboxEntry {
-                    inbox_seq,
-                    target_delivery_id: delivery.target_delivery_id.clone(),
-                    envelope,
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let replay_expires_at = request
-        .envelope
-        .created_at
-        .checked_add(i64::from(request.envelope.ttl))
-        .ok_or_else(|| anyhow::anyhow!("fan-out envelope ttl overflows replay expiry"))?;
-    let source = state.authenticated_envelope_source_durable(&request.envelope, store)?;
-    store.record_leased_fanout(
-        &ramflux_node_core::envelope_replay_tuple_key(&source, &request.envelope),
-        replay_expires_at,
-        source.root_commitment(),
-        &entries,
-        leases,
-    )?;
-    Ok(response)
+) -> anyhow::Result<ramflux_node_core::PreparedFanout> {
+    Ok(state.prepare_sender_fanout(
+        store,
+        request,
+        i64::try_from(submission_now()).unwrap_or(i64::MAX),
+    )?)
 }
 
 pub(crate) fn elapsed_us(started: Instant) -> u64 {
@@ -834,7 +796,11 @@ mod drain_tests;
 mod drain_recovery_tests;
 
 fn publication_reason(reason: &str) -> Option<&'static str> {
-    if reason.starts_with("capacity_retry_after") {
+    if reason == "aborted_retry_safe" {
+        Some("aborted_retry_safe")
+    } else if reason == "idempotency_conflict" {
+        Some("idempotency_conflict")
+    } else if reason.starts_with("capacity_retry_after") {
         Some("capacity_retry_after")
     } else if reason == "incarnation_mismatch" {
         Some("incarnation_mismatch")
@@ -868,7 +834,7 @@ fn persist_submission_outcome(
         &ramflux_node_core::RouterSubmitOutcome,
         Option<&ramflux_node_core::InboxEntry>,
     ),
-) {
+) -> anyhow::Result<()> {
     if should_persist_submission(outcome)
         && let Err(error) = store.record_leased_submission(
             replay_key,
@@ -878,13 +844,16 @@ fn persist_submission_outcome(
             Some(lease),
         )
     {
-        tracing::error!(
-            error = %error,
-            replay_key = %replay_key,
-            "router submit persistence failed after in-memory accept; aborting to avoid state fork"
-        );
+        if ramflux_node_core::publication::proved_non_write() {
+            return Err(ramflux_node_core::NodeCoreError::SenderRetry(
+                ramflux_node_core::sender_retry::SenderRetryRefusal::AbortedRetrySafe,
+            )
+            .into());
+        }
+        tracing::error!(error = %error, "router submit persistence failed after writer hand-off");
         std::process::abort();
     }
+    Ok(())
 }
 
 enum RetryPreparation {

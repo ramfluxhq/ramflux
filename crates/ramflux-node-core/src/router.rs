@@ -1850,3 +1850,6 @@ pub(crate) fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
+
+mod sender_fanout;
+pub use sender_fanout::PreparedFanout;

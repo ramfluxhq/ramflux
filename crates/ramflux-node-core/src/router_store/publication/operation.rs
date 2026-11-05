@@ -202,6 +202,13 @@ pub(crate) fn allocate(
         let sequence = guard.sequence();
         scope.assigned.insert((target.into(), sequence));
         scope.guards.push(guard);
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        crate::durability_test_hooks::notify(&core.shared.path, "reserved_assignment", true)
+            .map_err(|_| {
+                NodeCoreError::SenderRetry(
+                    crate::sender_retry::SenderRetryRefusal::AbortedRetrySafe,
+                )
+            })?;
         Ok(sequence)
     })
 }
@@ -279,4 +286,40 @@ fn attach_retry(scope: &Scope, guard: &AssignmentGuard) {
         .cloned()
         .collect();
     let _ = guard.descriptor.retry_abort.set(owners);
+}
+
+pub(crate) fn reference_replay(
+    core: &Arc<PublicationCore>,
+    key: &str,
+    held: impl FnOnce() -> bool,
+) -> Result<(), NodeCoreError> {
+    CURRENT.with(|current| {
+        let mut current = current.borrow_mut();
+        let scope = current
+            .as_mut()
+            .ok_or_else(|| NodeCoreError::Redb("fanout requires publication scope".into()))?;
+        core.reference_resource(key, held);
+        scope.core = Some(Arc::clone(core));
+        scope.resources.push(key.into());
+        Ok(())
+    })
+}
+
+/// Prove that the current request has handed no assignment to a writer.
+#[must_use]
+pub fn proved_non_write() -> bool {
+    CURRENT.with(|current| {
+        current.borrow().as_ref().is_some_and(|scope| {
+            crate::fatal_durability::check().is_ok()
+                && !scope.guards.is_empty()
+                && scope.guards.iter().all(|guard| {
+                    matches!(
+                        guard.state(),
+                        super::PersistenceState::ReservedNoWrite
+                            | super::PersistenceState::DefiniteNonWrite
+                            | super::PersistenceState::AbortedDurable
+                    )
+                })
+        })
+    })
 }

@@ -460,7 +460,7 @@ pub(crate) async fn handle_mesh_quic_request_value(
         .await??;
         return Ok(ramflux_transport::GatewayQuicResponse {
             status: 200,
-            body: serde_json::to_value(prepared.published().await?)?,
+            body: serde_json::to_value(prepared.published().await?.resolved().await?)?,
         });
     }
     let mesh_request = ramflux_transport::MeshHttpRequest {
