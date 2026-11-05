@@ -6,6 +6,7 @@
 pub mod backup_stream;
 pub mod custody;
 mod device_reference;
+pub mod large_attachment;
 mod object_erasure;
 pub mod object_verification;
 pub use device_reference::RootQualifiedDeviceRef;
