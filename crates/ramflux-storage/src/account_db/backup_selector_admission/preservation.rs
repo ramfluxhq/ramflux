@@ -149,7 +149,7 @@ pub(in crate::account_db) fn prepare(
                     || key.starts_with("own-device/");
                 let bound_drop = actor && excluded_actor_binding(db, schema, &key)?;
                 if bound_drop {
-                    exclude_actor(db, schema, table, id, &key)?;
+                    exclude_actor(db, schema, table, id)?;
                     continue;
                 }
                 let bytes = match row.get::<_, Option<Vec<u8>>>(2)? {
@@ -187,7 +187,7 @@ pub(in crate::account_db) fn prepare(
                 let changed = if drop_copy { false } else { redact(db, root, schema, &mut value)? };
                 drop_copy |= value.is_null();
                 if drop_copy {
-                    exclude_actor(db, schema, table, id, &key)?;
+                    exclude_actor(db, schema, table, id)?;
                 } else if changed {
                     let body = Zeroizing::new(serde_json::to_vec(&value)?);
                     if schema == "incoming" {
@@ -206,6 +206,34 @@ pub(in crate::account_db) fn prepare(
                 }
             }
         }
+    }
+    delete_excluded_target_copies(db)
+}
+
+fn delete_excluded_target_copies(db: &Connection) -> Result<(), StorageError> {
+    // Keep input bindings until every current and archived copy has been classified.
+    // Removing a current actor's binding earlier would hide its archived copies.
+    for table in [
+        "runtime_actor_state",
+        "backup_archived_actor_state",
+        "local_event_log",
+        "backup_archived_local_event",
+    ] {
+        if !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name=?1)",
+            [table],
+            |r| r.get::<_, bool>(0),
+        )? {
+            continue;
+        }
+        if table.ends_with("actor_state") {
+            for binding in
+                ["object_payload_actor", "object_reference_actor", "object_transport_actor"]
+            {
+                db.execute(&format!("DELETE FROM {binding} WHERE state_kind IN (SELECT state_kind FROM main.{table} WHERE rowid IN (SELECT row_id FROM backup_erased_copy WHERE database_name='main' AND table_name=?1))"),[table])?;
+            }
+        }
+        db.execute(&format!("DELETE FROM main.{table} WHERE rowid IN (SELECT row_id FROM backup_erased_copy WHERE database_name='main' AND table_name=?1)"),[table])?;
     }
     Ok(())
 }
@@ -232,29 +260,14 @@ fn excluded_actor_binding(db: &Connection, schema: &str, key: &str) -> Result<bo
     let side = if schema == "main" { "target" } else { "incoming" };
     Ok(db.query_row(&format!(r"SELECT
         EXISTS(SELECT 1 FROM {schema}.object_transport_actor a JOIN main.object_erasure_fence f USING(commitment) WHERE a.state_kind=?1)
+        OR EXISTS(SELECT 1 FROM {schema}.object_payload_actor a JOIN main.object_erasure_fence f USING(commitment) WHERE a.state_kind=?1)
         OR (EXISTS(SELECT 1 FROM {schema}.object_reference_actor WHERE state_kind=?1)
             AND NOT EXISTS(SELECT 1 FROM {schema}.object_reference_actor a JOIN backup_reference_admission r USING(reference_hash) WHERE a.state_kind=?1 AND r.side=?2 AND NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=r.commitment)))"), params![key, side], |r| r.get(0))?)
 }
-fn exclude_actor(
-    db: &Connection,
-    schema: &str,
-    table: &str,
-    id: i64,
-    key: &str,
-) -> Result<(), StorageError> {
+fn exclude_actor(db: &Connection, schema: &str, table: &str, id: i64) -> Result<(), StorageError> {
     db.execute(
         "INSERT OR IGNORE INTO backup_erased_copy VALUES(?1,?2,?3)",
         params![schema, table, id],
     )?;
-    if schema == "main" {
-        if table.ends_with("actor_state") {
-            for binding in
-                ["object_payload_actor", "object_reference_actor", "object_transport_actor"]
-            {
-                db.execute(&format!("DELETE FROM {binding} WHERE state_kind=?1"), [key])?;
-            }
-        }
-        db.execute(&format!("DELETE FROM main.{table} WHERE rowid=?1"), [id])?;
-    }
     Ok(())
 }
