@@ -412,6 +412,14 @@ impl PublicationCore {
             .map_or((0, 0), |inbox| (inbox.published, inbox.committed_settled.min(inbox.published)))
     }
 
+    /// Earliest unresolved assignment, under the same lock as allocation/publication.
+    pub(crate) fn first_in_flight(&self, target: &str, incarnation: &str) -> Option<u64> {
+        lock(&self.shared)
+            .inboxes
+            .get(&Key { target: target.into(), incarnation: incarnation.into() })
+            .and_then(|inbox| inbox.in_flight.first_key_value().map(|(&seq, _)| seq))
+    }
+
     pub(crate) fn commit_settled(&self, target: &str, incarnation: &str, settled: u64) {
         if let Some(inbox) = lock(&self.shared)
             .inboxes

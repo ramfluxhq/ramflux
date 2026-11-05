@@ -565,7 +565,12 @@ impl CustodyService {
             },
         )?;
         let cursor =
-            router.apply_ack_for_target(&session.target_delivery_id, ack).map_err(invalid)?;
+            router.apply_ack_for_target(&session.target_delivery_id, ack).map_err(|error| {
+                match error {
+                    crate::NodeCoreError::AckBackpressureRetry => CustodyRefusal::Busy,
+                    other => invalid(other),
+                }
+            })?;
         if let Err(error) = store.record_leased_ack(&cursor, &ack.envelope_id, lease) {
             tracing::error!(%error,"custody ACK persistence failed; terminating to avoid a state fork");
             std::process::abort();

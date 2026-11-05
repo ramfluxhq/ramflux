@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("ack_backpressure_retry")]
+    AckBackpressureRetry,
     #[error(transparent)]
     SenderRetry(#[from] crate::sender_retry::SenderRetryRefusal),
     #[error(transparent)]
