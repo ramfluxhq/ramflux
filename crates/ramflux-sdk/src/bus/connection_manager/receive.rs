@@ -82,6 +82,8 @@ pub(super) async fn run(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push((trigger, true));
+                #[cfg(test)]
+                handle.shared.receive_completed.notify_one();
                 interval = if active {
                     limits.receive_min
                 } else {
@@ -291,6 +293,7 @@ async fn apply_entry(
 #[cfg(test)]
 pub(crate) async fn test_redrive(
     account: &mut crate::bus::state::LocalBusAccountState,
+    conversation: &str,
     expected: usize,
 ) -> Result<(), SdkError> {
     let handle = account.connection.clone().ok_or(SdkError::NetworkingPending)?;
@@ -300,18 +303,16 @@ pub(crate) async fn test_redrive(
         receive_max: std::time::Duration::from_secs(3600),
         ..account.timeouts.clone()
     };
-    let completed = handle.test_receive_trace().iter().filter(|(_, completed)| *completed).count();
+    let completion = handle.shared.receive_completed.clone();
     let child = tokio::spawn(run(handle.clone(), writer, limits));
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let message = tokio::select! {
                 message = work.recv() => message.ok_or(SdkError::NetworkingPending)?,
-                () = tokio::task::yield_now() => {
-                    if handle.test_receive_trace().iter().filter(|(_, completed)| *completed).count() > completed {
-                        assert_eq!(account.client.direct_messages("thread")?.len(), expected, "receive pass must not drop or duplicate parked entries");
-                        break;
-                    }
-                    continue;
+                () = completion.notified() => {
+                    assert_eq!(account.client.direct_messages(conversation)?.len(), expected,
+                        "receive pass must not drop or duplicate parked entries");
+                    break;
                 }
             };
             match message {
@@ -320,6 +321,17 @@ pub(crate) async fn test_redrive(
                 }
                 AccountWork::Courier(step) => step.apply(account),
                 AccountWork::ReceiveApply { entry, source, backpressure, reply, .. } => {
+                    if let Some(key) = &entry.retry_key
+                        && crate::bus::couriers::head_refresh::inbound::eligible(account, key)
+                    {
+                        assert!(
+                            !account
+                                .client
+                                .account_db()?
+                                .inbox_retry_ready(key, crate::prelude::now_unix_timestamp(),)?,
+                            "refresh applies before the durable retry deadline"
+                        );
+                    }
                     let _ = reply.send(
                         crate::bus::sync_driver::apply_prepared_receive(
                             account,

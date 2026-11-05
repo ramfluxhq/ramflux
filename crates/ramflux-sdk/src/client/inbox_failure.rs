@@ -23,6 +23,12 @@ pub(crate) fn wire_signature_error(entry: &GatewayInboxEntry) -> Option<SdkError
 /// Directory response failures do not prove that immutable message bytes are invalid.
 pub(crate) fn lookup_error(error: SdkError, context: &str) -> SdkError {
     match error {
+        SdkError::DirectoryAuthorityUnavailable { root, source } => {
+            SdkError::DirectoryAuthorityUnavailable {
+                root,
+                source: Box::new(lookup_error(*source, context)),
+            }
+        }
         SdkError::Json(_) | SdkError::Protocol(_) | SdkError::Crypto(_) => {
             SdkError::InboundPending(context.into())
         }
@@ -32,6 +38,7 @@ pub(crate) fn lookup_error(error: SdkError, context: &str) -> SdkError {
 
 pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
     match error {
+        SdkError::DirectoryAuthorityUnavailable { source, .. } => deterministic(source),
         SdkError::ReplayMismatch => Some("replay_mismatch"),
         SdkError::Crypto(
             ramflux_crypto::CryptoError::VerifyFailed

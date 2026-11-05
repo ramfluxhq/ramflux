@@ -7,32 +7,12 @@
 //! Restart loses only this optimization; the normal durable retry re-discovers demand.
 use super::{BTreeSet, LocalBusAccountState, SdkError};
 use crate::GatewayInboxEntry;
-use crate::client::identity_authority::HeadUse;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub(super) struct Inbound {
-    entries: BTreeMap<String, (GatewayInboxEntry, BTreeSet<String>)>,
+    entries: BTreeMap<String, (GatewayInboxEntry, BTreeSet<String>, Option<String>)>,
     ready: BTreeSet<String>,
-}
-
-fn stale(account: &LocalBusAccountState, root: &str) -> Result<bool, SdkError> {
-    let Some(record) =
-        account.client.current_custody_authority(root, crate::custody::network_now()?)?
-    else {
-        return Ok(false);
-    };
-    match account.client.require_fresh_custody_head(
-        HeadUse::NewAuthorization,
-        root,
-        record.envelope(),
-    ) {
-        Ok(()) => Ok(false),
-        Err(error) if crate::bus::account_runtime::head_refresh::is_freshness_refusal(&error) => {
-            Ok(true)
-        }
-        Err(error) => Err(error),
-    }
 }
 
 pub(crate) fn retain(
@@ -49,17 +29,21 @@ pub(crate) fn retain(
     {
         return Ok(());
     }
-    // This lookup enforces the existing relationship/revocation boundary. Claims alone
-    // never authorize a refresh or admission.
-    let Ok(peer) = account.client.inbound_device_manifest_request(entry) else {
-        return Ok(());
+    // Classify the actual deferral, never ambient head staleness. Directory
+    // errors carry the exact attempted root from the failed fetch.
+    let roots = match error {
+        SdkError::DirectoryAuthorityUnavailable { root, .. } => BTreeSet::from([root.clone()]),
+        SdkError::InboundPending(reason) if reason == "sender manifest must be prepared" => {
+            account.client.inbound_device_manifest_request(entry)?.into_iter().collect()
+        }
+        error if crate::bus::account_runtime::head_refresh::is_freshness_refusal(error) => {
+            BTreeSet::from([account.principal_commitment.clone()])
+        }
+        _ => return Ok(()),
     };
-    let mut roots = BTreeSet::new();
-    if let Some(peer) = peer {
-        roots.insert(peer);
-    }
-    if stale(account, &account.principal_commitment)? {
-        roots.insert(account.principal_commitment.clone());
+    // Preserve relationship/revocation checks independently of failure provenance.
+    if account.client.inbound_device_manifest_request(entry).is_err() {
+        return Ok(());
     }
     if roots.is_empty() || account.head_refresh.inbound.entries.len() >= 128 {
         return Ok(());
@@ -67,14 +51,29 @@ pub(crate) fn retain(
     for root in &roots {
         account.head_refresh.enqueue(root.clone());
     }
-    account.head_refresh.inbound.entries.insert(key.to_owned(), (entry.clone(), roots));
+    // Routing is encrypted. An unavailable authority may prevent decoding it;
+    // such an opaque retry still refreshes/redrives in the background, but must
+    // never hold an RPC for an assumed group or a DM from a shared member.
+    let group = account
+        .client
+        .open_routed(entry, &account.gateway_config.device_id)
+        .ok()
+        .filter(|opened| {
+            matches!(
+                opened.routing.kind,
+                crate::client::routed::Kind::GroupMessage
+                    | crate::client::routed::Kind::GroupControl
+            )
+        })
+        .and_then(|opened| opened.routing.group_id);
+    account.head_refresh.inbound.entries.insert(key.to_owned(), (entry.clone(), roots, group));
     Ok(())
 }
 
 pub(crate) fn refreshed(account: &mut LocalBusAccountState, root: &str) -> Result<(), SdkError> {
     let mut ready = Vec::new();
     let mut gone = Vec::new();
-    for (key, (_, roots)) in &mut account.head_refresh.inbound.entries {
+    for (key, (_, roots, _)) in &mut account.head_refresh.inbound.entries {
         if !account.client.account_db()?.has_inbox_retry(key)? {
             gone.push(key.clone());
             continue;
@@ -112,12 +111,18 @@ pub(crate) fn entries(
         .entries
         .iter()
         .filter(|(key, _)| eligible(account, key))
-        .map(|(key, (entry, _))| (key, entry))
+        .map(|(key, (entry, _, _))| (key, entry))
 }
 
-pub(crate) fn blocked_roots(account: &LocalBusAccountState) -> Result<BTreeSet<String>, SdkError> {
+pub(crate) fn blocked_roots(
+    account: &LocalBusAccountState,
+    group_id: &str,
+) -> Result<BTreeSet<String>, SdkError> {
     let mut roots = BTreeSet::new();
-    for (key, (_, dependencies)) in &account.head_refresh.inbound.entries {
+    for (key, (_, dependencies, group)) in &account.head_refresh.inbound.entries {
+        if group.as_deref() != Some(group_id) {
+            continue;
+        }
         if account.client.account_db()?.has_inbox_retry(key)? && !eligible(account, key) {
             roots.extend(dependencies.iter().cloned());
         }

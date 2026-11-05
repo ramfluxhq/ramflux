@@ -104,6 +104,8 @@ struct Shared {
     #[cfg(test)]
     receive_trace: std::sync::Mutex<Vec<(ReceiveTrigger, bool)>>,
     #[cfg(test)]
+    receive_completed: Arc<Notify>,
+    #[cfg(test)]
     receive_profile: std::sync::Mutex<resync::ReceiveProfile>,
     #[cfg(test)]
     buffer_stats: Arc<std::sync::Mutex<crate::gateway::host_frames::BufferStats>>,
@@ -281,6 +283,8 @@ impl ConnectionHandle {
             removals: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             receive_trace: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            receive_completed: Arc::default(),
             #[cfg(test)]
             receive_profile: std::sync::Mutex::new(resync::ReceiveProfile::default()),
             #[cfg(test)]

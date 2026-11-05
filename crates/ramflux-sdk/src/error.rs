@@ -141,6 +141,12 @@ pub enum SdkError {
     ReplayMismatch,
     #[error("inbound state not ready: {0}")]
     InboundPending(String),
+    #[error("{source}")]
+    DirectoryAuthorityUnavailable {
+        root: String,
+        #[source]
+        source: Box<SdkError>,
+    },
     #[error("contact admission waits for capacity: {0}")]
     ContactRequestCapacity(String),
     #[error("voice call control receipt capacity exhausted at {limit} receipts")]

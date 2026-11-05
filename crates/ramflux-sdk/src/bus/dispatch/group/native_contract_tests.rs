@@ -245,6 +245,16 @@ fn group_entry(
     id: &str,
     sequence: u64,
 ) -> TestResult<GatewayInboxEntry> {
+    routed_entry(alice, bob, id, sequence, crate::client::routed::Route::group_message("group"))
+}
+
+fn routed_entry(
+    alice: &Fixture,
+    bob: &Fixture,
+    id: &str,
+    sequence: u64,
+    route: crate::client::routed::Route,
+) -> TestResult<GatewayInboxEntry> {
     let mut message = GatewayDirectMessage {
         conversation_id: "thread".into(),
         message_id: id.into(),
@@ -263,7 +273,7 @@ fn group_entry(
         &bob.config,
         &message,
         &body,
-        crate::client::routed::Route::group_message("group"),
+        route,
         crate::client::routed::SendMaterial {
             manifest: None,
             bundle: Some(
@@ -428,9 +438,10 @@ async fn verify_refresh_redrive(
     manifests: (&crate::SdkDeviceManifestResponse, &crate::SdkDeviceManifestResponse),
     flags: (bool, bool, bool),
     key: &str,
-    count: usize,
-    at: i64,
+    delivery: (usize, i64),
+    unrelated: &GatewayInboxEntry,
 ) -> TestResult {
+    let (count, at) = delivery;
     let (alice, bob) = manifests;
     let (local_fresh, peer_fresh, serve_peer) = flags;
     let handle = account.connection.as_ref().ok_or("connection")?.clone();
@@ -449,7 +460,21 @@ async fn verify_refresh_redrive(
     invalid.principal_id = "invalid-authority".into();
     assert!(refresh(account, root, std::time::Instant::now(), Ok(invalid)).is_err());
     assert!(!crate::bus::couriers::head_refresh::inbound::eligible(account, key));
-    account.client.account_db()?.defer_inbox_entry("unrelated-backoff", b"{}", at)?;
+    let unrelated_key = account.client.inbox_admission_key(unrelated)?;
+    assert_eq!(
+        account.client.account_db()?.defer_inbox_entry(
+            &unrelated_key,
+            &serde_json::to_vec(unrelated)?,
+            at,
+        )?,
+        1
+    );
+    crate::bus::couriers::head_refresh::inbound::retain(
+        account,
+        unrelated,
+        &unrelated_key,
+        &SdkError::InboundPending("sender key not yet available".into()),
+    )?;
     if !local_fresh {
         assert!(refresh(
             account,
@@ -475,10 +500,23 @@ async fn verify_refresh_redrive(
     }
     assert!(crate::bus::couriers::head_refresh::inbound::eligible(account, key));
     assert!(handle.resync_needed(), "existing receive courier must be notified");
-    assert!(!account.client.account_db()?.inbox_retry_ready("unrelated-backoff", at + 1)?);
+    assert!(!crate::bus::couriers::head_refresh::inbound::eligible(account, &unrelated_key));
+    assert!(!account.client.account_db()?.inbox_retry_ready(&unrelated_key, at + 1)?);
+    assert!(account.client.account_db()?.inbox_retry_ready(&unrelated_key, at + 2)?);
     // Run the existing receive loop with a one-hour tick; only the refresh wake can drive it.
-    crate::bus::connection_manager::receive::test_redrive(account, count).await?;
-    assert!(now_unix_timestamp() < at + 2, "must precede the old retry deadline");
+    crate::bus::connection_manager::receive::test_redrive(account, "thread", count).await?;
+    assert!(!crate::bus::couriers::head_refresh::inbound::eligible(account, &unrelated_key));
+    assert!(!account.client.account_db()?.inbox_retry_ready(&unrelated_key, at + 1)?);
+    assert!(account.client.account_db()?.inbox_retry_ready(&unrelated_key, at + 2)?);
+    assert_eq!(
+        account.client.account_db()?.defer_inbox_entry(
+            &unrelated_key,
+            &serde_json::to_vec(unrelated)?,
+            at,
+        )?,
+        2,
+        "refresh/redrive must not consume an unrelated attempt"
+    );
     assert_eq!(account.client.direct_messages("thread")?.len(), count);
     assert!(!account.client.account_db()?.has_inbox_retry(key)?);
     assert_eq!(
@@ -489,12 +527,36 @@ async fn verify_refresh_redrive(
     Ok(())
 }
 
+async fn assert_wait_scope(state: &mut LocalBusDaemonState, opaque: bool) -> TestResult {
+    for method in ["group.read", "group.receive"] {
+        let result = read_group(state, method).await;
+        if opaque {
+            // A directory failure precedes private-route decoding. Opaque retries
+            // remain background work and cannot hold an assumed group RPC.
+            assert_eq!(result?.response_body["decrypted_messages"], json!([]));
+        } else {
+            let error = result.err().ok_or("known group dependency must remain pending")?;
+            let wire = crate::bus::io::local_bus_error_body(&error);
+            assert_eq!(wire.code, "NetworkingPending");
+            assert!(wire.retry_after_ms.is_some());
+            assert!(wire.details.as_ref().ok_or("details")?.get("networking").is_some());
+        }
+    }
+    Ok(())
+}
+
 async fn characterise_gateway_admission(
     local_fresh: bool,
     peer_fresh: bool,
     serve_peer: bool,
 ) -> TestResult {
+    Box::pin(admission_case((local_fresh, peer_fresh, serve_peer), false)).await
+}
+
+async fn admission_case(flags: (bool, bool, bool), duplicate_redelivery: bool) -> TestResult {
+    let (local_fresh, peer_fresh, serve_peer) = flags;
     let (alice, bob, entry) = renamed_group_fixture().await?;
+    let unrelated = group_entry(&alice, &bob, "unrelated-backoff", 3)?;
     let second = if !local_fresh && !peer_fresh && !serve_peer {
         Some(group_entry(&alice, &bob, "second-after-rename", 2)?)
     } else {
@@ -562,13 +624,7 @@ async fn characterise_gateway_admission(
     assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 1)?.len(), 0);
     assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 2)?.len(), count);
     let mut state = daemon(account, &alice.root.0);
-    for method in ["group.read", "group.receive"] {
-        let error = read_group(&mut state, method).await.err().ok_or("must remain pending")?;
-        let wire = crate::bus::io::local_bus_error_body(&error);
-        assert_eq!(wire.code, "NetworkingPending");
-        assert!(wire.retry_after_ms.is_some());
-        assert!(wire.details.as_ref().ok_or("details")?.get("networking").is_some());
-    }
+    assert_wait_scope(&mut state, !peer_fresh && !serve_peer).await?;
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     assert_retry_retained(account, &key)?;
     verify_refresh_redrive(
@@ -576,8 +632,8 @@ async fn characterise_gateway_admission(
         (&alice.manifest, &bob.manifest),
         (local_fresh, peer_fresh, serve_peer),
         &key,
-        count,
-        at,
+        (count, at),
+        &unrelated,
     )
     .await?;
     let received = read_group(&mut state, "group.receive").await?;
@@ -586,6 +642,10 @@ async fn characterise_gateway_admission(
         state.accounts.get("owner").ok_or("Alice")?.client.direct_messages("thread")?.len(),
         count
     );
+    if duplicate_redelivery {
+        let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+        review::assert_duplicate_after_refresh(account, entry, count, at, &key).await?;
+    }
     directory.abort();
     Ok(())
 }
@@ -819,5 +879,7 @@ async fn new_inbound_after_rename_with_expired_head_is_pending_then_applied() ->
 
 #[tokio::test]
 async fn parked_inbound_is_applied_after_refresh_once() -> TestResult {
-    Box::pin(characterise_gateway_admission(false, false, false)).await
+    Box::pin(admission_case((false, false, false), true)).await
 }
+
+mod review;

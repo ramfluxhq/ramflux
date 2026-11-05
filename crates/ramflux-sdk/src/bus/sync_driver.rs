@@ -356,10 +356,10 @@ async fn prepare_entry(
         advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
         return Ok(None);
     }
-    head_inbound::consume(account, &key);
     if replay && backpressure.saturated(&account.client, &entry, now)? {
         return Ok(None);
     }
+    head_inbound::consume(account, &key);
     let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
     let outcome = match committed_retry {
         Err(error) => Err(error),
