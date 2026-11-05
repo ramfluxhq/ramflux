@@ -695,4 +695,4 @@ mod forwarded;
 
 mod new_traffic;
 
-mod drain;
+pub(super) mod drain;

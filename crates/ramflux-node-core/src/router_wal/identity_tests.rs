@@ -7,6 +7,7 @@ use super::*;
 use crate::{
     RouterRedbStore, durability_test_hooks::observe, router_store::incarnation::test_store,
 };
+use redb::ReadableDatabase;
 use std::sync::atomic::{AtomicBool, Ordering};
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 fn fixture(name: &str) -> PathBuf {
@@ -86,8 +87,39 @@ pub(crate) fn upgrade() -> Result {
             let directory = if legacy_root { wal.clone() } else { router_wal_shard_root(&wal, 0) };
             fs::create_dir_all(&directory)?;
             write_legacy_router_wal_segment(&directory, "legacy-row", i64::MAX, &entry(50))?;
+            let rotated = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&rotated);
+            let guard = observe(
+                root.clone(),
+                Arc::new(move |_, op, _| {
+                    if op == "rotation_pending" {
+                        observed.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                }),
+            );
             let store = test_store(&root, mode, u64::MAX)?;
             let router = store.load_router()?.expect("upgraded router");
+            assert!(!rotated.load(Ordering::SeqCst), "pre-S6 upgrade must not rotate");
+            drop(guard);
+            assert!(
+                fs::read(router_wal_segment_path(&directory, 0))?.starts_with(ROUTER_WAL_MAGIC)
+            );
+            let tx = store.migration_db().begin_read()?;
+            let snapshots = tx.open_table(crate::ROUTER_SNAPSHOT_TABLE)?;
+            let metadata: serde_json::Value = serde_json::from_slice(
+                snapshots.get("session_push_wal_v1")?.expect("association").value(),
+            )?;
+            let key = if legacy_root { "" } else { "router-wal-shard-0000" };
+            assert_eq!(metadata["chains"][key]["legacy"], serde_json::json!([0]));
+            assert_eq!(metadata["chains"][key]["anchor"], 0);
+            assert_eq!(metadata["chains"][key]["head"], 0);
+            assert_eq!(
+                metadata["directory_id"].as_str(),
+                Some(fs::read_to_string(wal.join("identity"))?.as_str())
+            );
+            drop(snapshots);
+            drop(tx);
             let id = store.inbox_status("p2-target")?.0.expect("upgraded E");
             assert_eq!(store.inbox_status("p2-target")?.1, 70);
             assert_eq!(

@@ -74,25 +74,12 @@ impl RouterRedbStore {
         for cursor in cursors {
             self.checkpoint_incarnation(&txn, cursor)?;
         }
-        {
-            let mut table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(redb_error)?;
-            for cursor in cursors {
-                let incarnation = super::incarnation::read_id(&table, &cursor.target_delivery_id)?;
-                let previous = table
-                    .get(cursor.target_delivery_id.as_str())
-                    .map_err(redb_error)?
-                    .map(|value| serde_json::from_slice::<CursorAckState>(value.value()))
-                    .transpose()
-                    .map_err(redb_error)?;
-                let merged = merge_cursor(previous, cursor);
-                table
-                    .insert(
-                        cursor.target_delivery_id.as_str(),
-                        super::incarnation::encode_cursor(&merged, incarnation.as_deref())?
-                            .as_slice(),
-                    )
-                    .map_err(redb_error)?;
-            }
+        for cursor in cursors {
+            let bytes = cursor_bytes(&txn, cursor)?;
+            txn.open_table(ROUTER_CURSOR_STATE_TABLE)
+                .map_err(redb_error)?
+                .insert(cursor.target_delivery_id.as_str(), bytes.as_slice())
+                .map_err(redb_error)?;
         }
         for cursor in cursors {
             crate::home_migration_store::drain::receiver_settled(&txn, cursor)?;
@@ -130,17 +117,72 @@ fn redb_error(error: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(error.to_string())
 }
 
+fn previous(
+    txn: &redb::WriteTransaction,
+    cursor: &CursorAckState,
+) -> Result<Option<CursorAckState>, NodeCoreError> {
+    txn.open_table(ROUTER_CURSOR_STATE_TABLE)
+        .map_err(redb_error)?
+        .get(cursor.target_delivery_id.as_str())
+        .map_err(redb_error)?
+        .map(|row| super::incarnation::decode_cursor(row.value()))
+        .transpose()
+}
+fn merged_bytes(
+    txn: &redb::WriteTransaction,
+    cursor: &CursorAckState,
+    previous: Option<CursorAckState>,
+    metadata: Option<&(String, u64)>,
+) -> Result<Vec<u8>, NodeCoreError> {
+    let mut merged = merge_cursor(previous, cursor);
+    if let Some((_, issued)) = metadata {
+        merged.issued_inbox_seq = merged.issued_inbox_seq.max(*issued);
+        let high_water = super::incarnation_state::high_water(&merged);
+        if high_water > *issued {
+            super::incarnation_state::set(
+                txn,
+                &cursor.target_delivery_id,
+                high_water,
+                metadata.map(|(id, _)| id.as_str()),
+                false,
+            )?;
+        }
+    }
+    super::incarnation::encode_cursor(&merged, metadata.as_ref().map(|(id, _)| id.as_str()))
+}
 pub(super) fn cursor_bytes(
     txn: &redb::WriteTransaction,
     cursor: &CursorAckState,
 ) -> Result<Vec<u8>, NodeCoreError> {
-    let table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(redb_error)?;
-    let previous = table
-        .get(cursor.target_delivery_id.as_str())
-        .map_err(redb_error)?
-        .map(|value| serde_json::from_slice::<CursorAckState>(value.value()))
-        .transpose()
-        .map_err(redb_error)?;
-    let incarnation = super::incarnation::read_id(&table, &cursor.target_delivery_id)?;
-    super::incarnation::encode_cursor(&merge_cursor(previous, cursor), incarnation.as_deref())
+    merged_bytes(
+        txn,
+        cursor,
+        previous(txn, cursor)?,
+        super::incarnation_state::read(txn, &cursor.target_delivery_id)?.as_ref(),
+    )
+}
+/// Unknown ACK/NACK is a no-op only when neither a counter nor an entry exists.
+pub(super) fn ack_cursor_bytes(
+    txn: &redb::WriteTransaction,
+    cursor: &CursorAckState,
+) -> Result<Option<Vec<u8>>, NodeCoreError> {
+    let previous = previous(txn, cursor)?;
+    let metadata = super::incarnation_state::read(txn, &cursor.target_delivery_id)?;
+    if metadata.is_none() {
+        let table = txn.open_table(super::super::ROUTER_INBOX_ENTRY_TABLE).map_err(redb_error)?;
+        let start = super::inbox_entry_storage_key(&cursor.target_delivery_id, 0);
+        let end = super::inbox_entry_storage_key(&cursor.target_delivery_id, u64::MAX);
+        let has_entry = table
+            .range(start.as_str()..=end.as_str())
+            .map_err(redb_error)?
+            .next()
+            .transpose()
+            .map_err(redb_error)?
+            .is_some();
+        if previous.is_some() || has_entry {
+            return Err(NodeCoreError::InboxIncarnationMissing);
+        }
+        return Ok(None);
+    }
+    merged_bytes(txn, cursor, previous, metadata.as_ref()).map(Some)
 }

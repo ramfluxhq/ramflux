@@ -39,6 +39,15 @@ impl RouterRedbStore {
                 .transpose()
                 .map_err(storage)?;
             let mut view = MailboxCutoverView::new(cursor, now);
+            if let Some(row) = tx
+                .open_table(super::incarnation_state::TABLE)
+                .map_err(storage)?
+                .get(target.as_str())
+                .map_err(storage)?
+            {
+                view.high_water =
+                    view.high_water.max(super::incarnation_state::decode(row.value())?.1);
+            }
             for row in rows
                 .range(
                     inbox_entry_storage_key(target, 0).as_str()

@@ -26,11 +26,25 @@ fn stored(
 ) -> std::result::Result<Option<StoredCursor>, NodeCoreError> {
     let txn = store.db.begin_read().map_err(error)?;
     let table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(error)?;
-    table
+    let mut stored = table
         .get(target)
         .map_err(error)?
-        .map(|row| serde_json::from_slice(row.value()).map_err(error))
+        .map(|row| serde_json::from_slice::<StoredCursor>(row.value()))
         .transpose()
+        .map_err(error)?;
+    if let Some(row) = txn.open_table(state::TABLE).map_err(error)?.get(target).map_err(error)? {
+        let (id, issued) = state::decode(row.value())?;
+        let stored = stored.get_or_insert_with(|| StoredCursor {
+            cursor: CursorAckState {
+                target_delivery_id: target.into(),
+                ..CursorAckState::default()
+            },
+            inbox_incarnation_id: None,
+        });
+        stored.inbox_incarnation_id = Some(id);
+        stored.cursor.issued_inbox_seq = stored.cursor.issued_inbox_seq.max(issued);
+    }
+    Ok(stored)
 }
 
 fn entry(seq: u64) -> InboxEntry {
@@ -68,6 +82,7 @@ fn reopen(path: &Path) -> std::result::Result<RouterRedbStore, NodeCoreError> {
 
 #[test]
 fn inbox_incarnation_lifecycle() -> Result {
+    crate::home_migration_store::drain_then_ack_restart_preserves_incarnation_and_ack()?;
     crate::router_wal::identity_tests::lifecycle()?;
     let root = fixture("lifecycle");
     let path = root.join("db");
@@ -131,6 +146,7 @@ fn pre_s6_store_upgrade() -> Result {
         ..CursorAckState::default()
     };
     let txn = store.db.begin_write()?;
+    txn.open_table(state::TABLE)?.remove("target")?;
     {
         let mut table = txn.open_table(ROUTER_CURSOR_STATE_TABLE)?;
         let bytes = serde_json::to_vec(&cursor)?;
@@ -152,5 +168,111 @@ fn pre_s6_store_upgrade() -> Result {
     assert_eq!(stored(&store, "target")?.expect("cursor").inbox_incarnation_id, Some(id));
     drop(store);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn append_metadata_does_not_rewrite_ack_history() -> Result {
+    for mode in 0..3 {
+        let root = fixture("append-work");
+        let store = test_store(&root, mode, u64::MAX)?;
+        store.record_inbox_entry(&entry(7))?;
+        let id = store.inbox_status("target")?.0.expect("E");
+        let mut cursor = CursorAckState {
+            target_delivery_id: "target".into(),
+            issued_inbox_seq: 7,
+            ..CursorAckState::default()
+        };
+        for i in 0..1024 {
+            let id = format!("ack-{i:04}-0123456789abcdef");
+            cursor.recent_ack_ids.push_back(id.clone());
+            cursor.acked_envelope_ids.insert(id);
+        }
+        store.retain_cursor_checkpoint(&cursor)?;
+        let before = {
+            let tx = store.db.begin_read()?;
+            let table = tx.open_table(ROUTER_CURSOR_STATE_TABLE)?;
+            table.get("target")?.expect("history").value().to_vec()
+        };
+        work::take();
+        store.record_inbox_entry(&entry(8))?;
+        let append = work::take();
+        assert_eq!(
+            (append.reads, append.read_bytes, append.writes, append.write_bytes),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(append.metadata_writes, 1);
+        assert_eq!(store.inbox_status("target")?, (Some(id), 8));
+        let tx = store.db.begin_read()?;
+        assert_eq!(
+            tx.open_table(ROUTER_CURSOR_STATE_TABLE)?.get("target")?.expect("history").value(),
+            before
+        );
+        drop(tx);
+        cursor.last_acknowledged_inbox_seq = Some(8);
+        cursor.acked_inbox_seqs.insert(8);
+        work::take();
+        store.record_ack_increment(&cursor, "incarnation-row")?;
+        let ack = work::take();
+        assert_eq!(
+            ack.reads, 2,
+            "one merged history read plus the existing migration settlement read"
+        );
+        println!(
+            "mode={mode}: unchanged history={} bytes, append JSON read/write=0/0, metadata writes=1 (40 bytes), ACK cursor reads={}",
+            before.len(),
+            ack.reads
+        );
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+#[test]
+fn missing_incarnation_ack_and_nack_fail_closed() -> Result {
+    for shape in ["entry", "cursor", "both"] {
+        let root = fixture("missing-E");
+        let store = test_store(&root, 0, u64::MAX)?;
+        store.record_inbox_entry(&entry(1))?;
+        let tx = store.db.begin_write()?;
+        tx.open_table(state::TABLE)?.remove("target")?;
+        if shape == "entry" {
+            tx.open_table(ROUTER_CURSOR_STATE_TABLE)?.remove("target")?;
+        } else {
+            let legacy = CursorAckState {
+                target_delivery_id: "target".into(),
+                issued_inbox_seq: 1,
+                ..CursorAckState::default()
+            };
+            tx.open_table(ROUTER_CURSOR_STATE_TABLE)?
+                .insert("target", serde_json::to_vec(&legacy)?.as_slice())?;
+        }
+        if shape == "cursor" {
+            crate::router_store::expiry_index::remove_inbox_row(
+                &tx,
+                &crate::router_store::inbox_entry_storage_key("target", 1),
+            )?;
+        }
+        tx.commit()?;
+        let cursor = CursorAckState {
+            target_delivery_id: "target".into(),
+            last_acknowledged_inbox_seq: Some(1),
+            ..CursorAckState::default()
+        };
+        assert!(matches!(
+            store.record_ack_increment(&cursor, "row"),
+            Err(NodeCoreError::InboxIncarnationMissing)
+        ));
+        assert!(matches!(
+            store.record_nack_increment(&cursor),
+            Err(NodeCoreError::InboxIncarnationMissing)
+        ));
+        assert_eq!(
+            store.load_delivery_state(0)?.0.pull_after("target", 0, 10).len(),
+            usize::from(shape != "cursor")
+        );
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+    }
     Ok(())
 }

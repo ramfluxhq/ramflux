@@ -33,6 +33,8 @@ pub enum NodeCoreError {
     StoreDoesNotExist { path: std::path::PathBuf },
     #[error("redb operation failed: {0}")]
     Redb(String),
+    #[error("inbox_incarnation_missing")]
+    InboxIncarnationMissing,
     #[error("corrupt migration drain row: {0}")]
     MigrationDrainCorrupt(String),
     #[error(
