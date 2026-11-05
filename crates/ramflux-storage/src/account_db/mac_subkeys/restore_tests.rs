@@ -328,3 +328,57 @@ fn database_digest(db: &Connection) -> Result<[u8; 32], StorageError> {
     }
     Ok(digest.finalize().into())
 }
+
+#[test]
+fn pre_bundle_merge_does_not_invent_archive_marker_authority() -> TestResult {
+    for version in [12, 13] {
+        let (root, source) = crate::tests::test_db(&format!("mac-raw-prebundle-{version}"))?;
+        seed_deleted(&source)?;
+        source.connection.execute_batch(
+            "DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14;",
+        )?;
+        if version == 12 {
+            source.connection.execute_batch("DELETE FROM schema_migration WHERE schema_version=13; DROP INDEX IF EXISTS runtime_outbox_object_selector;")?;
+            source.connection.execute(
+                "UPDATE schema_migration SET checksum=?1 WHERE schema_version=1",
+                params![crate::schema_object_erasure::V12_SENTINEL],
+            )?;
+        }
+        let path = root.join("archive.db");
+        let archive = source.write_backup_snapshot(&path)?;
+        let archive_hash = Sha256::digest(std::fs::read(&path)?);
+        for mode in 0..3 {
+            let (local_root, local) =
+                crate::tests::test_db(&format!("mac-raw-local-{version}-{mode}"))?;
+            let target = root.join(format!("target-{mode}.db"));
+            let snapshot = local.write_backup_snapshot(&target)?;
+            let mut merged = BackupDatabase::open(&target, &snapshot.key)?;
+            let before = load(&merged.db)?;
+            match mode {
+                0 => {
+                    merged.merge_backup(&path, &archive.key, || Ok(()))?;
+                }
+                1 => {
+                    merged.merge_native_backup(&path, &archive.key, || Ok(()))?;
+                }
+                _ => {
+                    merged.merge_backup_candidate(&path, &archive.key, || Ok(()))?;
+                }
+            }
+            assert_eq!(merge::load_set(&merged.db, "main")?.len(), 1);
+            assert!(load(&merged.db)?.keys == before.keys, "raw archive replaced local authority");
+            let installed_root = root.join(format!("installed-{mode}"));
+            let (restored, _) = install(&installed_root, &merged)?;
+            assert!(!restored.message_is_deleted("erased")?);
+            assert!(!restored.envelope_refers_to_deleted_message("envelope")?);
+            drop(restored);
+            drop(merged);
+            drop(local);
+            std::fs::remove_dir_all(local_root)?;
+        }
+        assert_eq!(Sha256::digest(std::fs::read(&path)?), archive_hash);
+        drop(source);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}

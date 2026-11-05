@@ -82,13 +82,36 @@ fn associations(
 /// Validate both sets and all associations before modifying any authority.
 pub(crate) fn prepare(db: &Connection) -> Result<Associations, StorageError> {
     let local = load_set(db, "main")?;
-    let incoming = load_set(db, "incoming")?;
+    let version: i64 = db.query_row(
+        "SELECT COALESCE(MAX(schema_version),0) FROM incoming.schema_migration",
+        [],
+        |row| row.get(0),
+    )?;
+    let incoming = if version < VERSION {
+        // A raw pre-bundle archive has no recoverable MAC authority. Import its
+        // data without minting authority from the enclosing archive key; legacy
+        // keyed markers remain unmatched, as for a fresh pre-bundle restore.
+        let partial: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE name='account_mac_bundle' OR name='account_mac_marker_bundle')", [], |row| row.get(0),
+        )?;
+        if partial {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        Vec::new()
+    } else {
+        load_set(db, "incoming")?
+    };
     if local.len() + incoming.iter().filter(|b| !local.iter().any(|l| l.id == b.id)).count() > LIMIT
     {
         return Err(StorageError::AuthorizationRejected);
     }
     let mut ids = associations(db, "main", &local)?;
-    for (marker, id) in associations(db, "incoming", &incoming)? {
+    let incoming_ids = if incoming.is_empty() {
+        Associations::new()
+    } else {
+        associations(db, "incoming", &incoming)?
+    };
+    for (marker, id) in incoming_ids {
         if ids.get(&marker).is_some_and(|old| *old != id) {
             return Err(StorageError::AuthorizationRejected);
         }
