@@ -239,7 +239,7 @@ fn receiver_ack_at_a_after_commit_counts_receiver_acked_and_releases() -> TestRe
         let cursor = crate::CursorAckState {
             target_delivery_id: s.target.clone(),
             last_acknowledged_inbox_seq: (!nack_path).then_some(rows[2].entry.inbox_seq),
-            retired_inbox_seqs: vec![rows[1].entry.inbox_seq],
+            retired_inbox_seqs: vec![rows[0].entry.inbox_seq, rows[1].entry.inbox_seq],
             settled_inbox_seq: rows[0].entry.inbox_seq,
             acked_inbox_seqs: [rows[2].entry.inbox_seq].into(),
             ..Default::default()

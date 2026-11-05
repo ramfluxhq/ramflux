@@ -174,6 +174,8 @@ pub struct OpaqueDeviceInbox {
     pub(crate) aborted_ranges: BTreeMap<String, Vec<(u64, u64)>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     incarnations: BTreeMap<String, String>,
+    /// One row per retained live delivery, rebuilt from durable rows at startup.
+    /// ACK, NACK retirement, expiry, abort cleanup and target removal release it.
     #[serde(with = "pending_rows")]
     pending: BTreeMap<String, BTreeMap<u64, InboxEntry>>,
     cursors: BTreeMap<String, CursorAckState>,
@@ -244,8 +246,10 @@ impl OpaqueDeviceInbox {
         &mut self,
         views: &crate::router_store::publication::PublishedViews,
     ) {
-        for (target, (id, limit, aborted)) in views {
-            let Some(id) = id else {
+        for (target, view) in views {
+            let limit = &view.issued;
+            let aborted = &view.aborted;
+            let Some(id) = &view.incarnation else {
                 self.remove_target(target);
                 continue;
             };
@@ -263,7 +267,7 @@ impl OpaqueDeviceInbox {
             self.next_seq.insert(target.clone(), limit.saturating_add(1));
             if let Some(cursor) = self.cursors.get_mut(target) {
                 cursor.issued_inbox_seq = cursor.issued_inbox_seq.min(*limit);
-                cursor.settled_inbox_seq = cursor.settled_inbox_seq.min(*limit);
+                cursor.settled_inbox_seq = view.settled;
                 cursor.inbox_seq = cursor.inbox_seq.min(*limit);
                 cursor.acked_inbox_seqs.retain(|seq| *seq <= *limit);
                 cursor.nack_attempts.retain(|seq, _| *seq <= *limit);
@@ -646,23 +650,17 @@ impl OpaqueDeviceInbox {
 
     fn advance_settled(&mut self, target: &str) {
         let issued = self.next_seq.get(target).copied().unwrap_or(1).saturating_sub(1);
+        // P is a finalized durable boundary: a guard with no pending row still
+        // stops the walk. Offline fixtures/recovery use their finalized issued view.
+        // Lock order is shard -> publication; neither data lock crosses storage I/O.
+        let boundary = self.publication.as_ref().map_or(issued, |core| {
+            self.incarnation_id(target).map_or(0, |id| core.settled_view(target, id).0)
+        });
         let settled = self
             .pending
             .get(target)
-            .and_then(|entries| entries.first_key_value().map(|(&seq, _)| seq))
-            .map_or(issued, |first| first.saturating_sub(1));
-        // A candidate is not durable authority. A contended publication observation
-        // keeps the previous floor; the store revalidates against durable rows.
-        let settled = if let Some(core) = &self.publication {
-            self.incarnation_id(target)
-                .and_then(|id| core.try_settlement_limit(target, id))
-                .map_or_else(
-                    || self.cursors.get(target).map_or(0, |c| c.settled_inbox_seq),
-                    |limit| settled.min(limit),
-                )
-        } else {
-            settled
-        };
+            .and_then(BTreeMap::first_key_value)
+            .map_or(boundary, |(&first, _)| boundary.min(first.saturating_sub(1)));
         if let Some(cursor) = self.cursors.get_mut(target) {
             cursor.issued_inbox_seq = cursor.issued_inbox_seq.max(issued);
             cursor.settled_inbox_seq = cursor.settled_inbox_seq.max(settled);

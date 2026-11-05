@@ -123,7 +123,13 @@ struct Registry {
     resources_published: BTreeSet<String>,
 }
 
-pub(crate) type PublishedViews = BTreeMap<String, (Option<String>, u64, Vec<(u64, u64)>)>;
+pub(crate) struct PublishedInboxView {
+    pub(crate) incarnation: Option<String>,
+    pub(crate) issued: u64,
+    pub(crate) settled: u64,
+    pub(crate) aborted: Vec<(u64, u64)>,
+}
+pub(crate) type PublishedViews = BTreeMap<String, PublishedInboxView>;
 type EntryCleanup = Arc<dyn Fn(&str, u64) + Send + Sync>;
 type ReplayCleanup = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -279,16 +285,17 @@ impl PublicationCore {
             .map(|(key, inbox)| {
                 (
                     key.target.clone(),
-                    (
-                        inbox.identity_durable.then(|| key.incarnation.clone()),
-                        inbox.published,
-                        inbox
+                    PublishedInboxView {
+                        incarnation: inbox.identity_durable.then(|| key.incarnation.clone()),
+                        issued: inbox.published,
+                        settled: inbox.committed_settled.min(inbox.published),
+                        aborted: inbox
                             .aborted
                             .iter()
                             .filter(|(start, _)| **start <= inbox.published)
                             .map(|(&a, &b)| (a, b.min(inbox.published)))
                             .collect(),
-                    ),
+                    },
                 )
             })
             .collect();
@@ -403,16 +410,6 @@ impl PublicationCore {
             .inboxes
             .get(&Key { target: target.into(), incarnation: incarnation.into() })
             .map_or((0, 0), |inbox| (inbox.published, inbox.committed_settled.min(inbox.published)))
-    }
-
-    // Inbox mutation holds a shard lock. Never wait for the registry here: snapshots
-    // take registry -> shard. Contention preserves the old candidate, not raw A.
-    pub(crate) fn try_settlement_limit(&self, target: &str, incarnation: &str) -> Option<u64> {
-        let registry = self.shared.registry.try_lock().ok()?;
-        registry
-            .inboxes
-            .get(&Key { target: target.into(), incarnation: incarnation.into() })
-            .map(|inbox| inbox.published)
     }
 
     pub(crate) fn commit_settled(&self, target: &str, incarnation: &str, settled: u64) {

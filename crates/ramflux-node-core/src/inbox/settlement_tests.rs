@@ -33,6 +33,23 @@ fn ack(seq: u64) -> ramflux_protocol::Ack {
         cursor_after: None,
     }
 }
+fn nack() -> ramflux_protocol::Nack {
+    ramflux_protocol::Nack {
+        schema: "ramflux.nack.v1".into(),
+        version: 1,
+        domain: "ramflux.nack.v1".into(),
+        ext: ramflux_protocol::Ext::default(),
+        signed: entry(3).envelope.signed,
+        nack_id: "nack-3".into(),
+        envelope_id: "entry-3".into(),
+        receiver_device_id: "receiver".into(),
+        received_at: 1_760_000_010,
+        reason: ramflux_protocol::NackReason::Expired,
+        retry_after: None,
+        proof_hash: None,
+        new_home_node_hint: None,
+    }
+}
 fn run_receiver(nack_leg: bool) -> Result {
     for mode in 0..=2 {
         let root = fixture(&format!("settled-{mode}-{nack_leg}"));
@@ -50,25 +67,16 @@ fn run_receiver(nack_leg: bool) -> Result {
         first_ack.ext.ext.insert("inbox_seq".into(), serde_json::json!(1));
         let cursor = router.apply_ack_for_target("target", &first_ack)?;
         assert_eq!(core.settled_view("target", &id), (1, 0), "tentative ACK does not publish R");
+        assert_eq!(
+            router.inbox_snapshot().cursor_state("target").expect("cursor").settled_inbox_seq,
+            0,
+            "snapshot must not export tentative R"
+        );
         store.record_ack_increment(&cursor, &first_ack.envelope_id)?;
         assert_eq!(persisted(&store).settled_inbox_seq, 1, "ACK must stop before held guard");
         assert_eq!(core.settled_view("target", &id), (1, 1));
         if nack_leg {
-            let mut nack = ramflux_protocol::Nack {
-                schema: "ramflux.nack.v1".into(),
-                version: 1,
-                domain: "ramflux.nack.v1".into(),
-                ext: ramflux_protocol::Ext::default(),
-                signed: entry(3).envelope.signed,
-                nack_id: "nack-3".into(),
-                envelope_id: "entry-3".into(),
-                receiver_device_id: "receiver".into(),
-                received_at: 1_760_000_010,
-                reason: ramflux_protocol::NackReason::Expired,
-                retry_after: None,
-                proof_hash: None,
-                new_home_node_hint: None,
-            };
+            let mut nack = nack();
             nack.ext.ext.insert("inbox_seq".into(), serde_json::json!(3));
             for _ in 0..ROUTER_NACK_RETRY_LIMIT {
                 let cursor = router.apply_nack_for_target("target", &nack)?;
@@ -117,6 +125,16 @@ fn run_receiver(nack_leg: bool) -> Result {
                 reopened.resume("target", 0, 10).iter().any(|row| row.inbox_seq == 2),
                 "guard-era checkpoint must not delete later accepted WAL row"
             );
+            if nack_leg {
+                assert!(
+                    reopened
+                        .inbox_snapshot()
+                        .dead_letter_index
+                        .get("target")
+                        .is_some_and(|rows| rows.contains_key(&3)),
+                    "startup rebuilds the sorted dead-letter index from durable cursor metadata"
+                );
+            }
             drop(reopened);
             drop(store);
         }
@@ -159,5 +177,28 @@ fn ordered_indexes_restore_and_release() -> Result {
     assert!(merged.expiry.due.is_empty());
     inbox.remove_target("target");
     assert!(inbox.dead_letter_index.is_empty());
+    Ok(())
+}
+
+#[test]
+fn ordered_indexes_do_not_retain_retired_payloads() -> Result {
+    let mut inbox = OpaqueDeviceInbox::new();
+    for seq in 1..=u64::try_from(ROUTER_DEAD_LETTER_LIMIT * 2)? {
+        let row = inbox.append(entry(seq).envelope);
+        inbox.dead_letter("target", row.inbox_seq, DeadLetterReason::AckWindowOverflow);
+        assert!(inbox.pending.is_empty(), "retirement releases pending index");
+        assert!(inbox.retain_until.is_empty(), "retirement releases deadline index");
+        assert!(inbox.dead_letter_index["target"].len() <= ROUTER_DEAD_LETTER_LIMIT);
+    }
+    assert_eq!(inbox.dead_letter_index["target"].len(), ROUTER_DEAD_LETTER_LIMIT);
+    assert_eq!(
+        inbox.dead_letter_index["target"].first_key_value().map(|(&seq, _)| seq),
+        Some(u64::try_from(ROUTER_DEAD_LETTER_LIMIT)? + 1)
+    );
+    let mut restored: OpaqueDeviceInbox = serde_json::from_slice(&serde_json::to_vec(&inbox)?)?;
+    restored.bound_retained_receipts();
+    assert_eq!(restored.dead_letter_index, inbox.dead_letter_index);
+    restored.remove_target("target");
+    assert!(restored.dead_letter_index.is_empty());
     Ok(())
 }
