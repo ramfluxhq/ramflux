@@ -24,11 +24,24 @@ impl RouterRedbStore {
         previous: Option<&CursorAckState>,
         core: Option<&super::publication::PublicationCore>,
     ) -> Result<(CursorAckState, Option<String>), NodeCoreError> {
+        self.checkpoint_settlement(txn, incoming, previous, None)
+    }
+
+    pub(super) fn checkpoint_settlement(
+        &self,
+        txn: &redb::WriteTransaction,
+        incoming: &CursorAckState,
+        previous: Option<&CursorAckState>,
+        expired_at: Option<i64>,
+    ) -> Result<(CursorAckState, Option<String>), NodeCoreError> {
         let mut cursor = incoming.clone();
         let metadata = incarnation_state::read(txn, &cursor.target_delivery_id)?;
-        let Some((id, issued)) = metadata else {
+        let Some((id, mut issued)) = metadata else {
             return Ok((cursor, None));
         };
+        if let Some(wal) = &self.submission_wal {
+            issued = issued.max(wal.issued_sequence(&cursor.target_delivery_id)?);
+        }
         let previous_r = previous.map_or(0, |old| old.settled_inbox_seq);
         // Keep independently committed out-of-order dispositions during concurrent
         // receiver updates. Other checkpoint writers share the persisted cursor.
@@ -45,14 +58,17 @@ impl RouterRedbStore {
         let end = inbox_entry_storage_key(&cursor.target_delivery_id, u64::MAX);
         for row in entries.range(start.as_str()..=end.as_str()).map_err(incarnation::error)? {
             let (_, bytes) = row.map_err(incarnation::error)?;
-            let (entry, _) = expiry_index::decode_entry(bytes.value())?;
+            let (entry, deadline) = expiry_index::decode_entry(bytes.value())?;
+            if expired_at.is_some_and(|now| deadline <= now) {
+                continue;
+            }
             if !retires(&cursor, entry.inbox_seq) {
                 settled = settled.min(entry.inbox_seq.saturating_sub(1));
                 break;
             }
         }
         if let Some(wal) = &self.submission_wal
-            && let Some(seq) = wal.settlement_head(&cursor, previous_r)?
+            && let Some(seq) = wal.settlement_head(&cursor, previous_r, expired_at)?
         {
             settled = settled.min(seq.saturating_sub(1));
         }

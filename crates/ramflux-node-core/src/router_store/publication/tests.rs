@@ -241,7 +241,31 @@ fn aborted_slot_capacity() -> Result {
             core.reserve("target", &id, &[]),
             Err(PublicationRefusal::CapacityRetryAfter { retry_after_ms: 1000 })
         ));
+        let checkpoint = crate::CursorAckState {
+            target_delivery_id: "target".into(),
+            last_acknowledged_inbox_seq: Some(1),
+            acked_inbox_seqs: [1, 2 * u64::try_from(ABORTED_RANGE_CAPACITY)?].into(),
+            ..Default::default()
+        };
+        store.retain_cursor_checkpoint(&checkpoint)?;
+        // Independent effect: a previously refused real allocation and accepted
+        // row now complete, and the row survives reopen.
+        let retry = core.reserve("target", &id, &[])?;
+        assert_eq!(retry.sequence(), allocated_before + 1);
+        accept(&store, &retry)?;
+        drop(retry);
         drop(core);
+        drop(store);
+        let store = test_store(&root, mode, 1024 * 1024)?;
+        let router = store.load_router()?.ok_or("router")?;
+        assert!(
+            router.resume("target", 0, 10).iter().any(|row| row.inbox_seq == allocated_before + 1)
+        );
+        let core = store.publication_core()?;
+        assert_eq!(core.view("target", &id).1, Vec::<(u64, u64)>::new());
+        assert!(core.reserve("target", &id, &[]).is_ok(), "slots stay released after reopen");
+        drop(core);
+        drop(router);
         drop(store);
         std::fs::remove_dir_all(root)?;
     }

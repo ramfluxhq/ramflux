@@ -303,8 +303,9 @@ pub(super) fn sweep(
     txn: &redb::WriteTransaction,
     now: i64,
     dry_run: bool,
-) -> Result<usize, NodeCoreError> {
+) -> Result<(usize, std::collections::BTreeSet<String>), NodeCoreError> {
     let mut removed = 0;
+    let mut targets = std::collections::BTreeSet::new();
     let inbox_end = deadline_prefix(now.saturating_add(1));
     for key in due_keys(txn, INBOX_EXPIRY, &inbox_end)? {
         let row_key = row_key_of(&key);
@@ -316,6 +317,14 @@ pub(super) fn sweep(
             .map(|value| decode_entry(value.value()).map(|(_, deadline)| deadline <= now))
             .transpose()?;
         if due == Some(true) {
+            if let Some(bytes) = txn
+                .open_table(ROUTER_INBOX_ENTRY_TABLE)
+                .map_err(db_error)?
+                .get(row_key)
+                .map_err(db_error)?
+            {
+                targets.insert(decode_entry(bytes.value())?.0.target_delivery_id);
+            }
             removed += 1;
             if !dry_run {
                 txn.open_table(ROUTER_INBOX_ENTRY_TABLE)
@@ -384,5 +393,5 @@ pub(super) fn sweep(
                 .map_err(db_error)?;
         }
     }
-    Ok(removed)
+    Ok((removed, targets))
 }

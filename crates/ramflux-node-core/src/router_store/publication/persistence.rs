@@ -192,3 +192,38 @@ pub(crate) fn export_ranges(
     }
     Ok(())
 }
+
+/// Prune only reasons covered by the cursor written in this same transaction.
+pub(crate) fn prune_ranges(
+    tx: &redb::WriteTransaction,
+    cursor: &crate::CursorAckState,
+) -> Result<(), NodeCoreError> {
+    let mut table = tx.open_table(TABLE).map_err(error)?;
+    let Some(bytes) = table
+        .get(cursor.target_delivery_id.as_str())
+        .map_err(error)?
+        .map(|row| row.value().to_vec())
+    else {
+        return Ok(());
+    };
+    let mut stored: AbortedRanges = serde_json::from_slice(&bytes).map_err(error)?;
+    let id = incarnation_state::read(tx, &cursor.target_delivery_id)?.map(|(id, _)| id);
+    if id.as_deref() != Some(stored.incarnation.as_str()) {
+        return Err(error("aborted checkpoint incarnation mismatch"));
+    }
+    stored.ranges = stored
+        .ranges
+        .into_iter()
+        .filter_map(|(start, end)| {
+            (end > cursor.settled_inbox_seq)
+                .then_some((start.max(cursor.settled_inbox_seq.saturating_add(1)), end))
+        })
+        .collect();
+    table
+        .insert(
+            cursor.target_delivery_id.as_str(),
+            serde_json::to_vec(&stored).map_err(error)?.as_slice(),
+        )
+        .map_err(error)?;
+    Ok(())
+}

@@ -418,6 +418,12 @@ impl PublicationCore {
             .get_mut(&Key { target: target.into(), incarnation: incarnation.into() })
         {
             inbox.committed_settled = inbox.committed_settled.max(settled);
+            inbox.aborted = std::mem::take(&mut inbox.aborted)
+                .into_iter()
+                .filter_map(|(start, end)| {
+                    (end > settled).then_some((start.max(settled.saturating_add(1)), end))
+                })
+                .collect();
         }
     }
 

@@ -1101,6 +1101,7 @@ impl RouterRedbStore {
             let key = inbox_entry_storage_key(&cursor.target_delivery_id, sequence);
             expiry_index::remove_inbox_row(&write_txn, &key)?;
         }
+        publication::persistence::prune_ranges(&write_txn, cursor)?;
         crate::durability_io::boundary(&self.path, "direct_commit", || {
             write_txn.commit().map_err(std::io::Error::other)
         })
@@ -1161,6 +1162,7 @@ impl RouterRedbStore {
             let key = inbox_entry_storage_key(&cursor.target_delivery_id, *sequence);
             expiry_index::remove_inbox_row(&write_txn, &key)?;
         }
+        publication::persistence::prune_ranges(&write_txn, cursor)?;
         crate::durability_io::boundary(&self.path, "direct_commit", || {
             write_txn.commit().map_err(std::io::Error::other)
         })
@@ -1619,6 +1621,9 @@ impl RouterRedbStore {
                 inbox.restore_incarnation(&target, id);
             }
         }
+        // Recompute only from the finalized redb + WAL view, including a redb
+        // counter above a WAL-only accepted row. Never checkpoint the early floor.
+        inbox.finalize_recovered_settlement();
         publication::persistence::restore_ranges(self, &mut inbox)?;
         inbox.bound_retained_receipts();
         let mut replay_guard_state = if has_incremental_replay {

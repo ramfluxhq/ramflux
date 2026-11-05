@@ -709,11 +709,23 @@ impl OpaqueDeviceInbox {
         removed
     }
 
+    /// Recovery has finished merging every durable source before deriving R.
+    pub(crate) fn finalize_recovered_settlement(&mut self) {
+        let targets: Vec<_> = self.cursors.keys().cloned().collect();
+        for target in targets {
+            self.advance_settled(&target);
+            self.checkpoint_due.insert(target);
+        }
+    }
+
     /// Cursors changed by expiry, dead-lettering or recovery that need a durable checkpoint.
     pub(crate) fn take_checkpoint_due(&mut self) -> Vec<CursorAckState> {
         std::mem::take(&mut self.checkpoint_due)
             .into_iter()
-            .filter_map(|target| self.cursors.get(&target).cloned())
+            .filter_map(|target| {
+                self.advance_settled(&target);
+                self.cursors.get(&target).cloned()
+            })
             .collect()
     }
 
@@ -934,3 +946,6 @@ pub enum RouterSubmitOutcome {
     RejectedDeleted { target_delivery_id: String },
     RejectedSecurity { target_delivery_id: String, reason: String },
 }
+
+#[cfg(test)]
+mod retention_settlement_tests;

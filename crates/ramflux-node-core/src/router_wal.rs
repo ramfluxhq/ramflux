@@ -782,6 +782,35 @@ impl RouterWalStore {
         self.state.lock().map_or_else(|_| BTreeMap::new(), |state| state.issued_by_target.clone())
     }
 
+    pub(crate) fn issued_sequence(&self, target: &str) -> Result<u64, NodeCoreError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(identity::error)?
+            .issued_by_target
+            .get(target)
+            .copied()
+            .unwrap_or(0))
+    }
+
+    /// Visit only due entries, retaining the ordered sweep's bounded footprint.
+    pub(crate) fn retention_targets(&self, now: i64) -> Result<BTreeSet<String>, NodeCoreError> {
+        let state = self.state.lock().map_err(identity::error)?;
+        Ok(state
+            .entry_due
+            .iter()
+            .take_while(|(deadline, _)| *deadline <= now)
+            .filter_map(|(_, key)| {
+                state
+                    .submissions_by_replay_key
+                    .get(key)?
+                    .entry
+                    .as_ref()
+                    .map(|entry| entry.target_delivery_id.clone())
+            })
+            .collect())
+    }
+
     /// Apply a durable ACK/NACK cursor to the live projection, retaining replay receipts and issued floors.
     pub(crate) fn observe_settlement(
         &self,
@@ -800,11 +829,22 @@ impl RouterWalStore {
         &self,
         cursor: &crate::CursorAckState,
         previous: u64,
+        expired_at: Option<i64>,
     ) -> Result<Option<u64>, NodeCoreError> {
         let state = self.state.lock().map_err(identity::error)?;
         Ok(state.submissions_by_target.get(&cursor.target_delivery_id).and_then(|sequences| {
             sequences
                 .range((std::ops::Bound::Excluded(previous), std::ops::Bound::Unbounded))
+                .filter(|(_, keys)| {
+                    !expired_at.is_some_and(|now| {
+                        keys.iter().all(|key| {
+                            state
+                                .submissions_by_replay_key
+                                .get(key)
+                                .is_some_and(|record| record.retain_until() <= now)
+                        })
+                    })
+                })
                 .map(|(&seq, _)| seq)
                 .find(|seq| !crate::router_store::settlement::retires(cursor, *seq))
         }))

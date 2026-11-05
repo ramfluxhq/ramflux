@@ -146,7 +146,9 @@ fn run_receiver(nack_leg: bool) -> Result {
 #[test]
 fn settled_prefix_bounded_by_publication() -> Result {
     run_receiver(false)?;
-    run_receiver(true)
+    run_receiver(true)?;
+    super::retention_settlement_tests::sweep_and_checkpoint()?;
+    super::retention_settlement_tests::startup_after_wal_merge()
 }
 
 #[test]
