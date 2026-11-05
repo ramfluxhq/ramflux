@@ -54,8 +54,8 @@ pub struct MeshQuicServer {
 }
 
 pub struct MeshQuicConnection {
-    connection: quinn::Connection,
-    peer_spiffe_uri: Option<String>,
+    pub(crate) connection: quinn::Connection,
+    pub(crate) peer_spiffe_uri: Option<String>,
 }
 
 pub struct MeshQuicAcceptedRequest {
@@ -587,7 +587,9 @@ impl MeshQuicConnection {
     }
 }
 
-fn quinn_peer_spiffe_uri(connection: &quinn::Connection) -> Result<Option<String>, TransportError> {
+pub(crate) fn quinn_peer_spiffe_uri(
+    connection: &quinn::Connection,
+) -> Result<Option<String>, TransportError> {
     let Some(peer_identity) = connection.peer_identity() else {
         return Ok(None);
     };

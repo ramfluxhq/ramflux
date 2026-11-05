@@ -16,6 +16,9 @@ mod gateway_frame_reader;
 mod loopback;
 mod mesh_http;
 mod mesh_quic;
+mod mesh_quic_admission;
+#[cfg(test)]
+mod mesh_quic_handshake_tests;
 mod mesh_request_deadline;
 mod mesh_tls;
 mod perf_metrics;
@@ -139,4 +142,9 @@ pub use custody_binding::{
     custody_certificate_file_hash, custody_certificate_public_key_hash, custody_quic_exporter,
     custody_tcp_exporter, read_custody_open_frame, read_custody_tcp_frame,
     verify_custody_peer_certificate, write_custody_tcp_frame,
+};
+
+pub use mesh_quic_admission::{
+    MeshQuicAdmissionLimits, MeshQuicHandshakeDriver, MeshQuicHandshakeMetrics,
+    MeshQuicHandshakeSnapshot, MeshQuicReadyConnection,
 };

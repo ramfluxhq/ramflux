@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+pub(crate) mod admission;
+
 use quinn::VarInt;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::server::{WebPkiClientVerifier, danger::ClientCertVerifier};
@@ -471,6 +473,57 @@ mod tests {
         QUIC_SEND_WINDOW_DEFAULT, QUIC_STREAM_RECEIVE_WINDOW_DEFAULT, positive_u32_from_value,
         quic_varint_from_value,
     };
+
+    #[test]
+    fn server_admission_limits_are_applied() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let certs = crate::mesh_quic_handshake_tests::Certificates::new()?;
+        assert_eq!(
+            super::admission::server_tls(&certs.server, certs.roots())?.max_early_data_size,
+            0
+        );
+        for (requested, streams, window) in [
+            (crate::MeshQuicAdmissionLimits::default(), 64, 16 * 1024 * 1024),
+            (
+                crate::MeshQuicAdmissionLimits {
+                    bidi_streams: 8,
+                    receive_window: 4096,
+                    ..Default::default()
+                },
+                8,
+                4096,
+            ),
+            (
+                crate::MeshQuicAdmissionLimits {
+                    bidi_streams: u32::MAX,
+                    receive_window: u32::MAX,
+                    ..Default::default()
+                },
+                64,
+                16 * 1024 * 1024,
+            ),
+        ] {
+            let config = super::admission::server_config(&certs.server, certs.roots(), requested)?;
+            let actual = format!("{config:?}");
+            for field in [
+                format!("max_concurrent_bidi_streams: {streams}"),
+                format!("receive_window: {window}"),
+                "max_concurrent_uni_streams: 0".into(),
+                "stream_receive_window: 1048576".into(),
+                "send_window: 16777216".into(),
+                "crypto_buffer_size: 65536".into(),
+                "datagram_receive_buffer_size: None".into(),
+                "datagram_send_buffer_size: 0".into(),
+                "max_incoming: 64".into(),
+                "incoming_buffer_size: 65536".into(),
+                "incoming_buffer_size_total: 4194304".into(),
+                "max_idle_timeout: Some(30000)".into(),
+            ] {
+                assert!(actual.contains(&field), "missing {field} in {actual}");
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn gateway_quic_stream_limit_parse_positive_env_value() {
