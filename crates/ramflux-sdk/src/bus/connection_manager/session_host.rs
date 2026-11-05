@@ -136,7 +136,12 @@ async fn exchange(
             let queued_deadline = next_deadline(queue);
             tokio::select! {
                 biased;
-                _=stopping.changed()=>{interrupted=Some(DisconnectReason::Stop);result=Err(handle.pending());break;}
+                _=stopping.changed()=>{
+                    interrupted=Some(handle.shared.stop_reason.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .unwrap_or(DisconnectReason::Stop));
+                    result=Err(handle.pending());break;
+                }
                 ()=handle.shared.retirement_changed.notified()=>{if let Some(reason)=handle.take_retirement() {interrupted=Some(reason);result=Err(handle.pending());break;}}
                 _=call.cancelled.changed()=>{interrupted=Some(DisconnectReason::CallerCancelled);result=Err(expired());break;}
                 ()=call.reply.closed()=>{interrupted=Some(DisconnectReason::CallerCancelled);result=Err(expired());break;}
@@ -158,7 +163,10 @@ async fn exchange(
     if let Some(reason) = interrupted
         && (matches!(
             reason,
-            DisconnectReason::Stop | DisconnectReason::CallTimeout | DisconnectReason::Restart
+            DisconnectReason::Stop
+                | DisconnectReason::Lock
+                | DisconnectReason::CallTimeout
+                | DisconnectReason::Restart
         ) || engine.wire_writes != before)
     {
         return Some(reason);
