@@ -25,19 +25,7 @@ pub(crate) fn submit(
 ) -> Result<CustodyServerFrame, CustodyRefusal> {
     let DeliveryAuthority { source, .. } = credentials;
     verify_sender(credentials, &envelope, now)?;
-    let lease = match store.acquire_submission(&envelope.target_delivery_id) {
-        Ok(lease) => lease,
-        Err(crate::NodeCoreError::HomeMigration(reason)) => {
-            let response = router
-                .migration_submission_refusal(store, &envelope, reason, now)
-                .map_err(|_| CustodyRefusal::PersistenceUnavailable)?;
-            return Err(CustodyRefusal::HomeMigration {
-                reason,
-                nack: response.nack.map(Box::new),
-            });
-        }
-        Err(_) => return Err(CustodyRefusal::PersistenceUnavailable),
-    };
+    let lease = acquire_submission(router, store, &envelope, now)?;
     if store
         .custody_prekey(&envelope.target_delivery_id)
         .map_err(|_| CustodyRefusal::PersistenceUnavailable)?
@@ -45,9 +33,6 @@ pub(crate) fn submit(
     {
         return Err(CustodyRefusal::AuthorityUnavailable);
     }
-    router
-        .prepare_publication_target(store, &envelope.target_delivery_id)
-        .map_err(|_| CustodyRefusal::PersistenceUnavailable)?;
     let retry_owner = match store
         .admit_sender_retry(source, &envelope, i64::try_from(now).map_err(invalid)?)
         .map_err(|error| crate::sender_retry::custody_refusal(&error))?
@@ -78,6 +63,9 @@ pub(crate) fn submit(
     retry_owner
         .bind(&envelope.target_delivery_id)
         .map_err(|error| crate::sender_retry::custody_refusal(&error))?;
+    router
+        .prepare_publication_target(store, &envelope.target_delivery_id)
+        .map_err(|_| CustodyRefusal::PersistenceUnavailable)?;
     let replay = envelope_replay_tuple_key(source, &envelope);
     let expiry = envelope
         .created_at
@@ -95,6 +83,11 @@ pub(crate) fn submit(
             "online",
         ),
         RouterSubmitOutcome::OfflineQueued(queued) => (queued.entry, "offline_queued"),
+        RouterSubmitOutcome::RejectedSecurity { reason, .. } => {
+            return Err(crate::sender_retry::refusal_from_reason(&reason)
+                .as_ref()
+                .map_or(CustodyRefusal::InvalidInput, crate::sender_retry::custody_refusal));
+        }
         _ => return Err(CustodyRefusal::InvalidInput),
     };
     if let Err(error) = store.record_leased_submission(
@@ -104,6 +97,9 @@ pub(crate) fn submit(
         Some(source.root_commitment()),
         Some(lease),
     ) {
+        if crate::publication::proved_non_write() {
+            return Err(CustodyRefusal::AbortedRetrySafe);
+        }
         tracing::error!(%error,"custody inbox persistence failed after acceptance; terminating to avoid a state fork");
         std::process::abort();
     }
@@ -143,4 +139,22 @@ fn verify_sender(
     )
     .map_err(invalid)?;
     Ok(())
+}
+
+fn acquire_submission(
+    router: &RouterCore,
+    store: &RouterRedbStore,
+    envelope: &ramflux_protocol::Envelope,
+    now: u64,
+) -> Result<crate::SubmissionLease, CustodyRefusal> {
+    match store.acquire_submission(&envelope.target_delivery_id) {
+        Ok(lease) => Ok(lease),
+        Err(crate::NodeCoreError::HomeMigration(reason)) => {
+            let response = router
+                .migration_submission_refusal(store, envelope, reason, now)
+                .map_err(|_| CustodyRefusal::PersistenceUnavailable)?;
+            Err(CustodyRefusal::HomeMigration { reason, nack: response.nack.map(Box::new) })
+        }
+        Err(_) => Err(CustodyRefusal::PersistenceUnavailable),
+    }
 }

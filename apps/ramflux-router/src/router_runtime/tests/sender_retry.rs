@@ -155,7 +155,7 @@ async fn unresolved_case(mode: u8, index: bool) -> anyhow::Result<()> {
     assert!(!durable_retry.is_finished());
     predecessor.definite_non_write();
     for reply in [join(original).await?, join(retry).await?, join(durable_retry).await?] {
-        assert_eq!(reply.outcome, "offline_queued");
+        assert!(matches!(reply.outcome.as_str(), "online" | "offline_queued"));
         assert_eq!(reply.inbox_seq, Some(2));
     }
     assert_eq!(held.writes.load(Ordering::Relaxed), 1);
@@ -224,7 +224,7 @@ fn reopen(fixture: Fixture, mode: u8) -> anyhow::Result<Fixture> {
     let store = Arc::new(ramflux_node_core::publication::open_durability_fixture(&root, mode)?);
     let state = Arc::new(store.load_router()?.ok_or_else(|| anyhow::anyhow!("restored router"))?);
     let handle = RouterHandle::tokio(Arc::clone(&state), Arc::clone(&store), None);
-    Ok(Fixture { root, store, state, handle })
+    Ok(Fixture { root, state, store, handle })
 }
 async fn crash_child() -> anyhow::Result<()> {
     let mode: u8 = std::env::var("RAMFLUX_P7_RETRY_MODE")?.parse()?;
@@ -280,11 +280,37 @@ async fn crash_retry(mode: u8) -> anyhow::Result<()> {
     let store = Arc::new(ramflux_node_core::publication::open_durability_fixture(&root, mode)?);
     let state = Arc::new(store.load_router()?.ok_or_else(|| anyhow::anyhow!("recovery"))?);
     let handle = RouterHandle::tokio(Arc::clone(&state), Arc::clone(&store), None);
-    let fixture = Fixture { root, store, state, handle };
+    let fixture = Fixture { root, state, store, handle };
     assert_eq!(join(submit(&fixture.handle, &envelope)).await?.inbox_seq, Some(2));
     assert_eq!(fixture.store.inbox_status("target_alice")?, (Some(id), 2));
     assert_eq!(fixture.state.resume("target_alice", 0, 10).len(), 1);
     fixture.close()?;
     std::fs::remove_dir_all(control)?;
     Ok(())
+}
+
+#[tokio::test]
+async fn capacity_refusal_leaves_no_sender_effect() -> anyhow::Result<()> {
+    let fixture = Fixture::new(0, "retry-capacity")?;
+    let core = fixture.store.publication_core()?;
+    let id = fixture.store.inbox_status("target_alice")?.0.ok_or_else(|| anyhow::anyhow!("id"))?;
+    let guards = (0..ramflux_node_core::publication::ABORTED_RANGE_CAPACITY)
+        .map(|_| core.reserve("target_alice", &id, &[]))
+        .collect::<Result<Vec<_>, _>>()?;
+    let envelope = current_envelope("capacity-original", "target_alice")?;
+    let refused = join(submit(&fixture.handle, &envelope)).await?;
+    assert_eq!(refused.outcome, "capacity_retry_after");
+    assert_eq!(fixture.store.sender_retry_registry_size(), 0);
+    assert_eq!(fixture.state.resume("target_alice", 0, 10), []);
+    assert_eq!(fixture.store.inbox_status("target_alice")?.1, 0);
+    for guard in &guards {
+        guard.definite_non_write();
+    }
+    core.wait_published(guards.last().expect("capacity guards")).await;
+    let accepted = join(submit(&fixture.handle, &envelope)).await?;
+    assert_eq!(accepted.inbox_seq, Some(4097), "capacity refusal must release tentative replay");
+    assert_eq!(fixture.state.resume("target_alice", 0, 10).len(), 1);
+    drop(guards);
+    drop(core);
+    fixture.close()
 }

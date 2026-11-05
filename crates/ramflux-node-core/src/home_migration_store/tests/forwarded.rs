@@ -184,7 +184,9 @@ fn forwarded_delivery_with_commit_proof_activates_dormant_inbox_then_queues_once
         request,
         crate::now_unix_seconds(),
     )?;
-    assert!(matches!(second, crate::RouterSubmitOutcome::DuplicateFederatedForward { .. }));
+    assert!(
+        matches!(second, crate::RouterSubmitOutcome::OfflineQueued(ref queued) if queued.entry.inbox_seq == 1)
+    );
     let entries = s.b.core.resume(&s.target, 0, 10);
     assert_eq!(entries.len(), 1);
     assert_eq!(serde_json::to_vec(&entries[0].envelope)?, bytes);
@@ -236,7 +238,7 @@ fn ordinary_forward_to_active_home_without_migration_proof_is_accepted() -> Test
     b.restart()?;
     assert!(matches!(
         b.core.submit_forwarded_envelope(b.store()?, None, request, now)?,
-        crate::RouterSubmitOutcome::DuplicateFederatedForward { .. }
+        crate::RouterSubmitOutcome::OfflineQueued(ref queued) if queued.entry.inbox_seq == 1
     ));
     Ok(())
 }
@@ -509,7 +511,7 @@ fn backlog_forward_and_direct_retry_via_other_node_store_one_inbox_entry_after_r
             verified_forward(&direct)?,
             crate::now_unix_seconds()
         )?,
-        crate::RouterSubmitOutcome::DuplicateFederatedForward { .. }
+        crate::RouterSubmitOutcome::OfflineQueued(ref queued) if queued.entry.inbox_seq == 1
     ));
     s.b.restart()?;
     let entries = s.b.core.resume(&s.target, 0, 10);
@@ -599,5 +601,79 @@ fn one_peer_cannot_exhaust_foreign_pin_bytes_for_others_via_protected_pins() -> 
         RouterSubmitOutcome::OfflineQueued(_)
     ));
     assert!(s.b.store()?.foreign_custody_state(source.root_commitment())?.is_some());
+    Ok(())
+}
+
+#[test]
+fn forwarded_sender_retry_attaches_without_releasing_foreign_pin_protection() -> TestResult {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    for mode in 0..3 {
+        let root = std::env::temp_dir().join(format!(
+            "forward-retry-{mode}-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        let store = crate::publication::open_durability_fixture(&root, mode)?;
+        let router = RouterCore::new();
+        store.bootstrap_router(&router)?;
+        let request = sender_with_seed("retry-target", 130 + mode)?;
+        let (_, source) =
+            crate::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
+        let now = crate::now_unix_seconds();
+        let (entered, arrived) = mpsc::sync_channel(1);
+        let (attached, attachment) = mpsc::sync_channel(1);
+        let (release, wait) = mpsc::sync_channel(1);
+        let wait = Mutex::new(wait);
+        let once = AtomicBool::new(false);
+        let observer = crate::durability_test_hooks::observe(
+            root.clone(),
+            Arc::new(move |_, op, done| {
+                if op == "retry_attached" && done {
+                    let _ = attached.try_send(());
+                }
+                if op == "reserved_assignment" && done && !once.swap(true, Ordering::Relaxed) {
+                    entered.send(()).map_err(std::io::Error::other)?;
+                    wait.lock()
+                        .map_err(|_| std::io::Error::other("lock"))?
+                        .recv_timeout(std::time::Duration::from_secs(30))
+                        .map_err(std::io::Error::other)?;
+                }
+                Ok(())
+            }),
+        );
+        std::thread::scope(|scope| -> TestResult {
+            let first = scope
+                .spawn(|| router.submit_forwarded_envelope(&store, None, request.clone(), now));
+            arrived.recv_timeout(std::time::Duration::from_secs(30))?;
+            assert!(crate::forwarded_delivery::pin_referenced(source.root_commitment()));
+            let second = scope
+                .spawn(|| router.submit_forwarded_envelope(&store, None, request.clone(), now));
+            attachment.recv_timeout(std::time::Duration::from_secs(30))?;
+            release.send(())?;
+            for result in [
+                first.join().map_err(|_| "original panic")??,
+                second.join().map_err(|_| "retry panic")??,
+            ] {
+                assert!(
+                    matches!(result, RouterSubmitOutcome::OfflineQueued(ref queued) if queued.entry.inbox_seq == 1),
+                    "{result:?}"
+                );
+            }
+            Ok(())
+        })?;
+        assert!(!crate::forwarded_delivery::pin_referenced(source.root_commitment()));
+        drop(observer);
+        assert!(
+            matches!(router.submit_forwarded_envelope(&store, None, request.clone(), now)?, RouterSubmitOutcome::OfflineQueued(ref queued) if queued.entry.inbox_seq == 1)
+        );
+        assert_eq!(store.inbox_status("retry-target")?.1, 1);
+        assert_eq!(router.resume("retry-target", 0, 10).len(), 1);
+        drop(router);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+    }
     Ok(())
 }

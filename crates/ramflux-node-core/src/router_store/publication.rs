@@ -456,8 +456,14 @@ impl PublicationCore {
             if !registry.resources.contains_key(resource)
                 && registry.resources_seen.get(resource).is_none_or(|count| *count == 0)
             {
-                registry.resources_seen.remove(resource);
-                registry.resources_published.remove(resource);
+                let marked = registry.resources_seen.remove(resource).is_some();
+                let published = registry.resources_published.remove(resource);
+                if marked
+                    && !published
+                    && let Some(cleanup) = self.shared.replay_cleanup.get()
+                {
+                    cleanup(resource);
+                }
             }
         }
     }

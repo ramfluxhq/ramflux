@@ -132,3 +132,52 @@ fn legacy_sender_receipts_do_not_invent_assignments() -> Result {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn retry_waiter_admission_is_bounded_and_cancel_safe() -> Result {
+    let root = fixture("bounded-retry-waiters");
+    let store = test_store(&root, 0, 1 << 20)?;
+    let root_identity = ramflux_crypto::create_identity_root("sender", [0x91; 32]);
+    let branch = ramflux_crypto::create_device_branch("sender", "device", 1, [0x92; 32]);
+    let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root_identity, &branch)?;
+    let row = entry(1);
+    let available = store.submission_admission.available_permits();
+    let RetryAdmission::Owner(owner) = store.admit_sender_retry(&source, &row.envelope, 0)? else {
+        return Err("owner".into());
+    };
+    let mut waiters = Vec::new();
+    for _ in 1..available {
+        let RetryAdmission::Waiting(waiter) =
+            store.admit_sender_retry(&source, &row.envelope, 1)?
+        else {
+            return Err("waiter".into());
+        };
+        assert_eq!(waiter.retain_until(), crate::inbox_retain_until(&row.envelope, 0));
+        waiters.push(waiter);
+    }
+    assert!(matches!(
+        store.admit_sender_retry(&source, &row.envelope, 2),
+        Err(NodeCoreError::Publication(
+            crate::publication::PublicationRefusal::CapacityRetryAfter { .. }
+        ))
+    ));
+    drop(waiters.pop());
+    let RetryAdmission::Waiting(replacement) =
+        store.admit_sender_retry(&source, &row.envelope, 3)?
+    else {
+        return Err("replacement".into());
+    };
+    assert_eq!(store.sender_retry_registry_size(), 1);
+    drop(owner);
+    assert_eq!(store.sender_retry_registry_size(), 0);
+    for waiter in waiters.into_iter().chain(std::iter::once(replacement)) {
+        assert!(matches!(
+            waiter.resolved().await,
+            Err(NodeCoreError::SenderRetry(SenderRetryRefusal::AbortedRetrySafe))
+        ));
+    }
+    assert_eq!(store.submission_admission.available_permits(), available);
+    drop(store);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

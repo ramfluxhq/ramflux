@@ -122,7 +122,7 @@ fn insert_bounded(
         candidates.sort_by_key(|(_, _, m)| m.touched);
         let mut victim = None;
         for (key, value, _) in candidates {
-            if protected(value)? {
+            if protected(value)? || crate::forwarded_delivery::pin_referenced(key) {
                 continue;
             }
             // Receipts are written in the same transaction as every forwarded durable inbox row.

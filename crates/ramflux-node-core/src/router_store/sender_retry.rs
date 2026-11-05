@@ -167,3 +167,18 @@ pub(crate) fn accepted_outcome(
         },
     })
 }
+
+/// Convert allocator reason strings retained by the core outcome into stable typed refusals.
+pub(crate) fn refusal_from_reason(reason: &str) -> Option<NodeCoreError> {
+    if reason == "aborted_retry_safe" {
+        Some(SenderRetryRefusal::AbortedRetrySafe.into())
+    } else if reason == "idempotency_conflict" {
+        Some(SenderRetryRefusal::IdempotencyConflict.into())
+    } else if reason.starts_with("capacity_retry_after") {
+        Some(NodeCoreError::Publication(
+            crate::publication::PublicationRefusal::CapacityRetryAfter { retry_after_ms: 1000 },
+        ))
+    } else {
+        None
+    }
+}
