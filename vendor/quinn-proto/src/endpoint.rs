@@ -39,6 +39,9 @@ use crate::{
     transport_parameters::{PreferredAddress, TransportParameters},
 };
 
+pub(crate) mod response_credit;
+use response_credit::{Output, ResponseBuffer};
+
 /// The main entry point to the library
 ///
 /// This object performs no I/O whatsoever. Instead, it consumes incoming packets and
@@ -191,7 +194,13 @@ impl Endpoint {
         buf: &mut Vec<u8>,
         owner: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Option<DatagramEvent> {
-        self.handle_owned(now, remote, local_ip, ecn, data, buf, Some(owner))
+        self.handle_owned(now, remote, local_ip, ecn, data, &mut Output::Legacy(buf), Some(owner))
+    }
+
+    /// Process ingress with lazily reserved stateless response backing.
+    pub fn handle_buffered(&mut self, now: Instant, remote: SocketAddr, local_ip: Option<IpAddr>, ecn: Option<EcnCodepoint>, data: BytesMut, buf: &mut ResponseBuffer,
+        owner: Option<Arc<dyn std::any::Any + Send + Sync>>) -> Option<DatagramEvent> {
+        self.handle_owned(now, remote, local_ip, ecn, data, &mut Output::Bounded(buf), owner)
     }
 
     /// Process an incoming UDP datagram
@@ -204,7 +213,7 @@ impl Endpoint {
         data: BytesMut,
         buf: &mut Vec<u8>,
     ) -> Option<DatagramEvent> {
-        self.handle_owned(now, remote, local_ip, ecn, data, buf, None)
+        self.handle_owned(now, remote, local_ip, ecn, data, &mut Output::Legacy(buf), None)
     }
 
     fn handle_owned(
@@ -214,7 +223,7 @@ impl Endpoint {
         local_ip: Option<IpAddr>,
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
-        buf: &mut Vec<u8>,
+        buf: &mut Output<'_>,
         owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Option<DatagramEvent> {
         // Partially decode packet or short-circuit if unable
@@ -250,6 +259,9 @@ impl Endpoint {
                     return None;
                 }
                 trace!("sending version negotiation");
+                // Bound all version entries before constructing any response backing.
+                let bound = self.config.supported_versions.len().checked_mul(4).and_then(|n| n.checked_add(2*MAX_CID_SIZE+11)).unwrap_or(usize::MAX);
+                let buf = buf.prepare(bound)?;
                 // Negotiate versions
                 Header::VersionNegotiate {
                     random: self.rng.random::<u8>() | 0x40,
@@ -342,7 +354,7 @@ impl Endpoint {
         inciting_dgram_len: usize,
         addresses: FourTuple,
         dst_cid: ConnectionId,
-        buf: &mut Vec<u8>,
+        buf: &mut Output<'_>,
     ) -> Option<Transmit> {
         if self
             .last_stateless_reset
@@ -381,6 +393,7 @@ impl Endpoint {
             self.rng
                 .random_range(IDEAL_MIN_PADDING_LEN..max_padding_len)
         };
+        let buf = buf.prepare(padding_len + RESET_TOKEN_SIZE)?;
         buf.reserve(padding_len + RESET_TOKEN_SIZE);
         buf.resize(padding_len, 0);
         self.rng.fill_bytes(&mut buf[0..padding_len]);
@@ -501,7 +514,7 @@ impl Endpoint {
         datagram_len: usize,
         event: DatagramConnectionEvent,
         addresses: FourTuple,
-        buf: &mut Vec<u8>,
+        buf: &mut Output<'_>,
     ) -> Option<DatagramEvent> {
         let dst_cid = event.first_decode.dst_cid();
         let header = event.first_decode.initial_header().unwrap();
@@ -542,14 +555,14 @@ impl Endpoint {
         };
 
         if let Err(reason) = self.early_validate_first_packet(header) {
-            return Some(DatagramEvent::Response(self.initial_close(
+            return self.initial_close(
                 header.version,
                 addresses,
                 &crypto,
                 &header.src_cid,
                 reason,
                 buf,
-            )));
+            ).map(DatagramEvent::Response);
         }
 
         let packet = match event.first_decode.finish(Some(&*crypto.header.remote)) {
@@ -582,14 +595,14 @@ impl Endpoint {
             Ok(token) => token,
             Err(InvalidRetryTokenError) => {
                 debug!("rejecting invalid retry token");
-                return Some(DatagramEvent::Response(self.initial_close(
+                return self.initial_close(
                     header.version,
                     addresses,
                     &crypto,
                     &header.src_cid,
                     TransportError::INVALID_TOKEN(""),
                     buf,
-                )));
+                ).map(DatagramEvent::Response);
             }
         };
 
@@ -620,13 +633,22 @@ impl Endpoint {
     }
 
     /// Attempt to accept this incoming connection (an error may still occur)
+    /// Accept with bounded stateless failure responses.
+    pub fn accept_buffered(&mut self, incoming: Incoming, now: Instant, buf: &mut ResponseBuffer, server_config: Option<Arc<ServerConfig>>) -> Result<(ConnectionHandle, Connection), AcceptError> {
+        self.accept_output(incoming, now, &mut Output::Bounded(buf), server_config)
+    }
+    /// Accept using the legacy unbounded response buffer.
+    pub fn accept(&mut self, incoming: Incoming, now: Instant, buf: &mut Vec<u8>, server_config: Option<Arc<ServerConfig>>) -> Result<(ConnectionHandle, Connection), AcceptError> {
+        self.accept_output(incoming, now, &mut Output::Legacy(buf), server_config)
+    }
+
     // AcceptError cannot be made smaller without semver breakage
     #[allow(clippy::result_large_err)]
-    pub fn accept(
+    fn accept_output(
         &mut self,
         mut incoming: Incoming,
         now: Instant,
-        buf: &mut Vec<u8>,
+        buf: &mut Output<'_>,
         server_config: Option<Arc<ServerConfig>>,
     ) -> Result<(ConnectionHandle, Connection), AcceptError> {
         let remote_address_validated = incoming.remote_address_validated();
@@ -663,14 +685,14 @@ impl Endpoint {
             self.index.remove_initial(dst_cid);
             return Err(AcceptError {
                 cause: ConnectionError::CidsExhausted,
-                response: Some(self.initial_close(
+                response: self.initial_close(
                     version,
                     incoming.addresses,
                     &incoming.crypto,
                     &src_cid,
                     TransportError::CONNECTION_REFUSED(""),
                     buf,
-                )),
+                ),
             });
         }
 
@@ -761,14 +783,14 @@ impl Endpoint {
                 debug!("handshake failed: {}", e);
                 self.handle_event(ch, EndpointEvent(EndpointEventInner::Drained, None));
                 let response = match e {
-                    ConnectionError::TransportError(ref e) => Some(self.initial_close(
+                    ConnectionError::TransportError(ref e) => self.initial_close(
                         version,
                         incoming.addresses,
                         &incoming.crypto,
                         &src_cid,
                         e.clone(),
                         buf,
-                    )),
+                    ),
                     _ => None,
                 };
                 Err(AcceptError { cause: e, response })
@@ -803,6 +825,13 @@ impl Endpoint {
 
     /// Reject this incoming connection attempt
     pub fn refuse(&mut self, incoming: Incoming, buf: &mut Vec<u8>) -> Transmit {
+        self.refuse_output(incoming, &mut Output::Legacy(buf)).expect("legacy response buffers never suppress")
+    }
+    /// Refuse with a response item reserved before construction, or suppress when full.
+    pub fn refuse_buffered(&mut self, incoming: Incoming, buf: &mut ResponseBuffer) -> Option<Transmit> {
+        self.refuse_output(incoming, &mut Output::Bounded(buf))
+    }
+    fn refuse_output(&mut self, incoming: Incoming, buf: &mut Output<'_>) -> Option<Transmit> {
         self.clean_up_incoming(&incoming);
         incoming.improper_drop_warner.dismiss();
 
@@ -820,6 +849,15 @@ impl Endpoint {
     ///
     /// Errors if `incoming.may_retry()` is false.
     pub fn retry(&mut self, incoming: Incoming, buf: &mut Vec<u8>) -> Result<Transmit, RetryError> {
+        self.retry_output(incoming, &mut Output::Legacy(buf)).map(|t| t.expect("legacy response buffers never suppress"))
+    }
+    /// Retry with reserved response backing, or suppress without retaining Incoming.
+    /// # Errors
+    /// Returns the original retry error when this Incoming cannot be retried.
+    pub fn retry_buffered(&mut self, incoming: Incoming, buf: &mut ResponseBuffer) -> Result<Option<Transmit>, RetryError> {
+        self.retry_output(incoming, &mut Output::Bounded(buf))
+    }
+    fn retry_output(&mut self, incoming: Incoming, buf: &mut Output<'_>) -> Result<Option<Transmit>, RetryError> {
         if !incoming.may_retry() {
             return Err(RetryError(Box::new(incoming)));
         }
@@ -830,6 +868,7 @@ impl Endpoint {
         self.clean_up_incoming(&incoming);
         incoming.improper_drop_warner.dismiss();
 
+        let Some(buf) = buf.prepare(512) else { return Ok(None); };
         // First Initial
         // The peer will use this as the DCID of its following Initials. Initial DCIDs are
         // looked up separately from Handshake/Data DCIDs, so there is no risk of collision
@@ -843,7 +882,7 @@ impl Endpoint {
             orig_dst_cid: incoming.packet.header.dst_cid,
             issued: server_config.time_source.now(),
         };
-        let token = Token::new(payload, &mut self.rng).encode(&*server_config.token_key);
+        let token = Token::new(payload, &mut self.rng).encode_response(&*server_config.token_key);
 
         let header = Header::Retry {
             src_cid: loc_cid,
@@ -860,13 +899,13 @@ impl Endpoint {
         ));
         encode.finish(buf, &*incoming.crypto.header.local, None);
 
-        Ok(Transmit {
+        Ok(Some(Transmit {
             destination: incoming.addresses.remote,
             ecn: None,
             size: buf.len(),
             segment_size: None,
             src_ip: incoming.addresses.local_ip,
-        })
+        }))
     }
 
     /// Ignore this incoming connection attempt, not sending any packet in response
@@ -953,8 +992,9 @@ impl Endpoint {
         crypto: &Keys,
         remote_id: &ConnectionId,
         reason: TransportError,
-        buf: &mut Vec<u8>,
-    ) -> Transmit {
+        buf: &mut Output<'_>,
+    ) -> Option<Transmit> {
+        let buf = buf.prepare(INITIAL_MTU as usize)?;
         // We don't need to worry about CID collisions in initial closes because the peer
         // shouldn't respond, and if it does, and the CID collides, we'll just drop the
         // unexpected response.
@@ -974,13 +1014,13 @@ impl Endpoint {
         frame::Close::from(reason).encode(buf, max_len);
         buf.resize(buf.len() + crypto.packet.local.tag_len(), 0);
         partial_encode.finish(buf, &*crypto.header.local, Some((0, &*crypto.packet.local)));
-        Transmit {
+        Some(Transmit {
             destination: addresses.remote,
             ecn: None,
             size: buf.len(),
             segment_size: None,
             src_ip: addresses.local_ip,
-        }
+        })
     }
 
     /// Access the configuration used by this endpoint
