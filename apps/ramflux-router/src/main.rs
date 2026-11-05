@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 mod custody_listener;
+#[cfg(test)]
+mod entry_admission_tests;
 mod forward_http;
 mod handlers;
 mod home_migration;

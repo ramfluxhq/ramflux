@@ -186,6 +186,7 @@ pub enum CustodyRefusal {
         retry_after_ms: u64,
     },
     IdempotencyConflict,
+    PayloadTooLarge,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

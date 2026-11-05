@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("payload_too_large")]
+    PayloadTooLarge,
     #[error("invalid ACK batch: {0}")]
     InvalidAckBatch(&'static str),
     #[error("ack_backpressure_retry")]

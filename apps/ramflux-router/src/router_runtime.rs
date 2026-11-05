@@ -472,7 +472,8 @@ fn forwarded_error_reply(
             Ok(forwarded_migration_reply(reason))
         }
         error @ (ramflux_node_core::NodeCoreError::SenderRetry(_)
-        | ramflux_node_core::NodeCoreError::Publication(_)) => {
+        | ramflux_node_core::NodeCoreError::Publication(_)
+        | ramflux_node_core::NodeCoreError::PayloadTooLarge) => {
             let text = error.to_string();
             match crate::router_engine::publication_reason(&text) {
                 Some(reason) => Ok(serde_json::json!({"accepted": false,
@@ -500,7 +501,7 @@ fn forwarded_delivery_reply(
         delivery.outcome.as_str(),
         "online" | "offline_queued" | "duplicate_federated_forward"
     );
-    serde_json::json!({"accepted": accepted, "retryable": !accepted && !delivery.outcome.starts_with("rejected_"), "delivery": delivery})
+    serde_json::json!({"accepted": accepted, "retryable": !accepted && !delivery.outcome.starts_with("rejected_") && delivery.outcome != "payload_too_large", "delivery": delivery})
 }
 fn forwarded_migration_reply(
     reason: ramflux_protocol::home_migration::Refusal,

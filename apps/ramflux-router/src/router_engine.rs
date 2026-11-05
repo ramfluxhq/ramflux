@@ -802,7 +802,9 @@ mod drain_tests;
 mod drain_recovery_tests;
 
 pub(crate) fn publication_reason(reason: &str) -> Option<&'static str> {
-    if reason == "aborted_retry_safe" {
+    if reason == "payload_too_large" {
+        Some("payload_too_large")
+    } else if reason == "aborted_retry_safe" {
         Some("aborted_retry_safe")
     } else if reason == "idempotency_conflict" {
         Some("idempotency_conflict")

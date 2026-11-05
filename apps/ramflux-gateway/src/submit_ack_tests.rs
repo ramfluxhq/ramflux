@@ -109,7 +109,9 @@ async fn submit_after_recipient_ack(
     serving.await??;
     result?;
     let frames = frames.lock().map_err(|_| anyhow::anyhow!("sender mutex"))?;
-    if ["aborted_retry_safe", "capacity_retry_after", "idempotency_conflict"].contains(&outcome) {
+    if ["aborted_retry_safe", "capacity_retry_after", "idempotency_conflict", "payload_too_large"]
+        .contains(&outcome)
+    {
         assert_retry_nack(&frames, &received, outcome)?;
         std::fs::remove_dir_all(root)?;
         return Ok(());
@@ -553,7 +555,9 @@ fn assert_retry_nack(
 #[tokio::test]
 async fn sender_retry_refusals_keep_the_existing_nack_shape()
 -> Result<(), Box<dyn std::error::Error>> {
-    for reason in ["aborted_retry_safe", "capacity_retry_after", "idempotency_conflict"] {
+    for reason in
+        ["aborted_retry_safe", "capacity_retry_after", "idempotency_conflict", "payload_too_large"]
+    {
         for capable in [false, true] {
             submit_after_recipient_ack(reason, false, false, reason, capable).await?;
         }

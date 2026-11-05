@@ -86,7 +86,11 @@ impl RouterCore {
     ) -> Result<PreparedFanout, NodeCoreError> {
         match self.prepare_sender_fanout_inner(store, request, now) {
             Ok(prepared) => Ok(prepared),
-            Err(error @ (NodeCoreError::SenderRetry(_) | NodeCoreError::Publication(_))) => {
+            Err(
+                error @ (NodeCoreError::SenderRetry(_)
+                | NodeCoreError::Publication(_)
+                | NodeCoreError::PayloadTooLarge),
+            ) => {
                 let outcome = if matches!(
                     error,
                     NodeCoreError::Publication(
@@ -125,11 +129,18 @@ impl RouterCore {
             .iter()
             .map(|(_, target)| store.acquire_submission(target))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut candidates = Vec::with_capacity(targets.len());
+        let mut normalized = request.envelope.clone();
+        self.refresh_registered_envelope_authority(&mut normalized)?;
+        let mut checked = Vec::with_capacity(targets.len());
         for (device, target) in targets {
-            let mut envelope = request.envelope.clone();
+            let mut envelope = normalized.clone();
             envelope.target_delivery_id = target;
             envelope.envelope_id = mvp10_fanout_envelope_id(&request.envelope.envelope_id, &device);
+            crate::check_entry_bound(&envelope)?;
+            checked.push((device, envelope));
+        }
+        let mut candidates = Vec::with_capacity(checked.len());
+        for (device, envelope) in checked {
             candidates.push(Candidate {
                 device,
                 admission: store.admit_sender_retry(&source, &envelope, now)?,

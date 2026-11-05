@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod entry_fetch;
+
 use crate::identity_authority::handle_signed_device_set;
 use std::io::Write;
 use std::time::Instant;
@@ -101,6 +103,10 @@ pub(crate) fn handle_itest_request(
             let response =
                 handle_mvp1_prekey_publish(&request.body, router.state(), router.store())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp1/inbox-entry/") => {
+            let (status, value) = entry_fetch::value(path, router.state())?;
+            ramflux_node_core::write_itest_json_response(stream, status, &value)?;
         }
         ("GET", path) if path.starts_with("/mvp1/inbox/") => {
             let response = handle_mvp1_inbox_fetch(path, router.state())?;
@@ -742,6 +748,9 @@ fn handle_mesh_general_value(
         ("GET", path) if is_identity_manifest_path(path) => {
             let response = handle_mvp1_device_manifest_fetch(path, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("GET", path) if path.starts_with("/mvp1/inbox-entry/") => {
+            entry_fetch::reply(path, router.state())
         }
         ("GET", path) if path.starts_with("/mvp1/inbox/") => {
             let response = handle_mvp1_inbox_fetch(path, router.state())?;

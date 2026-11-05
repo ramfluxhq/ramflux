@@ -1292,6 +1292,7 @@ pub(crate) async fn handle_gateway_submit(
                 | "invalid_seq"
                 | "aborted_retry_safe"
                 | "idempotency_conflict"
+                | "payload_too_large"
         )
     {
         write_gateway_handle(

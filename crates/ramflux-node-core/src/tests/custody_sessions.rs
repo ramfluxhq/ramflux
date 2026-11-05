@@ -834,3 +834,6 @@ fn durable_view_publication() -> Result {
 
 #[path = "custody_sender_retry.rs"]
 mod sender_retry;
+
+#[path = "custody_entry_bound.rs"]
+mod entry_bound;

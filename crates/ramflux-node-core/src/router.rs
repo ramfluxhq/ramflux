@@ -668,6 +668,7 @@ impl RouterCore {
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> Result<ReplayAcceptedEnvelope, NodeCoreError> {
+        crate::check_entry_bound(&envelope)?;
         self.check_envelope_replay_once(source, &envelope, now_unix_seconds)?;
         Ok(ReplayAcceptedEnvelope { envelope })
     }
@@ -703,6 +704,14 @@ impl RouterCore {
         now: i64,
     ) -> Result<(ReplayAcceptedFanoutPlan, Vec<crate::SubmissionLease>), NodeCoreError> {
         let targets = self.mvp10_own_device_targets(&request)?;
+        let mut normalized = request.envelope.clone();
+        self.refresh_registered_envelope_authority(&mut normalized)?;
+        for (device, target) in &targets {
+            let mut child = normalized.clone();
+            child.target_delivery_id.clone_from(target);
+            child.envelope_id = mvp10_fanout_envelope_id(&request.envelope.envelope_id, device);
+            crate::check_entry_bound(&child)?;
+        }
         for (_, target) in &targets {
             self.prepare_publication_target(store, target)?;
         }
@@ -738,11 +747,19 @@ impl RouterCore {
         now_unix_seconds: i64,
     ) -> Result<ReplayAcceptedFanoutPlan, NodeCoreError> {
         let source = self.authenticated_envelope_source(&request.envelope)?;
+        let mut normalized = request.envelope.clone();
+        self.refresh_registered_envelope_authority(&mut normalized)?;
+        for (device, target) in &targets {
+            let mut child = normalized.clone();
+            child.target_delivery_id.clone_from(target);
+            child.envelope_id = mvp10_fanout_envelope_id(&request.envelope.envelope_id, device);
+            crate::check_entry_bound(&child)?;
+        }
         self.check_envelope_replay_once(&source, &request.envelope, now_unix_seconds)?;
         let deliveries = targets
             .into_iter()
             .map(|(device_id, target_delivery_id)| {
-                let mut envelope = request.envelope.clone();
+                let mut envelope = normalized.clone();
                 envelope.target_delivery_id.clone_from(&target_delivery_id);
                 envelope.envelope_id =
                     mvp10_fanout_envelope_id(&request.envelope.envelope_id, &device_id);
@@ -784,7 +801,13 @@ impl RouterCore {
             }
             RouterSubmitOutcome::RejectedSecurity { reason, .. } => {
                 let outcome = crate::sender_retry::refusal_from_reason(&reason).map_or_else(
-                    || "rejected_security".to_owned(),
+                    || {
+                        if reason == "payload_too_large" {
+                            reason.clone()
+                        } else {
+                            "rejected_security".to_owned()
+                        }
+                    },
                     |error| {
                         if matches!(error, NodeCoreError::Publication(_)) {
                             "capacity_retry_after".into()
@@ -881,6 +904,12 @@ impl RouterCore {
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
+        if let Err(error) = crate::check_entry_bound(&envelope) {
+            return RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: error.to_string(),
+            };
+        }
         let forwarding_key = forwarding_submission_key(source, &envelope.envelope_id);
         let mut forwarding = lock_unpoisoned(
             &self.forwarding_reservations.shards
@@ -942,6 +971,12 @@ impl RouterCore {
         origin: RouterEnvelopeOrigin,
         lease_seconds: u64,
     ) -> RouterForwardPreparation {
+        if let Err(error) = crate::check_entry_bound(&envelope) {
+            return complete_forward_preparation(RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: error.to_string(),
+            });
+        }
         let shard_index = envelope_target_index_shard_index(&envelope.envelope_id);
         let forwarding_key = forwarding_submission_key(source, &envelope.envelope_id);
         let mut forwarding = lock_unpoisoned(&self.forwarding_reservations.shards[shard_index]);
@@ -1043,6 +1078,12 @@ impl RouterCore {
             };
         };
         if let Ok(response) = response {
+            if response.delivery.outcome == "payload_too_large" {
+                return RouterSubmitOutcome::RejectedSecurity {
+                    target_delivery_id: envelope.target_delivery_id,
+                    reason: "payload_too_large".into(),
+                };
+            }
             if federation_forward_succeeded(&response, plan.migration_evidence.is_some()) {
                 return RouterSubmitOutcome::ForwardedHomeNodeMigrated(Box::new(
                     HomeNodeMigrationForwardDelivery {
