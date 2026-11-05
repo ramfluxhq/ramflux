@@ -65,7 +65,10 @@ impl AccountDb {
             #[cfg(test)]
             during_write: None,
         };
-        store.recover_startup()?;
+        if self.segment_reconciled.get().is_none() {
+            store.recover_startup()?;
+            let _ = self.segment_reconciled.set(());
+        }
         Ok(store)
     }
 }
@@ -233,13 +236,27 @@ impl SegmentStore<'_> {
             }
             for (id, generation) in transfers {
                 after.clone_from(&id);
-                let _lease = self.lease(&id)?;
+                let _lease = match self.lease(&id) {
+                    Ok(lease) => lease,
+                    Err(StorageError::AccountWriterBusy(_)) => continue,
+                    Err(error) => return Err(error),
+                };
                 if matches!(self.current(&id, generation), Err(StorageError::ObjectErased)) {
                     continue;
                 }
                 let mut start = 0;
                 loop {
-                    let rows = self.recover_page(&id, generation, start, PAGE_LIMIT)?;
+                    let rows = match self.recover_page(&id, generation, start, PAGE_LIMIT) {
+                        Ok(rows) => rows,
+                        Err(StorageError::Integrity(_)) => {
+                            let tx = self.db.connection.immediate_transaction()?;
+                            self.db.connection.execute("UPDATE object_transfer_state SET state='segment_quarantined',last_error='segment_integrity',done_bytes=0,segment_sequence=segment_sequence+1 WHERE transfer_id=?1 AND segment_generation=?2",params![id,integer(generation)?])?;
+                            self.db.connection.execute("UPDATE object_segment_file SET received_bitmap=0,cipher_verified=0 WHERE transfer_id=?1 AND generation=?2",params![id,integer(generation)?])?;
+                            tx.commit()?;
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let Some(last) = rows.last() else {
                         break;
                     };

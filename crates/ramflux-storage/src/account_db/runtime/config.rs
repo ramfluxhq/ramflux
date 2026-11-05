@@ -97,6 +97,7 @@ impl AccountDb {
             connection,
             erasure_authority: Some(erasure_authority),
             volatile_typing: RefCell::new(BTreeMap::new()),
+            segment_reconciled: std::cell::OnceCell::new(),
             volatile_presence: RefCell::new(BTreeMap::new()),
         })
     }
