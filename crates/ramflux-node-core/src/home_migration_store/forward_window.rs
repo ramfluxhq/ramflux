@@ -17,7 +17,7 @@ impl RouterRedbStore {
         target: &str,
         now: u64,
     ) -> Result<Option<RecordEvidence>, NodeCoreError> {
-        let tx = self.migration_db().begin_write().map_err(storage)?;
+        let tx = self.begin_write().map_err(storage)?;
         let route: InboxRoute =
             read(&tx, TARGETS, target)?.ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
         let head: RecordEvidence =

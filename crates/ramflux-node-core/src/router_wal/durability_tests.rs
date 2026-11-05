@@ -124,6 +124,10 @@ fn recovery_sync_before_ready() -> TestResult {
 
 #[test]
 fn segment_directory_before_ack() -> TestResult {
+    super::fatal_tests::first_segment_failures()?;
+    if std::env::var_os("RAMFLUX_FATAL_CHILD").is_some() {
+        return Ok(());
+    }
     super::identity_tests::head_matrix()?;
     super::segment_tests::matrix()?;
     for pipeline in [false, true] {

@@ -173,7 +173,7 @@ impl RouterRedbStore {
     /// # Errors
     /// Propagates durable errors; local time never moves below its persisted floor.
     pub fn cleanup_home_migrations(&self, now: u64) -> Result<usize, NodeCoreError> {
-        let tx = self.migration_db().begin_write().map_err(storage)?;
+        let tx = self.begin_write().map_err(storage)?;
         let now = clock(&tx, now)?;
         let upper = format!("{now:020}/");
         let expired = tx
@@ -361,7 +361,7 @@ impl RouterRedbStore {
         migration_id: &str,
         now: u64,
     ) -> Result<(), NodeCoreError> {
-        let tx = self.migration_db().begin_write().map_err(storage)?;
+        let tx = self.begin_write().map_err(storage)?;
         clock(&tx, now)?;
         let key = super::op_key(anchor, migration_id, super::MigrationRole::Source)?;
         let mut op: MigrationOperation =

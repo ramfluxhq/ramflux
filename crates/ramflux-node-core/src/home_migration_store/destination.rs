@@ -42,7 +42,7 @@ impl RouterCore {
         let p = &input.prepare.body;
         let _root = store.migration_root_barrier(&p.account_anchor)?;
         self.with_migration_authority(&p.account_anchor, now, |authority, _publication| {
-            let tx = store.migration_db().begin_write().map_err(storage)?;
+            let tx = store.begin_write().map_err(storage)?;
             let offer = prepare_in_transaction(&tx, node, input, authority, now)?;
             commit_transition(store, tx)?;
             store.refresh_migration_root(&p.account_anchor)?;
@@ -98,7 +98,7 @@ impl RouterRedbStore {
             .ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
         let _root = self.migration_root_barrier(&a.account_anchor)?;
         let _submissions = self.migration_submission_barrier(&pending.delivery_map)?;
-        let tx = self.migration_db().begin_write().map_err(storage)?;
+        let tx = self.begin_write().map_err(storage)?;
         let now = clock(&tx, now)?;
         let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Destination)?;
         if let Some(head) = read::<RecordEvidence>(&tx, HEADS, &a.account_anchor)?
@@ -205,7 +205,7 @@ impl RouterRedbStore {
             .ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
         let _root = self.migration_root_barrier(anchor)?;
         let _submissions = self.migration_submission_barrier(&pending.delivery_map)?;
-        let tx = self.migration_db().begin_write().map_err(storage)?;
+        let tx = self.begin_write().map_err(storage)?;
         clock(&tx, now)?;
         let key = op_key(anchor, &fence.body.migration_id, MigrationRole::Destination)?;
         let mut op: MigrationOperation =
@@ -446,7 +446,7 @@ fn seal_in_transaction(
 ) -> Result<Signed<Receipt>, NodeCoreError> {
     let a = &authorization.body;
 
-    let tx = store.migration_db().begin_write().map_err(storage)?;
+    let tx = store.begin_write().map_err(storage)?;
     let now = clock(&tx, now)?;
 
     let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Destination)?;

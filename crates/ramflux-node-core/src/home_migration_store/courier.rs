@@ -42,7 +42,7 @@ impl RouterRedbStore {
         for (index, key) in due {
             // Each claim has its own short write transaction. Never retain 128 full
             // admission bundles or hold a node-wide writer over the whole bounded page.
-            let tx = self.migration_db().begin_write().map_err(storage)?;
+            let tx = self.begin_write().map_err(storage)?;
             let now = clock(&tx, now)?;
             if tx
                 .open_table(COURIER)
@@ -108,7 +108,7 @@ impl RouterRedbStore {
         outcome_unknown: bool,
         now: u64,
     ) -> Result<(), NodeCoreError> {
-        let tx = self.migration_db().begin_write().map_err(storage)?;
+        let tx = self.begin_write().map_err(storage)?;
         let now = clock(&tx, now)?;
         let p = &claimed.prepare.body;
         let key = op_key(&p.account_anchor, &p.migration_id, MigrationRole::Destination)?;

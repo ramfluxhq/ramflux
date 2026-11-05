@@ -92,7 +92,7 @@ impl RouterCore {
             } else {
                 None
             };
-            let tx = store.migration_db().begin_write().map_err(storage)?;
+            let tx = store.begin_write().map_err(storage)?;
             let now = clock(&tx, now)?;
             super::signer_pin::retain(&tx, node)?;
             super::authority_evidence::remember(&tx, publication, now)?;
@@ -177,7 +177,7 @@ impl RouterCore {
             now,
         )?;
         self.with_migration_authority(&a.account_anchor, now, |authority, publication| {
-            let tx = store.migration_db().begin_write().map_err(storage)?;
+            let tx = store.begin_write().map_err(storage)?;
             let now = clock(&tx, observed())?;
             let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Source)?;
             let auth_key = super::authorization_key(auth)?;

@@ -134,7 +134,7 @@ impl RouterCore {
             if c.action != Action::Abort || c.audience_node != node.node_id() {
                 return Err(refusal(Refusal::PinMismatch));
             }
-            let tx = store.migration_db().begin_write().map_err(storage)?;
+            let tx = store.begin_write().map_err(storage)?;
             clock(&tx, now)?;
             let key =
                 op_key(&c.requester.account_anchor, &c.migration_id, MigrationRole::Destination)?;

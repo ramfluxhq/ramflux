@@ -1426,6 +1426,7 @@ fn router_wal_ack_success(
     #[cfg(test)]
     let _pause = acknowledgement_test::before_apply(wal_state);
     if writer_check(path, "index_update").is_err() {
+        crate::fatal_durability::fence(false);
         return;
     }
     let update_result = wal_state
@@ -1442,11 +1443,16 @@ fn router_wal_ack_success(
     match update_result {
         Ok(()) => {
             for (request, location) in batch.into_iter().zip(locations) {
+                let Ok(reply_guard) = crate::fatal_durability::WriteGuard::new(false) else {
+                    return;
+                };
                 if writer_check(path, "writer_reply").is_err() {
+                    crate::fatal_durability::fence(false);
                     return;
                 }
                 let Ok(_gate) = crate::fatal_durability::publication() else { return };
                 request.reply.send(Ok(location));
+                let _ = reply_guard.complete();
             }
         }
         Err(error) => {
