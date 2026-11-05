@@ -56,8 +56,8 @@ fn configure_client(
 }
 
 /// Returns default server configuration along with its certificate.
-fn configure_server(
-) -> Result<(ServerConfig, CertificateDer<'static>), Box<dyn Error + Send + Sync + 'static>> {
+fn configure_server()
+-> Result<(ServerConfig, CertificateDer<'static>), Box<dyn Error + Send + Sync + 'static>> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert_der = CertificateDer::from(cert.cert);
     let priv_key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());

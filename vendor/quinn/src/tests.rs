@@ -14,8 +14,8 @@ use std::{
     pin::pin,
     str,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
@@ -23,11 +23,11 @@ use std::{
 use crate::runtime::TokioRuntime;
 use crate::{Duration, Instant};
 use bytes::Bytes;
-use proto::{crypto::rustls::QuicClientConfig, RandomConnectionIdGenerator};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use proto::{RandomConnectionIdGenerator, crypto::rustls::QuicClientConfig};
+use rand::{RngCore, SeedableRng, rngs::StdRng};
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     RootCertStore,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use tokio::time::{sleep, timeout};
 use tokio::{

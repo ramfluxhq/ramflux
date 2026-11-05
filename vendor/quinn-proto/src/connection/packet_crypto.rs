@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use tracing::{debug, trace};
 
+use crate::Instant;
 use crate::connection::spaces::PacketSpace;
 use crate::crypto::{HeaderKey, KeyPair, PacketKey};
 use crate::packet::{Packet, PartialDecode, SpaceId};
 use crate::token::ResetToken;
-use crate::Instant;
-use crate::{TransportError, RESET_TOKEN_SIZE};
+use crate::{RESET_TOKEN_SIZE, TransportError};
 
 /// Removes header protection of a packet, or returns `None` if the packet was dropped
 pub(super) fn unprotect_header(

@@ -441,7 +441,7 @@ jobs:
       - name: Rust diff
         id: diff
         run: |
-          git diff "origin/${{ github.base_ref }}...HEAD" -- '*.rs' > pr.diff
+          git diff "origin/${{ github.base_ref }}...HEAD" -- '*.rs' ':(exclude)vendor/**' > pr.diff
           if [ -s pr.diff ]; then echo "has=true" >> "$GITHUB_OUTPUT"; fi
 
       - name: Cache
@@ -521,6 +521,6 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
       - name: Verify patches and unique resolution
-        run: python3 -B scripts/check-quic-patches.py
+        run: python3 -B scripts/check-quic-patches.py --verify-upstream
       - name: Run dependency libraries explicitly
         run: python3 -B scripts/test-quic-dependencies.py

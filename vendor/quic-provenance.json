@@ -10,11 +10,13 @@
       },
       "Cargo.lock": {
         "upstream_sha256": "19d1373831b5caa615f97316dc09d27866cce671efc65c54239c7d52834c97f3",
-        "patched_sha256": "19d1373831b5caa615f97316dc09d27866cce671efc65c54239c7d52834c97f3"
+        "patched_sha256": "b5f65b51e9080ea562462c3f2c90ea17e11d3c9e597a4ccdc4aa22ee0558d330",
+        "delta": "Resolve standalone dependency-test workspace; preserve only the reviewed local proto path in Quinn tests"
       },
       "Cargo.toml": {
         "upstream_sha256": "d399537966b571462de862af3cfe03318286d67b300c0db6b87fedfd5189a540",
-        "patched_sha256": "d399537966b571462de862af3cfe03318286d67b300c0db6b87fedfd5189a540"
+        "patched_sha256": "377749a5f8985ced8fa36225ba8e4099723b330377f99ed1874d1621ace9665c",
+        "delta": "Isolate dependency-test workspace and optimize its dependencies; Quinn also patches sibling quinn-proto for standalone tests; freeze proto requirement to =0.11.18 so standalone tests cannot retain older registry proto"
       },
       "Cargo.toml.orig": {
         "upstream_sha256": "29016319840371d2c56e6d584e641d9b42136fdd6623438882416b6bde423f94",
@@ -34,119 +36,127 @@
       },
       "benches/bench.rs": {
         "upstream_sha256": "26625f06eb7d2f224f847aca1a3228e01fc8dff1370ed064f3196acb9521b696",
-        "patched_sha256": "8f7e46043a458b7d8f5af70103a5546d5f5cb5cdd827a7803506793a835cfba3",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "eb2b93ebc13ad90c65ef613762cd4826cda3643f5eb8652fdf62ed7a6746bdf4",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "build.rs": {
         "upstream_sha256": "da265b34113659b194be9d5972d4af6e5a334e0afa4adf02f949e4a1ab39a7ad",
         "patched_sha256": "baa6f99a56aab6ac110fa74624d626a4ee96a23378e718204af979ec6e4e0409",
-        "delta": "Replace cfg_aliases expansion with equivalent target-family/OS cfg emission for strict Rust 1.99 linting"
+        "delta": "Equivalent wasm_browser cfg emission without Rust 1.99 cfg_aliases lint failure; SPDX"
       },
       "examples/README.md": {
         "upstream_sha256": "8e83b342ead7bc7a1c2d6ca5712e098ed851c14314d37f13f3467b75ffd111cf",
         "patched_sha256": "90fae47498f5e0039304e6b52a1436fe3e35d95e2c0c68ec47d89f08ef24b4b1",
-        "delta": "Trim upstream trailing whitespace for the repository diff guard"
+        "delta": "Trim upstream trailing whitespace for repository diff guard"
       },
       "examples/client.rs": {
         "upstream_sha256": "619f1397f8f2d1f4692d965bb823893455aed4818126292f699605e4639321dc",
-        "patched_sha256": "559787fd84e8c9b79951bfa706395387ce1b91165590da15e1702af03bd16fef",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "609286b7f725fb5f454ea0388042fa422a521c5a2487fe87fb903bc9c5cd759b",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "examples/common/mod.rs": {
         "upstream_sha256": "53966987b1d87ae1c8cefaa55c00ada93ca74901a34c5acaee0bda8b30e82639",
-        "patched_sha256": "1cdc963ddbc02756689ebfc78b0f3c552e9c376eb79e60a2f7030ef75bb18152",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "dbbff8dd3478a5bcf962f646f951672055caa33ac63778916db2b9e5e81b6696",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "examples/connection.rs": {
         "upstream_sha256": "f39652625eb17aa299bbd929df9337774418ee2537b5c0a4ad27d517d98294f2",
         "patched_sha256": "a3f0bbf346145258af1ddf93aa3e70ea3ee71465789eb4841e967306104a8a1a",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "examples/insecure_connection.rs": {
         "upstream_sha256": "19685e1c9c0768adc9acfd64869a8b0773497e85334d96946bd78eb3715563ef",
         "patched_sha256": "662ba4affce5d64ec4372e9f4680ddcc2b70b88e6d64465aaafff1a7c62661e2",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "examples/server.rs": {
         "upstream_sha256": "7096ad2c7bf135d868e89196d98f653f0dbb9130ba56266c1ed1a83274a30bb6",
-        "patched_sha256": "874ddfc8eec3ccf26c297c9edde4e8de146b1986d23b280f3874b67152a75a79",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "4b577297c1b2d3e1c112014b173066aaab7c27618c029d2f48e065059f637828",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "examples/single_socket.rs": {
         "upstream_sha256": "464c1d5501b7c87beeac954fdfe84b7535347e25a4f4f16ee7a0cfea5a9b309b",
         "patched_sha256": "23526df119da0c2dc48cf072c5d6fa236c0b8084c0db323f1dbee27a94d50ae9",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection.rs": {
         "upstream_sha256": "3c388c6b455c318728c869b1f121fcc7d03572a92a92abda792d0cd8a2a10166",
-        "patched_sha256": "8a6eb33f210b5a1bdcb5a74d61c8e64b85221db24a6a80c748c34e030f1cc7eb",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "36c759faf394e5250c6a9b602af5e43514797a1b7d6c7cf99dba9370c698e01d",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/endpoint.rs": {
         "upstream_sha256": "a63bf8516128c5dd7ac7fb2e63450886873990f2084ff91b39737c4cf41c6c32",
-        "patched_sha256": "c024471353fd50bb4bf2bbb0a63adb314f87817875bc225526ae9f04722c8722",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "7a9bdc808044ec9381fa12669e4e6656b7ccb46630ef8f75665cb89b529bc00f",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/incoming.rs": {
         "upstream_sha256": "d10fcb0efd956d2d4f53e6600737520c04179d0c5850a8c89792c86a762eef98",
         "patched_sha256": "abfcf11268c693c3128e930a3ba1640d5afa0868a99e7c9e56bf48c5318f5fa7",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/lib.rs": {
         "upstream_sha256": "36660f7859142bfa1777092c8eb3016c079cadaf1daf2c48b41186130b2fcaf8",
-        "patched_sha256": "d24bfa0af0871caff5f27d9641cb99a326fb14a791d892057c12dc35b96b401f",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "bd0d86f13f3e38879ab7a13e885a17e6f50cb94c050e35f096f8e17ea9c8d178",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/mutex.rs": {
         "upstream_sha256": "9b78cec294b00b15768e2d97b74e3371a59ff9048ce1b2d970f43fcc3f1b7814",
         "patched_sha256": "e88c41e2bc962453807aba49f788364c2b92cf5b15e8daf17185ec347d3866aa",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/recv_stream.rs": {
         "upstream_sha256": "f4982d0a827c296f98c1da25672a6504b54a548416f6e293c9c8d2f899a48b73",
-        "patched_sha256": "42c70a9a56b8571704f943c7b6a862d82291adaf03bf433e452d1326f0edd9c0",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules; remove redundant formatting borrow for strict Rust 1.99 linting"
+        "patched_sha256": "c5c7dcfc77dedbcbe3d21f8b6926f5b9223fe35bf9501373fe2a25fc51267fc5",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; remove redundant formatting borrow for strict Rust 1.99 linting"
       },
       "src/runtime/async_io.rs": {
         "upstream_sha256": "bf2244735eb22438d1d0bedce0417d9d8553b3408d9922eb393cd87af8d21bb9",
         "patched_sha256": "7b45903f2cf6df5f098a3f6d0535e7b2a5afe70f60e82183fb691c9a863f944e",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/runtime/tokio.rs": {
         "upstream_sha256": "2912eaccd08b2bc738babf2df77c416add236eceb6e797717b277d8287cdff38",
-        "patched_sha256": "2ee887436bdf33900ab212554695624f9dc9deb684ad011a3ce62e32f5b61653",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "070b5db443e3a7a787c05a4ad0f556dea20e23029df7395b6a4c8a2ec78a3676",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/runtime.rs": {
         "upstream_sha256": "2e1061b9db063537a80c11601fb58927b2034ae505b7ce3d44842999d202dc98",
         "patched_sha256": "d91edef9305bce1ad5d953a26ce87358155a42834782cc9fbedf3c9e128fc518",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/send_stream.rs": {
         "upstream_sha256": "57619c4267c1faad9bd6b19114dd20745e8f7a1c048a7572dcd65a0de6b4da91",
-        "patched_sha256": "9bed91bc42c32d0ceff5ed3e505a50d2ae8e85684ea7e50ac290e95ac75ebd7d",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "ec5268edbf979e722fd94db8bb5acb0472424aee24453c0ba5ef4646f7db59f6",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/tests.rs": {
         "upstream_sha256": "2989f896d07b85d9266eef1c0d4b4766374fdc265b987546e9a20b3b4f77247a",
-        "patched_sha256": "d9600843d6d5fa2dae8553b3e59d0be147cfada763010cb49f4730bfd26bf652",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "cbc4a9f843fc8d8808a83fe221934e892b9519eb8dad8e4e24f3d71389b80f6e",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/work_limiter.rs": {
         "upstream_sha256": "515ee13aaba538843e112d287cc7cd91fb94f1922e246179421e45dbcfe41fea",
         "patched_sha256": "03906d5e5dff4778d05f12535881b3daebf226a443ad46f49d1edc3a9479d468",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "tests/many_connections.rs": {
         "upstream_sha256": "48fcfc2bb0bee84484425c1a23469f6657439d350b2479785e0dc5ae57d2a3f2",
-        "patched_sha256": "91433ec3649c2e74d1bd95c7ee8eb550832382878eac845f921b03574e3044c5",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "5de363050c2fe9d08a09a1795147822023453e40dc7892f8cb1884fd2d2d795f",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "tests/post_quantum.rs": {
         "upstream_sha256": "85f094df0f040e1f5a3a549ea7f05381e5193e94808691046dad850e7a36423f",
-        "patched_sha256": "1e4c744b74636520e1e82b33dac3d06e1413f6df96bd5594989bb922939cc064",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "f5ad509ca25a9b0791bb1dccbbd58dc295043ef22fb2757e688775114f8e54cb",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       }
+    },
+    "formatting": {
+      "current_policy": "Upstream Rust bytes plus declared transformations; no bulk vendor rustfmt in r2",
+      "product_command": "cargo fmt --all",
+      "vendor_command": "none (excluded from product workspace)",
+      "rustfmt_version": "rustfmt 1.10.0-stable (b940084d7e 2026-09-28)",
+      "r1_command": "cargo fmt --all (toolchain 1.99.0; vendor/rustfmt.toml edition=2021,max_width=100; root rustfmt.toml also applied during r1 import)",
+      "toolchain": "1.99.0 (rust-toolchain.toml)"
     }
   },
   "quinn-proto": {
@@ -164,7 +174,8 @@
       },
       "Cargo.toml": {
         "upstream_sha256": "739f19627faef023b9c24932441d4e23b82b5786c8c57e37a1419d93189ef5c5",
-        "patched_sha256": "739f19627faef023b9c24932441d4e23b82b5786c8c57e37a1419d93189ef5c5"
+        "patched_sha256": "1589f62fae399c4f30d9179ddf39ce270097dde129a76796c0ad6745f5522f8a",
+        "delta": "Isolate dependency-test workspace and optimize its dependencies; Quinn also patches sibling quinn-proto for standalone tests"
       },
       "Cargo.toml.orig": {
         "upstream_sha256": "b51200a74958e34fa6581ea6a7a349354eb3d68506e42d135baf251cc62eda3a",
@@ -180,268 +191,276 @@
       },
       "src/bloom_token_log.rs": {
         "upstream_sha256": "31429b70f6a12a9f599ded18f6bd22a9bc98e723c37baa68b23f0218592dc105",
-        "patched_sha256": "27dc056408b66101a24b06f1d6f78a7ff22b5aa36fd55e845bae52d25c2d8ae7",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "556ef85fb160d909a32feaaa85239000b9f994e97c41be0ce3f5d97185f78d30",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/cid_generator.rs": {
         "upstream_sha256": "070202c342e60be574ce3256b56d92f63ae7d10e9f553e1945b22ef33a9a4bd0",
-        "patched_sha256": "0b4b814618a294f5d456e821cf29be158fe2ad9e7f9131593b6e4490217b82bd",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "6a1264f531ebfcccb2703ac51bb21a7c29a92e6496c4fc47b7cd831dd8ce2aab",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/cid_queue.rs": {
         "upstream_sha256": "fea22a193fe004690b5359ce424d42fdaf29959ff145be2b11c53af300fc66e5",
-        "patched_sha256": "11933b7693b7c63fae168b0cf424a5d70105263028ce19ced8a04e6004414194",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "a8a8e4f9f43c8982057f43301233dc3d16dc2b1c924314a9820c0a9b24d7bfe3",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/coding.rs": {
         "upstream_sha256": "a446ee044f718ae8c0587815367b8df180311773e9fc31dca1515b348116bb5a",
         "patched_sha256": "c9aedcffcebb33ac5ee1f80dff0210a59e8d7145e87e2f65906a2577169afceb",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/config/mod.rs": {
         "upstream_sha256": "9d2de1a6a4f8957fac9cd565874385e2f86db285c6a51af85b7d9de6777dd294",
-        "patched_sha256": "ba2a9ad0002e62c56145939e8e7929b8f7b27c1e803eae0d1350554c456a5be4",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "9c79ed7d25c604421f34167d14b37c7f944015ddef3f9d6b27634a86419a9522",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/config/transport.rs": {
         "upstream_sha256": "67f8538b102d247c607ccfb55b86a05fa37290beab30dbca43f69d26a05f7cc4",
-        "patched_sha256": "fc33447d31a67bd8877333c4e1e59ce293423501511bebf004f6b701153221f9",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "3ae7442457d7e03c56454399fe22b39d7f90e91086700eae090cf4c35fc11417",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/congestion/bbr/bw_estimation.rs": {
         "upstream_sha256": "02eed27edb40e4c12f992f7f683fac238ced0dd153ecb87fdd689654bfb36eb7",
         "patched_sha256": "62c76fe213d41b9e2ee004a0dfb8dd63c72ef8e357dbe1d5102b8fd172af269a",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/congestion/bbr/min_max.rs": {
         "upstream_sha256": "06eb1be36b8700cc4b8a2df07a3d87253f0ef8184cec670928ebd27ecebda935",
         "patched_sha256": "721bd21817c891122aba1d92bcfb35543f8c0de872329c722648114d39dc40e5",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/congestion/bbr/mod.rs": {
         "upstream_sha256": "60cf8196e8c17b1ef5228128615c0d0df31cd76cafa47c3c9198ee4b5d0fa9fd",
-        "patched_sha256": "ee58f62908a3b61d3d5f5ce4a223e89af66811dbf5823f50d28e82a859bc3a18",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "c515854248fbdb8b4b0ffb998910b9cbe7160abe9f3a16f44d472d1194933903",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/congestion/cubic.rs": {
         "upstream_sha256": "7715fd5f2a59737fd2e16dae6c1f39701ade221a8c07f6f3cd087926d0f9d632",
-        "patched_sha256": "561413a9040b1b6b7aa0a745c736d384d603c5b9eebb27b35e7b924f43ebcd4c",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "c207645c82582bc9e4815b5cfb09f6cab5313e52eff8f7fd8c36bbd212b5e381",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/congestion/new_reno.rs": {
         "upstream_sha256": "15c6302d6e508e980bb03201f5293301211a8e60c9c40a5759ce543df296ae76",
-        "patched_sha256": "4d937dad759b7687060a70f760a22641cf8e4cc13f588ced0930df72d229f935",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "94c11ae5f8da6cde5291ee85f90e06a8af7e0403ba5dea999545f3613486c992",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/congestion.rs": {
         "upstream_sha256": "cf7232daa3ad094a6ee93a69a5f2d7d814ae0ecef7f6efed3aaf27eb52ff9131",
-        "patched_sha256": "9216f9c303f70eb6a93e8b7471a2b8d4309621ec634a5f203b208d6782f3feb9",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "1d264ca25762101fb1a8956b611eea9bd10dc52809b4645165fb4ea66f3d6597",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/ack_frequency.rs": {
         "upstream_sha256": "e740eab803d41c40df34a4edd6924507f8a5374ffc07e31a2761fd094ab7be74",
-        "patched_sha256": "c28dcfd8629fb685674154224abab28e59bf4dd2eabd34b9a1b410b4a022b0ee",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "06c5abc0153c9587ab697c500b4140cd5cef5e393d39200ea0f1c62e523d760c",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/assembler.rs": {
         "upstream_sha256": "5e205df22a27e1735536378836eb5c8d06cb88358c37f72f9935da09b5575852",
-        "patched_sha256": "43a304464d9a91d17bf8c09ed01839fb910139f1264475b083cbacfa121c85c4",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "1e5ed826974298d28e52c1048699ae00573fe41f6d72582f0ac0ed2ed005f697",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/cid_state.rs": {
         "upstream_sha256": "485b3821af4b706789b9ef6d78aaa60b1d49f54dbb2c6785daee801ad2696d24",
-        "patched_sha256": "790798f6c4fcb3006c852449f0f9f686ac5993934008d5b3be71642329969a92",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "093706d942f0c60bfae0fccf4db384d93f589b1b37f913996fcbbf94dedd56ab",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/datagrams.rs": {
         "upstream_sha256": "8d17cb428f872f3cc9c0d33f56a140f08714e19ddc67d84841d0ce499cf1a8da",
-        "patched_sha256": "55bd046e728c2b955cc58f93f5a46d9d6a60a7423b90af62f7d3529df567a37c",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "c47a3a202ca5623c115333dac919da6fc6f8f330f51bb4d05944920fadd6c36d",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/mod.rs": {
         "upstream_sha256": "8b5665fa7dc83e2bb9154fceed34733768633756adc900bb8ec50f24be0ba2b7",
-        "patched_sha256": "eb5929a431ff1b4bfd615a337c7489fc4cc7abdc8209e61a3e146473da9842c1",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules; extract unchanged idle timeout negotiation and tests"
+        "patched_sha256": "892c6b52d7d80226fc5f3e6b7c1d4cc267a8d414587466513eb580a2339b6b4a",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; extract unchanged idle timeout negotiation and its tests"
       },
       "src/connection/mtud.rs": {
         "upstream_sha256": "3a2917c053a6ec79e277a2fc895cf20ba8cde2b1fe8b3b8b1c96584062acf782",
-        "patched_sha256": "2196faaaf6478911e745839189cf592b4512b96b76ae5b79a266e280f8419262",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "5df45cbf631eda3698deefda120b007302a441a81a74552fd617129edee2fbac",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/pacing.rs": {
         "upstream_sha256": "0154f8f81187e11782bfe014be38165c41e74d0fbd4be2a54acc262102775c86",
-        "patched_sha256": "8427cea88659a0dda29abc43469eae9f96497435e3ced4f9b376915833903061",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "d5966743d8e7a2ad5e40b195b707f6373193c80227d5361e2468e70973c250f5",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/packet_builder.rs": {
         "upstream_sha256": "a6f0a4a01bdc866f10f6d80a898107226455c03b317b3d6dcd567c634a19b169",
-        "patched_sha256": "26e9b58629991cae4b7c5ea593bf3cfa4bdedeacf5e0630e42c8593b442de3d8",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "a58e0932c3e12fba86a6dc42c90104f9366e01c5c36cf4afbc34441d0a37889d",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/packet_crypto.rs": {
         "upstream_sha256": "0507abef0092c4d75c3c839798f2c11769718f7488c1e4aefc05612abbd738e2",
-        "patched_sha256": "751ca15c71cd8c79be3eab906bcc3d37235c8b443e53538f923fb2283a8ccab6",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "ad5f1bba678b82619d8c8258ce4cf113f08b3e27ec2fce434fd4005ffe935e11",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/paths.rs": {
         "upstream_sha256": "4cefe33794b4bfa73ae4cfc2b8c004fcc6e2be0ecd24d6f2c4a5872dda8fe812",
-        "patched_sha256": "604bdda030b209ee41eed73b74d872fbc33223d1700a36d91ced21e215e0201c",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "5ac4e1174394e0d1e6a525bc0e85f4e5a7a96a9d591bab36f121e77fd512d768",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/qlog.rs": {
         "upstream_sha256": "c637ebdad5281d77cc8cc946856c26e0b25f1e90f23e403230e8c5430b46710a",
-        "patched_sha256": "4d744939c2a5032120da2c85f4e015ef48c72dc9dc2aad08dd9f6550caa416be",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "19f2259640b502d7d89b7c0ac16229c93709a76d1a4ad5e8792eb25aba0a887d",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/send_buffer.rs": {
         "upstream_sha256": "1fcbd2c539aa97c395e1e1bea790349e83774393386ba87a1ce18c1ec31c1e9d",
-        "patched_sha256": "2638c915eabe2c7b8108215010dd88ab05abe0bfff5a1e1e8b1c815935a11641",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "fdf1bf706e908ec910f69324b8631cb1710d456dc4ae32ccc74be47399572982",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/spaces.rs": {
         "upstream_sha256": "a1b44aa9c1ff38a545741fff5546552b9650ae9381a6fdf5f9ef9ea62ef6a45c",
-        "patched_sha256": "41e6a7ee9e27af6b44bd382a4acb600eec0f86d26399fd2589804b2ccfb694ff",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "c1229b21e4754b50f16dc83e056bfe0a8a1caefec049cd093ec2443c21486ad0",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/stats.rs": {
         "upstream_sha256": "f420ca4132973cdcfd0625a68fe79333891bb8bd91072dff70997c76472970d5",
-        "patched_sha256": "e913abaf2744e587cf10ab9e6864cfada49caee9c2624f1f776cca6c81b54bb7",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "0b5fe0837b7982e5fdc607a6672c103e9b8573c01167b9a2378392bec8cf9f65",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/streams/mod.rs": {
         "upstream_sha256": "c86ced408df3348d1b4c8bd93a2c3cc885567925f8cea3b45271f5ab5d9d7acb",
-        "patched_sha256": "d6245ef6953f0f6d3ff7a4d77e94c50c23ffc031c479ae96e9ab7d63aac55cd6",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "e9fe72925526c2e0d750bb628314162f39f004de294868378d79f909fd3f56f6",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/streams/recv.rs": {
         "upstream_sha256": "fc6aeb34b4e5fe9781a571a34ce5b95014f60c18613f5bfecf44411f6bb662d5",
-        "patched_sha256": "0ba3888b296055d03dfc32132c4d7a9a9594ea644cf9b77e7ae91222779dc3dd",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "6f389da1770b3990202e90d29b671e8cb954a954ec7a8335788c4fb58b829502",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/streams/send.rs": {
         "upstream_sha256": "cb9ef9cfa35aaf8794454130d27c6233602cacf0cf038bb61c6dbe54f1fcc7f0",
-        "patched_sha256": "fe4969984ab37dc15f834d8ce64063271b6f0d31f5fab15372d399e1115df32d",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "6e6430d12c31b97866fed7c6d05df7d16f43e85690fae77185c32d8ab4b44759",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/streams/state.rs": {
         "upstream_sha256": "f3e993c4cdb34ac89bd379a601f19a3c928332445e98233de921f153ccb6a59e",
-        "patched_sha256": "2dbc5c29b4f81f21b3351f1a20dcec8a486ef25ac05d2e83548b9157af253842",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "84034ff47cb17989c2b1c7a4458cd0074906b7f711aa2080e144794e9ddb8600",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/timer.rs": {
         "upstream_sha256": "7deb170226d84472f4c0b1cc0badc384948458894b65f17277fe15a5705af7e3",
         "patched_sha256": "4135b07f6fc7337ca2cfb1b9d1374a82a4d327e896ab9af40c8047f44ee94b11",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/constant_time.rs": {
         "upstream_sha256": "35540c4e65fc083894bfedcb811c3495cd5f4168d2f1c25b73cdcdcfe3a44f3b",
         "patched_sha256": "7cdb2daf3421491380d1d852621f99bd188f742603a5b5189299d0258b63e2ef",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/crypto/ring_like.rs": {
         "upstream_sha256": "ea8cfef31b7a238d539ac7a95cf77e34a007a61eb1dcfd2838c4da648a9b2a53",
         "patched_sha256": "83ce70f8dcfc18f9bb216a6456f24978780ad2cc266da7c94666b5ede2efd511",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/crypto/rustls.rs": {
         "upstream_sha256": "1b487025d07deea95daa7b8596bf6f7eb792436891667a54592697b1c2d479f8",
-        "patched_sha256": "f4ff8a8ec159db05791af8ad58d9529ebe66c6a9c94a2011362a737235b9a25f",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "ddb3d2bc72b84d10085292b17993f83b9b9fa0a9ab5bc99193c0e43fe6b20112",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/crypto.rs": {
         "upstream_sha256": "ffa9d1d3071110eb5907af47123379378cac12c229d8251e8c69b967388e23b2",
-        "patched_sha256": "249a1c6d6438adb92d7e029d8fdabd581a33bc7b9ad1390064610d143dbcd533",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "ab4143d6e934922e27cf97212d2ff4008c04b0c100195f9adab74febfc79f0e9",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/endpoint.rs": {
         "upstream_sha256": "eb9cc82040621b95670e1d9ca9e82e902029766f7303b4329fcb169fb73d3bfc",
-        "patched_sha256": "5638a598e7c5ccc5426316e59664069ce631c656af542d333c97625ed5a6d5dc",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "06332a1d4396cd5b699fefbfe9ad0c0fe40f8616d3d93d52b299af1051181c6c",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/frame.rs": {
         "upstream_sha256": "ff9bc94eed5eaa96400c41f40dc0d73c68b71a60b98acbaf045885d0522341e3",
-        "patched_sha256": "a438df9786682c3792cef015d2a2e9e61c6a2b295fe123a8782dadf6931b8c0a",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "84f96d152f20f323348a880eaee3aaa11136f121f4789d91ee91118bd8569de6",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/lib.rs": {
         "upstream_sha256": "cf40840076b56b9b2c61b207604f60226157728d2af7b206bc3e4a2bebbb4488",
-        "patched_sha256": "b7b4edc4d9957e1c682e135c461f9594d10b54432175bec871950c4dd47daafd",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "8d25c1cb7d13f5fab9fbb0d0690a29465be9c3d9c019d3d5cf672a25fbad6c30",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/packet.rs": {
         "upstream_sha256": "b73d99c36983c4c0cb47e6cc38ba7f723e2f924e397aedd63bf9b8e4cf6a57a9",
-        "patched_sha256": "6d9717ba905d40ec38d2cbd2037c927dd5eea08ff7c9d61410bff613a5364b1f",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "623fc90718d72fbe141ca4e2b70359b253017979e526972cb87cc0eb383d54bc",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/range_set/array_range_set.rs": {
         "upstream_sha256": "b8372411b941df99a8da2a9a2948f4f8fed8bd116ac7e4b7f7960da36991bc07",
         "patched_sha256": "8e2198957110338ea6ddc085e342ba5fe00d0f000ff07cb5cf3c12489e47fe38",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/range_set/btree_range_set.rs": {
         "upstream_sha256": "ea055e691cc34351c81c5e386ab1ca2996781dca2da35fcb6364e9472a00a75f",
-        "patched_sha256": "2ba0fb5d8e3658492fd3d01a3ce9fc9bd0f3581c351a37b5bf77b7cd2ec6b765",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "2d33e3adf8a01282bb0cd952100e8253a10076df1c35201726cb48caba540b32",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/range_set/mod.rs": {
         "upstream_sha256": "34180938d54029c07d2bee70501e3c6e865581d1be1411c4e5319bf82e98a657",
         "patched_sha256": "28a94981a3262b94d06e7631560514eae43b9cff5c9bb8e842a0ca980eeed861",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/range_set/tests.rs": {
         "upstream_sha256": "195a6ced04ff4fb5d85f7d1aee3404de66ac4325e228cdb0d5fb3c82bb3b657d",
         "patched_sha256": "a957ad1d9ea26928d2a0a3d9b3ac47215c2e24ede761d071444297627dd2bfb8",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/shared.rs": {
         "upstream_sha256": "126c72d2c933a8e27cb9264d6d973239fbde78620af7a91b9967a4481ec49599",
-        "patched_sha256": "5aef5f53729ed9312e4aee3eca665912449c6f3fd1cdc1f16c124ed030c1deca",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "63976a9c391a9fd847e5cfdc0480e42bc8c4f288997c8a3c025f3b1e424329e6",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/tests/mod.rs": {
         "upstream_sha256": "a4f0907c8c39c02646602e628d0a7c9090db601bfb35edc4deb52b51d6245dd1",
-        "patched_sha256": "f915fe33775fc4440c7f4240083329d15062c35dc9e7f5d70b7ecd379cf11acf",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "9cad2d31271067edb1bc7d4e10754006eb9f5cc1c5f3a45cfce90a6c884f013f",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; remove one blank line to keep upstream line count"
       },
       "src/tests/token.rs": {
         "upstream_sha256": "f648dd0c171d1f2c498e0363b68c6211d5e9ec2f2b305db4a262d3ec47ebbc79",
         "patched_sha256": "b067bd33a5a45179b2be1f42a6a19e8010b8ecfba4549248ca2564c8fea2a19d",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/tests/util.rs": {
         "upstream_sha256": "147b3c45aa083fc13fb72818eb098f1ec14548830612040e7a1c521c41f12a3d",
-        "patched_sha256": "a8741bda400bb5009e689d449e2c831f27e9f81b112e4a853acecff34eac3a40",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "bc40d1d47b5a3506e6858b80af9e878c695fde6a495e4afd849f9e34e5c4c81c",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/token.rs": {
         "upstream_sha256": "b0364bcc2aa821a85e66f476f2314c9dedf01e1a24c456a70f9f9e79bc31d18c",
-        "patched_sha256": "c01220229642757fb0f9cb0508e8152bb1383c5486c91c2a3798e47dd99ed651",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "b63235cfecf79eb1ad05c3bf7213cd74d381c855a4ad853d22a1842da506bcba",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/token_memory_cache.rs": {
         "upstream_sha256": "79d40926f4707fd65b7c497fbde62f1cf40df29af5b5b4c49e840abd669ea03d",
-        "patched_sha256": "8617947d92d9c513ae01a973506572bca0d96c1ef74a5ab5175c82311b88008c",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "a4f8455edbd62f4ab832f2fcb6b92e999a90af1e2a89dfeb88e02f9f9f299402",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/transport_error.rs": {
         "upstream_sha256": "ba17c89e103e44917ec74698bc7e4cc72a4101c344bba37e06b08f87ffd3230f",
         "patched_sha256": "4ba7c57fd118d313e00b4947b2ca76f6505e3ea431f9ea629fcdd9a0ba53731a",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/transport_parameters.rs": {
         "upstream_sha256": "e6b70199d2322ddf2b2b6516c39bc4554b17364cf3fc60ba669d718fdc58a266",
-        "patched_sha256": "ca6f514eae0a5151c0ccd1d5ff674ff460ef727a669e2bd854b214142e489abe",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "patched_sha256": "13f16774ca7ea309408e7a739ab73797b4cfe69de08515c94a59843612495671",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/varint.rs": {
         "upstream_sha256": "6f07845002d5fe7b0a1388fc18eecba0f1d3870110494052d1eeaf963eb1d132",
         "patched_sha256": "7e3a599728464eb2feeef4837d98d9ed9f9f4f094139c80bddb7b873914017c6",
-        "delta": "Add original-license SPDX header and format with Rust 2021 rules"
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/connection/idle_timeout.rs": {
         "patched_sha256": "4f2cfc33c335710e0cd86d62f1ea0d31cea3e70a6a278849b06181aa5eea257a",
-        "delta": "Extract unchanged idle timeout negotiation and tests from connection/mod.rs"
+        "delta": "Extract unchanged idle timeout negotiation and tests with pub(super) visibility and SPDX"
       }
+    },
+    "formatting": {
+      "current_policy": "Upstream Rust bytes plus declared transformations; no bulk vendor rustfmt in r2",
+      "product_command": "cargo fmt --all",
+      "vendor_command": "none (excluded from product workspace)",
+      "rustfmt_version": "rustfmt 1.10.0-stable (b940084d7e 2026-09-28)",
+      "r1_command": "cargo fmt --all (toolchain 1.99.0; vendor/rustfmt.toml edition=2021,max_width=100; root rustfmt.toml also applied during r1 import)",
+      "toolchain": "1.99.0 (rust-toolchain.toml)"
     }
   }
 }

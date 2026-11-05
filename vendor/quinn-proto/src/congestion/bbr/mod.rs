@@ -6,13 +6,13 @@ use std::sync::Arc;
 use rand::{RngExt, SeedableRng};
 use rand_pcg::Pcg32;
 
+use crate::congestion::ControllerMetrics;
 use crate::congestion::bbr::bw_estimation::BandwidthEstimation;
 use crate::congestion::bbr::min_max::MinMax;
-use crate::congestion::ControllerMetrics;
 use crate::connection::RttEstimator;
 use crate::{Duration, Instant};
 
-use super::{Controller, ControllerFactory, BASE_DATAGRAM_SIZE};
+use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory};
 
 mod bw_estimation;
 mod min_max;

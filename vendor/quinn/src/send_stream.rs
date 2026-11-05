@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::{
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     io,
-    pin::{pin, Pin},
+    pin::{Pin, pin},
     task::{Context, Poll},
 };
 
@@ -11,8 +11,8 @@ use proto::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
 use thiserror::Error;
 
 use crate::{
-    connection::{ConnectionRef, State},
     VarInt,
+    connection::{ConnectionRef, State},
 };
 
 /// A stream that can only be used to send data

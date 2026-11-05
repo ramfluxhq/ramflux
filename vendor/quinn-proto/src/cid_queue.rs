@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::ops::Range;
 
-use crate::{frame::NewConnectionId, ConnectionId, ResetToken};
+use crate::{ConnectionId, ResetToken, frame::NewConnectionId};
 
 /// DataType stored in CidQueue buffer
 type CidData = (ConnectionId, Option<ResetToken>);

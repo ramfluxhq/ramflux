@@ -8,7 +8,7 @@ use super::{
     pacing::Pacer,
     spaces::{PacketSpace, SentPacket},
 };
-use crate::{congestion, packet::SpaceId, Duration, Instant, TransportConfig, TIMER_GRANULARITY};
+use crate::{Duration, Instant, TIMER_GRANULARITY, TransportConfig, congestion, packet::SpaceId};
 
 #[cfg(feature = "qlog")]
 use qlog::events::quic::MetricsUpdated;
@@ -481,10 +481,11 @@ mod tests {
             }
             path.pacing.on_transmit(mtu);
         }
-        assert!(path
-            .pacing
-            .delay(path.rtt.get(), mtu.into(), mtu, window, now)
-            .is_some());
+        assert!(
+            path.pacing
+                .delay(path.rtt.get(), mtu.into(), mtu, window, now)
+                .is_some()
+        );
 
         path.reset(now, &config);
 

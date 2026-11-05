@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::{
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     io,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
@@ -11,7 +11,7 @@ use proto::{Chunk, Chunks, ClosedStream, ConnectionError, ReadableError, StreamI
 use thiserror::Error;
 use tokio::io::ReadBuf;
 
-use crate::{connection::ConnectionRef, VarInt};
+use crate::{VarInt, connection::ConnectionRef};
 
 /// A stream that can only be used to receive data
 ///

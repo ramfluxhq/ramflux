@@ -3,9 +3,14 @@
 import argparse
 import hashlib
 import json
+import io
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
+import tempfile
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD = ROOT / "vendor/quic-provenance.json"
@@ -59,6 +64,13 @@ def check_resolution():
         cwd=ROOT, check=True, capture_output=True, text=True,
     )
     metadata = json.loads(result.stdout)
+    assert not any(
+        p["id"] in metadata["workspace_members"] and p["name"] in PINS
+        for p in metadata["packages"]
+    ), "vendored dependencies must not be workspace members"
+    assert not any(p["name"] == "async-std" for p in metadata["packages"]), (
+        "vendor-only dev dependencies leaked into product resolution"
+    )
     ids = {}
     for name, version in PINS.items():
         packages = [p for p in metadata["packages"] if p["name"] == name]
@@ -81,11 +93,59 @@ def check_resolution():
         )
 
 
+def verify_upstream(records, archive_dir=None):
+    """Authenticate and extract registry archives, then check every original file."""
+    cache = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))) / "registry/cache"
+    for name, version in PINS.items():
+        record = records[name]
+        filename = f"{name}-{version}.crate"
+        if archive_dir is not None:
+            archive = (archive_dir / filename).read_bytes()
+        else:
+            candidates = sorted(cache.glob(f"*/{filename}"))
+            if candidates:
+                archive = candidates[0].read_bytes()
+            else:
+                with urllib.request.urlopen(record["source"], timeout=30) as response:
+                    archive = response.read(32 * 1024 * 1024 + 1)
+        assert len(archive) <= 32 * 1024 * 1024, f"{name}: oversized archive"
+        assert hashlib.sha256(archive).hexdigest() == record["archive_sha256"], (
+            f"{name}: upstream archive checksum mismatch"
+        )
+        with tempfile.TemporaryDirectory(prefix="quic-upstream-") as directory:
+            extracted = Path(directory)
+            seen = set()
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as source:
+                for member in source.getmembers():
+                    if member.isdir():
+                        continue
+                    assert member.isfile(), f"{name}: non-regular archive member"
+                    rel = Path(member.name).relative_to(f"{name}-{version}")
+                    assert not rel.is_absolute() and ".." not in rel.parts, "unsafe archive path"
+                    assert str(rel) not in seen, "duplicate archive file"
+                    seen.add(str(rel))
+                    target = extracted / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(source.extractfile(member).read())
+            expected = {rel for rel, entry in record["files"].items() if "upstream_sha256" in entry}
+            assert seen == expected, f"{name}: upstream inventory mismatch"
+            for rel in sorted(seen):
+                assert digest(extracted / rel) == record["files"][rel]["upstream_sha256"], (
+                    f"{name}/{rel}: upstream file checksum mismatch"
+                )
+    print("QUIC upstream archives and original file hashes: OK")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sources-only", action="store_true")
+    parser.add_argument("--verify-upstream", action="store_true")
+    parser.add_argument("--archive-dir", type=Path)
     args = parser.parse_args()
-    check_sources(json.loads(RECORD.read_text()))
+    records = json.loads(RECORD.read_text())
+    check_sources(records)
+    if args.verify_upstream:
+        verify_upstream(records, args.archive_dir)
     if not args.sources_only:
         check_resolution()
     print("QUIC patch provenance and resolution: OK" if not args.sources_only
@@ -95,6 +155,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (AssertionError, KeyError, subprocess.CalledProcessError) as error:
+    except (AssertionError, KeyError, OSError, ValueError, tarfile.TarError,
+            subprocess.CalledProcessError) as error:
         print(f"QUIC patch check failed: {error}", file=sys.stderr)
         sys.exit(1)
