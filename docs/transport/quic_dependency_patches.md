@@ -59,3 +59,17 @@ certificates. Census line citations refer to immutable upstream source, before
 SPDX/extraction shifts. Missing runtime bounds continue to refuse activation.
 The controller owns upstream reproducer/benchmark/issues/PR publication and
 removes patches only after an audited upstream version reproduces all bounds.
+
+
+## Dormant packet-control checkpoint
+
+The next local checkpoint adds packet-atomic proto admission, a single parked
+remainder, aggregate directional reservations retained through endpoint replies,
+control-credit wakeups and raw backing owners propagated into stream chunks.
+Quinn has opt-in raw enqueue counters and a proto resume hook. None of these
+options is enabled by product services. This checkpoint is incomplete: socket
+pre-allocation admission, complete separate control/terminal lanes and the full
+named runtime proofs remain outstanding. It is not an allocation certificate or
+an activation-ready bounded endpoint. Source hashes include the exact scoped
+rustfmt argument list in the formatting record; untouched upstream modules are
+not bulk formatted.

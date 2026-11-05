@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use rustc_hash::FxHashSet;
 use tracing::{debug, trace};
 
-use crate::{Duration, Instant, TransportError, shared::IssuedCid};
+use crate::{shared::IssuedCid, Duration, Instant, TransportError};
 
 /// Local connection ID management
 pub(super) struct CidState {
@@ -177,6 +177,10 @@ impl CidState {
         // and meanwhile send a RETIRE_CONNECTION_ID to retire cid 0 to peer B.
         // If peer B doesn't check the cid limit here and send a new cid again, peer A will then face CONNECTION_ID_LIMIT_ERROR
         Ok(limit > self.active_seq.len() as u64)
+    }
+
+    pub(super) fn was_retired(&self, sequence: u64) -> bool {
+        sequence < self.issued && !self.active_seq.contains(&sequence)
     }
 
     /// Length of local Connection IDs

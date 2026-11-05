@@ -7,30 +7,29 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     },
-    task::{Context, Poll, Waker, ready},
+    task::{ready, Context, Poll, Waker},
 };
 
 use bytes::Bytes;
 use pin_project_lite::pin_project;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
-use tokio::sync::{Notify, futures::Notified, mpsc, oneshot};
-use tracing::{Instrument, Span, debug_span};
+use tokio::sync::{futures::Notified, mpsc, oneshot, Notify};
+use tracing::{debug_span, Instrument, Span};
 
 use crate::{
-    ConnectionEvent, Duration, Instant, VarInt,
     mutex::Mutex,
     recv_stream::RecvStream,
     runtime::{AsyncTimer, AsyncUdpSocket, Runtime, UdpPoller},
     send_stream::SendStream,
-    udp_transmit,
+    udp_transmit, ConnectionEvent, Duration, Instant, VarInt,
 };
 use proto::{
-    ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
-    StreamId, congestion::Controller,
+    congestion::Controller, ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent,
+    Side, StreamEvent, StreamId,
 };
 
 /// In-progress connection attempt future
@@ -1078,6 +1077,7 @@ impl State {
         shared: &Shared,
         cx: &mut Context,
     ) -> Result<(), ConnectionError> {
+        self.inner.poll_control_resume(cx);
         loop {
             match self.conn_events.poll_recv(cx) {
                 Poll::Ready(Some(ConnectionEvent::Rebind(socket))) => {
@@ -1085,8 +1085,13 @@ impl State {
                     self.io_poller = self.socket.clone().create_io_poller();
                     self.inner.local_address_changed();
                 }
+                Poll::Ready(Some(ConnectionEvent::RawProto { event, credit })) => {
+                    self.inner.handle_event_with_owner(event, credit);
+                    self.inner.poll_control_resume(cx);
+                }
                 Poll::Ready(Some(ConnectionEvent::Proto(event))) => {
                     self.inner.handle_event(event);
+                    self.inner.poll_control_resume(cx);
                 }
                 Poll::Ready(Some(ConnectionEvent::Close { reason, error_code })) => {
                     self.close(error_code, reason, shared);

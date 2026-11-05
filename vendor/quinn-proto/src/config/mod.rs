@@ -12,18 +12,18 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use thiserror::Error;
 
+#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+use crate::crypto::rustls::{configured_provider, QuicServerConfig};
 #[cfg(feature = "bloom")]
 use crate::BloomTokenLog;
 #[cfg(not(feature = "bloom"))]
 use crate::NoneTokenLog;
-#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
-use crate::crypto::rustls::{QuicServerConfig, configured_provider};
 use crate::{
-    DEFAULT_SUPPORTED_VERSIONS, Duration, MAX_CID_SIZE, RandomConnectionIdGenerator, SystemTime,
-    TokenLog, TokenMemoryCache, TokenStore, VarInt, VarIntBoundsExceeded,
     cid_generator::{ConnectionIdGenerator, HashedConnectionIdGenerator},
     crypto::{self, HandshakeTokenKey, HmacKey},
     shared::ConnectionId,
+    Duration, RandomConnectionIdGenerator, SystemTime, TokenLog, TokenMemoryCache, TokenStore,
+    VarInt, VarIntBoundsExceeded, DEFAULT_SUPPORTED_VERSIONS, MAX_CID_SIZE,
 };
 
 mod transport;
@@ -36,6 +36,7 @@ pub use transport::{AckFrequencyConfig, IdleTimeout, MtuDiscoveryConfig, Transpo
 /// Default values should be suitable for most internet applications.
 #[derive(Clone)]
 pub struct EndpointConfig {
+    pub(crate) control_limits: Option<crate::ControlLimits>,
     pub(crate) reset_key: Arc<dyn HmacKey>,
     pub(crate) max_udp_payload_size: VarInt,
     /// CID generator factory
@@ -57,6 +58,7 @@ impl EndpointConfig {
         let cid_factory =
             || -> Box<dyn ConnectionIdGenerator> { Box::<HashedConnectionIdGenerator>::default() };
         Self {
+            control_limits: None,
             reset_key,
             max_udp_payload_size: (1500u32 - 28).into(), // Ethernet MTU minus IP + UDP headers
             connection_id_generator_factory: Arc::new(cid_factory),
@@ -65,6 +67,21 @@ impl EndpointConfig {
             min_reset_interval: Duration::from_millis(20),
             rng_seed: None,
         }
+    }
+
+    /// Configure dormant ordinary control credits before any owner is allocated.
+    ///
+    /// # Errors
+    /// Rejects directions too small to hold a reserved response.
+    pub fn control_credit_limits(
+        &mut self,
+        limits: crate::ControlLimits,
+    ) -> Result<&mut Self, ConfigError> {
+        if limits.bytes < 1024 || limits.items < 2 {
+            return Err(ConfigError::OutOfBounds);
+        }
+        self.control_limits = Some(limits);
+        Ok(self)
     }
 
     /// Supply a custom connection ID generator factory

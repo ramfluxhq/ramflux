@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Aggregate bidirectional credits retained through endpoint response consumption.
 use super::*;
-use std::{sync::Mutex, task::{Context, Waker}};
+use std::{
+    sync::Mutex,
+    task::{Context, Waker},
+};
 
 /// Ordinary control credit available in each independent direction.
 #[derive(Clone, Copy, Debug)]
@@ -41,7 +44,9 @@ impl Drop for Reservation {
             state.generation = state.generation.wrapping_add(1);
             state.wake.take()
         };
-        if let Some(wake) = wake { wake.wake(); }
+        if let Some(wake) = wake {
+            wake.wake();
+        }
     }
 }
 
@@ -53,7 +58,12 @@ pub(super) enum Admission {
 
 impl CreditState {
     pub(super) fn new(limits: ControlLimits) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {limits, used: Demand::default(), generation: 0, wake: None}))
+        Arc::new(Mutex::new(Self {
+            limits,
+            used: Demand::default(),
+            generation: 0,
+            wake: None,
+        }))
     }
     pub(super) fn reserve(state: &Arc<Mutex<Self>>, demand: Demand) -> Admission {
         let mut locked = state.lock().unwrap();
@@ -64,16 +74,24 @@ impl CreditState {
             return Admission::Oversize;
         }
         if demand.forward > forward_limit - locked.used.forward
-            || demand.reverse > reverse_limit - locked.used.reverse {
+            || demand.reverse > reverse_limit - locked.used.reverse
+        {
             return Admission::Pending;
         }
         locked.used.forward += demand.forward;
         locked.used.reverse += demand.reverse;
-        Admission::Reserved(Arc::new(Reservation {state: state.clone(), demand}))
+        Admission::Reserved(Arc::new(Reservation {
+            state: state.clone(),
+            demand,
+        }))
     }
     pub(super) fn register(state: &Arc<Mutex<Self>>, cx: &Context<'_>) {
         let mut locked = state.lock().unwrap();
-        if locked.wake.as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
+        if locked
+            .wake
+            .as_ref()
+            .is_none_or(|w| !w.will_wake(cx.waker()))
+        {
             locked.wake = Some(cx.waker().clone());
         }
     }
@@ -87,6 +105,7 @@ pub(super) struct PendingPacket {
     pub number: Option<u64>,
     pub key_update: Option<packet_crypto::DecryptPacketResult>,
     pub remaining: Option<BytesMut>,
+    pub owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl Connection {
@@ -94,7 +113,8 @@ impl Connection {
     ///
     /// # Errors
     /// Returns an error if either ordinary direction cannot contain a response.
-    pub fn set_control_credit_limits(&mut self, limits: ControlLimits) -> Result<(), &'static str> {
+    #[cfg(test)]
+    fn set_control_credit_limits(&mut self, limits: ControlLimits) -> Result<(), &'static str> {
         if limits.bytes < 1024 || limits.items < 2 || self.control.is_some() {
             return Err("invalid or already frozen control credit");
         }
@@ -104,13 +124,29 @@ impl Connection {
 
     pub(super) fn queue_endpoint_event(&mut self, event: EndpointEventInner) {
         let terminal = matches!(event, EndpointEventInner::Drained);
-        if terminal && self.endpoint_events.iter().any(|e| e.is_drained()) { return; }
-        let credit = if terminal { None } else { self.active_control.clone() };
+        if terminal && self.endpoint_events.iter().any(|e| e.is_drained()) {
+            return;
+        }
+        let credit = if terminal {
+            None
+        } else {
+            self.active_control.clone()
+        };
         self.endpoint_events.push_back(EndpointEvent(event, credit));
     }
 
-    fn control_demand(&self, packet: &Packet) -> Result<Demand, TransportError> {
+    fn control_demand(
+        &self,
+        packet: &Packet,
+        remote: SocketAddr,
+    ) -> Result<Demand, TransportError> {
         let mut demand = Demand::default();
+        if !packet.header.has_frames() {
+            return Ok(demand);
+        }
+        if remote != self.path.remote {
+            demand.forward = 1;
+        }
         for result in frame::Iter::new(packet.plaintext.as_ref().unwrap().clone())? {
             match result? {
                 // Every attempt counts, including repeats; actual retired CIDs are idempotent.
@@ -131,20 +167,40 @@ impl Connection {
     }
 
     pub(super) fn admit_control_packet(&mut self, mut pending: PendingPacket) -> Option<Packet> {
+        if (self.control.is_some() || self.raw_owner.is_some())
+            && pending.packet.header.has_frames()
+            && pending.packet.plaintext.is_none()
+        {
+            let bytes = mem::take(&mut pending.packet.payload).freeze();
+            pending.packet.plaintext = Some(if let Some(owner) = self.raw_owner.clone() {
+                Bytes::from_owner(RawBacking {
+                    bytes,
+                    _owner: owner,
+                })
+            } else {
+                bytes
+            });
+        }
         if self.control.is_some() {
-            if pending.packet.plaintext.is_none() {
-                pending.packet.plaintext = Some(mem::take(&mut pending.packet.payload).freeze());
-            }
-            let demand = match self.control_demand(&pending.packet) {
+            let demand = match self.control_demand(&pending.packet, pending.remote) {
                 Ok(demand) => demand,
                 // Let the normal parser report the original framing error without committing effects.
-                Err(error) => { self.control_close(pending.now, error); return None; }
+                Err(error) => {
+                    self.control_close(pending.now, error);
+                    return None;
+                }
             };
             match CreditState::reserve(self.control.as_ref().unwrap(), demand) {
                 Admission::Reserved(reservation) => self.active_control = Some(reservation),
-                Admission::Pending => { self.pending_control = Some(pending); return None; }
+                Admission::Pending => {
+                    self.pending_control = Some(pending);
+                    return None;
+                }
                 Admission::Oversize => {
-                    self.control_close(pending.now, TransportError::INTERNAL_ERROR("control_packet_oversize"));
+                    self.control_close(
+                        pending.now,
+                        TransportError::INTERNAL_ERROR("control_packet_oversize"),
+                    );
                     return None;
                 }
             }
@@ -165,26 +221,109 @@ impl Connection {
     }
 
     fn control_close(&mut self, now: Instant, error: TransportError) {
-        if self.control_resource_closed { return; }
+        if self.control_resource_closed {
+            return;
+        }
         self.control_resource_closed = true;
         self.pending_control = None;
+        self.control_timer_pending = None;
+        self.active_control = None;
         self.error = Some(ConnectionError::TransportError(error.clone()));
         self.close_inner(now, Close::Connection(error.into()));
+    }
+
+    pub(super) fn reserve_control_timer(&mut self, now: Instant) -> bool {
+        let Some(control) = self.control.as_ref() else {
+            return true;
+        };
+        match CreditState::reserve(
+            control,
+            Demand {
+                forward: 1,
+                reverse: 1,
+            },
+        ) {
+            Admission::Reserved(reservation) => {
+                self.active_control = Some(reservation);
+                self.control_timer_pending = None;
+                true
+            }
+            Admission::Pending => {
+                self.timers.stop(Timer::PushNewCid);
+                self.control_timer_pending = Some(now);
+                false
+            }
+            Admission::Oversize => {
+                self.control_close(
+                    now,
+                    TransportError::INTERNAL_ERROR("control_timer_oversize"),
+                );
+                false
+            }
+        }
     }
 
     /// Retry the single pending remainder after control consumers return credit.
     /// Returns whether packet input remains paused. Existing committed heads are not replayed.
     pub fn poll_control_resume(&mut self, cx: &mut Context<'_>) -> bool {
-        if self.pending_control.is_none() { return false; }
+        if self.pending_control.is_none() && self.control_timer_pending.is_none() {
+            return false;
+        }
+        CreditState::register(self.control.as_ref().unwrap(), cx);
+        if let Some(now) = self.control_timer_pending {
+            self.timers.set(Timer::PushNewCid, now);
+            self.handle_timeout(now);
+        }
+        if self.pending_control.is_none() {
+            return false;
+        }
         // Register before retry so a concurrent final consumer cannot lose the wakeup.
         CreditState::register(self.control.as_ref().unwrap(), cx);
         let pending = self.pending_control.take().unwrap();
-        let PendingPacket {now, remote, ecn, packet, number, key_update, remaining} = pending;
+        let PendingPacket {
+            now,
+            remote,
+            ecn,
+            packet,
+            number,
+            key_update,
+            remaining,
+            owner,
+        } = pending;
+        self.raw_owner = owner;
         self.handle_authenticated_packet(now, remote, ecn, Ok((packet, number, key_update)), false);
-        if let Some(pending) = self.pending_control.as_mut() { pending.remaining = remaining; }
-        else if !self.control_resource_closed {
-            if let Some(remaining) = remaining { self.handle_coalesced(now, remote, ecn, remaining); }
+        if let Some(pending) = self.pending_control.as_mut() {
+            pending.remaining = remaining;
+        } else if !self.control_resource_closed {
+            if let Some(remaining) = remaining {
+                self.handle_coalesced(now, remote, ecn, remaining);
+            }
         }
+        self.raw_owner = None;
         self.pending_control.is_some()
     }
+
+    /// Process an event while its allocation owner remains charged through retained backing.
+    pub fn handle_event_with_owner(
+        &mut self,
+        event: ConnectionEvent,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) {
+        self.raw_owner = Some(owner);
+        self.handle_event(event);
+        self.raw_owner = None;
+    }
 }
+
+struct RawBacking {
+    bytes: Bytes,
+    _owner: Arc<dyn std::any::Any + Send + Sync>,
+}
+impl AsRef<[u8]> for RawBacking {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[cfg(test)]
+mod tests;
