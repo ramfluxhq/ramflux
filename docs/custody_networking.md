@@ -67,10 +67,10 @@ schedule. Roots become due after 120 seconds to allow for fetch and wake latency
 demands take priority between fetches. Each periodic trigger permits at most 32
 retries of previously failed demands, then reserves remaining work for sweep roots;
 separate cursors preserve continuation. Each account fetches one root at a time, in
-batches of at most 32 roots and at most four batches (128 roots) per trigger, with 25
-ms between batches. Large rosters may take several triggers to refresh. The pending-
-demand cap is 512. Repeated failures back off per root from 5 seconds, doubling up to
-150 seconds.
+batches of at most 32 roots and at most four batches (128 roots) per trigger, with
+25 ms between batches. Large rosters may take several triggers to refresh. The
+pending-demand cap is 512. Repeated failures back off per root from 5 seconds,
+doubling up to 150 seconds.
 
 Fetches run off the account writer; Apply checks generation, session, root and
 current membership and retains the conservative fetch-start time. Lock or session

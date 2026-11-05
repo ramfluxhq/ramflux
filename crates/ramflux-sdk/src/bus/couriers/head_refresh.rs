@@ -317,10 +317,11 @@ pub(crate) async fn pass(
     let mut cancel = context.cancel.clone();
     let mut attempted = BTreeSet::new();
     let mut retry_budget = RETRY_DEMAND_SHARE;
+    let fetch = fetch_pass(&context, &writer, false, &mut attempted, &mut retry_budget);
     tokio::select! {
         biased;
         _ = cancel.changed() => Ok(()),
-        result = fetch_pass(&context, &writer, false, &mut attempted, &mut retry_budget) => result.map(|_| ()),
+        result = fetch => result.map(|_| ()),
     }
 }
 async fn fetch_pass(
@@ -412,16 +413,14 @@ async fn cycle(
 }
 
 // Advance on the original interval grid, independent of wake delivery latency.
-fn advance_sweep(next: &mut tokio::time::Instant, ticked: bool, now: tokio::time::Instant) -> bool {
-    if !ticked && now < *next {
+fn advance_sweep(next: &mut tokio::time::Instant, now: tokio::time::Instant) -> bool {
+    if now < *next {
         return false;
     }
-    if now >= *next {
-        let elapsed = now.duration_since(*next);
-        let remainder = Duration::from_secs(elapsed.as_secs() % REFRESH_INTERVAL.as_secs())
-            + Duration::from_nanos(u64::from(elapsed.subsec_nanos()));
-        *next = now + REFRESH_INTERVAL.saturating_sub(remainder);
-    }
+    let elapsed = now.duration_since(*next);
+    let remainder = Duration::from_secs(elapsed.as_secs() % REFRESH_INTERVAL.as_secs())
+        + Duration::from_nanos(u64::from(elapsed.subsec_nanos()));
+    *next = now + REFRESH_INTERVAL.saturating_sub(remainder);
     true
 }
 
@@ -446,13 +445,12 @@ async fn run_with_triggers(
             tracing::debug!(%error, "connect head refresh deferred");
         }
         loop {
-            let ticked = tokio::select! {
+            tokio::select! {
                 biased;
-                _ = timer.tick(), if periodic => true,
-                () = wake.notified() => false,
-            };
-            let periodic =
-                periodic && advance_sweep(&mut next_sweep, ticked, tokio::time::Instant::now());
+                _ = timer.tick(), if periodic => {},
+                () = wake.notified() => {},
+            }
+            let periodic = periodic && advance_sweep(&mut next_sweep, tokio::time::Instant::now());
             if let Err(error) = cycle(&context, &writer, periodic).await {
                 tracing::debug!(%error, "head refresh cycle deferred");
             }
@@ -460,9 +458,15 @@ async fn run_with_triggers(
         #[allow(unreachable_code)]
         Ok::<(), SdkError>(())
     };
-    tokio::select! { biased; _ = cancel.changed() => {}, result = run => {
-        if let Err(error) = result { tracing::debug!(%error, "head refresh stopped"); }
-    }}
+    tokio::select! {
+        biased;
+        _ = cancel.changed() => {},
+        result = run => {
+            if let Err(error) = result {
+                tracing::debug!(%error, "head refresh stopped");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -129,32 +129,51 @@ async fn receive_applies_message_refreshed_inside_its_command() -> TestResult {
 
 #[tokio::test]
 async fn cancelled_apply_cannot_prepare_retry_that_waits_for_refresh() -> TestResult {
-    tokio::task::LocalSet::new().run_until(Box::pin(async {
-        let mut case = Box::pin(setup_refreshed()).await?;
-        let (entered, ready) = oneshot::channel();
-        let (_release, held) = oneshot::channel();
-        case.runtime.receive_gate_hook = Some((entered, held));
-        let mut command = receive_command();
-        let (reply, result) = oneshot::channel();
-        command.reply = Some(reply);
-        {
-            let apply = case.runtime.apply(command);
-            tokio::pin!(apply);
-            tokio::select! { result = &mut apply => panic!("apply returned before cancellation: {result:?}"), ready = ready => ready?, }
-            drop(result); // The production apply select observes reply.closed().
-            assert!(!apply.await?);
-        }
-        assert_eq!(case.resumes.load(Ordering::SeqCst), 1);
-        let account = case.runtime.state.accounts.get_mut("sender").ok_or("account")?;
-        assert!(account.client.direct_messages("thread")?.is_empty(), "cancelled dispatch must not apply the ready message");
-        *account.client.native_head_freshness.borrow_mut() = crate::client::identity_authority::NativeHeadFreshness::default();
-        account.client.persist_fetched_identity_directory(&case.bob.manifest)?;
-        let before = case.resumes.load(Ordering::SeqCst);
-        let response = receive(&mut case.runtime).await?;
-        assert_message(&response);
-        assert_eq!(case.resumes.load(Ordering::SeqCst) - before, 2, "retry must sync before and after its own refresh wait");
-        case.runtime.close_readers().await;
-        case.runtime.stop_connection().await;
-        Ok(())
-    })).await
+    tokio::task::LocalSet::new()
+        .run_until(Box::pin(async {
+            let mut case = Box::pin(setup_refreshed()).await?;
+            let (entered, ready) = oneshot::channel();
+            let (_release, held) = oneshot::channel();
+            case.runtime.receive_gate_hook = Some((entered, held));
+            let mut command = receive_command();
+            let (reply, result) = oneshot::channel();
+            command.reply = Some(reply);
+            {
+                let apply = case.runtime.apply(command);
+                tokio::pin!(apply);
+                tokio::select! {
+                    result = &mut apply => {
+                        return Err(format!(
+                            "apply returned before cancellation: {result:?}"
+                        ).into());
+                    }
+                    ready = ready => {
+                        ready?;
+                    }
+                }
+                drop(result); // The production apply select observes reply.closed().
+                assert!(!apply.await?);
+            }
+            assert_eq!(case.resumes.load(Ordering::SeqCst), 1);
+            let account = case.runtime.state.accounts.get_mut("sender").ok_or("account")?;
+            assert!(
+                account.client.direct_messages("thread")?.is_empty(),
+                "cancelled dispatch must not apply the ready message"
+            );
+            *account.client.native_head_freshness.borrow_mut() =
+                crate::client::identity_authority::NativeHeadFreshness::default();
+            account.client.persist_fetched_identity_directory(&case.bob.manifest)?;
+            let before = case.resumes.load(Ordering::SeqCst);
+            let response = receive(&mut case.runtime).await?;
+            assert_message(&response);
+            assert_eq!(
+                case.resumes.load(Ordering::SeqCst) - before,
+                2,
+                "retry must sync before and after its own refresh wait"
+            );
+            case.runtime.close_readers().await;
+            case.runtime.stop_connection().await;
+            Ok(())
+        }))
+        .await
 }
