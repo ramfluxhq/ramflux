@@ -2,6 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Dormant large-attachment wire formats. These codecs confer no authority.
+mod grant;
+mod receipt;
+pub use grant::{ScopedAttachmentGrant, VerifiedScopedGrant};
+pub use receipt::AttachmentRegistrationReceipt;
 mod media;
 mod native;
 pub use media::{MediaKeySlot, MediaManifest, MediaRef, PeerMedia, QualifiedDevice, Thumbnail};
