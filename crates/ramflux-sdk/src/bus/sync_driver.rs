@@ -740,9 +740,11 @@ pub(super) async fn process(
 mod ack;
 pub(crate) use ack::{AckState, PreparedAck, finish as finish_prepared_ack};
 
-fn inbound_failure_kind(error: &SdkError) -> &'static str {
+pub(crate) fn inbound_failure_kind(error: &SdkError) -> &'static str {
     match error.directory_source() {
-        SdkError::InboundPending(_) | SdkError::SenderManifestRequired { .. } | SdkError::FreshHeadRequired { .. } => "InboundPending",
+        SdkError::InboundPending(_)
+        | SdkError::SenderManifestRequired { .. }
+        | SdkError::FreshHeadRequired { .. } => "InboundPending",
         SdkError::InboundRejected(_) => "InboundRejected",
         source => local_bus_error_code(source),
     }
