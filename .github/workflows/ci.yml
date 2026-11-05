@@ -351,6 +351,7 @@ jobs:
         run: |
           job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
           echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
@@ -367,7 +368,8 @@ jobs:
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
-          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
+          case "${RF_TEST_TMPDIR:-}" in "$RUNNER_TEMP"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
@@ -415,6 +417,7 @@ jobs:
         run: |
           job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
           echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
@@ -431,7 +434,8 @@ jobs:
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
-          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
+          case "${RF_TEST_TMPDIR:-}" in "$RUNNER_TEMP"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
@@ -474,6 +478,7 @@ jobs:
         run: |
           job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
           echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
@@ -493,7 +498,8 @@ jobs:
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
-          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
+          case "${RF_TEST_TMPDIR:-}" in "$RUNNER_TEMP"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
@@ -537,6 +543,7 @@ jobs:
         run: |
           job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
           echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
@@ -556,7 +563,8 @@ jobs:
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
-          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
+          case "${RF_TEST_TMPDIR:-}" in "$RUNNER_TEMP"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
@@ -600,6 +608,7 @@ jobs:
         run: |
           job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
           echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
@@ -619,7 +628,8 @@ jobs:
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
-          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
+          case "${RF_TEST_TMPDIR:-}" in "$RUNNER_TEMP"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
@@ -663,6 +673,7 @@ jobs:
         run: |
           job_tmp="$(mktemp -d "$RUNNER_TEMP/rf-tests.XXXXXX")"
           echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
@@ -682,7 +693,8 @@ jobs:
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
-          if [ -n "${TMPDIR:-}" ]; then rm -rf -- "$TMPDIR"; fi
+          case "${RF_TEST_TMPDIR:-}" in "$RUNNER_TEMP"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
