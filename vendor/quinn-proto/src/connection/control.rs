@@ -224,6 +224,9 @@ impl Connection {
                 bytes
             });
         }
+        if let Some(number)=pending.number {
+            if self.spaces[pending.packet.header.space()].pending_acks.reserve_metadata_packet(number,self.metadata.clone()).is_err(){self.resource_exhausted(pending.now);return None;}
+        }
         if self.control.is_some() {
             let demand = match self.control_demand(&pending.packet, pending.remote) {
                 Ok(demand) => demand,

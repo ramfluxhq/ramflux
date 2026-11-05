@@ -93,7 +93,7 @@ impl SendBuffer {
                     self.unacked_segments.pop_front();
                     self.front_trimmed = 0;
 
-                    if self.unacked_segments.len() * 4 < self.unacked_segments.capacity() {
+                    if self.metadata.is_none() && self.unacked_segments.len() * 4 < self.unacked_segments.capacity() {
                         self.unacked_segments.shrink_to_fit();
                     }
                 } else {
@@ -249,6 +249,7 @@ mod tests {
         assert_eq!(credit.stats().peak,512,"old and new capacities overlap through deallocation");
         assert_eq!(credit.stats().allocations,2);
         buffer.ack(0..5);
+        assert_eq!(buffer.unacked_segments.capacity(),8,"bounded mode retains the charged backing instead of an untracked shrink allocation");
         assert_eq!(credit.stats().used,320,"empty retained backing remains charged");
         buffer.discard();
         assert_eq!(buffer.unacked_segments.capacity(),0);

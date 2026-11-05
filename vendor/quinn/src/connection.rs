@@ -301,6 +301,9 @@ pub struct Connection(ConnectionRef);
 
 impl Connection {
     #[cfg(test)]
+    pub(crate) fn control_test_transmit(&self,hold:bool){let mut state=self.0.state.lock("transmit barrier");state.hold_transmit=hold;state.wake();}
+
+    #[cfg(test)]
     pub(crate) fn control_test_counts(&self) -> (usize, usize) {
         let state = self.0.state.lock("counts");
         (
@@ -928,6 +931,8 @@ impl ConnectionRef {
             state: Mutex::new(State {
                 inner: conn,
                 #[cfg(test)]
+                hold_transmit: false,
+                #[cfg(test)]
                 control_wakes: Default::default(),
                 #[cfg(test)]
                 raw_processed: 0,
@@ -1013,6 +1018,8 @@ pub(crate) struct Shared {
 
 pub(crate) struct State {
     #[cfg(test)]
+    hold_transmit: bool,
+    #[cfg(test)]
     control_wakes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     raw_processed: usize,
@@ -1067,6 +1074,8 @@ impl State {
     }
 
     fn drive_transmit(&mut self, cx: &mut Context) -> io::Result<bool> {
+        #[cfg(test)]
+        if self.hold_transmit{return Ok(false);}
         let now = self.runtime.now();
         let mut transmits = 0;
 

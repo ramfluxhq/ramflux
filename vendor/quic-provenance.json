@@ -81,8 +81,8 @@
       },
       "src/connection.rs": {
         "upstream_sha256": "3c388c6b455c318728c869b1f121fcc7d03572a92a92abda792d0cd8a2a10166",
-        "patched_sha256": "bd1177dcb963c8f93396393389ff9f0aa626f878ccb568436b4d3f7fedf4484b",
-        "delta": "SPDX; Fresh runtime time for control resume; eight-packet fairness yield only in bounded mode; upstream import order restored; cfg(test) forward/reverse consumer barriers, actual raw dequeue count and forwarding credit-Waker witness; production wrapper preserves resume behavior; Use the owning runtime clock for metadata terminal adapter and schedule driver progress"
+        "patched_sha256": "7c01d626a43c34ccb8e76ea7307307d5433704d87b75b64df93bc20b2057d384",
+        "delta": "SPDX; Fresh runtime time for control resume; eight-packet fairness yield only in bounded mode; upstream import order restored; cfg(test) forward/reverse consumer barriers, actual raw dequeue count and forwarding credit-Waker witness; production wrapper preserves resume behavior; Use the owning runtime clock for metadata terminal adapter and schedule driver progress; cfg(test) transmit barrier leaves actual connection/receive drivers running for PendingAcks preflight oracle"
       },
       "src/endpoint.rs": {
         "upstream_sha256": "a63bf8516128c5dd7ac7fb2e63450886873990f2084ff91b39737c4cf41c6c32",
@@ -158,8 +158,8 @@
         "delta": "SPDX; Bounded-mode control-first lanes and coalesced Close/Rebind; default-mode events retain FIFO semantics; cfg(test) reverse consumer barrier while raw pause/resume is driven normally"
       },
       "src/rawq_tests.rs": {
-        "patched_sha256": "c600b80449fa4d3ffd8dbfd2ae0be36dd1d921d0eccd552ec167ef727e94945f",
-        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix; Real blocked socket write/poller barriers and card-named stateless response test registration; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle); Partial owned metadata exhaustion test: actual send deque/vector capacities, unchanged failed source, no partial wire STREAM packet, payload/ACK lifecycle and retained owners through Drained/final drop; other classes expressly not covered"
+        "patched_sha256": "6291979d86f2256c9393c9938405dce673063d03b9fce987fc2b110ab5c48acd",
+        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix; Real blocked socket write/poller barriers and card-named stateless response test registration; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle); Partial owned metadata exhaustion test: actual send deque/vector capacities, unchanged failed source, no partial wire STREAM packet, payload/ACK lifecycle and retained owners through Drained/final drop; other classes expressly not covered; Real record/ACK-scratch/loss-scratch/PendingAcks refusals with independent wire/frame/map/dedup observations; retain original source/payload/ACK/storage ownership tests"
       },
       "src/rawq_tests/control_driver.rs": {
         "patched_sha256": "0a5a1e4488b2be6baa8ccb17ae384a69632fc5f570f0b6ac3f96ae8e746de89e",
@@ -356,8 +356,8 @@
       },
       "src/connection/mod.rs": {
         "upstream_sha256": "8b5665fa7dc83e2bb9154fceed34733768633756adc900bb8ec50f24be0ba2b7",
-        "patched_sha256": "925bf6b0ad7ec0d0908bd5e15e919d2ac8f9b369be2c975ed448303c454e9650",
-        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored; r3: charge the whole datagram exactly once on the path selected by handle_decode, or at the pending/closed early return; preserve default migration anti-amplification behavior; A3 first commit: defer whole-datagram accounting when head parks before migration, storing its length in PendingPacket; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle); Dormant metadata owner and terminal checks; abort refused outbound packet build and immediately restart with resource-close; all other metadata classes remain unimplemented"
+        "patched_sha256": "7e3a70d139e36563c14d455ae8205368ea2313b65e186e07ce72b1fc08470733",
+        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored; r3: charge the whole datagram exactly once on the path selected by handle_decode, or at the pending/closed early return; preserve default migration anti-amplification behavior; A3 first commit: defer whole-datagram accounting when head parks before migration, storing its length in PendingPacket; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle); Dormant metadata owner and terminal checks; abort refused outbound packet build and immediately restart with resource-close; all other metadata classes remain unimplemented; Record builder failure restarts terminal close immediately; charged ACK scratch aborts before retirement; extract loss detection; metadata close suppresses ACK serialization of refused processing"
       },
       "src/connection/mtud.rs": {
         "upstream_sha256": "3a2917c053a6ec79e277a2fc895cf20ba8cde2b1fe8b3b8b1c96584062acf782",
@@ -371,8 +371,8 @@
       },
       "src/connection/packet_builder.rs": {
         "upstream_sha256": "a6f0a4a01bdc866f10f6d80a898107226455c03b317b3d6dcd567c634a19b169",
-        "patched_sha256": "a58e0932c3e12fba86a6dc42c90104f9366e01c5c36cf4afbc34441d0a37889d",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
+        "patched_sha256": "a8b1cec58df64b67652cc4ccd8e53beecc6861e5acbb0e0395e7474e8a83d6ba",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Reserve actual sent-record table backing before packet number/header mutation, across all spaces; terminal packets bypass ordinary storage"
       },
       "src/connection/packet_crypto.rs": {
         "upstream_sha256": "0507abef0092c4d75c3c839798f2c11769718f7488c1e4aefc05612abbd738e2",
@@ -391,13 +391,13 @@
       },
       "src/connection/send_buffer.rs": {
         "upstream_sha256": "1fcbd2c539aa97c395e1e1bea790349e83774393386ba87a1ce18c1ec31c1e9d",
-        "patched_sha256": "637dfeb2e352f16c044744ee39428ad26b5d38806d75a5be1690359cf3d2eeb6",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Preflight send-deque capacity growth before consuming application bytes; charge old/new capacity overlap and retain charge until backing destruction, including empty retained capacity"
+        "patched_sha256": "c42ea3fd5a9fbbf46670fde4d236d397a1cb887b14d38695dd7f99db17f177ff",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Preflight send-deque capacity growth before consuming application bytes; charge old/new capacity overlap and retain charge until backing destruction, including empty retained capacity; Retain charged deque backing in bounded mode instead of invoking an untracked shrink allocation; assert physical capacity after ACK"
       },
       "src/connection/spaces.rs": {
         "upstream_sha256": "a1b44aa9c1ff38a545741fff5546552b9650ae9381a6fdf5f9ef9ea62ef6a45c",
-        "patched_sha256": "090f1564a115db6b7d89e26fef45c77c03e37bdd03798eb87b1c15829a7c011a",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Non-mutating dedup observation behind non-default dependency-test feature; Remove unused private SentPacket Clone derive so capacity ownership cannot be duplicated through an infallible clone; size guard retained"
+        "patched_sha256": "f15a6d34d7f91f05d3e862ede83e3245ae6d9ccb4bec0b9dcaf92e00f0dca267",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Non-mutating dedup observation behind non-default dependency-test feature; Remove unused private SentPacket Clone derive so capacity ownership cannot be duplicated through an infallible clone; size guard retained; Use allocation-visible sent storage and PendingAcks preflight; verify 65th transient range, 128-slot spare capacity and exact old/new overlap"
       },
       "src/connection/stats.rs": {
         "upstream_sha256": "f420ca4132973cdcfd0625a68fe79333891bb8bd91072dff70997c76472970d5",
@@ -471,8 +471,8 @@
       },
       "src/range_set/array_range_set.rs": {
         "upstream_sha256": "b8372411b941df99a8da2a9a2948f4f8fed8bd116ac7e4b7f7960da36991bc07",
-        "patched_sha256": "8e2198957110338ea6ddc085e342ba5fe00d0f000ff07cb5cf3c12489e47fe38",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
+        "patched_sha256": "a410453f11888edc82db3813160483906a20529938763787785c46a4bc4b3f49",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Fallible TinyVec range backing for PendingAcks and ACK scratch; reserve insert/split growth before mutation, preserve inline/default algorithms; remove unused private infallible Clone"
       },
       "src/range_set/btree_range_set.rs": {
         "upstream_sha256": "ea055e691cc34351c81c5e386ab1ca2996781dca2da35fcb6364e9472a00a75f",
@@ -539,32 +539,44 @@
         "delta": "Extract unchanged idle timeout negotiation and tests with pub(super) visibility and SPDX"
       },
       "src/connection/control.rs": {
-        "patched_sha256": "825cb00c300240c882f73091494599b53539f2617d29cb21c19a039dd74cef86",
-        "delta": "SPDX; Generation-gated pending packet/timer revalidation, aggregate emitted-control reservation census and debug assertion; fresh resume time; Disarm the consumed waiter before retry; re-arm atomically and schedule if a concurrent release changed the generation; avoid duplicate wake on successful resume; A3 first commit: carry uncredited whole-datagram length across parked migrating heads and retry transfers; count only after successful head resume selects its path; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
+        "patched_sha256": "7c405c2102227699b9c8968ed64e6a1b863243a95c20781fbe330ed149c986ad",
+        "delta": "SPDX; Generation-gated pending packet/timer revalidation, aggregate emitted-control reservation census and debug assertion; fresh resume time; Disarm the consumed waiter before retry; re-arm atomically and schedule if a concurrent release changed the generation; avoid duplicate wake on successful resume; A3 first commit: carry uncredited whole-datagram length across parked migrating heads and retry transfers; count only after successful head resume selects its path; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle); Preflight PendingAcks range growth before packet dedup/ACK/frame effects"
       },
       "src/connection/packet_processing.rs": {
-        "patched_sha256": "526dc82c1510297f98cc82f98b2de6ad8424b322c08c4daca316a4d5c571d393",
-        "delta": "SPDX; Coalesced packet resume without duplicate UDP receive byte accounting; Initialize pending packet deferred path-byte ownership; coalesced tails use zero because their datagram was already counted"
+        "patched_sha256": "84dcb5cfe348d510f3f1df8535567504647e0b6476e020fa6f55e131e4b38abb",
+        "delta": "SPDX; Coalesced packet resume without duplicate UDP receive byte accounting; Initialize pending packet deferred path-byte ownership; coalesced tails use zero because their datagram was already counted; Terminal metadata adapter stops later packet/coalesced processing on a latched allocation failure"
       },
       "src/connection/control/tests.rs": {
         "patched_sha256": "674cd5f5bf55f6bf57da984dccdc4d22f3cbfd2ae3c3455e02bea5dcb3e548ed",
         "delta": "SPDX; Aggregate directional byte/item ceilings, generation retry gates, head/tail datagram accounting, fresh timer time and census overrun witnesses; A3 first commit: bounded authenticated migration parks with zero free control credit, preserves old path until resume, then credits new path once and unblocks anti-amplification; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       },
       "src/connection/control/probe.rs": {
-        "patched_sha256": "ed808be94bdf7a57cbaf355c98fe26388f24820e54fb33b066214dd3ea87d47e",
-        "delta": "Non-default test-only negotiated-key encrypted packet construction, directional census, dedup/ACK/effect observations and real timer arming; no product activation"
+        "patched_sha256": "b333b5ef94be73f1f9adfedbe44b83bcc4642bc754acf36521f8a935d580d42d",
+        "delta": "Non-default test-only negotiated-key encrypted packet construction, directional census, dedup/ACK/effect observations and real timer arming; no product activation; Dependency-test encrypted ACK construction over actual transmitted packet numbers"
       },
       "src/endpoint/response_credit.rs": {
         "patched_sha256": "8cfd880d8ae309caac6710677be51f70d350d67be5879de36d10e3edb784a2c6",
         "delta": "Separate endpoint response item/slab/512-byte metadata permits, held through builder/queue/active send destruction; nonblocking full/oversize suppression, frozen overrides and cancellation seal; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       },
       "src/connection/metadata_credit.rs": {
-        "patched_sha256": "5d63d4e55d7a3bcbe38b45ba3a33a40f15c05c958c40716e0a9114fd73f5d1f9",
-        "delta": "Partial metadata foundation: one shared actual-capacity ledger, align_up(capacity,64)+64 leases, terminal failure latch and diagnostic classes; configuration/probes remain __control-test only pending remaining coverage"
+        "patched_sha256": "0a515e7940dc47b38d9fc6f06e97118d68859690e09342b8deb46fb9624922d6",
+        "delta": "Partial metadata foundation: one shared actual-capacity ledger, align_up(capacity,64)+64 leases, terminal failure latch and diagnostic classes; configuration/probes remain __control-test only pending remaining coverage; Record and pending-ACK actual-storage observations plus test-only freeze-at-live fault injection; preserve first metadata failure cause"
       },
       "src/connection/metadata_vec.rs": {
         "patched_sha256": "f52054b6b2bf29580fcc3777b0247c350c1357ce72ee4002062c3cbe05c2a9a7",
         "delta": "Preflight STREAM metadata heap spills/growth, preserve inline TinyVec default, charge overlap and carry unique backing lease through packet retirement/owned iteration"
+      },
+      "src/connection/loss_detection.rs": {
+        "patched_sha256": "d80a068aa4e734a53c388a57f3ac9618f8c1420d1942bc85fc78d4477bd25282",
+        "delta": "Extract cohesive existing loss-selection/retirement responsibility; use fallible charged scratch before lost-record effects"
+      },
+      "src/connection/metadata_map.rs": {
+        "patched_sha256": "b65bc2f049c83dea9e83872cf0a1f124ed56b6c54f5709cd3594fac3d4532820",
+        "delta": "B1 continuation: allocation-visible ordered packet table with tombstones, exact vector capacity/overlap, safe borrowed/owned iteration and retained leases; default BTreeMap unchanged"
+      },
+      "src/connection/metadata_scratch.rs": {
+        "patched_sha256": "f800935b0a818539f0b7f2971a64137856338a49320a4447c6454e4a968ea4a4",
+        "delta": "B1 continuation: fallible loss scratch vector, actual-capacity preflight and old/new overlap ownership"
       }
     },
     "formatting": {

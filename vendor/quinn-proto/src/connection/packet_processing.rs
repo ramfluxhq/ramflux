@@ -208,6 +208,7 @@ impl Connection {
         };
 
         self.active_control = None;
+        if self.metadata_exhausted(){self.resource_exhausted(now);return;}
 
         // State transitions for error cases
         if let Err(conn_err) = result {

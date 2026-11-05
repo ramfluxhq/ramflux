@@ -43,6 +43,10 @@ impl PacketBuilder {
         ack_eliciting: bool,
         conn: &mut Connection,
     ) -> Option<Self> {
+        if !conn.state.is_closed() && conn.spaces[space_id].sent_packets.reserve_insert(conn.metadata.as_ref()).is_err() {
+            conn.resource_exhausted(now);
+            return None;
+        }
         let version = conn.version;
         // Initiate key update if we're approaching the confidentiality limit
         let sent_with_keys = conn.spaces[space_id].sent_with_keys;

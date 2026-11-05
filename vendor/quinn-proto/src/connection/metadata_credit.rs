@@ -67,13 +67,13 @@ impl MetadataCredit {
     }
     pub(crate) fn stats(&self) -> MetadataStats { *self.state.lock().unwrap() }
     pub(crate) fn fail(&self, class: MetadataClass) -> ResourceExhausted {
-        let mut s=self.state.lock().unwrap(); s.exhausted=true; s.failed_class=Some(class); s.refusals=s.refusals.saturating_add(1); ResourceExhausted { class }
+        let mut s=self.state.lock().unwrap(); if !s.exhausted{s.failed_class=Some(class);} s.exhausted=true; s.refusals=s.refusals.saturating_add(1); ResourceExhausted { class }
     }
     pub(crate) fn reserve(self: &Arc<Self>, capacity: usize, class: MetadataClass) -> Result<AllocationCharge, ResourceExhausted> {
         let bytes=capacity.checked_add(63).map(|n|n&!63).and_then(|n|n.checked_add(64));
         let mut s=self.state.lock().unwrap();
         if s.exhausted || bytes.is_none_or(|n|n>s.limit.saturating_sub(s.used)) {
-            s.exhausted=true; s.failed_class=Some(class); s.refusals=s.refusals.saturating_add(1);return Err(ResourceExhausted { class });
+            if !s.exhausted{s.failed_class=Some(class);} s.exhausted=true; s.refusals=s.refusals.saturating_add(1);return Err(ResourceExhausted { class });
         }
         let bytes=bytes.unwrap();s.used+=bytes;s.peak=s.peak.max(s.used);
         Ok(AllocationCharge { credit:self.clone(), bytes })
@@ -89,6 +89,9 @@ impl Drop for AllocationCharge {
 pub struct MetadataProbe(pub(crate) Arc<MetadataCredit>);
 #[cfg(feature="__control-test")]
 impl MetadataProbe {
+    /// Dependency-test fault injection: freeze the ceiling at actual currently live charges.
+    pub fn freeze_at_live_allocations(&self) {let mut s=self.0.state.lock().unwrap();assert!(!s.exhausted);s.limit=s.used;}
+
     /// Current shared capacity and allocation-site counters.
     pub fn stats(&self) -> MetadataStats { self.0.stats() }
 }
@@ -110,6 +113,28 @@ impl super::Connection {
     /// Actual retained send deque capacity and queued byte offsets, independent of credit counters.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_send_storage(&self) -> (usize,u64) { self.streams.metadata_send_storage() }
+
+
+
+
+    /// Actual retained pending-ACK heap backing across packet spaces.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_ack_storage(&self)->usize{self.spaces.iter().map(|s|s.pending_acks.ranges().heap_capacity_bytes()).sum()}
+    /// Actual retained Data ACK range count, independent of metadata credit.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_ack_ranges(&self)->usize{self.spaces[super::SpaceId::Data].pending_acks.ranges().len()}
+    /// Actual live Data packet numbers for driver-level ACK/loss fault injection.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_sent_numbers(&self)->Vec<u64>{self.spaces[super::SpaceId::Data].sent_packets.range(..).map(|(n,_)|*n).collect()}
+    /// Next nonduplicate incoming Data number used by wire-level test injection.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_next_received(&self)->u64{self.spaces[super::SpaceId::Data].rx_packet+1}
+    /// Actual retained packet record-table capacity, independent of ledger counters.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_record_storage(&self)->usize {self.spaces.iter().map(|s|s.sent_packets.capacity_bytes()).sum()}
+    /// Layout-derived charge for the next Data-space record-table allocation.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_next_record_charge(&self)->usize {((self.spaces[super::SpaceId::Data].sent_packets.next_allocation_bytes()+63)&!63)+64}
     /// Actual sent packet STREAM metadata heap capacity, independent of credit counters.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_frame_storage(&self) -> usize {

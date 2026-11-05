@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::{
     cmp,
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     mem,
     ops::{Bound, Index, IndexMut, Range},
 };
@@ -40,7 +40,7 @@ pub(super) struct PacketSpace {
     pub(super) unacked_non_ack_eliciting_tail: u64,
     /// Transmitted but not acked
     // We use a BTreeMap here so we can efficiently query by range on ACK and for loss detection
-    pub(super) sent_packets: BTreeMap<u64, SentPacket>,
+    pub(super) sent_packets: super::metadata_map::MetadataMap<SentPacket>,
     /// Number of explicit congestion notification codepoints seen on incoming packets
     pub(super) ecn_counters: frame::EcnCounts,
     /// Recent ECN counters sent by the peer in ACK frames
@@ -85,7 +85,7 @@ impl PacketSpace {
             largest_acked_packet_sent: now,
             largest_ack_eliciting_sent: 0,
             unacked_non_ack_eliciting_tail: 0,
-            sent_packets: BTreeMap::new(),
+            sent_packets: Default::default(),
             ecn_counters: frame::EcnCounts::ZERO,
             ecn_feedback: frame::EcnCounts::ZERO,
 
@@ -651,6 +651,11 @@ pub(super) struct PendingAcks {
 }
 
 impl PendingAcks {
+    pub(super) fn reserve_metadata_packet(&mut self,number:u64,credit:Option<std::sync::Arc<super::metadata_credit::MetadataCredit>>)->Result<(),super::metadata_credit::ResourceExhausted>{
+        self.ranges.bind_metadata(credit,super::metadata_credit::MetadataClass::PendingAcks)?;
+        self.ranges.reserve_insert(&(number..number+1))
+    }
+
     fn new() -> Self {
         Self {
             immediate_ack_required: false,
@@ -1120,6 +1125,20 @@ mod test {
         assert_eq!(acks.ack_delay(t3), Duration::from_millis(5));
     }
 
+
+    #[test]
+    fn pending_ack_capacity_preflights_the_transient_sixty_fifth_range() {
+        use super::super::metadata_credit::{MetadataCredit,MetadataClass};
+        for limit in [3199,3200] {
+            let credit=MetadataCredit::new(limit);let mut pending=PendingAcks::new();let now=Instant::now();
+            for n in 0..64 {pending.reserve_metadata_packet(n*2,Some(credit.clone())).unwrap();pending.insert_one(n*2,now);}
+            assert_eq!(pending.ranges.heap_capacity_bytes(),1024);assert_eq!(credit.stats().used,1088);
+            let result=pending.reserve_metadata_packet(128,Some(credit.clone()));
+            if limit==3199 {assert!(result.is_err());assert_eq!(pending.ranges.heap_capacity_bytes(),1024);assert_eq!(credit.stats().failed_class,Some(MetadataClass::PendingAcks));}
+            else {result.unwrap();pending.insert_one(128,now);assert_eq!(pending.ranges.len(),64);assert_eq!(pending.ranges.heap_capacity_bytes(),2048);assert_eq!(credit.stats().used,2112);assert_eq!(credit.stats().peak,3200);}
+            drop(pending);assert_eq!(credit.stats().used,0);
+        }
+    }
     #[test]
     fn sent_packet_size() {
         // The tracking state of sent packets should be minimal, and not grow

@@ -18,29 +18,47 @@ use tinyvec::TinyVec;
 /// of ranges is usually very low (since ACK numbers are in consecutive fashion
 /// unless reordering or packet loss occur).
 #[derive(Debug, Default)]
-pub struct ArrayRangeSet(TinyVec<[Range<u64>; ARRAY_RANGE_SET_INLINE_CAPACITY]>);
+pub struct ArrayRangeSet(
+    TinyVec<[Range<u64>; ARRAY_RANGE_SET_INLINE_CAPACITY]>,
+    Option<crate::connection::metadata_credit::AllocationCharge>,
+    Option<(std::sync::Arc<crate::connection::metadata_credit::MetadataCredit>,crate::connection::metadata_credit::MetadataClass)>,
+);
 
 /// The capacity of elements directly stored in [`ArrayRangeSet`]
 ///
 /// An inline capacity of 2 is chosen to keep `SentFrame` below 128 bytes.
 const ARRAY_RANGE_SET_INLINE_CAPACITY: usize = 2;
 
-impl Clone for ArrayRangeSet {
-    fn clone(&self) -> Self {
-        // tinyvec keeps the heap representation after clones.
-        // We rather prefer the inline representation for clones if possible,
-        // since clones (e.g. for storage in `SentFrames`) are rarely mutated
-        if self.0.is_inline() || self.0.len() > ARRAY_RANGE_SET_INLINE_CAPACITY {
-            return Self(self.0.clone());
-        }
-
-        let mut vec = TinyVec::new();
-        vec.extend_from_slice(self.0.as_slice());
-        Self(vec)
-    }
-}
-
 impl ArrayRangeSet {
+    #[cfg(any(test,feature="__control-test"))]
+    pub(crate) fn heap_capacity_bytes(&self)->usize{if self.0.is_heap(){self.0.capacity()*std::mem::size_of::<Range<u64>>()}else{0}}
+
+    pub(crate) fn with_metadata(credit:Option<std::sync::Arc<crate::connection::metadata_credit::MetadataCredit>>,class:crate::connection::metadata_credit::MetadataClass)->Self{
+        Self(TinyVec::new(),None,credit.map(|c|(c,class)))
+    }
+    pub(crate) fn bind_metadata(&mut self,credit:Option<std::sync::Arc<crate::connection::metadata_credit::MetadataCredit>>,class:crate::connection::metadata_credit::MetadataClass)->Result<(),crate::connection::metadata_credit::ResourceExhausted>{
+        if self.2.is_none(){
+            if let Some(credit)=credit {
+                if self.0.is_heap(){self.1=Some(credit.reserve(self.0.capacity()*std::mem::size_of::<Range<u64>>(),class)?);}
+                self.2=Some((credit,class));
+            }
+        }Ok(())
+    }
+    pub(crate) fn reserve_insert(&mut self,x:&Range<u64>)->Result<(),crate::connection::metadata_credit::ResourceExhausted>{
+        if self.2.is_none(){return Ok(());}
+        let needs_slot=!x.is_empty()&&!self.0.iter().any(|r|r.start<=x.end&&x.start<=r.end);
+        if needs_slot{self.reserve_extra()?;}Ok(())
+    }
+    fn reserve_extra(&mut self)->Result<(),crate::connection::metadata_credit::ResourceExhausted>{
+        let Some((credit,class))=&self.2 else{return Ok(());};
+        if self.0.len()<self.0.capacity(){return Ok(());}
+        let n=self.0.capacity().checked_mul(2).map(|n|n.max(4)).ok_or_else(||credit.fail(*class))?;
+        let bytes=n.checked_mul(std::mem::size_of::<Range<u64>>()).ok_or_else(||credit.fail(*class))?;
+        let charge=credit.reserve(bytes,*class)?;let mut next=Vec::new();next.try_reserve_exact(n).map_err(|_|credit.fail(*class))?;
+        assert_eq!(next.capacity(),n);credit.allocated();next.extend(self.0.drain(..));let old=std::mem::replace(&mut self.0,TinyVec::Heap(next));drop(old);self.1=Some(charge);Ok(())
+    }
+    pub(crate) fn try_insert_one(&mut self,n:u64)->Result<bool,crate::connection::metadata_credit::ResourceExhausted>{self.reserve_insert(&(n..n+1))?;Ok(self.insert_inner(n..n+1))}
+
     pub fn new() -> Self {
         Default::default()
     }
@@ -83,6 +101,9 @@ impl ArrayRangeSet {
     }
 
     pub fn insert(&mut self, x: Range<u64>) -> bool {
+        if self.reserve_insert(&x).is_err(){return false;}self.insert_inner(x)
+    }
+    fn insert_inner(&mut self, x: Range<u64>) -> bool {
         let mut result = false;
 
         if x.is_empty() {
@@ -145,6 +166,7 @@ impl ArrayRangeSet {
     }
 
     pub fn remove(&mut self, x: Range<u64>) -> bool {
+        if self.2.is_some() && !x.is_empty() && self.0.iter().any(|r|r.start<x.start&&r.end>x.end) && self.reserve_extra().is_err(){return false;}
         let mut result = false;
 
         if x.is_empty() {
