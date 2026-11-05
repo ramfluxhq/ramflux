@@ -12,6 +12,7 @@ impl BackupDatabase {
         &self,
         progress: &mut impl FnMut() -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
+        let candidate = super::backup_selector_admission::placeholders::active(&self.db)?;
         let root: String = self.db.query_row(
             "SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1",
             [],
@@ -84,11 +85,11 @@ impl BackupDatabase {
                 return Err(StorageError::ObjectOwnershipUnverified { schema_version: 11 });
             }
         }
-        if super::backup_selector_admission::placeholders::active(&self.db)? {
+        if candidate {
             super::backup_selector_admission::placeholders::classify(&self.db, &root)?;
         }
         for database in ["main", "incoming"] {
-            scan_objects(&self.db, database, &root, progress)?;
+            scan_objects(&self.db, database, &root, candidate, progress)?;
             for (table, key, column) in [
                 ("runtime_actor_state", "state_kind", "state_json"),
                 ("backup_archived_actor_state", "state_kind", "state_json"),
@@ -101,6 +102,7 @@ impl BackupDatabase {
                         database,
                         ObjectCopyStore { table, key, column },
                         &root,
+                        candidate,
                         progress,
                     )?;
                 }
@@ -113,7 +115,7 @@ impl BackupDatabase {
                     Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
                 })? {
                     let (id, selector, manifest) = row?;
-                    if erased(&self.db, &root, &selector, Some(&manifest), database)? {
+                    if erased(&self.db, &root, &selector, Some(&manifest), database, candidate)? {
                         exclude(&self.db, database, "backup_missing_attachment", id)?;
                     }
                 }
@@ -146,7 +148,7 @@ impl BackupDatabase {
                     ))
                 })? {
                     let (id, wire, manifest) = row?;
-                    if erased(&self.db, &root, &wire, manifest.as_deref(), "incoming")? {
+                    if erased(&self.db, &root, &wire, manifest.as_deref(), "incoming", candidate)? {
                         exclude(&self.db, "incoming", table, id)?;
                     }
                 }
@@ -154,10 +156,8 @@ impl BackupDatabase {
         }
         self.db.execute_batch("DELETE FROM object_erasure_work;")?;
         let mut rows=self.db.prepare("SELECT o.object_id,CAST(o.manifest_hash AS TEXT) FROM object_index o JOIN backup_erased_copy e ON e.database_name='main' AND e.table_name='object_index' AND e.row_id=o.rowid WHERE (?1=0 OR NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_retention_payload p USING(commitment) WHERE r.selector=o.object_id AND p.wire_id<>o.object_id))")?;
-        for row in rows
-            .query_map([super::backup_selector_admission::placeholders::active(&self.db)?], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
+        for row in
+            rows.query_map([candidate], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         {
             let (wire, manifest) = row?;
             let digest = object_erasure_commitment(&root, &wire, &manifest);
@@ -216,8 +216,9 @@ fn erased(
     selector: &str,
     manifest: Option<&str>,
     database: &str,
+    candidate: bool,
 ) -> Result<bool, StorageError> {
-    if super::backup_selector_admission::placeholders::active(db)? {
+    if candidate {
         return super::backup_selector_admission::placeholders::erased(
             db, root, selector, manifest, database,
         );
@@ -258,6 +259,7 @@ fn scan_objects(
     db: &Connection,
     database: &str,
     root: &str,
+    candidate: bool,
     progress: &mut impl FnMut() -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     let mut query = db.prepare(&format!(
@@ -272,7 +274,7 @@ fn scan_objects(
         if excluded {
             continue;
         }
-        if super::backup_selector_admission::placeholders::active(db)? {
+        if candidate {
             let placeholder: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {database}.object_index WHERE rowid=?1 AND tombstoned=1 AND length(ciphertext)=0 AND chunk_count=0)"),[id],|r|r.get(0))?;
             if placeholder {
                 // The unfiltered graph already resolved this selector. It is not a wire reuse.
@@ -308,6 +310,7 @@ fn scan_copies(
     database: &str,
     store: ObjectCopyStore<'_>,
     root: &str,
+    candidate: bool,
     progress: &mut impl FnMut() -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     let ObjectCopyStore { table, key, column } = store;
@@ -337,19 +340,19 @@ fn scan_copies(
         if let Some(bytes) = bytes {
             if let Ok(references) = super::backup_object_metadata::references(&bytes) {
                 for (wire, manifest) in references {
-                    drop_copy |= erased(db, root, &wire, manifest.as_deref(), database)?;
+                    drop_copy |= erased(db, root, &wire, manifest.as_deref(), database, candidate)?;
                 }
             }
             if let Some(selector) = key
                 .strip_prefix("directory/object/")
                 .or_else(|| key.strip_prefix("sync/attachment/"))
             {
-                drop_copy |= erased(db, root, selector, None, database)?;
+                drop_copy |= erased(db, root, selector, None, database, candidate)?;
             }
             if key.starts_with("attachment/reference-by-")
                 && let Ok(selector) = serde_json::from_slice::<String>(&bytes)
             {
-                drop_copy |= erased(db, root, &selector, None, database)?;
+                drop_copy |= erased(db, root, &selector, None, database, candidate)?;
             }
         }
         if drop_copy {

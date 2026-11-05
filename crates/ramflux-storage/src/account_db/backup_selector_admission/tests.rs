@@ -797,3 +797,53 @@ fn restore_g6_checks_closed_lookup_before_unfenced_payload() -> TestResult {
         Ok(())
     })
 }
+
+#[test]
+fn restore_copy_manifest_fence_survives_other_admitted_manifest() -> TestResult {
+    fixture("copy-manifest-fence", |_, _, target, path, key| {
+        let result = target.merge_backup_pipeline(
+            path,
+            key,
+            (BackupMergeMode::FullAccount(None), true),
+            &mut || Ok(()),
+            |db| {
+                graph::classify(db)?;
+                db.execute(
+                    "INSERT INTO object_erasure_fence VALUES(?1)",
+                    [object_erasure_commitment("principal", "wire", "retired-manifest")],
+                )?;
+                assert!(placeholders::erased(
+                    db,
+                    "principal",
+                    "wire",
+                    Some("retired-manifest"),
+                    "main"
+                )?);
+                assert!(!placeholders::erased(db, "principal", "wire", Some("manifest"), "main")?);
+                Err(StorageError::AuthorizationRejected)
+            },
+        );
+        assert!(matches!(result, Err(StorageError::AuthorizationRejected)));
+        Ok(())
+    })
+}
+
+#[test]
+fn mixed_selector_decisions_preserve_kept_owner_provenance() -> TestResult {
+    fixture("mixed-selector-decisions", |_, _, target, path, key| {
+        let result = target.merge_backup_pipeline(path, key,
+            (BackupMergeMode::FullAccount(None), true), &mut || Ok(()), |db| {
+                graph::classify(db)?;
+                db.execute("INSERT INTO backup_selector_admission VALUES('target','wire','other-commitment','erase')", [])?;
+                db.execute("INSERT OR IGNORE INTO message_copy_binding VALUES('object:wire','message')", [])?;
+                db.execute("INSERT INTO message_footprint VALUES('message','revocation_selector',?1)", [json!({"selector":"wire","commitment":"other-commitment"}).to_string()])?;
+                db.execute_batch("CREATE TEMP TABLE backup_erased_copy(database_name TEXT NOT NULL,table_name TEXT NOT NULL,row_id INTEGER NOT NULL,PRIMARY KEY(database_name,table_name,row_id));")?;
+                placeholders::classify(db,"principal")?;
+                assert_eq!(db.query_row("SELECT count(*) FROM message_copy_binding WHERE copy_id='object:wire'", [], |r|r.get::<_,u64>(0))?,1);
+                assert_eq!(db.query_row("SELECT count(*) FROM message_footprint WHERE kind='revocation_selector'", [], |r|r.get::<_,u64>(0))?,1);
+                Err(StorageError::AuthorizationRejected)
+            });
+        assert!(matches!(result, Err(StorageError::AuthorizationRejected)));
+        Ok(())
+    })
+}

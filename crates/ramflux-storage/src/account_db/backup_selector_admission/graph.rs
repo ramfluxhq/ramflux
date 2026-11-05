@@ -86,7 +86,7 @@ SELECT 'incoming',r.selector,r.commitment,CASE WHEN EXISTS(SELECT 1 FROM backup_
     Ok(())
 }
 
-fn deleted(db: &Connection, schema: &str, message: &str) -> Result<bool, StorageError> {
+pub(super) fn deleted(db: &Connection, schema: &str, message: &str) -> Result<bool, StorageError> {
     let projected: bool = db.query_row(
         &format!(
             r"SELECT

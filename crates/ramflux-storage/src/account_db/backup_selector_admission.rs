@@ -169,3 +169,6 @@ pub(super) mod placeholders;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod placeholder_compat_tests;
