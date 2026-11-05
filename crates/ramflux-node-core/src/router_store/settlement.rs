@@ -17,6 +17,16 @@ pub(crate) fn retires(cursor: &CursorAckState, seq: u64) -> bool {
 }
 
 impl RouterRedbStore {
+    pub(super) fn publication_after_commit(
+        &self,
+        captured: Option<std::sync::Arc<super::publication::PublicationCore>>,
+    ) -> Result<Option<std::sync::Arc<super::publication::PublicationCore>>, NodeCoreError> {
+        match captured {
+            Some(core) => Ok(Some(core)),
+            None => self.publication.lock().map(|core| core.clone()).map_err(incarnation::error),
+        }
+    }
+
     pub(super) fn receiver_settlement(
         &self,
         txn: &redb::WriteTransaction,
@@ -33,7 +43,7 @@ impl RouterRedbStore {
         incoming: &CursorAckState,
         previous: Option<&CursorAckState>,
         core: Option<&super::publication::PublicationCore>,
-        expired_at: Option<i64>,
+        wal_expired_at: Option<i64>,
     ) -> Result<(CursorAckState, Option<String>), NodeCoreError> {
         let mut cursor = incoming.clone();
         let metadata = incarnation_state::read(txn, &cursor.target_delivery_id)?;
@@ -60,25 +70,16 @@ impl RouterRedbStore {
         let end = inbox_entry_storage_key(&cursor.target_delivery_id, u64::MAX);
         for row in entries.range(start.as_str()..=end.as_str()).map_err(incarnation::error)? {
             let (_, bytes) = row.map_err(incarnation::error)?;
-            let (entry, deadline) = expiry_index::decode_entry(bytes.value())?;
-            if expired_at.is_some_and(|now| deadline <= now) {
-                continue;
-            }
+            let (entry, _) = expiry_index::decode_entry(bytes.value())?;
             if !retires(&cursor, entry.inbox_seq) {
                 settled = settled.min(entry.inbox_seq.saturating_sub(1));
                 break;
             }
         }
-        // WAL recovery omits entries past their fixed deadline. Its live head
-        // must use the same rule; redb rows remain live until the explicit sweep.
+        // Only sweep/startup omit expired WAL payloads. Receiver commits
+        // still see the unswept rows served from the live in-memory inbox.
         if let Some(wal) = &self.submission_wal
-            && let Some(seq) = wal.settlement_head(
-                &cursor,
-                previous_r,
-                expired_at.unwrap_or_else(|| {
-                    i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX)
-                }),
-            )?
+            && let Some(seq) = wal.settlement_head(&cursor, previous_r, wal_expired_at)?
         {
             settled = settled.min(seq.saturating_sub(1));
         }
@@ -171,3 +172,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod regression_tests;

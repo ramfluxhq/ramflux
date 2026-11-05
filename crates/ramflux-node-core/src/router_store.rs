@@ -1109,6 +1109,7 @@ impl RouterRedbStore {
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
         }
+        let core = self.publication_after_commit(core)?;
         if let (Some(core), Some(id)) = (core, incarnation) {
             core.commit_settled(&cursor.target_delivery_id, &id, cursor.settled_inbox_seq);
         }
@@ -1170,6 +1171,7 @@ impl RouterRedbStore {
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
         }
+        let core = self.publication_after_commit(core)?;
         if let (Some(core), Some(id)) = (core, incarnation) {
             core.commit_settled(&cursor.target_delivery_id, &id, cursor.settled_inbox_seq);
         }
@@ -1571,7 +1573,7 @@ impl RouterRedbStore {
             identity_lineage_heads,
         });
         // Sequence watermarks recovered from the log are durable before any new submission.
-        self.retain_cursor_checkpoints(&due_checkpoints)?;
+        self.retain_cursor_checkpoints_at(&due_checkpoints, Some(now))?;
         crate::durability_io::immediate_commit(&self.db, &self.path)?;
         Ok(Some(router))
     }

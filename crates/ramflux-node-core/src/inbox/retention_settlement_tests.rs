@@ -127,6 +127,25 @@ fn retention_mode_oracles() -> Result {
         )?;
         drop(store);
         let store = test_store(&root, mode, 1 << 20)?;
+        let now = i64::try_from(crate::now_unix_seconds())?;
+        if mode != 0 {
+            // WAL recovery has completed. Keep its expired record as the ONLY
+            // issued source at the delivery-state merge, before any checkpoint.
+            let id = store.inbox_status("target")?.0.ok_or("E")?;
+            let tx = store.migration_db().begin_write()?;
+            let mut bytes = id.into_bytes();
+            bytes.extend_from_slice(&0_u64.to_le_bytes());
+            tx.open_table(crate::router_store::incarnation_state::TABLE)?
+                .insert("target", bytes.as_slice())?;
+            tx.open_table(crate::ROUTER_CURSOR_STATE_TABLE)?.remove("target")?;
+            tx.commit()?;
+            let (recovered, _) = store.load_delivery_state(now)?;
+            assert_eq!(
+                recovered.issued_sequence("target"),
+                4,
+                "only expired WAL restores the in-memory issued floor"
+            );
+        }
         let router = store.load_router()?.ok_or("router")?;
         let rows = router.resume("target", 0, 10);
         assert_eq!(
@@ -142,13 +161,19 @@ fn retention_mode_oracles() -> Result {
         let now = i64::try_from(crate::now_unix_seconds())?;
         store.sweep_delivery_retention(now, false)?;
         assert_eq!(stored(&store)?.settled_inbox_seq, 4);
+        assert_eq!(router.inbox_snapshot().issued_sequence("target"), 4);
+        let next = submit(&router, &store, 5, true);
+        assert_eq!(
+            next.inbox_seq, 5,
+            "the next real submission must not reuse the expired sequence"
+        );
         drop(router);
         drop(store);
         for _ in 0..2 {
             let store = test_store(&root, mode, 1 << 20)?;
             let router = store.load_router()?.ok_or("router")?;
-            assert_eq!(router.resume("target", 0, 10), Vec::<crate::InboxEntry>::new());
-            assert_eq!(store.inbox_status("target")?.1, 4);
+            assert_eq!(router.resume("target", 0, 10), vec![next.clone()]);
+            assert_eq!(router.inbox_snapshot().issued_sequence("target"), 5);
             drop(router);
             drop(store);
         }

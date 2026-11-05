@@ -74,7 +74,7 @@ impl RouterRedbStore {
                 };
             }
             if !dry_run {
-                self.publish_retention_checkpoints(&committed, core.as_deref())?;
+                self.publish_retention_checkpoints(&committed, core.clone())?;
             }
             Ok(removed)
         })
@@ -90,6 +90,14 @@ impl RouterRedbStore {
     pub fn retain_cursor_checkpoints(
         &self,
         cursors: &[CursorAckState],
+    ) -> Result<(), NodeCoreError> {
+        self.retain_cursor_checkpoints_at(cursors, None)
+    }
+
+    pub(super) fn retain_cursor_checkpoints_at(
+        &self,
+        cursors: &[CursorAckState],
+        wal_expired_at: Option<i64>,
     ) -> Result<(), NodeCoreError> {
         if cursors.is_empty() {
             return Ok(());
@@ -109,14 +117,14 @@ impl RouterRedbStore {
                     &txn,
                     cursor,
                     core.as_deref(),
-                    None,
+                    wal_expired_at,
                 )?);
             }
             crate::durability_io::boundary(&self.path, "checkpoint_commit", || {
                 txn.commit().map_err(std::io::Error::other)
             })
             .map_err(redb_error)?;
-            self.publish_retention_checkpoints(&committed, core.as_deref())
+            self.publish_retention_checkpoints(&committed, core.clone())
         })
     }
 
@@ -125,7 +133,7 @@ impl RouterRedbStore {
         txn: &redb::WriteTransaction,
         incoming: &CursorAckState,
         core: Option<&super::publication::PublicationCore>,
-        expired_at: Option<i64>,
+        wal_expired_at: Option<i64>,
     ) -> Result<CursorAckState, NodeCoreError> {
         let previous = previous(txn, incoming)?;
         let retired = incoming
@@ -137,7 +145,7 @@ impl RouterRedbStore {
             .chain(previous.iter().flat_map(|old| old.acked_inbox_seqs.iter().copied()))
             .collect::<std::collections::BTreeSet<_>>();
         let (cursor, _) =
-            self.checkpoint_settlement(txn, incoming, previous.as_ref(), core, expired_at)?;
+            self.checkpoint_settlement(txn, incoming, previous.as_ref(), core, wal_expired_at)?;
         let bytes = merged_bytes(
             txn,
             &cursor,
@@ -164,13 +172,14 @@ impl RouterRedbStore {
     fn publish_retention_checkpoints(
         &self,
         cursors: &[CursorAckState],
-        core: Option<&super::publication::PublicationCore>,
+        core: Option<std::sync::Arc<super::publication::PublicationCore>>,
     ) -> Result<(), NodeCoreError> {
+        let core = self.publication_after_commit(core)?;
         for cursor in cursors {
             if let Some(wal) = &self.submission_wal {
                 wal.observe_settlement(cursor)?;
             }
-            if let Some(core) = core
+            if let Some(core) = &core
                 && let Some(id) = core.current_incarnation(&cursor.target_delivery_id)
             {
                 core.commit_settled(&cursor.target_delivery_id, &id, cursor.settled_inbox_seq);
