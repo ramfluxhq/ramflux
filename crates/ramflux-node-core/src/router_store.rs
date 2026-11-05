@@ -1075,9 +1075,11 @@ impl RouterRedbStore {
         let write_txn =
             self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
-        let (cursor, incarnation) = self.receiver_settlement(&write_txn, cursor)?;
+        let previous = retention::previous(&write_txn, cursor)?;
+        let (cursor, incarnation) =
+            self.receiver_settlement(&write_txn, cursor, previous.as_ref())?;
         let cursor = &cursor;
-        let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor)? else {
+        let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor, previous)? else {
             return Ok(());
         };
         {
@@ -1103,12 +1105,9 @@ impl RouterRedbStore {
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
         }
-        if let Some(id) = incarnation {
-            self.publication_core()?.commit_settled(
-                &cursor.target_delivery_id,
-                &id,
-                cursor.settled_inbox_seq,
-            );
+        let core = self.publication.lock().map_err(incarnation::error)?.clone();
+        if let (Some(core), Some(id)) = (core, incarnation) {
+            core.commit_settled(&cursor.target_delivery_id, &id, cursor.settled_inbox_seq);
         }
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
         crate::record_router_save_total_us(elapsed_us(save_started));
@@ -1137,9 +1136,11 @@ impl RouterRedbStore {
         let write_txn =
             self.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.checkpoint_incarnation(&write_txn, cursor)?;
-        let (cursor, incarnation) = self.receiver_settlement(&write_txn, cursor)?;
+        let previous = retention::previous(&write_txn, cursor)?;
+        let (cursor, incarnation) =
+            self.receiver_settlement(&write_txn, cursor, previous.as_ref())?;
         let cursor = &cursor;
-        let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor)? else {
+        let Some(cursor_bytes) = retention::ack_cursor_bytes(&write_txn, cursor, previous)? else {
             return Ok(());
         };
         {
@@ -1162,12 +1163,9 @@ impl RouterRedbStore {
         if let Some(wal) = &self.submission_wal {
             wal.observe_settlement(cursor)?;
         }
-        if let Some(id) = incarnation {
-            self.publication_core()?.commit_settled(
-                &cursor.target_delivery_id,
-                &id,
-                cursor.settled_inbox_seq,
-            );
+        let core = self.publication.lock().map_err(incarnation::error)?.clone();
+        if let (Some(core), Some(id)) = (core, incarnation) {
+            core.commit_settled(&cursor.target_delivery_id, &id, cursor.settled_inbox_seq);
         }
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
         crate::record_router_save_total_us(elapsed_us(save_started));

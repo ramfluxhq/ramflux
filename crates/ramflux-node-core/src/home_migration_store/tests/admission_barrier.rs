@@ -230,6 +230,9 @@ fn indexed_barrier_counts_each_delivery_once_and_preserves_settled_replay_receip
             inbox_seq: 60,
             issued_inbox_seq: 64,
             settled_inbox_seq: 32,
+            // A raw settled candidate is not retirement authority. Persist the
+            // actual prefix dispositions in this same receiver transaction.
+            retired_inbox_seqs: (1..=32).collect(),
             last_acknowledged_inbox_seq: Some(60),
             acked_inbox_seqs: [60].into(),
             ..Default::default()

@@ -125,7 +125,7 @@ fn redb_error(error: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(error.to_string())
 }
 
-fn previous(
+pub(super) fn previous(
     txn: &redb::WriteTransaction,
     cursor: &CursorAckState,
 ) -> Result<Option<CursorAckState>, NodeCoreError> {
@@ -173,8 +173,8 @@ pub(super) fn cursor_bytes(
 pub(super) fn ack_cursor_bytes(
     txn: &redb::WriteTransaction,
     cursor: &CursorAckState,
+    previous: Option<CursorAckState>,
 ) -> Result<Option<Vec<u8>>, NodeCoreError> {
-    let previous = previous(txn, cursor)?;
     let metadata = super::incarnation_state::read(txn, &cursor.target_delivery_id)?;
     if metadata.is_none() {
         let table = txn.open_table(super::super::ROUTER_INBOX_ENTRY_TABLE).map_err(redb_error)?;
