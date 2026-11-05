@@ -68,7 +68,13 @@ fn wait_abort_kind(mut child: Child, marker: &str) -> TestResult {
 fn wait_file(root: &Path, name: &str, child: &mut Child) -> TestResult {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !root.join(name).exists() {
-        assert!(child.try_wait()?.is_none(), "child exited before {name}");
+        if let Some(status) = child.try_wait()? {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_string(&mut stderr)?;
+            }
+            panic!("child exited before {name}: {status}; {stderr}");
+        }
         if Instant::now() >= deadline {
             child.kill()?;
             child.wait()?;

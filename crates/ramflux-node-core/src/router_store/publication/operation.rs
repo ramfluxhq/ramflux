@@ -110,11 +110,30 @@ pub fn capture<T>(f: impl FnOnce() -> T) -> Result<PublishedOperation<T>, NodeCo
     Ok(PublishedOperation { value, guards: scope.guards })
 }
 
+#[cfg(test)]
 pub(crate) fn replay_resource(core: Option<&Arc<PublicationCore>>, key: &str) {
     CURRENT.with(|current| {
         if let Some(scope) = current.borrow_mut().as_mut() {
             if let Some(core) = core {
                 core.mark_resource(key);
+                scope.core = Some(Arc::clone(core));
+            }
+            scope.resources.push(key.into());
+        }
+    });
+}
+
+pub(crate) fn replay_resource_if_new(
+    core: Option<&Arc<PublicationCore>>,
+    key: &str,
+    held: impl FnOnce() -> bool,
+) {
+    CURRENT.with(|current| {
+        if let Some(scope) = current.borrow_mut().as_mut() {
+            if let Some(core) = core {
+                if !core.mark_resource_if_new(key, held) {
+                    return;
+                }
                 scope.core = Some(Arc::clone(core));
             }
             scope.resources.push(key.into());

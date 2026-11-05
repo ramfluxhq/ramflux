@@ -11,6 +11,8 @@ pub(crate) mod persistence;
 pub(crate) use operation::allocate as operation_allocate;
 pub use operation::{PublishedOperation, capture};
 #[cfg(test)]
+mod lifetime_tests;
+#[cfg(test)]
 mod provisional_tests;
 #[cfg(test)]
 mod resource_tests;
@@ -127,14 +129,14 @@ struct Shared {
     worker: OnceLock<thread::Thread>,
     stopping: AtomicBool,
     changed: Notify,
-    db: Arc<redb::Database>,
+    db: Weak<redb::Database>,
     path: PathBuf,
 }
 
 /// Store-owned resolver and synchronized published view. Not restored as live state.
 pub struct PublicationCore {
     shared: Arc<Shared>,
-    worker: Option<JoinHandle<()>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// One member of an all-or-nothing pre-allocation reservation.
@@ -208,7 +210,7 @@ impl PublicationCore {
             .filter(|(key, _)| key.target == target)
         {
             if inbox.retired {
-                return Err(error("incarnation_mismatch"));
+                return Err(NodeCoreError::Publication(PublicationRefusal::IncarnationMismatch));
             }
             return Ok(key.incarnation.clone());
         }
@@ -268,6 +270,9 @@ impl PublicationCore {
         requests: &[AssignmentReservation<'_>],
     ) -> Result<Vec<AssignmentGuard>, PublicationRefusal> {
         let mut registry = lock(&self.shared);
+        if self.shared.stopping.load(Ordering::Acquire) {
+            return Err(PublicationRefusal::IncarnationMismatch);
+        }
         let _gate = crate::fatal_durability::publication()
             .map_err(|_| PublicationRefusal::FatalUncertain)?;
         let mut needed = BTreeMap::<Key, usize>::new();
@@ -357,6 +362,17 @@ impl PublicationCore {
         }
     }
 
+    pub(crate) fn mark_resource_if_new(&self, resource: &str, held: impl FnOnce() -> bool) -> bool {
+        // Preserve registry -> replay-shard lock order used by abort cleanup.
+        let mut registry = lock(&self.shared);
+        if held() {
+            return false;
+        }
+        *registry.resources_seen.entry(resource.into()).or_default() += 1;
+        true
+    }
+
+    #[cfg(test)]
     pub(crate) fn mark_resource(&self, resource: &str) {
         *lock(&self.shared).resources_seen.entry(resource.into()).or_default() += 1;
     }
@@ -469,6 +485,9 @@ impl Drop for AssignmentGuard {
 impl PublicationWrite {
     /// Called by the writer only after its positive durable completion.
     pub fn accepted_durable(self) {
+        if crate::fatal_durability::check().is_err() {
+            return;
+        }
         self.descriptor.state.store(PersistenceState::AcceptedDurable as u8, Ordering::Release);
         #[cfg(any(test, feature = "durability-test-hooks"))]
         if crate::durability_test_hooks::notify(&self.shared.path, "accepted_assignment", true)
@@ -686,15 +705,21 @@ fn resolver(shared: &Shared) {
     }
 }
 
-impl Drop for PublicationCore {
-    fn drop(&mut self) {
+impl PublicationCore {
+    pub(crate) fn shutdown(&self) {
         self.shared.stopping.store(true, Ordering::Release);
         if let Some(worker) = self.shared.worker.get() {
             worker.unpark();
         }
-        if let Some(worker) = self.worker.take() {
+        let worker = self.worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(worker) = worker {
             let _result = worker.join();
         }
+    }
+}
+impl Drop for PublicationCore {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

@@ -193,11 +193,12 @@ impl super::RouterRedbStore {
     ) -> Result<String, NodeCoreError> {
         let core = self.publication_core()?;
         if let (Some(id), issued) = self.inbox_status(target)? {
+            core.provisional_incarnation(target, id.clone())?;
             core.register(target, &id, issued);
             return Ok(id);
         }
         if let Some(id) = core.current_incarnation(target) {
-            return Ok(id);
+            return core.provisional_incarnation(target, id);
         }
         let candidate = match &self.submission_wal {
             Some(wal) => wal.reserve_incarnation(target)?,

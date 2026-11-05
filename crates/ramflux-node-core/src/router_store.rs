@@ -85,6 +85,20 @@ pub struct RouterRedbStore {
     pub(crate) fail_next_migration_commit: std::sync::atomic::AtomicBool,
 }
 
+impl Drop for RouterRedbStore {
+    fn drop(&mut self) {
+        // Drain writer ownership before resolving remaining non-writes. Routers
+        // may outlive this store, but their publication view must not pin redb.
+        let core =
+            self.publication.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        drop(self.commit_writer.take());
+        drop(self.submission_wal.take());
+        if let Some(core) = core {
+            core.shutdown();
+        }
+    }
+}
+
 struct RouterCommitWriter {
     sender: Option<mpsc::SyncSender<RouterCommitRequest>>,
     thread: Option<thread::JoinHandle<()>>,
