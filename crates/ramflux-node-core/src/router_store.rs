@@ -40,6 +40,7 @@ mod identity_registry;
 pub(crate) mod incarnation;
 pub(crate) mod incarnation_state;
 mod migration_barrier;
+pub mod publication;
 mod retention;
 mod submission_barrier;
 mod tuple_upgrade;
@@ -61,6 +62,7 @@ const CUSTODY_NEW_PRINCIPALS_PER_MINUTE_ENV: &str = "RAMFLUX_CUSTODY_NEW_PRINCIP
 pub struct RouterRedbStore {
     db: Arc<redb::Database>,
     path: PathBuf,
+    publication: std::sync::Mutex<Option<Arc<publication::PublicationCore>>>,
     commit_writer: Option<RouterCommitWriter>,
     pub(crate) submission_wal: Option<RouterWalStore>,
     submission_gates: submission_barrier::TargetGates,
@@ -512,6 +514,7 @@ impl RouterRedbStore {
         Ok(Self {
             db: Arc::clone(&db),
             path: path.to_path_buf(),
+            publication: std::sync::Mutex::new(None),
             commit_writer,
             submission_wal,
             submission_gates: submission_barrier::TargetGates::default(),

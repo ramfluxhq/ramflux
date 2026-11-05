@@ -162,6 +162,7 @@ pub use relay::*;
 pub use replay_guard::*;
 pub use retention::*;
 pub use router::*;
+pub use router_store::publication;
 pub use router_store::{
     CustodyPublicationBudgetRow, IdentityJournalDiscardReport, RouterRedbStore, SubmissionLease,
 };
