@@ -15,6 +15,7 @@ pub use device_address::{
     RootQualifiedDeviceIdentity, parse_qualified_device_id, qualified_device_id,
     validate_device_name,
 };
+pub mod dm_fs_v3;
 pub mod domain;
 mod encoding;
 mod error;
