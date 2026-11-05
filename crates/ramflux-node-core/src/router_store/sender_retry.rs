@@ -91,7 +91,9 @@ impl RouterRedbStore {
             if self.inbox_status(&assignment.target_delivery_id)?.0.as_deref()
                 != Some(assignment.inbox_incarnation_id.as_str())
             {
-                return Err(incarnation::error("incarnation_mismatch"));
+                return Err(NodeCoreError::Publication(
+                    crate::publication::PublicationRefusal::IncarnationMismatch,
+                ));
             }
         }
         Ok(assignment)
@@ -131,3 +133,37 @@ pub(super) use registry::Registry;
 pub use registry::{RetryAdmission, RetryOwner, RetryWaiter};
 
 pub(crate) use registry::RetryAbort;
+
+pub(crate) fn custody_refusal(error: &NodeCoreError) -> ramflux_protocol::custody::CustodyRefusal {
+    use ramflux_protocol::custody::CustodyRefusal;
+    match error {
+        NodeCoreError::SenderRetry(SenderRetryRefusal::AbortedRetrySafe) => {
+            CustodyRefusal::AbortedRetrySafe
+        }
+        NodeCoreError::SenderRetry(SenderRetryRefusal::IdempotencyConflict) => {
+            CustodyRefusal::IdempotencyConflict
+        }
+        NodeCoreError::Publication(
+            crate::publication::PublicationRefusal::CapacityRetryAfter { retry_after_ms },
+        ) => CustodyRefusal::CapacityRetryAfter { retry_after_ms: *retry_after_ms },
+        _ => CustodyRefusal::PersistenceUnavailable,
+    }
+}
+
+pub(crate) fn accepted_outcome(
+    assignment: &SenderAssignment,
+    envelope: ramflux_protocol::Envelope,
+) -> crate::RouterSubmitOutcome {
+    crate::RouterSubmitOutcome::OfflineQueued(crate::OfflineQueuedDelivery {
+        wake_hint: crate::WakeHint {
+            target_delivery_id: assignment.target_delivery_id.clone(),
+            push_alias_hash: None,
+            delivery_class: envelope.delivery_class.clone(),
+        },
+        entry: InboxEntry {
+            inbox_seq: assignment.inbox_seq,
+            target_delivery_id: assignment.target_delivery_id.clone(),
+            envelope,
+        },
+    })
+}

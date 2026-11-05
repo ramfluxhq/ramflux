@@ -215,3 +215,5 @@ mod home_migration_release;
 pub use home_migration_release::{HOME_MIGRATION_RELEASE_GATE, home_migration_enabled};
 
 pub use router_store::sender_retry;
+
+pub use router::PreparedFanout;

@@ -161,6 +161,11 @@ pub enum CustodyClientFrame {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CustodyRefusal {
+    AbortedRetrySafe,
+    CapacityRetryAfter {
+        retry_after_ms: u64,
+    },
+    IdempotencyConflict,
     Unsupported,
     InvalidInput,
     AuthorityUnavailable,

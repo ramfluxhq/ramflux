@@ -46,6 +46,42 @@ impl RouterCore {
         .published_blocking()?
     }
 
+    fn authenticated_forwarded_source(
+        &self,
+        store: &RouterRedbStore,
+        peer_node_id: &str,
+        envelope: &ramflux_protocol::Envelope,
+        floors: &[CustodyPublication],
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        let native = envelope
+            .ext
+            .ext
+            .get("source_device_authority")
+            .and_then(|v| v.get("custody_authority"))
+            .is_some_and(|v| !v.is_null());
+        let source = if native {
+            self.authenticated_native_forwarded_source_from_peer(
+                peer_node_id,
+                envelope,
+                floors,
+                store,
+                crate::RouterEnvelopeOrigin::Federation,
+            )?
+        } else {
+            if !floors.is_empty() {
+                return Err(NodeCoreError::Unauthorized(
+                    "native floors require native sender".into(),
+                ));
+            }
+            self.authenticated_envelope_source_from(
+                envelope,
+                Some(store),
+                crate::RouterEnvelopeOrigin::Federation,
+            )?
+        };
+        Ok(source)
+    }
+
     fn submit_forwarded_envelope_inner(
         &self,
         store: &RouterRedbStore,
@@ -53,7 +89,7 @@ impl RouterCore {
         request: ForwardedEnvelopeRequest,
         now: u64,
     ) -> Result<RouterSubmitOutcome, NodeCoreError> {
-        let _pin_admission =
+        let pin_admission =
             FOREIGN_PIN_ADMISSION.lock().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         let ForwardedEnvelopeRequest { envelope, migration_evidence, peer_node_id } = request;
         // Verify sender bytes without persistence, then the complete sealed proof, before pins.
@@ -66,32 +102,8 @@ impl RouterCore {
             return Err(NodeCoreError::HomeMigration(Refusal::DormantInbox));
         }
         let floors = migration_evidence.as_ref().map_or(&[][..], |e| e.floors.as_slice());
-        let native = envelope
-            .ext
-            .ext
-            .get("source_device_authority")
-            .and_then(|v| v.get("custody_authority"))
-            .is_some_and(|v| !v.is_null());
-        let source = if native {
-            self.authenticated_native_forwarded_source_from_peer(
-                &peer_node_id,
-                &envelope,
-                floors,
-                store,
-                crate::RouterEnvelopeOrigin::Federation,
-            )?
-        } else {
-            if !floors.is_empty() {
-                return Err(NodeCoreError::Unauthorized(
-                    "native floors require native sender".into(),
-                ));
-            }
-            self.authenticated_envelope_source_from(
-                &envelope,
-                Some(store),
-                crate::RouterEnvelopeOrigin::Federation,
-            )?
-        };
+        let source =
+            self.authenticated_forwarded_source(store, &peer_node_id, &envelope, floors)?;
         let proof = migration_evidence.as_ref().and_then(|e| e.commit_proof.as_ref());
         if let Some(proof) = proof {
             let node = node.ok_or(NodeCoreError::HomeMigration(Refusal::PeeringUnavailable))?;
@@ -112,6 +124,26 @@ impl RouterCore {
         if deadline <= now {
             return Err(NodeCoreError::Unauthorized("forwarded entry expired".into()));
         }
+        let retry_owner = match store.admit_sender_retry(&source, &envelope, now)? {
+            crate::sender_retry::RetryAdmission::Owner(owner) => owner,
+            retry => {
+                drop(lease);
+                drop(pin_admission);
+                let assignment = match retry {
+                    crate::sender_retry::RetryAdmission::Accepted(assignment) => assignment,
+                    crate::sender_retry::RetryAdmission::Waiting(waiter) => {
+                        waiter.resolved_blocking()?
+                    }
+                    crate::sender_retry::RetryAdmission::Owner(_) => unreachable!(),
+                };
+                crate::publication::await_sender_assignment(
+                    &store.publication_core()?,
+                    &assignment,
+                )?;
+                return Ok(crate::sender_retry::accepted_outcome(&assignment, envelope));
+            }
+        };
+        retry_owner.bind(&envelope.target_delivery_id)?;
         if store.has_local_delivery_envelope(
             source.root_commitment(),
             &envelope.envelope_id,
@@ -146,6 +178,10 @@ impl RouterCore {
                 tracing::error!(%error, "forwarded inbox persistence failed after acceptance; terminating to avoid a state fork");
                 std::process::abort();
             }
+            let assignment = store
+                .sender_assignment(source.root_commitment(), &entry.envelope, now)?
+                .ok_or_else(|| NodeCoreError::Redb("accepted sender index missing".into()))?;
+            retry_owner.accepted(assignment);
         }
         Ok(outcome)
     }

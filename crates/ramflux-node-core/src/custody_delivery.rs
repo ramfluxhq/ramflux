@@ -23,24 +23,8 @@ pub(crate) fn submit(
     envelope: ramflux_protocol::Envelope,
     now: u64,
 ) -> Result<CustodyServerFrame, CustodyRefusal> {
-    let DeliveryAuthority { authority, session, source } = credentials;
-    let cert = authority.authorize(&session.device_ref, "message", now).map_err(invalid)?;
-    if envelope.source_device_id != session.device_ref.device_id
-        || envelope.source_principal_id != authority.envelope().body.principal_id
-        || envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
-            != Some(source.root_commitment())
-        || envelope.schema != "ramflux.envelope.v1"
-        || envelope.domain != ramflux_protocol::domain::ENVELOPE
-        || envelope.version != 1
-    {
-        return Err(CustodyRefusal::InvalidInput);
-    }
-    ramflux_crypto::verify_canonical_signature(
-        &ramflux_protocol::envelope_sender_signed_bytes(&envelope).map_err(invalid)?,
-        &envelope.signed.signature,
-        &cert.branch_signing_public_key,
-    )
-    .map_err(invalid)?;
+    let DeliveryAuthority { source, .. } = credentials;
+    verify_sender(credentials, &envelope, now)?;
     let lease = match store.acquire_submission(&envelope.target_delivery_id) {
         Ok(lease) => lease,
         Err(crate::NodeCoreError::HomeMigration(reason)) => {
@@ -64,6 +48,36 @@ pub(crate) fn submit(
     router
         .prepare_publication_target(store, &envelope.target_delivery_id)
         .map_err(|_| CustodyRefusal::PersistenceUnavailable)?;
+    let retry_owner = match store
+        .admit_sender_retry(source, &envelope, i64::try_from(now).map_err(invalid)?)
+        .map_err(|error| crate::sender_retry::custody_refusal(&error))?
+    {
+        crate::sender_retry::RetryAdmission::Owner(owner) => owner,
+        retry => {
+            drop(lease);
+            let assignment = match retry {
+                crate::sender_retry::RetryAdmission::Accepted(assignment) => assignment,
+                crate::sender_retry::RetryAdmission::Waiting(waiter) => waiter
+                    .resolved_blocking()
+                    .map_err(|error| crate::sender_retry::custody_refusal(&error))?,
+                crate::sender_retry::RetryAdmission::Owner(_) => unreachable!(),
+            };
+            crate::publication::await_sender_assignment(
+                &store
+                    .publication_core()
+                    .map_err(|error| crate::sender_retry::custody_refusal(&error))?,
+                &assignment,
+            )
+            .map_err(|error| crate::sender_retry::custody_refusal(&error))?;
+            return Ok(CustodyServerFrame::Submitted {
+                envelope_id: envelope.envelope_id,
+                outcome: "offline_queued".into(),
+            });
+        }
+    };
+    retry_owner
+        .bind(&envelope.target_delivery_id)
+        .map_err(|error| crate::sender_retry::custody_refusal(&error))?;
     let replay = envelope_replay_tuple_key(source, &envelope);
     let expiry = envelope
         .created_at
@@ -93,5 +107,40 @@ pub(crate) fn submit(
         tracing::error!(%error,"custody inbox persistence failed after acceptance; terminating to avoid a state fork");
         std::process::abort();
     }
+    let assignment = store
+        .sender_assignment(
+            source.root_commitment(),
+            &entry.envelope,
+            i64::try_from(now).map_err(invalid)?,
+        )
+        .map_err(|error| crate::sender_retry::custody_refusal(&error))?
+        .ok_or(CustodyRefusal::PersistenceUnavailable)?;
+    retry_owner.accepted(assignment);
     Ok(CustodyServerFrame::Submitted { envelope_id: id, outcome: status.into() })
+}
+
+fn verify_sender(
+    credentials: DeliveryAuthority<'_>,
+    envelope: &ramflux_protocol::Envelope,
+    now: u64,
+) -> Result<(), CustodyRefusal> {
+    let DeliveryAuthority { authority, session, source } = credentials;
+    let cert = authority.authorize(&session.device_ref, "message", now).map_err(invalid)?;
+    if envelope.source_device_id != session.device_ref.device_id
+        || envelope.source_principal_id != authority.envelope().body.principal_id
+        || envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
+            != Some(source.root_commitment())
+        || envelope.schema != "ramflux.envelope.v1"
+        || envelope.domain != ramflux_protocol::domain::ENVELOPE
+        || envelope.version != 1
+    {
+        return Err(CustodyRefusal::InvalidInput);
+    }
+    ramflux_crypto::verify_canonical_signature(
+        &ramflux_protocol::envelope_sender_signed_bytes(envelope).map_err(invalid)?,
+        &envelope.signed.signature,
+        &cert.branch_signing_public_key,
+    )
+    .map_err(invalid)?;
+    Ok(())
 }

@@ -9,7 +9,7 @@
 pub(crate) mod operation;
 pub(crate) mod persistence;
 pub(crate) use operation::allocate as operation_allocate;
-pub use operation::{PublishedOperation, await_sender_assignment, capture};
+pub use operation::{PublishedOperation, await_sender_assignment, capture, proved_non_write};
 #[cfg(test)]
 mod lifetime_tests;
 #[cfg(test)]
@@ -408,6 +408,17 @@ impl PublicationCore {
                 return;
             }
             notified.await;
+        }
+    }
+
+    pub(crate) fn reference_resource(&self, resource: &str, held: impl FnOnce() -> bool) {
+        let mut registry = lock(&self.shared);
+        let published = held()
+            && (!registry.resources_seen.contains_key(resource)
+                || registry.resources_published.contains(resource));
+        *registry.resources_seen.entry(resource.into()).or_default() += 1;
+        if published {
+            registry.resources_published.insert(resource.into());
         }
     }
 

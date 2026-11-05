@@ -51,6 +51,15 @@ impl RetryWaiter {
         self.slot.retain_until
     }
 
+    /// Blocking compatibility adapter for native/TCP store threads.
+    /// # Errors
+    /// Returns runtime creation or the original typed non-write refusal.
+    pub fn resolved_blocking(self) -> Result<SenderAssignment, NodeCoreError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .map_err(super::incarnation::error)?;
+        runtime.block_on(self.resolved())
+    }
     /// Await the original persistence disposition without holding any router lock.
     /// # Errors
     /// Returns `aborted_retry_safe` after the original request proves non-write.
@@ -163,10 +172,12 @@ impl RouterRedbStore {
             if slot.digest != digest {
                 return Err(super::SenderRetryRefusal::IdempotencyConflict.into());
             }
-            return Ok(RetryAdmission::Waiting(RetryWaiter {
-                slot: Arc::clone(slot),
-                _permit: permit,
-            }));
+            let waiter = RetryWaiter { slot: Arc::clone(slot), _permit: permit };
+            drop(entries);
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            crate::durability_test_hooks::notify(&self.path, "retry_attached", true)
+                .map_err(super::incarnation::error)?;
+            return Ok(RetryAdmission::Waiting(waiter));
         }
         if let Some(assignment) = self.sender_assignment(source.root_commitment(), envelope, now)? {
             return Ok(RetryAdmission::Accepted(assignment));
@@ -188,9 +199,11 @@ impl RouterRedbStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "durability-test-hooks"))]
 impl RouterRedbStore {
-    pub(super) fn sender_retry_registry_size(&self) -> usize {
+    /// Number of unresolved originals; terminal slots never retain history.
+    #[must_use]
+    pub fn sender_retry_registry_size(&self) -> usize {
         self.sender_retries.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 }
