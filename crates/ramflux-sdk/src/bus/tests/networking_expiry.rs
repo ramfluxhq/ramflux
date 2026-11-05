@@ -305,8 +305,13 @@ impl tracing::Subscriber for ExpiryWarnings {
         impl tracing::field::Visit for Message {
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                 if field.name() == "message" {
-                    self.0 =
-                        format!("{value:?}").contains("networking expiry publication deferred");
+                    self.0 = format!("{value:?}").contains(
+                        if std::env::var_os("RAMFLUX_OBSERVATION_LOG_CHILD").is_some() {
+                            "networking observation persistence deferred"
+                        } else {
+                            "networking expiry publication deferred"
+                        },
+                    );
                 }
             }
         }
@@ -498,6 +503,21 @@ async fn custody_expiry_tick_stays_within_sync_deadline() -> TestResult {
 
 #[tokio::test]
 async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> TestResult {
+    if std::env::var_os("RAMFLUX_OBSERVATION_LOG_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "bus::account_runtime::expiry_tests::observation_persistence_failure_keeps_actor_open_and_allows_retry", "--nocapture"])
+            .env("RAMFLUX_OBSERVATION_LOG_CHILD", "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+    let warnings = ExpiryWarnings::default();
+    tracing::subscriber::set_global_default(warnings.clone())?;
     LocalSet::new()
         .run_until(Box::pin(async {
             let mut h = Harness::new().await?;
@@ -526,6 +546,11 @@ async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> 
                     .await?;
                 assert!(h.runtime.networking_observation_warned);
             }
+            assert_eq!(
+                warnings.0.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "one warning per outage"
+            );
             h.runtime
                 .state
                 .accounts
@@ -565,6 +590,11 @@ async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> 
                 })
                 .await?;
             assert!(h.runtime.networking_observation_warned, "a new outage warns again");
+            assert_eq!(
+                warnings.0.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "separate outage must emit another warning"
+            );
             h.runtime.stop_connection().await;
             Ok(())
         }))
