@@ -133,6 +133,7 @@ pub(super) struct PendingPacket {
     pub remaining: Option<BytesMut>,
     pub owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
     pub generation: u64,
+    pub data_len: usize,
 }
 
 impl Connection {
@@ -357,14 +358,19 @@ impl Connection {
             remaining,
             owner,
             generation: _,
+            data_len,
         } = pending;
         self.raw_owner = owner;
         self.handle_authenticated_packet(now, remote, ecn, Ok((packet, number, key_update)), false);
         if let Some(pending) = self.pending_control.as_mut() {
             pending.remaining = remaining;
-        } else if !self.control_resource_closed {
+            pending.data_len = data_len;
+        } else {
+            self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
+            if !self.control_resource_closed {
             if let Some(remaining) = remaining {
                 self.handle_coalesced(now, remote, ecn, remaining);
+            }
             }
         }
         self.raw_owner = None;
