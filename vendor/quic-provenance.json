@@ -44,7 +44,8 @@
       },
       "examples/README.md": {
         "upstream_sha256": "8e83b342ead7bc7a1c2d6ca5712e098ed851c14314d37f13f3467b75ffd111cf",
-        "patched_sha256": "8e83b342ead7bc7a1c2d6ca5712e098ed851c14314d37f13f3467b75ffd111cf"
+        "patched_sha256": "90fae47498f5e0039304e6b52a1436fe3e35d95e2c0c68ec47d89f08ef24b4b1",
+        "delta": "Trim upstream trailing whitespace for the repository diff guard"
       },
       "examples/client.rs": {
         "upstream_sha256": "619f1397f8f2d1f4692d965bb823893455aed4818126292f699605e4639321dc",
