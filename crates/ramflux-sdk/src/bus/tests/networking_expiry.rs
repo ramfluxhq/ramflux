@@ -548,6 +548,23 @@ async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> 
                 .load_actor_state::<serde_json::Value>("account/networking")?
                 .ok_or("snapshot")?;
             assert!(saved.get("session").is_some());
+            assert!(!h.runtime.networking_observation_warned, "recovery re-arms warning");
+            h.runtime
+                .state
+                .accounts
+                .get_mut("expiry-runtime")
+                .ok_or("account")?
+                .client
+                .active_account_db = None;
+            h.runtime
+                .apply_connection_work(super::super::connection_manager::AccountWork::Observation {
+                    event: super::super::connection_manager::ConnectionEvent::Disconnected {
+                        reason: super::super::connection_manager::DisconnectReason::Stop,
+                        generation: 0,
+                    },
+                })
+                .await?;
+            assert!(h.runtime.networking_observation_warned, "a new outage warns again");
             h.runtime.stop_connection().await;
             Ok(())
         }))

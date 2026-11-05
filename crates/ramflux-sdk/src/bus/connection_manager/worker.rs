@@ -271,14 +271,7 @@ async fn run_account(
         if let Some(host) = &resident.host {
             host.hub.disconnect(reason);
         }
-        update(handle, |snapshot| {
-            snapshot.state = NetworkingState::NetworkingPending;
-            snapshot.phase = ConnectionPhase::Backoff;
-            snapshot.active_transport_kind = None;
-            snapshot.session_id = None;
-            snapshot.last_reason = Some(format!("{reason:?}"));
-        });
-        let _ = handle.shared.events.send(ConnectionEvent::Disconnected { reason, generation });
+        disconnected(handle, reason, generation);
         drop(resident);
         if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
             break;
@@ -287,6 +280,23 @@ async fn run_account(
         retry.record(&error, Instant::now());
         failed(handle, retry, &error);
     }
+}
+
+fn disconnected(handle: &ConnectionHandle, reason: DisconnectReason, generation: u64) {
+    update(handle, |snapshot| {
+        snapshot.state = NetworkingState::NetworkingPending;
+        snapshot.phase = if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
+            ConnectionPhase::Stopped
+        } else {
+            ConnectionPhase::Backoff
+        };
+        snapshot.active_transport_kind = None;
+        snapshot.session_id = None;
+        snapshot.last_reason = Some(format!("{reason:?}"));
+        snapshot.retry_after_ms = None;
+        snapshot.next_retry_at_ms = None;
+    });
+    let _ = handle.shared.events.send(ConnectionEvent::Disconnected { reason, generation });
 }
 
 fn update(handle: &ConnectionHandle, change: impl FnOnce(&mut NetworkingSnapshot)) {
@@ -440,4 +450,44 @@ fn announce_live(
     });
     handle.shared.receive_wake.notify_one();
     session
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disconnect_event_exposes_terminal_or_retry_phase()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (handle, _io) = super::super::tests::fixture().await?;
+        handle.stop().await;
+        let mut events = handle.events();
+        for reason in [DisconnectReason::Stop, DisconnectReason::Lock, DisconnectReason::Drain] {
+            update(&handle, |snapshot| {
+                snapshot.state = NetworkingState::Live;
+                snapshot.phase = ConnectionPhase::Live;
+                snapshot.session_id = Some("retiring".into());
+                snapshot.retry_after_ms = Some(1000);
+                snapshot.next_retry_at_ms = Some(4242);
+            });
+            let generation = handle.generation();
+            disconnected(&handle, reason, generation);
+            assert!(
+                matches!(events.recv().await?, ConnectionEvent::Disconnected { reason: r, generation: g } if r == reason && g == generation)
+            );
+            let snapshot = handle.snapshot();
+            let expected = if reason == DisconnectReason::Drain {
+                ConnectionPhase::Backoff
+            } else {
+                ConnectionPhase::Stopped
+            };
+            assert_eq!(snapshot.phase, expected);
+            assert_eq!(snapshot.state, NetworkingState::NetworkingPending);
+            assert!(snapshot.session_id.is_none());
+            assert!(snapshot.active_transport_kind.is_none());
+            assert!(snapshot.retry_after_ms.is_none());
+            assert!(snapshot.next_retry_at_ms.is_none());
+        }
+        Ok(())
+    }
 }
