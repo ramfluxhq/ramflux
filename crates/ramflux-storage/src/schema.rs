@@ -1261,7 +1261,9 @@ fn ensure_object_index_legacy_columns(connection: &Connection) -> Result<(), Sto
     Ok(())
 }
 
-fn ensure_object_transfer_state_columns(connection: &Connection) -> Result<(), StorageError> {
+pub(crate) fn ensure_object_transfer_state_columns(
+    connection: &Connection,
+) -> Result<(), StorageError> {
     ensure_column(
         connection,
         "object_transfer_state",
@@ -1300,6 +1302,14 @@ fn ensure_object_transfer_state_columns(connection: &Connection) -> Result<(), S
         "next_chunk_index INTEGER",
     )?;
     ensure_column(connection, "object_transfer_state", "expires_at", "expires_at INTEGER")?;
+    for (name, definition) in [
+        ("segment_generation", "segment_generation INTEGER"),
+        ("segment_sequence", "segment_sequence INTEGER NOT NULL DEFAULT 0"),
+        ("segment_manifest", "segment_manifest BLOB"),
+    ] {
+        ensure_column(connection, "object_transfer_state", name, definition)?;
+    }
+    crate::schema_large_segments::install(connection)?;
     Ok(())
 }
 

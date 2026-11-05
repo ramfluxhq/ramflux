@@ -110,6 +110,13 @@ impl BackupDatabase {
             crate::encryption::apply_key(&writer, key)?;
             crate::schema_object_erasure::upgrade_private(&writer)?;
         }
+        // Schema-only additive upgrade; never import physical segment progress.
+        let segment_schema:bool=db.query_row("SELECT (SELECT count(*) FROM pragma_table_info('object_transfer_state') WHERE name IN ('segment_generation','segment_sequence','segment_manifest'))=3 AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='object_segment_file')",[],|r|r.get(0))?;
+        if !segment_schema {
+            let writer = crate::database::Connection::open(path)?;
+            crate::encryption::apply_key(&writer, key)?;
+            crate::schema::ensure_object_transfer_state_columns(&writer)?;
+        }
         // An archive's enclosing key is never MAC authority. Record old keyed
         // markers as unmatched before minting fresh-install authority.
         match source {

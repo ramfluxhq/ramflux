@@ -119,9 +119,10 @@ impl SegmentStore<'_> {
         index: u32,
         chunk_index: u32,
     ) -> Result<Vec<u8>, StorageError> {
+        let _lease = self.lease(id)?;
         let chunk = self.current(id, generation)?;
         let row = self
-            .reconcile_page(id, generation, index, 1)?
+            .metadata_page(id, generation, index, 1)?
             .into_iter()
             .next()
             .filter(|r| r.index == index)
@@ -133,13 +134,23 @@ impl SegmentStore<'_> {
             return Err(StorageError::Integrity("segment bytes missing"));
         }
         let path = self
-            .directory(id, generation)?
+            .location(id, generation)
             .join(format!("{index}.{}", if row.cipher_verified { "segment" } else { "part" }));
         regular(&path)?;
         let mut file = File::open(path)?;
+        if file.metadata()?.len() > row.expected_length
+            || row.cipher_verified && file.metadata()?.len() != row.expected_length
+        {
+            return Err(StorageError::Integrity("segment file length"));
+        }
         file.seek(SeekFrom::Start(u64::from(chunk) * u64::from(chunk_index)))?;
         let mut bytes = vec![0; length];
         file.read_exact(&mut bytes)?;
+        let hashes:Vec<u8>=self.db.connection.query_row("SELECT chunk_digests FROM object_segment_file WHERE transfer_id=?1 AND generation=?2 AND segment_index=?3",params![id,integer(generation)?,index],|r|r.get(0))?;
+        let start = chunk_index as usize * 32;
+        if hashes.get(start..start + 32) != Some(blake3::hash(&bytes).as_bytes().as_slice()) {
+            return Err(StorageError::Integrity("segment chunk hash"));
+        }
         Ok(bytes)
     }
 
@@ -156,9 +167,10 @@ impl SegmentStore<'_> {
         chunk_index: u32,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
+        let _lease = self.lease(id)?;
         let chunk = self.current(id, generation)?;
         let row = self
-            .reconcile_page(id, generation, index, 1)?
+            .metadata_page(id, generation, index, 1)?
             .into_iter()
             .next()
             .filter(|r| r.index == index)
@@ -178,6 +190,11 @@ impl SegmentStore<'_> {
         if row.received_bitmap & bit != 0 {
             regular(path)?;
             let mut file = File::open(path)?;
+            if file.metadata()?.len() > row.expected_length
+                || row.cipher_verified && file.metadata()?.len() != row.expected_length
+            {
+                return Err(StorageError::Integrity("segment file length"));
+            }
             let actual = chunk_hash(&mut file, u64::from(chunk) * u64::from(chunk_index), len)?;
             if actual != *blake3::hash(bytes).as_bytes()
                 || hashes.get(start..start + 32) != Some(actual.as_slice())
@@ -195,8 +212,15 @@ impl SegmentStore<'_> {
             }
             Err(e) => return Err(e.into()),
         };
+        if file.metadata()?.len() > row.expected_length {
+            return Err(StorageError::Integrity("segment file length"));
+        }
         file.seek(SeekFrom::Start(u64::from(chunk) * u64::from(chunk_index)))?;
         file.write_all(bytes)?;
+        #[cfg(test)]
+        if let Some(hook) = &self.during_write {
+            hook();
+        }
         #[cfg(test)]
         self.crash_at(CrashPoint::Written)?;
         file.sync_all()?;
@@ -243,6 +267,17 @@ impl SegmentStore<'_> {
     /// # Errors
     /// Refuses stale generations, inaccessible files and database failures.
     pub fn reconcile_page(
+        &mut self,
+        id: &str,
+        generation: u64,
+        start: u32,
+        limit: u32,
+    ) -> Result<Vec<SegmentPageEntry>, StorageError> {
+        let _lease = self.lease(id)?;
+        self.recover_page(id, generation, start, limit)
+    }
+
+    pub(super) fn recover_page(
         &mut self,
         id: &str,
         generation: u64,
@@ -314,11 +349,11 @@ impl SegmentStore<'_> {
                 sync_dir(&dir)?;
             }
             // Re-establish durability before adopting bytes after interrupted commit.
-            if full {
+            if full && !row.cipher_verified {
                 File::open(&final_path)?.sync_all()?;
                 sync_dir(&dir)?;
             }
-            if bits != row.received_bitmap || full != row.cipher_verified || row.authenticated {
+            if bits != row.received_bitmap || full != row.cipher_verified {
                 self.persist(
                     id,
                     generation,
@@ -344,7 +379,7 @@ impl SegmentStore<'_> {
         if previous != row.received_bitmap {
             return Err(StorageError::ObjectIdentityConflict);
         }
-        self.db.connection.execute("UPDATE object_segment_file SET received_bitmap=?4,chunk_digests=?5,cipher_verified=?6,authenticated=0 WHERE transfer_id=?1 AND generation=?2 AND segment_index=?3",params![id,integer(generation)?,row.index,bits,hashes,full])?;
+        self.db.connection.execute("UPDATE object_segment_file SET received_bitmap=?4,chunk_digests=?5,cipher_verified=?6 WHERE transfer_id=?1 AND generation=?2 AND segment_index=?3",params![id,integer(generation)?,row.index,bits,hashes,full])?;
         let delta = accounted(row.expected_length, chunk, bits)?
             - accounted(row.expected_length, chunk, previous)?;
         self.db.connection.execute("UPDATE object_transfer_state SET done_bytes=done_bytes+?2,segment_sequence=segment_sequence+1 WHERE transfer_id=?1",params![id,delta])?;
