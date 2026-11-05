@@ -25,6 +25,7 @@ fn open(root: &Path, mode: &str) -> std::result::Result<RouterRedbStore, NodeCor
 fn setup(root: &Path, mode: &str, populated: bool, due: bool) -> Result {
     fs::create_dir_all(root)?;
     let store = open(root, "redb")?;
+    crate::durability_test_hooks::notify(root, "startup_fixture_open", true)?;
     if populated {
         store.record_submission_increment("startup-row", i64::MAX, Some(&entry()))?;
         // Persisted redb rows do not mark a cursor checkpoint due merely by loading.
@@ -130,51 +131,110 @@ fn finish(mut child: std::process::Child, success: bool) -> Result {
         thread::sleep(Duration::from_millis(2));
     }
 }
-pub(super) fn matrix() -> Result {
-    for mode in ["redb", "ordinary", "pipeline"] {
-        for (populated, due) in [(false, false), (true, false), (true, true)] {
-            if mode == "redb" && due {
-                continue;
+// Each nextest case owns one bounded matrix row. The re-exec entry point stays
+// NAME, so every original hold/failure and surface-ordering assertion is retained.
+fn matrix_case(mode: &str, populated: bool, due: bool) -> Result {
+    let root = std::env::temp_dir()
+        .join(format!("startup-matrix-{}-{mode}-{populated}-{due}", std::process::id()));
+    let seed = root.join("seed");
+    let parent_opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&parent_opens);
+    let _observer = observe(
+        root.clone(),
+        Arc::new(move |_, op, done| {
+            if op == "startup_fixture_open" && done {
+                observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            let root = std::env::temp_dir()
-                .join(format!("startup-matrix-{}-{mode}-{populated}-{due}", std::process::id()));
-            setup(&root, mode, populated, due)?;
-            for (index, (path, operation)) in required(&root, mode, due).into_iter().enumerate() {
-                for action in ["hold", "fail"] {
-                    // Each cut starts from the same pre-checkpoint image. A successful
-                    // earlier restart must not consume the due checkpoint for later cuts.
-                    fs::remove_file(root.join("db"))?;
-                    setup(&root, mode, populated, due)?;
-                    let control = root.join(format!("control-{index}-{action}"));
-                    fs::create_dir(&control)?;
-                    let mut child = command(&root, mode)
-                        .env("RAMFLUX_MATRIX_PATH", path.strip_prefix(&root)?)
-                        .env("RAMFLUX_MATRIX_DUE", if due { "1" } else { "0" })
-                        .env("RAMFLUX_MATRIX_OP", operation)
-                        .env("RAMFLUX_MATRIX_ACTION", action)
-                        .env("RAMFLUX_MATRIX_CONTROL", &control)
-                        .spawn()?;
-                    wait_file(&control.join("entered"), &mut child)?;
-                    for surface in ["ready", "resume", "http-inbox", "submit-reply", "push"] {
-                        assert!(
-                            !control.join(surface).exists(),
-                            "{surface} escaped {mode} {index} {action}"
-                        );
-                    }
-                    if action == "hold" {
-                        fs::write(control.join("release"), [])?;
-                    }
-                    finish(child, action == "hold")?;
-                    for surface in ["ready", "resume", "http-inbox", "submit-reply", "push"] {
-                        assert_eq!(control.join(surface).exists(), action == "hold");
-                    }
-                }
+            Ok(())
+        }),
+    );
+    // Build the exact pre-checkpoint image once. Copies are independent writable
+    // files; a preceding successful restart cannot consume the next cut's state.
+    setup(&seed, mode, populated, due)?;
+    for (index, (path, operation)) in required(&seed, mode, due).into_iter().enumerate() {
+        for action in ["hold", "fail"] {
+            let case = root.join(format!("cut-{index}-{action}"));
+            copy_fixture(&seed, &case)?;
+            let control = case.join("control");
+            fs::create_dir(&control)?;
+            let mut child = command(&case, mode)
+                .env("RAMFLUX_MATRIX_PATH", path.strip_prefix(&seed)?)
+                .env("RAMFLUX_MATRIX_DUE", if due { "1" } else { "0" })
+                .env("RAMFLUX_MATRIX_OP", operation)
+                .env("RAMFLUX_MATRIX_ACTION", action)
+                .env("RAMFLUX_MATRIX_CONTROL", &control)
+                .spawn()?;
+            wait_file(&control.join("entered"), &mut child)?;
+            for surface in ["ready", "resume", "http-inbox", "submit-reply", "push"] {
+                assert!(
+                    !control.join(surface).exists(),
+                    "{surface} escaped {mode} {index} {action}"
+                );
             }
-            fs::remove_dir_all(root)?;
+            if action == "hold" {
+                fs::write(control.join("release"), [])?;
+            }
+            finish(child, action == "hold")?;
+            for surface in ["ready", "resume", "http-inbox", "submit-reply", "push"] {
+                assert_eq!(control.join(surface).exists(), action == "hold");
+            }
         }
     }
-    redb_crashes()
+    assert_eq!(
+        parent_opens.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "each matrix row must seed one store, not repeat durable setup for every cut"
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
 }
+fn copy_fixture(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_fixture(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_sync_before_ready_redb_empty() -> Result {
+    matrix_case("redb", false, false)
+}
+#[test]
+fn recovery_sync_before_ready_redb_populated() -> Result {
+    matrix_case("redb", true, false)
+}
+#[test]
+fn recovery_sync_before_ready_ordinary_empty() -> Result {
+    matrix_case("ordinary", false, false)
+}
+#[test]
+fn recovery_sync_before_ready_ordinary_populated() -> Result {
+    matrix_case("ordinary", true, false)
+}
+#[test]
+fn recovery_sync_before_ready_ordinary_due() -> Result {
+    matrix_case("ordinary", true, true)
+}
+#[test]
+fn recovery_sync_before_ready_pipeline_empty() -> Result {
+    matrix_case("pipeline", false, false)
+}
+#[test]
+fn recovery_sync_before_ready_pipeline_populated() -> Result {
+    matrix_case("pipeline", true, false)
+}
+#[test]
+fn recovery_sync_before_ready_pipeline_due() -> Result {
+    matrix_case("pipeline", true, true)
+}
+
 pub(super) fn child() -> Result {
     let root = PathBuf::from(std::env::var_os("RAMFLUX_STARTUP_MATRIX_CHILD").expect("root"));
     let mode = std::env::var("RAMFLUX_MATRIX_MODE")?;
@@ -261,7 +321,7 @@ fn legacy_surfaces(router: &crate::RouterCore, store: &RouterRedbStore, control:
     fs::write(control.join("push"), serde_json::to_vec(&gateway)?)?;
     Ok(())
 }
-fn redb_crashes() -> Result {
+pub(super) fn redb_crashes() -> Result {
     for kind in ["uncertain", "reply-loss"] {
         let root =
             std::env::temp_dir().join(format!("startup-redb-crash-{}-{kind}", std::process::id()));
