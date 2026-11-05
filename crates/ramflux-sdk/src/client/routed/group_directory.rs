@@ -12,9 +12,9 @@ pub(crate) enum ReceiveGroupDirectory {
 }
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Lookup {
-    root: String,
-    device: String,
-    url: Option<String>,
+    pub(crate) root: String,
+    pub(crate) device: String,
+    pub(crate) url: Option<String>,
 }
 pub(crate) struct LegacyGroupDirectory {
     lookup: Option<Lookup>,
@@ -26,7 +26,10 @@ pub(crate) enum LegacyGroupRequest {
 }
 impl LegacyGroupRequest {
     pub(crate) fn directory_root(&self) -> Option<&str> {
-        match self { Self::Control { lookup: Some(lookup) } => Some(&lookup.root), _ => None }
+        match self {
+            Self::Control { lookup: Some(lookup) } => Some(&lookup.root),
+            _ => None,
+        }
     }
 
     pub(crate) async fn resolve(

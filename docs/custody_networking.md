@@ -61,13 +61,16 @@ interrupted exchange can replay through the same admission key without applying
 a committed message twice. Cancellation does not roll back messages already
 committed, nor mark an unfinished sync complete.
 
-Background refresh runs on connect and demand, with periodic sweeps due every
-150 seconds while Live. Demand wakes cannot postpone a due sweep. Pending demands
-are selected before sweep roots, with demand rechecked between individual fetches.
-Each account fetches one root at a time, in batches of at most 32 roots and at most
-four batches (128 roots) per trigger, with 25 ms between batches. A fair cursor
-continues remaining roots on later triggers; large rosters may take several
-triggers to refresh. The pending-demand cap is 512. Repeated failures back off per root from 5 seconds, doubling up to 150 seconds.
+Background refresh runs on connect and demand, with periodic sweeps on a fixed
+schedule at 150-second intervals while Live. Wake delivery cannot shift that
+schedule. Roots become due after 120 seconds to allow for fetch and wake latency. New
+demands take priority between fetches. Each periodic trigger permits at most 32
+retries of previously failed demands, then reserves remaining work for sweep roots;
+separate cursors preserve continuation. Each account fetches one root at a time, in
+batches of at most 32 roots and at most four batches (128 roots) per trigger, with 25
+ms between batches. Large rosters may take several triggers to refresh. The pending-
+demand cap is 512. Repeated failures back off per root from 5 seconds, doubling up to
+150 seconds.
 
 Fetches run off the account writer; Apply checks generation, session, root and
 current membership and retains the conservative fetch-start time. Lock or session

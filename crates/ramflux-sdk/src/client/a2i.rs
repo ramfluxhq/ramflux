@@ -86,7 +86,10 @@ impl RamfluxClient {
                     ramflux_transport::RelayQuicPoolConfig::functional_default()
                         .map_err(|error| SdkError::LocalBus(error.to_string()))?,
                 );
-                let delivery = self.apply_routed_entry(engine, &pool, &entry, false).await.map_err(SdkError::without_directory_context)?;
+                let delivery = self
+                    .apply_routed_entry(engine, &pool, &entry, false)
+                    .await
+                    .map_err(SdkError::without_directory_context)?;
                 if delivery
                     .routing
                     .as_ref()

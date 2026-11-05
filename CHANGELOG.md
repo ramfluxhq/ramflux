@@ -30,9 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `group.history` reads stored history, name and roster offline while retaining
   revocation and erasure fences. New authorization keeps fresh-head checks and
   returns typed `NetworkingPending` within five seconds when refresh is unavailable.
-  Schedule head refresh on connect, every 150 seconds and on demand. Demand
-  precedes sweep work between fetches, and queued wakes cannot postpone a due
-  sweep. Each trigger handles at most 128 roots in paced 32-root batches, with
+  Schedule head refresh on connect, on demand and on a fixed schedule at
+  150-second intervals. New demand precedes sweep work; periodic triggers cap
+  failed-demand retries at 32 so sweep roots progress. Each trigger handles at most 128 roots in paced 32-root batches, with
   fair continuation and per-root failure backoff. Verified background refresh
   immediately redrives matching deferred inbox entries once, preserving unrelated
   retry backoff. Explicit `device.refresh` refreshes the named principal (own by

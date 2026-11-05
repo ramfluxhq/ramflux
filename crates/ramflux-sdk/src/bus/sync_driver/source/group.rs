@@ -46,8 +46,11 @@ pub(super) async fn prepare(
             Ok((current.addition, actor))
         })
         .await?;
-    let addition =
-        if let Some(request) = addition { Some(resolve_addition(request, config).await?) } else { None };
+    let addition = if let Some(request) = addition {
+        Some(resolve_addition(request, config).await?)
+    } else {
+        None
+    };
     Ok(Some(ReceiveGroupDirectory::Shared(Box::new(GroupDirectoryEvidence { actor, addition }))))
 }
 
@@ -57,7 +60,7 @@ async fn resolve_legacy(
 ) -> Result<Option<ReceiveGroupDirectory>, SdkError> {
     let root = request.directory_root().map(str::to_owned);
     request.resolve(config).await.map_err(|source| match root {
-        Some(root) => SdkError::DirectoryAuthorityUnavailable { root, source: Box::new(source) },
+        Some(root) => inbound_directory_error(root, source),
         None => source,
     })
 }
@@ -65,11 +68,17 @@ async fn resolve_legacy(
 async fn resolve_addition(
     request: crate::client::shared_group::GroupDirectoryRequest,
     config: &GatewaySessionConfig,
-) -> Result<(crate::client::shared_group::GroupDirectoryRequest, crate::SdkDeviceManifestResponse), SdkError> {
+) -> Result<
+    (crate::client::shared_group::GroupDirectoryRequest, crate::SdkDeviceManifestResponse),
+    SdkError,
+> {
     let root = request.root.clone();
-    request.fetch(config).await.map_err(|source|
-        SdkError::DirectoryAuthorityUnavailable { root, source: Box::new(source) })
+    request.fetch(config).await.map_err(|source| inbound_directory_error(root, source))
 }
 
 #[cfg(test)]
 mod tests;
+
+fn inbound_directory_error(root: String, source: SdkError) -> SdkError {
+    SdkError::DirectoryAuthorityUnavailable { root, source: Box::new(source) }
+}

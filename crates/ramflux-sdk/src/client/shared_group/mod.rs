@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 mod bootstrap;
 mod controls;
 mod receive_directory;
-pub(crate) use receive_directory::GroupDirectoryEvidence;
+pub(crate) use receive_directory::{GroupDirectoryEvidence, GroupDirectoryRequest};
 mod creator_conflicts;
 mod devices;
 mod federation;

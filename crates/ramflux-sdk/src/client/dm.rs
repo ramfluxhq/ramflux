@@ -322,8 +322,10 @@ impl RamfluxClient {
         let mut plaintext = Vec::new();
         for entry in entries {
             if crate::client::routed::decode(&entry.envelope).is_ok() {
-                let delivery: crate::client::routed::Delivery =
-                    self.apply_routed_entry(engine, pool, &entry, auto_fetch_attachments).await.map_err(SdkError::without_directory_context)?;
+                let delivery: crate::client::routed::Delivery = self
+                    .apply_routed_entry(engine, pool, &entry, auto_fetch_attachments)
+                    .await
+                    .map_err(SdkError::without_directory_context)?;
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
                 if delivery
                     .routing

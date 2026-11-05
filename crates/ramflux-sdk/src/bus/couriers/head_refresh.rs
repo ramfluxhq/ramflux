@@ -169,27 +169,47 @@ fn prepare_due_limit(
     // Demand precedes sweep work. Each class rotates through never-observed and
     // observed roots with a persistent cursor, including after failed fetches.
     let reserve_sweep = periodic && retry_budget == 0;
-    let cursor = if reserve_sweep { account.head_refresh.sweep_cursor.as_ref() }
-        else { account.head_refresh.cursor.as_ref() };
+    let cursor = if reserve_sweep {
+        account.head_refresh.sweep_cursor.as_ref()
+    } else {
+        account.head_refresh.cursor.as_ref()
+    };
     let after = candidates.iter().filter(|key| cursor.is_none_or(|last| *key > last));
     let before = candidates.iter().filter(|key| cursor.is_some_and(|last| *key <= last));
     let ordered: Vec<_> = after.chain(before).collect();
-    let demand = ordered.iter().filter(|(_, root)| account.head_refresh.pending.contains(root)
-        && !(reserve_sweep && account.head_refresh.failures.contains_key(root)));
+    let demand = ordered.iter().filter(|(_, root)| {
+        account.head_refresh.pending.contains(root)
+            && !(reserve_sweep && account.head_refresh.failures.contains_key(root))
+    });
     let sweep = ordered.iter().filter(|(_, root)| !account.head_refresh.pending.contains(root));
     let selected: Vec<_> = demand.chain(sweep).take(limit).map(|key| (*key).clone()).collect();
     if selected.is_empty() {
         return Ok(None);
     }
-    if reserve_sweep { account.head_refresh.sweep_cursor = selected.last().cloned(); }
-    else { account.head_refresh.cursor = selected.last().cloned(); }
-    let retried_demands = selected.iter().filter(|(_, root)|
-        account.head_refresh.pending.contains(root) && account.head_refresh.failures.contains_key(root)).count();
+    if reserve_sweep {
+        account.head_refresh.sweep_cursor = selected.last().cloned();
+    } else {
+        account.head_refresh.cursor = selected.last().cloned();
+    }
+    let retried_demands = selected
+        .iter()
+        .filter(|(_, root)| {
+            account.head_refresh.pending.contains(root)
+                && account.head_refresh.failures.contains_key(root)
+        })
+        .count();
     let remaining_passes = candidates.len().saturating_sub(selected.len()).div_ceil(PASS_ROOTS);
     let roots = selected.into_iter().map(|(_, root)| root).collect();
     let lease = Arc::new(());
     account.head_refresh.active = Arc::downgrade(&lease);
-    Ok(Some(Plan { fence, lease, roots, remaining_passes, retried_demands, config: account.gateway_config.clone() }))
+    Ok(Some(Plan {
+        fence,
+        lease,
+        roots,
+        remaining_passes,
+        retried_demands,
+        config: account.gateway_config.clone(),
+    }))
 }
 
 fn apply(
@@ -267,7 +287,14 @@ pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) {
         }
         Work::Prepare { fence, periodic, retry_budget, attempted, reply } => {
             if !reply.is_closed() {
-                let _ = reply.send(prepare_due_limit(account, fence, periodic, &attempted, 1, retry_budget));
+                let _ = reply.send(prepare_due_limit(
+                    account,
+                    fence,
+                    periodic,
+                    &attempted,
+                    1,
+                    retry_budget,
+                ));
             }
         }
         Work::Apply { plan, root, fetched_after, outcome, reply } => {
@@ -386,12 +413,14 @@ async fn cycle(
 
 // Advance on the original interval grid, independent of wake delivery latency.
 fn advance_sweep(next: &mut tokio::time::Instant, ticked: bool, now: tokio::time::Instant) -> bool {
-    if !ticked && now < *next { return false; }
+    if !ticked && now < *next {
+        return false;
+    }
     if now >= *next {
         let elapsed = now.duration_since(*next);
         let remainder = Duration::from_secs(elapsed.as_secs() % REFRESH_INTERVAL.as_secs())
             + Duration::from_nanos(u64::from(elapsed.subsec_nanos()));
-        *next = now + (REFRESH_INTERVAL - remainder);
+        *next = now + REFRESH_INTERVAL.saturating_sub(remainder);
     }
     true
 }
@@ -422,7 +451,8 @@ async fn run_with_triggers(
                 _ = timer.tick(), if periodic => true,
                 () = wake.notified() => false,
             };
-            let periodic = periodic && advance_sweep(&mut next_sweep, ticked, tokio::time::Instant::now());
+            let periodic =
+                periodic && advance_sweep(&mut next_sweep, ticked, tokio::time::Instant::now());
             if let Err(error) = cycle(&context, &writer, periodic).await {
                 tracing::debug!(%error, "head refresh cycle deferred");
             }
