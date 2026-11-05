@@ -42,6 +42,25 @@ impl BackupDatabase {
         Ok(())
     }
 
+    /// Candidate admission with every native data-only exclusion preserved.
+    /// # Errors
+    /// Refuses invalid graphs, conflicting pins, cancellation and storage errors.
+    #[doc(hidden)]
+    pub fn merge_native_backup_candidate(
+        &mut self,
+        path: &Path,
+        key: &AccountDbKey,
+        mut progress: impl FnMut() -> Result<(), StorageError>,
+    ) -> Result<BackupMergeReport, StorageError> {
+        self.merge_backup_pipeline(
+            path,
+            key,
+            (BackupMergeMode::NativeDataOnly, true),
+            &mut progress,
+            |_| Ok(()),
+        )
+    }
+
     /// Merges data while leaving live authority, key pins, permissions and replay state intact.
     /// Imported DM sessions are receive-only and outbound sessions bootstrap independently.
     /// # Errors
@@ -64,6 +83,10 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     #[test]
     fn native_merge_cannot_install_authority_or_resume_saved_outbound_sessions() -> TestResult {
+        native_exclusions(false)?;
+        native_exclusions(true)
+    }
+    fn native_exclusions(candidate: bool) -> TestResult {
         let root = std::env::temp_dir().join(format!(
             "rf-native-merge-{}-{}",
             std::process::id(),
@@ -105,7 +128,11 @@ mod tests {
         let target = root.join("merged.db");
         let copied = local.write_backup_snapshot(&target)?;
         let mut merged = BackupDatabase::open(&target, &copied.key)?;
-        merged.merge_native_backup(&incoming, &snapshot.key, || Ok(()))?;
+        if candidate {
+            merged.merge_native_backup_candidate(&incoming, &snapshot.key, || Ok(()))?;
+        } else {
+            merged.merge_native_backup(&incoming, &snapshot.key, || Ok(()))?;
+        }
         assert!(!merged.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_own_copy_state WHERE state_kind='own-device/status/imported')", [], |row| row.get::<_,bool>(0))?, "derived own-copy state must not be imported without its actor row");
         assert!(merged.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_own_copy_state WHERE state_kind='own-device/status/local')", [], |row| row.get::<_,bool>(0))?);
         assert_eq!(

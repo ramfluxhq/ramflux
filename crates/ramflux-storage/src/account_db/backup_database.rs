@@ -68,6 +68,19 @@ impl BackupDatabase {
         )
     }
 
+    /// Opens an owner-guarded live restore input before private normalization.
+    /// # Errors
+    /// Returns authentication, schema or I/O errors.
+    #[doc(hidden)]
+    pub fn open_live_restore_input(path: &Path, key: &AccountDbKey) -> Result<Self, StorageError> {
+        Self::open_with_source(
+            path,
+            key,
+            BackupOpenMode::PreNormalization,
+            MarkerAuthoritySource::LiveAccountKey,
+        )
+    }
+
     /// Opens an internal candidate restore input with an explicit validation boundary.
     /// This does not normalize rows or select a generation for installation.
     /// # Errors

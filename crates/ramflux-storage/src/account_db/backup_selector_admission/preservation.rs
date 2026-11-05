@@ -177,6 +177,10 @@ pub(in crate::account_db) fn prepare(
                         .or_else(|| key.strip_prefix("sync/attachment/"))
                     {
                         drop_copy |= blocked(db, root, schema, selector, None)?;
+                        if key.starts_with("attachment/reference/") {
+                            let owned: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.object_retention_reference r JOIN {schema}.object_message_reference m USING(reference_hash) WHERE r.selector=?1)"), [selector], |r| r.get(0))?;
+                            drop_copy |= !owned;
+                        }
                     }
                     if key.starts_with("attachment/reference-by-")
                         && let Some(selector) = value.as_str()

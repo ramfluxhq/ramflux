@@ -882,3 +882,6 @@ async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestR
         Ok(())
     })).await
 }
+
+#[path = "tests/selector_normalization.rs"]
+mod selector_normalization_tests;

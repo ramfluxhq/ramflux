@@ -182,6 +182,25 @@ impl BackupDatabase {
             |_| Ok(()),
         )
     }
+    /// Runs candidate admission with the independently certified local group actor.
+    /// # Errors
+    /// Refuses invalid graphs, pins, group history or storage errors.
+    #[doc(hidden)]
+    pub fn merge_backup_candidate_with_group_actor(
+        &mut self,
+        path: &Path,
+        key: &AccountDbKey,
+        local: Option<&ramflux_protocol::GroupStateActor>,
+        mut progress: impl FnMut() -> Result<(), StorageError>,
+    ) -> Result<BackupMergeReport, StorageError> {
+        self.merge_backup_pipeline(
+            path,
+            key,
+            (BackupMergeMode::FullAccount(local), true),
+            &mut progress,
+            |_| Ok(()),
+        )
+    }
     pub(super) fn merge_backup_pipeline(
         &mut self,
         path: &Path,
@@ -818,3 +837,6 @@ fn projected_actor(candidate: bool) -> String {
         "r.state_json".into()
     }
 }
+
+#[path = "backup_normalization.rs"]
+mod normalization;
