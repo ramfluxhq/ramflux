@@ -193,3 +193,9 @@ version = "1"
 level = "warn"
 priority = 0
 check-cfg = ["cfg(fuzzing)"]
+
+# Isolated dependency test workspace; product builds use the root path patches.
+[workspace]
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::{
-    cmp::{max, Ordering},
-    collections::{binary_heap::PeekMut, BinaryHeap},
+    cmp::{Ordering, max},
+    collections::{BinaryHeap, binary_heap::PeekMut},
     mem,
 };
 

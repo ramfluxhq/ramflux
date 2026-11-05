@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use bencher::{benchmark_group, benchmark_main, Bencher};
+use bencher::{Bencher, benchmark_group, benchmark_main};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::runtime::{Builder, Runtime};
 use tracing::error_span;

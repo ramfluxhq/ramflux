@@ -12,18 +12,18 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use thiserror::Error;
 
-#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
-use crate::crypto::rustls::{configured_provider, QuicServerConfig};
 #[cfg(feature = "bloom")]
 use crate::BloomTokenLog;
 #[cfg(not(feature = "bloom"))]
 use crate::NoneTokenLog;
+#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+use crate::crypto::rustls::{QuicServerConfig, configured_provider};
 use crate::{
+    DEFAULT_SUPPORTED_VERSIONS, Duration, MAX_CID_SIZE, RandomConnectionIdGenerator, SystemTime,
+    TokenLog, TokenMemoryCache, TokenStore, VarInt, VarIntBoundsExceeded,
     cid_generator::{ConnectionIdGenerator, HashedConnectionIdGenerator},
     crypto::{self, HandshakeTokenKey, HmacKey},
     shared::ConnectionId,
-    Duration, RandomConnectionIdGenerator, SystemTime, TokenLog, TokenMemoryCache, TokenStore,
-    VarInt, VarIntBoundsExceeded, DEFAULT_SUPPORTED_VERSIONS, MAX_CID_SIZE,
 };
 
 mod transport;

@@ -9,10 +9,10 @@ use std::time::Duration;
 #[cfg(feature = "qlog")]
 use qlog::{
     events::{
+        Event, EventData,
         quic::{
             PacketHeader, PacketLost, PacketLostTrigger, PacketReceived, PacketSent, PacketType,
         },
-        Event, EventData,
     },
     streamer::QlogStreamer,
 };
@@ -20,9 +20,9 @@ use qlog::{
 use tracing::warn;
 
 use crate::{
+    ConnectionId, Instant,
     connection::{PathData, SentPacket},
     packet::SpaceId,
-    ConnectionId, Instant,
 };
 
 /// Shareable handle to a single qlog output stream

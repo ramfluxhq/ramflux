@@ -8,14 +8,14 @@ use std::{
 };
 
 use rustls::{
-    pki_types::{CertificateDer, PrivatePkcs8KeyDer},
     NamedGroup,
+    pki_types::{CertificateDer, PrivatePkcs8KeyDer},
 };
 use tracing::info;
 
 use quinn::{
-    crypto::rustls::{HandshakeData, QuicClientConfig, QuicServerConfig},
     Endpoint,
+    crypto::rustls::{HandshakeData, QuicClientConfig, QuicServerConfig},
 };
 
 #[tokio::test]

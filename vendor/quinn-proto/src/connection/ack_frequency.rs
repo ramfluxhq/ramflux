@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use crate::Duration;
 use crate::connection::spaces::PendingAcks;
 use crate::frame::AckFrequency;
 use crate::transport_parameters::TransportParameters;
-use crate::Duration;
-use crate::{AckFrequencyConfig, TransportError, VarInt, TIMER_GRANULARITY};
+use crate::{AckFrequencyConfig, TIMER_GRANULARITY, TransportError, VarInt};
 
 /// State associated to ACK frequency
 pub(super) struct AckFrequencyState {

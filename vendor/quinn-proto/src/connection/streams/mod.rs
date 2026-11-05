@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::{
-    collections::{hash_map, BinaryHeap},
+    collections::{BinaryHeap, hash_map},
     io,
 };
 
@@ -10,8 +10,9 @@ use tracing::trace;
 
 use super::spaces::{Retransmits, ThinRetransmits};
 use crate::{
+    Dir, StreamId, VarInt,
     connection::streams::state::{get_or_insert_recv, get_or_insert_send},
-    frame, Dir, StreamId, VarInt,
+    frame,
 };
 
 mod recv;

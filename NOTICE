@@ -275,7 +275,7 @@ proc-macro2 | 1.0.106 | MIT OR Apache-2.0
 prost | 0.14.4 | Apache-2.0
 prost-derive | 0.14.4 | Apache-2.0
 quinn | 0.11.11 | MIT OR Apache-2.0
-quinn-proto | 0.11.15 | MIT OR Apache-2.0
+quinn-proto | 0.11.18 | MIT OR Apache-2.0
 quinn-udp | 0.5.14 | MIT OR Apache-2.0
 quote | 1.0.46 | MIT OR Apache-2.0
 ramflux-core | 0.1.0 | Apache-2.0
@@ -463,3 +463,7 @@ Derived code
 -------------------------------------------------------------------------------
 
 No derived source files requiring additional attribution are currently identified.
+
+Quinn 0.11.11 and quinn-proto 0.11.18 are vendored and modified under vendor/.
+Their original MIT OR Apache-2.0 licenses are retained. Source archives, per-file
+checksums and local changes are recorded in vendor/quic-provenance.json.

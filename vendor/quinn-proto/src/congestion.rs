@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Logic for controlling the rate at which data is sent
 
-use crate::connection::RttEstimator;
 use crate::Instant;
+use crate::connection::RttEstimator;
 use std::any::Any;
 use std::sync::Arc;
 

@@ -10,8 +10,8 @@ use std::{
     pin::Pin,
     str,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
 };
@@ -19,8 +19,9 @@ use std::{
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))]
 use crate::runtime::default_runtime;
 use crate::{
+    Instant,
     runtime::{AsyncUdpSocket, Runtime},
-    udp_transmit, Instant,
+    udp_transmit,
 };
 use bytes::{Bytes, BytesMut};
 use pin_project_lite::pin_project;
@@ -31,13 +32,13 @@ use proto::{
 use rustc_hash::FxHashMap;
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring"),))]
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::sync::{futures::Notified, mpsc, Notify};
+use tokio::sync::{Notify, futures::Notified, mpsc};
 use tracing::{Instrument, Span};
-use udp::{RecvMeta, BATCH_SIZE};
+use udp::{BATCH_SIZE, RecvMeta};
 
 use crate::{
-    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter, ConnectionEvent,
-    EndpointConfig, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND,
+    ConnectionEvent, EndpointConfig, IO_LOOP_BOUND, RECV_TIME_BOUND, VarInt,
+    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter,
 };
 
 /// A QUIC endpoint.
