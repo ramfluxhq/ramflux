@@ -114,6 +114,7 @@ impl Harness {
             courier: None,
             networking_expiry_pending: None,
             networking_expiry_warned: false,
+            networking_observation_warned: false,
             courier_events: None,
         };
         runtime.publish(&runtime.networking_expiry_request()).await?;
@@ -474,6 +475,64 @@ async fn custody_expiry_tick_stays_within_sync_deadline() -> TestResult {
             h.delay.set(Duration::ZERO);
             h.runtime.refresh_networking_expiry().await;
             assert!(h.runtime.networking_expiry_pending.is_none());
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test]
+async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> TestResult {
+    LocalSet::new()
+        .run_until(Box::pin(async {
+            let mut h = Harness::new().await?;
+            let db = h
+                .runtime
+                .state
+                .accounts
+                .get_mut("expiry-runtime")
+                .ok_or("account")?
+                .client
+                .active_account_db
+                .take()
+                .ok_or("db")?;
+            for _ in 0..2 {
+                h.runtime
+                    .apply_connection_work(
+                        super::super::connection_manager::AccountWork::Observation {
+                            event:
+                                super::super::connection_manager::ConnectionEvent::Disconnected {
+                                    reason:
+                                        super::super::connection_manager::DisconnectReason::Stop,
+                                    generation: 0,
+                                },
+                        },
+                    )
+                    .await?;
+                assert!(h.runtime.networking_observation_warned);
+            }
+            h.runtime
+                .state
+                .accounts
+                .get_mut("expiry-runtime")
+                .ok_or("account")?
+                .client
+                .active_account_db = Some(db);
+            h.runtime
+                .apply_connection_work(super::super::connection_manager::AccountWork::Observation {
+                    event: super::super::connection_manager::ConnectionEvent::Disconnected {
+                        reason: super::super::connection_manager::DisconnectReason::Stop,
+                        generation: 0,
+                    },
+                })
+                .await?;
+            let saved = h
+                .account()?
+                .client
+                .account_db()?
+                .load_actor_state::<serde_json::Value>("account/networking")?
+                .ok_or("snapshot")?;
+            assert!(saved.get("session").is_some());
+            h.runtime.stop_connection().await;
             Ok(())
         }))
         .await

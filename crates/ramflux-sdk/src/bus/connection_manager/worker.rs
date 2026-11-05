@@ -273,6 +273,7 @@ async fn run_account(
         }
         update(handle, |snapshot| {
             snapshot.state = NetworkingState::NetworkingPending;
+            snapshot.phase = ConnectionPhase::Backoff;
             snapshot.active_transport_kind = None;
             snapshot.session_id = None;
             snapshot.last_reason = Some(format!("{reason:?}"));

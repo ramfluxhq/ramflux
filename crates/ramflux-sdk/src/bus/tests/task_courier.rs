@@ -190,6 +190,7 @@ pub(super) fn runtime(
         courier_events: Some(observations),
         networking_expiry_pending: None,
         networking_expiry_warned: false,
+        networking_observation_warned: false,
     };
     (runtime, sender, stop, observed)
 }

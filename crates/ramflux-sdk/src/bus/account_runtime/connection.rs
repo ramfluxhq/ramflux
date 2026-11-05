@@ -182,7 +182,17 @@ impl AccountRuntime {
             }
             AccountWork::Metadata { metadata } => apply_metadata(account, &handle, *metadata),
             AccountWork::Observation { event } => {
-                return record_observation(account, &handle, event);
+                return match record_observation(account, &handle, event) {
+                    Ok(changed) => Ok(changed),
+                    Err(error) => {
+                        if !self.networking_observation_warned {
+                            tracing::warn!(account_id = %self.id, %error,
+                                "networking observation persistence deferred; account remains open");
+                            self.networking_observation_warned = true;
+                        }
+                        Ok(false)
+                    }
+                };
             }
             AccountWork::Prepare { generation, deadline, reply } => {
                 if reply.is_closed()

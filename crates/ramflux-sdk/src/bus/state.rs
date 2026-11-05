@@ -405,7 +405,12 @@ impl LocalBusAccountState {
             if self.client.born_v3_account.is_some()
                 && let Some(handle) = &self.connection
             {
-                super::networking_events::record_session(self, &handle.snapshot())?;
+                if let Err(error) =
+                    super::networking_events::record_session(self, &handle.snapshot())
+                {
+                    tracing::warn!(%error,
+                        "account session started; networking snapshot reset deferred");
+                }
             }
         }
         Ok(())
