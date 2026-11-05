@@ -3,8 +3,14 @@
 
 //! Shared node-service runtime helpers.
 
+#[cfg(all(feature = "durability-test-hooks", ramflux_production))]
+compile_error!("durability-test-hooks must not be enabled in a production build");
+
 mod authority_refusal;
 mod config;
+mod durability_io;
+#[cfg(any(test, feature = "durability-test-hooks"))]
+pub mod durability_test_hooks;
 pub use authority_refusal::*;
 pub use ramflux_core::environment;
 mod error;

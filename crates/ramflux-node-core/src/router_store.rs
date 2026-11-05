@@ -1320,6 +1320,7 @@ impl RouterRedbStore {
             && home_node_routes.is_empty()
             && replay_guard_state == NodeReplayGuardState::default();
         if router_is_empty {
+            crate::durability_io::immediate_commit(&self.db, &self.path)?;
             return Ok(None);
         }
         let due_checkpoints = inbox.take_checkpoint_due();
@@ -1342,6 +1343,7 @@ impl RouterRedbStore {
         });
         // Sequence watermarks recovered from the log are durable before any new submission.
         self.retain_cursor_checkpoints(&due_checkpoints)?;
+        crate::durability_io::immediate_commit(&self.db, &self.path)?;
         Ok(Some(router))
     }
 

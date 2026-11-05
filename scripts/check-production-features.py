@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 
 def check(metadata):
@@ -21,13 +22,35 @@ def check(metadata):
                 raise ValueError(f"production graph enables forbidden SDK {feature}")
 
 
+def check_tree(graph):
+    for line in graph.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        name = fields[0]
+        # cargo tree puts optional source paths before the feature list.
+        features = set(fields[-1].split(","))
+        forbidden = {
+            "ramflux-sdk": ("itest-memory-vault", "itest-legacy-accounts"),
+            "ramflux-node-core": ("durability-test-hooks",),
+        }.get(name, ())
+        for feature in forbidden:
+            if feature in features:
+                raise ValueError(f"production graph enables forbidden {name} {feature}")
+
+
 def main():
     root = Path(__file__).resolve().parent.parent
-    command = ["cargo", "metadata", "--locked", "--format-version", "1"]
-    if len(sys.argv) > 1:
-        command += ["--features", sys.argv[1]]
-    result = subprocess.run(command, cwd=root, check=True, capture_output=True, text=True)
-    check(json.loads(result.stdout))
+    # Each production binary gets its own normal/build graph. Dev feature
+    # unification from cargo metadata is deliberately excluded here.
+    for manifest in sorted((root / "apps").glob("*/Cargo.toml")):
+        package = tomllib.loads(manifest.read_text())["package"]["name"]
+        command = ["perl", "-e", "alarm 900; exec @ARGV", "cargo", "tree", "--locked",
+                   "-p", package, "-e", "normal,build", "--prefix", "none", "-f", "{p} {f}"]
+        if len(sys.argv) > 1:
+            command += ["--features", sys.argv[1]]
+        result = subprocess.run(command, cwd=root, check=True, capture_output=True, text=True)
+        check_tree(result.stdout)
     for file in (root / ".github/workflows/release.yml", root / "deploy/Dockerfile"):
         text = file.read_text()
         if "RAMFLUX_PRODUCTION_BUILD=1 cargo build" not in text:

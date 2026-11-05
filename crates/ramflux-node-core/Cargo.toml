@@ -11,6 +11,7 @@ commercial-license = true
 
 [features]
 default = []
+durability-test-hooks = []
 itest-http = []
 # T23-A2b2b: the legacy single-pinned-provider-key trust envelope path
 # (SignedFederatedIssuerTrustSnapshot v3 + verify_signed_federated_issuer_trust_snapshot +
