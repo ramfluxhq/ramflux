@@ -60,6 +60,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 courier_events: None,
                 networking_expiry_pending: None,
                 networking_expiry_warned: false,
+                networking_observation_warned: false,
             };
             private_unlock(&mut runtime).await?;
             assert!(runtime.courier.is_none(), "pending native data must not start preparation");

@@ -294,6 +294,14 @@ async fn repeated_attempt_failures_with_same_cause_emit_once() -> TestResult {
     view.cause = Some(AccountNetworkingReason::NodeBusy { retry_after_ms: 42, capacity: None });
     assert!(!record_session(&account, &view)?);
     assert_eq!(projected(&account)?.len(), 1);
+    for retry_after_ms in [1000, 42] {
+        view.cause = Some(AccountNetworkingReason::NodeBusy {
+            retry_after_ms,
+            capacity: Some(CapacityHint { scope: CapacityScope::PrefixDaily, resets_at_unix: 200 }),
+        });
+        assert_eq!(record_session(&account, &view)?, retry_after_ms == 1000);
+    }
+    assert_eq!(projected(&account)?.len(), 1, "capacity countdown changes are deduped");
     Ok(())
 }
 
