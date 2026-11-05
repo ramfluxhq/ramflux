@@ -195,7 +195,11 @@ impl RamfluxClient {
                 resolution,
             ) {
                 Ok(_) => Ok(false),
-                Err(SdkError::InboundPending(_)) => Ok(true),
+                Err(
+                    SdkError::InboundPending(_)
+                    | SdkError::SenderManifestRequired { .. }
+                    | SdkError::FreshHeadRequired { .. },
+                ) => Ok(true),
                 Err(other) => Err(other),
             };
         }

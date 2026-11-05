@@ -33,11 +33,8 @@ pub(crate) fn retain(
     // errors carry the exact attempted root from the failed fetch.
     let roots = match error {
         SdkError::DirectoryAuthorityUnavailable { root, .. } => BTreeSet::from([root.clone()]),
-        SdkError::InboundPending(reason) if reason == "sender manifest must be prepared" => {
-            account.client.inbound_device_manifest_request(entry)?.into_iter().collect()
-        }
-        error if crate::bus::account_runtime::head_refresh::is_freshness_refusal(error) => {
-            BTreeSet::from([account.principal_commitment.clone()])
+        SdkError::SenderManifestRequired { root } | SdkError::FreshHeadRequired { root } => {
+            BTreeSet::from([root.clone()])
         }
         _ => return Ok(()),
     };

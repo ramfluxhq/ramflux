@@ -57,34 +57,22 @@ pub(crate) async fn prepare(
             let result = match request {
                 Err(error) => Err(error),
                 Ok(Lookup::OwnCopy(root)) => {
-                    crate::client::contact::fetch_verified_device_manifest(&config, &root)
-                        .await
-                        .map(|manifest| PreparedInbound {
-                            manifest: None,
-                            native_prepared: false,
-                            candidate: None,
-                            own_copy_manifest: Some(manifest),
-                            group_directory: None,
-                            history: None,
-                        })
+                    fetch_inbound_manifest(&config, &root).await.map(|manifest| PreparedInbound {
+                        manifest: None,
+                        native_prepared: false,
+                        candidate: None,
+                        own_copy_manifest: Some(manifest),
+                        group_directory: None,
+                        history: None,
+                    })
                 }
-                Ok(Lookup::Contact(root)) => {
-                    match crate::client::contact::fetch_verified_device_manifest(&config, &root)
-                        .await
-                    {
-                        Ok(manifest) => {
-                            native::contact(writer, &config, &entry.entry, manifest).await
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
+                Ok(Lookup::Contact(root)) => match fetch_inbound_manifest(&config, &root).await {
+                    Ok(manifest) => native::contact(writer, &config, &entry.entry, manifest).await,
+                    Err(error) => Err(error),
+                },
                 Ok(Lookup::Sender(root)) => {
                     let manifest = match root {
-                        Some(root) => {
-                            crate::client::contact::fetch_verified_device_manifest(&config, &root)
-                                .await
-                                .map(Some)
-                        }
+                        Some(root) => fetch_inbound_manifest(&config, &root).await.map(Some),
                         None => Ok(None),
                     };
                     match manifest {
@@ -141,4 +129,13 @@ fn request(
         Ok(Some(request)) => Request::Prepared(request),
         Err(error) => Request::Prepared(Err(error)),
     }
+}
+
+async fn fetch_inbound_manifest(
+    config: &GatewaySessionConfig,
+    root: &str,
+) -> Result<crate::SdkDeviceManifestResponse, SdkError> {
+    crate::client::contact::fetch_verified_device_manifest(config, root).await.map_err(|source| {
+        SdkError::DirectoryAuthorityUnavailable { root: root.to_owned(), source: Box::new(source) }
+    })
 }

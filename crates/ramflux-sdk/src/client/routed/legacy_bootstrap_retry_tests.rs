@@ -121,7 +121,12 @@ async fn malformed_gateway_success_during_bootstrap_is_held_and_the_same_distrib
             "bob",
         )
         .await;
-    assert!(matches!(&result, Err(SdkError::InboundPending(_))));
+    assert!(matches!(
+        &result,
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
+    ));
     assert!(matches!(
         bob.client.isolate_legacy_group_delivery(&entry, result)?,
         crate::client::group_quarantine::LegacyGroupDelivery::Held

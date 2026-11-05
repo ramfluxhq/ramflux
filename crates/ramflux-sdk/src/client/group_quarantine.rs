@@ -143,6 +143,8 @@ impl RamfluxClient {
                     matches!(
                         error,
                         SdkError::InboundPending(_)
+                            | SdkError::SenderManifestRequired { .. }
+                            | SdkError::FreshHeadRequired { .. }
                             | SdkError::GatewaySessionRejected(_)
                             | SdkError::Transport(_)
                             | SdkError::LocalBus(_)

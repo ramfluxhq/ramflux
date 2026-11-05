@@ -141,7 +141,11 @@ impl RamfluxClient {
                                     "deferred_pin_key_mismatch",
                                 )?;
                             }
-                            Err(SdkError::InboundPending(_)) => {
+                            Err(
+                                SdkError::InboundPending(_)
+                                | SdkError::SenderManifestRequired { .. }
+                                | SdkError::FreshHeadRequired { .. },
+                            ) => {
                                 retained.push(pin.clone());
                                 continue;
                             }

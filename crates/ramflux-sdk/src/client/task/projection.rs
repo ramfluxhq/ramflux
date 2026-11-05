@@ -249,11 +249,9 @@ impl RamfluxClient {
             self.store_task_message_metadata(delivery, &receipt.outcome, &carrier)?;
             return Ok(receipt.outcome);
         }
-        self.require_task_member(
-            &carrier.conversation_id,
-            &carrier.principal_id,
-            Some(&carrier.device_id),
-        )?;
+        let (conversation, principal, device) =
+            (&carrier.conversation_id, &carrier.principal_id, &carrier.device_id);
+        self.require_task_member(conversation, principal, Some(device))?;
         self.check_task_pending_collision(&carrier)?;
         let pending_key = self.task_pending_key(&carrier)?;
         let already_pending = db.load_actor_state::<super::pending::Pending>(&pending_key)?;
@@ -275,11 +273,14 @@ impl RamfluxClient {
         });
         let outcome = match applied {
             Ok(outcome) => outcome,
-            Err(SdkError::InboundPending(_)) => {
+            Err(
+                SdkError::InboundPending(_)
+                | SdkError::SenderManifestRequired { .. }
+                | SdkError::FreshHeadRequired { .. },
+            ) => {
                 return self.hold_task_message(delivery, &carrier, already_pending.is_some());
             }
-            Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
-            Err(SdkError::Io(error)) => return Err(SdkError::Io(error)),
+            Err(error @ (SdkError::Storage(_) | SdkError::Io(_))) => return Err(error),
             Err(error) => self.rejected_task_outcome(&carrier, &error)?,
         };
         db.delete_task_state(&pending_key)?;

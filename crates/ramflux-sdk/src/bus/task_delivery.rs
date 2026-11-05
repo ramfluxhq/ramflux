@@ -368,7 +368,15 @@ mod tests {
         .await
         .err()
         .ok_or("expected submit timeout")?;
-        assert!(matches!(error, SdkError::InboundPending(_)), "unexpected error: {error:?}");
+        assert!(
+            matches!(
+                error,
+                SdkError::InboundPending(_)
+                    | SdkError::SenderManifestRequired { .. }
+                    | SdkError::FreshHeadRequired { .. }
+            ),
+            "unexpected error: {error:?}"
+        );
         assert!(!account.has_pooled_engine());
         let persisted = account
             .client

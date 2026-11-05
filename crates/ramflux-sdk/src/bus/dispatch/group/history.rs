@@ -72,9 +72,12 @@ fn sender_verification(
     // authority is unverified, and storage/DB/JSON errors remain fatal.
     match verify_sender(client, state, message) {
         Ok(()) => Ok(SenderVerification::Verified),
-        Err(SdkError::InboundPending(_) | SdkError::IdentityRootMissing) => {
-            Ok(SenderVerification::Unknown)
-        }
+        Err(
+            SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. }
+            | SdkError::IdentityRootMissing,
+        ) => Ok(SenderVerification::Unknown),
         Err(
             SdkError::InboundRejected(_)
             | SdkError::Crypto(_)

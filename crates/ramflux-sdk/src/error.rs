@@ -141,6 +141,10 @@ pub enum SdkError {
     ReplayMismatch,
     #[error("inbound state not ready: {0}")]
     InboundPending(String),
+    #[error("inbound state not ready: sender manifest must be prepared")]
+    SenderManifestRequired { root: String },
+    #[error("inbound state not ready: native current-head freshness expired; refresh directory")]
+    FreshHeadRequired { root: String },
     #[error("{source}")]
     DirectoryAuthorityUnavailable {
         root: String,

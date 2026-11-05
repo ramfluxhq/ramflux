@@ -51,6 +51,8 @@ impl RamfluxClient {
                 SdkError::LocalBus(_)
                 | SdkError::TaskRefused { .. }
                 | SdkError::InboundPending(_)
+                | SdkError::SenderManifestRequired { .. }
+                | SdkError::FreshHeadRequired { .. }
                 | SdkError::InboundRejected(_) => Ok(false),
                 other => Err(other),
             };
@@ -180,7 +182,12 @@ impl RamfluxClient {
                     self.replace_task_pending_fallback(&p, &outcome)?;
                     applied += 1;
                 }
-                Ok(_) | Err(SdkError::InboundPending(_)) => {}
+                Ok(_)
+                | Err(
+                    SdkError::InboundPending(_)
+                    | SdkError::SenderManifestRequired { .. }
+                    | SdkError::FreshHeadRequired { .. },
+                ) => {}
                 Err(error) => {
                     self.account_db()?.delete_task_state(&key)?;
                     let outcome = Outcome {

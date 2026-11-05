@@ -206,7 +206,7 @@ pub(crate) fn list(client: &RamfluxClient) -> Result<Value, SdkError> {
 
 #[cfg(test)]
 #[path = "call_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 fn new_call_id() -> Result<String, SdkError> {
     loop {

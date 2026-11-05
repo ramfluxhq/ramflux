@@ -142,10 +142,14 @@ fn shared_directory(
     let routes = match client.shared_group_member_routes(state) {
         Ok(routes) => routes,
         Err(error)
-            if matches!(error, SdkError::InboundPending(_))
-                || (matches!(purpose, DirectoryPurpose::Read)
-                    && client.born_v3_account.is_some()
-                    && matches!(error, SdkError::InboundRejected(_))) =>
+            if matches!(
+                error,
+                SdkError::InboundPending(_)
+                    | SdkError::SenderManifestRequired { .. }
+                    | SdkError::FreshHeadRequired { .. }
+            ) || (matches!(purpose, DirectoryPurpose::Read)
+                && client.born_v3_account.is_some()
+                && matches!(error, SdkError::InboundRejected(_))) =>
         {
             // Recovery may revoke a roster device; historical metadata is still readable.
             // Sending retains the original authorization failure rather than this fallback.
@@ -240,7 +244,9 @@ mod tests {
             crate::client::identity_authority::NativeHeadFreshness::default();
         assert!(matches!(
             owner.client.trusted_device(HeadUse::NewAuthorization, &peer_identity),
-            Err(SdkError::InboundPending(_))
+            Err(SdkError::InboundPending(_)
+                | SdkError::SenderManifestRequired { .. }
+                | SdkError::FreshHeadRequired { .. })
         ));
         let view = crate::bus::read_model::row(&owner.client, "conversation", "thread")?;
         assert_eq!(view["group_id"], "group");
@@ -261,7 +267,9 @@ mod tests {
         assert!(resolve(&account, &request).is_err(), "read projection lent send authority");
         assert!(matches!(
             account.client.trusted_device(HeadUse::NewAuthorization, &peer_identity),
-            Err(SdkError::InboundPending(_))
+            Err(SdkError::InboundPending(_)
+                | SdkError::SenderManifestRequired { .. }
+                | SdkError::FreshHeadRequired { .. })
         ));
         Ok(())
     }

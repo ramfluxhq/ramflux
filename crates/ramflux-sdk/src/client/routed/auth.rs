@@ -34,10 +34,23 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         prepared: Option<InboundManifest>,
     ) -> Result<(), SdkError> {
-        match prepared {
-            Some(result) => self.apply_inbound_device_manifest(entry, result?.as_ref()),
-            None => self.ensure_inbound_device(gateway, entry).await,
+        if let Some(result) = prepared {
+            return self.apply_inbound_device_manifest(entry, result?.as_ref());
         }
+        let request = self.inbound_device_manifest_request(entry)?;
+        let manifest = if let Some(root) = request {
+            Some(
+                crate::client::contact::fetch_verified_device_manifest(gateway, &root)
+                    .await
+                    .map_err(|source| SdkError::DirectoryAuthorityUnavailable {
+                        root,
+                        source: Box::new(source),
+                    })?,
+            )
+        } else {
+            None
+        };
+        self.apply_inbound_device_manifest(entry, manifest.as_ref())
     }
 
     pub(crate) async fn ensure_inbound_device(
@@ -117,9 +130,7 @@ impl RamfluxClient {
         if let Some(commitment) = self.inbound_device_manifest_request(entry)? {
             let manifest = manifest
                 .filter(|manifest| manifest.principal_commitment == commitment)
-                .ok_or_else(|| {
-                    SdkError::InboundPending("sender manifest must be prepared".into())
-                })?;
+                .ok_or_else(|| SdkError::SenderManifestRequired { root: commitment.clone() })?;
             let device = manifest
                 .devices
                 .iter()

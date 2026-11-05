@@ -6,7 +6,7 @@ use super::*;
 use crate::bus::actor::AccountCommand;
 use crate::client::call;
 use std::sync::{Arc, atomic::AtomicBool};
-fn fixture(name: &str) -> Result<(PathBuf, LocalBusDaemonState, String), SdkError> {
+pub(crate) fn fixture(name: &str) -> Result<(PathBuf, LocalBusDaemonState, String), SdkError> {
     let root = crate::bus::runtime_tests::root(name);
     let mut account =
         crate::bus::runtime_tests::account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;

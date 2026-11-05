@@ -11,8 +11,7 @@ use std::collections::BTreeSet;
 use tokio::time::Instant;
 
 pub(crate) fn is_freshness_refusal(error: &SdkError) -> bool {
-    matches!(error, SdkError::InboundPending(message)
-        if message == "native current-head freshness expired; refresh directory")
+    matches!(error, SdkError::FreshHeadRequired { .. })
 }
 
 pub(crate) fn pending(account: &LocalBusAccountState) -> SdkError {

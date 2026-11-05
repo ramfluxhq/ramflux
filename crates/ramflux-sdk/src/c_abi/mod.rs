@@ -927,6 +927,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::InboundRejected(_)
         | SdkError::ReplayMismatch
         | SdkError::InboundPending(_)
+        | SdkError::SenderManifestRequired { .. }
+        | SdkError::FreshHeadRequired { .. }
         | SdkError::PairRecoveryRequired => RamfluxErrorCode::InvalidArgument,
     }
 }

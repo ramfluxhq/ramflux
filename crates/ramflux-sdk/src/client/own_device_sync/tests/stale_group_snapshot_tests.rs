@@ -677,7 +677,9 @@ fn freshly_activated_sibling_restores_foreign_authority_before_group_keys_and_of
     db.remove_actor_state("identity/manifest/bob")?;
     assert!(matches!(
         target.device_identity_for_root(&commitment, "bob"),
-        Err(SdkError::InboundPending(_))
+        Err(SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. })
     ));
     let mut forged = history.clone();
     let foreign = forged
