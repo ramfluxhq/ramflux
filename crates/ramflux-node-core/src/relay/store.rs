@@ -19,6 +19,13 @@ pub struct RelayRedbStore {
 }
 
 impl RelayRedbStore {
+    /// Opens a dormant streaming backend on this relay's authoritative metadata.
+    /// # Errors
+    /// Refuses inaccessible or unsafe private staging roots.
+    pub fn local_attachment_backend(&self,namespace:[u8;32],root:impl AsRef<Path>)->Result<super::attachment::backend::LocalAttachmentBackend,super::attachment::backend::BackendError> {
+        super::attachment::backend::LocalAttachmentBackend::open(std::sync::Arc::clone(&self.db),namespace,root.as_ref())
+    }
+
     /// Opens dormant native attachment accounting on the existing relay database.
     /// # Errors
     /// Refuses invalid operator policy. No serving path is activated.

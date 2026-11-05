@@ -4,6 +4,7 @@
 //! Dormant native attachment accounting. No endpoint calls this module yet.
 //! The service authenticates the original owner before constructing its context;
 //! this ledger is not a grant verifier or a local-reference retirement authority.
+pub mod backend;
 mod identity;
 mod quota;
 mod retention;
@@ -105,6 +106,7 @@ pub struct AttachmentLedger {
 }
 
 pub(super) fn install(tx: &redb::WriteTransaction) -> Result<(), crate::NodeCoreError> {
+    backend::install(tx)?;
     let map = |error: redb::TableError| crate::NodeCoreError::Redb(error.to_string());
     let _ = tx.open_table(RECORDS).map_err(map)?;
     let _ = tx.open_table(TOTALS).map_err(map)?;
