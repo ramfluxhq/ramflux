@@ -58,11 +58,19 @@ impl RouterRedbStore {
                 }
             }
             registry.inboxes.insert(
-                Key { target, incarnation },
+                Key { target: target.clone(), incarnation },
                 Inbox {
                     identity_durable: true,
                     allocated: issued,
                     published: issued,
+                    committed_settled: txn
+                        .open_table(crate::ROUTER_CURSOR_STATE_TABLE)
+                        .map_err(error)?
+                        .get(target.as_str())
+                        .map_err(error)?
+                        .map(|row| incarnation::decode_cursor(row.value()))
+                        .transpose()?
+                        .map_or(0, |cursor| cursor.settled_inbox_seq),
                     aborted,
                     ..Inbox::default()
                 },

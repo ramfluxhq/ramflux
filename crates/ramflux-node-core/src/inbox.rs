@@ -8,6 +8,10 @@ use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+mod pending_rows;
+#[cfg(test)]
+mod settlement_tests;
+
 pub const ROUTER_ACK_WINDOW: usize = 1024;
 /// NACKs accepted for one delivery before it leaves the redelivery window.
 pub const ROUTER_NACK_RETRY_LIMIT: u32 = 3;
@@ -98,6 +102,9 @@ fn server_now() -> i64 {
 
 impl CursorAckState {
     fn bound_receipts(&mut self) {
+        while self.dead_letters.len() > ROUTER_DEAD_LETTER_LIMIT {
+            self.dead_letters.pop_front();
+        }
         if self.recent_ack_ids.is_empty() {
             self.recent_ack_ids
                 .extend(self.acked_envelope_ids.iter().rev().take(ROUTER_ACK_WINDOW).cloned());
@@ -167,8 +174,13 @@ pub struct OpaqueDeviceInbox {
     pub(crate) aborted_ranges: BTreeMap<String, Vec<(u64, u64)>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     incarnations: BTreeMap<String, String>,
-    pending: BTreeMap<String, Vec<InboxEntry>>,
+    #[serde(with = "pending_rows")]
+    pending: BTreeMap<String, BTreeMap<u64, InboxEntry>>,
     cursors: BTreeMap<String, CursorAckState>,
+    /// At most `ROUTER_DEAD_LETTER_LIMIT` per target; rebuilt on restore, released
+    /// on metadata eviction, expiry, snapshot filtering, or target removal.
+    #[serde(skip)]
+    dead_letter_index: BTreeMap<String, BTreeMap<u64, DeadLetterRecord>>,
     /// Server-assigned retention deadline per pending sequence.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     retain_until: BTreeMap<String, BTreeMap<u64, i64>>,
@@ -240,7 +252,7 @@ impl OpaqueDeviceInbox {
             self.incarnations.insert(target.clone(), id.clone());
             self.aborted_ranges.insert(target.clone(), aborted.clone());
             if let Some(entries) = self.pending.get_mut(target) {
-                entries.retain(|entry| {
+                entries.retain(|_, entry| {
                     entry.inbox_seq <= *limit
                         && !aborted.iter().any(|(a, b)| (*a..=*b).contains(&entry.inbox_seq))
                 });
@@ -257,6 +269,9 @@ impl OpaqueDeviceInbox {
                 cursor.nack_attempts.retain(|seq, _| *seq <= *limit);
                 cursor.dead_letters.retain(|row| row.inbox_seq <= *limit);
             }
+        }
+        for target in views.keys() {
+            self.rebuild_dead_letter_index(target);
         }
         self.publication = None;
         self.expiry = InboxExpiryIndex::default();
@@ -279,7 +294,10 @@ impl OpaqueDeviceInbox {
             envelope,
         };
         *next_seq = next_seq.saturating_add(1);
-        self.pending.entry(target_delivery_id.clone()).or_default().push(entry.clone());
+        self.pending
+            .entry(target_delivery_id.clone())
+            .or_default()
+            .insert(entry.inbox_seq, entry.clone());
         self.cursors
             .entry(target_delivery_id.clone())
             .or_insert(CursorAckState { target_delivery_id, ..CursorAckState::default() })
@@ -318,7 +336,7 @@ impl OpaqueDeviceInbox {
         let missing: Vec<(String, u64, i64)> = self
             .pending
             .values()
-            .flatten()
+            .flat_map(BTreeMap::values)
             .filter(|entry| {
                 self.retain_until
                     .get(&entry.target_delivery_id)
@@ -337,7 +355,7 @@ impl OpaqueDeviceInbox {
         }
         let mut due = BTreeSet::new();
         for entries in self.pending.values() {
-            for entry in entries {
+            for entry in entries.values() {
                 due.insert((
                     self.retain_until(entry),
                     entry.target_delivery_id.clone(),
@@ -351,8 +369,7 @@ impl OpaqueDeviceInbox {
     /// Removes one pending delivery and its deadline bookkeeping.
     pub(crate) fn retire_pending(&mut self, target: &str, seq: u64) -> Option<InboxEntry> {
         let entries = self.pending.get_mut(target)?;
-        let position = entries.iter().position(|entry| entry.inbox_seq == seq)?;
-        let entry = entries.remove(position);
+        let entry = entries.remove(&seq)?;
         if entries.is_empty() {
             self.pending.remove(target);
         }
@@ -380,11 +397,9 @@ impl OpaqueDeviceInbox {
             .get(target_delivery_id)
             .map(|entries| {
                 entries
-                    .iter()
-                    .filter(|entry| {
-                        entry.inbox_seq > after_inbox_seq
-                            && entry.inbox_seq <= self.published_limit(target_delivery_id)
-                    })
+                    .range((std::ops::Bound::Excluded(after_inbox_seq), std::ops::Bound::Unbounded))
+                    .map(|(_, entry)| entry)
+                    .take_while(|entry| entry.inbox_seq <= self.published_limit(target_delivery_id))
                     .take(limit)
                     .cloned()
                     .collect()
@@ -405,11 +420,9 @@ impl OpaqueDeviceInbox {
             .get(target_delivery_id)
             .map(|entries| {
                 entries
-                    .iter()
-                    .filter(|entry| {
-                        entry.inbox_seq > after_inbox_seq
-                            && entry.inbox_seq <= self.published_limit(target_delivery_id)
-                    })
+                    .range((std::ops::Bound::Excluded(after_inbox_seq), std::ops::Bound::Unbounded))
+                    .map(|(_, entry)| entry)
+                    .take_while(|entry| entry.inbox_seq <= self.published_limit(target_delivery_id))
                     .filter(|entry| self.retain_until(entry) > now)
                     .take(limit)
                     .cloned()
@@ -462,10 +475,7 @@ impl OpaqueDeviceInbox {
         {
             return Err(NodeCoreError::AmbiguousEnvelopeId(ack.envelope_id.clone()));
         }
-        let pending = self
-            .pending
-            .get(target)
-            .and_then(|entries| entries.iter().find(|entry| entry.inbox_seq == entry_seq));
+        let pending = self.pending.get(target).and_then(|entries| entries.get(&entry_seq));
         if let Some(entry) = pending {
             if entry.envelope.envelope_id != ack.envelope_id {
                 return Err(NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()));
@@ -517,9 +527,10 @@ impl OpaqueDeviceInbox {
             {
                 return;
             }
-            let head = self.pending.get(target).and_then(|entries| {
-                entries.iter().map(|entry| entry.inbox_seq).filter(|seq| *seq < entry_seq).min()
-            });
+            let head = self
+                .pending
+                .get(target)
+                .and_then(|entries| entries.range(..entry_seq).next().map(|(&seq, _)| seq));
             let Some(head) = head else {
                 return;
             };
@@ -533,7 +544,7 @@ impl OpaqueDeviceInbox {
         let Some(retain_until) = self
             .pending
             .get(target)
-            .and_then(|entries| entries.iter().find(|entry| entry.inbox_seq == seq))
+            .and_then(|entries| entries.get(&seq))
             .map(|entry| self.retain_until(entry))
         else {
             return;
@@ -559,6 +570,7 @@ impl OpaqueDeviceInbox {
         while cursor.dead_letters.len() > ROUTER_DEAD_LETTER_LIMIT {
             cursor.dead_letters.pop_front();
         }
+        self.rebuild_dead_letter_index(target);
         self.checkpoint_due.insert(target.to_owned());
     }
 
@@ -596,20 +608,19 @@ impl OpaqueDeviceInbox {
         target: &str,
         nack: &ramflux_protocol::Nack,
     ) -> Result<CursorAckState, NodeCoreError> {
-        let seq =
-            match nack.ext.ext.get("inbox_seq") {
-                Some(value) => Some(value.as_u64().filter(|seq| *seq > 0).ok_or_else(|| {
+        let seq = match nack.ext.ext.get("inbox_seq") {
+            Some(value) => {
+                Some(value.as_u64().filter(|seq| *seq > 0).ok_or_else(|| {
                     NodeCoreError::ItestHttp("invalid NACK inbox sequence".into())
-                })?),
-                None => self.legacy_seq_for_envelope(target, &nack.envelope_id)?,
+                })?)
             }
-            .filter(|seq| {
-                self.pending.get(target).is_some_and(|entries| {
-                    entries.iter().any(|entry| {
-                        entry.inbox_seq == *seq && entry.envelope.envelope_id == nack.envelope_id
-                    })
-                })
-            });
+            None => self.legacy_seq_for_envelope(target, &nack.envelope_id)?,
+        }
+        .filter(|seq| {
+            self.pending.get(target).is_some_and(|entries| {
+                entries.get(seq).is_some_and(|entry| entry.envelope.envelope_id == nack.envelope_id)
+            })
+        });
         let cursor = self.cursors.entry(target.into()).or_insert(CursorAckState {
             target_delivery_id: target.into(),
             ..CursorAckState::default()
@@ -638,16 +649,28 @@ impl OpaqueDeviceInbox {
         let settled = self
             .pending
             .get(target)
-            .and_then(|entries| entries.iter().map(|entry| entry.inbox_seq).min())
+            .and_then(|entries| entries.first_key_value().map(|(&seq, _)| seq))
             .map_or(issued, |first| first.saturating_sub(1));
+        // A candidate is not durable authority. A contended publication observation
+        // keeps the previous floor; the store revalidates against durable rows.
+        let settled = if let Some(core) = &self.publication {
+            self.incarnation_id(target)
+                .and_then(|id| core.try_settlement_limit(target, id))
+                .map_or_else(
+                    || self.cursors.get(target).map_or(0, |c| c.settled_inbox_seq),
+                    |limit| settled.min(limit),
+                )
+        } else {
+            settled
+        };
         if let Some(cursor) = self.cursors.get_mut(target) {
             cursor.issued_inbox_seq = cursor.issued_inbox_seq.max(issued);
             cursor.settled_inbox_seq = cursor.settled_inbox_seq.max(settled);
             cursor.acked_inbox_seqs.retain(|seq| *seq > cursor.settled_inbox_seq);
             let pending = self.pending.get(target);
-            cursor.nack_attempts.retain(|seq, _| {
-                pending.is_some_and(|entries| entries.iter().any(|entry| entry.inbox_seq == *seq))
-            });
+            cursor
+                .nack_attempts
+                .retain(|seq, _| pending.is_some_and(|entries| entries.contains_key(seq)));
             while cursor.acked_envelope_ids.len() > ROUTER_ACK_WINDOW {
                 cursor.acked_envelope_ids.pop_first();
             }
@@ -682,6 +705,7 @@ impl OpaqueDeviceInbox {
             if let Some(cursor) = self.cursors.get_mut(&target) {
                 cursor.dead_letters.retain(|record| record.retain_until > now);
             }
+            self.rebuild_dead_letter_index(&target);
             self.checkpoint_due.insert(target);
         }
         removed
@@ -699,6 +723,7 @@ impl OpaqueDeviceInbox {
     pub(crate) fn requeue_checkpoints(&mut self, targets: impl IntoIterator<Item = String>) {
         for target in targets {
             if self.cursors.contains_key(&target) {
+                self.rebuild_dead_letter_index(&target);
                 self.checkpoint_due.insert(target);
             }
         }
@@ -746,7 +771,7 @@ impl OpaqueDeviceInbox {
     }
 
     pub(crate) fn pending_entries(&self) -> impl Iterator<Item = &InboxEntry> {
-        self.pending.values().flat_map(|entries| entries.iter())
+        self.pending.values().flat_map(BTreeMap::values)
     }
 
     /// Pending deliveries with their server retention deadlines.
@@ -778,10 +803,24 @@ impl OpaqueDeviceInbox {
         let deadline = retain_until
             .unwrap_or_else(|| inbox_legacy_retain_until(&entry.envelope, server_now()));
         let entries = self.pending.entry(target.clone()).or_default();
-        if !entries.iter().any(|existing| existing.inbox_seq == seq) {
-            entries.push(entry);
-            entries.sort_by_key(|entry| entry.inbox_seq);
+        if let std::collections::btree_map::Entry::Vacant(slot) = entries.entry(seq) {
+            slot.insert(entry);
             self.set_deadline(&target, seq, deadline);
+        }
+    }
+
+    fn rebuild_dead_letter_index(&mut self, target: &str) {
+        let rows: BTreeMap<_, _> = self
+            .cursors
+            .get(target)
+            .into_iter()
+            .flat_map(|cursor| cursor.dead_letters.iter())
+            .map(|record| (record.inbox_seq, record.clone()))
+            .collect();
+        if rows.is_empty() {
+            self.dead_letter_index.remove(target);
+        } else {
+            self.dead_letter_index.insert(target.into(), rows);
         }
     }
 
@@ -803,12 +842,18 @@ impl OpaqueDeviceInbox {
         let next_seq = self.next_seq.entry(cursor.target_delivery_id.clone()).or_insert(1);
         *next_seq =
             (*next_seq).max(cursor.inbox_seq.max(cursor.issued_inbox_seq).saturating_add(1));
-        self.cursors.insert(cursor.target_delivery_id.clone(), cursor);
+        let target = cursor.target_delivery_id.clone();
+        self.cursors.insert(target.clone(), cursor);
+        self.rebuild_dead_letter_index(&target);
     }
 
     pub(crate) fn bound_retained_receipts(&mut self) {
         for cursor in self.cursors.values_mut() {
             cursor.bound_receipts();
+        }
+        let targets: Vec<_> = self.cursors.keys().cloned().collect();
+        for target in targets {
+            self.rebuild_dead_letter_index(&target);
         }
     }
 
@@ -824,6 +869,7 @@ impl OpaqueDeviceInbox {
     }
 
     pub(crate) fn remove_target(&mut self, target_delivery_id: &str) -> usize {
+        self.dead_letter_index.remove(target_delivery_id);
         self.incarnations.remove(target_delivery_id);
         self.aborted_ranges.remove(target_delivery_id);
         let pending_count =
@@ -840,7 +886,7 @@ impl OpaqueDeviceInbox {
     pub(crate) fn target_for_envelope(&self, envelope_id: &str) -> Option<String> {
         self.pending.iter().find_map(|(target, entries)| {
             entries
-                .iter()
+                .values()
                 .any(|entry| entry.envelope.envelope_id == envelope_id)
                 .then(|| target.clone())
         })
@@ -854,7 +900,7 @@ impl OpaqueDeviceInbox {
         let Some(entries) = self.pending.get(target) else {
             return Ok(None);
         };
-        let mut matching = entries.iter().filter(|entry| entry.envelope.envelope_id == id);
+        let mut matching = entries.values().filter(|entry| entry.envelope.envelope_id == id);
         let first = matching.next().map(|entry| entry.inbox_seq);
         if matching.next().is_some() {
             return Err(NodeCoreError::AmbiguousEnvelopeId(id.into()));

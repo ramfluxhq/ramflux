@@ -794,6 +794,22 @@ impl RouterWalStore {
         Ok(())
     }
 
+    /// First durable live row after the previously committed floor; numeric gaps
+    /// are skipped by the ordered index, never enumerated.
+    pub(crate) fn settlement_head(
+        &self,
+        cursor: &crate::CursorAckState,
+        previous: u64,
+    ) -> Result<Option<u64>, NodeCoreError> {
+        let state = self.state.lock().map_err(identity::error)?;
+        Ok(state.submissions_by_target.get(&cursor.target_delivery_id).and_then(|sequences| {
+            sequences
+                .range((std::ops::Bound::Excluded(previous), std::ops::Bound::Unbounded))
+                .map(|(&seq, _)| seq)
+                .find(|seq| !crate::router_store::settlement::retires(cursor, *seq))
+        }))
+    }
+
     /// Snapshot one mailbox's WAL view without walking unrelated accounts or swallowing lock errors.
     pub(crate) fn migration_target_view(
         &self,

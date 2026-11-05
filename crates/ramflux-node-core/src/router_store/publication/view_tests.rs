@@ -20,7 +20,7 @@ pub(super) fn source() -> ramflux_crypto::RootQualifiedDeviceRef {
     );
     ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch).expect("source")
 }
-pub(super) fn submit(
+pub(crate) fn submit(
     router: &RouterCore,
     store: &RouterRedbStore,
     seq: u64,
