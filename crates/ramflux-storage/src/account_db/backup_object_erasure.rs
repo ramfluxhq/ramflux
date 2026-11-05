@@ -70,7 +70,7 @@ impl BackupDatabase {
             }
             self.db.execute_batch("INSERT INTO object_erasure_fence SELECT commitment FROM incoming.object_erasure_fence WHERE 1 ON CONFLICT DO NOTHING; INSERT INTO object_erasure_lookup SELECT lookup,commitment FROM incoming.object_erasure_lookup WHERE 1 ON CONFLICT DO NOTHING;")?;
             let unsafe_references:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM incoming.object_retention_reference r JOIN incoming.object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22)))",[],|r|r.get(0))?;
-            if unsafe_references {
+            if unsafe_references && !candidate {
                 return Err(StorageError::ObjectOwnershipUnverified { schema_version: version });
             }
             validate_payload_identities(&self.db, &root)?;

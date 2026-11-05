@@ -168,14 +168,33 @@ impl BackupJobs {
         };
         Ok(result)
     }
+    fn native_generation_parent(
+        &self,
+        id: &str,
+        incoming: &Path,
+    ) -> Result<std::path::PathBuf, SdkError> {
+        let parent = self.data_root.join("accounts").join(id);
+        check_space(
+            &parent,
+            incoming.metadata()?.len().saturating_mul(2).saturating_add(20 * 1024 * 1024),
+        )
+        .map_err(|failure| SdkError::LocalBusRefused {
+            code: "BackupRefused".into(),
+            message: "restore requires more space".into(),
+            body: Box::new(
+                serde_json::json!({"reason_code":"insufficient_space","failure":failure}),
+            ),
+        })?;
+        Ok(parent)
+    }
     pub(super) fn install_native(
         &self,
         job: &BackupJob,
         staging: &VerifiedBackupStaging,
         metadata: &Metadata,
-        local_key: Option<super::NativeInstallKey>,
-        setup: Option<super::NativeRestoreSetup>,
+        options: (Option<super::NativeInstallKey>, Option<super::NativeRestoreSetup>, bool),
     ) -> Result<(crate::backup::BackupInstalledAccount, BackupCounts, BackupCounts), SdkError> {
+        let (local_key, setup, candidate) = options;
         let Identity::Native { native } = &metadata.identity else {
             return Err(refused("root_conflict"));
         };
@@ -195,35 +214,45 @@ impl BackupJobs {
         let previous = self.index.account(id)?;
         let incoming = staging.directory().join("account.db");
         let incoming_key = AccountDbKey::from_bytes(metadata.database_key);
-        let source = BackupDatabase::open_live_account(
+        let source = super::install::open_live_stage(
             &self.data_root.join(&previous.db_relative_path),
             &local_key,
+            candidate,
         )?;
         install_step("pins", source.check_backup_pins(&incoming, &incoming_key))?;
-        let parent = self.data_root.join("accounts").join(id);
-        check_space(
-            &parent,
-            incoming.metadata()?.len().saturating_mul(2).saturating_add(20 * 1024 * 1024),
-        )
-        .map_err(|failure| SdkError::LocalBusRefused {
-            code: "BackupRefused".into(),
-            message: "restore requires more space".into(),
-            body: Box::new(
-                serde_json::json!({"reason_code":"insufficient_space","failure":failure}),
-            ),
-        })?;
+        let parent = self.native_generation_parent(id, &incoming)?;
         let generation = parent.join(format!("generation_{}", job.job_id));
         std::fs::create_dir(&generation)?;
         crate::bus::daemon::set_owner_only_dir_permissions(&generation)?;
         let mut guard = PrivateDirectory { path: generation.clone(), transferred: false };
         super::recovery::mark_install(&generation)?;
+        #[cfg(test)]
+        self.install_checkpoint(super::test_install::InstallPoint::Prepared, &generation)?;
         let target = generation.join("account.db");
         // Retain the independently wrapped live data key; no archive passphrase is used.
         install_step("copy", source.copy_to(&target, &local_key))?;
         drop(source);
-        let mut merged = BackupDatabase::open(&target, &local_key)?;
-        let report =
-            install_step("merge", merged.merge_native_backup(&incoming, &incoming_key, || Ok(())))?;
+        let mut merged = BackupDatabase::open_restore_input(
+            &target,
+            &local_key,
+            if candidate {
+                ramflux_storage::BackupOpenMode::PreNormalization
+            } else {
+                ramflux_storage::BackupOpenMode::Normalized
+            },
+        )?;
+        let report = install_step(
+            "merge",
+            if candidate {
+                merged.merge_native_backup_candidate(&incoming, &incoming_key, || Ok(()))
+            } else {
+                merged.merge_native_backup(&incoming, &incoming_key, || Ok(()))
+            },
+        )?;
+        if candidate {
+            drop(merged);
+            merged = BackupDatabase::open(&target, &local_key)?;
+        }
         install_step("integrity", merged.check_integrity())?;
         install_step("events", merged.enqueue_restore_events(id, &job.job_id))?;
         install_step(
@@ -239,6 +268,8 @@ impl BackupJobs {
         std::fs::File::open(&generation)?.sync_all()?;
         std::fs::File::open(&parent)?.sync_all()?;
         super::reclamation::remember(&generation, Some(&previous))?;
+        #[cfg(test)]
+        self.install_checkpoint(super::test_install::InstallPoint::BeforeCommit, &generation)?;
         self.index.install_backup_generation(&BackupIndexInstall {
             account_id: id,
             principal_commitment: native.anchor(),
@@ -248,6 +279,8 @@ impl BackupJobs {
             wrapped_key: &wrapped,
         })?;
         guard.transferred = true;
+        #[cfg(test)]
+        self.install_checkpoint(super::test_install::InstallPoint::Committed, &generation)?;
         super::recovery::selected(&generation);
         drop(lease);
         self.cleanup_committed_generations();

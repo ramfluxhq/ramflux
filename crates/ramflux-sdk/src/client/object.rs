@@ -989,7 +989,7 @@ impl RamfluxClient {
         Ok(self.object_store.install_prepared_object(prepared))
     }
 
-    pub(super) fn prepare_history_transport(
+    pub(crate) fn prepare_history_transport(
         &mut self,
         object_id: &str,
         plaintext: &[u8],

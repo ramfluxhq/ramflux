@@ -74,15 +74,31 @@ impl BackupJobs {
         native_key: Option<super::NativeInstallKey>,
         native_setup: Option<super::NativeRestoreSetup>,
     ) -> Result<(crate::backup::BackupInstalledAccount, BackupCounts, BackupCounts), SdkError> {
+        self.install_generation_mode(job, staging, native_key, native_setup, false)
+    }
+    pub(super) fn install_generation_mode(
+        &self,
+        job: &BackupJob,
+        staging: VerifiedBackupStaging,
+        native_key: Option<super::NativeInstallKey>,
+        native_setup: Option<super::NativeRestoreSetup>,
+        candidate: bool,
+    ) -> Result<(crate::backup::BackupInstalledAccount, BackupCounts, BackupCounts), SdkError> {
         let metadata =
             format::load_metadata(&staging.directory().join("identity.sealed"), staging.key())?;
         if matches!(&metadata.identity, format::Identity::Native { .. }) {
-            return self.install_native(job, &staging, &metadata, native_key, native_setup);
+            return self.install_native(
+                job,
+                &staging,
+                &metadata,
+                (native_key, native_setup, candidate),
+            );
         }
         if native_setup.is_some() {
             return Err(crate::SdkError::CustodyModeDowngrade);
         }
-        let (id, restored, kept_newer) = self.install_legacy_generation(job, staging, metadata)?;
+        let (id, restored, kept_newer) =
+            self.install_legacy_generation(job, staging, metadata, candidate)?;
         Ok((
             crate::backup::BackupInstalledAccount { local_account_id: id, networking: None },
             restored,
@@ -94,6 +110,7 @@ impl BackupJobs {
         job: &BackupJob,
         staging: VerifiedBackupStaging,
         mut metadata: format::Metadata,
+        candidate: bool,
     ) -> Result<(String, BackupCounts, BackupCounts), SdkError> {
         let id = metadata.identity.account_id().to_owned();
         let _writer = self.index.acquire_account_writer(&id)?;
@@ -101,13 +118,13 @@ impl BackupJobs {
             self.generations.try_acquire(&id)?.ok_or_else(|| refused("install_in_progress"))?;
         let incoming = staging.directory().join("account.db");
         let incoming_key = AccountDbKey::from_bytes(metadata.database_key);
-        self.check_existing_identity(&metadata, &incoming, &incoming_key).map_err(|failure| {
-            SdkError::LocalBusRefused {
+        self.check_existing_identity_mode(&metadata, &incoming, &incoming_key, candidate).map_err(
+            |failure| SdkError::LocalBusRefused {
                 code: "BackupRefused".into(),
                 message: "restore identity check failed".into(),
                 body: Box::new(serde_json::json!({"reason_code":failure.code,"failure":failure})),
-            }
-        })?;
+            },
+        )?;
         let previous = match self.index.account(&id) {
             Ok(record) => Some(record),
             Err(ramflux_storage::StorageError::AccountNotFound(_)) => None,
@@ -116,23 +133,7 @@ impl BackupJobs {
         let parent = self.data_root.join("accounts").join(&id);
         std::fs::create_dir_all(&parent)?;
         crate::bus::daemon::set_owner_only_dir_permissions(&parent)?;
-        check_space(
-            &parent,
-            staging
-                .directory()
-                .join("account.db")
-                .metadata()?
-                .len()
-                .saturating_mul(2)
-                .saturating_add(20 * 1024 * 1024),
-        )
-        .map_err(|failure| SdkError::LocalBusRefused {
-            code: "BackupRefused".into(),
-            message: "restore requires more space".into(),
-            body: Box::new(
-                serde_json::json!({"reason_code":"insufficient_space","failure":failure}),
-            ),
-        })?;
+        check_generation_space(&parent, &incoming)?;
         let generation = parent.join(format!("generation_{}", job.job_id));
         std::fs::create_dir(&generation)?;
         crate::bus::daemon::set_owner_only_dir_permissions(&generation)?;
@@ -148,17 +149,22 @@ impl BackupJobs {
             )?;
             let key =
                 existing_key(&self.index, &self.data_root, &id, local.account_secret.as_bytes())?;
-            BackupDatabase::open_live_account(
-                &self.data_root.join(&record.db_relative_path),
-                &key,
-            )?
-            .copy_to(&target, &installed_key)?;
-            let mut merged = BackupDatabase::open(&target, &installed_key)?;
-            let report = merge_shared_backup(&mut merged, &incoming, &incoming_key, &local)?;
+            open_live_stage(&self.data_root.join(&record.db_relative_path), &key, candidate)?
+                .copy_to(&target, &installed_key)?;
+            let mut merged = open_stage(&target, &installed_key, candidate)?;
+            let report =
+                merge_shared_backup(&mut merged, &incoming, &incoming_key, &local, candidate)?;
             metadata.identity = format::Identity::Legacy { manifest: Box::new(local) };
             (report.restored, report.kept_newer)
         } else {
-            prepare_fresh_restore(&incoming, &incoming_key, &target, &installed_key, &mut metadata)?
+            prepare_fresh_restore(
+                &incoming,
+                &incoming_key,
+                &target,
+                &installed_key,
+                &mut metadata,
+                candidate,
+            )?
         };
         let db = BackupDatabase::open(&target, &installed_key)?;
         db.check_integrity()?;
@@ -185,9 +191,9 @@ impl BackupJobs {
             manifest_json: &manifest,
             wrapped_key: &wrapped,
         })?;
+        guard.transferred = true;
         #[cfg(test)]
         self.install_checkpoint(super::test_install::InstallPoint::Committed, &generation)?;
-        guard.transferred = true;
         super::recovery::selected(&generation);
         drop(lease);
         self.cleanup_committed_generations();
@@ -244,10 +250,14 @@ fn prepare_fresh_restore(
     target: &Path,
     installed_key: &AccountDbKey,
     metadata: &mut format::Metadata,
+    candidate: bool,
 ) -> Result<(BackupCounts, BackupCounts), SdkError> {
-    let source = BackupDatabase::open(incoming, incoming_key)?;
+    let source = open_stage(incoming, incoming_key, candidate)?;
     source.copy_to(target, installed_key)?;
-    let db = BackupDatabase::open(target, installed_key)?;
+    let mut db = open_stage(target, installed_key, candidate)?;
+    if candidate {
+        db.normalize_backup_candidate()?;
+    }
     db.archive_outbound()?;
     db.put_state("backup/reestablishing", &true)?;
     db.put_state("backup/fresh-outbound", &true)?;
@@ -335,7 +345,51 @@ fn merge_shared_backup(
     incoming: &Path,
     key: &AccountDbKey,
     local: &crate::bus::LocalBusPersistedAccount,
+    candidate: bool,
 ) -> Result<ramflux_storage::BackupMergeReport, SdkError> {
     let actor = backup_group_actor(local)?;
-    Ok(db.merge_backup_with_group_actor(incoming, key, Some(&actor), || Ok(()))?)
+    Ok(if candidate {
+        db.merge_backup_candidate_with_group_actor(incoming, key, Some(&actor), || Ok(()))?
+    } else {
+        db.merge_backup_with_group_actor(incoming, key, Some(&actor), || Ok(()))?
+    })
+}
+
+fn open_stage(
+    path: &Path,
+    key: &AccountDbKey,
+    candidate: bool,
+) -> Result<BackupDatabase, ramflux_storage::StorageError> {
+    BackupDatabase::open_restore_input(
+        path,
+        key,
+        if candidate {
+            ramflux_storage::BackupOpenMode::PreNormalization
+        } else {
+            ramflux_storage::BackupOpenMode::Normalized
+        },
+    )
+}
+
+fn check_generation_space(parent: &Path, incoming: &Path) -> Result<(), SdkError> {
+    check_space(
+        parent,
+        incoming.metadata()?.len().saturating_mul(2).saturating_add(20 * 1024 * 1024),
+    )
+    .map_err(|failure| SdkError::LocalBusRefused {
+        code: "BackupRefused".into(),
+        message: "restore requires more space".into(),
+        body: Box::new(serde_json::json!({"reason_code":"insufficient_space","failure":failure})),
+    })
+}
+pub(super) fn open_live_stage(
+    path: &Path,
+    key: &AccountDbKey,
+    candidate: bool,
+) -> Result<BackupDatabase, ramflux_storage::StorageError> {
+    if candidate {
+        BackupDatabase::open_live_restore_input(path, key)
+    } else {
+        BackupDatabase::open_live_account(path, key)
+    }
 }

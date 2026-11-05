@@ -1,0 +1,447 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Candidate installation through encrypted private generations and durable index publication.
+use super::*;
+use crate::bus::backup_jobs::{format, service::BackupJobs, test_install::InstallPoint};
+use ramflux_storage::{BackupDatabase, BackupOpenMode};
+use std::sync::Mutex;
+
+#[derive(Clone, Copy, Debug)]
+enum PathKind {
+    Fresh,
+    Full,
+    Native,
+}
+
+fn raw(path: &Path, key: &ramflux_storage::AccountDbKey) -> TestResult<rusqlite::Connection> {
+    use std::fmt::Write;
+    let mut hex = zeroize::Zeroizing::new(String::new());
+    for b in key.bytes() {
+        write!(&mut *hex, "{b:02x}")?;
+    }
+    let db = rusqlite::Connection::open(path)?;
+    let sql = zeroize::Zeroizing::new(format!("PRAGMA key=\"x'{}'\"", hex.as_str()));
+    db.execute_batch(&sql)?;
+    Ok(db)
+}
+
+fn producers(client: &mut RamfluxClient) -> TestResult {
+    client.account_db()?.send_direct_message("thread", "owner", "peer", b"body")?;
+    client.prepare_history_transport("history-owned", br#"{"message_id":"owner"}"#, &[])?;
+    let object = client.put_encrypted_object("attachment-owned", b"attachment")?;
+    let mut sender = ramflux_crypto::DmSession::initiator([7; 32], [1; 32], [2; 32], [3; 32])?;
+    let slot = crate::SdkObjectKeySlot {
+        schema: "ramflux.sdk.object_key_slot.dm.v1".into(),
+        version: 1,
+        object_id: object.object_id.clone(),
+        conversation_id: "thread".into(),
+        recipient_device_id: "device".into(),
+        source_principal_commitment: None,
+        x3dh: None,
+        ciphertext: sender.encrypt(&[9; 32], b"fixture")?,
+    };
+    let reference = SdkDmAttachmentRef {
+        schema: "ramflux.sdk.dm_attachment_ref.v1".into(),
+        version: 1,
+        object_id: object.object_id,
+        manifest_hash: object.manifest_hash,
+        plaintext_hash: object.plaintext_hash,
+        cipher_size: object.ciphertext.len() as u64,
+        chunk_size: 64,
+        total_chunks: 1,
+        relay_endpoint: "https://relay.invalid".into(),
+        owner_home_node_id: None,
+        relay_audience_node_id: None,
+        owner_principal_id: "peer".into(),
+        owner_device_epoch: 1,
+        access_grant: None,
+        key_slot: slot,
+    };
+    client.persist_received_reference_prepared(&reference, "peer", "thread", "owner", None)?;
+    Ok(())
+}
+
+fn run(
+    kind: PathKind,
+    version: i64,
+    unwrapped: bool,
+    fault: Option<InstallPoint>,
+    invalid: Option<&str>,
+) -> TestResult {
+    let source_root = tempfile::tempdir()?;
+    let target_root = tempfile::tempdir()?;
+    let source_index = AccountIndex::open(source_root.path())?;
+    let mut state = initialized_at_scale(
+        source_root.path(),
+        source_index,
+        Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
+    )?;
+    producers(&mut state.client)?;
+    if matches!(kind, PathKind::Native) {
+        drop(state);
+        return native_case(
+            source_root.path(),
+            target_root.path(),
+            (version, unwrapped, fault, invalid),
+        );
+    }
+    let id = "alice";
+    let manifest =
+        read_local_bus_account_manifest(&local_bus_account_manifest_path(source_root.path(), id))?;
+    let identity = format::Identity::Legacy { manifest: Box::new(manifest) };
+    let target_index = AccountIndex::open(target_root.path())?;
+    if matches!(kind, PathKind::Full) {
+        initialize_local(target_root.path(), &target_index)?;
+    }
+    let jobs = BackupJobs::new(target_root.path(), target_index.clone())?;
+    let job = jobs.start(crate::backup::BackupJobKind::Restore, "archive.rfb".into())?;
+    let dir = jobs.directory(&job.job_id)?;
+    let path = dir.join("account.db");
+    let saved = state.client.account_db()?.write_backup_snapshot(&path)?;
+    drop(state);
+    prepare_input(&path, &saved.key, version, unwrapped, invalid)?;
+    let before = std::fs::read(&path)?;
+    let source_copy = source_root.path().join("unchanged.db");
+    std::fs::write(&source_copy, &before)?;
+    let metadata = format::Metadata {
+        identity,
+        database_key: *saved.key.bytes(),
+        ca_pem: b"test-ca".to_vec(),
+    };
+    let master = [8; 32];
+    format::save_metadata(&dir.join("identity.sealed"), &master, &metadata)?;
+    let staging = crate::backup::VerifiedBackupStaging::new(
+        dir,
+        master,
+        crate::bus::backup_jobs::service::now(),
+    )?;
+    let previous = target_index.account(id).ok().map(|r| r.db_relative_path);
+    let seen = install_hook(&jobs, &target_index, id, fault)?;
+    let result = jobs.install_generation_mode(&job, staging, None, None, true);
+    if invalid.is_some() || fault.is_some() {
+        assert!(result.is_err());
+    } else {
+        result?;
+    }
+    assert_eq!(std::fs::read(&source_copy)?, before);
+    let selected = target_index.account(id).ok().map(|r| r.db_relative_path);
+    if fault == Some(InstallPoint::BeforeCommit) || invalid.is_some() {
+        assert_eq!(selected, previous);
+    } else {
+        let relative = selected.ok_or("selected generation")?;
+        let key = crate::bus::backup_jobs::install::existing_key(
+            &target_index,
+            target_root.path(),
+            id,
+            b"account-test-secret",
+        )?;
+        let installed = BackupDatabase::open(&target_root.path().join(relative), &key)?;
+        installed.check_integrity()?;
+        let db = raw(&target_root.path().join(target_index.account(id)?.db_relative_path), &key)?;
+        assert_clean(&db)?;
+        assert_eq!(db.query_row("SELECT count(*) FROM object_retention_reference WHERE selector IN ('history-owned','attachment-owned')",[],|r|r.get::<_,u64>(0))?,2);
+    }
+    if invalid.is_none() {
+        let seen = seen.lock().map_err(|_| "seen")?;
+        assert!(seen.contains(&fault.unwrap_or(InstallPoint::BeforeCommit)));
+    }
+    Ok(())
+}
+
+fn corrupt(db: &rusqlite::Connection, what: &str) -> TestResult {
+    match what {
+        "hash" => {
+            db.execute("UPDATE object_retention_reference SET reference_hash='wrong' WHERE selector='history-owned'",[])?;
+        }
+        "owner" => {
+            db.execute("UPDATE object_message_reference SET message_id='absent' WHERE reference_hash IN (SELECT reference_hash FROM object_retention_reference WHERE selector='history-owned')",[])?;
+        }
+        _ => {
+            db.execute("UPDATE object_retention_reference SET reference_json=x'7b7d' WHERE selector='attachment-owned'",[])?;
+        }
+    }
+    Ok(())
+}
+fn assert_clean(db: &rusqlite::Connection) -> TestResult {
+    assert_eq!(db.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind='attachment/reference/unowned'",[],|r|r.get::<_,u64>(0))?,0,"fresh normalization must omit inherited actor");
+    assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('backup_reference_admission','backup_selector_admission','backup_lookup_origin','backup_target_delete')",[],|r|r.get::<_,u64>(0))?,0);
+    assert_eq!(db.query_row("SELECT count(*) FROM object_message_reference m JOIN object_retention_reference r USING(reference_hash) WHERE m.message_id='owner' AND r.selector IN ('history-owned','attachment-owned')",[],|r|r.get::<_,u64>(0))?,2);
+    let transport: (String,String,String) = db.query_row("SELECT r.reference_hash,p.wire_id,p.manifest_hash FROM object_retention_reference r JOIN object_retention_payload p USING(commitment) WHERE r.selector='history-owned' AND CAST(r.reference_json AS TEXT)='{}' AND p.retention_class='transport'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    assert_eq!(
+        transport.0,
+        ramflux_crypto::blake3_256_base64url(
+            "ramflux.object.transport.owner.v1",
+            &ramflux_protocol::canonical_json_bytes(&(&transport.1, &transport.2, "owner"))?
+        )
+    );
+    for table in ["object_erasure_work", "object_reference_erasure_work"] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, u64>(0))?,
+            0
+        );
+    }
+    let tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for table in tables {
+        let mut q = db.prepare(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))?;
+        let columns = q.column_count();
+        let mut rows = q.query([])?;
+        while let Some(row) = rows.next()? {
+            for c in 0..columns {
+                if let rusqlite::types::ValueRef::Text(b) | rusqlite::types::ValueRef::Blob(b) =
+                    row.get_ref(c)?
+                {
+                    assert!(
+                        !b.windows(b"normalization-only-canary".len())
+                            .any(|w| w == b"normalization-only-canary"),
+                        "retired canary in {table}"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+fn install_hook(
+    jobs: &BackupJobs,
+    index: &AccountIndex,
+    id: &str,
+    fault: Option<InstallPoint>,
+) -> TestResult<Arc<Mutex<Vec<InstallPoint>>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let capture = seen.clone();
+    let index = index.clone();
+    let locks = jobs.generations.clone();
+    let id = id.to_owned();
+    *jobs.install_hook.lock().map_err(|_| "hook")? = Some(Arc::new(move |point, _| {
+        capture.lock().map_err(|_| std::io::ErrorKind::Other)?.push(point);
+        if matches!(point, InstallPoint::BeforeCommit | InstallPoint::Committed) {
+            let writer_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(index.root().join("accounts").join(&id).join(".writer.lock"))?;
+            assert!(writer_file.try_lock().is_err(), "writer lease released before publication");
+            assert!(
+                locks.try_acquire(&id).map_err(|_| std::io::ErrorKind::Other)?.is_none(),
+                "generation lease released before publication"
+            );
+        }
+        if Some(point) == fault {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        Ok(())
+    }));
+    Ok(seen)
+}
+
+fn run_native(
+    client: RamfluxClient,
+    identity: format::Identity,
+    input: (
+        ramflux_storage::AccountBackupSnapshot,
+        Option<crate::bus::backup_jobs::NativeInstallKey>,
+    ),
+    snapshot: &Path,
+    root: &Path,
+    case: (i64, bool, Option<InstallPoint>, Option<&str>),
+) -> TestResult {
+    let (saved, key) = input;
+    let (version, unwrapped, fault, invalid) = case;
+    let index = client.account_index()?.clone();
+    let jobs = BackupJobs::new(root, index.clone())?;
+    let job = jobs.start(crate::backup::BackupJobKind::Restore, "native.rfb".into())?;
+    let dir = jobs.directory(&job.job_id)?;
+    let before = std::fs::read(snapshot)?;
+    std::fs::copy(snapshot, dir.join("account.db"))?;
+    prepare_input(&dir.join("account.db"), &saved.key, version, unwrapped, invalid)?;
+    let metadata =
+        format::Metadata { identity, database_key: *saved.key.bytes(), ca_pem: Vec::new() };
+    let master = [8; 32];
+    format::save_metadata(&dir.join("identity.sealed"), &master, &metadata)?;
+    let staging = crate::backup::VerifiedBackupStaging::new(
+        dir,
+        master,
+        crate::bus::backup_jobs::service::now(),
+    )?;
+    let previous = index.account("account")?.db_relative_path;
+    drop(client);
+    let seen = install_hook(&jobs, &index, "account", fault)?;
+    let result = jobs.install_generation_mode(&job, staging, key, None, true);
+    assert_eq!(std::fs::read(snapshot)?, before);
+    if fault.is_some() || invalid.is_some() {
+        assert!(result.is_err());
+    } else {
+        result?;
+    }
+    if fault == Some(InstallPoint::BeforeCommit) || invalid.is_some() {
+        assert_eq!(index.account("account")?.db_relative_path, previous);
+    } else {
+        let key = crate::bus::backup_jobs::install::existing_key(
+            &index,
+            root,
+            "account",
+            b"local-secret",
+        )?;
+        let path = root.join(index.account("account")?.db_relative_path);
+        let db = BackupDatabase::open(&path, &key)?;
+        db.check_integrity()?;
+        assert_clean(&raw(&path, &key)?)?;
+    }
+    if invalid.is_none() {
+        assert!(seen.lock().map_err(|_| "seen")?.contains(&InstallPoint::BeforeCommit));
+    }
+    Ok(())
+}
+
+#[test]
+fn e14_fresh_full_restore_normalizes_before_index_selection() -> TestResult {
+    run(PathKind::Fresh, 14, false, None, None)
+}
+#[test]
+fn e14_full_restore_local_then_merge_normalized() -> TestResult {
+    run(PathKind::Full, 14, false, None, None)
+}
+#[test]
+fn e14_native_data_restore_uses_two_input_classification() -> TestResult {
+    run(PathKind::Native, 14, false, None, None)
+}
+#[test]
+fn e14_fault_before_index_selection() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        run(k, 14, false, Some(InstallPoint::BeforeCommit), None)?;
+    }
+    Ok(())
+}
+#[test]
+fn e14_fault_after_index_commit() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        run(k, 14, false, Some(InstallPoint::Committed), None)?;
+    }
+    Ok(())
+}
+#[test]
+fn e14_transport_owner_reference_restores_full_native_fresh() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        for version in [12, 14] {
+            run(k, version, false, None, None)?;
+        }
+    }
+    Ok(())
+}
+#[test]
+fn e14_wrapped_and_unwrapped_attachment_references_restore() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        for version in [12, 14] {
+            for unwrapped in [false, true] {
+                run(k, version, unwrapped, None, None)?;
+            }
+        }
+    }
+    Ok(())
+}
+#[test]
+fn e14_reference_validation_rejects_hash_owner_domain_substitution() -> TestResult {
+    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
+        for what in ["hash", "owner", "domain"] {
+            run(k, 14, false, None, Some(what))?;
+        }
+    }
+    Ok(())
+}
+
+fn native_case(
+    source_root: &Path,
+    target_root: &Path,
+    case: (i64, bool, Option<InstallPoint>, Option<&str>),
+) -> TestResult {
+    let (version, unwrapped, fault, invalid) = case;
+    let vault = crate::custody::tests::TestVault::default();
+    let account = crate::custody::tests::create(
+        target_root,
+        "account",
+        &vault,
+        crate::custody::network_now()?,
+    )?;
+    let mut client = RamfluxClient::new();
+    client.open_account_index(target_root)?;
+    client.seal_new_account_data(
+        "account",
+        &account.record().body.account_anchor,
+        b"local-secret",
+    )?;
+    client.unlock_account("account", b"local-secret")?;
+    producers(&mut client)?;
+    // The native archive and target must share their independently held anchor.
+    let identity = crate::bus::backup_jobs::capture_identity(&client, target_root, "account")?;
+    let key = crate::bus::backup_jobs::install::existing_key(
+        client.account_index()?,
+        target_root,
+        "account",
+        b"local-secret",
+    )?;
+    let native_key =
+        Some(crate::bus::backup_jobs::NativeInstallKey { account_id: "account".into(), key });
+    let snapshot = source_root.join("native-source.db");
+    let saved = client.account_db()?.write_backup_snapshot(&snapshot)?;
+    BackupDatabase::open(&snapshot, &saved.key)?.sanitize_native_backup()?;
+    run_native(
+        client,
+        identity,
+        (saved, native_key),
+        &snapshot,
+        target_root,
+        (version, unwrapped, fault, invalid),
+    )
+}
+fn prepare_input(
+    path: &Path,
+    key: &ramflux_storage::AccountDbKey,
+    version: i64,
+    unwrapped: bool,
+    invalid: Option<&str>,
+) -> TestResult {
+    let db = raw(path, key)?;
+    if version == 12 {
+        // Same pre-v13 ledger reconstruction as storage's selector_upgrade_tests:
+        // v13 has no table/column changes; remove its candidate index and v14 bundle.
+        db.execute_batch("DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version>12; DROP INDEX IF EXISTS runtime_outbox_object_selector; UPDATE schema_migration SET checksum='2026-06-14-account-core-v1;writer-floor=12;object-erasure-v1' WHERE schema_version=1;")?;
+    }
+    if unwrapped {
+        db.execute("UPDATE object_retention_reference SET reference_json=CAST(json_extract(CAST(reference_json AS TEXT),'$.reference') AS BLOB) WHERE selector='attachment-owned'",[])?;
+    }
+    if let Some(invalid) = invalid {
+        corrupt(&db, invalid)?;
+    }
+    db.execute(
+        "INSERT INTO runtime_actor_state VALUES('attachment/reference/unowned',?1)",
+        rusqlite::params![br#"{"private":"normalization-only-canary"}"#.as_slice()],
+    )?;
+    db.execute("INSERT INTO object_index(object_id,chunk_manifest_hash,object_state,total_cipher_size,chunk_count,created_at,updated_at,manifest_hash,nonce,ciphertext,tombstoned) VALUES('unowned',zeroblob(32),'revoked',0,0,1,1,zeroblob(32),'',x'',1)",[])?;
+    drop(db);
+    let opened = BackupDatabase::open_restore_input(path, key, BackupOpenMode::PreNormalization)?;
+    assert_eq!(opened.original_input().unowned_legacy_actor_count, 1);
+    drop(opened);
+    Ok(())
+}
+
+fn initialize_local(root: &Path, index: &AccountIndex) -> TestResult {
+    drop(initialized_at_scale(
+        root,
+        index.clone(),
+        Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
+    )?);
+    // Each independent fixture encrypted `file` randomly; it is not a shared identity.
+    let key = crate::bus::backup_jobs::install::existing_key(
+        index,
+        root,
+        "alice",
+        b"account-test-secret",
+    )?;
+    let db = raw(&root.join(index.account("alice")?.db_relative_path), &key)?;
+    db.execute_batch("DELETE FROM object_index WHERE object_id='file'; DELETE FROM object_manifest WHERE object_id='file'; DELETE FROM object_chunk WHERE object_id='file'; DELETE FROM object_key_slot WHERE object_id='file'; DELETE FROM object_retention_payload WHERE wire_id='file';")?;
+    Ok(())
+}

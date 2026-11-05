@@ -503,6 +503,15 @@ impl BackupJobs {
         incoming: &std::path::Path,
         key: &AccountDbKey,
     ) -> Result<bool, BackupFailure> {
+        self.check_existing_identity_mode(metadata, incoming, key, false)
+    }
+    pub(super) fn check_existing_identity_mode(
+        &self,
+        metadata: &Metadata,
+        incoming: &std::path::Path,
+        key: &AccountDbKey,
+        candidate: bool,
+    ) -> Result<bool, BackupFailure> {
         let manifest =
             metadata.identity.legacy().map_err(|_| failure(BackupFailureCode::RootConflict))?;
         let id = &manifest.local_account_id;
@@ -539,7 +548,7 @@ impl BackupJobs {
                     crate::SdkError::Storage(error) => storage_error(&error),
                     _ => failure(BackupFailureCode::Unreadable),
                 })?;
-                BackupDatabase::open_live_account(&path, &local_key)
+                super::install::open_live_stage(&path, &local_key, candidate)
                     .map_err(|error| storage_error(&error))?
                     .check_backup_pins(incoming, key)
                     .map_err(|_| failure(BackupFailureCode::RootConflict))?;
