@@ -92,6 +92,10 @@ enum StoredRouterWalPayload {
         incarnation_id: String,
         payload: Box<StoredRouterWalPayload>,
     },
+    /// New classified receipts carry a complete sender assignment; older variants keep legacy replay.
+    SenderAssigned {
+        payload: Box<StoredRouterWalPayload>,
+    },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -121,6 +125,16 @@ struct StoredRouterWalEnvelope {
     payload_hash: String,
 }
 
+impl StoredRouterWalPayload {
+    fn sender_assigned(&self) -> bool {
+        match self {
+            Self::SenderAssigned { .. } => true,
+            Self::Incarnated { payload, .. } => payload.sender_assigned(),
+            _ => false,
+        }
+    }
+}
+
 impl TryFrom<&RouterWalPayload> for StoredRouterWalPayload {
     type Error = NodeCoreError;
 
@@ -138,7 +152,7 @@ impl TryFrom<&RouterWalPayload> for StoredRouterWalPayload {
                     .map(|entry| StoredRouterWalInboxEntry::try_from(entry.as_ref()))
                     .transpose()?
                     .map(Box::new);
-                Ok(match (accepted_at, local_delivery) {
+                let stored = match (accepted_at, local_delivery) {
                     (Some(accepted_at), Some(local_delivery)) => Self::SubmissionClassified {
                         replay_key: replay_key.clone(),
                         replay_expires_at: *replay_expires_at,
@@ -157,6 +171,11 @@ impl TryFrom<&RouterWalPayload> for StoredRouterWalPayload {
                         replay_expires_at: *replay_expires_at,
                         entry,
                     },
+                };
+                Ok(if local_delivery.is_some() {
+                    Self::SenderAssigned { payload: Box::new(stored) }
+                } else {
+                    stored
                 })
             }
         }
@@ -169,6 +188,12 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
     fn try_from(payload: StoredRouterWalPayload) -> Result<Self, Self::Error> {
         match payload {
             StoredRouterWalPayload::Incarnated { payload, .. } => (*payload).try_into(),
+            StoredRouterWalPayload::SenderAssigned { payload } => {
+                if !matches!(*payload, StoredRouterWalPayload::SubmissionClassified { .. }) {
+                    return Err(identity::error("invalid sender assignment WAL wrapper"));
+                }
+                (*payload).try_into()
+            }
             StoredRouterWalPayload::Submission { replay_key, replay_expires_at, entry } => {
                 // Records from before acceptance times were logged. The router store resolves
                 // and persists their deadline once, so it is never rebased at a later restart.
@@ -305,6 +330,7 @@ pub struct RouterWalSubmissionRecord {
     pub accepted_at: Option<i64>,
     pub local_delivery: Option<RouterWalLocalDelivery>,
     pub location: RouterWalRecordLocation,
+    sender_assigned: bool,
 }
 
 impl RouterWalSubmissionRecord {
@@ -346,6 +372,14 @@ struct RouterWalLocalDeliveryIndex {
 
 impl RouterWalState {
     fn apply(&mut self, payload: RouterWalPayload, location: RouterWalRecordLocation) {
+        self.apply_with_sender_assignment(payload, location, true);
+    }
+    fn apply_with_sender_assignment(
+        &mut self,
+        payload: RouterWalPayload,
+        location: RouterWalRecordLocation,
+        sender_assigned: bool,
+    ) {
         match payload {
             RouterWalPayload::Submission {
                 replay_key,
@@ -379,6 +413,7 @@ impl RouterWalState {
                     accepted_at,
                     local_delivery,
                     location,
+                    sender_assigned,
                 };
                 if let Some(previous) = self.submissions_by_replay_key.remove(&replay_key) {
                     self.unindex(&previous);
@@ -413,6 +448,7 @@ impl RouterWalState {
                         assignment: record
                             .entry
                             .as_ref()
+                            .filter(|_| record.sender_assigned)
                             .and_then(|entry| {
                                 self.incarnations.get(&entry.target_delivery_id).map(|id| {
                                     crate::router_store::sender_retry::SenderAssignment::new(
@@ -1624,8 +1660,9 @@ fn recover_router_wal_segment(
         };
         offset = offset.saturating_add(8 + u64::from(len));
         let location = RouterWalRecordLocation { segment_id, offset: record_offset, len };
+        let sender_assigned = stored.sender_assigned();
         let payload = identity::decode_payload(stored, state)?;
-        state.apply(payload, location);
+        state.apply_with_sender_assignment(payload, location, sender_assigned);
     }
     durability_io::set_len(&file, &path, offset)
         .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
@@ -1841,6 +1878,58 @@ mod tests {
     use super::*;
     use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
     use std::sync::Barrier;
+
+    #[test]
+    fn legacy_classified_receipts_do_not_gain_sender_assignments()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for assigned in [false, true] {
+            let entry = router_wal_inbox_entry("legacy-classified", "target");
+            let stored = StoredRouterWalPayload::SubmissionClassified {
+                replay_key: "legacy".into(),
+                replay_expires_at: i64::MAX,
+                accepted_at: 1_760_000_001,
+                entry: Some(Box::new(StoredRouterWalInboxEntry::try_from(&entry)?)),
+                local_delivery: RouterWalLocalDelivery {
+                    sender_root_commitment: "sender".into(),
+                    envelope_id: entry.envelope.envelope_id.clone(),
+                    target_delivery_id: "target".into(),
+                },
+            };
+            let stored = if assigned {
+                StoredRouterWalPayload::SenderAssigned { payload: Box::new(stored) }
+            } else {
+                stored
+            };
+            let stored = StoredRouterWalPayload::Incarnated {
+                incarnation_id: crate::router_store::incarnation::new_id()?,
+                payload: Box::new(stored),
+            };
+            let bytes = postcard::to_allocvec(&stored)?;
+            let stored: StoredRouterWalPayload = postcard::from_bytes(&bytes)?;
+            assert_eq!(stored.sender_assigned(), assigned);
+            let mut state = RouterWalState::default();
+            let payload = identity::decode_payload(stored, &mut state)?;
+            state.apply_with_sender_assignment(
+                payload,
+                RouterWalRecordLocation { segment_id: 0, offset: 0, len: 1 },
+                assigned,
+            );
+            assert!(state.has_local_delivery_envelope(
+                "sender",
+                "legacy-classified",
+                "target",
+                1_760_000_002
+            ));
+            let receipt = &state.local_delivery_by_sender_envelope["sender"]
+                [&("legacy-classified".into(), "target".into())];
+            assert_eq!(
+                receipt.assignment.is_some(),
+                assigned,
+                "legacy replay behavior must survive upgrade"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn wal_record_with_v2_key_replays_into_tuple_index() -> Result<(), Box<dyn std::error::Error>> {

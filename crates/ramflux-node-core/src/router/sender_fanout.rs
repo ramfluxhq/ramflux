@@ -234,9 +234,9 @@ impl RouterCore {
             let target = child.envelope.target_delivery_id.clone();
             match child.admission {
                 RetryAdmission::Accepted(assignment) => {
-                    crate::publication::await_sender_assignment(
+                    let assignment = crate::publication::await_sender_retry(
                         &store.publication_core()?,
-                        &assignment,
+                        assignment,
                     )?;
                     children.push(Child::Complete(delivery(
                         child.device,

@@ -130,7 +130,7 @@ mod tests;
 
 mod registry;
 pub(super) use registry::Registry;
-pub use registry::{RetryAdmission, RetryOwner, RetryWaiter};
+pub use registry::{ResolvedRetry, RetryAdmission, RetryOwner, RetryWaiter};
 
 pub(crate) use registry::RetryAbort;
 

@@ -161,11 +161,6 @@ pub enum CustodyClientFrame {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CustodyRefusal {
-    AbortedRetrySafe,
-    CapacityRetryAfter {
-        retry_after_ms: u64,
-    },
-    IdempotencyConflict,
     Unsupported,
     InvalidInput,
     AuthorityUnavailable,
@@ -185,6 +180,12 @@ pub enum CustodyRefusal {
         reason: crate::home_migration::Refusal,
         nack: Option<Box<crate::Nack>>,
     },
+    // Append variants to preserve the existing postcard discriminants.
+    AbortedRetrySafe,
+    CapacityRetryAfter {
+        retry_after_ms: u64,
+    },
+    IdempotencyConflict,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

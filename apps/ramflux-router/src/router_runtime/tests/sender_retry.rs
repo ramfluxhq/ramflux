@@ -314,3 +314,22 @@ async fn capacity_refusal_leaves_no_sender_effect() -> anyhow::Result<()> {
     drop(core);
     fixture.close()
 }
+
+#[test]
+fn forwarded_conflict_uses_typed_refusal_reply() -> anyhow::Result<()> {
+    let fixture = Fixture::new(0, "forwarded-retry-refusal")?;
+    let envelope = current_envelope("forwarded-conflict", "target_alice")?;
+    let source = fixture.state.authenticated_envelope_source_durable(&envelope, &fixture.store)?;
+    let owner = fixture.store.admit_sender_retry(&source, &envelope, envelope.created_at)?;
+    let reply = fixture.handle.submit_forwarded(ramflux_node_core::ForwardedEnvelopeRequest {
+        peer_node_id: "test-peer".into(),
+        envelope: changed(&envelope, &fixture.state)?,
+        migration_evidence: None,
+    })?;
+    assert_eq!(reply["accepted"], false);
+    assert_eq!(reply["retryable"], false);
+    assert_eq!(reply["reason"], "idempotency_conflict");
+    assert_eq!(fixture.store.inbox_status("target_alice")?.1, 0);
+    drop(owner);
+    fixture.close()
+}
