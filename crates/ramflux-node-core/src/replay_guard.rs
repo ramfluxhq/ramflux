@@ -136,6 +136,10 @@ impl NodeReplayGuardState {
         self.accepted_by_key.is_empty()
     }
 
+    pub(crate) fn retain_keys(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.accepted_by_key.retain(|key, _| keep(key));
+    }
+
     pub(crate) fn accepted_entries(&self) -> impl Iterator<Item = (&String, &i64)> {
         self.accepted_by_key.iter()
     }

@@ -82,7 +82,7 @@ fn server_retention_router_gc_is_dry_run_safe_and_survives_restart()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_store_path("server_retention_router")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
-    store.save_router(&RouterCore::new())?;
+    store.bootstrap_router(&RouterCore::new())?;
     let mut inbox = OpaqueDeviceInbox::new();
     let mut message = envelope("retire", "mailbox", DeliveryClass::OpaqueEvent);
     message.ttl = 1;

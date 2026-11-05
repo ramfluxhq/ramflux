@@ -238,7 +238,7 @@ fn deletion_cleanup_cannot_persist_a_snapshot_older_than_a_concurrent_publicatio
     let router = Arc::new(RouterCore::new());
     router.register_identity_durable(&a.request, &store)?;
     router.register_identity_durable(&b.request, &store)?;
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     router.mvp7_apply_lifecycle_event(&LifecycleEventRequest {
         principal_id: "alice".into(),
         event_id: "delete".into(),
@@ -347,7 +347,7 @@ fn durable_finalize_and_concurrent_publication_keep_lifecycle_authority_and_clea
         recovery_quorum: None,
         recovery_quorum_proof: None,
     })?;
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let barrier = Barrier::new(2);
     std::thread::scope(|scope| {
         let publication = scope.spawn(|| {

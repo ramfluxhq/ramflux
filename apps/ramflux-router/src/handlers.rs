@@ -444,6 +444,25 @@ pub(crate) async fn handle_mesh_quic_request_value(
             body: serde_json::to_value(response)?,
         });
     }
+    if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp10/own-devices/fanout") {
+        let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
+            serde_json::from_slice(&body)?;
+        let router = router.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            ramflux_node_core::publication::capture(|| {
+                crate::router_engine::own_device_fanout_inner(
+                    router.state(),
+                    router.store(),
+                    &request,
+                )
+            })
+        })
+        .await??;
+        return Ok(ramflux_transport::GatewayQuicResponse {
+            status: 200,
+            body: serde_json::to_value(prepared.published().await?)?,
+        });
+    }
     let mesh_request = ramflux_transport::MeshHttpRequest {
         method: request.method.clone(),
         path: request.path.clone(),
@@ -1285,7 +1304,7 @@ mod tests {
             1,
             now,
         )?;
-        store.save_router(&state)?;
+        store.bootstrap_router(&state)?;
         let before = serde_json::to_value(state.mvp1_identities_snapshot())?;
         let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;

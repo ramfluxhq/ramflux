@@ -436,7 +436,7 @@ fn reopening_legacy_registration_policies_restores_finite_admission_and_keeps_op
             ..RegistrationPolicy::default()
         });
         let store = RouterRedbStore::open(&path)?;
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         drop(store);
         let store = RouterRedbStore::open(&path)?;
         let restored = store.load_router()?.ok_or("missing router")?;

@@ -117,7 +117,7 @@ fn inbox_incarnation_lifecycle() -> Result {
     store.record_nack_increment(&cursor)?;
     store.record_ack_increment(&cursor, "other-row")?;
     let router = store.load_router()?.expect("router");
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     drop(store);
     let store = reopen(&path)?;
     store.load_router()?;

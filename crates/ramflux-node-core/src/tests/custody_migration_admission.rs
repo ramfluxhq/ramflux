@@ -9,7 +9,7 @@ fn migration_direct_grant_respects_listener_capacity_revocation_and_one_use_scop
     let path = temp_store_path("migration-direct-admission")?;
     let store = RouterRedbStore::open_with_wal(&path, path.with_extension("wal"))?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let (driver, _) = super::super::registered_direct_driver(&router, &store)?;
     let service = service(&driver, &store)?;
     let control = request(&driver, false)?;

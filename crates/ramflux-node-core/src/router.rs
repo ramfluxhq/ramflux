@@ -54,14 +54,15 @@ pub enum RouterEnvelopeOrigin {
 
 #[derive(Debug)]
 pub struct RouterCore {
-    pub(crate) target_shards: Vec<Mutex<RouterTargetShard>>,
-    envelope_target_index_shards: Vec<Mutex<BTreeMap<String, String>>>,
+    pub(crate) target_shards: Vec<Arc<Mutex<RouterTargetShard>>>,
+    envelope_target_index_shards: Vec<Arc<Mutex<BTreeMap<String, String>>>>,
     forwarding_reservations: Arc<ForwardingReservations>,
     pub(crate) control: Mutex<RouterControlState>,
     migration_read_snapshot: ArcSwap<RouterMigrationReadSnapshot>,
-    pub(crate) replay_guard_shards: Vec<Mutex<NodeReplayGuardState>>,
+    pub(crate) replay_guard_shards: Vec<Arc<Mutex<NodeReplayGuardState>>>,
     node_service_signer: Mutex<Option<NodeServiceSigningKey>>,
     local_home_node_id: Mutex<Option<String>>,
+    publication: std::sync::OnceLock<Arc<crate::router_store::publication::PublicationCore>>,
 }
 
 #[derive(Debug)]
@@ -208,6 +209,67 @@ pub(crate) struct RouterCoreSnapshot {
 }
 
 impl RouterCore {
+    pub(crate) fn publication_is_bound(&self) -> bool {
+        self.publication.get().is_some()
+    }
+
+    /// Install the store-owned publication authority before serving this router.
+    /// # Errors
+    /// Returns store initialization failures.
+    pub fn bind_publication(&self, store: &crate::RouterRedbStore) -> Result<(), NodeCoreError> {
+        let core = store.publication_core()?;
+        let _ = self.publication.set(Arc::clone(&core));
+        let targets = self.target_shards.iter().map(Arc::downgrade).collect::<Vec<_>>();
+        let indexes =
+            self.envelope_target_index_shards.iter().map(Arc::downgrade).collect::<Vec<_>>();
+        let replays = self.replay_guard_shards.iter().map(Arc::downgrade).collect::<Vec<_>>();
+        core.install_cleanup(
+            Arc::new(move |target, seq| {
+                if let Some(shard) = targets[target_shard_index(target)].upgrade() {
+                    let entry = lock_unpoisoned(&shard).inbox.retire_pending(target, seq);
+                    if let Some(entry) = entry
+                        && let Some(index) = indexes
+                            [envelope_target_index_shard_index(&entry.envelope.envelope_id)]
+                        .upgrade()
+                    {
+                        lock_unpoisoned(&index).remove(&entry.envelope.envelope_id);
+                    }
+                }
+            }),
+            Arc::new(move |resource| {
+                if let Some(replay) = replays[replay_guard_shard_index(resource)].upgrade() {
+                    lock_unpoisoned(&replay).retain_keys(|key| key != resource);
+                }
+            }),
+        );
+        for shard in &self.target_shards {
+            lock_unpoisoned(shard).inbox.publication = Some(Arc::clone(&core));
+        }
+        Ok(())
+    }
+
+    /// Initialize durable identity before entering allocation synchronization.
+    /// # Errors
+    /// Returns identity or publication initialization failures.
+    pub fn prepare_publication_target(
+        &self,
+        store: &crate::RouterRedbStore,
+        target: &str,
+    ) -> Result<(), NodeCoreError> {
+        self.bind_publication(store)?;
+        let (id, issued) = store.inbox_status(target)?;
+        let id = match id {
+            Some(id) => id,
+            None => store.initialize_inbox(target)?,
+        };
+        let mut shard = self.target_shard(target);
+        shard.inbox.restore_incarnation(target, id.clone());
+        if let Some(core) = self.publication.get() {
+            core.register(target, &id, issued);
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self::from_snapshot(RouterCoreSnapshot::default())
@@ -638,6 +700,9 @@ impl RouterCore {
         now: i64,
     ) -> Result<(ReplayAcceptedFanoutPlan, Vec<crate::SubmissionLease>), NodeCoreError> {
         let targets = self.mvp10_own_device_targets(&request)?;
+        for (_, target) in &targets {
+            self.prepare_publication_target(store, target)?;
+        }
         let leases = targets
             .iter()
             .map(|(_, target)| store.acquire_submission(target))
@@ -1015,7 +1080,15 @@ impl RouterCore {
         match shard.registry.route_envelope(&envelope) {
             DeliveryDecision::Online { gateway_id, session_id, target_delivery_id } => {
                 crate::record_router_envelope_accepted();
-                let entry = shard.inbox.append_at(envelope.clone(), now_unix_seconds);
+                let entry = match shard.inbox.append_published(envelope.clone(), now_unix_seconds) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        return RouterSubmitOutcome::RejectedSecurity {
+                            target_delivery_id: envelope.target_delivery_id,
+                            reason: error.to_string(),
+                        };
+                    }
+                };
                 self.index_envelope_target(&entry);
                 RouterSubmitOutcome::Online(OnlineDelivery {
                     gateway_id,
@@ -1027,7 +1100,16 @@ impl RouterCore {
             }
             DeliveryDecision::OfflineWake(wake_hint) => {
                 crate::record_router_envelope_accepted();
-                let entry = shard.inbox.append_at(envelope, now_unix_seconds);
+                let target = envelope.target_delivery_id.clone();
+                let entry = match shard.inbox.append_published(envelope, now_unix_seconds) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        return RouterSubmitOutcome::RejectedSecurity {
+                            target_delivery_id: target,
+                            reason: error.to_string(),
+                        };
+                    }
+                };
                 self.index_envelope_target(&entry);
                 RouterSubmitOutcome::OfflineQueued(OfflineQueuedDelivery { entry, wake_hint })
             }
@@ -1121,6 +1203,26 @@ impl RouterCore {
     }
 
     pub(crate) fn snapshot(&self) -> RouterCoreSnapshot {
+        let control = lock_unpoisoned(&self.control);
+        let shards =
+            self.target_shards.iter().map(|shard| lock_unpoisoned(shard)).collect::<Vec<_>>();
+        if let Some(core) = self.publication.get() {
+            let mut snapshot = self.raw_snapshot(&control, &shards);
+            let mut snapshot = core.with_views(|views| {
+                snapshot.inbox.filter_published(views);
+                snapshot
+            });
+            snapshot.replay_guard_state.retain_keys(|key| core.resource_visible(key));
+            return snapshot;
+        }
+        self.raw_snapshot(&control, &shards)
+    }
+
+    fn raw_snapshot(
+        &self,
+        control: &RouterControlState,
+        shards: &[MutexGuard<'_, RouterTargetShard>],
+    ) -> RouterCoreSnapshot {
         let mut snapshot = RouterCoreSnapshot {
             registry: SessionRegistry::new(),
             inbox: OpaqueDeviceInbox::new(),
@@ -1132,7 +1234,6 @@ impl RouterCore {
             }
         }
         {
-            let control = lock_unpoisoned(&self.control);
             snapshot.mvp1_identities = control.mvp1_identities.clone();
             snapshot.foreign_device_heads = control.foreign_device_heads.clone();
             snapshot.lifecycle_by_principal = control.lifecycle_by_principal.clone();
@@ -1144,8 +1245,7 @@ impl RouterCore {
             snapshot.home_node_migrations = control.home_node_migrations.clone();
             snapshot.home_node_routes = control.home_node_routes.clone();
         }
-        for shard in &self.target_shards {
-            let shard = lock_unpoisoned(shard);
+        for shard in shards {
             snapshot.registry.merge_from(&shard.registry);
             snapshot.inbox.merge_from(&shard.inbox);
             snapshot
@@ -1160,10 +1260,10 @@ impl RouterCore {
 
     pub(crate) fn from_snapshot(snapshot: RouterCoreSnapshot) -> Self {
         let target_shards = (0..ROUTER_TARGET_SHARD_COUNT)
-            .map(|_index| Mutex::new(RouterTargetShard::default()))
+            .map(|_index| Arc::new(Mutex::new(RouterTargetShard::default())))
             .collect::<Vec<_>>();
         let envelope_target_index_shards = (0..ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT)
-            .map(|_index| Mutex::new(BTreeMap::new()))
+            .map(|_index| Arc::new(Mutex::new(BTreeMap::new())))
             .collect::<Vec<_>>();
         let forwarding_reservations = Arc::new(ForwardingReservations {
             shards: (0..ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT)
@@ -1172,7 +1272,7 @@ impl RouterCore {
             next_attempt_id: AtomicU64::new(1),
         });
         let replay_guard_shards = (0..ROUTER_REPLAY_GUARD_SHARD_COUNT)
-            .map(|_index| Mutex::new(NodeReplayGuardState::new()))
+            .map(|_index| Arc::new(Mutex::new(NodeReplayGuardState::new())))
             .collect::<Vec<_>>();
         let control = RouterControlState {
             principal_lookup_limiter: crate::principal_directory::PrincipalLookupLimiter::default(),
@@ -1194,6 +1294,7 @@ impl RouterCore {
             forwarding_reservations,
             control: Mutex::new(control),
             migration_read_snapshot: ArcSwap::from_pointee(migration_read_snapshot),
+            publication: std::sync::OnceLock::new(),
             replay_guard_shards,
             node_service_signer: Mutex::new(None),
             local_home_node_id: Mutex::new(None),
@@ -1417,6 +1518,7 @@ impl RouterCore {
         crate::record_router_replay_guard_check();
         let replay_check_started = Instant::now();
         let replay_key = envelope_replay_tuple_key(source, envelope);
+        crate::router_store::publication::operation::replay_resource(&replay_key);
         let replay_check =
             lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])
                 .check_envelope(source, envelope, now_unix_seconds);
@@ -1433,6 +1535,7 @@ impl RouterCore {
         crate::record_router_replay_guard_check();
         let replay_check_started = Instant::now();
         let replay_key = envelope_replay_tuple_key(source, envelope);
+        crate::router_store::publication::operation::replay_resource(&replay_key);
         let replay_check =
             lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])
                 .accept_envelope_once(source, envelope, now_unix_seconds);

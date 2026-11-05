@@ -108,7 +108,7 @@ fn stripe(target: &str) -> u64 {
 fn sync_and_async_submit_refuse_cutover_without_sequence_or_live_push_while_colliding_target_succeeds()
 -> TestResult {
     let dir = directory()?;
-    let store = RouterRedbStore::open(dir.0.join("router.redb"))?;
+    let store = Arc::new(RouterRedbStore::open(dir.0.join("router.redb"))?);
     let state = Arc::new(RouterCore::new());
     let unrelated = (0..4096)
         .map(|i| format!("unrelated-{i}"))
@@ -207,7 +207,7 @@ fn repeated_remote_submits_to_committed_home_return_signed_refusal_without_abort
         tx.open_table(redb::TableDefinition::<&str, &[u8]>::new("migration_inbox_routes_v1"))?.insert("moving", serde_json::to_vec(&serde_json::json!({"anchor":head.record.account_anchor(),"migration_id":authorization.body.migration_id,"epoch":head.record.epoch(),"active":false}))?.as_slice())?;
         tx.commit()?;
     }
-    let store = RouterRedbStore::open(&path)?;
+    let store = Arc::new(RouterRedbStore::open(&path)?);
     let state = RouterCore::new();
     state.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([8; 32])));
     let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
@@ -279,7 +279,7 @@ fn new_source_submission_after_commit_is_forwarded_or_refused_never_spooled() ->
         )?;
         tx.commit()?;
     }
-    let store = RouterRedbStore::open(&path)?;
+    let store = Arc::new(RouterRedbStore::open(&path)?);
     state.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([8; 32])));
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let client = crate::router_runtime::LocalFederationForwardClient {

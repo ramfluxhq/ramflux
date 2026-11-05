@@ -160,6 +160,11 @@ impl From<&CursorAckState> for InboxCursorResponse {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct OpaqueDeviceInbox {
     next_seq: BTreeMap<String, u64>,
+    #[serde(skip)]
+    pub(crate) publication:
+        Option<std::sync::Arc<crate::router_store::publication::PublicationCore>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) aborted_ranges: BTreeMap<String, Vec<(u64, u64)>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     incarnations: BTreeMap<String, String>,
     pending: BTreeMap<String, Vec<InboxEntry>>,
@@ -196,6 +201,61 @@ impl OpaqueDeviceInbox {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn append_published(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+        now: i64,
+    ) -> Result<InboxEntry, NodeCoreError> {
+        if let Some(core) = &self.publication {
+            let id = self
+                .incarnation_id(&envelope.target_delivery_id)
+                .ok_or_else(|| NodeCoreError::Redb("uninitialized publication target".into()))?;
+            let sequence = crate::router_store::publication::operation_allocate(
+                core,
+                &envelope.target_delivery_id,
+                id,
+            )?;
+            self.next_seq.insert(envelope.target_delivery_id.clone(), sequence);
+        }
+        Ok(self.append_at(envelope, now))
+    }
+
+    fn published_limit(&self, target: &str) -> u64 {
+        self.publication.as_ref().map_or(u64::MAX, |core| {
+            self.incarnation_id(target).map_or(0, |id| core.view(target, id).0)
+        })
+    }
+
+    pub(crate) fn filter_published(
+        &mut self,
+        views: &crate::router_store::publication::PublishedViews,
+    ) {
+        for (target, (id, limit, aborted)) in views {
+            self.incarnations.insert(target.clone(), id.clone());
+            self.aborted_ranges.insert(target.clone(), aborted.clone());
+            if let Some(entries) = self.pending.get_mut(target) {
+                entries.retain(|entry| {
+                    entry.inbox_seq <= *limit
+                        && !aborted.iter().any(|(a, b)| (*a..=*b).contains(&entry.inbox_seq))
+                });
+            }
+            if let Some(deadlines) = self.retain_until.get_mut(target) {
+                deadlines.retain(|seq, _| *seq <= *limit);
+            }
+            self.next_seq.insert(target.clone(), limit.saturating_add(1));
+            if let Some(cursor) = self.cursors.get_mut(target) {
+                cursor.issued_inbox_seq = cursor.issued_inbox_seq.min(*limit);
+                cursor.settled_inbox_seq = cursor.settled_inbox_seq.min(*limit);
+                cursor.inbox_seq = cursor.inbox_seq.min(*limit);
+                cursor.acked_inbox_seqs.retain(|seq| *seq <= *limit);
+                cursor.nack_attempts.retain(|seq, _| *seq <= *limit);
+                cursor.dead_letters.retain(|row| row.inbox_seq <= *limit);
+            }
+        }
+        self.publication = None;
+        self.expiry = InboxExpiryIndex::default();
     }
 
     /// Appends at the current server time.
@@ -317,7 +377,10 @@ impl OpaqueDeviceInbox {
             .map(|entries| {
                 entries
                     .iter()
-                    .filter(|entry| entry.inbox_seq > after_inbox_seq)
+                    .filter(|entry| {
+                        entry.inbox_seq > after_inbox_seq
+                            && entry.inbox_seq <= self.published_limit(target_delivery_id)
+                    })
                     .take(limit)
                     .cloned()
                     .collect()
@@ -339,7 +402,10 @@ impl OpaqueDeviceInbox {
             .map(|entries| {
                 entries
                     .iter()
-                    .filter(|entry| entry.inbox_seq > after_inbox_seq)
+                    .filter(|entry| {
+                        entry.inbox_seq > after_inbox_seq
+                            && entry.inbox_seq <= self.published_limit(target_delivery_id)
+                    })
                     .filter(|entry| self.retain_until(entry) > now)
                     .take(limit)
                     .cloned()
@@ -744,6 +810,7 @@ impl OpaqueDeviceInbox {
 
     pub(crate) fn merge_from(&mut self, other: &Self) {
         self.incarnations.extend(other.incarnations.clone());
+        self.aborted_ranges.extend(other.aborted_ranges.clone());
         for (entry, deadline) in other.pending_entries_with_deadline() {
             self.restore_pending_entry_until(entry.clone(), Some(deadline));
         }

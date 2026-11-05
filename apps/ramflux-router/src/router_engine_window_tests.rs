@@ -113,7 +113,7 @@ fn clock_rollback_after_observed_closure_never_reopens_forwarding_after_restart(
         timeout: std::time::Duration::from_millis(100),
     };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let store = RouterRedbStore::open(&path)?;
+    let store = Arc::new(RouterRedbStore::open(&path)?);
     // No preseeded floor: actual sync submit is the first observer of closure.
     let response = at(end, || {
         submit_envelope(
@@ -129,7 +129,7 @@ fn clock_rollback_after_observed_closure_never_reopens_forwarding_after_restart(
     assert_eq!(response.outcome, "rejected_home_node_migrated");
     assert!(response.nack.is_some());
     drop(store);
-    let store = RouterRedbStore::open(&path)?;
+    let store = Arc::new(RouterRedbStore::open(&path)?);
     for (asynchronous, client_enabled) in
         [(false, true), (true, true), (false, false), (true, false)]
     {
@@ -229,7 +229,7 @@ fn committed_forward_missing_source_operation_is_permanent_and_never_connects() 
         tx.delete_table(redb::TableDefinition::<&str, &[u8]>::new("migration_ops_v1"))?;
         tx.commit()?;
     }
-    let store = RouterRedbStore::open(&path)?;
+    let store = Arc::new(RouterRedbStore::open(&path)?);
     let state = RouterCore::new();
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
@@ -281,7 +281,7 @@ fn window_latch_persist_failure_fails_closed_without_forwarding() -> Result {
             .insert("unwritable", "wrong value type")?;
         tx.commit()?;
     }
-    let store = RouterRedbStore::open(&path)?;
+    let store = Arc::new(RouterRedbStore::open(&path)?);
     let state = Arc::new(RouterCore::new());
     state.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([8; 32])));
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -348,7 +348,7 @@ fn window_latch_persist_failure_fails_closed_without_forwarding() -> Result {
         tx.delete_table(redb::TableDefinition::<&str, &str>::new("migration_window_closed_v1"))?;
         tx.commit()?;
     }
-    let store = RouterRedbStore::open(&path)?;
+    let store = Arc::new(RouterRedbStore::open(&path)?);
     let server = std::thread::spawn(move || -> std::io::Result<()> {
         let until = Instant::now() + std::time::Duration::from_secs(3);
         loop {

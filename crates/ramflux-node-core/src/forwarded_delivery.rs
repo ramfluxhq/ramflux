@@ -40,6 +40,19 @@ impl RouterCore {
         request: ForwardedEnvelopeRequest,
         now: u64,
     ) -> Result<RouterSubmitOutcome, NodeCoreError> {
+        crate::router_store::publication::capture(|| {
+            self.submit_forwarded_envelope_inner(store, node, request, now)
+        })?
+        .published_blocking()?
+    }
+
+    fn submit_forwarded_envelope_inner(
+        &self,
+        store: &RouterRedbStore,
+        node: Option<&MigrationNode>,
+        request: ForwardedEnvelopeRequest,
+        now: u64,
+    ) -> Result<RouterSubmitOutcome, NodeCoreError> {
         let _pin_admission =
             FOREIGN_PIN_ADMISSION.lock().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         let ForwardedEnvelopeRequest { envelope, migration_evidence, peer_node_id } = request;
@@ -109,6 +122,7 @@ impl RouterCore {
                 target_delivery_id: envelope.target_delivery_id,
             });
         }
+        self.prepare_publication_target(store, &envelope.target_delivery_id)?;
         let replay = crate::envelope_replay_tuple_key(&source, &envelope);
         let outcome = self.submit_envelope_at(&source, envelope, now);
         let entry = match &outcome {

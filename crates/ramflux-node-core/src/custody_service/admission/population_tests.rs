@@ -28,7 +28,7 @@ impl Scenario {
     ) -> Result<Self> {
         let store = crate::RouterRedbStore::open_without_wal(path)?;
         let router = crate::RouterCore::new();
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         // Known principals isolate admission from unchanged durable new-principal quotas.
         for (n, driver) in drivers.iter().enumerate() {
             router.publish_custody_record_from(

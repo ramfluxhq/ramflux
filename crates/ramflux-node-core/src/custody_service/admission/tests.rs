@@ -17,7 +17,7 @@ fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
     {
         let store = crate::RouterRedbStore::open_without_wal(&path)?;
         let router = crate::RouterCore::new();
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         let refused = Driver::new("final-refused", 170)?;
         let service = CustodyService::new(refused.node.clone(), false, &store, now)?;
         let action = refused.publish();

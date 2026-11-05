@@ -49,7 +49,7 @@ async fn forwarded_wire_reply_refuses_dormant_and_acks_durable_duplicate_after_r
             state.refresh_registered_envelope_authority(&mut envelope)?;
             bodies.push(serde_json::json!({"envelope": envelope, "migration_evidence":null}));
         }
-        store.save_router(&state)?;
+        store.bootstrap_router(&state)?;
         drop(store);
         // Install only the persisted dormant route: this fixture tests the wire mapping,
         // while node-core exercises the full cryptographic seal and activation protocol.

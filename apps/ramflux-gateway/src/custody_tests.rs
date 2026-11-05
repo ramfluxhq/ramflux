@@ -126,7 +126,7 @@ fn exercise(
     };
     let router = ramflux_node_core::RouterCore::new();
     let store = ramflux_node_core::RouterRedbStore::open(fixture.root.join("router.redb"))?;
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let service = ramflux_node_core::CustodyService::new(node.clone(), false, &store, now)?;
     let mut proxy = Proxy {
         node,

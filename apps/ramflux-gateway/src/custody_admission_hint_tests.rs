@@ -25,7 +25,7 @@ async fn refusal_frames_carry_hint_over_tcp_and_quic() -> Result {
 
     let router = Arc::new(RouterCore::new());
     let store = Arc::new(RouterRedbStore::open(fixture.root.join("hint-router.redb"))?);
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let now = ramflux_node_core::now_unix_seconds();
     let node = authority(now)?.node;
     let service = Arc::new(CustodyService::new(node.clone(), false, &store, now)?);

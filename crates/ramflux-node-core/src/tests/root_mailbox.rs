@@ -14,7 +14,7 @@ fn populated_mailbox() -> Result<Mailbox, Box<dyn std::error::Error>> {
     let path = temp_store_path("root-qualified-mailbox")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let bob_root = ramflux_crypto::create_identity_root("bob", [0xb1; 32]);
     let mallory_root = ramflux_crypto::create_identity_root("mallory", [0xb2; 32]);
     for root in [&mallory_root, &bob_root] {

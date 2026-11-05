@@ -311,7 +311,7 @@ fn damaged_associations() -> Result {
 fn prior_cursor_field_store(root: &Path, mode: u8, ids: &[String]) -> Result {
     let store = test_store(root, mode, 1)?;
     let router = store.load_router()?.expect("router");
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     drop(store);
     let db = redb::Database::open(root.join("db"))?;
     let tx = db.begin_write()?;
