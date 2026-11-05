@@ -166,14 +166,18 @@ impl Runtime for RuntimeGate {
     }
 }
 
-async fn until(mut ready: impl FnMut() -> bool) {
+#[track_caller]
+fn until(mut ready: impl FnMut() -> bool) -> impl Future<Output=()> {
+    let caller=std::panic::Location::caller();
+    async move {
     timeout(Duration::from_secs(5), async {
         while !ready() {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|_|panic!("condition did not become ready at {caller}"));
+    }
 }
 
 async fn pair(
@@ -664,6 +668,9 @@ async fn metadata_send_ack_ranges_refuse_before_third_range() {
     let(endpoint,peer_endpoint,connection,peer,gate,wire)=pair(65536,64,524288,512,65536,128).await;
     gate.closed.store(true,Ordering::SeqCst);
     wire.held.store(true,Ordering::SeqCst);
+    // Only injected ACKs may reach this sender. Clearing queued datagrams does not
+    // stop a peer driver from producing a delayed ordinary ACK afterwards.
+    wire.suppress_send.store(true,Ordering::SeqCst);
     let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));
     let mut stream=connection.open_uni().await.unwrap();
     gate.open();
@@ -686,7 +693,17 @@ async fn metadata_send_ack_ranges_refuse_before_third_range() {
         wire.held.store(false,Ordering::SeqCst);
         if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}
         gate.open();
-        if index<2 {until(||connection.control_test(|p|p.metadata_test_send_ranges()).0==index+1).await;}
+        if index<2 {
+            until(||connection.control_test(|p|p.metadata_test_send_ranges()).0==index+1).await;
+            // Force the formerly racy ordering: an ordinary cumulative ACK is built
+            // after the controlled ACK. It must be discarded at the actual send site.
+            let delivered=wire.delivered.load(Ordering::SeqCst);
+            let acks=peer.stats().frame_tx.acks;
+            peer.control_test(|p|p.metadata_test_force_ack());
+            until(||peer.stats().frame_tx.acks>acks).await;
+            assert_eq!(wire.delivered.load(Ordering::SeqCst),delivered,"ordinary ACK escaped the controlled-ACK fixture");
+            assert_eq!(connection.control_test(|p|p.metadata_test_send_ranges()).0,index+1);
+        }
     }
     assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
     assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));

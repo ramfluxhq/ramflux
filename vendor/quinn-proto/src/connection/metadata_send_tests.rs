@@ -84,3 +84,57 @@ fn all_three_space_transfers_and_key_discard_charge_actual_retained_backing(){
     }
     assert!(credit.stats().used>0);drop(pair);assert_eq!(credit.stats().used,0);
 }
+
+#[test]
+fn refused_probe_keeps_the_committed_packet_owner(){
+    let mut pair=Pair::default();let(client,_)=pair.connect();let now=pair.time;
+    let conn=pair.client_conn_mut(client);
+    let record_bytes=4*std::mem::size_of::<super::metadata_map::Slot<SentPacket>>();
+    let limit=ThinRetransmits::box_charge()+128+((record_bytes+63)&!63)+64;
+    let credit=MetadataCredit::new(limit);
+    let space=&mut conn.spaces[SpaceId::Data];
+    space.pending=Retransmits::with_metadata(Some(credit.clone()),MetadataClass::PendingRetransmits);
+    space.sent_packets=Default::default();
+    let mut owner=ThinRetransmits::default();owner.get_or_create(Some(credit.clone())).unwrap().test_child(0,0).unwrap();
+    let backing=owner.storage();
+    space.sent_packets.reserve_insert(Some(&credit)).unwrap();
+    space.sent_packets.insert(0,SentPacket{path_generation:0,time_sent:now,size:0,ack_eliciting:false,largest_acked:None,retransmits:owner,stream_frames:Default::default()});
+    let used=credit.stats().used;space.loss_probes=1;
+    space.maybe_queue_probe(false,&conn.streams);
+    assert_eq!(credit.stats().failed_class,Some(MetadataClass::PendingRetransmits));
+    assert_eq!(space.sent_packets.get(&0).unwrap().retransmits.storage(),backing,"refused transfer must preserve the committed box and children");
+    assert_eq!(credit.stats().used,used);assert_eq!(space.pending.capacity_bytes(),0);
+    drop(pair);assert_eq!(credit.stats().used,0);
+}
+
+#[test]
+fn populate_refusal_preserves_the_finished_datagram_prefix(){
+    let mut pair=Pair::default();let(client,_)=pair.connect();let now=pair.time;
+    let conn=pair.client_conn_mut(client);
+    let record_bytes=4*std::mem::size_of::<super::metadata_map::Slot<SentPacket>>();
+    let limit=384+((record_bytes+63)&!63)+64;
+    for space in &mut conn.spaces {
+        assert!(space.pending.is_empty(&conn.streams));
+        space.pending=Retransmits::default();
+    }
+    let old=std::mem::take(&mut conn.spaces[SpaceId::Data].sent_packets);
+    for packet in old.into_values(){conn.remove_in_flight(&packet);}
+    let credit=arm(conn,limit);
+    let first=conn.streams().open(Dir::Uni).unwrap();let second=conn.streams().open(Dir::Uni).unwrap();
+    conn.send_stream(first).set_priority(10).unwrap();
+    let payload=vec![0x5a;conn.path.current_mtu() as usize];
+    conn.send_stream(first).write(&payload).unwrap();conn.send_stream(second).write(b"second").unwrap();
+    let mut buffer=Vec::new();
+    let tx=conn.poll_transmit(now,2,&mut buffer).unwrap();
+    assert!(conn.metadata_exhausted(),"second packet must hit STREAM metadata spill");
+    assert_eq!(credit.stats().failed_class,Some(MetadataClass::SentFrameMetadata));
+    let records=conn.spaces[SpaceId::Data].sent_packets.values().filter(|p|!p.stream_frames.is_empty()).collect::<Vec<_>>();
+    assert_eq!(records.len(),1,"only the finished first packet is tracked");
+    assert_eq!(records[0].stream_frames.iter().next().unwrap().id,first);
+    assert_eq!(tx.size,buffer.len());assert_eq!(tx.size,conn.path.current_mtu() as usize);
+    assert_eq!(tx.segment_size,None,"no empty second GSO datagram is reported");
+    assert_eq!(buffer[0]&0x80,0,"returned prefix is the completed Data packet, not a replacement close");
+    drop(records);
+    let mut close=Vec::new();assert!(conn.poll_transmit(now,1,&mut close).is_some());
+    assert!(!close.is_empty());
+}
