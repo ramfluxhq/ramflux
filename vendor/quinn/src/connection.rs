@@ -1040,6 +1040,11 @@ pub(crate) struct State {
 }
 
 impl State {
+    pub(crate) fn fail_metadata(&mut self) {
+        self.inner.resource_exhausted(self.runtime.now());
+        self.wake();
+    }
+
     fn resume_control(&mut self, cx: &mut Context<'_>) -> bool {
         #[cfg(test)]
         {

@@ -280,7 +280,7 @@ impl IndexMut<SpaceId> for [PacketSpace; 3] {
 }
 
 /// Represents one or more packets subject to retransmission
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct SentPacket {
     /// [`PathData::generation`](super::PathData::generation) of the path on which this packet was sent
     pub(super) path_generation: u64,

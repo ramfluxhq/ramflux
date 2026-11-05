@@ -271,6 +271,7 @@ impl<'a> SendStream<'a> {
             return Err(WriteError::Blocked);
         }
 
+        stream.pending.set_metadata(self.state.metadata.clone());
         let was_pending = stream.is_pending();
         let written = match stream.write(source, limit) {
             Ok(written) => written,

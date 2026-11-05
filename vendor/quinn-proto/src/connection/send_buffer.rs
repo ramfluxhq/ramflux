@@ -10,6 +10,9 @@ use crate::{VarInt, range_set::RangeSet};
 pub(super) struct SendBuffer {
     /// Data queued by the application but not yet acknowledged. May or may not have been sent.
     unacked_segments: VecDeque<Bytes>,
+    // Backing is declared first so it is destroyed before its charge.
+    segment_charge: Option<super::metadata_credit::AllocationCharge>,
+    metadata: Option<std::sync::Arc<super::metadata_credit::MetadataCredit>>,
     /// Total size of `unacked_segments`
     unacked_len: usize,
     /// Acknowledged bytes removed from the first segment's view but still held by its allocation
@@ -29,6 +32,30 @@ pub(super) struct SendBuffer {
 }
 
 impl SendBuffer {
+    pub(super) fn set_metadata(&mut self, metadata: Option<std::sync::Arc<super::metadata_credit::MetadataCredit>>) {
+        if self.metadata.is_none() { self.metadata=metadata; }
+    }
+    pub(super) fn reserve_segment(&mut self) -> Result<(),super::metadata_credit::ResourceExhausted> {
+        use super::metadata_credit::MetadataClass;
+        let Some(credit)=self.metadata.as_ref() else { return Ok(()); };
+        if self.unacked_segments.len()<self.unacked_segments.capacity() { return Ok(()); }
+        let capacity=self.unacked_segments.capacity().checked_mul(2).map(|n|n.max(4))
+            .ok_or_else(||credit.fail(MetadataClass::SendSegments))?;
+        let bytes=capacity.checked_mul(std::mem::size_of::<Bytes>()).ok_or_else(||credit.fail(MetadataClass::SendSegments))?;
+        let charge=credit.reserve(bytes,MetadataClass::SendSegments)?;
+        let mut next=VecDeque::new();
+        next.try_reserve_exact(capacity).map_err(|_|credit.fail(MetadataClass::SendSegments))?;
+        assert_eq!(next.capacity(),capacity,"metadata allocation layout differs from requested capacity");
+        credit.allocated();
+        next.append(&mut self.unacked_segments);
+        let old=std::mem::replace(&mut self.unacked_segments,next);
+        drop(old);
+        self.segment_charge=Some(charge);
+        Ok(())
+    }
+    #[cfg(feature="__control-test")]
+    pub(super) fn segment_capacity_bytes(&self) -> usize { self.unacked_segments.capacity()*std::mem::size_of::<Bytes>() }
+
     /// Construct an empty buffer at the initial offset
     pub(super) fn new() -> Self {
         Self::default()
@@ -165,6 +192,7 @@ impl SendBuffer {
         *self = Self {
             offset: self.offset,
             unsent: self.offset,
+            metadata: self.metadata.clone(),
             ..Self::default()
         };
     }
@@ -206,6 +234,27 @@ impl SendBuffer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_growth_charges_overlap_and_retains_empty_capacity() {
+        use super::super::metadata_credit::MetadataCredit;
+        let credit=MetadataCredit::new(512);
+        let mut buffer=SendBuffer::new();
+        buffer.set_metadata(Some(credit.clone()));
+        for _ in 0..5 {
+            buffer.reserve_segment().unwrap();
+            buffer.write(Bytes::from_static(b"x"));
+        }
+        assert_eq!(buffer.unacked_segments.capacity()*std::mem::size_of::<Bytes>(),256);
+        assert_eq!(credit.stats().used,320);
+        assert_eq!(credit.stats().peak,512,"old and new capacities overlap through deallocation");
+        assert_eq!(credit.stats().allocations,2);
+        buffer.ack(0..5);
+        assert_eq!(credit.stats().used,320,"empty retained backing remains charged");
+        buffer.discard();
+        assert_eq!(buffer.unacked_segments.capacity(),0);
+        assert_eq!(credit.stats().used,0);
+    }
+
     use super::*;
 
     #[test]
