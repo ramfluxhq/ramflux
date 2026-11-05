@@ -380,11 +380,66 @@ fn assert_retry_retained(account: &LocalBusAccountState, key: &str) -> TestResul
     Ok(())
 }
 
-async fn characterise_gateway_admission(local_fresh: bool, peer_fresh: bool) -> TestResult {
+async fn assert_first_pass_admitted(
+    account: &mut LocalBusAccountState,
+    key: &str,
+    at: i64,
+) -> TestResult {
+    let messages = account.client.direct_messages("thread")?;
+    assert_eq!(messages.len(), 1, "served peer manifest must admit on the first pass");
+    assert_eq!(
+        account.client.account_db()?.message_content(&messages[0].message_id)?,
+        Some(b"after rename".to_vec())
+    );
+    assert!(!account.client.account_db()?.has_inbox_retry(key)?);
+    assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
+    crate::bus::sync_driver::run_at(account, at + 1).await?;
+    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    Ok(())
+}
+
+async fn assert_deferred_reason(
+    account: &mut LocalBusAccountState,
+    entry: &GatewayInboxEntry,
+    unavailable: bool,
+) -> TestResult {
+    // Replay the same production admission leg without changing the retained retry/backoff.
+    let mut engine = account.session_client().await?;
+    let pool = account.relay_quic_pool()?;
+    let result = account.client.apply_routed_entry(&mut engine, &pool, entry, false).await;
+    account.apply_session_metadata(engine);
+    if unavailable {
+        let error = result.err().ok_or("unavailable directory unexpectedly admitted")?;
+        assert!(error.to_string().contains("404"), "{error}");
+        assert!(account.client.inbound_device_manifest_request(entry)?.is_some());
+    } else {
+        assert_freshness_refusal(&result);
+        assert!(account.client.inbound_device_manifest_request(entry)?.is_none());
+        assert_freshness_refusal(
+            &account
+                .client
+                .require_current_device_authorization(&account.client.owned_device_identity()?),
+        );
+    }
+    Ok(())
+}
+
+async fn characterise_gateway_admission(
+    local_fresh: bool,
+    peer_fresh: bool,
+    serve_peer: bool,
+) -> TestResult {
     let (alice, bob, entry) = renamed_group_fixture().await?;
-    // The peer refresh really reaches a TLS directory and fails with a deterministic 404.
+    let manifests = if serve_peer {
+        BTreeMap::from([(
+            bob.manifest.principal_commitment.clone(),
+            serde_json::to_value(&bob.manifest)?,
+        )])
+    } else {
+        BTreeMap::new()
+    };
     let (address, directory) =
-        crate::bus::dispatch::surface_transport::fixture::directory(&alice.root.0, BTreeMap::new())
+        crate::bus::dispatch::surface_transport::fixture::directory(&alice.root.0, manifests)
             .await?;
     let mut config = alice.config;
     config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
@@ -421,11 +476,17 @@ async fn characterise_gateway_admission(local_fresh: bool, peer_fresh: bool) -> 
         (!peer_fresh).then(|| bob.manifest.principal_commitment.clone())
     );
     let key = account.client.inbox_admission_key(&entry)?;
-    install_gateway(&mut account, vec![entry]);
+    install_gateway(&mut account, vec![entry.clone()]);
     // Same driver and quarantine path as the bus; only its existing receive clock is injected.
     let at = now_unix_timestamp() + 60;
     crate::bus::sync_driver::run_at(&mut account, at).await?;
+    if serve_peer && local_fresh {
+        assert_first_pass_admitted(&mut account, &key, at).await?;
+        directory.abort();
+        return Ok(());
+    }
     assert_retry_retained(&account, &key)?;
+    assert_deferred_reason(&mut account, &entry, !peer_fresh && !serve_peer).await?;
     assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 1)?.len(), 0);
     assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 2)?.len(), 1);
     let mut state = daemon(account, &alice.root.0);
@@ -455,16 +516,26 @@ async fn characterise_gateway_admission(local_fresh: bool, peer_fresh: bool) -> 
 
 #[tokio::test]
 async fn stale_local_head_gateway_admission_is_deferred_until_retry_due() -> TestResult {
-    Box::pin(characterise_gateway_admission(false, true)).await
+    Box::pin(characterise_gateway_admission(false, true, false)).await
 }
 
 #[tokio::test]
 async fn stale_peer_head_after_rename_gateway_admission_is_deferred_until_retry_due() -> TestResult
 {
-    Box::pin(characterise_gateway_admission(true, false)).await
+    Box::pin(characterise_gateway_admission(true, false, false)).await
 }
 
 #[tokio::test]
 async fn both_stale_heads_gateway_admission_is_deferred_until_retry_due() -> TestResult {
-    Box::pin(characterise_gateway_admission(false, false)).await
+    Box::pin(characterise_gateway_admission(false, false, false)).await
+}
+
+#[tokio::test]
+async fn stale_peer_head_with_served_manifest_is_admitted_on_first_pass() -> TestResult {
+    Box::pin(characterise_gateway_admission(true, false, true)).await
+}
+
+#[tokio::test]
+async fn both_stale_heads_with_served_peer_manifest_defer_on_local_head() -> TestResult {
+    Box::pin(characterise_gateway_admission(false, false, true)).await
 }
