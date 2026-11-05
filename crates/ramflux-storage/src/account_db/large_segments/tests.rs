@@ -156,7 +156,7 @@ fn large_segment_checkpoint_survives_crash_without_phantom_bytes() {
     fs::write(directory.join("0.part"), [1, 2]).unwrap();
     drop(store);
     let mut store = db.segment_store().unwrap();
-    assert_eq!(store.page("transfer", 1, 0, 1).unwrap()[0].received_bitmap, 0);
+    assert_eq!(store.reconcile_page("transfer", 1, 0, 1).unwrap()[0].received_bitmap, 0);
     assert_eq!(raw_progress(&db, "transfer").2, 0);
     for (index, bytes) in ciphertexts.iter().enumerate() {
         for (part, data) in bytes.chunks(chunk).enumerate() {
@@ -232,8 +232,9 @@ fn large_partial_restart_rejects_same_length_corruption_and_invalid_lengths() {
                 params![len],
             )
             .unwrap();
+        let mut store = db.segment_store().unwrap();
         assert!(matches!(
-            db.segment_store(),
+            store.reconcile_page("transfer", 1, 0, 1),
             Err(StorageError::Integrity("segment expected length"))
         ));
     }
@@ -250,7 +251,11 @@ fn large_transfer_lease_protects_inflight_part_and_reads_only_requested_chunk() 
     store.admit("transfer", 1, SegmentDirection::Download, &manifest).unwrap();
     let path = store.directory("transfer", 1).unwrap().join("0.part");
     store.during_write = Some(Box::new(|| {
-        assert!(matches!(db.segment_store(), Err(StorageError::AccountWriterBusy(_))));
+        let mut second = db.segment_store().unwrap();
+        assert!(matches!(
+            second.reconcile_page("transfer", 1, 0, 1),
+            Err(StorageError::AccountWriterBusy(_))
+        ));
         observed.set(true);
     }));
     let chunk = manifest.manifest().layout.network_chunk_bytes as usize;
@@ -349,4 +354,52 @@ fn large_backup_merge_upgrades_old_shapes_without_importing_physical_progress() 
             fs::remove_dir_all(target_root).unwrap();
         }
     }
+}
+
+#[test]
+fn startup_recovery_is_once_per_account_and_isolates_busy_or_corrupt_transfers() {
+    let (bad, bad_bytes) = fixture(1);
+    let (good, good_bytes) = fixture(6);
+    let (root, db) = crate::tests::test_db("large-recovery-isolation").unwrap();
+    let mut store = db.segment_store().unwrap();
+    for (id, manifest, bytes) in [("bad", &bad, &bad_bytes), ("good", &good, &good_bytes)] {
+        store.admit(id, 1, SegmentDirection::Download, manifest).unwrap();
+        store.checkpoint(id, 1, 0, 0, &bytes[0]).unwrap();
+    }
+    db.connection.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE object_segment_file SET expected_length=0 WHERE transfer_id='bad';").unwrap();
+    let busy = store.lease("bad").unwrap();
+    drop(store);
+    drop(db);
+    let db = reopen(&root);
+    let mut store = db.segment_store().unwrap();
+    assert_eq!(store.read_chunk("good", 1, 0, 0).unwrap(), good_bytes[0]);
+    drop(busy);
+    drop(store);
+    drop(db);
+    let db = reopen(&root);
+    let mut store = db.segment_store().unwrap();
+    let state: String = db
+        .connection
+        .query_row("SELECT state FROM object_transfer_state WHERE transfer_id='bad'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(state, "segment_quarantined");
+    assert_eq!(store.read_chunk("good", 1, 0, 0).unwrap(), good_bytes[0]);
+    let path = store.location("good", 1).join("0.segment");
+    let mut changed = good_bytes[0].clone();
+    changed[0] ^= 1;
+    fs::write(&path, changed).unwrap();
+    drop(store);
+    let mut again = db.segment_store().unwrap();
+    // The second handle performs no restart rehash or destructive repair.
+    assert!(again.page("good", 1, 0, 1).unwrap()[0].cipher_verified);
+    assert!(matches!(
+        again.read_chunk("good", 1, 0, 0),
+        Err(StorageError::Integrity("segment chunk hash"))
+    ));
+    assert!(path.exists());
+    drop(again);
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
 }

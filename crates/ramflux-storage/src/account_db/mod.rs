@@ -89,6 +89,7 @@ pub struct AccountDb {
     pub(crate) connection: Connection,
     erasure_authority: Option<Connection>,
     volatile_typing: RefCell<BTreeMap<(String, String), TypingStateRecord>>,
+    segment_reconciled: std::cell::OnceCell<()>,
     volatile_presence: RefCell<BTreeMap<String, ContactPresenceRecord>>,
 }
 
@@ -132,6 +133,7 @@ impl AccountDb {
             connection,
             erasure_authority: None,
             volatile_typing: RefCell::new(BTreeMap::new()),
+            segment_reconciled: std::cell::OnceCell::new(),
             volatile_presence: RefCell::new(BTreeMap::new()),
         };
         crate::schema_contact_requests::upgrade(&db.connection)?;
