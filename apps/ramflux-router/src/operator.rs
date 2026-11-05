@@ -155,9 +155,12 @@ mod tests {
         let drained = RouterRedbStore::open_existing(&drain_path)?;
         assert_eq!(drained.pending_identity_admission_count()?, 0);
         drop(drained);
-        let txn = redb::Database::open(&drain_path)?.begin_read()?;
+        // Inspect persisted state without letting cached pages hide a closed owner.
+        let db = redb::Database::builder().set_cache_size(0).open(&drain_path)?;
+        let txn = db.begin_read()?;
         assert!(txn.open_table(BUDGETS)?.is_empty()?);
         drop(txn);
+        drop(db);
         std::fs::remove_file(drain_path)?;
 
         let shutdown_path = path("shutdown");
@@ -170,9 +173,12 @@ mod tests {
         checkpoint_for_shutdown(&RouterCore::new(), &store)?;
         assert_eq!(store.pending_identity_admission_count()?, 0);
         drop(store);
-        let txn = redb::Database::open(&shutdown_path)?.begin_read()?;
+        // Inspect persisted state without letting cached pages hide a closed owner.
+        let db = redb::Database::builder().set_cache_size(0).open(&shutdown_path)?;
+        let txn = db.begin_read()?;
         assert!(txn.open_table(SNAPSHOTS)?.get("identity_registry")?.is_some());
         drop(txn);
+        drop(db);
         std::fs::remove_file(shutdown_path)?;
         Ok(())
     }
