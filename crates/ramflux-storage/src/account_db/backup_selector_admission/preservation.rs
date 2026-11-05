@@ -213,6 +213,12 @@ pub(in crate::account_db) fn prepare(
 fn delete_excluded_target_copies(db: &Connection) -> Result<(), StorageError> {
     // Keep input bindings until every current and archived copy has been classified.
     // Removing a current actor's binding earlier would hide its archived copies.
+    db.execute_batch("CREATE TABLE main.backup_excluded_actor_kind(state_kind TEXT PRIMARY KEY);")?;
+    let archived_exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='backup_archived_actor_state')",
+        [],
+        |r| r.get(0),
+    )?;
     for table in [
         "runtime_actor_state",
         "backup_archived_actor_state",
@@ -227,14 +233,20 @@ fn delete_excluded_target_copies(db: &Connection) -> Result<(), StorageError> {
             continue;
         }
         if table.ends_with("actor_state") {
-            for binding in
-                ["object_payload_actor", "object_reference_actor", "object_transport_actor"]
-            {
-                db.execute(&format!("DELETE FROM {binding} WHERE state_kind IN (SELECT state_kind FROM main.{table} WHERE rowid IN (SELECT row_id FROM backup_erased_copy WHERE database_name='main' AND table_name=?1))"),[table])?;
-            }
+            db.execute(&format!("INSERT OR IGNORE INTO main.backup_excluded_actor_kind SELECT state_kind FROM main.{table} WHERE rowid IN (SELECT row_id FROM backup_erased_copy WHERE database_name='main' AND table_name=?1)"), [table])?;
         }
         db.execute(&format!("DELETE FROM main.{table} WHERE rowid IN (SELECT row_id FROM backup_erased_copy WHERE database_name='main' AND table_name=?1)"),[table])?;
     }
+    // Bindings belong to the state kind, so either surviving target copy retains them.
+    let archived_guard = if archived_exists {
+        "AND NOT EXISTS(SELECT 1 FROM main.backup_archived_actor_state s WHERE s.state_kind=b.state_kind)"
+    } else {
+        ""
+    };
+    for binding in ["object_payload_actor", "object_reference_actor", "object_transport_actor"] {
+        db.execute(&format!("DELETE FROM main.{binding} AS b WHERE state_kind IN (SELECT state_kind FROM main.backup_excluded_actor_kind) AND NOT EXISTS(SELECT 1 FROM main.runtime_actor_state s WHERE s.state_kind=b.state_kind) {archived_guard}"), [])?;
+    }
+    db.execute_batch("DROP TABLE main.backup_excluded_actor_kind;")?;
     Ok(())
 }
 
