@@ -13,12 +13,15 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+pub(crate) mod inbound;
+
 const MAX_PENDING: usize = 512;
 const PASS_ROOTS: usize = 32;
 
 #[derive(Default)]
 pub(crate) struct RefreshState {
     pending: BTreeSet<String>,
+    inbound: inbound::Inbound,
     wake: Arc<tokio::sync::Notify>,
     // A dropped/cancelled pass releases ownership without needing an actor message.
     active: Weak<()>,
@@ -164,6 +167,7 @@ fn apply(
     };
     if ready {
         account.head_refresh.pending.remove(root);
+        inbound::refreshed(account, root)?;
     }
     Ok(ready)
 }
@@ -274,3 +278,23 @@ pub(crate) async fn run(context: SessionContext, writer: mpsc::Sender<AccountWor
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) fn test_apply(
+    account: &mut LocalBusAccountState,
+    root: &str,
+    at: Instant,
+    outcome: Result<SdkDeviceManifestResponse, SdkError>,
+) -> Result<bool, SdkError> {
+    let snapshot = account.connection.as_ref().ok_or(SdkError::NetworkingPending)?.snapshot();
+    account.head_refresh.enqueue(root.to_owned());
+    let plan = prepare(
+        account,
+        Fence {
+            generation: snapshot.generation,
+            session_id: snapshot.session_id.ok_or(SdkError::NetworkingPending)?,
+        },
+    )?
+    .ok_or(SdkError::NetworkingPending)?;
+    apply(account, &plan, root, at, outcome)
+}

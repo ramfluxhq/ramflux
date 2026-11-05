@@ -4,7 +4,7 @@
 //! Resident account connection authority, bounded calls, observations, and session children.
 
 mod model;
-mod receive;
+pub(crate) mod receive;
 pub(crate) mod resync;
 pub(crate) use receive::{ReceiveApplied, ReceiveEntry, ReceivePlan, ReceiveTrigger};
 mod account_work;
@@ -519,6 +519,10 @@ impl ConnectionHandle {
             .take()
             .filter(|(generation, _)| *generation == self.generation())
             .map(|(_, reason)| reason)
+    }
+    pub(crate) fn redrive_receive(&self) {
+        self.shared.resync_needed.request();
+        self.shared.receive_wake.notify_one();
     }
     pub(crate) fn resync_needed(&self) -> bool {
         self.shared.resync_needed.needed()

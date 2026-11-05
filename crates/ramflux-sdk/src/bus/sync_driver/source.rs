@@ -117,7 +117,8 @@ fn request(
         }
         let (key, committed) = super::retry_context(&account.client, entry, &keys)?;
         if !matches!(committed, Ok(false))
-            || !account.client.account_db()?.inbox_retry_ready(&key, now_unix_timestamp())?
+            || (!crate::bus::couriers::head_refresh::inbound::eligible(account, &key)
+                && !account.client.account_db()?.inbox_retry_ready(&key, now_unix_timestamp())?)
             || (now_unix_timestamp()
                 >= entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl))
                 && account.client.account_db()?.has_inbox_retry(&key)?)
