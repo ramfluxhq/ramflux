@@ -270,3 +270,58 @@ async fn verified_legacy_authority_does_not_remain_pending() -> TestResult {
     account.connection.take().ok_or("connection")?.stop().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn refresh_session_loss_cancels_registered_child() -> TestResult {
+    let (mut account, native, io) = account().await?;
+    let handle = account.connection.as_ref().ok_or("connection")?.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let certified = rcgen::generate_simple_self_signed(vec!["session-refresh.test".into()])?;
+    let ca = native.root.0.join("session-refresh-ca.pem");
+    std::fs::write(&ca, certified.cert.pem())?;
+    account.gateway_config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
+        bind_addr: "127.0.0.1:0".parse()?,
+        gateway_addr: listener.local_addr()?,
+        server_name: "session-refresh.test".into(),
+        ca_cert: ca,
+        principal_id: "refresh".into(),
+        device_id: "primary".into(),
+        target_delivery_id: "refresh".into(),
+        prekey_http_url: None,
+    });
+    let (writer, mut work) = mpsc::channel(4);
+    // The real registration supplies Children.cancel, rather than test_context's
+    // handle-wide stop channel. Use the same child body as production activation.
+    handle.spawn_session_child("head-refresh", move |context| {
+        Box::pin(super::run(context, writer.clone()))
+    })?;
+    for _ in 0..2 {
+        let AccountWork::Directory(message) =
+            tokio::time::timeout(Duration::from_secs(1), work.recv())
+                .await?
+                .ok_or("writer work")?
+        else {
+            return Err("wrong writer work".into());
+        };
+        let super::super::directory::DirectoryWork::HeadRefresh(message) = *message else {
+            return Err("wrong directory work".into());
+        };
+        apply_work(&mut account, message);
+    }
+    let (_socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await??;
+    assert!(account.head_refresh.active.upgrade().is_some(), "fetch holds the lease");
+    crate::bus::connection_manager::tests::send(
+        &io,
+        &crate::GatewayServerFrame::Close { reason: "refresh-session-loss".into() },
+    )?;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while account.head_refresh.active.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert!(!fresh(&account, &native)?, "lost session must not apply held authority");
+    assert!(work.try_recv().is_err(), "cancelled session must send no Apply");
+    handle.stop().await;
+    Ok(())
+}

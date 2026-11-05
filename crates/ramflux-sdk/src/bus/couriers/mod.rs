@@ -25,6 +25,4 @@ pub(crate) mod reset;
 #[cfg(test)]
 mod tests;
 
-// Dormant until command demand is wired into the session manager.
-#[allow(dead_code)]
 pub(crate) mod head_refresh;
