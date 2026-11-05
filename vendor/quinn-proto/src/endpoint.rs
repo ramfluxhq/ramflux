@@ -110,9 +110,10 @@ impl Endpoint {
         event: EndpointEvent,
     ) -> Option<ConnectionEvent> {
         use EndpointEventInner::*;
+        let credit = event.1;
         match event.0 {
             NeedIdentifiers(now, n) => {
-                return Some(self.send_new_identifiers(now, ch, n));
+                return Some(self.send_new_identifiers(now, ch, n, credit));
             }
             ResetToken(remote, token) => {
                 if let Some(old) = self.connections[ch].reset_token.replace((remote, token)) {
@@ -127,7 +128,7 @@ impl Endpoint {
                     trace!("peer retired CID {}: {}", seq, cid);
                     self.index.retire(cid);
                     if allow_more_cids {
-                        return Some(self.send_new_identifiers(now, ch, 1));
+                        return Some(self.send_new_identifiers(now, ch, 1, credit));
                     }
                 }
             }
@@ -396,6 +397,7 @@ impl Endpoint {
         now: Instant,
         ch: ConnectionHandle,
         num: u64,
+        credit: Option<Arc<crate::connection::control::Reservation>>,
     ) -> ConnectionEvent {
         let mut ids = vec![];
         for _ in 0..num {
@@ -410,7 +412,7 @@ impl Endpoint {
                 reset_token: ResetToken::new(&*self.config.reset_key, id),
             });
         }
-        ConnectionEvent(ConnectionEventInner::NewIdentifiers(ids, now))
+        ConnectionEvent(ConnectionEventInner::NewIdentifiers(ids, now, credit))
     }
 
     /// Generate a connection ID for `ch`
@@ -682,7 +684,7 @@ impl Endpoint {
             }
             Err(e) => {
                 debug!("handshake failed: {}", e);
-                self.handle_event(ch, EndpointEvent(EndpointEventInner::Drained));
+                self.handle_event(ch, EndpointEvent(EndpointEventInner::Drained, None));
                 let response = match e {
                     ConnectionError::TransportError(ref e) => Some(self.initial_close(
                         version,

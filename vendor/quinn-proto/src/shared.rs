@@ -14,7 +14,7 @@ pub(crate) enum ConnectionEventInner {
     /// A datagram has been received for the Connection
     Datagram(DatagramConnectionEvent),
     /// New connection identifiers have been issued for the Connection
-    NewIdentifiers(Vec<IssuedCid>, Instant),
+    NewIdentifiers(Vec<IssuedCid>, Instant, Option<std::sync::Arc<crate::connection::control::Reservation>>),
 }
 
 /// Variant of [`ConnectionEventInner`].
@@ -29,7 +29,7 @@ pub(crate) struct DatagramConnectionEvent {
 
 /// Events sent from a Connection to an Endpoint
 #[derive(Debug)]
-pub struct EndpointEvent(pub(crate) EndpointEventInner);
+pub struct EndpointEvent(pub(crate) EndpointEventInner, pub(crate) Option<std::sync::Arc<crate::connection::control::Reservation>>);
 
 impl EndpointEvent {
     /// Construct an event that indicating that a `Connection` will no longer emit events
@@ -37,7 +37,7 @@ impl EndpointEvent {
     /// Useful for notifying an `Endpoint` that a `Connection` has been destroyed outside of the
     /// usual state machine flow, e.g. when being dropped by the user.
     pub fn drained() -> Self {
-        Self(EndpointEventInner::Drained)
+        Self(EndpointEventInner::Drained, None)
     }
 
     /// Determine whether this is the last event a `Connection` will emit
