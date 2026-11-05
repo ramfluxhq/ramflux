@@ -125,7 +125,7 @@ struct LocalDeliveryEnvelopeRecord {
 }
 
 impl RouterCommitWriter {
-    fn start(db: Arc<redb::Database>) -> Result<Self, NodeCoreError> {
+    fn start(db: Arc<redb::Database>, path: PathBuf) -> Result<Self, NodeCoreError> {
         let batch_max =
             router_usize_env(ROUTER_COMMIT_BATCH_MAX_ENV, ROUTER_COMMIT_BATCH_MAX_DEFAULT).max(1);
         let queue_capacity = router_usize_env(
@@ -140,7 +140,7 @@ impl RouterCommitWriter {
         let (sender, receiver) = mpsc::sync_channel(queue_capacity);
         let thread = thread::Builder::new()
             .name("ramflux-router-commit-writer".to_owned())
-            .spawn(move || router_commit_writer_loop(&db, &receiver, batch_max, window))
+            .spawn(move || router_commit_writer_loop(&db, &path, &receiver, batch_max, window))
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         Ok(Self { sender: Some(sender), thread: Some(thread) })
     }
@@ -171,6 +171,7 @@ impl Drop for RouterCommitWriter {
 
 fn router_commit_writer_loop(
     db: &redb::Database,
+    path: &Path,
     receiver: &mpsc::Receiver<RouterCommitRequest>,
     batch_max: usize,
     window: Duration,
@@ -197,7 +198,7 @@ fn router_commit_writer_loop(
                 }
             }
         }
-        let result = router_commit_batch(db, batch.iter().map(|request| &request.op));
+        let result = router_commit_batch(db, path, batch.iter().map(|request| &request.op));
         match result {
             Ok(()) => {
                 for request in batch {
@@ -216,10 +217,14 @@ fn router_commit_writer_loop(
 
 fn router_commit_batch<'a>(
     db: &redb::Database,
+    path: &Path,
     ops: impl Iterator<Item = &'a RouterCommitOp>,
 ) -> Result<(), NodeCoreError> {
     let begin_write_started = Instant::now();
-    let write_txn = db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+    let write_txn = crate::durability_io::boundary(path, "begin_write", || {
+        db.begin_write().map_err(std::io::Error::other)
+    })
+    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     crate::record_router_save_begin_write_us(elapsed_us(begin_write_started));
     let mutation_started = Instant::now();
     {
@@ -229,7 +234,10 @@ fn router_commit_batch<'a>(
     }
     crate::record_router_save_mutation_us(elapsed_us(mutation_started));
     let commit_started = Instant::now();
-    write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+    crate::durability_io::boundary(path, "commit", || {
+        write_txn.commit().map_err(std::io::Error::other)
+    })
+    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     crate::record_router_save_commit_us(elapsed_us(commit_started));
     Ok(())
 }
@@ -470,7 +478,7 @@ impl RouterRedbStore {
         identity_registry::replay(&db, &mut legacy_registry)?;
         identity_registry::initialize_budgets(&db, &legacy_registry)?;
         let commit_writer = if router_group_commit_enabled() {
-            Some(RouterCommitWriter::start(Arc::clone(&db))?)
+            Some(RouterCommitWriter::start(Arc::clone(&db), path.to_path_buf())?)
         } else {
             None
         };
@@ -1245,7 +1253,7 @@ impl RouterRedbStore {
         if let Some(writer) = &self.commit_writer {
             return writer.commit(op);
         }
-        router_commit_batch(&self.db, std::iter::once(&op))
+        router_commit_batch(&self.db, &self.path, std::iter::once(&op))
     }
 
     fn insert_table_value<T: Serialize>(

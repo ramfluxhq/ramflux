@@ -5,6 +5,10 @@ use crate::{InboxEntry, NodeCoreError, durability_io};
 
 #[cfg(test)]
 mod durability_tests;
+#[cfg(test)]
+mod segment_tests;
+#[cfg(test)]
+mod startup_tests;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -1312,6 +1316,8 @@ fn recover_router_wal(root: &Path) -> Result<RouterWalRecovery, NodeCoreError> {
     let mut shards = BTreeMap::new();
     for (shard_id, shard_root) in router_wal_existing_shard_roots(root)? {
         let recovered = recover_router_wal_directory(&shard_root, &mut state)?;
+        durability_io::sync_dir(&shard_root)
+            .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         if recovered.last_segment_id.is_some() {
             shards.insert(shard_id, recovered);
         }
@@ -1335,7 +1341,6 @@ fn recover_router_wal_directory(
         current_offset = offset;
         last_segment_id = Some(segment_id);
     }
-    durability_io::sync_dir(root).map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
     Ok(RouterWalRecoveredShard { last_segment_id, current_offset })
 }
 

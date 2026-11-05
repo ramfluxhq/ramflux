@@ -67,7 +67,10 @@ impl RouterRedbStore {
         if cursors.is_empty() {
             return Ok(());
         }
-        let txn = self.db.begin_write().map_err(redb_error)?;
+        let txn = crate::durability_io::boundary(&self.path, "checkpoint_begin", || {
+            self.db.begin_write().map_err(std::io::Error::other)
+        })
+        .map_err(redb_error)?;
         {
             let mut table = txn.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(redb_error)?;
             for cursor in cursors {
@@ -95,7 +98,10 @@ impl RouterRedbStore {
                 )?;
             }
         }
-        txn.commit().map_err(redb_error)
+        crate::durability_io::boundary(&self.path, "checkpoint_commit", || {
+            txn.commit().map_err(std::io::Error::other)
+        })
+        .map_err(redb_error)
     }
 }
 pub(super) fn merge_cursor(

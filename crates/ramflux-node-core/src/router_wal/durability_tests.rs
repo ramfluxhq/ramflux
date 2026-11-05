@@ -40,6 +40,9 @@ fn capture(root: &Path) -> (crate::durability_test_hooks::Registration, Events) 
 
 #[test]
 fn recovery_sync_before_ready() -> TestResult {
+    if std::env::var_os("RAMFLUX_STARTUP_MATRIX_CHILD").is_some() {
+        return super::startup_tests::child();
+    }
     if let Some(root) = std::env::var_os("RAMFLUX_RECORD_K_CHILD") {
         return record_k_child(PathBuf::from(root));
     }
@@ -88,6 +91,7 @@ fn recovery_sync_before_ready() -> TestResult {
         drop(wal);
         fs::remove_dir_all(root)?;
     }
+    super::startup_tests::matrix()?;
     for wal in [false, true] {
         let root = fixture("commit");
         fs::create_dir_all(&root)?;
@@ -116,6 +120,7 @@ fn recovery_sync_before_ready() -> TestResult {
 
 #[test]
 fn segment_directory_before_ack() -> TestResult {
+    super::segment_tests::matrix()?;
     for pipeline in [false, true] {
         let root = fixture("segment");
         let (_guard, events) = capture(&root);
