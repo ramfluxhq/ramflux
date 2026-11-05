@@ -182,17 +182,12 @@ impl AccountRuntime {
             }
             AccountWork::Metadata { metadata } => apply_metadata(account, &handle, *metadata),
             AccountWork::Observation { event } => {
-                return match record_observation(account, &handle, event) {
-                    Ok(changed) => Ok(changed),
-                    Err(error) => {
-                        if !self.networking_observation_warned {
-                            tracing::warn!(account_id = %self.id, %error,
-                                "networking observation persistence deferred; account remains open");
-                            self.networking_observation_warned = true;
-                        }
-                        Ok(false)
-                    }
-                };
+                return Ok(record_observation(
+                    account,
+                    &handle,
+                    event,
+                    &mut self.networking_observation_warned,
+                ));
             }
             AccountWork::Prepare { generation, deadline, reply } => {
                 if reply.is_closed()
@@ -367,12 +362,22 @@ fn record_observation(
     account: &crate::bus::state::LocalBusAccountState,
     handle: &crate::bus::connection_manager::ConnectionHandle,
     event: crate::bus::connection_manager::ConnectionEvent,
-) -> Result<bool, SdkError> {
+    warned: &mut bool,
+) -> bool {
     observe_connection(event);
-    if account.client.born_v3_account.is_some() {
-        super::super::networking_events::record_session(account, &handle.snapshot())
-    } else {
-        Ok(false)
+    if account.client.born_v3_account.is_none() {
+        return false;
+    }
+    match super::super::networking_events::record_session(account, &handle.snapshot()) {
+        Ok(changed) => changed,
+        Err(error) => {
+            if !*warned {
+                tracing::warn!(%error,
+                    "networking observation persistence deferred; account remains open");
+                *warned = true;
+            }
+            false
+        }
     }
 }
 
