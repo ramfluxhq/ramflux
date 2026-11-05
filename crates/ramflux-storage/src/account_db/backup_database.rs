@@ -16,8 +16,28 @@ pub struct BackupAttachmentVerification {
     pub local_missing_kept: u64,
 }
 
+/// Validation boundary for a private restore generation, independent of its schema version.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupOpenMode {
+    /// Authenticated input whose inherited legacy actors have not yet been normalized.
+    PreNormalization,
+    /// A completed generation; unresolved ownership is a hard error.
+    Normalized,
+}
+
+/// Immutable observations from the first input open, before any row omission.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackupInputObservation {
+    pub counts: BackupCounts,
+    pub unowned_legacy_actor_count: u64,
+    pub schema_version: i64,
+}
+
 pub struct BackupDatabase {
     pub(crate) db: rusqlite::Connection,
+    original_input: BackupInputObservation,
 }
 impl BackupDatabase {
     /// Opens a private snapshot or an owner-guarded generation for restore checks.
@@ -25,6 +45,19 @@ impl BackupDatabase {
     /// # Errors
     /// Returns authentication, schema or I/O errors.
     pub fn open(path: &Path, key: &AccountDbKey) -> Result<Self, StorageError> {
+        Self::open_restore_input(path, key, BackupOpenMode::Normalized)
+    }
+
+    /// Opens an internal candidate restore input with an explicit validation boundary.
+    /// This does not normalize rows or select a generation for installation.
+    /// # Errors
+    /// Returns authentication, schema, ownership or I/O errors.
+    #[doc(hidden)]
+    pub fn open_restore_input(
+        path: &Path,
+        key: &AccountDbKey,
+        mode: BackupOpenMode,
+    ) -> Result<Self, StorageError> {
         let db = rusqlite::Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(&format!("PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",key.sqlcipher_hex()))?;
@@ -49,16 +82,50 @@ impl BackupDatabase {
         }
         db.execute_batch(super::event_counter::SCHEMA)?;
         super::message_footprint::install(&db)?;
-        let unsafe_references:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22)))",[],|r|r.get(0))?;
-        if unsafe_references {
+        // P1's schema-only private upgrade never omits rows. Capture before any
+        // candidate normalization and retain the input's original version.
+        let original_input = BackupInputObservation {
+            counts: super::backup::read_counts(&db)?,
+            unowned_legacy_actor_count: db.query_row(
+                "SELECT count(*) FROM runtime_actor_state a WHERE a.state_kind GLOB 'attachment/reference/*' AND NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_message_reference m USING(reference_hash) WHERE r.selector=substr(a.state_kind,22))",
+                [],
+                |row| row.get(0),
+            )?,
+            schema_version: input_version,
+        };
+        if mode == BackupOpenMode::Normalized && original_input.unowned_legacy_actor_count > 0 {
             return Err(StorageError::ObjectOwnershipUnverified { schema_version: input_version });
         }
-        let opened = Self { db };
+        let opened = Self { db, original_input };
         opened.ensure_missing_manifest()?;
         opened.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;
         opened.db.execute_batch(crate::schema_contact_requests::CONSENT_DECISIONS)?;
         Ok(opened)
     }
+    /// Original authenticated counts and legacy classification, retained across private reopens.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn original_input(&self) -> &BackupInputObservation {
+        &self.original_input
+    }
+
+    /// Reopens this input's private copy, retaining its original observations.
+    /// The requested boundary is checked against the current rows, never the old count.
+    /// Callers must supply this input's copy, rather than a different archive.
+    /// # Errors
+    /// Returns the same errors as `open_restore_input`.
+    #[doc(hidden)]
+    pub fn reopen_restore_input(
+        &self,
+        path: &Path,
+        key: &AccountDbKey,
+        mode: BackupOpenMode,
+    ) -> Result<Self, StorageError> {
+        let mut reopened = Self::open_restore_input(path, key, mode)?;
+        reopened.original_input = self.original_input.clone();
+        Ok(reopened)
+    }
+
     /// Copies a quiesced generation to a fresh encrypted private generation.
     /// # Errors
     /// Returns snapshot, encryption or filesystem errors.
@@ -238,3 +305,6 @@ impl<R: std::io::Read, F: FnMut() -> Result<(), StorageError>> std::io::Read
         self.inner.read(buf)
     }
 }
+
+#[cfg(test)]
+mod tests;

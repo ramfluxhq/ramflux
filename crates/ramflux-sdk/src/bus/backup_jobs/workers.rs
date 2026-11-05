@@ -408,14 +408,15 @@ impl BackupJobs {
             .validate(&context.account_id)
             .map_err(|_| failure(BackupFailureCode::RootConflict))?;
         let (master, key) = fresh_staging_keys()?;
-        let db = BackupDatabase::open(&path, &AccountDbKey::from_bytes(metadata.database_key))
-            .map_err(|error| storage_error(&error))?;
+        let db = open_checked_input(
+            &path,
+            &AccountDbKey::from_bytes(metadata.database_key),
+            &counts,
+            ramflux_storage::BackupOpenMode::Normalized,
+        )?;
         db.check_integrity().map_err(|error| storage_error(&error))?;
         db.rekey(&key).map_err(|error| storage_error(&error))?;
         metadata.database_key = *key.bytes();
-        if db.counts().map_err(|error| storage_error(&error))? != counts {
-            return Err(failure(BackupFailureCode::Tampered));
-        }
         if db.approved_missing_count().map_err(|error| storage_error(&error))?
             != context.totals.get("missing_attachments").copied().unwrap_or(0)
         {
@@ -592,3 +593,21 @@ fn archive_metadata(
         .map_err(|_| failure(BackupFailureCode::RootConflict))?;
     Ok(metadata)
 }
+
+/// Candidate mode is selected only by internal callers until restore normalization is complete.
+fn open_checked_input(
+    path: &std::path::Path,
+    key: &AccountDbKey,
+    authenticated_counts: &BackupCounts,
+    mode: ramflux_storage::BackupOpenMode,
+) -> Result<BackupDatabase, BackupFailure> {
+    let db = BackupDatabase::open_restore_input(path, key, mode)
+        .map_err(|error| storage_error(&error))?;
+    if &db.original_input().counts != authenticated_counts {
+        return Err(failure(BackupFailureCode::Tampered));
+    }
+    Ok(db)
+}
+
+#[cfg(test)]
+mod input_tests;
