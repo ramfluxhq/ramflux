@@ -17,6 +17,10 @@ use tokio::time::timeout;
 
 #[derive(Debug, Default)]
 struct Wire {
+    held: AtomicBool,
+    pause_after_recv: AtomicBool,
+    suppress_send: AtomicBool,
+    history: Mutex<Vec<Vec<u8>>>,
     packets: Mutex<VecDeque<Vec<u8>>>,
     wake: Mutex<Option<Waker>>,
     last: Mutex<Vec<u8>>,
@@ -44,6 +48,15 @@ impl AsyncUdpSocket for Socket {
         if t.destination != self.remote {
             return Ok(());
         }
+        {
+            let mut history = self.outbound.history.lock().unwrap();
+            if history.len() < 128 {
+                history.push(t.contents.to_vec());
+            }
+        }
+        if self.outbound.suppress_send.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let mut packets = self.outbound.packets.lock().unwrap();
         if packets.len() < 128 {
             packets.push_back(t.contents.to_vec());
@@ -63,8 +76,15 @@ impl AsyncUdpSocket for Socket {
         bufs: &mut [IoSliceMut<'_>],
         metas: &mut [udp::RecvMeta],
     ) -> Poll<io::Result<usize>> {
+        if self.inbound.held.load(Ordering::SeqCst) {
+            *self.inbound.wake.lock().unwrap() = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
         let mut packets = self.inbound.packets.lock().unwrap();
         if let Some(packet) = packets.pop_front() {
+            if self.inbound.pause_after_recv.swap(false, Ordering::SeqCst) {
+                self.inbound.held.store(true, Ordering::SeqCst);
+            }
             assert!(packet.len() <= bufs[0].len());
             bufs[0][..packet.len()].copy_from_slice(&packet);
             metas[0] = udp::RecvMeta {
@@ -349,6 +369,7 @@ async fn packet_credit_covers_enqueue_processing_and_backing_release() {
 
 #[tokio::test]
 async fn control_credit_preserves_cid_close_and_drained() {
+    control_driver::r10_driver_matrix().await;
     let (server, client, server_conn, client_conn, gate, _) =
         pair(65536, 2, 524288, 16, 65536, 128).await;
     let pool = server.rawq_pool();
@@ -441,3 +462,5 @@ async fn owner_slots_refuse_capacity_and_rebind_sparse_protocol_handles() {
     assert_eq!(server.open_connections(), 8);
     drop((attempt, clients, servers, server, client));
 }
+
+mod control_driver;

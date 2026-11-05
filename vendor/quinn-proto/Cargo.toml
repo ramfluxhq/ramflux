@@ -40,6 +40,7 @@ features = [
 ]
 
 [features]
+__control-test = []
 __rustls-post-quantum-test = []
 aws-lc-rs = [
     "dep:aws-lc-rs",

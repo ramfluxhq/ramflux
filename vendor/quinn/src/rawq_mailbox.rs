@@ -23,6 +23,8 @@ pub(crate) struct Sender {
 }
 #[derive(Debug)]
 pub(crate) struct Receiver {
+    #[cfg(test)]
+    pub(crate) hold_control: bool,
     raw: mpsc::UnboundedReceiver<ConnectionEvent>,
     control: mpsc::UnboundedReceiver<ConnectionEvent>,
     slots: Arc<Mutex<Slots>>,
@@ -41,6 +43,8 @@ pub(crate) fn channel(bounded: bool) -> (Sender, Receiver) {
             bounded,
         },
         Receiver {
+            #[cfg(test)]
+            hold_control: false,
             raw: raw_recv,
             control: control_recv,
             slots,
@@ -105,7 +109,18 @@ impl Receiver {
         raw_enabled: bool,
     ) -> Poll<Option<ConnectionEvent>> {
         // Committed ordinary controls precede terminal visibility and never wait for raw credit.
-        if let Poll::Ready(event) = self.control.poll_recv(cx) {
+        #[cfg(test)]
+        let allow_control = !self.hold_control;
+        #[cfg(not(test))]
+        let allow_control = true;
+        if let (true, Poll::Ready(event)) = (
+            allow_control,
+            if allow_control {
+                self.control.poll_recv(cx)
+            } else {
+                Poll::Pending
+            },
+        ) {
             return Poll::Ready(event);
         }
         {

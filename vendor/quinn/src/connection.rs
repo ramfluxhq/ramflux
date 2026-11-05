@@ -42,6 +42,11 @@ pub struct Connecting {
 }
 
 impl Connecting {
+    #[cfg(test)]
+    pub(crate) fn control_test_connection(&self) -> Connection {
+        Connection(self.conn.as_ref().unwrap().clone())
+    }
+
     pub(crate) fn new(
         handle: ConnectionHandle,
         conn: proto::Connection,
@@ -295,6 +300,31 @@ impl Future for ConnectionDriver {
 pub struct Connection(ConnectionRef);
 
 impl Connection {
+    #[cfg(test)]
+    pub(crate) fn control_test_counts(&self) -> (usize, usize) {
+        let state = self.0.state.lock("counts");
+        (
+            state
+                .control_wakes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            state.raw_processed,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_test<R>(&self, f: impl FnOnce(&mut proto::Connection) -> R) -> R {
+        let mut state = self.0.state.lock("control test");
+        let result = f(&mut state.inner);
+        state.wake();
+        result
+    }
+    #[cfg(test)]
+    pub(crate) fn control_test_reverse(&self, hold: bool) {
+        let mut state = self.0.state.lock("reverse barrier");
+        state.conn_events.hold_control = hold;
+        state.wake();
+    }
+
     /// Initiate a new outgoing unidirectional stream.
     ///
     /// Streams are cheap and instantaneous to open unless blocked by flow control. As a
@@ -897,6 +927,10 @@ impl ConnectionRef {
         Self(Arc::new(ConnectionInner {
             state: Mutex::new(State {
                 inner: conn,
+                #[cfg(test)]
+                control_wakes: Default::default(),
+                #[cfg(test)]
+                raw_processed: 0,
                 driver: None,
                 handle,
                 on_handshake_data: Some(on_handshake_data),
@@ -978,6 +1012,10 @@ pub(crate) struct Shared {
 }
 
 pub(crate) struct State {
+    #[cfg(test)]
+    control_wakes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    raw_processed: usize,
     pub(crate) inner: proto::Connection,
     driver: Option<Waker>,
     handle: ConnectionHandle,
@@ -1002,6 +1040,27 @@ pub(crate) struct State {
 }
 
 impl State {
+    fn resume_control(&mut self, cx: &mut Context<'_>) -> bool {
+        #[cfg(test)]
+        {
+            struct CreditWake(std::sync::Arc<std::sync::atomic::AtomicUsize>, Waker);
+            impl std::task::Wake for CreditWake {
+                fn wake(self: std::sync::Arc<Self>) {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    self.1.wake_by_ref();
+                }
+            }
+            let waker = Waker::from(std::sync::Arc::new(CreditWake(
+                self.control_wakes.clone(),
+                cx.waker().clone(),
+            )));
+            self.inner
+                .poll_control_resume(&mut Context::from_waker(&waker), self.runtime.now())
+        }
+        #[cfg(not(test))]
+        self.inner.poll_control_resume(cx, self.runtime.now())
+    }
+
     fn drive_transmit(&mut self, cx: &mut Context) -> io::Result<bool> {
         let now = self.runtime.now();
         let mut transmits = 0;
@@ -1085,7 +1144,7 @@ impl State {
     ) -> Result<(), ConnectionError> {
         let mut raw_count = 0;
         loop {
-            let paused = self.inner.poll_control_resume(cx, self.runtime.now());
+            let paused = self.resume_control(cx);
             if self.conn_events.bounded() && raw_count == 8 {
                 cx.waker().wake_by_ref();
                 return Ok(());
@@ -1098,15 +1157,17 @@ impl State {
                 }
                 Poll::Ready(Some(ConnectionEvent::RawProto { event, credit })) => {
                     raw_count += 1;
+                    #[cfg(test)]
+                    { self.raw_processed += 1; }
                     self.inner.handle_event_with_owner(event, credit);
-                    self.inner.poll_control_resume(cx, self.runtime.now());
+                    self.resume_control(cx);
                 }
                 Poll::Ready(Some(ConnectionEvent::Proto(event))) => {
                     if event.datagram_size().is_some() {
                         raw_count += 1;
                     }
                     self.inner.handle_event(event);
-                    self.inner.poll_control_resume(cx, self.runtime.now());
+                    self.resume_control(cx);
                 }
                 Poll::Ready(Some(ConnectionEvent::Close { reason, error_code })) => {
                     self.close(error_code, reason, shared);
