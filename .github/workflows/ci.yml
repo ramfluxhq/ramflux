@@ -499,7 +499,7 @@ jobs:
       - name: Test
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
-          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --no-build --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
+          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -566,7 +566,7 @@ jobs:
       - name: Test
         run: |
           RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
-          RAMFLUX_PRODUCTION_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --no-build --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
+          RAMFLUX_PRODUCTION_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -633,7 +633,7 @@ jobs:
       - name: Test
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
-          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --no-build --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
+          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -700,7 +700,7 @@ jobs:
       - name: Test
         run: |
           cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
-          ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --no-build --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
+          ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -822,13 +822,13 @@ jobs:
       - name: Migration release gate regressions
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
-          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --no-build --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
+          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
 
       - name: Configured graceful shutdown regressions
         timeout-minutes: 13
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
-          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --no-build --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
+          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
 
       - name: Upload JUnit
         if: always()
