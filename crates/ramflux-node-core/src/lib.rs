@@ -53,6 +53,8 @@ pub use custody_listener_resources::{
 mod identity_authority;
 pub use custody_authority::CustodyPublication;
 mod inbox;
+mod inbox_page;
+pub use inbox_page::{KnownLoss, PageEntryRecord, PageError, PageReason, ResumePage};
 mod lifecycle;
 mod mesh_identity;
 mod mvp1_registry;

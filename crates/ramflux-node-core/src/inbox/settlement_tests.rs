@@ -163,7 +163,10 @@ fn ordered_indexes_restore_and_release() -> Result {
     );
     inbox.dead_letter("target", 7, DeadLetterReason::AckWindowOverflow);
     inbox.dead_letter("target", 3, DeadLetterReason::AckWindowOverflow);
-    assert_eq!(inbox.dead_letter_index["target"].keys().copied().collect::<Vec<_>>(), [3, 7]);
+    assert_eq!(
+        inbox.dead_letter_index["target"].keys().map(|seq| seq.0).collect::<Vec<_>>(),
+        [3, 7]
+    );
     let json = serde_json::to_value(&inbox)?;
     assert!(json["pending"]["target"].is_array(), "legacy snapshot schema");
     let restored: OpaqueDeviceInbox = serde_json::from_value(json)?;
@@ -194,7 +197,7 @@ fn ordered_indexes_do_not_retain_retired_payloads() -> Result {
     }
     assert_eq!(inbox.dead_letter_index["target"].len(), ROUTER_DEAD_LETTER_LIMIT);
     assert_eq!(
-        inbox.dead_letter_index["target"].first_key_value().map(|(&seq, _)| seq),
+        inbox.dead_letter_index["target"].first_key_value().map(|(&seq, _)| seq.0),
         Some(u64::try_from(ROUTER_DEAD_LETTER_LIMIT)? + 1)
     );
     let mut restored: OpaqueDeviceInbox = serde_json::from_slice(&serde_json::to_vec(&inbox)?)?;

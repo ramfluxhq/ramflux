@@ -412,6 +412,23 @@ impl PublicationCore {
             .map_or((0, 0), |inbox| (inbox.published, inbox.committed_settled.min(inbox.published)))
     }
 
+    /// Borrow published cursor and sparse abort boundaries under one lock.
+    pub(crate) fn with_page_view<T>(
+        &self,
+        target: &str,
+        incarnation: &str,
+        f: impl FnOnce(u64, u64, &BTreeMap<u64, u64>) -> T,
+    ) -> T {
+        let registry = lock(&self.shared);
+        if let Some(inbox) =
+            registry.inboxes.get(&Key { target: target.into(), incarnation: incarnation.into() })
+        {
+            f(inbox.published, inbox.committed_settled.min(inbox.published), &inbox.aborted)
+        } else {
+            f(0, 0, &BTreeMap::new())
+        }
+    }
+
     /// Earliest unresolved assignment, under the same lock as allocation/publication.
     pub(crate) fn first_in_flight(&self, target: &str, incarnation: &str) -> Option<u64> {
         lock(&self.shared)
