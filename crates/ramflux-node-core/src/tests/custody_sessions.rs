@@ -743,6 +743,7 @@ fn durable_view_publication() -> Result {
         store.bootstrap_router(&router)?;
         let (driver, service, session) = publication_session(&router, &store)?;
         let target = session.target_delivery_id.clone();
+        store.initialize_inbox(&target)?;
         router.prepare_publication_target(&store, &target)?;
         let core = store.publication_core()?;
         let id = store.inbox_status(&target)?.0.ok_or("identity")?;

@@ -11,6 +11,8 @@ pub(crate) mod persistence;
 pub(crate) use operation::allocate as operation_allocate;
 pub use operation::{PublishedOperation, capture};
 #[cfg(test)]
+mod provisional_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod view_tests;
@@ -91,6 +93,7 @@ struct Descriptor {
 #[derive(Default)]
 struct Inbox {
     retired: bool,
+    identity_durable: bool,
     allocated: u64,
     published: u64,
     in_flight: BTreeMap<u64, Arc<Descriptor>>,
@@ -109,7 +112,7 @@ struct Registry {
     resources_unassigned: BTreeSet<String>,
 }
 
-pub(crate) type PublishedViews = BTreeMap<String, (String, u64, Vec<(u64, u64)>)>;
+pub(crate) type PublishedViews = BTreeMap<String, (Option<String>, u64, Vec<(u64, u64)>)>;
 type EntryCleanup = Arc<dyn Fn(&str, u64) + Send + Sync>;
 type ReplayCleanup = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -170,7 +173,46 @@ impl PublicationCore {
         lock(&self.shared)
             .inboxes
             .entry(Key { target: target.into(), incarnation: incarnation.into() })
-            .or_insert_with(|| Inbox { allocated: issued, published: issued, ..Inbox::default() });
+            .and_modify(|inbox| inbox.identity_durable = true)
+            .or_insert_with(|| Inbox {
+                identity_durable: true,
+                allocated: issued,
+                published: issued,
+                ..Inbox::default()
+            });
+    }
+
+    pub(crate) fn current_incarnation(&self, target: &str) -> Option<String> {
+        lock(&self.shared)
+            .inboxes
+            .range(Key { target: target.into(), incarnation: String::new() }..)
+            .next()
+            .filter(|(key, _)| key.target == target)
+            .map(|(key, _)| key.incarnation.clone())
+    }
+
+    pub(crate) fn provisional_incarnation(
+        &self,
+        target: &str,
+        candidate: String,
+    ) -> Result<String, NodeCoreError> {
+        let mut registry = lock(&self.shared);
+        if let Some((key, inbox)) = registry
+            .inboxes
+            .range(Key { target: target.into(), incarnation: String::new() }..)
+            .next()
+            .filter(|(key, _)| key.target == target)
+        {
+            if inbox.retired {
+                return Err(error("incarnation_mismatch"));
+            }
+            return Ok(key.incarnation.clone());
+        }
+        registry.inboxes.insert(
+            Key { target: target.into(), incarnation: candidate.clone() },
+            Inbox::default(),
+        );
+        Ok(candidate)
     }
 
     pub(crate) fn with_views<T>(&self, f: impl FnOnce(&PublishedViews) -> T) -> T {
@@ -183,7 +225,7 @@ impl PublicationCore {
                 (
                     key.target.clone(),
                     (
-                        key.incarnation.clone(),
+                        inbox.identity_durable.then(|| key.incarnation.clone()),
                         inbox.published,
                         inbox
                             .aborted
@@ -469,6 +511,7 @@ fn finish(shared: &Shared, descriptor: &Descriptor, aborted: bool) {
         }
     }
     if let Some(inbox) = registry.inboxes.get_mut(&descriptor.key) {
+        inbox.identity_durable = true;
         if aborted {
             coalesce(&mut inbox.aborted, descriptor.seq, descriptor.seq);
         }

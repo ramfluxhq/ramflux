@@ -1360,7 +1360,8 @@ impl RouterRedbStore {
     }
 
     fn commit_router_op(&self, op: RouterCommitOp) -> Result<(), NodeCoreError> {
-        let op = if let Some(wal) = &self.submission_wal {
+        let core = self.publication.lock().map_err(incarnation::error)?.clone();
+        let op = if self.submission_wal.is_some() || core.is_some() {
             let entries: Vec<&InboxEntry> = match &op {
                 RouterCommitOp::Submission { entry, .. } => {
                     entry.iter().map(AsRef::as_ref).collect()
@@ -1375,7 +1376,15 @@ impl RouterRedbStore {
             };
             let mut ids: BTreeMap<String, (String, u64)> = BTreeMap::new();
             for entry in entries {
-                let id = wal.reserve_incarnation(&entry.target_delivery_id)?;
+                let id = match &self.submission_wal {
+                    Some(wal) => Some(wal.reserve_incarnation(&entry.target_delivery_id)?),
+                    None => core
+                        .as_ref()
+                        .and_then(|core| core.current_incarnation(&entry.target_delivery_id)),
+                };
+                let Some(id) = id else {
+                    continue;
+                };
                 ids.entry(entry.target_delivery_id.clone())
                     .and_modify(|(_, issued)| *issued = (*issued).max(entry.inbox_seq))
                     .or_insert((id, entry.inbox_seq));

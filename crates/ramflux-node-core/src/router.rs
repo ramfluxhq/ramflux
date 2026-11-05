@@ -267,16 +267,8 @@ impl RouterCore {
         if self.target_shard(target).deleted_delivery_targets.contains(target) {
             return Ok(());
         }
-        let (id, issued) = store.inbox_status(target)?;
-        let id = match id {
-            Some(id) => id,
-            None => store.initialize_inbox(target)?,
-        };
-        let mut shard = self.target_shard(target);
-        shard.inbox.restore_incarnation(target, id.clone());
-        if let Some(core) = self.publication.get() {
-            core.register(target, &id, issued);
-        }
+        let id = store.provisional_inbox_incarnation(target)?;
+        self.target_shard(target).inbox.restore_incarnation(target, id);
         Ok(())
     }
 
@@ -725,10 +717,7 @@ impl RouterCore {
         let identities = targets
             .iter()
             .map(|(_, target)| {
-                store.inbox_status(target).and_then(|(id, _)| {
-                    id.map(|id| (target.clone(), id))
-                        .ok_or_else(|| NodeCoreError::Redb("missing fanout identity".into()))
-                })
+                store.provisional_inbox_incarnation(target).map(|id| (target.clone(), id))
             })
             .collect::<Result<Vec<_>, _>>()?;
         if let Some(core) = self.publication.get() {

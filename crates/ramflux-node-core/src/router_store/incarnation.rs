@@ -186,6 +186,26 @@ impl super::RouterRedbStore {
         }
         Ok((id, issued))
     }
+    /// Reserve E without a write. The first acceptance or aborted checkpoint owns its persistence.
+    pub(crate) fn provisional_inbox_incarnation(
+        &self,
+        target: &str,
+    ) -> Result<String, NodeCoreError> {
+        let core = self.publication_core()?;
+        if let (Some(id), issued) = self.inbox_status(target)? {
+            core.register(target, &id, issued);
+            return Ok(id);
+        }
+        if let Some(id) = core.current_incarnation(target) {
+            return Ok(id);
+        }
+        let candidate = match &self.submission_wal {
+            Some(wal) => wal.reserve_incarnation(target)?,
+            None => new_id()?,
+        };
+        core.provisional_incarnation(target, candidate)
+    }
+
     /// Durably initialize the authenticated capable session's own empty inbox.
     /// Callers run storage operations on the store/blocking thread before replying.
     /// # Errors
@@ -204,6 +224,12 @@ impl super::RouterRedbStore {
             return Err(error("deleted inbox"));
         }
         drop(read);
+        let provisional = self
+            .publication
+            .lock()
+            .map_err(error)?
+            .as_ref()
+            .and_then(|core| core.current_incarnation(target));
         let id = crate::fatal_durability::run(|| {
             let mut txn = self.begin_write().map_err(error)?;
             txn.set_durability(redb::Durability::Immediate).map_err(error)?;
@@ -211,6 +237,9 @@ impl super::RouterRedbStore {
                 let id = wal.reserve_incarnation(target)?;
                 set_cursor(&txn, target, 0, &id, false)?;
                 id
+            } else if let Some(id) = &provisional {
+                set_cursor(&txn, target, 0, id, false)?;
+                id.clone()
             } else {
                 ensure_cursor(&txn, target, 0)?
             };

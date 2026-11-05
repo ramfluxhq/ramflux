@@ -62,7 +62,13 @@ impl RouterRedbStore {
             }
             registry.inboxes.insert(
                 Key { target, incarnation },
-                Inbox { allocated: issued, published: issued, aborted, ..Inbox::default() },
+                Inbox {
+                    identity_durable: true,
+                    allocated: issued,
+                    published: issued,
+                    aborted,
+                    ..Inbox::default()
+                },
             );
         }
         let shared = Arc::new(Shared {

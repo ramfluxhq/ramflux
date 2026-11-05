@@ -13,6 +13,7 @@ async fn single_worker_reply_and_drop() -> anyhow::Result<()> {
         register_test_device(&state, "alice", "alice_phone", "target_alice", 1)?;
         register_test_device(&state, "alice", "alice_laptop", "target_laptop", 2)?;
         store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+        store.initialize_inbox("target_laptop")?;
         state.prepare_publication_target(&store, "target_laptop")?;
         let core = store.publication_core()?;
         let id =
