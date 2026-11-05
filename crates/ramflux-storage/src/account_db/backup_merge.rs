@@ -198,20 +198,17 @@ impl BackupDatabase {
         self.check_backup_pins(path, key)?;
         self.attach(path, key)?;
         let result = (|| {
-            let tables = self.incoming_tables()?;
-            self.begin_message_merge()?;
-            if candidate {
-                super::backup_selector_admission::prepare(&self.db)?;
-                after_capture(&self.db)?;
-                super::backup_selector_admission::graph::classify(&self.db)?;
-            }
+            let tables = self.begin_merge_inputs(candidate, after_capture)?;
             let marker_ids = super::mac_subkeys::merge::prepare(&self.db)?;
             self.merge_object_erasure(progress)?;
             let legacy_verifications = self.begin_legacy_verification_import(native_data_only)?;
             let shared_groups = self.select_backup_shared_groups(mode)?;
+            let preserved_actor = projected_actor(candidate);
             // A restored generation starts fresh handshakes, never archived reservations.
-            self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'merge-local',state_kind,state_json FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
+            self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'merge-local',state_kind,state_json FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'group-transfer/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); DELETE FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';"))?;
             self.preserve_imported_archives(key)?;
+            #[cfg(test)]
+            super::backup_selector_admission::preservation::checkpoint(&self.db)?;
             self.merge_contact_fences()?;
             self.prepare_conversation_counts()?;
             let mut report = BackupMergeReport::default();
@@ -233,6 +230,7 @@ impl BackupDatabase {
                 }
                 let names =
                     columns.iter().map(|(name, _)| quoted(name)).collect::<Vec<_>>().join(",");
+                let selected = projected_columns(&table, &columns, candidate);
                 let keys = columns
                     .iter()
                     .filter(|(_, pk)| *pk > 0)
@@ -265,7 +263,7 @@ impl BackupDatabase {
                     self.db.execute_batch(&format!("INSERT OR IGNORE INTO backup_imported_verification SELECT r.contact_identity_commitment FROM incoming.contact_verification_projection r WHERE r.verification_state='verified' AND {filter} AND NOT EXISTS(SELECT 1 FROM main.contact_verification_projection l WHERE {join} AND NOT ({newer}));"))?;
                 }
                 let replacements=self.db.execute(&format!("DELETE FROM main.{t} AS l WHERE EXISTS(SELECT 1 FROM incoming.{t} r WHERE {join} AND {filter} AND ({newer}))",t=quoted(&table)),[])?;
-                let inserted=self.db.execute(&format!("INSERT OR IGNORE INTO main.{t}({names}) SELECT {names} FROM incoming.{t} r WHERE {filter}",t=quoted(&table)),[])?;
+                let inserted=self.db.execute(&format!("INSERT OR IGNORE INTO main.{t}({names}) SELECT {selected} FROM incoming.{t} r WHERE {filter}",t=quoted(&table)),[])?;
                 if table == "contact_message_request" {
                     self.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;
                 }
@@ -273,7 +271,7 @@ impl BackupDatabase {
                 add_count(&mut report.kept_newer, &table, kept);
                 let _ = replacements;
             }
-            self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/%'; INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));")?;
+            self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'dm-pair/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));"))?;
             if legacy_verifications {
                 self.finish_legacy_verification_import()?;
             }
@@ -291,6 +289,20 @@ impl BackupDatabase {
         }
         self.db.execute_batch("DROP TABLE IF EXISTS main.backup_imported_verification; DROP TABLE IF EXISTS main.backup_local_message_own; DROP TABLE IF EXISTS main.backup_local_pair; DROP TABLE IF EXISTS main.backup_local_conversation; DROP TABLE IF EXISTS main.backup_source_conversation; DROP TABLE IF EXISTS main.backup_changed_conversation; DETACH DATABASE incoming")?;
         result
+    }
+    fn begin_merge_inputs(
+        &self,
+        candidate: bool,
+        after_capture: impl FnOnce(&rusqlite::Connection) -> Result<(), StorageError>,
+    ) -> Result<Vec<String>, StorageError> {
+        let tables = self.incoming_tables()?;
+        self.begin_message_merge()?;
+        if candidate {
+            super::backup_selector_admission::prepare(&self.db)?;
+            after_capture(&self.db)?;
+            super::backup_selector_admission::graph::classify(&self.db)?;
+        }
+        Ok(tables)
     }
     fn incoming_tables(&self) -> Result<Vec<String>, StorageError> {
         let mut statement = self.db.prepare("SELECT name FROM incoming.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
@@ -394,8 +406,31 @@ impl BackupDatabase {
         let source = key.fingerprint();
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); CREATE TABLE IF NOT EXISTS backup_archived_local_event AS SELECT '' AS source,* FROM incoming.local_event_log WHERE 0; CREATE UNIQUE INDEX IF NOT EXISTS backup_archive_event_key ON backup_archived_local_event(source,event_id);")?;
         super::message_footprint::install(&self.db)?;
-        self.db.execute("INSERT OR IGNORE INTO backup_archived_actor_state SELECT ?1,state_kind,state_json FROM incoming.runtime_actor_state r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid)",params![source])?;
-        self.db.execute("INSERT OR IGNORE INTO backup_archived_local_event SELECT ?1,r.* FROM incoming.local_event_log r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='local_event_log' AND e.row_id=r.rowid)",params![source])?;
+        let candidate = super::backup_selector_admission::placeholders::active(&self.db)?;
+        let actor_body = if candidate {
+            super::backup_selector_admission::preservation::expression(
+                "runtime_actor_state",
+                "state_json",
+            )
+        } else {
+            "r.state_json".into()
+        };
+        self.db.execute(&format!("INSERT OR IGNORE INTO backup_archived_actor_state SELECT ?1,state_kind,{actor_body} FROM incoming.runtime_actor_state r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid)"),params![source])?;
+        let event_values = columns(&self.db, "incoming", "local_event_log")?
+            .iter()
+            .map(|(name, _)| {
+                if candidate {
+                    super::backup_selector_admission::preservation::expression(
+                        "local_event_log",
+                        name,
+                    )
+                } else {
+                    format!("r.{}", quoted(name))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        self.db.execute(&format!("INSERT OR IGNORE INTO backup_archived_local_event SELECT ?1,{event_values} FROM incoming.local_event_log r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='local_event_log' AND e.row_id=r.rowid)"),params![source])?;
         for table in ["backup_archived_actor_state", "backup_archived_local_event"] {
             let exists:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name=?1)",params![table],|r|r.get(0))?;
             if exists {
@@ -405,7 +440,19 @@ impl BackupDatabase {
                     .map(|(name, _)| quoted(&name))
                     .collect::<Vec<_>>()
                     .join(",");
-                self.db.execute(&format!("INSERT OR IGNORE INTO {table}(source,{names}) SELECT ?1||'/'||source,{names} FROM incoming.{table} r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{table}' AND e.row_id=r.rowid)"),params![source])?;
+                let values = columns(&self.db, "incoming", table)?
+                    .iter()
+                    .filter(|(name, _)| name != "source")
+                    .map(|(name, _)| {
+                        if candidate {
+                            super::backup_selector_admission::preservation::expression(table, name)
+                        } else {
+                            format!("r.{}", quoted(name))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                self.db.execute(&format!("INSERT OR IGNORE INTO {table}(source,{names}) SELECT ?1||'/'||source,{values} FROM incoming.{table} r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{table}' AND e.row_id=r.rowid)"),params![source])?;
             }
         }
         Ok(())
@@ -679,5 +726,30 @@ fn add_count(counts: &mut BackupCounts, table: &str, n: u64) {
         "message_projection" | "direct_message_projection" => counts.messages += n,
         "group_projection" => counts.groups += n,
         _ => {}
+    }
+}
+
+fn projected_columns(table: &str, columns: &[(String, u32)], candidate: bool) -> String {
+    columns
+        .iter()
+        .map(|(name, _)| {
+            if candidate {
+                super::backup_selector_admission::preservation::expression(table, name)
+            } else {
+                format!("r.{}", quoted(name))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn projected_actor(candidate: bool) -> String {
+    if candidate {
+        super::backup_selector_admission::preservation::expression(
+            "runtime_actor_state",
+            "state_json",
+        )
+    } else {
+        "r.state_json".into()
     }
 }
