@@ -472,3 +472,6 @@ mod pr10_r2_probes;
 
 #[path = "history_pr10_r4_tests.rs"]
 mod pr10_r4_probes;
+
+#[path = "history_pr10_r5_tests.rs"]
+mod pr10_r5_probes;
