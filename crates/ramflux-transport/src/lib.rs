@@ -25,6 +25,10 @@ mod perf_metrics;
 mod policy;
 mod quic_errors;
 mod quic_gateway;
+/// Dormant checked QUIC resource policy; constructing a plan starts no runtime.
+pub mod rawq_budget;
+#[cfg(test)]
+mod rawq_budget_tests;
 mod relay_quic_pool;
 mod tls_config;
 mod types;
