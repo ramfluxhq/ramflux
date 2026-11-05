@@ -308,7 +308,7 @@ async fn repeated_attempt_failures_with_same_cause_emit_once() -> TestResult {
 #[tokio::test]
 async fn same_kind_refusal_code_or_capacity_change_emits_event() -> TestResult {
     use ramflux_protocol::custody::CustodyRefusal;
-    let (_root, account) = session_account("session-semantics").await?;
+    let (_root, mut account) = session_account("session-semantics").await?;
     let mut view = snapshot();
     for code in [CustodyRefusal::PrincipalIdTaken, CustodyRefusal::Busy] {
         view.cause = Some(AccountNetworkingReason::RegistrationRefused { code });
@@ -335,6 +335,18 @@ async fn same_kind_refusal_code_or_capacity_change_emits_event() -> TestResult {
         assert!(record_session(&account, &view)?);
     }
     assert_eq!(projected(&account)?.len(), 7);
+    let now = crate::custody::network_now()?;
+    let before = status_at(&account, "session-semantics", now)?;
+    account.gateway_config.custody.as_mut().ok_or("custody config")?.node_public_key =
+        ramflux_protocol::encode_base64url([8; 32]);
+    record_networking_at(&mut account, None, now)?;
+    let rebound = projected(&account)?;
+    assert_eq!(rebound.len(), 1, "node binding change emits");
+    assert_ne!(rebound[0]["node_binding"], before["node_binding"]);
+    assert_eq!(rebound[0]["networking_reason"], before["networking_reason"]);
+    assert_eq!(rebound[0]["session"]["cause"], serde_json::to_value(&view.cause)?);
+    record_networking_at(&mut account, None, now)?;
+    assert!(projected(&account)?.is_empty(), "identical binding is deduped");
     Ok(())
 }
 

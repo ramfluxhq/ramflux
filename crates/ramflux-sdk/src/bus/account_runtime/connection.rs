@@ -369,7 +369,10 @@ fn record_observation(
         return false;
     }
     match super::super::networking_events::record_session(account, &handle.snapshot()) {
-        Ok(changed) => changed,
+        Ok(changed) => {
+            *warned = false;
+            changed
+        }
         Err(error) => {
             if !*warned {
                 tracing::warn!(%error,
