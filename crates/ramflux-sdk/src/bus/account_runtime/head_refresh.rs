@@ -7,8 +7,19 @@ use super::AccountRuntime;
 use crate::SdkError;
 use crate::bus::{actor::AccountCommand, state::LocalBusAccountState};
 use crate::client::identity_authority::HeadUse;
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use tokio::time::Instant;
+
+// The account command owns this scope, never the account or connection. Dropping
+// its future on cancellation/preemption also drops any completed preparation.
+tokio::task_local! {
+    pub(super) static RECEIVE_PREPARED: Cell<bool>;
+}
+
+pub(crate) fn take_receive_preparation() -> bool {
+    RECEIVE_PREPARED.try_with(|prepared| prepared.replace(false)).unwrap_or(false)
+}
 
 pub(crate) fn is_freshness_refusal(error: &SdkError) -> bool {
     matches!(error, SdkError::FreshHeadRequired { .. })
@@ -76,12 +87,18 @@ impl AccountRuntime {
     ) -> Result<(), SdkError> {
         let deadline = admitted_at + self.timeouts.network_wait;
         let mut enqueued = BTreeSet::new();
+        let mut receive_prepared = false;
         if matches!(command.request.method.as_str(), "group.read" | "group.receive")
             && let Some(account) = self.state.accounts.get_mut(&self.id)
         {
+            // Cancellation is replay-safe: receive persists a committed receipt or
+            // durable hold/retry before advancing its cursor and acknowledging.
+            // Redelivery uses the admission key/receipt to avoid a second apply;
+            // an unfinished pass never grants reusable preparation.
             tokio::time::timeout_at(deadline, crate::bus::sync_driver::run(account))
                 .await
                 .map_err(|_| pending(account))??;
+            receive_prepared = true;
         }
         loop {
             let Some(account) = self.state.accounts.get_mut(&self.id) else {
@@ -89,6 +106,7 @@ impl AccountRuntime {
             };
             let roots = stale_roots(account, &command.request)?;
             if roots.is_empty() {
+                let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(receive_prepared));
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -113,5 +131,7 @@ impl AccountRuntime {
     }
 }
 
+#[cfg(test)]
+mod receive_tests;
 #[cfg(test)]
 mod tests;

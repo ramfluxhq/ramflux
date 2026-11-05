@@ -1,0 +1,168 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Command-owned preparation counts real gateway Resume frames.
+use super::*;
+use crate::bus::connection_manager::tests::{seeded, send};
+use crate::client::native_test_support::{Fixture, TestResult};
+use crate::{GatewayClientFrame, GatewayServerFrame};
+use serde_json::json;
+use std::rc::Rc;
+use tokio::sync::oneshot;
+
+fn receive_command() -> AccountCommand {
+    let (outbound, _) = tokio::sync::mpsc::channel(1);
+    AccountCommand {
+        admission: None,
+        private: None,
+        request: crate::LocalBusFrame::request(
+            "receive",
+            Some("sender".into()),
+            "group",
+            "group.receive",
+            json!({"group_id":"group", "conversation_id":"thread", "limit":32}),
+        ),
+        connection_id: 1,
+        topics: BTreeSet::new(),
+        attended: true,
+        nodes: None,
+        outbound,
+        reply: None,
+    }
+}
+
+async fn setup() -> TestResult<(AccountRuntime, FixtureGuard, Rc<Cell<usize>>)> {
+    let native = Fixture::with_device("receive-preparation", "device").await?;
+    let primary = native
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or("native")?
+        .group_primary(native.vault.as_ref())?;
+    native.client.shared_group_create_with_primary(
+        "group",
+        "thread",
+        None,
+        &native.config.target_delivery_id,
+        Some(&primary),
+    )?;
+    let mut account = LocalBusAccountState::disconnected(
+        native.client,
+        native.config,
+        native.manifest.principal_commitment,
+    );
+    let (handle, mut io) = seeded(account.gateway_config.clone(), account.timeouts.clone());
+    handle.require_live(std::time::Duration::from_secs(1)).await?;
+    account.connection = Some(handle.clone());
+    let count = Rc::new(Cell::new(0));
+    let observed = count.clone();
+    let responder = tokio::task::spawn_local(async move {
+        while let Some(frame) = io.output.recv().await {
+            if matches!(frame, GatewayClientFrame::Resume { .. }) {
+                observed.set(observed.get() + 1);
+                if send(&io, &GatewayServerFrame::Resume { entries: vec![] }).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let (runtime, _commands, stop, _observed) =
+        super::super::tests::runtime(account, &native.root.0);
+    Ok((runtime, FixtureGuard { _root: native.root, handle, responder, _stop: stop }, count))
+}
+
+struct FixtureGuard {
+    _root: crate::custody::tests::Root,
+    handle: crate::bus::connection_manager::ConnectionHandle,
+    responder: tokio::task::JoinHandle<()>,
+    _stop: tokio::sync::watch::Sender<bool>,
+}
+impl Drop for FixtureGuard {
+    fn drop(&mut self) {
+        self.responder.abort();
+        self.handle.request_stop(crate::bus::connection_manager::DisconnectReason::Stop);
+    }
+}
+
+async fn apply_receive(runtime: &mut AccountRuntime) -> TestResult {
+    let mut command = receive_command();
+    let (reply, result) = oneshot::channel();
+    command.reply = Some(reply);
+    assert!(!runtime.apply(command).await?);
+    result.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn successful_group_receive_resumes_gateway_once_per_command() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(Box::pin(async {
+            let (mut runtime, _guard, count) = setup().await?;
+            apply_receive(&mut runtime).await?;
+            assert_eq!(count.get(), 1, "one successful group.receive must sync once");
+            apply_receive(&mut runtime).await?;
+            assert_eq!(count.get(), 2, "a later command must prepare again");
+            let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
+            crate::bus::dispatch::group::dispatch_group_receive_request(
+                &receive_command().request,
+                account,
+            )
+            .await?;
+            assert_eq!(count.get(), 3, "direct dispatch must sync independently");
+            runtime.close_readers().await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test]
+async fn cancelled_or_failed_receive_preparation_is_not_reused_by_retry() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(Box::pin(async {
+            let (mut runtime, _guard, count) = setup().await?;
+            // Drop at the gate/dispatch boundary, when a completed pass is reusable.
+            // Shutdown, reply cancellation and lifecycle preemption all drop this scope.
+            let (ready, entered) = oneshot::channel();
+            let command = receive_command();
+            {
+                let abandoned = RECEIVE_PREPARED.scope(Cell::new(false), async {
+                    runtime.prepare_command_network(&command).await?;
+                    assert!(RECEIVE_PREPARED.with(Cell::get));
+                    let _ = ready.send(());
+                    std::future::pending::<Result<(), SdkError>>().await
+                });
+                tokio::pin!(abandoned);
+                tokio::select! {
+                    result = &mut abandoned => panic!("unexpected completion: {result:?}"),
+                    result = entered => result?,
+                }
+            }
+            assert_eq!(count.get(), 1);
+            assert!(!take_receive_preparation(), "cancelled scope must not leak");
+            apply_receive(&mut runtime).await?;
+            assert_eq!(count.get(), 2, "retry must sync again");
+            // A dispatch failure after a successful gate also loses its preparation.
+            RECEIVE_PREPARED
+                .scope(Cell::new(false), async {
+                    runtime.prepare_command_network(&command).await?;
+                    let mut invalid = receive_command().request;
+                    invalid.body = json!({});
+                    let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
+                    assert!(
+                        crate::bus::dispatch::group::dispatch_group_receive_request(
+                            &invalid, account
+                        )
+                        .await
+                        .is_err()
+                    );
+                    Ok::<_, Box<dyn std::error::Error>>(())
+                })
+                .await?;
+            assert_eq!(count.get(), 3);
+            apply_receive(&mut runtime).await?;
+            assert_eq!(count.get(), 4, "failed request must not prepare a later request");
+            runtime.close_readers().await;
+            Ok(())
+        }))
+        .await
+}
