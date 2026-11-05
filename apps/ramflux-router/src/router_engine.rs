@@ -53,18 +53,19 @@ pub(crate) fn submit_envelope_inner(
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     let target = envelope.target_delivery_id.clone();
-    let result = (|| { match prepare_submission(state, store, forward, envelope, total_started, origin)? {
-        PreparedSubmit::Complete(response) => Ok(*response),
-        PreparedSubmit::Waiting(waiter) => {
-            let runtime = tokio::runtime::Builder::new_current_thread().build()?;
-            let assignment = runtime.block_on(waiter.resolved())?;
-            ramflux_node_core::publication::await_sender_assignment(
-                &store.publication_core()?,
-                &assignment,
-            )?;
-            Ok(sender_retry_response(&assignment))
-        }
-    } })();
+    let result =
+        (|| match prepare_submission(state, store, forward, envelope, total_started, origin)? {
+            PreparedSubmit::Complete(response) => Ok(*response),
+            PreparedSubmit::Waiting(waiter) => {
+                let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+                let assignment = runtime.block_on(waiter.resolved())?;
+                ramflux_node_core::publication::await_sender_assignment(
+                    &store.publication_core()?,
+                    &assignment,
+                )?;
+                Ok(sender_retry_response(&assignment))
+            }
+        })();
     typed_sender_result(result, &target)
 }
 
@@ -312,14 +313,17 @@ pub(crate) async fn submit_envelope_async(
         })
     })
     .await??;
-    let result = async { match prepared.published().await? {
-        PreparedSubmit::Complete(response) => Ok(*response),
-        PreparedSubmit::Waiting(waiter) => {
-            let assignment = waiter.resolved().await?;
-            publication.wait_sender_assignment(&assignment).await;
-            Ok(sender_retry_response(&assignment))
+    let result = async {
+        match prepared.published().await? {
+            PreparedSubmit::Complete(response) => Ok(*response),
+            PreparedSubmit::Waiting(waiter) => {
+                let assignment = waiter.resolved().await?;
+                publication.wait_sender_assignment(&assignment).await;
+                Ok(sender_retry_response(&assignment))
+            }
         }
-    } }.await;
+    }
+    .await;
     typed_sender_result(result, &target)
 }
 
@@ -915,18 +919,33 @@ fn prepare_sender_retry(
     )
 }
 
-fn typed_sender_result(result: anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse>, target: &str) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+fn typed_sender_result(
+    result: anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse>,
+    target: &str,
+) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     match result {
         Ok(response) => Ok(response),
         Err(error) => {
-            let code = error.downcast_ref::<ramflux_node_core::NodeCoreError>().and_then(|error| match error {
-                ramflux_node_core::NodeCoreError::SenderRetry(reason) => Some(reason.to_string()),
-                ramflux_node_core::NodeCoreError::Publication(reason) => publication_reason(&reason.to_string()).map(str::to_owned),
-                _ => None,
+            let code = error.downcast_ref::<ramflux_node_core::NodeCoreError>().and_then(|error| {
+                match error {
+                    ramflux_node_core::NodeCoreError::SenderRetry(reason) => {
+                        Some(reason.to_string())
+                    }
+                    ramflux_node_core::NodeCoreError::Publication(reason) => {
+                        publication_reason(&reason.to_string()).map(str::to_owned)
+                    }
+                    _ => None,
+                }
             });
             match code {
-                Some(outcome) => Ok(ramflux_node_core::EnvelopeSubmitResponse { migration_refusal: None, outcome,
-                    target_delivery_id: target.into(), inbox_seq: None, cursor: None, nack: None }),
+                Some(outcome) => Ok(ramflux_node_core::EnvelopeSubmitResponse {
+                    migration_refusal: None,
+                    outcome,
+                    target_delivery_id: target.into(),
+                    inbox_seq: None,
+                    cursor: None,
+                    nack: None,
+                }),
                 None => Err(error),
             }
         }

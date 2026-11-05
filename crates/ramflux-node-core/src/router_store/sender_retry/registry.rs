@@ -47,7 +47,9 @@ pub struct RetryWaiter {
 impl RetryWaiter {
     /// Original admission's retention horizon. Attaching a waiter never refreshes it.
     #[must_use]
-    pub fn retain_until(&self) -> i64 { self.slot.retain_until }
+    pub fn retain_until(&self) -> i64 {
+        self.slot.retain_until
+    }
 
     /// Await the original persistence disposition without holding any router lock.
     /// # Errors
@@ -60,7 +62,9 @@ impl RetryWaiter {
             match self.slot.result.lock().map_err(super::incarnation::error)?.clone() {
                 Resolution::Pending => {}
                 Resolution::Accepted(assignment) => return Ok(assignment),
-                Resolution::Aborted => return Err(super::SenderRetryRefusal::AbortedRetrySafe.into()),
+                Resolution::Aborted => {
+                    return Err(super::SenderRetryRefusal::AbortedRetrySafe.into());
+                }
             }
             notified.await;
         }
@@ -147,9 +151,11 @@ impl RouterRedbStore {
         envelope: &ramflux_protocol::Envelope,
         now: i64,
     ) -> Result<RetryAdmission, NodeCoreError> {
-        let permit = Arc::clone(&self.submission_admission)
-            .try_acquire_owned()
-            .map_err(|_| NodeCoreError::Publication(crate::publication::PublicationRefusal::CapacityRetryAfter { retry_after_ms: 1000 }))?;
+        let permit = Arc::clone(&self.submission_admission).try_acquire_owned().map_err(|_| {
+            NodeCoreError::Publication(crate::publication::PublicationRefusal::CapacityRetryAfter {
+                retry_after_ms: 1000,
+            })
+        })?;
         let digest = content_digest(envelope)?;
         let key = crate::envelope_replay_tuple_key(source, envelope);
         let mut entries = self.sender_retries.0.lock().map_err(super::incarnation::error)?;
@@ -184,5 +190,7 @@ impl RouterRedbStore {
 
 #[cfg(test)]
 impl RouterRedbStore {
-    pub(super) fn sender_retry_registry_size(&self) -> usize { self.sender_retries.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() }
+    pub(super) fn sender_retry_registry_size(&self) -> usize {
+        self.sender_retries.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+    }
 }
