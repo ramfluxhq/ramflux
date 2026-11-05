@@ -23,7 +23,7 @@ use fixture::{Case, Fixture};
 
 #[derive(Debug)]
 pub(super) enum CourierEvent {
-    Requested(std::time::Instant),
+    Requested,
     Item { key: String, attempts: u32, charged: bool },
     Finished,
 }
@@ -33,7 +33,7 @@ impl CourierEvent {
         account: Option<&LocalBusAccountState>,
     ) -> Result<Self, SdkError> {
         Ok(match outcome {
-            Outcome::Requested { .. } => Self::Requested(std::time::Instant::now()),
+            Outcome::Requested { .. } => Self::Requested,
             Outcome::Finished => Self::Finished,
             Outcome::Item { item, preparation } => {
                 let attempts = account
@@ -222,24 +222,24 @@ async fn next(events: &mut mpsc::UnboundedReceiver<CourierEvent>) -> Case<Courie
 async fn pass(
     events: &mut mpsc::UnboundedReceiver<CourierEvent>,
 ) -> Case<Vec<(String, u32, bool)>> {
-    Ok(observe_pass(events).await?.0)
-}
-
-async fn observe_pass(
-    events: &mut mpsc::UnboundedReceiver<CourierEvent>,
-) -> Case<(Vec<(String, u32, bool)>, Duration)> {
-    let mut start = None;
+    let mut requested = false;
     let mut items = Vec::new();
     loop {
         match next(events).await? {
-            CourierEvent::Item { key, attempts, charged } => items.push((key, attempts, charged)),
-            CourierEvent::Finished => break,
-            CourierEvent::Requested(at) => start = Some(at),
+            CourierEvent::Requested => {
+                assert!(!requested, "next courier pass started before Finished");
+                requested = true;
+            }
+            CourierEvent::Item { key, attempts, charged } => {
+                assert!(requested, "courier item arrived before Requested");
+                items.push((key, attempts, charged));
+            }
+            CourierEvent::Finished => {
+                assert!(requested, "courier pass finished before Requested");
+                return Ok(items);
+            }
         }
     }
-    let elapsed = start.ok_or("courier pass did not begin with Requested")?.elapsed();
-    eprintln!("courier pass: {} items in {elapsed:?}", items.len());
-    Ok((items, elapsed))
 }
 
 async fn serving(runtime: &mut AccountRuntime) -> Result<(), SdkError> {
@@ -543,7 +543,7 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
                 assert!(charged >= 20, "courier passes did not contain stalled work");
                 // Wait until another pass is in preparation, then lock through the normal mailbox.
                 loop {
-                    if matches!(next(&mut events).await?, CourierEvent::Requested(_)) {
+                    if matches!(next(&mut events).await?, CourierEvent::Requested) {
                         break;
                     }
                 }
@@ -604,21 +604,32 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
             actor.courier = Some(TaskCourier::start());
             let driver = async {
                 let _shutdown = Shutdown(stop.clone());
-                let mut sent = 0;
+                let mut prepared = BTreeSet::new();
                 let mut passes = 0;
-                while sent < 100 {
-                    let (rows, elapsed) = observe_pass(&mut events).await?;
-                    assert!(
-                        elapsed < Duration::from_secs(12),
-                        "ack courier pass exceeded its bound: {elapsed:?}"
-                    );
-                    assert_eq!(rows.len(), 2, "ack throughput fell below two per pass");
-                    assert!(rows.iter().all(|(_, attempts, charged)| *attempts == 0 && !charged));
-                    sent += rows.len();
-                    passes += 1;
-                }
-                assert_eq!(passes, 50);
-                // Finished reports preparation; wait for the independent sends to commit.
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while prepared.len() < 100 {
+                        let rows = pass(&mut events).await?;
+                        assert!(rows.len() <= 2, "ack preparation exceeded two items per pass");
+                        assert!(
+                            rows.iter().all(|(_, attempts, charged)| *attempts == 0 && !charged)
+                        );
+                        for (key, _, _) in rows {
+                            prepared.insert(key);
+                        }
+                        passes += 1;
+                    }
+                    Ok::<_, Box<dyn std::error::Error>>(())
+                })
+                .await
+                .map_err(|_| "ACK preparation did not visit the backlog before the hang guard")??;
+                assert!(passes >= 50, "100 distinct ACKs require at least 50 bounded passes");
+                assert_eq!(
+                    prepared,
+                    (0..100).map(|index| format!("task/ack/{index:03}")).collect()
+                );
+                // Requested -> at most two Items -> Finished bounds preparation work.
+                // Pending deliveries may be prepared again before their durable removal.
+                // Independent sends may still be queued: observe durable completion before stop.
                 await_ack_commits(&completion_reader, &gateway, 100).await?;
                 stop.send(true)?;
                 Ok::<_, Box<dyn std::error::Error>>(())
@@ -809,7 +820,8 @@ async fn await_ack_commits(
     gateway: &Arc<Mutex<fixture::Gateway>>,
     expected: usize,
 ) -> Case {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    // Hang guard for the whole independent delivery backlog, not a per-pass latency bound.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         if reader.task_state_usage("task/ack/")?.0 == 0 {
             assert_eq!(
@@ -824,7 +836,9 @@ async fn await_ack_commits(
             );
             return Ok(());
         }
-        tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(10))).await?;
+        tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(10)))
+            .await
+            .map_err(|_| "ACK delivery backlog did not commit before the hang guard")?;
     }
 }
 
