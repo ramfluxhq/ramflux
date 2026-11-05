@@ -8,9 +8,12 @@ mod census;
 mod metadata;
 mod reservation;
 pub use census::{
-    AllocationCertificate, AllocationClass, AllocationLayout, CENSUS, CensusEntry, Pool,
+    AllocationCertificate, AllocationClass, AllocationLayout, CENSUS, CensusEntry,
+    MetadataMultiplicity, Pool,
 };
-pub use metadata::{MetadataBudget, MetadataCharge, NoProgressDeadline};
+pub use metadata::{
+    METADATA_FIXED_BYTES, METADATA_REFERENCE_BYTES, METADATA_UNIT_BYTES, MetadataBudget,
+};
 pub use reservation::{HostReservation, reserve_host_slice};
 
 /// Configuration or reservation refusal, always before runtime construction.
@@ -76,19 +79,11 @@ fn slab_and_frame(slice: u64, frame: Option<u64>) -> Result<(u64, u64)> {
     Ok((z, frame))
 }
 
-fn owner_cost(
-    crypto: u64,
-    window: u64,
-    delta_unit: u64,
-    streams: u64,
-    raw: u64,
-    control: u64,
-) -> Result<u64> {
+fn owner_cost(crypto: u64, window: u64, streams: u64, raw: u64, control: u64) -> Result<u64> {
     sum(&[
         crypto,
         window,
         window,
-        delta_unit,
         256 * KIB,
         mul(streams, 4 * KIB)?,
         raw,
@@ -130,30 +125,10 @@ pub struct Profile {
     pub crypto: u64,
     /// Receive and send windows (each).
     pub window: u64,
-    /// Shared tracked-record credit, including two ACK-only records; builders count.
-    pub sent_records: u64,
-    /// PTO records per round (`S_pto`), above ordinary shared credit.
-    pub s_pto: u64,
-    /// Consecutive PTO overshoot rounds (`K_pto`).
-    pub k_pto: u64,
-    /// Fixed ACK-only allowance inside ordinary credit; ACK service never blocks.
-    pub ack_only_records: u64,
-    /// Independent no-progress policy (`T_np`), reset only by record-freeing ACKs.
-    pub t_np: NoProgressDeadline,
-    /// Total record backing including `S_pto`*`K_pto` overshoot.
-    pub tracked_records: u64,
-    /// Item-3 metadata capacities and charged shapes.
+    /// One shared metadata byte credit, including its common factor two.
     pub metadata: MetadataBudget,
-    /// Exact `DeltaUnit` added to the original Unit before deriving N.
-    pub delta_unit: u64,
-    /// Sent-record backing allowance before the factor two.
-    pub sent_record_bytes: u64,
-    /// Steady ACK ranges per space; transient insertion also reserves one entry.
-    pub ack_ranges_per_space: u64,
-    /// ACK-range backing allowance across all packet-number spaces.
-    pub ack_range_bytes: u64,
-    /// Complete doubled window pool: both payload windows and packet/range metadata.
-    pub window_pool: u64,
+    /// Complete baseline unit, excluding the separate metadata contribution.
+    pub unit_base: u64,
     /// Per-stream receive window.
     pub stream_window: u64,
     /// Bidirectional streams per owner; unidirectional streams are disabled.
@@ -172,15 +147,15 @@ pub struct Profile {
     pub raw: u64,
     /// Control payload and metadata pool.
     pub control: u64,
-    /// Full retained owner cost.
-    pub owner: u64,
+    /// Baseline owner cost, excluding packet/fragment metadata.
+    pub owner_base: u64,
     /// Initial datagram and Incoming cost.
     pub incoming: u64,
     /// Stateless response cost.
     pub response: u64,
     /// Gateway pre-auth cost (zero for mesh).
     pub preauth: u64,
-    /// Complete unit cost.
+    /// Complete unit, including the undoubled metadata base exactly once.
     pub unit: u64,
     /// Final owners, Incoming slots, response slots and total protocol entries.
     pub owners: u64,
@@ -206,31 +181,21 @@ impl Profile {
         let (z, frame) = slab_and_frame(slice, frame)?;
         let crypto = z / 4;
         let window = mul(4, z)?;
-        let sent_records = add(window / 600, u64::from(!window.is_multiple_of(600)))?;
         let streams = (z / (32 * KIB)).min(64);
-        let s_pto = 2;
-        let k_pto = 3;
-        let ack_only_records = 2;
-        let t_np = NoProgressDeadline { pto_multiple: 3, minimum_ms: 10_000 };
-        let tracked_records = add(sent_records, mul(s_pto, k_pto)?)?;
-        let sent_record_bytes = mul(tracked_records, 256)?;
-        let ack_ranges_per_space = 64;
-        let ack_range_bytes = mul(mul(3, add(ack_ranges_per_space, 1)?)?, 32)?;
-        let metadata = MetadataBudget::derive(tracked_records, streams)?;
-        let delta_unit = sum(&[sent_record_bytes, ack_range_bytes, metadata.total])?;
-        let window_pool = mul(2, add(mul(2, window)?, delta_unit)?)?;
+        let metadata = MetadataBudget::derive(window, window)?;
         let output = (z / 4).min(64 * KIB);
         let raw_items = (z / (4 * KIB)).min(64);
         let control_items = (crypto / 512).min(256);
         let raw = add(z, mul(256, raw_items)?)?;
         let control = add(crypto, mul(512, control_items)?)?;
-        let owner = owner_cost(crypto, window, delta_unit, streams, raw, control)?;
+        let owner_base = owner_cost(crypto, window, streams, raw, control)?;
         let incoming = sum(&[65_535, crypto, 1024])?;
         let response = 65_536 + 512;
         let gateway = role == ListenerRole::Gateway;
         // A lower frame override does not reduce the certified backing pools.
         let preauth = if gateway { sum(&[mul(4, z)?, z, output, 8, 64 * KIB])? } else { 0 };
-        let unit = sum(&[incoming, owner, response, preauth])?;
+        let unit_base = sum(&[incoming, owner_base, response, preauth])?;
+        let unit = add(unit_base, metadata.base)?;
         let available =
             slice.checked_sub(ENDPOINT_BYTES).ok_or(BudgetError::Invalid("endpoint slab"))?;
         let owners = (available / mul(2, unit)?).min(if gateway { 128 } else { 64 });
@@ -249,18 +214,8 @@ impl Profile {
             z,
             crypto,
             window,
-            sent_records,
-            s_pto,
-            k_pto,
-            ack_only_records,
-            t_np,
-            tracked_records,
             metadata,
-            delta_unit,
-            sent_record_bytes,
-            ack_ranges_per_space,
-            ack_range_bytes,
-            window_pool,
+            unit_base,
             stream_window: z,
             streams,
             frame,
@@ -270,7 +225,7 @@ impl Profile {
             control_items,
             raw,
             control,
-            owner,
+            owner_base,
             incoming,
             response,
             preauth,
@@ -303,8 +258,8 @@ impl Profile {
             self.z,
             self.crypto,
             self.window,
-            self.window_pool,
-            self.owner,
+            self.metadata.ceiling,
+            self.owner_base,
             self.incoming,
             self.response,
             self.preauth,
@@ -372,7 +327,7 @@ impl FrozenBudget {
         }
         let mut listeners = Vec::with_capacity(requests.len());
         let mut digest = blake3::Hasher::new();
-        digest.update(b"rawq-budget-v2-r6");
+        digest.update(b"rawq-budget-v3-metadata-bytes");
         for component in ENDPOINT_COMPONENTS {
             digest.update(&component.to_le_bytes());
         }
@@ -394,18 +349,7 @@ impl FrozenBudget {
                 profile.z,
                 profile.crypto,
                 profile.window,
-                profile.sent_records,
-                profile.s_pto,
-                profile.k_pto,
-                profile.ack_only_records,
-                profile.t_np.pto_multiple,
-                profile.t_np.minimum_ms,
-                profile.tracked_records,
-                profile.delta_unit,
-                profile.sent_record_bytes,
-                profile.ack_ranges_per_space,
-                profile.ack_range_bytes,
-                profile.window_pool,
+                profile.unit_base,
                 profile.stream_window,
                 profile.streams,
                 profile.frame,
@@ -415,7 +359,7 @@ impl FrozenBudget {
                 profile.control_items,
                 profile.raw,
                 profile.control,
-                profile.owner,
+                profile.owner_base,
                 profile.incoming,
                 profile.response,
                 profile.preauth,

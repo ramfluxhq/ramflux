@@ -27,11 +27,6 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             z: 262_144,
             crypto: 65_536,
             window: 1_048_576,
-            sent_records: 1_748,
-            sent_record_bytes: 449_024,
-            ack_ranges_per_space: 64,
-            ack_range_bytes: 6_240,
-            window_pool: 22_598_592,
             stream_window: 262_144,
             streams: 8,
             frame: 262_144,
@@ -41,84 +36,22 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             control_items: 128,
             raw: 278_528,
             control: 131_072,
-            owner: 12_171_744,
             incoming: 132_095,
             response: 66_048,
             preauth: 0,
-            unit: 12_369_887,
-            owners: 9,
-            phases: [(9, 8), (9, 4), (9, 4), (0, 0), (0, 0)],
-            sources: [9, 18, 9],
+            unit: 4_128_255,
+            owners: 29,
+            phases: [(29, 8), (29, 4), (16, 4), (0, 0), (0, 0)],
+            sources: [29, 58, 29],
             active_cids: 8,
-            queues: [2_359_296, 576, 589_824, 1_152],
-            responses: [589_824, 9],
-            derived: 226_852_270,
-            s_pto: 2,
-            k_pto: 3,
-            ack_only_records: 2,
-            t_np: NoProgressDeadline { pto_multiple: 3, minimum_ms: 10_000 },
-            tracked_records: 1_754,
-            metadata: MetadataBudget {
-                frames_per_packet: 32,
-                ranges_per_stream: 64,
-                segments_per_stream: 64,
-                scratch_entries: 1_754,
-                charges: [
-                    MetadataCharge {
-                        class: AllocationClass::SentFrameMetadata,
-                        count: 56_128,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 7_184_384,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::RetransmitOwner,
-                        count: 1_754,
-                        capacity: 512,
-                        item_charge: 576,
-                        bytes: 1_010_304,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendRanges,
-                        count: 1_024,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 131_072,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendSegments,
-                        count: 512,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 65_536,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveRanges,
-                        count: 512,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 65_536,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveSegments,
-                        count: 512,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 65_536,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::AckLossScratch,
-                        count: 1_754,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 224_512,
-                    },
-                ],
-                total: 8_746_880,
-            },
-            delta_unit: 9_202_144,
+            queues: [7_602_176, 1_856, 1_900_544, 3_712],
+            responses: [1_900_544, 29],
+            derived: 243_633_094,
+            owner_base: 2_969_600,
+            unit_base: 3_167_743,
+            metadata: MetadataBudget { reference_units: 1_748, base: 960_512, ceiling: 1_921_024 },
         },
-        23_147_730,
+        6_366_906,
     ),
     (
         1_000_000_000,
@@ -128,11 +61,6 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             z: 262_144,
             crypto: 65_536,
             window: 1_048_576,
-            sent_records: 1_748,
-            sent_record_bytes: 449_024,
-            ack_ranges_per_space: 64,
-            ack_range_bytes: 6_240,
-            window_pool: 22_598_592,
             stream_window: 262_144,
             streams: 8,
             frame: 262_144,
@@ -142,84 +70,22 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             control_items: 128,
             raw: 278_528,
             control: 131_072,
-            owner: 12_171_744,
             incoming: 132_095,
             response: 66_048,
             preauth: 1_441_800,
-            unit: 13_811_687,
-            owners: 8,
-            phases: [(8, 8), (8, 4), (8, 4), (8, 4), (8, 4)],
-            sources: [8, 16, 8],
+            unit: 5_570_055,
+            owners: 22,
+            phases: [(22, 8), (22, 4), (16, 4), (22, 4), (22, 4)],
+            sources: [22, 44, 22],
             active_cids: 8,
-            queues: [2_097_152, 512, 524_288, 1_024],
-            responses: [524_288, 8],
-            derived: 225_181_296,
-            s_pto: 2,
-            k_pto: 3,
-            ack_only_records: 2,
-            t_np: NoProgressDeadline { pto_multiple: 3, minimum_ms: 10_000 },
-            tracked_records: 1_754,
-            metadata: MetadataBudget {
-                frames_per_packet: 32,
-                ranges_per_stream: 64,
-                segments_per_stream: 64,
-                scratch_entries: 1_754,
-                charges: [
-                    MetadataCharge {
-                        class: AllocationClass::SentFrameMetadata,
-                        count: 56_128,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 7_184_384,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::RetransmitOwner,
-                        count: 1_754,
-                        capacity: 512,
-                        item_charge: 576,
-                        bytes: 1_010_304,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendRanges,
-                        count: 1_024,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 131_072,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendSegments,
-                        count: 512,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 65_536,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveRanges,
-                        count: 512,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 65_536,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveSegments,
-                        count: 512,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 65_536,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::AckLossScratch,
-                        count: 1_754,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 224_512,
-                    },
-                ],
-                total: 8_746_880,
-            },
-            delta_unit: 9_202_144,
+            queues: [5_767_168, 1_408, 1_441_792, 2_816],
+            responses: [1_441_792, 22],
+            derived: 249_276_724,
+            owner_base: 2_969_600,
+            unit_base: 4_609_543,
+            metadata: MetadataBudget { reference_units: 1_748, base: 960_512, ceiling: 1_921_024 },
         },
-        24_818_704,
+        723_276,
     ),
     (
         2_000_000_000,
@@ -229,11 +95,6 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             z: 524_288,
             crypto: 131_072,
             window: 2_097_152,
-            sent_records: 3_496,
-            sent_record_bytes: 896_512,
-            ack_ranges_per_space: 64,
-            ack_range_bytes: 6_240,
-            window_pool: 45_124_032,
             stream_window: 524_288,
             streams: 16,
             frame: 524_288,
@@ -243,84 +104,26 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             control_items: 256,
             raw: 540_672,
             control: 262_144,
-            owner: 23_925_984,
             incoming: 197_631,
             response: 66_048,
             preauth: 0,
-            unit: 24_189_663,
-            owners: 10,
-            phases: [(10, 8), (10, 4), (10, 4), (0, 0), (0, 0)],
-            sources: [10, 20, 10],
+            unit: 7_677_439,
+            owners: 32,
+            phases: [(32, 8), (32, 4), (16, 4), (0, 0), (0, 0)],
+            sources: [32, 64, 32],
             active_cids: 8,
-            queues: [5_242_880, 640, 1_310_720, 2_560],
-            responses: [655_360, 10],
-            derived: 487_987_564,
-            s_pto: 2,
-            k_pto: 3,
-            ack_only_records: 2,
-            t_np: NoProgressDeadline { pto_multiple: 3, minimum_ms: 10_000 },
-            tracked_records: 3_502,
+            queues: [16_777_216, 2_048, 4_194_304, 8_192],
+            responses: [2_097_152, 32],
+            derived: 495_550_400,
+            owner_base: 5_558_272,
+            unit_base: 5_821_951,
             metadata: MetadataBudget {
-                frames_per_packet: 32,
-                ranges_per_stream: 64,
-                segments_per_stream: 64,
-                scratch_entries: 3_502,
-                charges: [
-                    MetadataCharge {
-                        class: AllocationClass::SentFrameMetadata,
-                        count: 112_064,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 14_344_192,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::RetransmitOwner,
-                        count: 3_502,
-                        capacity: 512,
-                        item_charge: 576,
-                        bytes: 2_017_152,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendRanges,
-                        count: 2_048,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 262_144,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendSegments,
-                        count: 1_024,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 131_072,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveRanges,
-                        count: 1_024,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 131_072,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveSegments,
-                        count: 1_024,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 131_072,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::AckLossScratch,
-                        count: 3_502,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 448_256,
-                    },
-                ],
-                total: 17_464_960,
+                reference_units: 3_496,
+                base: 1_855_488,
+                ceiling: 3_710_976,
             },
-            delta_unit: 18_367_712,
         },
-        12_012_436,
+        4_449_600,
     ),
     (
         2_000_000_000,
@@ -330,11 +133,6 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             z: 524_288,
             crypto: 131_072,
             window: 2_097_152,
-            sent_records: 3_496,
-            sent_record_bytes: 896_512,
-            ack_ranges_per_space: 64,
-            ack_range_bytes: 6_240,
-            window_pool: 45_124_032,
             stream_window: 524_288,
             streams: 16,
             frame: 524_288,
@@ -344,84 +142,26 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             control_items: 256,
             raw: 540_672,
             control: 262_144,
-            owner: 23_925_984,
             incoming: 197_631,
             response: 66_048,
             preauth: 2_752_520,
-            unit: 26_942_183,
-            owners: 9,
-            phases: [(9, 8), (9, 4), (9, 4), (9, 4), (9, 4)],
-            sources: [9, 18, 9],
+            unit: 10_429_959,
+            owners: 23,
+            phases: [(23, 8), (23, 4), (16, 4), (23, 4), (23, 4)],
+            sources: [23, 46, 23],
             active_cids: 8,
-            queues: [4_718_592, 576, 1_179_648, 2_304],
-            responses: [589_824, 9],
-            derived: 489_153_598,
-            s_pto: 2,
-            k_pto: 3,
-            ack_only_records: 2,
-            t_np: NoProgressDeadline { pto_multiple: 3, minimum_ms: 10_000 },
-            tracked_records: 3_502,
+            queues: [12_058_624, 1_472, 3_014_656, 5_888],
+            responses: [1_507_328, 23],
+            derived: 483_972_418,
+            owner_base: 5_558_272,
+            unit_base: 8_574_471,
             metadata: MetadataBudget {
-                frames_per_packet: 32,
-                ranges_per_stream: 64,
-                segments_per_stream: 64,
-                scratch_entries: 3_502,
-                charges: [
-                    MetadataCharge {
-                        class: AllocationClass::SentFrameMetadata,
-                        count: 112_064,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 14_344_192,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::RetransmitOwner,
-                        count: 3_502,
-                        capacity: 512,
-                        item_charge: 576,
-                        bytes: 2_017_152,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendRanges,
-                        count: 2_048,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 262_144,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendSegments,
-                        count: 1_024,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 131_072,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveRanges,
-                        count: 1_024,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 131_072,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveSegments,
-                        count: 1_024,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 131_072,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::AckLossScratch,
-                        count: 3_502,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 448_256,
-                    },
-                ],
-                total: 17_464_960,
+                reference_units: 3_496,
+                base: 1_855_488,
+                ceiling: 3_710_976,
             },
-            delta_unit: 18_367_712,
         },
-        10_846_402,
+        16_027_582,
     ),
     (
         8_000_000_000,
@@ -431,11 +171,6 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             z: 1_048_576,
             crypto: 262_144,
             window: 4_194_304,
-            sent_records: 6_991,
-            sent_record_bytes: 1_791_232,
-            ack_ranges_per_space: 64,
-            ack_range_bytes: 6_240,
-            window_pool: 90_164_800,
             stream_window: 1_048_576,
             streams: 32,
             frame: 1_048_576,
@@ -445,84 +180,26 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             control_items: 256,
             raw: 1_064_960,
             control: 393_216,
-            owner: 47_298_336,
             incoming: 328_703,
             response: 66_048,
             preauth: 0,
-            unit: 47_693_087,
-            owners: 20,
-            phases: [(20, 8), (20, 4), (16, 4), (0, 0), (0, 0)],
-            sources: [20, 40, 20],
+            unit: 14_644_223,
+            owners: 64,
+            phases: [(64, 8), (64, 4), (16, 4), (0, 0), (0, 0)],
+            sources: [64, 128, 64],
             active_cids: 8,
-            queues: [20_971_520, 1_280, 5_242_880, 5_120],
-            responses: [1_310_720, 20],
-            derived: 1_911_917_784,
-            s_pto: 2,
-            k_pto: 3,
-            ack_only_records: 2,
-            t_np: NoProgressDeadline { pto_multiple: 3, minimum_ms: 10_000 },
-            tracked_records: 6_997,
+            queues: [67_108_864, 4_096, 16_777_216, 16_384],
+            responses: [4_194_304, 64],
+            derived: 1_878_654_848,
+            owner_base: 10_604_544,
+            unit_base: 10_999_295,
             metadata: MetadataBudget {
-                frames_per_packet: 32,
-                ranges_per_stream: 64,
-                segments_per_stream: 64,
-                scratch_entries: 6_997,
-                charges: [
-                    MetadataCharge {
-                        class: AllocationClass::SentFrameMetadata,
-                        count: 223_904,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 28_659_712,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::RetransmitOwner,
-                        count: 6_997,
-                        capacity: 512,
-                        item_charge: 576,
-                        bytes: 4_030_272,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendRanges,
-                        count: 4_096,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 524_288,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendSegments,
-                        count: 2_048,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 262_144,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveRanges,
-                        count: 2_048,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 262_144,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveSegments,
-                        count: 2_048,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 262_144,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::AckLossScratch,
-                        count: 6_997,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 895_616,
-                    },
-                ],
-                total: 34_896_320,
+                reference_units: 6_991,
+                base: 3_644_928,
+                ceiling: 7_289_856,
             },
-            delta_unit: 36_693_792,
         },
-        88_082_216,
+        121_345_152,
     ),
     (
         8_000_000_000,
@@ -532,11 +209,6 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             z: 1_048_576,
             crypto: 262_144,
             window: 4_194_304,
-            sent_records: 6_991,
-            sent_record_bytes: 1_791_232,
-            ack_ranges_per_space: 64,
-            ack_range_bytes: 6_240,
-            window_pool: 90_164_800,
             stream_window: 1_048_576,
             streams: 32,
             frame: 1_048_576,
@@ -546,85 +218,87 @@ const PROFILES: [(u64, ListenerRole, Profile, u64); 6] = [
             control_items: 256,
             raw: 1_064_960,
             control: 393_216,
-            owner: 47_298_336,
             incoming: 328_703,
             response: 66_048,
             preauth: 5_373_960,
-            unit: 53_067_047,
-            owners: 18,
-            phases: [(18, 8), (18, 4), (16, 4), (18, 4), (18, 4)],
-            sources: [18, 36, 18],
+            unit: 20_018_183,
+            owners: 49,
+            phases: [(49, 8), (49, 4), (16, 4), (49, 4), (49, 4)],
+            sources: [49, 98, 49],
             active_cids: 8,
-            queues: [18_874_368, 1_152, 4_718_592, 4_608],
-            responses: [1_179_648, 18],
-            derived: 1_914_607_996,
-            s_pto: 2,
-            k_pto: 3,
-            ack_only_records: 2,
-            t_np: NoProgressDeadline { pto_multiple: 3, minimum_ms: 10_000 },
-            tracked_records: 6_997,
+            queues: [51_380_224, 3_136, 12_845_056, 12_544],
+            responses: [3_211_264, 49],
+            derived: 1_965_976_238,
+            owner_base: 10_604_544,
+            unit_base: 16_373_255,
             metadata: MetadataBudget {
-                frames_per_packet: 32,
-                ranges_per_stream: 64,
-                segments_per_stream: 64,
-                scratch_entries: 6_997,
-                charges: [
-                    MetadataCharge {
-                        class: AllocationClass::SentFrameMetadata,
-                        count: 223_904,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 28_659_712,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::RetransmitOwner,
-                        count: 6_997,
-                        capacity: 512,
-                        item_charge: 576,
-                        bytes: 4_030_272,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendRanges,
-                        count: 4_096,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 524_288,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::SendSegments,
-                        count: 2_048,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 262_144,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveRanges,
-                        count: 2_048,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 262_144,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::ReceiveSegments,
-                        count: 2_048,
-                        capacity: 64,
-                        item_charge: 128,
-                        bytes: 262_144,
-                    },
-                    MetadataCharge {
-                        class: AllocationClass::AckLossScratch,
-                        count: 6_997,
-                        capacity: 32,
-                        item_charge: 128,
-                        bytes: 895_616,
-                    },
-                ],
-                total: 34_896_320,
+                reference_units: 6_991,
+                base: 3_644_928,
+                ceiling: 7_289_856,
             },
-            delta_unit: 36_693_792,
         },
-        85_392_004,
+        34_023_762,
     ),
+];
+const SPLIT_PROFILES: [Profile; 2] = [
+    Profile {
+        slice: 125_000_000,
+        z: 131_072,
+        crypto: 32_768,
+        window: 524_288,
+        stream_window: 131_072,
+        streams: 4,
+        frame: 131_072,
+        auth: 131_072,
+        output: 32_768,
+        raw_items: 32,
+        control_items: 64,
+        raw: 139_264,
+        control: 65_536,
+        incoming: 99_327,
+        response: 66_048,
+        preauth: 753_672,
+        unit: 3_099_143,
+        owners: 19,
+        phases: [(19, 8), (19, 4), (16, 4), (19, 4), (19, 4)],
+        sources: [19, 38, 19],
+        active_cids: 8,
+        queues: [2_490_368, 608, 622_592, 1_216],
+        responses: [1_245_184, 19],
+        derived: 121_961_738,
+        owner_base: 1_667_072,
+        unit_base: 2_586_119,
+        metadata: MetadataBudget { reference_units: 874, base: 513_024, ceiling: 1_026_048 },
+    },
+    Profile {
+        slice: 125_000_000,
+        z: 131_072,
+        crypto: 32_768,
+        window: 524_288,
+        stream_window: 131_072,
+        streams: 4,
+        frame: 131_072,
+        auth: 131_072,
+        output: 32_768,
+        raw_items: 32,
+        control_items: 64,
+        raw: 139_264,
+        control: 65_536,
+        incoming: 99_327,
+        response: 66_048,
+        preauth: 0,
+        unit: 2_345_471,
+        owners: 25,
+        phases: [(25, 8), (25, 4), (16, 4), (0, 0), (0, 0)],
+        sources: [25, 50, 25],
+        active_cids: 8,
+        queues: [3_276_800, 800, 819_200, 1_600],
+        responses: [1_638_400, 25],
+        derived: 121_467_854,
+        owner_base: 1_667_072,
+        unit_base: 1_832_447,
+        metadata: MetadataBudget { reference_units: 874, base: 513_024, ceiling: 1_026_048 },
+    },
 ];
 
 #[test]
@@ -647,15 +321,7 @@ fn one_gb_profile_accounts_every_allocation() {
         A::Terminal,
         A::Crypto,
         A::Tls,
-        A::Protocol,
         A::ProtocolFixed,
-        A::SentFrameMetadata,
-        A::RetransmitOwner,
-        A::SendRanges,
-        A::SendSegments,
-        A::ReceiveRanges,
-        A::ReceiveSegments,
-        A::AckLossScratch,
         A::StreamPayload,
         A::StreamState,
         A::Sources,
@@ -663,10 +329,21 @@ fn one_gb_profile_accounts_every_allocation() {
         A::Responses,
         A::Preauth,
         A::SharedConfig,
+        A::SentRecords,
+        A::SentFrameMetadata,
+        A::RetransmitOwners,
+        A::SendSegments,
+        A::SendRanges,
+        A::StreamAssemblers,
+        A::CryptoAssemblers,
+        A::UnorderedHistory,
+        A::PendingRetransmits,
+        A::PendingAcks,
+        A::AckScratch,
+        A::LossScratch,
     ];
     assert_eq!(CENSUS.len(), classes.len());
     for class in classes {
-        // Exhaustive match forces future variants to declare their expected pool/owners.
         let expected = match class {
             A::Socket | A::EndpointState | A::Runtime | A::SharedConfig => (P::Endpoint, 1, 7),
             A::Incoming => (P::Incoming, 1, 7),
@@ -675,21 +352,25 @@ fn one_gb_profile_accounts_every_allocation() {
             A::Terminal => (P::Terminal, 1, 7),
             A::Crypto => (P::Crypto, 1, 7),
             A::Tls => (P::TlsOwner, 1, 7),
-            A::Protocol
-            | A::StreamPayload
-            | A::SentFrameMetadata
-            | A::RetransmitOwner
-            | A::SendRanges
-            | A::SendSegments
-            | A::ReceiveRanges
-            | A::ReceiveSegments
-            | A::AckLossScratch => (P::Windows, 1, 7),
+            A::StreamPayload => (P::Windows, 1, 7),
             A::ProtocolFixed => (P::Residual, 1, 7),
             A::StreamState => (P::Streams, 1, 7),
             A::Sources => (P::Sources, 1, 7),
             A::Tasks => (P::Tasks, 1, 7),
             A::Responses => (P::Response, 1, 6),
             A::Preauth => (P::Preauth, 1, 7),
+            A::SentRecords
+            | A::SentFrameMetadata
+            | A::RetransmitOwners
+            | A::SendSegments
+            | A::SendRanges
+            | A::StreamAssemblers
+            | A::CryptoAssemblers
+            | A::UnorderedHistory
+            | A::PendingRetransmits
+            | A::PendingAcks
+            | A::AckScratch
+            | A::LossScratch => (P::Metadata, 1, 7),
         };
         let entries: Vec<_> = CENSUS.iter().filter(|entry| entry.class == class).collect();
         assert_eq!(entries.len(), 1, "{class:?}");
@@ -750,7 +431,7 @@ fn rejects_impossible_or_over_budget_before_listener_allocation() {
     lower.frame_ceiling = Some(128 * 1_024);
     let lowered = prepare(None, vec![lower.clone()]).unwrap();
     assert_eq!(lowered.listeners()[0].2.frame, 128 * 1_024);
-    assert_eq!(lowered.listeners()[0].2.derived, 225_181_296);
+    assert_eq!(lowered.listeners()[0].2.derived, 249_276_724);
     lower.frame_ceiling = Some(1_024 * 1_024);
     assert!(prepare(None, vec![lower.clone()]).is_err());
     lower.frame_ceiling = Some(0);
@@ -804,15 +485,9 @@ fn listeners_and_processes_share_one_host_budget() {
         plan(1_000_000_000, vec![request("mesh", Mesh, None), request("gateway", Gateway, None)]);
     assert_eq!(budget.reserved_bytes(), 250_000_000);
     let profiles = budget.listeners(); // canonical gateway then mesh
-    assert_eq!(
-        (profiles[0].2.z, profiles[0].2.owners, profiles[0].2.derived),
-        (131_072, 8, 119_481_968)
-    );
-    assert_eq!(
-        (profiles[1].2.z, profiles[1].2.owners, profiles[1].2.derived),
-        (131_072, 9, 120_326_830)
-    );
-    assert_eq!(profiles.iter().map(|l| l.2.derived).sum::<u64>(), 239_808_798);
+    assert_eq!(profiles[0].2, SPLIT_PROFILES[0]);
+    assert_eq!(profiles[1].2, SPLIT_PROFILES[1]);
+    assert_eq!(profiles.iter().map(|l| l.2.derived).sum::<u64>(), 243_429_592);
     let reversed =
         plan(1_000_000_000, vec![request("gateway", Gateway, None), request("mesh", Mesh, None)]);
     assert_eq!(budget.digest(), reversed.digest());
@@ -890,77 +565,76 @@ fn listeners_and_processes_share_one_host_budget() {
 }
 
 #[test]
-fn sent_record_and_ack_range_credit_scale_with_window() {
+fn metadata_byte_credit_scales_with_windows() {
     let mut previous = 0;
-    for (z, base_owner) in [
-        (128 * 1_024, 1_667_072),
-        (256 * 1_024, 2_969_600),
-        (512 * 1_024, 5_558_272),
-        (1_024 * 1_024, 10_604_544),
+    for (z, unit_base, metadata_base) in [
+        (128 * 1_024, 1_832_447, 513_024),
+        (256 * 1_024, 3_167_743, 960_512),
+        (512 * 1_024, 5_821_951, 1_855_488),
+        (1_024 * 1_024, 10_999_295, 3_644_928),
     ] {
         let budget = plan(z * 512 * 4, vec![request("m", Mesh, None)]);
         let p = &budget.listeners()[0].2;
         assert_eq!(p.z, z);
-        assert_eq!(p.sent_records, p.window.div_ceil(600));
-        assert_eq!((p.s_pto, p.k_pto, p.ack_only_records), (2, 3, 2));
-        assert_eq!(p.tracked_records, p.sent_records + 6);
-        assert_eq!(p.sent_record_bytes, (p.sent_records + 6) * 256);
-        assert_eq!(p.ack_ranges_per_space, 64);
+        assert_eq!(p.unit_base, unit_base);
+        assert_eq!(p.metadata.reference_units, (2 * p.window).div_ceil(1_200));
+        assert_eq!(p.metadata.base, metadata_base);
+        assert_eq!(p.metadata.ceiling, 2 * metadata_base);
+        assert_eq!(p.unit, unit_base + metadata_base);
         assert_eq!(
-            p.ack_range_bytes,
-            65 * 32 * 3,
-            "ACK backing is constant, including transient insertion"
+            p.derived,
+            ENDPOINT_BYTES + p.owners * (2 * unit_base + p.metadata.ceiling),
+            "metadata factor two must appear exactly once"
         );
-        assert_eq!(p.delta_unit, (p.sent_records + 6) * 256 + 65 * 32 * 3 + p.metadata.total);
-        assert_eq!(p.owner, base_owner + p.delta_unit, "DeltaUnit must affect owner/unit/N");
-        assert_eq!(p.window_pool, 2 * (2 * p.window + p.delta_unit));
-        assert!(p.sent_record_bytes > previous);
-        previous = p.sent_record_bytes;
-        assert_eq!((p.t_np.pto_multiple, p.t_np.minimum_ms), (3, 10_000));
-        assert_eq!(p.t_np.timeout_ms(2_000).unwrap(), 10_000);
-        assert_eq!(p.t_np.timeout_ms(5_000).unwrap(), 15_000);
-        assert!(matches!(p.t_np.timeout_ms(u64::MAX), Err(BudgetError::Overflow)));
+        assert!(p.metadata.ceiling > previous);
+        previous = p.metadata.ceiling;
     }
+    assert_eq!(MetadataBudget::derive(1_199, 0).unwrap().reference_units, 1);
+    assert_eq!(MetadataBudget::derive(1_200, 0).unwrap().reference_units, 1);
+    assert_eq!(MetadataBudget::derive(1_201, 0).unwrap().reference_units, 2);
+    assert!(matches!(MetadataBudget::derive(u64::MAX, 1), Err(BudgetError::Overflow)));
 }
 
 #[test]
-fn metadata_caps_charge_each_shape_and_assign_exhaustion_policy() {
-    for (ram, role, _, _) in PROFILES {
-        let budget = plan(ram, vec![request("m", role, None)]);
-        let p = &budget.listeners()[0].2;
-        assert_eq!(
-            (
-                p.metadata.frames_per_packet,
-                p.metadata.ranges_per_stream,
-                p.metadata.segments_per_stream
-            ),
-            (32, 64, 64)
-        );
-        assert_eq!(p.metadata.scratch_entries, p.sent_records + 6);
-        let expected = [
-            (A::SentFrameMetadata, p.tracked_records * 32, 64, 128),
-            (A::RetransmitOwner, p.tracked_records, 512, 576),
-            (A::SendRanges, p.streams * 64 * 2, 32, 128),
-            (A::SendSegments, p.streams * 64, 64, 128),
-            (A::ReceiveRanges, p.streams * 64, 32, 128),
-            (A::ReceiveSegments, p.streams * 64, 64, 128),
-            (A::AckLossScratch, p.tracked_records, 32, 128),
-        ];
-        let mut total = 0;
-        for (shape, (class, count, capacity, charge)) in p.metadata.charges.iter().zip(expected) {
-            assert_eq!(
-                (shape.class, shape.count, shape.capacity, shape.item_charge),
-                (class, count, capacity, charge)
-            );
-            assert_eq!(shape.item_charge, allocation_charge(shape.capacity).unwrap() as u64);
-            assert_eq!(shape.bytes, count * charge);
-            total += shape.bytes;
-            let entry = CENSUS.iter().find(|e| e.class == class).unwrap();
-            assert_eq!((entry.pool, entry.tokio_owner, entry.compio_owner), (Pool::Windows, 1, 7));
-            assert_ne!(entry.exhaustion, "");
+fn metadata_census_covers_all_r8_classes() {
+    use MetadataMultiplicity as M;
+    let expected = [
+        (A::SentRecords, M::PacketSpaces(3)),
+        (A::SentFrameMetadata, M::RetainedPacketsAndBuilders),
+        (A::RetransmitOwners, M::RetainedPacketAndPendingChildren),
+        (A::SendSegments, M::SendHalves),
+        (A::SendRanges, M::SendRangeSets(2)),
+        (A::StreamAssemblers, M::ReceiveHalves),
+        (A::CryptoAssemblers, M::PacketSpaces(3)),
+        (A::UnorderedHistory, M::UnorderedAssemblers),
+        (A::PendingRetransmits, M::PacketSpaces(3)),
+        (A::PendingAcks, M::PacketSpaces(3)),
+        (A::AckScratch, M::ConcurrentScratch),
+        (A::LossScratch, M::ConcurrentScratch),
+    ];
+    let entries: Vec<_> = CENSUS.iter().filter(|e| e.pool == Pool::Metadata).collect();
+    assert_eq!(entries.len(), expected.len());
+    for (class, multiplicity) in expected {
+        let found: Vec<_> = entries.iter().filter(|e| e.class == class).collect();
+        assert_eq!(found.len(), 1, "{class:?}");
+        let e = found[0];
+        assert_eq!(e.metadata_multiplicity, Some(multiplicity));
+        assert_eq!((e.pool, e.tokio_owner, e.compio_owner), (Pool::Metadata, 1, 7));
+        assert!(e.source.contains("p 0.11.18 src/"));
+        for policy in [
+            "ResourceExhausted before growth",
+            "abort frame/coalesced/build",
+            "one local error",
+            "handshake APPLICATION_ERROR",
+            "wake waiters",
+            "Close timer to Drained",
+            "retain charges until final destruction",
+        ] {
+            assert!(e.exhaustion.contains(policy), "{class:?} lacks {policy}");
         }
-        assert_eq!(p.metadata.total, total);
-        assert!(p.owners >= 2);
+    }
+    for e in CENSUS.iter().filter(|e| e.pool != Pool::Metadata) {
+        assert!(e.metadata_multiplicity.is_none());
     }
 }
 

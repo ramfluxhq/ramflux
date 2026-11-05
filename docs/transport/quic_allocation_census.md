@@ -1,136 +1,154 @@
-# Dormant QUIC allocation policy and certificate inventory
+# Dormant QUIC resource policy and allocation certificates
 
-This prerequisite provides configuration and reservation accounting only. No
-production call site selects this policy. Existing upstream runtimes remain
-uncertified. There is no activation API and no total-process RSS claim.
+This module plans immutable listener/host reservations. No production call site
+activates it, constructs a listener or enforces runtime allocation credit. The
+lockfile pins quinn 0.11.11 (q), quinn-proto 0.11.18 (p), compio-quic 0.8.0 (c)
+and rustls 0.23.46. All runtime integration remains contingent on complete
+allocation certificates, supported-platform layouts and the tests below.
 
-The lockfile pins quinn 0.11.11, quinn-proto 0.11.18, compio-quic 0.8.0 and
-rustls 0.23.46. `rawq_budget::CENSUS` assigns every allocation family to a
-component and an implementation proof owner. R numbers denote subsequent bounded
-integration stages, not evidence already obtained. Known unbounded event queues
-belong to the R1/R7 pre-allocation hooks; compio stateless sends belong to R6.
-All other entries also require hooks or verified finite layouts. A missing
-allocation family, an impossible minimum, or an unsupported allocator/platform
-blocks integration and requires replanning. Residual pools cannot absorb unknown
-allocations. Dependency or target changes invalidate certificates.
+## Checked metadata sizing and exact profiles
 
-| Allocation family and reachable children | Pool and proof obligation |
-| --- | --- |
-| Receive/send scratch, UDP socket owners and effective OS buffers | E: 128 KiB scratch, 512 KiB receive, 512 KiB send; read back effective OS caps, including Linux doubling. GRO disabled. |
-| Endpoint config, route/CID maps, reset-token associations, token log/cache, hash capacity, counters | E: 512 KiB route state, with fixed capacity; no capacity inferred from current length. |
-| Endpoint queues/sender state, timer/task registries, runtime/driver/completion records, shared config/cert roots/session caches, listener identities and reservation records | E: 512 KiB bookkeeping, 1 MiB runtime and 896 KiB finite residual. Separately certify each reachable allocation; external shared owners cannot escape charging. |
-| Initial/coalesced datagram backing, Incoming queue and route metadata | Incoming: 65535 + I + 1024; Q=N; count backing through final release. |
-| Forward packet events, clones, popped/processing buffers, bytes reference/header allocations | Raw: z + 256*ir per owner; global N*z/N*ir; pre-enqueue credit remains live until last buffer owner. |
-| CID/new/retired vectors, forward/reverse endpoint events, ACK/dedup preflight state, timer controls | Ctl: C + 512*ic; atomically reserve before mutation; vector backing separately charged; bounded producer backpressure. |
-| Close, reset, Drained, bounded terminal reason and duplicate state | Two 1024-byte terminal slots per owner, independent of ordinary controls. |
-| CRYPTO fragments, reassembly/backing, rustls QUIC handshake queue and transport parameters | C=z/4, plus I for retained Incoming; no double charge of shared backing. |
-| TLS connection/session, certificate chains and identity copies, verifier/ring/webpki temporaries, key material and key updates | T=256 KiB owner slab; immutable global configuration in E, CRYPTO bytes in C. Require complete transitive provider layout bounds or pre-allocation hooks. |
-| Stream send/receive backing, assembled and out-of-order fragments, frame retransmit payload | Independent 4*z send/receive pools; stream receive window z; metadata is additional, never implied by a byte window. |
-| Stream state maps, wakers, read/write futures, handles and result records | S*4 KiB; S=min(64,z/32 KiB); uni streams, datagrams and 0-RTT disabled. Clone/waker multiplicity must be bounded. |
-| Sent packet trees, ACK-range sets and frame retransmit metadata | Windows: ceil(Wsend/600)+6 records at 256 bytes each, plus three spaces of 65 transient ACK ranges at 32 bytes each; both receive the factor two. R1/R7 pre-allocation credit covers every record kind, including non-ACK tails/probes/PTO/MTU probes. Two ACK-only records are included in C_pkt; ACK-only/untracked close never block. PTO may exceed C_pkt by two records for three rounds (six charged above C_pkt). Payload vectors retain their payload credits. |
-| Fixed loss/congestion clones, CID/path/MTU/timer state, packet-builder and decode temporaries | Finite 64 KiB owner residual; packet-count-dependent allocations are excluded. Verify fixed layouts and clone multiplicity; no small-allocation fallback. |
-| Primary/alternative/idle source records, normalized addresses, per-source phase indexes | 4*N records at 512 bytes, partitioned N/2N/N; phase counts overlap final owners. |
-| Handshake/driver/ready/preauth futures, JoinSet, channel cells, completed-unjoined outputs, retained final handles and lease metadata | Eight 4 KiB records per owner; final-owner count N. Retained buffers keep their original pool credits. |
-| Retry/reset/version negotiation/refusal vector backing, sender queue and completion, including zero-connection producers | Response: 65536+512 each, N items; reserve before construction, exactly one endpoint sender; retain through completion. |
-| Gateway raw/JSON/value/string/base64 conversion, auth parser, output and length prefix, task metadata | Preauth: 4*F+A+O+8+64 KiB per slot; backing maxima F=A=z; V=N; lower frame admission does not shrink backing allowance. |
+Read physical RAM once; B defaults to floor(RAM/4). Canonical listener identities
+share this single host limit, with positive disjoint slices b whose checked sum
+is at most B. Each enabled runtime variant requires its own listener/slice.
+Existing scalar derivation is in Profile::derive: E=4194304, z is the capped
+power-of-two slab, Wsend=Wrecv_conn=4*z, and all original payload, TLS, stream,
+raw/control, terminal, source, task, response and fixed residual terms remain.
+Owner_base and Unit_base exclude the separate metadata contribution.
 
-Every variable allocation charges `align_up(actual_capacity,64)+64` before
-allocation against its doubled component pool. Headers, alignment, allocator
-layout/fragmentation and reference metadata require proof too. Allocation failure
-must follow the owning component's drop/backpressure/resource-close policy.
-Fixed E is fully charged once per listener/runtime endpoint. No shared clone,
-result or timer registry may grow outside these components.
+```
+M_base = ceil((Wsend + Wrecv_conn)/1200)*512 + 65536
+M_conn = 2*M_base
+Unit_r8 = Unit_base + M_base
+N = min(role_cap, floor((b-E)/(2*Unit_r8)))
+Bderived = E + 2*N*Unit_r8 = E + N*(2*Unit_base + M_conn)
+require N >= 2 and Bderived <= b
+```
 
-`AllocationCertificate` records allocation class/pool, runtime, target/allocator
-and OS convention, dependency/patch digest, frozen config digest, per-allocation shapes/counts and actual/charged capacities, component ceiling and hook/layout evidence. Each separately
-allocated child pays its own alignment and header before the checked sum;
-aligning an aggregate allocation total is forbidden. Socket evidence
-also records both effective caps. The future startup gate must require complete,
-nonduplicated coverage and verify evidence against the resolved dependency
-sources and effective profile. R0 creates no certificate and proves no runtime
-bound. R1/R7 must finish their full runtime certificates before candidate use;
-R2/R3/R4 and R6/R8/R9 additionally prove source, final-owner and runtime behavior.
+The 1200-byte reference sizes the policy; it is not a legal packet minimum or
+an inferred packet-count bound. M_conn is already doubled and appears exactly
+once in the complete per-owner envelope. The frozen digest includes the sizing
+constants and all effective scalar ceilings. Lower frame admission does not
+reduce backing allowances. Arithmetic/target conversion failures refuse planning.
 
-`FrozenBudget::prepare` consumes a physical-RAM reader exactly once, validates B
-and the full canonical listener list, checks every slice sum and freezes the
-configuration digest before any runtime factory is available. Each enabled
-runtime variant needs its own listener identity and slice. Frame admission may
-be lowered; other scalar overrides are not exposed. Application allocations after
-handoff require their own service quota before activation.
+Indicative arithmetic, not measured allocation certification or runtime support:
 
-All product processes on a host must use one controller-provisioned, protected
-local ledger path and the same RAM/B policy. The controller assigns disjoint
-byte intervals; the library does not independently claim the full host B.
-Transactions lock the stable file, verify its fixed-size checksum, then persist
-and sync the complete ledger. Never unlink, replace, or use a private alternate
-ledger while owners exist. A claim is retained through all cloned leases and is
-removed only on clean final destruction. A crash, torn write, failed release,
-unknown process state, unsupported locking or unverifiable ledger refuses reuse.
-No PID-based automatic recovery exists. Offline controller recovery requires
-proof that all affected owners are dead; budget changes require complete
-shutdown and re-reservation. Ledger provisioning must finish before concurrent
-startup; racing an incomplete initial creation may safely refuse startup.
+| RAM / role | z | Unit_base | M_base | M_conn | Unit_r8 | N | Bderived | Unallocated slice |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 GB / mesh | 262144 | 3167743 | 960512 | 1921024 | 4128255 | 29 | 243633094 | 6366906 |
+| 1 GB / gateway | 262144 | 4609543 | 960512 | 1921024 | 5570055 | 22 | 249276724 | 723276 |
+| 2 GB / mesh | 524288 | 5821951 | 1855488 | 3710976 | 7677439 | 32 | 495550400 | 4449600 |
+| 2 GB / gateway | 524288 | 8574471 | 1855488 | 3710976 | 10429959 | 23 | 483972418 | 16027582 |
+| 8 GB / mesh | 1048576 | 10999295 | 3644928 | 7289856 | 14644223 | 64 | 1878654848 | 121345152 |
+| 8 GB / gateway | 1048576 | 16373255 | 3644928 | 7289856 | 20018183 | 49 | 1965976238 | 34023762 |
 
-## Controller r6 packet-state derivation
+| RAM / role | L/l | H/h | R/r | U/u | V/v | Primary/alternative/idle records |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 GB / mesh | 29/8 | 29/4 | 16/4 | 0/0 | 0/0 | 29/58/29 |
+| 1 GB / gateway | 22/8 | 22/4 | 16/4 | 22/4 | 22/4 | 22/44/22 |
+| 2 GB / mesh | 32/8 | 32/4 | 16/4 | 0/0 | 0/0 | 32/64/32 |
+| 2 GB / gateway | 23/8 | 23/4 | 16/4 | 23/4 | 23/4 | 23/46/23 |
+| 8 GB / mesh | 64/8 | 64/4 | 16/4 | 0/0 | 0/0 | 64/128/64 |
+| 8 GB / gateway | 49/8 | 49/4 | 16/4 | 49/4 | 49/4 | 49/98/49 |
 
-This supersedes r5 totals. Credits include all packet-number spaces and builder
-reservations; discard, Retry/rejection and space discard release their own
-reservations. ACK-only service never blocks on credit: two records inside C_pkt
-are reserved for its pinned non-ACK-tail policy. Untracked CONNECTION_CLOSE and
-previous-path challenges remain unblocked. PTO may exceed C_pkt by S_pto=2 records
-for K_pto=3 consecutive rounds. T_np=max(3*PTO,10000 ms) starts at exhaustion;
-only an ACK freeing at least one record resets it. PING/keepalive does not reset
-it. Deadline expiry resource-closes with untracked Close, then ordinary
-Drained/final-owner destruction. These are frozen policy fields, not runtime hooks.
+The 1 GB split uses b=125000000 each and z=131072; M_base=513024,
+M_conn=1026048. Mesh N=25/Bderived=121467854 and gateway
+N=19/Bderived=121961738 sum to243429592<=250000000. Exact tests compare
+complete literal Profile fixtures for all six defaults and both split roles,
+including phases, source/queue counts and credit terms.
 
-Pinned quinn-proto 0.11.18 spaces.rs:794-803 prunes PendingAcks to64 after
-insertion. Preserve that algorithm; charge65 entries per space to cover the
-transient insertion. The record allowance excludes the variable metadata below.
-All classes are assigned to Windows with R1/R7 growth hooks. Capacities are policy
-slab ceilings, not certified upstream layouts; R1/R7 must implement/certify them
-before candidate activation. Unknown or unhookable layouts refuse integration.
+## Shared metadata allocation census
 
-| Item-3 class | Item cap per connection | Capacity / charged item bytes | Exhaustion and lifetime policy |
-| --- | --- | --- | --- |
-| STREAM/retransmit frame descriptors | 32*(C_pkt+6), aggregate32 per packet | 64 / 128 | Stop adding frames before growth; payload vectors retain independent payload credit. |
-| Boxed Retransmits collection owners | C_pkt+6 | 512 / 576 | Reserve before boxing; descriptor children charged separately; pause builders at record credit. |
-| SendBuffer ACK/loss range nodes | 2*64*S | 32 / 128 | Coalesce each set to a covering range before growth; permit duplicate retransmission. |
-| SendBuffer segment descriptors | 64*S | 64 / 128 | Backpressure writes before growth; adjacent merges require existing payload credit. |
-| Receive reassembly/unordered range nodes | 64*S | 32 / 128 | Drop excess out-of-order STREAM data unacknowledged before growth; peer retransmits. |
-| Receive heap/buffer descriptors | 64*S | 64 / 128 | Same independent descriptor cap; retained payload keeps its original charge. |
-| Shared simultaneous ACK/loss scratch | C_pkt+6 | 32 / 128 | Reserve before growth; use bounded sequential chunks with no overflow allocation. |
+All twelve classes below debit the same Pool::Metadata M_conn per final owner.
+CENSUS assigns the Tokio proof owner1 and compio proof owner7. The other census
+rows retain their own endpoint, Incoming, payload/CRYPTO admission, TLS, stream,
+raw/control/terminal/source/task/response/preauth and finite residual pools.
+Metadata is never absorbed by residual storage. There are no separate per-class
+item caps, ACK/PTO exemptions, overshoot allowances or no-progress deadlines.
+Multiplicities describe reachable owners, not inferred bounds on item count.
 
-Each shape pays align_up(capacity,64)+64 separately. D_meta is their checked
-sum, retained through transfer and final destruction. Its charged-shape totals
-still receive the common outer factor two; no aggregation before alignment.
-Thus D_meta=(C_pkt+6)*(32*128+576+128)+S*(2*64*128+3*64*128).
-C_pkt=ceil(Wsend/600); DeltaUnit=(C_pkt+6)*256+65*32*3+D_meta;
-Unit'=Unit+DeltaUnit; N=min(role_cap,floor((b-E)/(2*Unit')));
-Bderived=E+2*N*Unit'. Window pool=2*(Wrecv+Wsend+DeltaUnit).
-ACK backing is constant6240 bytes before doubling; packet terms grow with z.
-New ceilings, metadata shapes and T_np/S_pto/K_pto enter the configuration digest.
+Every actual allocation/growth reserves align_up(capacity,64)+64 before mutation.
+Charge capacity rather than current length; growing/replacing a collection must
+charge old and new backing simultaneously, including spare capacity, tree nodes,
+allocator headers, temporary copies and compaction peaks. Transfer retains the
+charge with the allocation until final destruction. Shared backing pays once;
+separately allocated clone/reference state pays separately. Inline fields already
+charged with an enclosing allocation are not double charged. Payload/CRYPTO
+admission quotas remain independently required and do not replace this debit.
 
-| RAM / role | z | C_pkt | Record bytes incl PTO | ACK bytes | D_meta | DeltaUnit | N | Bderived | Unallocated B |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 GB / mesh | 262144 | 1748 | 449024 | 6240 | 8746880 | 9202144 | 9 | 226852270 | 23147730 |
-| 1 GB / gateway | 262144 | 1748 | 449024 | 6240 | 8746880 | 9202144 | 8 | 225181296 | 24818704 |
-| 2 GB / mesh | 524288 | 3496 | 896512 | 6240 | 17464960 | 18367712 | 10 | 487987564 | 12012436 |
-| 2 GB / gateway | 524288 | 3496 | 896512 | 6240 | 17464960 | 18367712 | 9 | 489153598 | 10846402 |
-| 8 GB / mesh | 1048576 | 6991 | 1791232 | 6240 | 34896320 | 36693792 | 20 | 1911917784 | 88082216 |
-| 8 GB / gateway | 1048576 | 6991 | 1791232 | 6240 | 34896320 | 36693792 | 18 | 1914607996 | 85392004 |
+| Class | Reachability | Exact pinned allocation/transfer evidence |
+| --- | --- | --- |
+| SentRecords | Three packet spaces per owner, sharing the same byte credit | p 0.11.18 src/connection/spaces.rs:20-54,218-255,283-305; src/connection/packet_builder.rs:32-44,184-216; all tracked packets and outstanding builders |
+| SentFrameMetadata | Every retained packet and outstanding builder capacity | p 0.11.18 src/frame.rs:468-509; src/connection/spaces.rs:283-305; variable StreamMetaVec capacity per retained packet/builder |
+| RetransmitOwners | Every retained/pending owner and separately allocated child, including overlap | p 0.11.18 src/connection/spaces.rs:309-338,383-408,428-454; boxed owners and all vector/set/deque children including transfer overlap |
+| SendSegments | Up to S send halves under the aggregate stream limit | p 0.11.18 src/connection/send_buffer.rs:9-40,43-77,147-174; every retained deque cell/backing capacity across S send halves |
+| SendRanges | Two independent range trees per send half, up to 2*S sets | p 0.11.18 src/connection/send_buffer.rs:21-27,43-77,171-174; src/range_set/btree_range_set.rs:13-15,26-38; ACK/retransmit nodes survive record removal |
+| StreamAssemblers | Up to S receive halves; old/new compaction backing remains live | p 0.11.18 src/connection/streams/recv.rs:15-27,274-300; src/connection/assembler.rs:13-23,105-147,153-219,255-280; chunks, descriptors, backing and compaction peaks |
+| CryptoAssemblers | Three packet spaces per owner, sharing the same byte credit | p 0.11.18 src/connection/spaces.rs:20-54,80-91; src/connection/mod.rs:2128-2137; src/connection/assembler.rs:105-219; three additional CRYPTO assemblers |
+| UnorderedHistory | One persistent received-history tree per unordered assembler | p 0.11.18 src/connection/assembler.rs:40-55,85-97,166-182,332-340; q 0.11.11 src/recv_stream.rs:163-180; c 0.8.0 src/recv_stream.rs:279-296; recvd trees persist after chunk consumption |
+| PendingRetransmits | Three packet spaces per owner, sharing the same byte credit | p 0.11.18 src/connection/spaces.rs:20-28,383-408; src/connection/mod.rs:1779-1793; pending collections plus transferred backing until actual free |
+| PendingAcks | Three packet spaces per owner, sharing the same byte credit | p 0.11.18 src/connection/spaces.rs:610-654,794-803,924; src/range_set/array_range_set.rs:20-38; preserve steady64/transient65 pruning, charge actual capacity |
+| AckScratch | All simultaneous scratch allocations and replacement backing | p 0.11.18 src/connection/mod.rs:1493-1501; src/range_set/array_range_set.rs:20-38; every simultaneous ACK allocation and replacement backing |
+| LossScratch | All simultaneous scratch allocations and replacement backing | p 0.11.18 src/connection/mod.rs:1695-1696,1730-1735,1779-1793; lost_packets capacity plus simultaneous pending transfers |
 
-| RAM / role | L/l | H/h | R/r | U/u | V/v | Primary/alternative/idle | Endpoint raw bytes/items | Endpoint control bytes/items | Response bytes/items |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 GB / mesh | 9/8 | 9/4 | 9/4 | 0/0 | 0/0 | 9/18/9 | 2359296/576 | 589824/1152 | 589824/9 |
-| 1 GB / gateway | 8/8 | 8/4 | 8/4 | 8/4 | 8/4 | 8/16/8 | 2097152/512 | 524288/1024 | 524288/8 |
-| 2 GB / mesh | 10/8 | 10/4 | 10/4 | 0/0 | 0/0 | 10/20/10 | 5242880/640 | 1310720/2560 | 655360/10 |
-| 2 GB / gateway | 9/8 | 9/4 | 9/4 | 9/4 | 9/4 | 9/18/9 | 4718592/576 | 1179648/2304 | 589824/9 |
-| 8 GB / mesh | 20/8 | 20/4 | 16/4 | 0/0 | 0/0 | 20/40/20 | 20971520/1280 | 5242880/5120 | 1310720/20 |
-| 8 GB / gateway | 18/8 | 18/4 | 16/4 | 18/4 | 18/4 | 18/36/18 | 18874368/1152 | 4718592/4608 | 1179648/18 |
+The scope includes all tracked ACK-only/PTO/MTU/ordinary packets and builders;
+Retry/rejection/packet-space discard returns only destroyed reservations. Stream
+and CRYPTO assembler backing are both included, as is unordered received history
+after chunks have been consumed. PendingAcks preserves pinned steady64/transient65
+pruning, charging its actual backing capacity rather than an assumed node size.
+Pending loss transfers and ACK/loss scratch retain simultaneous charges.
 
-The 1 GB split retains b=125000000 per listener and z=131072.
-C_pkt=874; record bytes=225280; ACK bytes=6240; D_meta=4387840;
-DeltaUnit=4619360. Mesh N=9, Bderived=120326830;
-gateway N=8, Bderived=119481968; combined=239808798 <=250000000.
-Every profile has N>=2; complete scalar, metadata, phase, source and queue
-fixtures are tested via FrozenBudget::prepare. No runtime certificate is issued.
+## Required runtime exhaustion and operating-envelope proofs
+
+Exhaustion is an attempted charge for which used+charge exceeds M_conn; equality
+alone is permitted. Hooks return ResourceExhausted before growth and abort current
+frame, coalesced-packet and packet-build processing by early return. Existing
+committed data and owners stay charged; do not fabricate ACK knowledge, discard
+already-ACKed data or refund transferred storage. No overflowing allocation or
+metadata exemption is used to close: fixed terminal reservations remain available.
+
+The local-close adapter must set the connection error exactly once as well as
+entering Closed. Pinned p src/connection/mod.rs:396-406 emits ConnectionLost from
+error; :1269-1283 alone changes close state. Data uses application RESOURCE_LIMIT;
+Initial/Handshake preserve transport APPLICATION_ERROR conversion (:819-829).
+Preserve the Close timer to Drained (:1193-1203,3490-3499) and endpoint ordering.
+Both wrappers terminate/wake handshake, connection and stream/read/write waiters:
+q src/connection.rs:1231-1234; c src/connection.rs:84-87. q :262-273 must never see
+Drained without an error. Final buffers/handles and lifetime leases remain held
+until actual joined destruction. These are future integration obligations.
+
+Supported-envelope tests must use the actual coalescing writer (flush >=1200 bytes
+or end-of-frame), including 1 KiB application writes, full send/connection receive
+windows, reordering/loss up to one window, ACK-only/PTO interleaving and a bounded
+consumer barrier until the receive window fills. Require reliable payload/hole
+recovery, FIN completion and credit recovery after release. Include a lost leading
+packet then at least65 full-size packets, and257 separate1KiB writes wherever the
+profile permits (otherwise use a full window of1KiB writes), ordered/unordered
+reads, mixed/coalesced frames and handshake/Data transitions. Recovery is unchanged.
+
+Traffic outside that envelope, such as sustained tiny fragments, may resource-close.
+There is no universal never-exhausts claim. Independent class exhaustion probes
+must cover exact-full versus attempted-overflow, consumed-chunk unordered history,
+CRYPTO, pending-loss transfers and compaction peaks, with one local error, all
+waiters notified, correct wire close, Drained and held-owner destruction. A required
+healthy case that cannot fit needs policy replanning before activation.
+
+## Certificates and host-ledger lifetime
+
+AllocationCertificate binds class/pool, runtime, target/allocator/socket convention,
+dependency/patch digest, frozen configuration digest, exhaustive per-allocation
+shapes/counts and actual/charged capacities. Separately allocated children each pay
+alignment/header before the sum; aggregate-first alignment is forbidden. Socket
+certificates include effective OS receive/send caps, including Linux doubling.
+Uncovered allocation families and unsupported layouts refuse candidate startup.
+The planner issues no runtime certificates and claims no total-process RSS bound.
+
+All product processes on a host use one protected controller-provisioned local
+ledger path and the same physical-RAM/B policy. Transactions lock its stable file,
+verify fixed size, magic, checksum and policy, then persist/sync the complete ledger.
+Do not unlink/replace a live ledger or select private alternate ledgers. Disjoint
+claims remain held by every lease clone until final destruction. Release matches
+digest, interval start/end and PID; altered identity leaves the claim intact.
+Crash, torn write, failed release or unproved stale ownership refuses reuse. There
+is no PID-based automatic recovery; offline recovery requires proof of death.
+Changing budget/configuration requires complete shutdown and re-reservation.

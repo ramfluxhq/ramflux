@@ -13,8 +13,10 @@ pub enum Pool {
     Incoming,
     /// C retained handshake/crypto data.
     Crypto,
-    /// Independent receive and send windows, including packet/reassembly metadata.
+    /// Independent receive and send payload window allowances.
     Windows,
+    /// Shared metadata byte credit, already doubled once in `MetadataBudget`.
+    Metadata,
     /// T fixed TLS/protocol owner slab.
     TlsOwner,
     /// S stream state slabs.
@@ -39,56 +41,84 @@ pub enum Pool {
 /// Exhaustive allocation families in the pinned transport dependency graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocationClass {
-    /// Fixed socket scratch and OS buffers.
+    /// Fixed socket scratch and effective OS buffers.
     Socket,
-    /// Endpoint/config/routes/CID lookup/token-cache state.
+    /// Endpoint configuration, route, CID and token state.
     EndpointState,
-    /// Runtime scheduler/driver/timer registry and socket owners.
+    /// Runtime scheduling, driver and timer registries.
     Runtime,
-    /// Initial packet, coalesced backing and Incoming admission queues.
+    /// Initial datagram backing and admission queue state.
     Incoming,
-    /// Forward raw event queues, shared backing, clones and popped buffers.
+    /// Raw packet queues, shared backing and retained references.
     RawEvents,
-    /// Both control directions, CID vectors, timer controls and dedup preflight.
+    /// Both control directions, vectors and atomic preflight state.
     Controls,
-    /// Close/reset/drained reason and terminal delivery.
+    /// Bounded close, reset and drained records.
     Terminal,
-    /// TLS CRYPTO reassembly and retained handshake bytes.
+    /// Retained handshake payload admission; metadata has its own shared credit.
     Crypto,
-    /// TLS session, certificate chains, verification temporaries and crypto provider.
+    /// TLS session and transitive verification/provider allocations.
     Tls,
-    /// Sent-record and ACK-range credits, with payload vectors charged separately.
-    Protocol,
-    /// Fixed loss/congestion/path/MTU/timer state; never packet-count-dependent.
+    /// Finite fixed loss, congestion, path, MTU and timer state.
     ProtocolFixed,
-    /// Aggregate bounded STREAM/retransmit descriptors per tracked packet.
-    SentFrameMetadata,
-    /// Boxed retransmit collection owner/header per tracked packet.
-    RetransmitOwner,
-    /// Per-stream ACK and loss range nodes retained beyond sent-record retirement.
-    SendRanges,
-    /// Retained send-buffer segment descriptors.
-    SendSegments,
-    /// Receive reassembly and unordered-read range nodes.
-    ReceiveRanges,
-    /// Receive reassembly heap/buffer descriptors.
-    ReceiveSegments,
-    /// Shared simultaneous ACK/loss scratch entries.
-    AckLossScratch,
-    /// Stream send/receive payload, frame vectors and assembler segments.
+    /// Stream payload admission and backing allowances.
     StreamPayload,
-    /// Stream maps, wakers, handles and stream-local state.
+    /// Bounded stream maps, handles and wakers.
     StreamState,
-    /// Authenticated primary/migration/idle source records and normalization keys.
+    /// Primary, migration and idle source records.
     Sources,
-    /// Handshake/ready/driver tasks, `JoinSet`, channel and completed-unjoined results.
+    /// Retained driver, handshake, ready and result owners.
     Tasks,
-    /// Stateless Retry/reset/negotiation/refusal allocation through send completion.
+    /// Stateless response backing through socket completion.
     Responses,
-    /// Gateway frame/JSON/value/String/base64/conversion/output/parser state.
+    /// Gateway framing, authentication and conversion allocations.
     Preauth,
-    /// Identity/config/certificate shared owners and bounded diagnostics.
+    /// Shared identities, trust roots and immutable configuration.
     SharedConfig,
+    /// Sent map records and outstanding packet builder reservations.
+    SentRecords,
+    /// Variable stream frame metadata and vector capacity per retained packet.
+    SentFrameMetadata,
+    /// Boxed retransmit owners and all separately allocated children.
+    RetransmitOwners,
+    /// Retained send-buffer segment deque descriptors and capacity.
+    SendSegments,
+    /// Send ACK and retransmit range trees beyond packet retirement.
+    SendRanges,
+    /// Stream receive chunks, descriptors, backing and compaction peaks.
+    StreamAssemblers,
+    /// Three additional packet-space CRYPTO assemblers and backing.
+    CryptoAssemblers,
+    /// Persistent unordered received-range history after chunk consumption.
+    UnorderedHistory,
+    /// Pending loss collections and transferred backing until actual free.
+    PendingRetransmits,
+    /// Pending acknowledgement backing, including transient insertion.
+    PendingAcks,
+    /// Simultaneous ACK-processing scratch and replacement backing.
+    AckScratch,
+    /// Loss-detection scratch and overlapping pending transfers.
+    LossScratch,
+}
+/// Multiplicities describe reachability, not independent item caps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataMultiplicity {
+    /// This many packet spaces per final connection owner.
+    PacketSpaces(u8),
+    /// All retained packet and in-progress builder vector capacities.
+    RetainedPacketsAndBuilders,
+    /// Every retained/pending owner and each allocated child, including overlaps.
+    RetainedPacketAndPendingChildren,
+    /// Up to S send halves under the aggregate stream limit.
+    SendHalves,
+    /// This many independent sets per send half, up to S halves.
+    SendRangeSets(u8),
+    /// Up to S receive halves under the aggregate stream limit.
+    ReceiveHalves,
+    /// One persistent history tree for each unordered assembler state.
+    UnorderedAssemblers,
+    /// All simultaneous scratch allocations and old/new backing.
+    ConcurrentScratch,
 }
 /// A required bounded hook or finite-layout verification, owned by one implementation PR.
 #[derive(Clone, Copy, Debug)]
@@ -105,10 +135,28 @@ pub struct CensusEntry {
     pub source: &'static str,
     /// Required bounded exhaustion behavior; later runtime owners implement it.
     pub exhaustion: &'static str,
+    /// Shared metadata reachability; absent for baseline pools.
+    pub metadata_multiplicity: Option<MetadataMultiplicity>,
 }
 use AllocationClass as A;
 use Pool as P;
-/// Pending inventory: no entry is certified by merely appearing in this list.
+const METADATA_EXHAUSTION: &str = "ResourceExhausted before growth; abort frame/coalesced/build processing; one local error; Data RESOURCE_LIMIT or handshake APPLICATION_ERROR; q/c terminate and wake waiters; Close timer to Drained; retain charges until final destruction";
+const fn metadata_entry(
+    class: AllocationClass,
+    multiplicity: MetadataMultiplicity,
+    source: &'static str,
+) -> CensusEntry {
+    CensusEntry {
+        class,
+        pool: P::Metadata,
+        tokio_owner: 1,
+        compio_owner: 7,
+        source,
+        exhaustion: METADATA_EXHAUSTION,
+        metadata_multiplicity: Some(multiplicity),
+    }
+}
+/// Complete pending inventory; none of these entries certifies an unpatched runtime.
 pub const CENSUS: &[CensusEntry] = &[
     CensusEntry {
         class: A::Socket,
@@ -117,6 +165,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "q runtime.rs/endpoint.rs; c socket.rs; quinn-udp; OS effective SO_RCVBUF/SO_SNDBUF",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::EndpointState,
@@ -125,6 +174,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "p endpoint.rs/config/token_memory_cache/bloom_token_log; q endpoint.rs; c endpoint.rs/builder.rs",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Runtime,
@@ -133,6 +183,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "q runtime.rs; tokio runtime/time/task; c endpoint.rs; compio-runtime/driver/net/io completion registries",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Incoming,
@@ -141,6 +192,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "p endpoint.rs Incoming; q incoming.rs/endpoint.rs; c incoming.rs/endpoint.rs",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::RawEvents,
@@ -149,6 +201,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "q endpoint.rs/connection.rs; p shared.rs; c endpoint.rs/connection.rs; bytes backing/reference headers",
         exhaustion: "Drop newest before allocation on raw byte/item exhaustion",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Controls,
@@ -157,6 +210,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "p shared.rs/connection/cid_state.rs/cid_queue.rs; q connection.rs; c connection.rs",
         exhaustion: "Atomic preflight; pause on temporary shortage; resource-close oversize via reserved terminal",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Terminal,
@@ -165,6 +219,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "p connection/mod.rs/token.rs; q connection.rs; c connection.rs",
         exhaustion: "Coalesce first cause and final Drained in independent reserved slots",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Crypto,
@@ -173,6 +228,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "p crypto/rustls.rs/connection/spaces.rs/assembler.rs; rustls quic.rs",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Tls,
@@ -181,14 +237,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "rustls 0.23.46 common_state/conn/msgs/client/server/verify; webpki/ring certificate verification and keys",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
-    },
-    CensusEntry {
-        class: A::Protocol,
-        pool: P::Windows,
-        tokio_owner: 1,
-        compio_owner: 7,
-        source: "p connection/spaces.rs sent_packets/PendingAcks; packet_builder.rs; R1/R7 shared builder/sent credit, ACK-only allowance inside C_pkt, PTO overshoot6 outside; 64 ACK ranges per space with65 transient entries; payload vectors retain payload credit",
-        exhaustion: "Ordinary ack-eliciting builders pause at C_pkt; ACK-only/untracked close continue; PTO overshoot <=2 per round for3 rounds; T_np closes without ACK progress; PendingAcks prunes oldest after transient65",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::ProtocolFixed,
@@ -197,70 +246,16 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "p connection/{mod,paths,timer,ack_frequency,mtud}/congestion; finite fixed loss/congestion/path/MTU/timer state only",
         exhaustion: "Resource-close on impossible fixed layout; no borrowing from count-dependent pools",
-    },
-    CensusEntry {
-        class: A::SentFrameMetadata,
-        pool: P::Windows,
-        tokio_owner: 1,
-        compio_owner: 7,
-        source: "p frame.rs StreamMetaVec; spaces.rs boxed Retransmits children: aggregate <=32 descriptors per tracked packet",
-        exhaustion: "Stop adding frames before descriptor growth; unused builder reservations release on discard",
-    },
-    CensusEntry {
-        class: A::RetransmitOwner,
-        pool: P::Windows,
-        tokio_owner: 1,
-        compio_owner: 7,
-        source: "p spaces.rs ThinRetransmits/boxed Retransmits: <=C_pkt+6 owners, 512-byte owner shape; children charged separately",
-        exhaustion: "Reserve before boxing; stop packet building at record credit; retain through retransmit transfer/final destruction",
-    },
-    CensusEntry {
-        class: A::SendRanges,
-        pool: P::Windows,
-        tokio_owner: 1,
-        compio_owner: 7,
-        source: "p connection/send_buffer.rs acks/retransmits: each <=64 ranges per stream",
-        exhaustion: "Coalesce to covering range before growth; resend covered acknowledged bytes if needed; retain transferred charges",
-    },
-    CensusEntry {
-        class: A::SendSegments,
-        pool: P::Windows,
-        tokio_owner: 1,
-        compio_owner: 7,
-        source: "p connection/send_buffer.rs unacked_segments: <=64 descriptors per stream",
-        exhaustion: "Backpressure application writes before descriptor growth; merge adjacent segments only with existing payload credit",
-    },
-    CensusEntry {
-        class: A::ReceiveRanges,
-        pool: P::Windows,
-        tokio_owner: 1,
-        compio_owner: 7,
-        source: "p connection/assembler.rs unordered recvd/ranges: <=64 per stream",
-        exhaustion: "Drop excess out-of-order STREAM data unacknowledged before growth; peer retransmits",
-    },
-    CensusEntry {
-        class: A::ReceiveSegments,
-        pool: P::Windows,
-        tokio_owner: 1,
-        compio_owner: 7,
-        source: "p connection/assembler.rs BinaryHeap<Buffer>: <=64 descriptors per stream",
-        exhaustion: "Drop excess out-of-order STREAM data unacknowledged before descriptor growth; preserve retained payload credit",
-    },
-    CensusEntry {
-        class: A::AckLossScratch,
-        pool: P::Windows,
-        tokio_owner: 1,
-        compio_owner: 7,
-        source: "p connection/mod.rs ACK processing/loss detection scratch: shared <=C_pkt+6 simultaneous entries",
-        exhaustion: "Reserve shared scratch before growth; process bounded chunks sequentially, never allocate overflow scratch",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::StreamPayload,
         pool: P::Windows,
         tokio_owner: 1,
         compio_owner: 7,
-        source: "p connection/streams/{send,recv,state,mod}/send_buffer/assembler; q/c send_stream.rs/recv_stream.rs",
+        source: "p connection/streams/{send,recv,state,mod}; q/c send_stream.rs/recv_stream.rs; payload admission quotas do not replace shared metadata/backing credit",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::StreamState,
@@ -269,6 +264,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "p connection/streams/state.rs; q/c connection.rs stream wakers/maps, handle clones",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Sources,
@@ -277,6 +273,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "mesh_quic_admission.rs; candidate primary/alternative/idle map hooks and normalized keys",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Tasks,
@@ -285,6 +282,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "mesh_quic_admission.rs; q/c connection driver futures; ready/channel/JoinSet/results/handshake and final handles",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Responses,
@@ -293,6 +291,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 6,
         source: "p endpoint.rs response vectors; q/c endpoint.rs stateless send; c socket.rs completion buffers",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::Preauth,
@@ -301,6 +300,7 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "gateway_frame_reader.rs/quic_gateway.rs/types.rs; serde_json/postcard/base64 conversion temporaries",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
     CensusEntry {
         class: A::SharedConfig,
@@ -309,7 +309,68 @@ pub const CENSUS: &[CensusEntry] = &[
         compio_owner: 7,
         source: "tls_config.rs/mesh_quic_admission.rs; rustls trust roots/session caches/config Arc; frozen config identities/digest/reservation records; fixed-label diagnostics",
         exhaustion: "Refuse growth before allocation; owning pool applies bounded backpressure/drop/resource-close; no uncharged fallback",
+        metadata_multiplicity: None,
     },
+    metadata_entry(
+        A::SentRecords,
+        MetadataMultiplicity::PacketSpaces(3),
+        "p 0.11.18 src/connection/spaces.rs:20-54,218-255,283-305; src/connection/packet_builder.rs:32-44,184-216; all tracked packets and outstanding builders",
+    ),
+    metadata_entry(
+        A::SentFrameMetadata,
+        MetadataMultiplicity::RetainedPacketsAndBuilders,
+        "p 0.11.18 src/frame.rs:468-509; src/connection/spaces.rs:283-305; variable StreamMetaVec capacity per retained packet/builder",
+    ),
+    metadata_entry(
+        A::RetransmitOwners,
+        MetadataMultiplicity::RetainedPacketAndPendingChildren,
+        "p 0.11.18 src/connection/spaces.rs:309-338,383-408,428-454; boxed owners and all vector/set/deque children including transfer overlap",
+    ),
+    metadata_entry(
+        A::SendSegments,
+        MetadataMultiplicity::SendHalves,
+        "p 0.11.18 src/connection/send_buffer.rs:9-40,43-77,147-174; every retained deque cell/backing capacity across S send halves",
+    ),
+    metadata_entry(
+        A::SendRanges,
+        MetadataMultiplicity::SendRangeSets(2),
+        "p 0.11.18 src/connection/send_buffer.rs:21-27,43-77,171-174; src/range_set/btree_range_set.rs:13-15,26-38; ACK/retransmit nodes survive record removal",
+    ),
+    metadata_entry(
+        A::StreamAssemblers,
+        MetadataMultiplicity::ReceiveHalves,
+        "p 0.11.18 src/connection/streams/recv.rs:15-27,274-300; src/connection/assembler.rs:13-23,105-147,153-219,255-280; chunks, descriptors, backing and compaction peaks",
+    ),
+    metadata_entry(
+        A::CryptoAssemblers,
+        MetadataMultiplicity::PacketSpaces(3),
+        "p 0.11.18 src/connection/spaces.rs:20-54,80-91; src/connection/mod.rs:2128-2137; src/connection/assembler.rs:105-219; three additional CRYPTO assemblers",
+    ),
+    metadata_entry(
+        A::UnorderedHistory,
+        MetadataMultiplicity::UnorderedAssemblers,
+        "p 0.11.18 src/connection/assembler.rs:40-55,85-97,166-182,332-340; q 0.11.11 src/recv_stream.rs:163-180; c 0.8.0 src/recv_stream.rs:279-296; recvd trees persist after chunk consumption",
+    ),
+    metadata_entry(
+        A::PendingRetransmits,
+        MetadataMultiplicity::PacketSpaces(3),
+        "p 0.11.18 src/connection/spaces.rs:20-28,383-408; src/connection/mod.rs:1779-1793; pending collections plus transferred backing until actual free",
+    ),
+    metadata_entry(
+        A::PendingAcks,
+        MetadataMultiplicity::PacketSpaces(3),
+        "p 0.11.18 src/connection/spaces.rs:610-654,794-803,924; src/range_set/array_range_set.rs:20-38; preserve steady64/transient65 pruning, charge actual capacity",
+    ),
+    metadata_entry(
+        A::AckScratch,
+        MetadataMultiplicity::ConcurrentScratch,
+        "p 0.11.18 src/connection/mod.rs:1493-1501; src/range_set/array_range_set.rs:20-38; every simultaneous ACK allocation and replacement backing",
+    ),
+    metadata_entry(
+        A::LossScratch,
+        MetadataMultiplicity::ConcurrentScratch,
+        "p 0.11.18 src/connection/mod.rs:1695-1696,1730-1735,1779-1793; lost_packets capacity plus simultaneous pending transfers",
+    ),
 ];
 
 /// One allocation shape; each object pays its own alignment and allocator header.
