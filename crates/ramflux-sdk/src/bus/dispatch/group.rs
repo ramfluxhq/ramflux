@@ -1651,8 +1651,10 @@ fn group_receive_compat(
         let page_keys = page
             .0
             .iter()
-            .map(|value| account.client.authenticated_committed_key(HeadUse::HistoricalRead, value))
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .filter_map(|value| {
+                account.client.authenticated_committed_key(HeadUse::HistoricalRead, value).ok()
+            })
+            .collect::<BTreeSet<_>>();
         if !page_keys.contains(&source_key) {
             page.0.push(entry);
         }

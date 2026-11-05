@@ -395,8 +395,15 @@ observe their bounded release rules.
 `group_id`, `conversation_id`, `metadata` (including `name` and `member_roster`),
 `messages` and `decrypted_messages`. It does not connect, fetch directories,
 receive or apply inbox entries. Deleted or erased content is omitted; cached
-sender authority and revocation fences still apply. The process-local current
-head observation clock is not required to display admitted history.
+sender authority and revocation fences still apply. Each row in both arrays has
+`sender_verification`: `verified`, `unverified` (cached authority rejected, including
+revocation), or `unknown` (authority cannot be resolved, including an unbound
+second-device sender). Unverified and unknown rows retain their stored content;
+the marker does not authenticate that plaintext or authorize any new operation.
+One sender failure does not hide other history; storage errors remain fatal.
+The process-local current-head observation clock is not required to display
+admitted history. `limit` returns the oldest N available messages, ordered by
+creation time and then message ID; zero returns no messages.
 
 `group.read` and `group.receive` retain their network and new-admission behavior.
 Their admitted-message projection also ignores only that observation clock.
