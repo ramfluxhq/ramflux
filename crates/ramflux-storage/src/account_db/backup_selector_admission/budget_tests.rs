@@ -53,11 +53,11 @@ DROP TABLE budget_numbers; COMMIT;")?;
         prepare(&target.db)?;
         assert_eq!(
             target.db.query_row(
-                "SELECT count(*) FROM message_footprint WHERE message_id GLOB 'unrelated-*'",
+                "SELECT count(*) FROM message_footprint WHERE message_id GLOB 'unrelated-*' AND kind='revocation_selector'",
                 [],
                 |r| r.get::<_, i64>(0)
             )?,
-            2 * n
+            n
         );
         for table in TABLES {
             assert!(!target.db.query_row(
