@@ -110,15 +110,16 @@ impl BackupDatabase {
             crate::encryption::apply_key(&writer, key)?;
             crate::schema_object_erasure::upgrade_private(&writer)?;
         }
-        // A pre-bundle archive has lost its original live-key authority. Its
-        // enclosing key ships in backup metadata and must never become marker
-        // authority. Mint independent subkeys; old archive markers stay unmatched,
-        // as before schema14. Existing complete bundles are preserved unchanged.
-        super::mac_subkeys::initialize(
-            &mut db,
-            key,
-            matches!(source, MarkerAuthoritySource::ArchiveInput),
-        )?;
+        // An archive's enclosing key is never MAC authority. Record old keyed
+        // markers as unmatched before minting fresh-install authority.
+        match source {
+            MarkerAuthoritySource::ArchiveInput => {
+                super::mac_subkeys::initialize_archive(&mut db, key)?;
+            }
+            MarkerAuthoritySource::LiveAccountKey => {
+                super::mac_subkeys::initialize(&mut db, key, false)?;
+            }
+        }
         db.execute_batch(super::event_counter::SCHEMA)?;
         super::message_footprint::install(&db)?;
         // P1's schema-only private upgrade never omits rows. Capture before any

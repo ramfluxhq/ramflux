@@ -382,3 +382,168 @@ fn pre_bundle_merge_does_not_invent_archive_marker_authority() -> TestResult {
     }
     Ok(())
 }
+
+fn merge_mode(
+    target: &mut BackupDatabase,
+    path: &std::path::Path,
+    key: &AccountDbKey,
+    mode: u8,
+) -> TestResult {
+    match mode {
+        0 => {
+            target.merge_backup(path, key, || Ok(()))?;
+        }
+        1 => {
+            target.merge_native_backup(path, key, || Ok(()))?;
+        }
+        _ => {
+            target.merge_backup_candidate(path, key, || Ok(()))?;
+        }
+    }
+    assert_eq!(merge::load_set(&target.db, "main")?.len(), 1);
+    assert_eq!(
+        target.db.query_row("SELECT count(*) FROM account_mac_marker_bundle", [], |r| r
+            .get::<_, u64>(0))?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn pre_bundle_staged_restore_can_repeat_without_synthesized_authority() -> TestResult {
+    for version in [12, 13] {
+        let (root, source) = crate::tests::test_db(&format!("mac-staged-prebundle-{version}"))?;
+        seed_deleted(&source)?;
+        source.connection.execute_batch(
+            "DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14;",
+        )?;
+        if version == 12 {
+            source.connection.execute_batch("DELETE FROM schema_migration WHERE schema_version=13; DROP INDEX IF EXISTS runtime_outbox_object_selector;")?;
+            source.connection.execute(
+                "UPDATE schema_migration SET checksum=?1 WHERE schema_version=1",
+                params![crate::schema_object_erasure::V12_SENTINEL],
+            )?;
+        }
+        let archive_path = root.join("original.db");
+        let archive = source.write_backup_snapshot(&archive_path)?;
+        let original_hash = Sha256::digest(std::fs::read(&archive_path)?);
+        for mode in 0..3 {
+            let (local_root, local) =
+                crate::tests::test_db(&format!("mac-staged-target-{version}-{mode}"))?;
+            let target_path = root.join(format!("target-{mode}.db"));
+            let target_snapshot = local.write_backup_snapshot(&target_path)?;
+            let mut target = BackupDatabase::open(&target_path, &target_snapshot.key)?;
+            let current = load(&target.db)?.id;
+            let mut fresh = None;
+            for round in 0..2 {
+                let stage_path = root.join(format!("stage-{mode}-{round}.db"));
+                std::fs::copy(&archive_path, &stage_path)?;
+                // Same production boundary used by the SDK's open_checked_input.
+                let stage = BackupDatabase::open_restore_input(
+                    &stage_path,
+                    &archive.key,
+                    crate::BackupOpenMode::PreNormalization,
+                )?;
+                assert_eq!(stage.original_input().counts, archive.counts);
+                assert_eq!(
+                    stage.db.query_row(
+                        "SELECT count(*) FROM account_mac_legacy_origin WHERE kind='bundle'",
+                        [],
+                        |r| r.get::<_, u64>(0)
+                    )?,
+                    1
+                );
+                if round == 0 {
+                    let install_root = root.join(format!("fresh-{mode}"));
+                    let (installed, _) = install(&install_root, &stage)?;
+                    assert!(!installed.message_is_deleted("erased")?);
+                    assert!(!installed.envelope_refers_to_deleted_message("envelope")?);
+                    let fresh_path = root.join(format!("fresh-target-{mode}.db"));
+                    let fresh_snapshot = installed.write_backup_snapshot(&fresh_path)?;
+                    fresh = Some((
+                        BackupDatabase::open(&fresh_path, &fresh_snapshot.key)?,
+                        install_root,
+                    ));
+                }
+                drop(stage);
+                let staged_hash = Sha256::digest(std::fs::read(&stage_path)?);
+                merge_mode(&mut target, &stage_path, &archive.key, mode)?;
+                assert_eq!(load(&target.db)?.id, current);
+                merge_mode(
+                    &mut fresh.as_mut().ok_or("missing installed target")?.0,
+                    &stage_path,
+                    &archive.key,
+                    mode,
+                )?;
+                assert_eq!(Sha256::digest(std::fs::read(&stage_path)?), staged_hash);
+                // A merge/reopen must not turn the unmatched markers into current-key associations.
+                drop(target);
+                target = BackupDatabase::open(&target_path, &target_snapshot.key)?;
+            }
+            for (label, merged) in [
+                ("merged", &target),
+                ("fresh-merged", &fresh.as_ref().ok_or("missing installed target")?.0),
+            ] {
+                let (installed, _) = install(&root.join(format!("{label}-{mode}")), merged)?;
+                assert!(!installed.message_is_deleted("erased")?);
+                assert!(!installed.envelope_refers_to_deleted_message("envelope")?);
+                // A newly written marker still uses the adopted current authority.
+                installed.send_direct_message("thread", "new-message", "peer", b"body")?;
+                installed.delete_direct_message(
+                    "thread",
+                    "new-message",
+                    "local",
+                    "new-tombstone",
+                )?;
+                assert!(installed.message_is_deleted("new-message")?);
+            }
+            drop(fresh);
+            drop(target);
+            drop(local);
+            std::fs::remove_dir_all(local_root)?;
+        }
+        assert_eq!(Sha256::digest(std::fs::read(&archive_path)?), original_hash);
+        drop(source);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn unmatched_archive_copy_keeps_known_marker_authority() -> TestResult {
+    let (root, source) = crate::tests::test_db("mac-known-unmatched-copy")?;
+    seed_deleted(&source)?;
+    let target_path = root.join("known.db");
+    let target_snapshot = source.write_backup_snapshot(&target_path)?;
+    source.connection.execute_batch(
+        "DROP TABLE account_mac_bundle; DELETE FROM schema_migration WHERE schema_version=14;",
+    )?;
+    let archive_path = root.join("archive.db");
+    let snapshot = source.write_backup_snapshot(&archive_path)?;
+    let stage = BackupDatabase::open_restore_input(
+        &archive_path,
+        &snapshot.key,
+        crate::BackupOpenMode::PreNormalization,
+    )?;
+    drop(stage);
+    let mut target = BackupDatabase::open(&target_path, &target_snapshot.key)?;
+    for _ in 0..2 {
+        target.merge_backup(&archive_path, &snapshot.key, || Ok(()))?;
+    }
+    assert_eq!(merge::load_set(&target.db, "main")?.len(), 1);
+    assert_eq!(
+        target.db.query_row(
+            "SELECT count(*) FROM account_mac_legacy_origin WHERE kind='marker'",
+            [],
+            |r| r.get::<_, u64>(0)
+        )?,
+        0
+    );
+    let (restored, _) = install(&root.join("installed"), &target)?;
+    assert_deleted(&restored)?;
+    drop(restored);
+    drop(target);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

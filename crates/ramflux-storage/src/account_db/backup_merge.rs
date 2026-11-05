@@ -38,6 +38,7 @@ fn skip_merge_table(table: &str) -> bool {
         table,
         "account_mac_bundle"
             | "account_mac_marker_bundle"
+            | "account_mac_legacy_origin"
             | "account_erasure_generation"
             | "message_footprint"
             | "message_copy_binding"

@@ -21,6 +21,7 @@ ALLOW = {
     ('database.rs', 'transaction'): 'sole managed transaction acquisition boundary',
     ('database.rs', 'commit'): 'managed transaction completion boundary',
     ('database.rs', 'drop'): 'managed transaction rollback boundary',
+    ('account_db/mac_subkeys.rs', 'initialize_archive'): 'atomic authority provenance for private restore staging; live accounts use initialize_managed',
     ('account_db/mac_subkeys.rs', 'initialize_with_fault'): 'private restore staging migration; live accounts use initialize_managed',
     ('account_db/backup_database.rs', 'enqueue_restore_events'): 'private restore staging database',
     ('account_db/backup_merge.rs', 'begin_message_merge'): 'private restore staging database',

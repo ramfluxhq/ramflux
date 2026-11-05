@@ -18,7 +18,7 @@ fn legacy_db(tag: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError>
         let bundle = Bundle::derive(&[0x42; 32]);
         raw.execute(
             "UPDATE account_mac_bundle SET bundle_id=?1,subkeys=?2",
-            params![bundle.id, bundle.keys.as_slice()],
+            params![bundle.id, bundle.keys.as_ref()],
         )?;
         Ok(())
     })?;
@@ -250,7 +250,7 @@ fn mac_subkey_bundle_new_accounts_use_independent_random_subkeys() -> TestResult
 
 #[test]
 fn mac_subkey_bundle_debug_is_redacted_and_secret_lifecycle_is_zeroizing() {
-    fn protected(_: &Zeroizing<[u8; 192]>) {}
+    fn protected(_: &Zeroizing<Box<[u8]>>) {}
     let bundle = Bundle::derive(&[0x42; 32]);
     protected(&bundle.keys);
     assert_eq!(format!("{bundle:?}"), "MacSubkeyBundle([redacted])");

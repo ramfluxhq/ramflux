@@ -32,7 +32,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 struct Bundle {
     id: String,
-    keys: Zeroizing<[u8; BUNDLE_BYTES]>,
+    keys: Zeroizing<Box<[u8]>>,
     current: bool,
 }
 
@@ -47,7 +47,7 @@ impl Bundle {
         // RFC 5869 extract and single-block expand. Keep PRK, expansion output
         // and HMAC key pads in zeroizing storage, including early returns.
         let prk = keyed_hash(&[0; 32], &[seed]);
-        let mut keys = Zeroizing::new([0; BUNDLE_BYTES]);
+        let mut keys = Zeroizing::new(vec![0; BUNDLE_BYTES].into_boxed_slice());
         for (index, label) in LABELS.iter().enumerate() {
             let output = keyed_hash(&prk, &[label, &[1]]);
             keys[index * 32..(index + 1) * 32].copy_from_slice(output.as_ref());
@@ -132,7 +132,34 @@ pub(super) fn initialize_managed(
 ) -> Result<(), StorageError> {
     let transaction = db.immediate_transaction()?;
     let key = key.clone();
-    db.call(move |raw| Ok(initialize_inner(raw, &key, fresh, false)))??;
+    db.call(move |raw| {
+        Ok((|| {
+            initialize_inner(raw, &key, fresh, false)?;
+            // Fresh installation adopts the random bundle for future live writes;
+            // the old marker provenance remains permanently unmatched.
+            merge::adopt_archive_bundle(raw)?;
+            Ok::<(), StorageError>(())
+        })())
+    })??;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Stage an archive without attributing its old keyed rows to newly minted keys.
+pub(super) fn initialize_archive(
+    db: &mut Connection,
+    key: &AccountDbKey,
+) -> Result<(), StorageError> {
+    let transaction = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let pre_bundle: bool = transaction.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM schema_migration WHERE schema_version=14)",
+        [],
+        |r| r.get(0),
+    )?;
+    initialize_inner(&transaction, key, true, false)?;
+    if pre_bundle {
+        merge::record_archive_origin(&transaction)?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -185,7 +212,7 @@ fn initialize_inner(
     db.execute_batch(SCHEMA)?;
     db.execute(
         "INSERT INTO account_mac_bundle VALUES(?1,?2,1)",
-        params![bundle.id, bundle.keys.as_slice()],
+        params![bundle.id, bundle.keys.as_ref()],
     )?;
     if interrupt {
         return Err(StorageError::AuthorizationRejected);
