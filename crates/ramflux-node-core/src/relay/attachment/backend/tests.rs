@@ -72,7 +72,7 @@ fn large_local_backend_range_commit_is_durable() {
     assert!(backend.commit(&spec).is_err());
     backend.write_chunk(&spec, 0, &mut Cursor::new(&bytes[..524_288])).unwrap();
     let prepared = backend.prepare(&spec).unwrap();
-    assert!(matches!(backend.delete(&spec), Err(BackendError::Busy)));
+    assert!(matches!(backend.reconcile(&spec), Err(BackendError::Busy)));
     fs::create_dir(&data).unwrap();
     assert!(backend.publish(prepared).is_err());
     assert!(!checkpoint(&db)["committed"].as_bool().unwrap());
@@ -106,13 +106,162 @@ fn large_local_backend_range_commit_is_durable() {
     assert!(backend.enumerate(Some(&backend.cursor(&spec)), 1).unwrap().is_empty());
     backend.delete(&spec).unwrap();
     assert!(!data.exists());
-    assert!(!checkpoint(&db)["committed"].as_bool().unwrap());
+    assert!(backend.enumerate(None, 128).unwrap().is_empty());
     backend.delete(&spec).unwrap();
     assert!(matches!(
         backend.write_chunk(&spec, 0, &mut Cursor::new(&bytes[..524_288])),
         Err(BackendError::Retired)
     ));
     assert!(backend.commit(&spec).is_err());
+    drop(backend);
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shared_backend_contract_local() {
+    let root = std::env::temp_dir().join(format!(
+        "rf-contract-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let db = Arc::new(redb::Database::create(root.join("db")).unwrap());
+    let tx = db.begin_write().unwrap();
+    install(&tx).unwrap();
+    tx.commit().unwrap();
+    contract::contract_suite(|spec| {
+        let local =
+            LocalAttachmentBackend::open(Arc::clone(&db), [4; 32], &root.join("files")).unwrap();
+        let cursor = local.cursor(spec);
+        (local, cursor)
+    });
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn concurrent_readers_and_segment_writers_do_not_starve_delete() {
+    use std::{
+        io::{Read, Write},
+        sync::mpsc,
+        time::Duration,
+    };
+    struct Gate {
+        bytes: Cursor<Vec<u8>>,
+        ready: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+    impl Gate {
+        fn wait(&mut self) {
+            if let Some(tx) = self.ready.take() {
+                tx.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+        }
+    }
+    impl Read for Gate {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.wait();
+            self.bytes.read(out)
+        }
+    }
+    impl Write for Gate {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.wait();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let root = std::env::temp_dir().join(format!(
+        "rf-parallel-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let db = Arc::new(redb::Database::create(root.join("db")).unwrap());
+    let tx = db.begin_write().unwrap();
+    install(&tx).unwrap();
+    tx.commit().unwrap();
+    let backend =
+        LocalAttachmentBackend::open(Arc::clone(&db), [5; 32], &root.join("files")).unwrap();
+    let first = spec(&[71; 16]);
+    let mut second = first.clone();
+    second.index = 1;
+    let timeout = Duration::from_secs(2);
+    let mut writers = Vec::new();
+    let mut releases = Vec::new();
+    for spec in [&first, &second] {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let local = backend.clone();
+        let spec = spec.clone();
+        writers.push(std::thread::spawn(move || {
+            local.write_chunk(
+                &spec,
+                0,
+                &mut Gate {
+                    bytes: Cursor::new(vec![71; 16]),
+                    ready: Some(ready_tx),
+                    release: release_rx,
+                },
+            )
+        }));
+        releases.push(release_tx);
+        ready_rx.recv_timeout(timeout).unwrap();
+    }
+    for tx in releases {
+        tx.send(()).unwrap();
+    }
+    for writer in writers {
+        writer.join().unwrap().unwrap();
+    }
+    backend.commit(&first).unwrap();
+    backend.commit(&second).unwrap();
+    let mut readers = Vec::new();
+    let mut releases = Vec::new();
+    for _ in 0..2 {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let local = backend.clone();
+        let spec = first.clone();
+        readers.push(std::thread::spawn(move || {
+            local.read_range(
+                &spec,
+                0,
+                16,
+                &mut Gate {
+                    bytes: Cursor::new(Vec::new()),
+                    ready: Some(ready_tx),
+                    release: release_rx,
+                },
+            )
+        }));
+        releases.push(release_tx);
+        ready_rx.recv_timeout(timeout).unwrap();
+    }
+    assert!(matches!(backend.delete(&first), Err(BackendError::Busy)));
+    // Once deletion is requested, fresh readers are fenced while old readers drain.
+    assert!(matches!(
+        backend.read_range(&first, 0, 16, &mut Vec::new()),
+        Err(BackendError::Retired)
+    ));
+    for tx in releases {
+        tx.send(()).unwrap();
+    }
+    for reader in readers {
+        reader.join().unwrap().unwrap();
+    }
+    backend.delete(&first).unwrap();
+    backend.delete(&second).unwrap();
+    assert!(backend.enumerate(None, 128).unwrap().is_empty());
+    let locks = fs::read_dir(root.join("files"))
+        .unwrap()
+        .filter(|p| p.as_ref().unwrap().path().extension().is_some_and(|x| x == "lock"))
+        .count();
+    assert!(locks <= 4);
     drop(backend);
     drop(db);
     fs::remove_dir_all(root).unwrap();

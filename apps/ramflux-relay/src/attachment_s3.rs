@@ -24,15 +24,58 @@ pub struct MultipartPage {
     pub uploads: Vec<MultipartUpload>,
     pub next: Option<String>,
 }
+/// Closed client errors cannot retain URLs, headers, SDK sources or credentials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S3ClientError {
+    Transport,
+    Timeout,
+    Conflict,
+    Integrity,
+    Completion,
+    Abort,
+    Delete,
+}
+impl std::fmt::Display for S3ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Transport => "s3_transport",
+            Self::Timeout => "s3_timeout",
+            Self::Conflict => "s3_conflict",
+            Self::Integrity => "s3_integrity",
+            Self::Completion => "s3_completion",
+            Self::Abort => "s3_abort",
+            Self::Delete => "s3_delete",
+        })
+    }
+}
+impl std::error::Error for S3ClientError {}
+impl From<std::io::Error> for S3ClientError {
+    fn from(_: std::io::Error) -> Self {
+        Self::Transport
+    }
+}
+impl From<S3ClientError> for BackendError {
+    fn from(error: S3ClientError) -> Self {
+        match error {
+            S3ClientError::Conflict => Self::Conflict,
+            S3ClientError::Transport => Self::Remote("s3_transport"),
+            S3ClientError::Timeout => Self::Remote("s3_timeout"),
+            S3ClientError::Integrity => Self::Remote("s3_integrity"),
+            S3ClientError::Completion => Self::Remote("s3_completion"),
+            S3ClientError::Abort => Self::Remote("s3_abort"),
+            S3ClientError::Delete => Self::Remote("s3_delete"),
+        }
+    }
+}
 /// Operator credentials remain entirely inside this client. All writes are
 /// conditional; implementations must report HTTP-200 XML Error responses as errors.
 pub trait AuthenticatedS3Client: Send + Sync {
     /// # Errors
     /// Returns transport/storage errors; absence must be distinguished from failure.
-    fn head(&self, key: &str) -> Result<Option<S3Object>, BackendError>;
+    fn head(&self, key: &str) -> Result<Option<S3Object>, S3ClientError>;
     /// # Errors
     /// Returns creation failure; caller journals the bounded ID before sending parts.
-    fn begin_multipart(&self, key: &str, object: &S3Object) -> Result<String, BackendError>;
+    fn begin_multipart(&self, key: &str, object: &S3Object) -> Result<String, S3ClientError>;
     /// Streams one final part (segments are <=4MiB); it has no S3 minimum part size.
     /// # Errors
     /// Rejects truncated bodies and any remote upload failure.
@@ -42,15 +85,15 @@ pub trait AuthenticatedS3Client: Send + Sync {
         id: &str,
         length: u64,
         body: &mut dyn Read,
-    ) -> Result<String, BackendError>;
+    ) -> Result<String, S3ClientError>;
     /// Uses If-None-Match:*; Conflict means an object already exists or changed.
     /// # Errors
     /// Returns conflict or any HTTP/XML/completion failure, never premature success.
-    fn complete_if_absent(&self, key: &str, id: &str, etag: &str) -> Result<(), BackendError>;
+    fn complete_if_absent(&self, key: &str, id: &str, etag: &str) -> Result<(), S3ClientError>;
     /// Idempotent for already completed/aborted IDs; waits for actual cleanup.
     /// # Errors
     /// Retains debt when abort has not completed durably.
-    fn abort_multipart(&self, key: &str, id: &str) -> Result<(), BackendError>;
+    fn abort_multipart(&self, key: &str, id: &str) -> Result<(), S3ClientError>;
     /// # Errors
     /// Refuses failed/truncated/oversized bounded Range responses.
     fn read_range(
@@ -59,11 +102,11 @@ pub trait AuthenticatedS3Client: Send + Sync {
         offset: u64,
         length: u64,
         output: &mut dyn Write,
-    ) -> Result<(), BackendError>;
+    ) -> Result<(), S3ClientError>;
     /// Idempotent; success includes confirmed durable absence.
     /// # Errors
     /// Returns deletion failure rather than releasing unreclaimed storage charges.
-    fn delete(&self, key: &str) -> Result<(), BackendError>;
+    fn delete(&self, key: &str) -> Result<(), S3ClientError>;
     /// # Errors
     /// Returns at most the requested limit and a bounded opaque continuation token.
     fn list_multipart(
@@ -71,7 +114,7 @@ pub trait AuthenticatedS3Client: Send + Sync {
         prefix: &str,
         after: Option<&str>,
         limit: usize,
-    ) -> Result<MultipartPage, BackendError>;
+    ) -> Result<MultipartPage, S3ClientError>;
 }
 pub struct S3AttachmentBackend<C> {
     stage: LocalAttachmentBackend,
@@ -125,7 +168,7 @@ impl<C: AuthenticatedS3Client> S3AttachmentBackend<C> {
                 return Err(BackendError::Bounds);
             }
             match self.stage.abort_multipart(&upload.key, &upload.upload_id, || {
-                self.client.abort_multipart(&upload.key, &upload.upload_id)
+                self.client.abort_multipart(&upload.key, &upload.upload_id).map_err(Into::into)
             }) {
                 Ok(()) | Err(BackendError::Busy) => (),
                 Err(e) => return Err(e),
@@ -173,10 +216,10 @@ impl<C: AuthenticatedS3Client> AttachmentBackend for S3AttachmentBackend<C> {
             }
             match self.client.complete_if_absent(&key, &upload, &etag) {
                 Ok(()) => (),
-                Err(BackendError::Conflict) => {
+                Err(S3ClientError::Conflict) => {
                     self.client.abort_multipart(&key, &upload)?;
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
             self.verify_remote(spec)
         })();
@@ -235,7 +278,7 @@ impl<C: AuthenticatedS3Client> AttachmentBackend for S3AttachmentBackend<C> {
             if page.next.is_some() {
                 return Err(BackendError::Remote("multipart cleanup remains"));
             }
-            self.client.delete(&key)
+            self.client.delete(&key).map_err(Into::into)
         })
     }
 }

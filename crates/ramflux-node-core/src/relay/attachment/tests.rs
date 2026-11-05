@@ -410,3 +410,50 @@ fn historical_released_records_compact_on_normal_schema_install() {
     ));
     ledger.reserve(&owner, cycle_request(2), 101).unwrap();
 }
+
+#[test]
+fn distinct_identity_fences_and_cleanup_after_lowered_cap_do_not_hide_due_jobs() {
+    let policy = AttachmentPolicy {
+        pending_lease_seconds: 1,
+        pending_max_seconds: 2,
+        max_identity_fences_per_owner: 4,
+        ..Default::default()
+    };
+    let ledger = memory_ledger(policy);
+    let owner = AttachmentOwner::from_authenticated_session("distinct-owner").unwrap();
+    let first = AttachmentReservationRequest {
+        upload_id: [1; 32],
+        object_id: [2; 32],
+        layout: SegmentLayout { plaintext_length: 0, network_chunk_bytes: 524_288 },
+    };
+    ledger.reserve(&owner, first, 100).unwrap();
+    ledger.abandon_pending(&owner, &first.upload_id).unwrap();
+    let lower = AttachmentLedger::new(
+        Arc::clone(&ledger.db),
+        AttachmentPolicy { max_identity_fences_per_owner: 1, ..policy },
+    )
+    .unwrap();
+    lower.reclaim(&owner, &first.upload_id, |_| Ok(())).unwrap();
+    assert!(matches!(
+        ledger.reserve(&owner, AttachmentReservationRequest { object_id: [3; 32], ..first }, 101),
+        Err(AttachmentLedgerError::State)
+    ));
+    assert!(matches!(
+        ledger.reserve(&owner, AttachmentReservationRequest { upload_id: [4; 32], ..first }, 101),
+        Err(AttachmentLedgerError::Conflict)
+    ));
+    let debt = AttachmentReservationRequest { upload_id: [5; 32], object_id: [6; 32], ..first };
+    ledger.reserve(&owner, debt, 406).unwrap();
+    // The fence expires at407 and the live reservation's lease also expires at407.
+    let due = ledger.gc_due(407, 1).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].upload_id, debt.upload_id);
+    assert_eq!(ledger.usage(&owner).unwrap().fences, 0);
+    ledger.reclaim(&owner, &debt.upload_id, |_| Ok(())).unwrap();
+    // Cleanup cannot become refused after lowering the cap beneath existing fences.
+    let next = AttachmentReservationRequest { upload_id: [7; 32], object_id: [8; 32], ..first };
+    ledger.reserve(&owner, next, 408).unwrap();
+    ledger.abandon_pending(&owner, &next.upload_id).unwrap();
+    lower.reclaim(&owner, &next.upload_id, |_| Ok(())).unwrap();
+    assert_eq!(ledger.usage(&owner).unwrap().reserved, 0);
+}
