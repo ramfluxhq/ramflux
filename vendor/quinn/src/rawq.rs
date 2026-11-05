@@ -10,6 +10,10 @@ use std::{
 pub struct PacketQueueLimits {
     /// Maximum number of indexed protocol owners.
     pub owners: usize,
+    /// Shared established-packet backing ceiling (at most owners times the owner ceiling).
+    pub bytes_total: usize,
+    /// Shared established-packet item ceiling.
+    pub items_total: usize,
     /// Charged allocation bytes per owner.
     pub bytes_per_owner: usize,
     /// Retained packet items per owner.
@@ -21,9 +25,9 @@ pub struct PacketQueueLimits {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct Count {
-    bytes: usize,
-    items: usize,
+pub(crate) struct Count {
+    pub(crate) bytes: usize,
+    pub(crate) items: usize,
 }
 #[derive(Debug, Default)]
 struct Source {
@@ -35,6 +39,10 @@ struct State {
     owners: Box<[Count]>,
     sources: Box<[Source]>,
     total: Count,
+    allocations: u64,
+    refusals: u64,
+    refusal_class: [u64; 6],
+    established: Count,
 }
 #[derive(Debug)]
 pub(crate) struct Pool {
@@ -53,6 +61,16 @@ impl Pool {
     pub(crate) fn new(limits: PacketQueueLimits) -> Result<Arc<Self>, &'static str> {
         if limits.owners == 0
             || limits.owners > 128
+            || limits.bytes_total == 0
+            || limits.items_total == 0
+            || limits
+                .owners
+                .checked_mul(limits.bytes_per_owner)
+                .is_none_or(|n| limits.bytes_total > n)
+            || limits
+                .owners
+                .checked_mul(limits.items_per_owner)
+                .is_none_or(|n| limits.items_total > n)
             || limits.bytes_per_owner == 0
             || limits.items_per_owner == 0
             || limits.bytes_per_source == 0
@@ -60,20 +78,46 @@ impl Pool {
             || limits.owners.checked_mul(limits.bytes_per_owner).is_none()
             || limits.owners.checked_mul(limits.items_per_owner).is_none()
             || limits.owners.checked_mul(4).is_none()
+            || limits
+                .bytes_per_owner
+                .checked_add(65536)
+                .and_then(|n| n.checked_mul(limits.owners))
+                .is_none()
+            || limits
+                .items_per_owner
+                .checked_add(1)
+                .and_then(|n| n.checked_mul(limits.owners))
+                .is_none()
         {
             return Err("invalid packet queue limits");
         }
         Ok(Arc::new(Self {
             limits,
             state: Mutex::new(State {
-                owners: vec![Count::default(); limits.owners].into_boxed_slice(),
+                owners: vec![Count::default(); limits.owners + 1].into_boxed_slice(),
                 sources: (0..limits.owners * 4)
                     .map(|_| Source::default())
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
                 total: Count::default(),
+                allocations: 0,
+                refusals: 0,
+                refusal_class: [0; 6],
+                established: Count::default(),
             }),
         }))
+    }
+    pub(crate) fn incoming_owner(&self) -> usize {
+        self.limits.owners
+    }
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> (Count, u64, u64) {
+        let state = self.state.lock().unwrap();
+        (state.total, state.allocations, state.refusals)
+    }
+    #[cfg(test)]
+    pub(crate) fn refusal_classes(&self) -> [u64; 6] {
+        self.state.lock().unwrap().refusal_class
     }
     pub(crate) fn reserve(
         self: &Arc<Self>,
@@ -99,15 +143,43 @@ impl Pool {
             .or_else(|| state.sources.iter().position(|s| s.key.is_none()))?;
         let source_count = state.sources[slot].count;
         let limits = self.limits;
-        if bytes > limits.bytes_per_owner.checked_sub(owner_count.bytes)?
-            || owner_count.items >= limits.items_per_owner
-            || bytes > limits.bytes_per_source.checked_sub(source_count.bytes)?
-            || source_count.items >= limits.items_per_source
-            || bytes > (limits.owners * limits.bytes_per_owner).checked_sub(state.total.bytes)?
-            || state.total.items >= limits.owners * limits.items_per_owner
+        let owner_bytes = if owner == limits.owners {
+            limits.owners * 65536
+        } else {
+            limits.bytes_per_owner
+        };
+        let owner_items = if owner == limits.owners {
+            limits.owners
+        } else {
+            limits.items_per_owner
+        };
+        let refusal = if bytes > owner_bytes.saturating_sub(owner_count.bytes) {
+            Some(0)
+        } else if owner_count.items >= owner_items {
+            Some(1)
+        } else if bytes > limits.bytes_per_source.saturating_sub(source_count.bytes) {
+            Some(2)
+        } else if source_count.items >= limits.items_per_source {
+            Some(3)
+        } else if owner < limits.owners
+            && bytes > limits.bytes_total.saturating_sub(state.established.bytes)
         {
+            Some(4)
+        } else if owner < limits.owners && state.established.items >= limits.items_total {
+            Some(5)
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            state.refusals = state.refusals.saturating_add(1);
+            state.refusal_class[reason] = state.refusal_class[reason].saturating_add(1);
             return None;
         }
+        if owner < limits.owners {
+            state.established.bytes += bytes;
+            state.established.items += 1;
+        }
+        state.allocations = state.allocations.saturating_add(1);
         state.owners[owner].bytes += bytes;
         state.owners[owner].items += 1;
         state.sources[slot].key = Some(source);
@@ -133,6 +205,10 @@ impl Drop for Credit {
         if state.sources[self.source].count.items == 0 {
             state.sources[self.source].key = None;
         }
+        if self.owner < self.pool.limits.owners {
+            state.established.bytes -= self.bytes;
+            state.established.items -= 1;
+        }
         state.total.bytes -= self.bytes;
         state.total.items -= 1;
     }
@@ -145,6 +221,8 @@ mod tests {
     fn allocation_credit_stays_with_shared_backing_owner() {
         let pool = Pool::new(PacketQueueLimits {
             owners: 2,
+            bytes_total: 512,
+            items_total: 4,
             bytes_per_owner: 256,
             items_per_owner: 2,
             bytes_per_source: 256,

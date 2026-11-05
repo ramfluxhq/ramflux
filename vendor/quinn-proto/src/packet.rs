@@ -57,6 +57,10 @@ impl PartialDecode {
         }
     }
 
+    pub(crate) fn protected_header(&self) -> &ProtectedHeader {
+        &self.plain_header
+    }
+
     /// The underlying partially-decoded packet data
     pub(crate) fn data(&self) -> &[u8] {
         self.buf.get_ref()
@@ -590,8 +594,8 @@ impl ProtectedHeader {
     }
 
     /// Decode a plain header from given buffer, with given [`ConnectionIdParser`].
-    pub fn decode(
-        buf: &mut io::Cursor<BytesMut>,
+    pub fn decode<B: AsRef<[u8]>>(
+        buf: &mut io::Cursor<B>,
         cid_parser: &(impl ConnectionIdParser + ?Sized),
         supported_versions: &[u32],
         grease_quic_bit: bool,

@@ -45,6 +45,9 @@
 use std::sync::Arc;
 
 mod rawq;
+mod rawq_mailbox;
+#[cfg(test)]
+mod rawq_tests;
 pub use rawq::PacketQueueLimits;
 mod connection;
 mod endpoint;

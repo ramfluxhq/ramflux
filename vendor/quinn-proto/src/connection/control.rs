@@ -220,6 +220,24 @@ impl Connection {
         Some(pending.packet)
     }
 
+    /// Terminal adapter for a fallible metadata allocation hook.
+    /// Data sends RESOURCE_LIMIT; Initial/Handshake use the existing APPLICATION_ERROR conversion.
+    pub fn resource_exhausted(&mut self, now: Instant) {
+        if self.control_resource_closed || self.state.is_closed() {
+            return;
+        }
+        self.control_resource_closed = true;
+        self.pending_control = None;
+        self.control_timer_pending = None;
+        self.active_control = None;
+        self.error = Some(ConnectionError::LocallyClosed);
+        self.close(
+            now,
+            VarInt::from_u32(0x524c),
+            Bytes::from_static(b"RESOURCE_LIMIT"),
+        );
+    }
+
     fn control_close(&mut self, now: Instant, error: TransportError) {
         if self.control_resource_closed {
             return;
@@ -303,6 +321,27 @@ impl Connection {
         self.pending_control.is_some()
     }
 
+    pub(crate) fn handle_first_packet_owned(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        ecn: Option<EcnCodepoint>,
+        packet_number: u64,
+        packet: crate::packet::InitialPacket,
+        remaining: Option<BytesMut>,
+        owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<(), ConnectionError> {
+        self.raw_owner = owner;
+        let result = self.handle_first_packet(now, remote, ecn, packet_number, packet, remaining);
+        self.raw_owner = None;
+        result
+    }
+
+    /// Whether this connection uses bounded control admission.
+    pub fn control_credit_enabled(&self) -> bool {
+        self.control.is_some()
+    }
+
     /// Process an event while its allocation owner remains charged through retained backing.
     pub fn handle_event_with_owner(
         &mut self,
@@ -313,6 +352,13 @@ impl Connection {
         self.handle_event(event);
         self.raw_owner = None;
     }
+}
+
+pub(crate) fn own_bytes(bytes: Bytes, owner: Arc<dyn std::any::Any + Send + Sync>) -> Bytes {
+    Bytes::from_owner(RawBacking {
+        bytes,
+        _owner: owner,
+    })
 }
 
 struct RawBacking {

@@ -146,6 +146,54 @@ impl Endpoint {
         None
     }
 
+    /// Route from borrowed socket scratch without allocating packet backing or mutating state.
+    pub fn route_datagram(
+        &self,
+        remote: SocketAddr,
+        local_ip: Option<IpAddr>,
+        data: &[u8],
+    ) -> Option<ConnectionHandle> {
+        let mut cursor = std::io::Cursor::new(data);
+        let header = crate::packet::ProtectedHeader::decode(
+            &mut cursor,
+            &FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
+            &self.config.supported_versions,
+            self.config.grease_quic_bit,
+        )
+        .ok()?;
+        let payload = match &header {
+            crate::packet::ProtectedHeader::Initial(h) => Some(h.len),
+            crate::packet::ProtectedHeader::Long { len, .. } => Some(*len),
+            _ => None,
+        };
+        let packet_len = match payload {
+            Some(len) => usize::try_from(cursor.position().checked_add(len)?).ok()?,
+            None => data.len(),
+        };
+        let first = data.get(..packet_len)?;
+        match self
+            .index
+            .get_parts(&FourTuple { remote, local_ip }, &header, first)
+        {
+            Some(RouteDatagramTo::Connection(handle)) => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// Receive backing with a previously reserved allocation owner.
+    pub fn handle_with_owner(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        local_ip: Option<IpAddr>,
+        ecn: Option<EcnCodepoint>,
+        data: BytesMut,
+        buf: &mut Vec<u8>,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Option<DatagramEvent> {
+        self.handle_owned(now, remote, local_ip, ecn, data, buf, Some(owner))
+    }
+
     /// Process an incoming UDP datagram
     pub fn handle(
         &mut self,
@@ -156,6 +204,19 @@ impl Endpoint {
         data: BytesMut,
         buf: &mut Vec<u8>,
     ) -> Option<DatagramEvent> {
+        self.handle_owned(now, remote, local_ip, ecn, data, buf, None)
+    }
+
+    fn handle_owned(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        local_ip: Option<IpAddr>,
+        ecn: Option<EcnCodepoint>,
+        data: BytesMut,
+        buf: &mut Vec<u8>,
+        owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Option<DatagramEvent> {
         // Partially decode packet or short-circuit if unable
         let datagram_len = data.len();
         let event = match PartialDecode::new(
@@ -165,6 +226,7 @@ impl Endpoint {
             self.config.grease_quic_bit,
         ) {
             Ok((first_decode, remaining)) => DatagramConnectionEvent {
+                owner,
                 now,
                 remote,
                 ecn,
@@ -500,10 +562,17 @@ impl Endpoint {
             return None;
         }
 
-        let Header::Initial(header) = packet.header else {
+        let Header::Initial(mut header) = packet.header else {
             panic!("non-initial packet in handle_first_packet()");
         };
 
+        let header_data = if let Some(owner) = &event.owner {
+            let bytes = crate::connection::control::own_bytes(packet.header_data, owner.clone());
+            header.token = bytes.slice_ref(&header.token);
+            bytes
+        } else {
+            packet.header_data
+        };
         let server_config = self.server_config.as_ref().unwrap().clone();
 
         let token = match IncomingToken::from_header(&header, &server_config, addresses.remote) {
@@ -533,9 +602,10 @@ impl Endpoint {
             received_at: event.now,
             addresses,
             ecn: event.ecn,
+            owner: event.owner,
             packet: InitialPacket {
                 header,
-                header_data: packet.header_data,
+                header_data,
                 payload: packet.payload,
             },
             rest: event.remaining,
@@ -665,14 +735,16 @@ impl Endpoint {
         );
         self.index.insert_initial(dst_cid, ch);
 
-        match conn.handle_first_packet(
+        let first_result = conn.handle_first_packet_owned(
             incoming.received_at,
             incoming.addresses.remote,
             incoming.ecn,
             packet_number,
             incoming.packet,
             incoming.rest,
-        ) {
+            incoming.owner,
+        );
+        match first_result {
             Ok(()) => {
                 trace!(id = ch.0, icid = %dst_cid, "new connection");
 
@@ -1096,17 +1168,34 @@ impl ConnectionIndex {
 
     /// Find the existing connection that `datagram` should be routed to, if any
     fn get(&self, addresses: &FourTuple, datagram: &PartialDecode) -> Option<RouteDatagramTo> {
-        if !datagram.dst_cid().is_empty() {
-            if let Some(&ch) = self.connection_ids.get(datagram.dst_cid()) {
+        self.get_parts(addresses, datagram.protected_header(), datagram.data())
+    }
+
+    fn get_parts(
+        &self,
+        addresses: &FourTuple,
+        header: &crate::packet::ProtectedHeader,
+        data: &[u8],
+    ) -> Option<RouteDatagramTo> {
+        let cid = header.dst_cid();
+        if !cid.is_empty() {
+            if let Some(&ch) = self.connection_ids.get(cid) {
                 return Some(RouteDatagramTo::Connection(ch));
             }
         }
-        if datagram.is_initial() || datagram.is_0rtt() {
-            if let Some(&ch) = self.connection_ids_initial.get(datagram.dst_cid()) {
+        if matches!(
+            header,
+            crate::packet::ProtectedHeader::Initial(_)
+                | crate::packet::ProtectedHeader::Long {
+                    ty: crate::LongType::ZeroRtt,
+                    ..
+                }
+        ) {
+            if let Some(&ch) = self.connection_ids_initial.get(cid) {
                 return Some(ch);
             }
         }
-        if datagram.dst_cid().is_empty() {
+        if cid.is_empty() {
             if let Some(&ch) = self.incoming_connection_remotes.get(addresses) {
                 return Some(RouteDatagramTo::Connection(ch));
             }
@@ -1114,7 +1203,6 @@ impl ConnectionIndex {
                 return Some(RouteDatagramTo::Connection(ch));
             }
         }
-        let data = datagram.data();
         if data.len() < RESET_TOKEN_SIZE {
             return None;
         }
@@ -1180,6 +1268,7 @@ pub struct Incoming {
     received_at: Instant,
     addresses: FourTuple,
     ecn: Option<EcnCodepoint>,
+    owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
     packet: InitialPacket,
     rest: Option<BytesMut>,
     crypto: Keys,

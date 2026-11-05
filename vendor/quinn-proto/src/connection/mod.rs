@@ -1138,6 +1138,16 @@ impl Connection {
     /// (including application `Event`s, `EndpointEvent`s and outgoing datagrams) that should be
     /// extracted through the relevant methods.
     pub fn handle_event(&mut self, event: ConnectionEvent) {
+        let previous = self.raw_owner.take();
+        self.raw_owner = match &event.0 {
+            ConnectionEventInner::Datagram(d) => d.owner.clone().or_else(|| previous.clone()),
+            _ => previous.clone(),
+        };
+        self.handle_event_inner(event);
+        self.raw_owner = previous;
+    }
+
+    fn handle_event_inner(&mut self, event: ConnectionEvent) {
         use ConnectionEventInner::*;
         match event.0 {
             Datagram(DatagramConnectionEvent {
@@ -1146,6 +1156,7 @@ impl Connection {
                 ecn,
                 first_decode,
                 remaining,
+                owner: _,
             }) => {
                 // If this packet could initiate a migration and we're a client or a server that
                 // forbids migration, drop the datagram. This could be relaxed to heuristically
@@ -1302,6 +1313,11 @@ impl Connection {
     ///
     /// [`StreamEvent::Finished`]: crate::StreamEvent::Finished
     pub fn close(&mut self, now: Instant, error_code: VarInt, reason: Bytes) {
+        let reason = if self.control.is_some() && reason.len() > 256 {
+            Bytes::copy_from_slice(&reason[..256])
+        } else {
+            reason
+        };
         self.close_inner(
             now,
             Close::Application(frame::ApplicationClose { error_code, reason }),
