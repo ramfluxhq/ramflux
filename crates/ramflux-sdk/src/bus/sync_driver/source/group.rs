@@ -30,7 +30,7 @@ pub(super) async fn prepare(
                 account.client.legacy_group_directory_request(&entry, &route, &body, &local)
             })
             .await?;
-        return request.resolve(config).await;
+        return resolve_legacy(request, config).await;
     };
     let actor = super::fetch_inbound_manifest(config, &plan.actor_root).await?;
     // A fresh, active transport actor is required before it can cause an addition lookup.
@@ -47,6 +47,29 @@ pub(super) async fn prepare(
         })
         .await?;
     let addition =
-        if let Some(request) = addition { Some(request.fetch(config).await?) } else { None };
+        if let Some(request) = addition { Some(resolve_addition(request, config).await?) } else { None };
     Ok(Some(ReceiveGroupDirectory::Shared(Box::new(GroupDirectoryEvidence { actor, addition }))))
 }
+
+async fn resolve_legacy(
+    request: crate::client::routed::group_directory::LegacyGroupRequest,
+    config: &GatewaySessionConfig,
+) -> Result<Option<ReceiveGroupDirectory>, SdkError> {
+    let root = request.directory_root().map(str::to_owned);
+    request.resolve(config).await.map_err(|source| match root {
+        Some(root) => SdkError::DirectoryAuthorityUnavailable { root, source: Box::new(source) },
+        None => source,
+    })
+}
+
+async fn resolve_addition(
+    request: crate::client::shared_group::GroupDirectoryRequest,
+    config: &GatewaySessionConfig,
+) -> Result<(crate::client::shared_group::GroupDirectoryRequest, crate::SdkDeviceManifestResponse), SdkError> {
+    let root = request.root.clone();
+    request.fetch(config).await.map_err(|source|
+        SdkError::DirectoryAuthorityUnavailable { root, source: Box::new(source) })
+}
+
+#[cfg(test)]
+mod tests;

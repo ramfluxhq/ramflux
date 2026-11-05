@@ -604,13 +604,7 @@ pub(super) fn quarantine_failure(
     // Immutable malformed signature bytes cannot become valid after a directory refresh.
     let wire_error = crate::client::inbox_failure::wire_signature_error(entry);
     let error = wire_error.as_ref().unwrap_or(error);
-    let kind = match error {
-        SdkError::InboundPending(_)
-        | SdkError::SenderManifestRequired { .. }
-        | SdkError::FreshHeadRequired { .. } => "InboundPending",
-        SdkError::InboundRejected(_) => "InboundRejected",
-        _ => local_bus_error_code(error),
-    };
+    let kind = inbound_failure_kind(error);
     let retry_bytes = serde_json::to_vec(entry)?;
     let code = if let Some(code) = crate::client::inbox_failure::deterministic(error) {
         code
@@ -745,3 +739,11 @@ pub(super) async fn process(
 
 mod ack;
 pub(crate) use ack::{AckState, PreparedAck, finish as finish_prepared_ack};
+
+fn inbound_failure_kind(error: &SdkError) -> &'static str {
+    match error.directory_source() {
+        SdkError::InboundPending(_) | SdkError::SenderManifestRequired { .. } | SdkError::FreshHeadRequired { .. } => "InboundPending",
+        SdkError::InboundRejected(_) => "InboundRejected",
+        source => local_bus_error_code(source),
+    }
+}

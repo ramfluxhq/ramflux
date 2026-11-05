@@ -19,12 +19,15 @@ const MAX_PENDING: usize = 512;
 const PASS_ROOTS: usize = 32;
 const MAX_CYCLE_PASSES: usize = 4;
 const PASS_PAUSE: Duration = Duration::from_millis(25);
+const REFRESH_DUE: Duration = Duration::from_secs(120);
+const RETRY_DEMAND_SHARE: usize = PASS_ROOTS;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(150);
 
 #[derive(Default)]
 pub(crate) struct RefreshState {
     pending: BTreeSet<String>,
     cursor: Option<(bool, String)>,
+    sweep_cursor: Option<(bool, String)>,
     failures: BTreeMap<String, (tokio::time::Instant, u8)>,
     inbound: inbound::Inbound,
     wake: Arc<tokio::sync::Notify>,
@@ -74,6 +77,7 @@ pub(crate) struct Plan {
     lease: Arc<()>,
     roots: Vec<String>,
     remaining_passes: usize,
+    retried_demands: usize,
     config: GatewaySessionConfig,
 }
 pub(crate) enum Work {
@@ -83,6 +87,7 @@ pub(crate) enum Work {
     Prepare {
         fence: Fence,
         periodic: bool,
+        retry_budget: usize,
         attempted: BTreeSet<String>,
         reply: oneshot::Sender<Result<Option<Plan>, SdkError>>,
     },
@@ -126,7 +131,7 @@ fn prepare_due(
     periodic: bool,
     attempted: &BTreeSet<String>,
 ) -> Result<Option<Plan>, SdkError> {
-    prepare_due_limit(account, fence, periodic, attempted, PASS_ROOTS)
+    prepare_due_limit(account, fence, periodic, attempted, PASS_ROOTS, usize::MAX)
 }
 
 fn prepare_due_limit(
@@ -135,6 +140,7 @@ fn prepare_due_limit(
     periodic: bool,
     attempted: &BTreeSet<String>,
     limit: usize,
+    retry_budget: usize,
 ) -> Result<Option<Plan>, SdkError> {
     if !fence.current(account) || account.head_refresh.active.upgrade().is_some() {
         return Ok(None);
@@ -153,7 +159,7 @@ fn prepare_due_limit(
         .filter_map(|root| {
             let observed = freshness.observation(&root);
             let due = observed.is_none_or(|at| {
-                now.checked_duration_since(at).is_none_or(|age| age >= REFRESH_INTERVAL)
+                now.checked_duration_since(at).is_none_or(|age| age >= REFRESH_DUE)
             });
             (account.head_refresh.pending.contains(&root) || (periodic && due))
                 .then_some((observed.is_some(), root))
@@ -162,22 +168,28 @@ fn prepare_due_limit(
     drop(freshness);
     // Demand precedes sweep work. Each class rotates through never-observed and
     // observed roots with a persistent cursor, including after failed fetches.
-    let cursor = account.head_refresh.cursor.as_ref();
+    let reserve_sweep = periodic && retry_budget == 0;
+    let cursor = if reserve_sweep { account.head_refresh.sweep_cursor.as_ref() }
+        else { account.head_refresh.cursor.as_ref() };
     let after = candidates.iter().filter(|key| cursor.is_none_or(|last| *key > last));
     let before = candidates.iter().filter(|key| cursor.is_some_and(|last| *key <= last));
     let ordered: Vec<_> = after.chain(before).collect();
-    let demand = ordered.iter().filter(|(_, root)| account.head_refresh.pending.contains(root));
+    let demand = ordered.iter().filter(|(_, root)| account.head_refresh.pending.contains(root)
+        && !(reserve_sweep && account.head_refresh.failures.contains_key(root)));
     let sweep = ordered.iter().filter(|(_, root)| !account.head_refresh.pending.contains(root));
     let selected: Vec<_> = demand.chain(sweep).take(limit).map(|key| (*key).clone()).collect();
     if selected.is_empty() {
         return Ok(None);
     }
-    account.head_refresh.cursor = selected.last().cloned();
+    if reserve_sweep { account.head_refresh.sweep_cursor = selected.last().cloned(); }
+    else { account.head_refresh.cursor = selected.last().cloned(); }
+    let retried_demands = selected.iter().filter(|(_, root)|
+        account.head_refresh.pending.contains(root) && account.head_refresh.failures.contains_key(root)).count();
     let remaining_passes = candidates.len().saturating_sub(selected.len()).div_ceil(PASS_ROOTS);
     let roots = selected.into_iter().map(|(_, root)| root).collect();
     let lease = Arc::new(());
     account.head_refresh.active = Arc::downgrade(&lease);
-    Ok(Some(Plan { fence, lease, roots, remaining_passes, config: account.gateway_config.clone() }))
+    Ok(Some(Plan { fence, lease, roots, remaining_passes, retried_demands, config: account.gateway_config.clone() }))
 }
 
 fn apply(
@@ -253,9 +265,9 @@ pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) {
         Work::Subscribe { reply } => {
             let _ = reply.send(account.head_refresh.wake.clone());
         }
-        Work::Prepare { fence, periodic, attempted, reply } => {
+        Work::Prepare { fence, periodic, retry_budget, attempted, reply } => {
             if !reply.is_closed() {
-                let _ = reply.send(prepare_due_limit(account, fence, periodic, &attempted, 1));
+                let _ = reply.send(prepare_due_limit(account, fence, periodic, &attempted, 1, retry_budget));
             }
         }
         Work::Apply { plan, root, fetched_after, outcome, reply } => {
@@ -277,10 +289,11 @@ pub(crate) async fn pass(
     }
     let mut cancel = context.cancel.clone();
     let mut attempted = BTreeSet::new();
+    let mut retry_budget = RETRY_DEMAND_SHARE;
     tokio::select! {
         biased;
         _ = cancel.changed() => Ok(()),
-        result = fetch_pass(&context, &writer, false, &mut attempted) => result.map(|_| ()),
+        result = fetch_pass(&context, &writer, false, &mut attempted, &mut retry_budget) => result.map(|_| ()),
     }
 }
 async fn fetch_pass(
@@ -288,6 +301,7 @@ async fn fetch_pass(
     writer: &mpsc::Sender<AccountWork>,
     periodic: bool,
     attempted: &mut BTreeSet<String>,
+    retry_budget: &mut usize,
 ) -> Result<usize, SdkError> {
     let mut remaining = 0;
     for _ in 0..PASS_ROOTS {
@@ -300,6 +314,7 @@ async fn fetch_pass(
                     session_id: context.session_id.clone(),
                 },
                 periodic,
+                retry_budget: *retry_budget,
                 attempted: attempted.clone(),
                 reply,
             },
@@ -308,6 +323,7 @@ async fn fetch_pass(
         let Some(plan) = response.await.map_err(|_| stopped())?? else { return Ok(0) };
         let plan = Arc::new(plan);
         remaining = plan.remaining_passes;
+        *retry_budget = retry_budget.saturating_sub(plan.retried_demands);
         for root in &plan.roots {
             let fetched_after = Instant::now();
             let outcome = super::directory::fetch(&plan.config, root).await;
@@ -356,15 +372,28 @@ async fn cycle(
     periodic: bool,
 ) -> Result<(), SdkError> {
     let mut attempted = BTreeSet::new();
+    let mut retry_budget = RETRY_DEMAND_SHARE;
     for pass in 0..MAX_CYCLE_PASSES {
         if pass > 0 {
             tokio::time::sleep(PASS_PAUSE).await;
         }
-        if fetch_pass(context, writer, periodic, &mut attempted).await? == 0 {
+        if fetch_pass(context, writer, periodic, &mut attempted, &mut retry_budget).await? == 0 {
             break;
         }
     }
     Ok(())
+}
+
+// Advance on the original interval grid, independent of wake delivery latency.
+fn advance_sweep(next: &mut tokio::time::Instant, ticked: bool, now: tokio::time::Instant) -> bool {
+    if !ticked && now < *next { return false; }
+    if now >= *next {
+        let elapsed = now.duration_since(*next);
+        let remainder = Duration::from_secs(elapsed.as_secs() % REFRESH_INTERVAL.as_secs())
+            + Duration::from_nanos(u64::from(elapsed.subsec_nanos()));
+        *next = now + (REFRESH_INTERVAL - remainder);
+    }
+    true
 }
 
 async fn run_with_triggers(
@@ -388,17 +417,12 @@ async fn run_with_triggers(
             tracing::debug!(%error, "connect head refresh deferred");
         }
         loop {
-            tokio::select! {
+            let ticked = tokio::select! {
                 biased;
-                _ = timer.tick(), if periodic => {},
-                () = wake.notified() => {},
-            }
-            // A queued wake cannot hide an elapsed deadline, even before the
-            // timer driver's readiness notification has been delivered.
-            let periodic = periodic && tokio::time::Instant::now() >= next_sweep;
-            if periodic {
-                next_sweep = tokio::time::Instant::now() + REFRESH_INTERVAL;
-            }
+                _ = timer.tick(), if periodic => true,
+                () = wake.notified() => false,
+            };
+            let periodic = periodic && advance_sweep(&mut next_sweep, ticked, tokio::time::Instant::now());
             if let Err(error) = cycle(&context, &writer, periodic).await {
                 tracing::debug!(%error, "head refresh cycle deferred");
             }
