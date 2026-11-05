@@ -204,6 +204,14 @@ pub enum SdkError {
 }
 
 impl SdkError {
+    pub(crate) fn without_directory_context(self) -> Self {
+        match self { Self::DirectoryAuthorityUnavailable { source, .. } => source.without_directory_context(), other => other }
+    }
+
+    pub(crate) fn directory_source(&self) -> &Self {
+        match self { Self::DirectoryAuthorityUnavailable { source, .. } => source.directory_source(), other => other }
+    }
+
     /// Typed custody refusal category, including a server-supplied daily capacity hint.
     #[must_use]
     pub fn custody_refusal(&self) -> Option<ramflux_protocol::custody::CustodyRefusal> {

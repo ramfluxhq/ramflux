@@ -25,6 +25,10 @@ pub(crate) enum LegacyGroupRequest {
     Control { lookup: Option<Lookup> },
 }
 impl LegacyGroupRequest {
+    pub(crate) fn directory_root(&self) -> Option<&str> {
+        match self { Self::Control { lookup: Some(lookup) } => Some(&lookup.root), _ => None }
+    }
+
     pub(crate) async fn resolve(
         self,
         gateway: &GatewaySessionConfig,
