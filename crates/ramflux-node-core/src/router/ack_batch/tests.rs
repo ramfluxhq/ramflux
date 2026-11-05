@@ -40,6 +40,7 @@ fn seed(
     store: &crate::RouterRedbStore,
     count: u64,
     mode: u8,
+    full_window: bool,
 ) -> std::result::Result<RouterCore, NodeCoreError> {
     let router = RouterCore::new();
     for seq in 1..=count {
@@ -47,6 +48,13 @@ fn seed(
         let mut row = entry(seq);
         row.envelope.created_at = *CREATED.get_or_init(|| row.envelope.created_at);
         router.target_shard("target").inbox.restore_pending_entry_until(row, None);
+    }
+    // Build the common precondition offline, then persist it atomically. The
+    // measured ACK batch and the sequential comparison below use real writers.
+    if full_window {
+        for seq in 2..=1025 {
+            router.apply_ack_for_target("target", &ack(seq))?;
+        }
     }
     store.bootstrap_router(&router)?;
     if mode != 0 {
@@ -83,12 +91,8 @@ fn ack_batch_reopen_equivalence() -> Result {
         let right = fixture(&format!("ack-batch-{mode}"));
         let sequential_store = test_store(&left, mode, 1 << 20)?;
         let batch_store = test_store(&right, mode, 1 << 20)?;
-        let sequential = seed(&sequential_store, 1089, mode)?;
-        let batch = seed(&batch_store, 1089, mode)?;
-        for seq in 2..=1025 {
-            one(&sequential, &sequential_store, seq)?;
-            one(&batch, &batch_store, seq)?;
-        }
+        let sequential = seed(&sequential_store, 1089, mode, true)?;
+        let batch = seed(&batch_store, 1089, mode, true)?;
         // First member overflows the window and retires head1. Later members clear
         // their own transient retirement lists; the batch writer must retain head1.
         let starts = Arc::new(AtomicUsize::new(0));
@@ -138,7 +142,7 @@ fn ack_batch_reopen_equivalence() -> Result {
                 redb::TableDefinition::new("router_inbox_expiry_v1");
             assert_eq!(tx.open_table(expiry)?.iter()?.count(), 0, "no stale expiry index");
         }
-        // All ID indexes must still resolve idempotent ACKs after reopen.
+        // Sequence selectors must still resolve idempotent ACKs after reopen.
         for seq in 1..=1089 {
             assert!(batch.apply_ack_for_target("target", &ack(seq)).is_ok());
         }
@@ -210,7 +214,7 @@ fn ack_batch_atomic_failure() -> Result {
         // A caller-owned, uncommitted transaction can be discarded without fencing.
         let root = fixture(&format!("ack-precommit-{mode}"));
         let store = test_store(&root, mode, 1 << 20)?;
-        let router = seed(&store, 3, mode)?;
+        let router = seed(&store, 3, mode, false)?;
         let before = pending(&router);
         let cursor_before = router.target_shard("target").inbox.cursor_state("target").cloned();
         let observer = crate::durability_test_hooks::observe(
@@ -295,7 +299,7 @@ fn atomic_child(root: std::ffi::OsString) -> Result {
     let mode = std::env::var("RAMFLUX_ACK_BATCH_MODE")?.parse::<u8>()?;
     let cut = std::env::var("RAMFLUX_ACK_BATCH_CUT")?;
     let store = test_store(&root, mode, 1 << 20)?;
-    let router = seed(&store, 3, mode)?;
+    let router = seed(&store, 3, mode, false)?;
     let _observer = crate::durability_test_hooks::observe(
         root.clone(),
         Arc::new(move |_, op, done| {
