@@ -48,7 +48,7 @@ fn custody_registry_durable_head_latch_and_conflict_fence_survive_restart() -> T
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = RouterCore::new();
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         router.publish_custody_record(&publication, now, &store)?;
         router.publish_custody_record(&revoked, now + 1, &store)?;
     }
@@ -150,7 +150,7 @@ fn custody_consent_history_retains_exact_superseded_heads_across_restart_and_exp
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = RouterCore::new();
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         router.publish_custody_record(&original, now, &store)?;
         assert_eq!(
             router.custody_consent_history(&anchor, &old_hash, now, &store)?,

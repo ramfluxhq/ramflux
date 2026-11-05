@@ -158,7 +158,7 @@ impl RouterHandle {
             Self::Tokio(runtime) => {
                 crate::router_engine::submit_envelope_async(
                     &runtime.state,
-                    runtime.store.as_ref(),
+                    &runtime.store,
                     crate::router_engine::AsyncForwardContext {
                         client: runtime.home_node_forward.as_ref(),
                         semaphore: &runtime.forward_semaphore,

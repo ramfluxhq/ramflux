@@ -29,7 +29,7 @@ fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error
         envelope("env_acked", "target_ack", DeliveryClass::OpaqueEvent),
     );
     router.apply_ack(&ack("env_acked"))?;
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     drop(store);
 
     let reopened = RouterRedbStore::open(&path)?;
@@ -57,7 +57,7 @@ fn router_redb_incremental_replay_survives_restart() -> Result<(), Box<dyn std::
     let path = temp_store_path("router_redb_incremental_replay_survives_restart")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let submitted =
         current_envelope("env_replay_incremental", "target_replay", DeliveryClass::OpaqueEvent);
     let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
@@ -89,7 +89,7 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
     let wal_root = path.with_extension("submission.wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let submitted = current_envelope(
         "env_router_wal_submission",
         "target_router_wal",
@@ -152,7 +152,7 @@ fn router_wal_async_submission_restores_replay_and_inbox_atomically()
     let wal_root = path.with_extension("async_submission.wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let submitted = current_envelope(
         "env_router_wal_async_submission",
         "target_router_wal_async",
@@ -197,7 +197,7 @@ fn router_wal_submission_respects_redb_ack_cursor_on_restore()
     let wal_root = path.with_extension("ack.wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let submitted = current_envelope(
         "env_router_wal_acked",
         "target_router_wal_ack",
@@ -260,7 +260,7 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
     let path = temp_store_path("router_redb_fanout_replay_survives_restart")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     router.mvp1_register_identity(&registration_request(
         &router,
         "principal_fanout",
@@ -353,7 +353,7 @@ fn router_redb_incremental_ack_survives_restart_without_duplicate_delivery()
         temp_store_path("router_redb_incremental_ack_survives_restart_without_duplicate_delivery")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let submitted = current_envelope(
         "env_ack_incremental",
         "target_ack_incremental",

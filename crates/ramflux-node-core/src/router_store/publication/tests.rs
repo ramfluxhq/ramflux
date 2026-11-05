@@ -15,7 +15,7 @@ use tracing_subscriber::prelude::*;
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-fn fixture(name: &str) -> PathBuf {
+pub(super) fn fixture(name: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     std::env::temp_dir().join(format!(
         "publication-{name}-{}-{}",
@@ -24,7 +24,7 @@ fn fixture(name: &str) -> PathBuf {
     ))
 }
 
-fn entry(seq: u64) -> InboxEntry {
+pub(super) fn entry(seq: u64) -> InboxEntry {
     let envelope = ramflux_protocol::Envelope {
         schema: ramflux_protocol::domain::ENVELOPE.into(),
         version: 1,
@@ -250,6 +250,7 @@ fn aborted_slot_capacity() -> Result {
 
 #[test]
 fn single_worker_reply_and_drop() -> Result {
+    super::view_tests::reply_liveness()?;
     crate::router_wal::fatal_tests::panic_in_write()?;
     for mode in 0..=2 {
         let root = fixture(&format!("worker-{mode}"));

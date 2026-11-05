@@ -106,7 +106,7 @@ fn far_future_rows_from_older_builds_expire_seven_days_after_upgrade()
         redb::TableDefinition::new("router_expiry_index_format_v1");
     let path = temp_store_path("r3_legacy_rows")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
-    store.save_router(&RouterCore::new())?;
+    store.bootstrap_router(&RouterCore::new())?;
     drop(store);
     // A row written by an older build: no stored deadline, created ten years ahead.
     let mut envelope = envelope("legacy-future", "legacy-mailbox", DeliveryClass::OpaqueEvent);

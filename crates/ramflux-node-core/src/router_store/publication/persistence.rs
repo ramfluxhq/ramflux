@@ -62,6 +62,8 @@ impl RouterRedbStore {
             );
         }
         let shared = Arc::new(Shared {
+            entry_cleanup: OnceLock::new(),
+            replay_cleanup: OnceLock::new(),
             registry: Mutex::new(registry),
             worker: OnceLock::new(),
             stopping: AtomicBool::new(false),

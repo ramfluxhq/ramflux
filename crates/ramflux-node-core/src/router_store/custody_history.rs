@@ -234,7 +234,7 @@ mod tests {
         {
             let store = RouterRedbStore::open_without_wal(&path)?;
             let router = RouterCore::new();
-            store.save_router(&router)?;
+            store.bootstrap_router(&router)?;
             router.publish_custody_record(&original, now, &store)?;
             let mut next = original.clone();
             let mut body = original.record.body.clone();

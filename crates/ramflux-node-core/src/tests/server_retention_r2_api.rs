@@ -59,7 +59,7 @@ fn repeated_nacks_dead_letter_without_keeping_ciphertext() -> Result<(), Box<dyn
 {
     let path = temp_store_path("server_retention_dead_letter")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
-    store.save_router(&RouterCore::new())?;
+    store.bootstrap_router(&RouterCore::new())?;
     let mut inbox = OpaqueDeviceInbox::new();
     let mut message = envelope("poison", "mailbox", DeliveryClass::OpaqueEvent);
     message.created_at = i64::try_from(now_unix_seconds())?;
@@ -89,7 +89,7 @@ fn durable_sweep_removes_only_rows_whose_index_deadline_is_due()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_store_path("server_retention_index_sweep")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
-    store.save_router(&RouterCore::new())?;
+    store.bootstrap_router(&RouterCore::new())?;
     let now = i64::try_from(now_unix_seconds())?;
     let mut inbox = OpaqueDeviceInbox::new();
     for (id, ttl) in [("soon", 10_u32), ("later", 3_600)] {

@@ -162,7 +162,7 @@ async fn id02_nine_same_ip_challenges_succeed_without_a_retry_wait() -> Result {
     let fixture = Fixture::new()?;
     let router = RouterCore::new();
     let store = RouterRedbStore::open(fixture.root.join("diagnosis.redb"))?;
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let node = authority(ramflux_node_core::now_unix_seconds())?.node;
     let service =
         CustodyService::new(node.clone(), false, &store, ramflux_node_core::now_unix_seconds())?;

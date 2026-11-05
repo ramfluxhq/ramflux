@@ -216,7 +216,7 @@ fn highest_signed_epoch_and_revocation_survive_durable_restart() -> TestResult {
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     router.register_identity_durable(&f.request, &store)?;
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let revoked = f.record(2, DeviceSetStatus::Revoked)?;
     router.publish_signed_device_set(&f.publish(revoked.clone()), &store)?;
     assert!(
@@ -330,7 +330,7 @@ fn concurrent_publication_and_snapshot_persistence_never_restore_a_lower_epoch()
     let store = Arc::new(RouterRedbStore::open(&path)?);
     let router = Arc::new(RouterCore::new());
     router.register_identity_durable(&f.request, &store)?;
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let mut threads = Vec::new();
     for epoch in [2, 3, 4] {
         let request = f.publish(f.record(epoch, DeviceSetStatus::Active)?);

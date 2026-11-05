@@ -6,9 +6,14 @@
 //! A descriptor is its own preallocated resolver mailbox. Drop only sets a flag
 //! and unparks the store thread; it never acquires a lock or writes storage.
 
+pub(crate) mod operation;
 mod persistence;
+pub(crate) use operation::allocate as operation_allocate;
+pub use operation::{PublishedOperation, capture};
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod view_tests;
 
 use super::incarnation::error;
 use crate::NodeCoreError;
@@ -99,9 +104,16 @@ struct Registry {
     // later assignment's reservation; accepted children retain their references.
     resources: BTreeMap<String, BTreeSet<(Key, u64)>>,
     warnings: u64,
+    resources_seen: BTreeSet<String>,
 }
 
+pub(crate) type PublishedViews = BTreeMap<String, (String, u64, Vec<(u64, u64)>)>;
+type EntryCleanup = Arc<dyn Fn(&str, u64) + Send + Sync>;
+type ReplayCleanup = Arc<dyn Fn(&str) + Send + Sync>;
+
 struct Shared {
+    entry_cleanup: OnceLock<EntryCleanup>,
+    replay_cleanup: OnceLock<ReplayCleanup>,
     registry: Mutex<Registry>,
     worker: OnceLock<thread::Thread>,
     stopping: AtomicBool,
@@ -140,7 +152,49 @@ fn lock(shared: &Shared) -> std::sync::MutexGuard<'_, Registry> {
     shared.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+impl std::fmt::Debug for PublicationCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublicationCore").finish_non_exhaustive()
+    }
+}
+
 impl PublicationCore {
+    pub(crate) fn install_cleanup(&self, entry: EntryCleanup, replay: ReplayCleanup) {
+        let _ = self.shared.entry_cleanup.set(entry);
+        let _ = self.shared.replay_cleanup.set(replay);
+    }
+
+    pub(crate) fn register(&self, target: &str, incarnation: &str, issued: u64) {
+        lock(&self.shared)
+            .inboxes
+            .entry(Key { target: target.into(), incarnation: incarnation.into() })
+            .or_insert_with(|| Inbox { allocated: issued, published: issued, ..Inbox::default() });
+    }
+
+    pub(crate) fn with_views<T>(&self, f: impl FnOnce(&PublishedViews) -> T) -> T {
+        let registry = lock(&self.shared);
+        let views = registry
+            .inboxes
+            .iter()
+            .map(|(key, inbox)| {
+                (
+                    key.target.clone(),
+                    (
+                        key.incarnation.clone(),
+                        inbox.published,
+                        inbox
+                            .aborted
+                            .iter()
+                            .filter(|(start, _)| **start <= inbox.published)
+                            .map(|(&a, &b)| (a, b.min(inbox.published)))
+                            .collect(),
+                    ),
+                )
+            })
+            .collect();
+        f(&views)
+    }
+
     /// Reserve a reason slot and descriptor under allocation synchronization.
     /// `resources` are shared replay/fan-out/custody reservation identities.
     /// # Errors
@@ -203,6 +257,7 @@ impl PublicationCore {
             inbox.reservations += 1;
             inbox.in_flight.insert(seq, Arc::clone(&descriptor));
             for resource in request.resources {
+                registry.resources_seen.insert(resource.clone());
                 registry.resources.entry(resource.clone()).or_default().insert((key.clone(), seq));
             }
             guards.push(AssignmentGuard {
@@ -248,6 +303,18 @@ impl PublicationCore {
             }
             notified.await;
         }
+    }
+
+    pub(crate) fn resource_visible(&self, resource: &str) -> bool {
+        let registry = lock(&self.shared);
+        !registry.resources_seen.contains(resource)
+            || registry.resources.get(resource).is_some_and(|owners| {
+                owners.iter().any(|(key, seq)| {
+                    registry.inboxes.get(key).is_some_and(|inbox| {
+                        *seq <= inbox.published && !inbox.in_flight.contains_key(seq)
+                    })
+                })
+            })
     }
 
     /// Number of child references retaining a tentative or accepted identity.
@@ -362,6 +429,9 @@ fn descriptor_state(descriptor: &Descriptor) -> PersistenceState {
 }
 
 fn finish(shared: &Shared, descriptor: &Descriptor, aborted: bool) {
+    if aborted && let Some(cleanup) = shared.entry_cleanup.get() {
+        cleanup(&descriptor.key.target, descriptor.seq);
+    }
     let mut registry = lock(shared);
     let Ok(publication_gate) = crate::fatal_durability::publication() else { return };
     if aborted {
@@ -370,6 +440,9 @@ fn finish(shared: &Shared, descriptor: &Descriptor, aborted: bool) {
                 owners.remove(&(descriptor.key.clone(), descriptor.seq));
                 if owners.is_empty() {
                     registry.resources.remove(resource);
+                    if let Some(cleanup) = shared.replay_cleanup.get() {
+                        cleanup(resource);
+                    }
                 }
             }
         }

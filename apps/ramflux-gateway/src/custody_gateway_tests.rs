@@ -33,7 +33,7 @@ impl Gateway {
         std::fs::create_dir(&accounts)?;
         let router = Arc::new(RouterCore::new());
         let store = Arc::new(RouterRedbStore::open(public.root.join("router.redb"))?);
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         let now = ramflux_node_core::now_unix_seconds();
         // This test spans several minute windows. Its development proxy key
         // remains valid beyond the complete test timeout.

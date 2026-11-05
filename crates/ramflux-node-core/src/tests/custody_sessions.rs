@@ -191,7 +191,7 @@ fn custody_network_admits_only_signed_possession_and_consumes_challenge_once() -
     let path = temp_store_path("custody-network-challenge")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let driver = Driver::new("alice", 10)?;
     let service = crate::CustodyService::new(driver.node.clone(), false, &store, NOW)?;
     let action = driver.publish();
@@ -311,7 +311,7 @@ fn custody_session_requests_bind_connection_possession_nonce_and_current_head() 
     let path = temp_store_path("custody-session-binding")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let driver = Driver::new("alice", 10)?;
     let service = crate::CustodyService::new(driver.node.clone(), false, &store, NOW)?;
     driver.run(&service, &router, &store, driver.publish())?;
@@ -503,7 +503,7 @@ fn custody_mesh_unauthenticated_ipv6_prefix_cannot_exhaust_other_sources() -> Re
     let path = temp_store_path("custody-unauthenticated-prefixes")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let driver = Driver::new("prefix-test", 70)?;
     let service = crate::CustodyService::new(driver.node.clone(), false, &store, NOW)?;
     let mut issued = 0;
@@ -536,7 +536,7 @@ fn custody_publication_quota_refusal_does_not_occupy_successful_replay_cache() -
     let path = temp_store_path("custody-publication-quota-admission")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let first = Driver::new("quota-first", 150)?;
     let service = crate::CustodyService::new(first.node.clone(), false, &store, NOW)?;
     for n in 0_u8..8 {
@@ -611,7 +611,7 @@ fn custody_direct_prove_busy_and_revoked_grants_never_establish_a_session() -> R
     let path = temp_store_path("custody-direct-grant-fence")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let (driver, service) = registered_direct_driver(&router, &store)?;
     let limiter =
         crate::CustodyIngressLimiter::with_pools(1, Some(1), 4, std::time::Duration::from_secs(10));

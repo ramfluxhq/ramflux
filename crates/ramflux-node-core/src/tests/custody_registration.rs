@@ -46,7 +46,7 @@ fn custody_principal_owner_is_first_authenticated_root_and_survives_restart() ->
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = RouterCore::new();
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         router.publish_custody_record(&first, now, &store)?;
         assert!(matches!(
             router.publish_custody_record(&second, now, &store),
@@ -107,7 +107,7 @@ fn custody_publication_prefix_budget_and_incremental_head_survive_restart() -> T
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = RouterCore::new();
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         router.publish_custody_record_from(&first, now, &store, source)?;
         let incremental_writes = store.custody_publication_write_count();
         let writes = store.identity_registry_write_count();
@@ -171,7 +171,7 @@ fn custody_global_principal_rate_is_shared_across_prefixes_and_durable() -> Test
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = RouterCore::new();
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         for n in 0_u8..8 {
             let source = std::net::IpAddr::V6(std::net::Ipv6Addr::new(
                 0x2001,
@@ -220,7 +220,7 @@ fn custody_rows_do_not_grow_or_deep_clone_the_legacy_registry_snapshot() -> Test
     let path = temp_store_path("custody-snapshot-isolation")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     let before = serde_json::to_vec(&router.mvp1_identities_snapshot())?;
     for n in 0_u8..8 {
         router.publish_custody_record_from(
@@ -262,7 +262,7 @@ fn custody_ownership_survives_scoped_legacy_admission_and_journal_replay() -> Te
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = RouterCore::new();
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         router.publish_custody_record(&publication, publication.record.body.issued_at, &store)?;
         let conflicting = registration_request(&router, "alice", "phone", 91, None, "source-a")?;
         let before = store.identity_registry_write_count();
@@ -310,7 +310,7 @@ fn custody_ordinary_directory_uses_native_authority_and_current_signed_prekeys()
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = RouterCore::new();
-        store.save_router(&router)?;
+        store.bootstrap_router(&router)?;
         router.publish_custody_record(&publication, now, &store)?;
         let response = router.mvp1_device_auth_key_checked(&address)?.ok_or("native auth key")?;
         assert!(response.custody_authority.is_some());
@@ -379,7 +379,7 @@ fn native_registered_envelope_uses_current_custody_without_a_legacy_device_set()
     let path = temp_store_path("native-envelope-authority")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
-    store.save_router(&router)?;
+    store.bootstrap_router(&router)?;
     router.publish_custody_record(&publication, now, &store)?;
     let branch =
         ramflux_crypto::create_device_branch("native-envelope-alice", "primary", 1, [seed + 2; 32]);
@@ -438,7 +438,7 @@ fn forwarded_unregistered_at_b_v3_sender_is_admitted_via_native_foreign_authorit
     let b_store = RouterRedbStore::open_without_wal(&b_path)?;
     let a = RouterCore::new();
     let b = RouterCore::new();
-    b_store.save_router(&b)?;
+    b_store.bootstrap_router(&b)?;
     a.publish_custody_record(&publication, now, &a_store)?;
     let branch =
         ramflux_crypto::create_device_branch("foreign-native-sender", "primary", 1, [seed + 2; 32]);
@@ -501,7 +501,7 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
     let b_store = RouterRedbStore::open_without_wal(&b_path)?;
     let a = RouterCore::new();
     let b = RouterCore::new();
-    b_store.save_router(&b)?;
+    b_store.bootstrap_router(&b)?;
     a.publish_custody_record(&publication, now, &a_store)?;
     let branch =
         ramflux_crypto::create_device_branch("forwarded-floors", "primary", 1, [seed + 2; 32]);

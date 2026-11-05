@@ -26,6 +26,20 @@ pub(crate) fn submit_envelope(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
     forward: AsyncForwardContext<'_>,
+    envelope: ramflux_protocol::Envelope,
+    total_started: Instant,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    ramflux_node_core::publication::capture(|| {
+        submit_envelope_inner(state, store, forward, envelope, total_started, origin)
+    })?
+    .published_blocking()?
+}
+
+pub(crate) fn submit_envelope_inner(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    forward: AsyncForwardContext<'_>,
     mut envelope: ramflux_protocol::Envelope,
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
@@ -55,6 +69,7 @@ pub(crate) fn submit_envelope(
         }
         Err(error) => return submission_refusal(state, store, &envelope, error),
     };
+    state.prepare_publication_target(store, &envelope.target_delivery_id)?;
     state.refresh_registered_envelope_authority(&mut envelope)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let sender_root_commitment = source.root_commitment().to_owned();
@@ -217,103 +232,31 @@ fn complete_sync_forward(
 
 pub(crate) async fn submit_envelope_async(
     state: &std::sync::Arc<ramflux_node_core::RouterCore>,
-    store: &ramflux_node_core::RouterRedbStore,
+    store: &std::sync::Arc<ramflux_node_core::RouterRedbStore>,
     forward: AsyncForwardContext<'_>,
-    mut envelope: ramflux_protocol::Envelope,
+    envelope: ramflux_protocol::Envelope,
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-    record_decoded(&envelope);
-    let (source, mut source_lease) = match authenticate_submission(state, store, &envelope, origin)?
-    {
-        SourceAdmission::Admitted(source, lease) => (source, lease),
-        SourceAdmission::Refused(response) => return Ok(*response),
-    };
-    let submission = match store.acquire_submission(&envelope.target_delivery_id) {
-        Ok(mut lease) => {
-            if let Some(source) = source_lease.take() {
-                lease.retain_home_operation(source);
-            }
-            lease
-        }
-        Err(ramflux_node_core::NodeCoreError::HomeMigration(
-            ramflux_protocol::home_migration::Refusal::HomeMigrated,
-        )) if forward.client.is_some() => {
-            let preparation =
-                committed_preparation(state, store, &source, envelope, forward.timeout);
-            return Ok(submit_response_from_outcome(
-                state,
-                complete_async_forward(state, forward, preparation).await?,
-            ));
-        }
-        Err(error) => return submission_refusal(state, store, &envelope, error),
-    };
-    state.refresh_registered_envelope_authority(&mut envelope)?;
-    let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
-    let sender_root_commitment = source.root_commitment().to_owned();
-    let replay_expires_at = envelope
-        .created_at
-        .checked_add(i64::from(envelope.ttl))
-        .ok_or_else(|| anyhow::anyhow!("envelope ttl overflows replay expiry"))?;
-    ramflux_node_core::record_router_submit_lock_wait_us(0);
-    let dispatch_started = Instant::now();
-    let now_unix_seconds = i64::try_from(submission_now()).unwrap_or(i64::MAX);
-    if let Some(response) = persistent_local_replay_response(PersistentReplayQuery {
-        store,
-        origin,
-        sender_root_commitment: source.root_commitment(),
-        envelope: &envelope,
-        replay_key: &replay_key,
-        now_unix_seconds,
-    })? {
-        return Ok(response);
-    }
-    let outcome = if forward.client.is_some() {
-        let preparation = state.prepare_envelope_with_home_node_forward_at(
-            &source,
-            envelope,
-            now_unix_seconds,
-            origin,
-            forward.timeout.as_secs().max(1),
-        );
-        complete_async_forward(state, forward, preparation).await?
-    } else {
-        state.submit_envelope_at(&source, envelope, now_unix_seconds)
-    };
-    ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
-    let save_started = Instant::now();
-    let persistent_entry = persistent_entry_from_outcome(&outcome);
-    if should_persist_submission(&outcome)
-        && let Err(error) = store
-            .record_leased_submission_async(
-                &replay_key,
-                replay_expires_at,
-                persistent_entry.as_ref(),
-                Some(&sender_root_commitment),
-                Some(submission),
+    let state = std::sync::Arc::clone(state);
+    let store = std::sync::Arc::clone(store);
+    let client = forward.client.cloned();
+    let semaphore = std::sync::Arc::clone(forward.semaphore);
+    let timeout = forward.timeout;
+    let prepared = tokio::task::spawn_blocking(move || {
+        ramflux_node_core::publication::capture(|| {
+            submit_envelope_inner(
+                &state,
+                &store,
+                AsyncForwardContext { client: client.as_ref(), semaphore: &semaphore, timeout },
+                envelope,
+                total_started,
+                origin,
             )
-            .await
-    {
-        tracing::error!(
-            error = %error,
-            replay_key = %replay_key,
-            "router submit persistence failed after in-memory accept; aborting to avoid state fork"
-        );
-        std::process::abort();
-    }
-    ramflux_node_core::record_router_submit_completed();
-    ramflux_node_core::record_router_submit_save_us(elapsed_us(save_started));
-    let response_started = Instant::now();
-    let response = submit_response_from_outcome(state, outcome);
-    tracing::info!(
-        target_delivery_id = %response.target_delivery_id,
-        outcome = %response.outcome,
-        inbox_seq = ?response.inbox_seq,
-        "router mvp0 envelope outcome"
-    );
-    ramflux_node_core::record_router_submit_response_us(elapsed_us(response_started));
-    ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));
-    Ok(response)
+        })
+    })
+    .await??;
+    prepared.published().await
 }
 
 fn record_decoded(envelope: &ramflux_protocol::Envelope) {
@@ -394,62 +337,9 @@ fn submission_refusal(
     }
 }
 
-async fn complete_async_forward(
-    state: &ramflux_node_core::RouterCore,
-    forward: AsyncForwardContext<'_>,
-    preparation: ramflux_node_core::RouterForwardPreparation,
-) -> anyhow::Result<ramflux_node_core::RouterSubmitOutcome> {
-    Ok(match preparation {
-        ramflux_node_core::RouterForwardPreparation::Complete(outcome) => *outcome,
-        ramflux_node_core::RouterForwardPreparation::Forward(reservation) => {
-            let target_delivery_id = reservation.target_delivery_id().to_owned();
-            match std::sync::Arc::clone(forward.semaphore).try_acquire_owned() {
-                Ok(permit) => {
-                    let Some(plan) = reservation.plan().cloned() else {
-                        drop(reservation);
-                        return Err(anyhow::anyhow!(
-                            "forward reservation did not contain a forward plan"
-                        ));
-                    };
-                    let Some(client) = forward.client.cloned() else {
-                        drop(reservation);
-                        return Err(anyhow::anyhow!(
-                            "forward reservation did not contain a forward client"
-                        ));
-                    };
-                    let peer_permit = if plan.migration_evidence.is_some() {
-                        match crate::migration_forward_limits::acquire(&plan.new_home_node) {
-                            Ok(permit) => Some(permit),
-                            Err(_) => {
-                                return Ok(
-                                    ramflux_node_core::RouterSubmitOutcome::ForwardInProgress {
-                                        target_delivery_id,
-                                    },
-                                );
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    let timeout = forward.timeout;
-                    let worker = tokio::task::spawn_blocking(move || {
-                        let _peer_permit = peer_permit;
-                        let _permit = permit;
-                        client.forward(&plan, timeout)
-                    });
-                    complete_forward_worker(state, reservation, forward.timeout, worker).await
-                }
-                Err(_full) => {
-                    drop(reservation);
-                    ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id }
-                }
-            }
-        }
-    })
-}
-
 // Kept separate so both JoinError and elapsed branches can be exercised without
 // changing the production federation client or injecting network failures globally.
+#[cfg(test)]
 pub(crate) async fn complete_forward_worker(
     state: &ramflux_node_core::RouterCore,
     reservation: Box<ramflux_node_core::RouterForwardReservation>,
@@ -533,6 +423,15 @@ pub(crate) fn apply_bound_nack(
 }
 
 pub(crate) fn own_device_fanout(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
+) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
+    ramflux_node_core::publication::capture(|| own_device_fanout_inner(state, store, request))?
+        .published_blocking()?
+}
+
+pub(crate) fn own_device_fanout_inner(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,

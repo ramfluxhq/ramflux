@@ -8,6 +8,7 @@ use std::path::Path;
 pub(crate) fn load(path: impl AsRef<Path>) -> anyhow::Result<(RouterCore, RouterRedbStore)> {
     let store = RouterRedbStore::open(path)?;
     let router = store.load_router()?.unwrap_or_default();
+    router.bind_publication(&store)?;
     Ok((router, store))
 }
 

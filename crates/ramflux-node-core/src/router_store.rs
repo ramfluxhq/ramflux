@@ -634,7 +634,7 @@ impl RouterRedbStore {
                 &snapshot.registry,
             )?;
             let inbox_started = Instant::now();
-            self.replace_incremental_router_tables(&snapshot)?;
+            // Delivery and recovery tables remain owned by incremental store operations.
             crate::record_router_save_inbox_us(elapsed_us(inbox_started));
             router.persist_identity_registry(self)?;
             for record in &snapshot.foreign_device_heads.records {
@@ -819,6 +819,7 @@ impl RouterRedbStore {
         lease: Option<SubmissionLease>,
     ) -> Result<(), NodeCoreError> {
         self.validate_submission_lease(entry, lease.as_ref())?;
+        let writes = publication::operation::hand_off(&entry.into_iter().collect::<Vec<_>>())?;
         let _submission = lease;
         let save_started = Instant::now();
         let replay_started = Instant::now();
@@ -841,6 +842,9 @@ impl RouterRedbStore {
         }
         crate::record_router_save_replay_guard_us(elapsed_us(replay_started));
         crate::record_router_save_total_us(elapsed_us(save_started));
+        for write in writes {
+            write.accepted_durable();
+        }
         Ok(())
     }
 
@@ -1317,6 +1321,7 @@ impl RouterRedbStore {
                 )?;
             self.validate_submission_lease(Some(entry), Some(lease))?;
         }
+        let writes = publication::operation::hand_off(&entries.iter().collect::<Vec<_>>())?;
         let _leases = leases;
         let save_started = Instant::now();
         let replay_started = Instant::now();
@@ -1329,6 +1334,9 @@ impl RouterRedbStore {
         crate::record_router_save_replay_guard_us(elapsed_us(replay_started));
         crate::record_router_replay_guard_redb_write();
         crate::record_router_save_total_us(elapsed_us(save_started));
+        for write in writes {
+            write.accepted_durable();
+        }
         Ok(())
     }
 
@@ -1612,6 +1620,17 @@ impl RouterRedbStore {
             incremental_entries.push((entry, retain_until));
         }
         Ok(())
+    }
+
+    /// Seed an offline router fixture or initial import before live publication is bound.
+    /// # Errors
+    /// Refuses live imports and returns storage failures.
+    pub fn bootstrap_router(&self, router: &RouterCore) -> Result<(), NodeCoreError> {
+        if router.publication_is_bound() {
+            return Err(NodeCoreError::Redb("bootstrap requires an offline router".into()));
+        }
+        self.save_router(router)?;
+        self.replace_incremental_router_tables(&router.snapshot())
     }
 
     fn replace_incremental_router_tables(
@@ -2128,6 +2147,7 @@ impl RouterRedbStore {
         lease: SubmissionLease,
     ) -> Result<(), NodeCoreError> {
         self.validate_submission_lease(Some(entry), Some(&lease))?;
+        let writes = publication::operation::hand_off(&[entry])?;
         let _lease = lease;
         self.commit_router_op(RouterCommitOp::Forwarded {
             replay_key: replay_key.into(),
@@ -2138,7 +2158,11 @@ impl RouterRedbStore {
             entry: Box::new(entry.clone()),
             root: root.into(),
             retain_until,
-        })
+        })?;
+        for write in writes {
+            write.accepted_durable();
+        }
+        Ok(())
     }
 }
 
