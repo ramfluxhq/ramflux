@@ -333,3 +333,33 @@ fn forwarded_conflict_uses_typed_refusal_reply() -> anyhow::Result<()> {
     drop(owner);
     fixture.close()
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepted_reply_survives_post_commit_lookup_error() -> anyhow::Result<()> {
+    for mode in 0..3 {
+        let fixture = Fixture::new(mode, "reply-post-commit")?;
+        let envelope = current_envelope("post-commit-reply", "target_alice")?;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let registration = ramflux_node_core::durability_test_hooks::observe(
+            fixture.root.clone(),
+            Arc::new(move |_, operation, _| {
+                if operation == "sender_reply_lookup" {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    return Err(std::io::Error::other("post-commit lookup unavailable"));
+                }
+                Ok(())
+            }),
+        );
+        let original = join(submit(&fixture.handle, &envelope)).await?;
+        assert_eq!(original.inbox_seq, Some(1));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.store.sender_retry_registry_size(), 0);
+        let retry = join(submit(&fixture.handle, &envelope)).await?;
+        assert_eq!(retry.inbox_seq, original.inbox_seq);
+        assert_eq!(fixture.state.resume(&envelope.target_delivery_id, 0, 10).len(), 1);
+        drop(registration);
+        fixture.close()?;
+    }
+    Ok(())
+}

@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default) without redriving inbox retries. Backup restore keeps freshness empty
   until a new network observation. Peer changes use eventual observation, without
   a new node push notification.
+- Durable sender retries return their original mailbox sequence. Retry waiters
+  forwarded to a new home receive `forward_in_progress`; clients must retry with
+  the same sender identity and envelope ID so the remote home deduplicates them.
+- **BREAKING (rollback):** Nodes that write `SenderAssigned` WAL records or emit
+  the appended native custody refusal variants require a compatible binary.
+  Pre-change binaries cannot decode these records or variants; downgrade in place
+  is unsupported. Preserve backups from before the upgrade for rollback.
 
 - All pending mutation receipts now return the bus code
   `OperationReconciliationRequired`, preserving the reconciliation message while

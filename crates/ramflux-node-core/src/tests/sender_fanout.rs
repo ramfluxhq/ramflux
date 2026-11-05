@@ -70,6 +70,7 @@ async fn fanout_mixed_retry_reuses_children_after_abort_and_restart() -> Result 
             assert_eq!(store.inbox_status(target)?.1, 1);
         }
         assert_eq!(store.sender_retry_registry_size(), 0);
+        post_commit_siblings(&root, &store, &router, &request, now).await?;
         drop(router);
         drop(store);
         let store = crate::publication::open_durability_fixture(&root, mode)?;
@@ -82,12 +83,56 @@ async fn fanout_mixed_retry_reuses_children_after_abort_and_restart() -> Result 
                 .await?;
         assert!(restored.delivered.iter().all(|child| child.inbox_seq == Some(1)));
         for (_, target) in &targets {
-            assert_eq!(router.resume(target, 0, 10).len(), 1);
-            assert_eq!(store.inbox_status(target)?.1, 1);
+            assert_eq!(router.resume(target, 0, 10).len(), 2);
+            assert_eq!(store.inbox_status(target)?.1, 2);
         }
         drop(router);
         drop(store);
         std::fs::remove_dir_all(root)?;
     }
+    Ok(())
+}
+
+async fn post_commit_siblings(
+    root: &std::path::Path,
+    store: &crate::RouterRedbStore,
+    router: &RouterCore,
+    original: &ItestMvp10OwnDeviceFanoutRequest,
+    now: i64,
+) -> Result {
+    let mut request = original.clone();
+    request.envelope.envelope_id = "post-commit-parent".into();
+    request.envelope = signed_registered_envelope(request.envelope, "fanout", "source", 601)?;
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&calls);
+    let registration = crate::durability_test_hooks::observe(
+        root.to_path_buf(),
+        std::sync::Arc::new(move |_, operation, _| {
+            if operation == "sender_reply_lookup"
+                && counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            {
+                return Err(std::io::Error::other(
+                    "one child lookup fails after all children commit",
+                ));
+            }
+            Ok(())
+        }),
+    );
+    let response =
+        crate::publication::capture(|| router.prepare_sender_fanout(store, &request, now))?
+            .published()
+            .await?
+            .resolved()
+            .await?;
+    assert!(response.delivered.iter().all(|child| child.inbox_seq == Some(2)));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2, "later sibling still completes");
+    assert_eq!(store.sender_retry_registry_size(), 0);
+    let retry = crate::publication::capture(|| router.prepare_sender_fanout(store, &request, now))?
+        .published()
+        .await?
+        .resolved()
+        .await?;
+    assert!(retry.delivered.iter().all(|child| child.inbox_seq == Some(2)));
+    drop(registration);
     Ok(())
 }

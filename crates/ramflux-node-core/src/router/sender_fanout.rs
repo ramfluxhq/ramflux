@@ -178,10 +178,7 @@ impl RouterCore {
                 std::process::abort();
             }
             for (owner, entry) in owners {
-                let assignment = store
-                    .sender_assignment(source.root_commitment(), &entry.envelope, now)?
-                    .ok_or_else(|| NodeCoreError::Redb("accepted child index missing".into()))?;
-                owner.accepted(assignment);
+                owner.accepted_entry(store, source.root_commitment(), &entry, now);
             }
         }
         Ok(PreparedFanout {

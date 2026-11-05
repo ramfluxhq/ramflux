@@ -18,8 +18,14 @@ enum Resolution {
     Pending,
     Accepted(SenderAssignment),
     Aborted,
+    Recheck,
+    Closed,
+    Forwarded,
 }
 struct Slot {
+    lookup: super::RetryLookup,
+    durable: std::sync::atomic::AtomicBool,
+    owner_alive: std::sync::atomic::AtomicBool,
     digest: String,
     retain_until: i64,
     permit: Mutex<Option<OwnedSemaphorePermit>>,
@@ -79,10 +85,31 @@ impl RetryWaiter {
             let notified = self.slot.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            match self.slot.result.lock().map_err(super::incarnation::error)?.clone() {
+            let resolution = self.slot.result.lock().map_err(super::incarnation::error)?.clone();
+            match resolution {
                 Resolution::Pending => {}
                 Resolution::Accepted(assignment) => {
                     return Ok(ResolvedRetry { assignment, permit: self.permit });
+                }
+                Resolution::Recheck => {
+                    let slot = Arc::clone(&self.slot);
+                    let assignment = tokio::task::spawn_blocking(move || (slot.lookup)())
+                        .await
+                        .map_err(super::incarnation::error)??
+                        .ok_or_else(|| {
+                            super::incarnation::error(
+                                "durable sender assignment missing after commit",
+                            )
+                        })?;
+                    return Ok(ResolvedRetry { assignment, permit: self.permit });
+                }
+                Resolution::Closed => {
+                    return Err(NodeCoreError::Publication(
+                        crate::publication::PublicationRefusal::StoreClosed,
+                    ));
+                }
+                Resolution::Forwarded => {
+                    return Err(super::SenderRetryRefusal::ForwardInProgress.into());
                 }
                 Resolution::Aborted => {
                     return Err(super::SenderRetryRefusal::AbortedRetrySafe.into());
@@ -115,7 +142,13 @@ impl RetryAbort {
             .is_ok()
     }
     pub(crate) fn aborted(&self) {
-        finish(&self.registry, &self.key, &self.slot, None);
+        finish(&self.registry, &self.key, &self.slot, Resolution::Aborted);
+    }
+    pub(crate) fn durable(&self) {
+        self.slot.durable.store(true, std::sync::atomic::Ordering::SeqCst);
+        if !self.slot.owner_alive.load(std::sync::atomic::Ordering::SeqCst) {
+            finish(&self.registry, &self.key, &self.slot, Resolution::Recheck);
+        }
     }
 }
 impl RetryOwner {
@@ -132,6 +165,25 @@ impl RetryOwner {
         })
     }
 
+    /// Complete the original from its own durable entry. A failed follow-up
+    /// lookup only makes attached retries re-read the index; it cannot undo the
+    /// write or turn the original reply into an error.
+    pub fn accepted_entry(
+        self,
+        store: &RouterRedbStore,
+        root: &str,
+        entry: &crate::InboxEntry,
+        now: i64,
+    ) {
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        if crate::durability_test_hooks::notify(&store.path, "sender_reply_lookup", true).is_err() {
+            return;
+        }
+        if let Ok(Some(assignment)) = store.sender_assignment(root, &entry.envelope, now) {
+            self.accepted(assignment);
+        }
+    }
+
     /// Install the original durable result before releasing the registration.
     /// Persistent lookup and waiter attachment share the registry lock.
     pub fn accepted(self, assignment: SenderAssignment) {
@@ -142,34 +194,47 @@ impl RetryOwner {
         }
         self.finish(Some(assignment));
     }
+    /// A remote home may already have accepted the request. Retrying must keep
+    /// the original replay identity so the remote home deduplicates it.
+    pub fn forwarded(self) {
+        finish(&self.registry, &self.key, &self.slot, Resolution::Forwarded);
+    }
     fn finish(&self, assignment: Option<SenderAssignment>) {
-        finish(&self.registry, &self.key, &self.slot, assignment);
+        finish(
+            &self.registry,
+            &self.key,
+            &self.slot,
+            assignment.map_or(Resolution::Aborted, Resolution::Accepted),
+        );
     }
 }
-fn finish(
-    owner: &Weak<Registry>,
-    key: &str,
-    slot: &Arc<Slot>,
-    assignment: Option<SenderAssignment>,
-) {
-    if let Some(registry) = owner.upgrade() {
-        let mut entries = registry.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut result = slot.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(*result, Resolution::Pending) {
-            *result = assignment.map_or(Resolution::Aborted, Resolution::Accepted);
-            if entries.get(key).is_some_and(|current| Arc::ptr_eq(current, slot)) {
-                entries.remove(key);
-            }
-            slot.permit.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-            slot.changed.notify_waiters();
+fn finish(owner: &Weak<Registry>, key: &str, slot: &Arc<Slot>, resolution: Resolution) {
+    // Lock order remains registry -> result. Even a destroyed registry must
+    // resolve the independently owned slot and notify its attached waiters.
+    let registry = owner.upgrade();
+    let mut entries = registry
+        .as_ref()
+        .map(|registry| registry.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    let mut result = slot.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if matches!(*result, Resolution::Pending) {
+        *result = resolution;
+        if let Some(entries) = entries.as_mut()
+            && entries.get(key).is_some_and(|current| Arc::ptr_eq(current, slot))
+        {
+            entries.remove(key);
         }
+        slot.permit.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        slot.changed.notify_waiters();
     }
 }
 
 impl Drop for RetryOwner {
     fn drop(&mut self) {
+        self.slot.owner_alive.store(false, std::sync::atomic::Ordering::SeqCst);
         if !self.bound.load(std::sync::atomic::Ordering::Acquire) {
             self.finish(None);
+        } else if self.slot.durable.load(std::sync::atomic::Ordering::SeqCst) {
+            finish(&self.registry, &self.key, &self.slot, Resolution::Recheck);
         }
     }
 }
@@ -207,6 +272,9 @@ impl RouterRedbStore {
             return Ok(RetryAdmission::Accepted(ResolvedRetry { assignment, permit }));
         }
         let slot = Arc::new(Slot {
+            lookup: self.retry_lookup(source.root_commitment(), envelope, now)?,
+            durable: false.into(),
+            owner_alive: true.into(),
             digest,
             retain_until: crate::inbox_retain_until(envelope, now),
             permit: Mutex::new(Some(permit)),
@@ -229,5 +297,18 @@ impl RouterRedbStore {
     #[must_use]
     pub fn sender_retry_registry_size(&self) -> usize {
         self.sender_retries.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+    }
+}
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        for slot in self.0.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).values() {
+            let mut result = slot.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(*result, Resolution::Pending) {
+                *result = Resolution::Closed;
+                slot.permit.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                slot.changed.notify_waiters();
+            }
+        }
     }
 }

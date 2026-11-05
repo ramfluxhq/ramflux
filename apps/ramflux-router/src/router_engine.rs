@@ -164,12 +164,14 @@ fn prepare_submission(
         submission,
         (&outcome, persistent_entry.as_ref()),
     )?;
-    if let Some(entry) = &persistent_entry {
-        let assignment = store
-            .sender_assignment(&sender_root_commitment, &entry.envelope, now_unix_seconds)?
-            .ok_or_else(|| anyhow::anyhow!("accepted sender index missing"))?;
-        retry_owner.accepted(assignment);
-    }
+    finish_retry_owner(
+        retry_owner,
+        store,
+        &sender_root_commitment,
+        persistent_entry.as_ref(),
+        &outcome,
+        now_unix_seconds,
+    );
     ramflux_node_core::record_router_submit_completed();
     ramflux_node_core::record_router_submit_save_us(elapsed_us(save_started));
     let response_started = Instant::now();
@@ -918,5 +920,24 @@ fn typed_sender_result(
                 None => Err(error),
             }
         }
+    }
+}
+
+fn finish_retry_owner(
+    owner: ramflux_node_core::sender_retry::RetryOwner,
+    store: &ramflux_node_core::RouterRedbStore,
+    root: &str,
+    entry: Option<&ramflux_node_core::InboxEntry>,
+    outcome: &ramflux_node_core::RouterSubmitOutcome,
+    now: i64,
+) {
+    if let Some(entry) = entry {
+        owner.accepted_entry(store, root, entry, now);
+    } else if matches!(
+        outcome,
+        ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(_)
+            | ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }
+    ) {
+        owner.forwarded();
     }
 }

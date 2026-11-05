@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 pub enum SenderRetryRefusal {
     #[error("aborted_retry_safe")]
     AbortedRetrySafe,
+    #[error("forward_in_progress")]
+    ForwardInProgress,
     #[error("idempotency_conflict")]
     IdempotencyConflict,
 }
@@ -56,6 +58,62 @@ pub fn content_digest(envelope: &ramflux_protocol::Envelope) -> Result<String, N
 }
 
 impl RouterRedbStore {
+    fn retry_lookup(
+        &self,
+        root: &str,
+        envelope: &ramflux_protocol::Envelope,
+        now: i64,
+    ) -> Result<RetryLookup, NodeCoreError> {
+        let db = std::sync::Arc::downgrade(&self.db);
+        let key =
+            local_delivery_storage_key(root, &envelope.envelope_id, &envelope.target_delivery_id);
+        let target = envelope.target_delivery_id.clone();
+        let digest = content_digest(envelope)?;
+        let wal = self.submission_wal.as_ref().map(|wal| wal.retry_lookup(root, envelope, now));
+        Ok(Box::new(move || {
+            let db = db.upgrade().ok_or(NodeCoreError::Publication(
+                crate::publication::PublicationRefusal::StoreClosed,
+            ))?;
+            let tx = db.begin_read().map_err(incarnation::error)?;
+            let table =
+                tx.open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE).map_err(incarnation::error)?;
+            let mut assignment = table
+                .get(key.as_str())
+                .map_err(incarnation::error)?
+                .map(|row| {
+                    serde_json::from_slice::<LocalDeliveryEnvelopeRecord>(row.value())
+                        .map_err(incarnation::error)
+                })
+                .transpose()?
+                .filter(|row| row.expires_at > now)
+                .and_then(|row| row.assignment);
+            if assignment.is_none()
+                && let Some(wal) = &wal
+            {
+                assignment = wal()?;
+            }
+            if let Some(assignment) = &assignment {
+                if assignment.digest != digest {
+                    return Err(SenderRetryRefusal::IdempotencyConflict.into());
+                }
+                if let Some(row) = tx
+                    .open_table(super::incarnation_state::TABLE)
+                    .map_err(incarnation::error)?
+                    .get(target.as_str())
+                    .map_err(incarnation::error)?
+                {
+                    let (id, _) = super::incarnation_state::decode(row.value())?;
+                    if id != assignment.inbox_incarnation_id {
+                        return Err(NodeCoreError::Publication(
+                            crate::publication::PublicationRefusal::IncarnationMismatch,
+                        ));
+                    }
+                }
+            }
+            Ok(assignment)
+        }))
+    }
+
     /// Look up a complete assignment before generic replay rejection. Legacy
     /// receipts return None and retain their historical replay behavior.
     /// # Errors
@@ -182,3 +240,8 @@ pub(crate) fn refusal_from_reason(reason: &str) -> Option<NodeCoreError> {
         None
     }
 }
+
+// Only weak storage references and bounded identity strings survive in a slot.
+// Rechecking never pins a store or duplicates the request ciphertext.
+pub(crate) type RetryLookup =
+    Box<dyn Fn() -> Result<Option<SenderAssignment>, NodeCoreError> + Send + Sync>;
