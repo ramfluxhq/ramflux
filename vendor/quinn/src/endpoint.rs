@@ -55,6 +55,19 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    /// Enable a dormant pre-allocation stateless response pool and one retained sender.
+    /// # Errors
+    /// Rejects invalid limits, reconfiguration, or an endpoint which admitted work.
+    pub fn set_stateless_response_limits(&mut self, items: usize, bytes: usize) -> Result<crate::StatelessResponseSender, &'static str> {
+        let mut state=self.inner.state.lock().unwrap();
+        if state.recv_state.responses.is_some() || !state.recv_state.connections.is_empty() || !state.recv_state.incoming.is_empty() { return Err("endpoint already admitted response work"); }
+        let pool=proto::ResponsePool::new(items,bytes)?;
+        if state.recv_state.connections.raw_credit.as_ref().is_some_and(|raw| pool.capacity() > raw.owner_capacity()) { return Err("response capacity exceeds endpoint owner limit"); }
+        let sender=crate::StatelessResponseSender::start(pool,state.socket.clone(),&*state.runtime);
+        state.recv_state.responses=Some(sender.clone());
+        Ok(sender)
+    }
+
     #[cfg(test)]
     pub(crate) fn control_test_forward(&self, hold: bool) {
         let mut state = self.inner.state.lock().unwrap();
@@ -81,6 +94,7 @@ impl Endpoint {
             return Err("endpoint already admitted work");
         }
         let pool = crate::rawq::Pool::new(limits)?;
+        if state.recv_state.responses.as_ref().is_some_and(|responses| responses.capacity() > pool.owner_capacity()) { return Err("response capacity exceeds endpoint owner limit"); }
         state.recv_state.connections.owner_slots =
             vec![None; pool.owner_capacity()].into_boxed_slice();
         state.recv_state.connections.raw_credit = Some(pool);
@@ -380,6 +394,7 @@ impl Endpoint {
     /// [`Connection::close()`]: crate::Connection::close
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
         let mut endpoint = self.inner.state.lock().unwrap();
+        if let Some(sender)=&endpoint.recv_state.responses { sender.cancel(); }
         if endpoint.recv_state.connections.raw_credit.is_some()
             && endpoint.recv_state.connections.close.is_some()
         {
@@ -514,13 +529,13 @@ impl EndpointInner {
         server_config: Option<Arc<ServerConfig>>,
     ) -> Result<Connecting, ConnectionError> {
         let mut state = self.state.lock().unwrap();
-        let mut response_buffer = Vec::new();
+        let mut response_buffer = crate::rawq::stateless_response::Buffer::new(state.recv_state.responses.as_ref());
         let now = state.runtime.now();
         let owner_slot = match state.recv_state.connections.available_owner() {
             Ok(slot) => slot,
             Err(_) => {
-                let transmit = state.inner.refuse(incoming, &mut response_buffer);
-                respond(transmit, &response_buffer, &*state.socket);
+                let transmit = response_buffer.refuse(&mut state.inner, incoming);
+                response_buffer.send(transmit, &*state.socket);
                 return Err(ConnectionError::ApplicationClosed(
                     proto::ApplicationClose {
                         error_code: VarInt::from_u32(0x524c),
@@ -529,9 +544,7 @@ impl EndpointInner {
                 ));
             }
         };
-        match state
-            .inner
-            .accept(incoming, now, &mut response_buffer, server_config)
+        match response_buffer.accept(&mut state.inner, incoming, now, server_config)
         {
             Ok((handle, conn)) => {
                 state.stats.accepted_handshakes += 1;
@@ -544,7 +557,7 @@ impl EndpointInner {
             }
             Err(error) => {
                 if let Some(transmit) = error.response {
-                    respond(transmit, &response_buffer, &*state.socket);
+                    response_buffer.send(Some(transmit), &*state.socket);
                 }
                 Err(error.cause)
             }
@@ -554,16 +567,16 @@ impl EndpointInner {
     pub(crate) fn refuse(&self, incoming: proto::Incoming) {
         let mut state = self.state.lock().unwrap();
         state.stats.refused_handshakes += 1;
-        let mut response_buffer = Vec::new();
-        let transmit = state.inner.refuse(incoming, &mut response_buffer);
-        respond(transmit, &response_buffer, &*state.socket);
+        let mut response_buffer = crate::rawq::stateless_response::Buffer::new(state.recv_state.responses.as_ref());
+        let transmit = response_buffer.refuse(&mut state.inner, incoming);
+        response_buffer.send(transmit, &*state.socket);
     }
 
     pub(crate) fn retry(&self, incoming: proto::Incoming) -> Result<(), proto::RetryError> {
         let mut state = self.state.lock().unwrap();
-        let mut response_buffer = Vec::new();
-        let transmit = state.inner.retry(incoming, &mut response_buffer)?;
-        respond(transmit, &response_buffer, &*state.socket);
+        let mut response_buffer = crate::rawq::stateless_response::Buffer::new(state.recv_state.responses.as_ref());
+        let transmit = response_buffer.retry(&mut state.inner, incoming)?;
+        response_buffer.send(transmit, &*state.socket);
         Ok(())
     }
 
@@ -664,13 +677,14 @@ impl State {
 
 impl Drop for State {
     fn drop(&mut self) {
+        if let Some(sender)=&self.recv_state.responses { sender.cancel(); }
         for incoming in self.recv_state.incoming.drain(..) {
             self.inner.ignore(incoming);
         }
     }
 }
 
-fn respond(transmit: proto::Transmit, response_buffer: &[u8], socket: &dyn AsyncUdpSocket) {
+pub(crate) fn respond(transmit: proto::Transmit, response_buffer: &[u8], socket: &dyn AsyncUdpSocket) {
     // Send if there's kernel buffer space; otherwise, drop it
     //
     // As an endpoint-generated packet, we know this is an
@@ -695,7 +709,7 @@ fn respond(transmit: proto::Transmit, response_buffer: &[u8], socket: &dyn Async
 }
 
 #[inline]
-fn proto_ecn(ecn: udp::EcnCodepoint) -> proto::EcnCodepoint {
+pub(crate) fn proto_ecn(ecn: udp::EcnCodepoint) -> proto::EcnCodepoint {
     match ecn {
         udp::EcnCodepoint::Ect0 => proto::EcnCodepoint::Ect0,
         udp::EcnCodepoint::Ect1 => proto::EcnCodepoint::Ect1,
@@ -941,6 +955,7 @@ impl std::ops::Deref for EndpointRef {
 
 /// State directly involved in handling incoming packets
 struct RecvState {
+    responses: Option<crate::StatelessResponseSender>,
     incoming: VecDeque<proto::Incoming>,
     connections: ConnectionSet,
     recv_buf: Box<[u8]>,
@@ -960,6 +975,7 @@ impl RecvState {
                 * BATCH_SIZE
         ];
         Self {
+            responses: None,
             connections: ConnectionSet {
                 senders: FxHashMap::default(),
                 sender,
@@ -1025,35 +1041,15 @@ impl RecvState {
                             let Some((buf, credit)) = admitted else {
                                 continue;
                             };
-                            let mut response_buffer = Vec::new();
-                            let outcome = if let Some(credit) = &credit {
-                                endpoint.handle_with_owner(
-                                    now,
-                                    meta.addr,
-                                    meta.dst_ip,
-                                    meta.ecn.map(proto_ecn),
-                                    buf,
-                                    &mut response_buffer,
-                                    credit.clone(),
-                                )
-                            } else {
-                                endpoint.handle(
-                                    now,
-                                    meta.addr,
-                                    meta.dst_ip,
-                                    meta.ecn.map(proto_ecn),
-                                    buf,
-                                    &mut response_buffer,
-                                )
-                            };
+                            let mut response_buffer = crate::rawq::stateless_response::Buffer::new(self.responses.as_ref());
+                            let outcome = response_buffer.handle(endpoint, now, meta, buf, credit.as_ref());
                             match outcome {
                                 Some(DatagramEvent::NewConnection(incoming)) => {
                                     if self.connections.close.is_none() {
                                         self.incoming.push_back(incoming);
                                     } else {
-                                        let transmit =
-                                            endpoint.refuse(incoming, &mut response_buffer);
-                                        respond(transmit, &response_buffer, socket);
+                                        let transmit = response_buffer.refuse(endpoint, incoming);
+                                        response_buffer.send(transmit, socket);
                                     }
                                 }
                                 Some(DatagramEvent::ConnectionEvent(handle, event)) => {
@@ -1062,7 +1058,7 @@ impl RecvState {
                                     self.connections.send_packet(handle, event, credit);
                                 }
                                 Some(DatagramEvent::Response(transmit)) => {
-                                    respond(transmit, &response_buffer, socket);
+                                    response_buffer.send(Some(transmit), socket);
                                 }
                                 None => {}
                             }

@@ -47,9 +47,10 @@ verified upstream archive, prepend `// SPDX-License-Identifier: MIT OR Apache-2.
 to Rust sources, then apply each declared delta. Scoped later formatting commands and upstream
 import/whitespace restoration are recorded in the provenance file. The provenance record also retains r1's exact
 `cargo fmt --all` (pinned toolchain 1.99.0) command/config history, superseded by this restoration.
-For newly changed vendor modules use the recorded pinned rustfmt version with
-`rustfmt +1.99.0 --edition 2021 --config-path vendor/rustfmt.toml PATH`; record
-that command and changed hashes rather than reformatting the whole dependency.
+Do not run rustfmt on vendor sources. `vendor/rustfmt.toml` was removed because
+its edition setting reintroduced import churn. Root `cargo fmt --all` excludes
+these packages. Preserve pinned upstream formatting by hand; historical formatter
+commands in provenance describe earlier states and are not current instructions.
 
 When updating the patch, verify the base archive and all original hashes first,
 then review/reapply every declared delta by responsibility. Never replace base
@@ -116,3 +117,39 @@ The r3 review set adds the upstream migration and oversized-datagram path-change
 tests. An unbound routed handle is an `InvalidOwner` invariant refusal, distinct
 from an exhausted owner-slot arena. RETIRE retransmission/duplicate checks wait
 for consumer drain and assert that local CID issuance remains unchanged.
+
+
+## Dormant stateless response construction and ownership
+
+`set_stateless_response_limits` freezes a separate endpoint pool and starts exactly
+one retained sender. Where raw owner capacity is configured, neither configuration
+order permits an effective response capacity above that owner limit. Response
+builders reserve an item, a 65536-byte slab and 512 bytes of metadata allowance
+before negotiation, Retry, reset, refusal or accept-failure output grows. Byte
+limits may lower the item-derived ceiling; oversize/full output is suppressed with
+fixed counters and no connection/control credit borrowing. Legacy constructors
+and response paths keep their direct-send behavior until explicitly configured.
+
+A pre-sized ring and one active datagram retain typed proto permits through socket
+completion, send error or cancellation plus buffer drop. There is no response
+spawn or unbounded completion list. The exported sender handle supports cancel,
+join and queued/active/task diagnostics; endpoint close/destruction cancels it.
+Join witnesses destruction of sender-owned responses. R4 still owns the enclosing
+service scope and racing synchronous producers; no full teardown certificate or
+activation is supplied here.
+
+The exact stateless response test blocks the real socket write/poller with zero
+accepted connections, separately floods negotiation, Retry and refusal, and binds
+item and byte ceilings independently. It checks actual runtime spawn counts, full
+slab/metadata ownership, fixed drop labels, zero-allocation oversize negotiation,
+unblock/recovery and healthy TLS admission. It also fills the protocol owner arena
+and exercises response refusal there without closing admitted peers, plus blocked
+cancel/join and endpoint-drop destruction. CI requires all three exact raw/control/
+response test names to be present in its standalone Quinn listing.
+
+A parked migrating head now carries its uncredited datagram length in PendingPacket.
+Only resume after path selection charges those bytes; repeated shortage transfers
+the length without accounting, and already-counted tails carry zero. The bounded
+migration regression asserts new-path anti-amplification credit and exactly-once
+accounting. The final requested upstream blank line in tests/mod.rs is restored;
+its sole added line over upstream is the mandatory SPDX header.

@@ -7,7 +7,7 @@ use crate::Transmit;
 pub const RESPONSE_SLAB: usize = 65536;
 /// Endpoint-owned stateless response allocation pool.
 #[derive(Debug)]
-pub struct ResponsePool { items: usize, bytes: usize, state: Mutex<ResponseStats> }
+pub struct ResponsePool { items: usize, bytes: usize, state: Mutex<ResponseStats>, closed: std::sync::atomic::AtomicBool }
 /// Fixed-label response allocation diagnostics.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ResponseStats {
@@ -33,15 +33,17 @@ impl ResponsePool {
     /// Rejects zero, impossible, overflowing or out-of-range limits.
     pub fn new(items: usize, bytes: usize) -> Result<Arc<Self>, &'static str> {
         if !(1..=128).contains(&items) || bytes < RESPONSE_SLAB || items.checked_mul(RESPONSE_SLAB).is_none_or(|n| bytes>n) { return Err("invalid stateless response limits"); }
-        Ok(Arc::new(Self {items, bytes, state: Mutex::new(ResponseStats::default())}))
+        Ok(Arc::new(Self {items, bytes, state: Mutex::new(ResponseStats::default()), closed: std::sync::atomic::AtomicBool::new(false)}))
     }
     /// Current bounded owners and fixed-label counters.
     pub fn stats(&self) -> ResponseStats { *self.state.lock().unwrap() }
     /// Maximum number of responses; useful for sizing a fixed send ring.
-    pub fn capacity(&self) -> usize { self.items }
+    pub fn capacity(&self) -> usize { self.items.min(self.bytes / RESPONSE_SLAB) }
+    /// Refuse all future response allocations after endpoint cancellation.
+    pub fn close(&self) { self.closed.store(true, std::sync::atomic::Ordering::SeqCst); }
     fn reserve(self: &Arc<Self>) -> Option<Permit> {
         let mut s=self.state.lock().unwrap();
-        if s.items==self.items || RESPONSE_SLAB > self.bytes-s.bytes { s.full=s.full.saturating_add(1); return None; }
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) || s.items==self.items || RESPONSE_SLAB > self.bytes-s.bytes { s.full=s.full.saturating_add(1); return None; }
         s.items+=1; s.bytes+=RESPONSE_SLAB; s.metadata_bytes+=512;
         Some(Permit {pool:self.clone()})
     }
