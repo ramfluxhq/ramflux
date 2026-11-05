@@ -1,0 +1,1205 @@
+{
+  "format": "RFS1",
+  "header": "magic[4] || type[u8] || version[u8] || count[u16be]",
+  "field": "id[u16be] || length[u32be] || value",
+  "integer": "u64be",
+  "optional": "00 absent; 01 followed by canonical value",
+  "collection": "count[u16be] then length[u32be] and canonical element for each item",
+  "signed_body": "same type/version with signature field omitted and field count decremented; full signed object includes signature as final field",
+  "strings": "strict UTF-8; inherited text is nonempty, <=256 encoded bytes, no Unicode control characters",
+  "profile": "ramflux.dm.bootstrap.fs.v1",
+  "domains": [
+    "ramflux.dm_bootstrap_fs.base.v1",
+    "ramflux.dm_bootstrap_fs.opk.v1",
+    "ramflux.dm_bootstrap_fs.branch_binding.v1",
+    "ramflux.dm_bootstrap_fs.owner_update.v1",
+    "ramflux.dm_bootstrap_fs.publication_snapshot.v1",
+    "ramflux.dm_bootstrap_fs.public_view.v1",
+    "ramflux.dm_bootstrap_fs.lease_intent.v1",
+    "ramflux.dm_bootstrap_fs.lease_operation_id.v1",
+    "ramflux.dm_bootstrap_fs.lease_result.v1",
+    "ramflux.dm_bootstrap_fs.owner_status.v1",
+    "ramflux.dm_bootstrap_fs.request.v1",
+    "ramflux.dm_bootstrap_fs.request_argument.v1",
+    "ramflux.dm_bootstrap_fs.base_hash.v1",
+    "ramflux.dm_bootstrap_fs.bundle_hash.v1",
+    "ramflux.dm_bootstrap_fs.header.v1",
+    "ramflux.dm_bootstrap_fs.transcript.v1",
+    "ramflux.dm_bootstrap_fs.x3dh_root.v1",
+    "ramflux.dm_bootstrap_fs.frame_lease.v1",
+    "ramflux.dm_bootstrap_fs.frame_publish.v1",
+    "ramflux.dm_bootstrap_fs.frame_status.v1",
+    "ramflux.dm_bootstrap_fs.frame_result.v1"
+  ],
+  "types": {
+    "QualifiedBranch": {
+      "code": 1,
+      "version": 1,
+      "ceiling": 1024,
+      "domain": null,
+      "fields": [
+        {
+          "id": 1,
+          "name": "account_anchor",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 2,
+          "name": "principal_id",
+          "kind": "text",
+          "required": true,
+          "max_bytes": 256
+        },
+        {
+          "id": 3,
+          "name": "device_id",
+          "kind": "text",
+          "required": true,
+          "max_bytes": 256
+        },
+        {
+          "id": 4,
+          "name": "device_epoch",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 5,
+          "name": "certificate_hash",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 6,
+          "name": "record_hash",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 7,
+          "name": "signing_key",
+          "kind": "key",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 8,
+          "name": "agreement_key",
+          "kind": "key",
+          "required": true,
+          "max_bytes": 32
+        }
+      ]
+    },
+    "SignedNativePrekeyBase": {
+      "code": 2,
+      "version": 1,
+      "ceiling": 2048,
+      "domain": "base",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "branch",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 3,
+          "name": "generation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 4,
+          "name": "spk_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 5,
+          "name": "spk_serial",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 6,
+          "name": "spk_key",
+          "kind": "key",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 7,
+          "name": "issued_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 8,
+          "name": "expires_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 9,
+          "name": "update_counter",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 10,
+          "name": "capabilities",
+          "kind": "code",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 11,
+          "name": "signature",
+          "kind": "sig",
+          "required": true,
+          "max_bytes": 64
+        }
+      ]
+    },
+    "SignedNativeOpk": {
+      "code": 3,
+      "version": 1,
+      "ceiling": 512,
+      "domain": "opk",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "branch_binding",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 3,
+          "name": "generation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 4,
+          "name": "serial",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 5,
+          "name": "opk_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 6,
+          "name": "opk_key",
+          "kind": "key",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 7,
+          "name": "signature",
+          "kind": "sig",
+          "required": true,
+          "max_bytes": 64
+        }
+      ]
+    },
+    "RetirementRef": {
+      "code": 4,
+      "version": 1,
+      "ceiling": 128,
+      "domain": null,
+      "fields": [
+        {
+          "id": 1,
+          "name": "generation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 2,
+          "name": "serial",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 3,
+          "name": "key_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        }
+      ]
+    },
+    "OwnerPrekeyUpdate": {
+      "code": 5,
+      "version": 1,
+      "ceiling": 65536,
+      "domain": "owner_update",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "base",
+          "kind": "@SignedNativePrekeyBase",
+          "required": true,
+          "max_bytes": 2048
+        },
+        {
+          "id": 3,
+          "name": "update_counter",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 4,
+          "name": "additive_opks",
+          "kind": "list64@SignedNativeOpk",
+          "required": true,
+          "max_bytes": 65536
+        },
+        {
+          "id": 5,
+          "name": "retirements",
+          "kind": "list400@RetirementRef",
+          "required": true,
+          "max_bytes": 65536
+        },
+        {
+          "id": 6,
+          "name": "signature",
+          "kind": "sig",
+          "required": true,
+          "max_bytes": 64
+        }
+      ]
+    },
+    "PrekeyPublicationSnapshot": {
+      "code": 6,
+      "version": 1,
+      "ceiling": 65536,
+      "domain": "publication_snapshot",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "update",
+          "kind": "@OwnerPrekeyUpdate",
+          "required": true,
+          "max_bytes": 65536
+        },
+        {
+          "id": 3,
+          "name": "counter",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 4,
+          "name": "epoch",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 5,
+          "name": "generation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 6,
+          "name": "pending_retirements",
+          "kind": "list400@RetirementRef",
+          "required": true,
+          "max_bytes": 65536
+        },
+        {
+          "id": 7,
+          "name": "retirement_digest",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        }
+      ]
+    },
+    "PublicPrekeyView": {
+      "code": 7,
+      "version": 1,
+      "ceiling": 4096,
+      "domain": "public_view",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "base",
+          "kind": "@SignedNativePrekeyBase",
+          "required": true,
+          "max_bytes": 2048
+        },
+        {
+          "id": 3,
+          "name": "authority",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 4,
+          "name": "home_generation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        }
+      ]
+    },
+    "PrekeyLeaseIntent": {
+      "code": 8,
+      "version": 1,
+      "ceiling": 4096,
+      "domain": "lease_intent",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "requester",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 3,
+          "name": "target",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 4,
+          "name": "base_hash",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 5,
+          "name": "home_generation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 6,
+          "name": "issued_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 7,
+          "name": "expires_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 8,
+          "name": "nonce",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        }
+      ]
+    },
+    "PrekeyLeaseResult": {
+      "code": 9,
+      "version": 1,
+      "ceiling": 8192,
+      "domain": "lease_result",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "base",
+          "kind": "@SignedNativePrekeyBase",
+          "required": true,
+          "max_bytes": 2048
+        },
+        {
+          "id": 3,
+          "name": "opk",
+          "kind": "opt@SignedNativeOpk",
+          "required": true,
+          "max_bytes": 513
+        },
+        {
+          "id": 4,
+          "name": "requester",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 5,
+          "name": "target",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 6,
+          "name": "operation_id",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 7,
+          "name": "issued_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 8,
+          "name": "leased_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 9,
+          "name": "deadline",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 10,
+          "name": "fallback",
+          "kind": "code",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 11,
+          "name": "signature",
+          "kind": "sig",
+          "required": true,
+          "max_bytes": 64
+        }
+      ]
+    },
+    "OwnerStatusQuery": {
+      "code": 10,
+      "version": 1,
+      "ceiling": 8192,
+      "domain": null,
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "owner",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 3,
+          "name": "requested_ids",
+          "kind": "list200@RetirementRef",
+          "required": true,
+          "max_bytes": 65536
+        }
+      ]
+    },
+    "OwnerStatusEntry": {
+      "code": 11,
+      "version": 1,
+      "ceiling": 256,
+      "domain": null,
+      "fields": [
+        {
+          "id": 1,
+          "name": "key_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 2,
+          "name": "generation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 3,
+          "name": "serial",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 4,
+          "name": "leased_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 5,
+          "name": "deadline",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 6,
+          "name": "state",
+          "kind": "code",
+          "required": true,
+          "max_bytes": 64
+        }
+      ]
+    },
+    "OwnerPrekeyStatus": {
+      "code": 12,
+      "version": 1,
+      "ceiling": 65536,
+      "domain": "owner_status",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "owner",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 3,
+          "name": "base_hash",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 4,
+          "name": "publication_counter",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 5,
+          "name": "generation_floor",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 6,
+          "name": "activation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 7,
+          "name": "retirement_ack",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 8,
+          "name": "unleased_count",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 9,
+          "name": "entries",
+          "kind": "list200@OwnerStatusEntry",
+          "required": true,
+          "max_bytes": 65536
+        },
+        {
+          "id": 10,
+          "name": "signature",
+          "kind": "sig",
+          "required": true,
+          "max_bytes": 64
+        }
+      ]
+    },
+    "NativePrekeyRequest": {
+      "code": 13,
+      "version": 1,
+      "ceiling": 8192,
+      "domain": "request",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "action",
+          "kind": "code",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 3,
+          "name": "argument_hash",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 4,
+          "name": "source",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 5,
+          "name": "target",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 6,
+          "name": "home_generation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 7,
+          "name": "node_id",
+          "kind": "text",
+          "required": true,
+          "max_bytes": 256
+        },
+        {
+          "id": 8,
+          "name": "node_record_hash",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 9,
+          "name": "gateway_id",
+          "kind": "text",
+          "required": true,
+          "max_bytes": 256
+        },
+        {
+          "id": 10,
+          "name": "session_id",
+          "kind": "text",
+          "required": true,
+          "max_bytes": 256
+        },
+        {
+          "id": 11,
+          "name": "nonce",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 12,
+          "name": "issued_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 13,
+          "name": "expires_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 14,
+          "name": "signature",
+          "kind": "sig",
+          "required": true,
+          "max_bytes": 64
+        }
+      ]
+    },
+    "NativePrekeyLease": {
+      "code": 14,
+      "version": 1,
+      "ceiling": 16384,
+      "domain": "frame_lease",
+      "fields": [
+        {
+          "id": 1,
+          "name": "correlation_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 2,
+          "name": "request",
+          "kind": "@NativePrekeyRequest",
+          "required": true,
+          "max_bytes": 8192
+        },
+        {
+          "id": 3,
+          "name": "intent",
+          "kind": "@PrekeyLeaseIntent",
+          "required": true,
+          "max_bytes": 4096
+        }
+      ]
+    },
+    "NativePrekeyPublish": {
+      "code": 15,
+      "version": 1,
+      "ceiling": 131072,
+      "domain": "frame_publish",
+      "fields": [
+        {
+          "id": 1,
+          "name": "correlation_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 2,
+          "name": "request",
+          "kind": "@NativePrekeyRequest",
+          "required": true,
+          "max_bytes": 8192
+        },
+        {
+          "id": 3,
+          "name": "update",
+          "kind": "@OwnerPrekeyUpdate",
+          "required": true,
+          "max_bytes": 65536
+        }
+      ]
+    },
+    "NativePrekeyStatus": {
+      "code": 16,
+      "version": 1,
+      "ceiling": 32768,
+      "domain": "frame_status",
+      "fields": [
+        {
+          "id": 1,
+          "name": "correlation_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 2,
+          "name": "request",
+          "kind": "@NativePrekeyRequest",
+          "required": true,
+          "max_bytes": 8192
+        },
+        {
+          "id": 3,
+          "name": "query",
+          "kind": "@OwnerStatusQuery",
+          "required": true,
+          "max_bytes": 8192
+        }
+      ]
+    },
+    "NativePrekeyResult": {
+      "code": 17,
+      "version": 1,
+      "ceiling": 131072,
+      "domain": "frame_result",
+      "fields": [
+        {
+          "id": 1,
+          "name": "correlation_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 2,
+          "name": "request_hash",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 3,
+          "name": "result_kind",
+          "kind": "code",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 4,
+          "name": "lease",
+          "kind": "opt@PrekeyLeaseResult",
+          "required": true,
+          "max_bytes": 8193
+        },
+        {
+          "id": 5,
+          "name": "status",
+          "kind": "opt@OwnerPrekeyStatus",
+          "required": true,
+          "max_bytes": 65537
+        },
+        {
+          "id": 6,
+          "name": "refusal",
+          "kind": "code",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 7,
+          "name": "retry_scope",
+          "kind": "code",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 8,
+          "name": "retry_after_ms",
+          "kind": "u32",
+          "required": true,
+          "max_bytes": 4
+        },
+        {
+          "id": 9,
+          "name": "node_id",
+          "kind": "text",
+          "required": true,
+          "max_bytes": 256
+        },
+        {
+          "id": 10,
+          "name": "session_id",
+          "kind": "text",
+          "required": true,
+          "max_bytes": 256
+        }
+      ]
+    },
+    "BootstrapHeader": {
+      "code": 18,
+      "version": 1,
+      "ceiling": 16384,
+      "domain": "header",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "source",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 3,
+          "name": "target",
+          "kind": "@QualifiedBranch",
+          "required": true,
+          "max_bytes": 1024
+        },
+        {
+          "id": 4,
+          "name": "base",
+          "kind": "@SignedNativePrekeyBase",
+          "required": true,
+          "max_bytes": 2048
+        },
+        {
+          "id": 5,
+          "name": "base_hash",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 6,
+          "name": "bundle_hash",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 7,
+          "name": "spk_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 8,
+          "name": "spk_serial",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 9,
+          "name": "generation",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 10,
+          "name": "opk_id",
+          "kind": "opt_id",
+          "required": true,
+          "max_bytes": 33
+        },
+        {
+          "id": 11,
+          "name": "opk_key",
+          "kind": "opt_key",
+          "required": true,
+          "max_bytes": 33
+        },
+        {
+          "id": 12,
+          "name": "ephemeral_key",
+          "kind": "key",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 13,
+          "name": "ratchet_key",
+          "kind": "key",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 14,
+          "name": "operation_id",
+          "kind": "hash",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 15,
+          "name": "issued_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 16,
+          "name": "leased_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 17,
+          "name": "conversation_id",
+          "kind": "id",
+          "required": true,
+          "max_bytes": 32
+        },
+        {
+          "id": 18,
+          "name": "session_id",
+          "kind": "text",
+          "required": true,
+          "max_bytes": 256
+        },
+        {
+          "id": 19,
+          "name": "sequence",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 20,
+          "name": "sequence_version",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 21,
+          "name": "deadline",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 22,
+          "name": "routed_ad",
+          "kind": "bytes",
+          "required": true,
+          "max_bytes": 65536
+        }
+      ]
+    },
+    "BootstrapTranscript": {
+      "code": 19,
+      "version": 1,
+      "ceiling": 32768,
+      "domain": "transcript",
+      "fields": [
+        {
+          "id": 1,
+          "name": "profile",
+          "kind": "profile",
+          "required": true,
+          "max_bytes": 64
+        },
+        {
+          "id": 2,
+          "name": "header",
+          "kind": "@BootstrapHeader",
+          "required": true,
+          "max_bytes": 16384
+        },
+        {
+          "id": 3,
+          "name": "envelope_created_at",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 4,
+          "name": "envelope_ttl",
+          "kind": "u64",
+          "required": true,
+          "max_bytes": 8
+        },
+        {
+          "id": 5,
+          "name": "routed_ad",
+          "kind": "bytes",
+          "required": true,
+          "max_bytes": 65536
+        }
+      ]
+    }
+  },
+  "signer_roles": {
+    "base": "target branch",
+    "opk": "target branch",
+    "owner_update": "target branch",
+    "request": "source branch",
+    "lease_result": "authenticated receiving node",
+    "owner_status": "authenticated receiving node"
+  },
+  "json_carrier": "JCS({\"frame_type\": snake_case_type_name, \"payload\": unpadded_base64url(full_RFS1_frame)})"
+}
