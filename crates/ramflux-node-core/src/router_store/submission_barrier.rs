@@ -156,7 +156,9 @@ impl RouterRedbStore {
             .map(|(anchor, _)| self.acquire_home_operation(&anchor).map(Box::new))
             .transpose()?;
         let permit = Arc::clone(&self.submission_admission).try_acquire_owned().map_err(|_| {
-            NodeCoreError::Redb("capacity_retry_after (retry_after_ms=1000)".into())
+            NodeCoreError::Publication(super::publication::PublicationRefusal::CapacityRetryAfter {
+                retry_after_ms: 1000,
+            })
         })?;
         let mut lease = self.submission_gates.acquire(target, None)?;
         lease.permit = Some(permit);

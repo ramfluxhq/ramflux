@@ -105,8 +105,8 @@ fn guard_drop_tombstone() -> Result {
         assert_eq!(core.view("target", &id), (2, vec![(1, 1)]));
         assert_eq!(
             core.reservation_owners("shared-replay"),
-            1,
-            "accepted sibling retains identity"
+            0,
+            "published accepted sibling no longer retains registry metadata"
         );
         drop(later);
         // Unwind strictly before a store call is safe to resolve off-request.

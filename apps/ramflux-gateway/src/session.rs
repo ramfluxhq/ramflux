@@ -1283,7 +1283,12 @@ pub(crate) async fn handle_gateway_submit(
     );
     let response: ramflux_node_core::EnvelopeSubmitResponse =
         router_post_json_async(&context.router, "/mvp0/envelope", &envelope).await?;
-    if response.outcome.starts_with("rejected_") || response.outcome == "forward_in_progress" {
+    if response.outcome.starts_with("rejected_")
+        || matches!(
+            response.outcome.as_str(),
+            "forward_in_progress" | "capacity_retry_after" | "incarnation_mismatch" | "invalid_seq"
+        )
+    {
         write_gateway_handle(
             send,
             &ramflux_node_core::GatewayServerFrame::Nack { reason: response.outcome.clone() },

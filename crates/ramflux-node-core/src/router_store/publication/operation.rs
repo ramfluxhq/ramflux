@@ -21,7 +21,11 @@ struct Reset;
 impl Drop for Reset {
     fn drop(&mut self) {
         CURRENT.with(|current| {
-            current.borrow_mut().take();
+            if let Some(scope) = current.borrow_mut().take()
+                && let Some(core) = &scope.core
+            {
+                core.release_unallocated(&scope.resources);
+            }
         });
     }
 }
@@ -100,6 +104,9 @@ pub fn capture<T>(f: impl FnOnce() -> T) -> Result<PublishedOperation<T>, NodeCo
     for guard in &scope.guards {
         guard.definite_non_write();
     }
+    if let Some(core) = &scope.core {
+        core.release_unallocated(&scope.resources);
+    }
     Ok(PublishedOperation { value, guards: scope.guards })
 }
 
@@ -132,9 +139,7 @@ pub(crate) fn reserve_targets(
                 resources: &scope.resources,
             })
             .collect::<Vec<_>>();
-        let guards = core
-            .reserve_batch(&requests)
-            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let guards = core.reserve_batch(&requests).map_err(NodeCoreError::Publication)?;
         scope.guards.extend(guards);
         Ok(())
     })
@@ -158,9 +163,8 @@ pub(crate) fn allocate(
             scope.assigned.insert((target.into(), sequence));
             return Ok(sequence);
         }
-        let guard = core
-            .reserve(target, id, &scope.resources)
-            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let guard =
+            core.reserve(target, id, &scope.resources).map_err(NodeCoreError::Publication)?;
         let sequence = guard.sequence();
         scope.assigned.insert((target.into(), sequence));
         scope.guards.push(guard);
