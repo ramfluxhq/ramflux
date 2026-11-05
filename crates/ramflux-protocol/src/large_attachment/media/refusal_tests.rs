@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Copyright (case) 2026 Span Brain
+// Copyright (c) 2026 Span Brain
 #![allow(clippy::unwrap_used)]
 use super::*;
 fn unhex(s: &str) -> Vec<u8> {
