@@ -668,3 +668,132 @@ fn dependency_fences_reach_fixed_point_across_both_graphs() -> TestResult {
         Ok(())
     })
 }
+
+#[test]
+fn e5_target_payload_fence_excludes_incoming_alias_graph() -> TestResult {
+    for legacy_zero in [false, true] {
+        fixture("e5-alias-fence", |root, live, target, _, _| {
+            let inner = json!({"object_id":"wire","manifest_hash":"manifest","slot":"alias-slot"});
+            let hash = blake3_256_base64url(
+                "ramflux.attachment.reference.v1",
+                &ramflux_protocol::canonical_json_bytes(&inner)?,
+            );
+            live.send_direct_message("thread", "alias-message", "peer", b"alias body")?;
+            live.register_object_reference(
+                ObjectReferenceAdmission::FreshMessage,
+                &ObjectReferenceOwner {
+                    reference_hash: &hash,
+                    wire_id: "wire",
+                    manifest_hash: "manifest",
+                    selector: "private-alias",
+                    message_id: "alias-message",
+                    reference: &inner,
+                    metadata: &json!({"message_id":"alias-message"}),
+                },
+            )?;
+            live.set_object_tombstoned("private-alias")?;
+            let alias_path = root.join("alias-input.db");
+            let snapshot = live.write_backup_snapshot(&alias_path)?;
+            if legacy_zero {
+                let source = BackupDatabase::open(&alias_path, &snapshot.key)?;
+                source.db.execute("UPDATE object_index SET manifest_hash=?1,chunk_manifest_hash=?1 WHERE object_id='private-alias'",[&[0_u8;32][..]])?;
+            }
+            let commitment = object_erasure_commitment("principal", "wire", "manifest");
+            target.db.execute("INSERT INTO object_erasure_fence VALUES(?1)", [&commitment])?;
+            let lookup = object_erasure_lookup("principal", "private-alias");
+            assert!(!target.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM object_erasure_lookup WHERE lookup=?1)",
+                [&lookup],
+                |r| r.get::<_, bool>(0)
+            )?);
+            let before = std::fs::read(&alias_path)?;
+            target.merge_backup_candidate(&alias_path, &snapshot.key, || Ok(()))?;
+            assert_eq!(
+                target.db.query_row(
+                    "SELECT count(*) FROM object_index WHERE object_id='private-alias'",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )?,
+                0
+            );
+            for table in
+                ["object_retention_reference", "object_message_reference", "object_reference_actor"]
+            {
+                assert_eq!(
+                    target.db.query_row(
+                        &format!("SELECT count(*) FROM {table} WHERE reference_hash=?1"),
+                        [&hash],
+                        |r| r.get::<_, u64>(0)
+                    )?,
+                    0,
+                    "{table}"
+                );
+            }
+            assert_eq!(target.db.query_row("SELECT count(*) FROM message_copy_binding WHERE copy_id='object:private-alias'",[],|r|r.get::<_,u64>(0))?,0,"placeholder binding survived");
+            assert_eq!(std::fs::read(&alias_path)?, before);
+            // Exercise P1's public access resolver on the committed, encrypted generation.
+            let installed = root.join("read-access.db");
+            let installed_key = AccountDbKey::generate()?;
+            target.copy_to(&installed, &installed_key)?;
+            let index = crate::AccountIndex::open(root)?;
+            index.create_account("read-access", "principal")?;
+            let record = index.account("read-access")?;
+            std::fs::copy(&installed, root.join(record.db_relative_path))?;
+            let reopened = crate::AccountDb::open(&index, "read-access", &installed_key)?;
+            assert!(
+                matches!(
+                    reopened.check_object_access("private-alias"),
+                    Err(StorageError::ObjectErased)
+                ),
+                "alias access must remain erased"
+            );
+            drop(reopened);
+            absent(&target.db)?;
+            assert_eq!(
+                target.db.query_row(
+                    "SELECT count(*) FROM object_erasure_lookup WHERE lookup=?1 AND commitment=?2",
+                    params![lookup, commitment],
+                    |r| r.get::<_, u64>(0)
+                )?,
+                1,
+                "resolved alias lookup missing"
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn restore_g6_checks_closed_lookup_before_unfenced_payload() -> TestResult {
+    fixture("g6-closed-unfenced", |_, _, target, path, key| {
+        let lookup = object_erasure_lookup("principal", "wire");
+        let commitment = object_erasure_commitment("principal", "wire", "manifest");
+        target.db.execute(
+            "INSERT INTO object_erasure_lookup VALUES(?1,?2)",
+            params![lookup, commitment],
+        )?;
+        target.db.execute_batch(
+            "DELETE FROM object_message_reference; DELETE FROM object_retention_reference;",
+        )?;
+        let result = target.merge_backup_pipeline(
+            path,
+            key,
+            (BackupMergeMode::FullAccount(None), true),
+            &mut || Ok(()),
+            |db| {
+                graph::classify(db)?;
+                assert!(placeholders::erased(
+                    db,
+                    "principal",
+                    "wire",
+                    Some("manifest"),
+                    "incoming"
+                )?);
+                Err(StorageError::AuthorizationRejected)
+            },
+        );
+        assert!(matches!(result, Err(StorageError::AuthorizationRejected)));
+        Ok(())
+    })
+}

@@ -8,7 +8,7 @@ mod holds;
 mod legacy;
 mod resources;
 mod schema;
-mod selector_admission;
+pub(super) mod selector_admission;
 mod selector_erasure;
 mod selector_legacy;
 #[cfg(test)]

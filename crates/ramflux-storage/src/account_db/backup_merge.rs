@@ -439,7 +439,7 @@ impl BackupDatabase {
             let excluded: bool = row.get(4)?;
             let source_deleted: bool = row.get(5)?;
             let source_manifest: String = row.get(6)?;
-            let source_placeholder = source_deleted
+            let original_legacy_zero = source_deleted
                 && bytes == 0
                 && row.get::<_, i64>(7)? == 0
                 && source_manifest.as_bytes() == [0_u8; 32];
@@ -461,7 +461,7 @@ impl BackupDatabase {
                 .optional()?;
             // A durable revocation can deliberately have an unknown (zero) manifest.
             if !current.is_some_and(|(_, tombstoned)| tombstoned)
-                && !source_placeholder
+                && !original_legacy_zero
                 && current_manifest.as_deref().is_some_and(|manifest| manifest != source_manifest)
             {
                 return Err(StorageError::ObjectIdentityConflict);
@@ -497,7 +497,7 @@ impl BackupDatabase {
                 }
             }
             // A legacy payload-free fence can inherit the live identity it revokes.
-            if source_placeholder && let Some(manifest) = current_manifest {
+            if original_legacy_zero && let Some(manifest) = current_manifest {
                 self.db.execute(
                     "UPDATE object_index SET manifest_hash=?1,chunk_manifest_hash=?1 WHERE rowid=?2",
                     params![manifest.as_bytes(), target_row],

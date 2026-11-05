@@ -35,30 +35,19 @@ impl AccountDb {
         expected: Option<(&str, &str)>,
     ) -> Result<Option<(String, String)>, StorageError> {
         let authority = self.erasure_authority.as_ref().unwrap_or(&self.connection);
-        let mut query = authority.prepare(
-            "SELECT p.wire_id,p.manifest_hash,m.message_id FROM object_retention_reference r
-             JOIN object_retention_payload p USING(commitment)
-             JOIN object_message_reference m USING(reference_hash)
-             WHERE r.selector=?1 ORDER BY r.reference_hash,m.message_id",
-        )?;
-        let rows = query
+        let rows = authority
+            .prepare(&identity_query("main"))?
             .query_map(params![selector], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (wire, manifest, message) in rows {
-            if expected.is_some_and(|(expected_wire, expected_manifest)| {
-                expected_wire != wire || expected_manifest != manifest
-            }) {
-                continue;
+        resolve_admitted_identity(rows, expected, |wire, manifest, message| {
+            if self.message_is_deleted(message)? {
+                return Ok(false);
             }
-            if self.message_is_deleted(&message)? {
-                continue;
-            }
-            self.check_object_identity(&wire, &manifest)?;
-            return Ok(Some((wire, manifest)));
-        }
-        Ok(None)
+            self.check_object_identity(wire, manifest)?;
+            Ok(true)
+        })
     }
 
     pub(super) fn check_reference_admission(
@@ -102,4 +91,30 @@ impl AccountDb {
         }
         Ok(())
     }
+}
+
+/// Shared G6 identity traversal; callers supply live or restore admission authority.
+pub(in crate::account_db) fn identity_query(schema: &str) -> String {
+    format!(
+        "SELECT p.wire_id,p.manifest_hash,m.message_id FROM {schema}.object_retention_reference r
+         JOIN {schema}.object_retention_payload p USING(commitment)
+         JOIN {schema}.object_message_reference m USING(reference_hash)
+         WHERE r.selector=?1 ORDER BY r.reference_hash,m.message_id"
+    )
+}
+
+pub(in crate::account_db) fn resolve_admitted_identity(
+    rows: Vec<(String, String, String)>,
+    expected: Option<(&str, &str)>,
+    mut admitted: impl FnMut(&str, &str, &str) -> Result<bool, StorageError>,
+) -> Result<Option<(String, String)>, StorageError> {
+    for (wire, manifest, message) in rows {
+        if expected.is_some_and(|(w, m)| w != wire || m != manifest) {
+            continue;
+        }
+        if admitted(&wire, &manifest, &message)? {
+            return Ok(Some((wire, manifest)));
+        }
+    }
+    Ok(None)
 }

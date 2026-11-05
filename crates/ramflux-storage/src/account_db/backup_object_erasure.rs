@@ -84,6 +84,9 @@ impl BackupDatabase {
                 return Err(StorageError::ObjectOwnershipUnverified { schema_version: 11 });
             }
         }
+        if super::backup_selector_admission::placeholders::active(&self.db)? {
+            super::backup_selector_admission::placeholders::classify(&self.db, &root)?;
+        }
         for database in ["main", "incoming"] {
             scan_objects(&self.db, database, &root, progress)?;
             for (table, key, column) in [
@@ -150,8 +153,12 @@ impl BackupDatabase {
             }
         }
         self.db.execute_batch("DELETE FROM object_erasure_work;")?;
-        let mut rows=self.db.prepare("SELECT o.object_id,CAST(o.manifest_hash AS TEXT) FROM object_index o JOIN backup_erased_copy e ON e.database_name='main' AND e.table_name='object_index' AND e.row_id=o.rowid")?;
-        for row in rows.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        let mut rows=self.db.prepare("SELECT o.object_id,CAST(o.manifest_hash AS TEXT) FROM object_index o JOIN backup_erased_copy e ON e.database_name='main' AND e.table_name='object_index' AND e.row_id=o.rowid WHERE (?1=0 OR NOT EXISTS(SELECT 1 FROM object_retention_reference r JOIN object_retention_payload p USING(commitment) WHERE r.selector=o.object_id AND p.wire_id<>o.object_id))")?;
+        for row in rows
+            .query_map([super::backup_selector_admission::placeholders::active(&self.db)?], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+        {
             let (wire, manifest) = row?;
             let digest = object_erasure_commitment(&root, &wire, &manifest);
             self.db.execute("INSERT INTO object_retention_payload(commitment,wire_id,manifest_hash,wire_lookup,retention_class) VALUES(?1,?2,?3,?4,'legacy') ON CONFLICT DO NOTHING",params![digest,wire,manifest,object_erasure_lookup(&root,&wire)])?;
@@ -210,6 +217,11 @@ fn erased(
     manifest: Option<&str>,
     database: &str,
 ) -> Result<bool, StorageError> {
+    if super::backup_selector_admission::placeholders::active(db)? {
+        return super::backup_selector_admission::placeholders::erased(
+            db, root, selector, manifest, database,
+        );
+    }
     if let Some(manifest) = manifest
         && fenced(db, &object_erasure_commitment(root, selector, manifest))?
     {
@@ -256,6 +268,17 @@ fn scan_objects(
     })? {
         progress()?;
         let (id, wire, manifest) = row?;
+        let excluded: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM backup_erased_copy WHERE database_name=?1 AND table_name='object_index' AND row_id=?2)", params![database,id], |r|r.get(0))?;
+        if excluded {
+            continue;
+        }
+        if super::backup_selector_admission::placeholders::active(db)? {
+            let placeholder: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {database}.object_index WHERE rowid=?1 AND tombstoned=1 AND length(ciphertext)=0 AND chunk_count=0)"),[id],|r|r.get(0))?;
+            if placeholder {
+                // The unfiltered graph already resolved this selector. It is not a wire reuse.
+                continue;
+            }
+        }
         let digest = object_erasure_commitment(root, &wire, &manifest);
         if fenced(db, &digest)? {
             exclude(db, database, "object_index", id)?;
