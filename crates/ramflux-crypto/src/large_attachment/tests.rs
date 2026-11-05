@@ -150,6 +150,33 @@ fn large_segments_reject_reorder_truncation_and_nonce_reuse() {
 }
 
 #[test]
+fn large_final_verifier_rejects_mutated_reference_binding() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../ramflux-protocol/tests/fixtures/large_attachment_v1.json"
+    ))
+    .unwrap();
+    let (reference, native) = manifests(&fixture["cases"][1]);
+    assert!(PlaintextVerifier::new(&reference, &native).is_ok());
+
+    let mut variants = [reference.clone(), reference.clone(), reference];
+    variants[0].size += 1;
+    variants[1].large_manifest.manifest_id[0] ^= 1;
+    variants[2].large_manifest.segment_digests[0][0] ^= 1;
+    // Keep Hinner valid for the changed inner bytes, so these two cases exercise
+    // the binding to the signature-verified native manifest independently.
+    for changed in &mut variants[1..] {
+        changed.manifest_digest = changed.large_manifest.hash().unwrap();
+    }
+    for (name, changed) in ["size", "manifest_id", "segment_digests"].into_iter().zip(variants) {
+        assert_eq!(
+            PlaintextVerifier::new(&changed, &native).err(),
+            Some(FormatError("reference binding")),
+            "{name} mutation must prevent verifier construction"
+        );
+    }
+}
+
+#[test]
 fn large_final_verifier_requires_ordered_complete_authenticated_segments() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../ramflux-protocol/tests/fixtures/large_attachment_v1.json"
