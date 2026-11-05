@@ -38,8 +38,18 @@ countdown rendering and persistent background retry ownership are separate chang
 
 The resumable topic `account.networking.changed` carries `account_id`, `state`,
 `node_binding` (an opaque node-id/public-key hash, or null), and `networking_reason`.
+Native accounts also carry `session: {state, phase, generation, cause, retry_after_ms}`
+from the current resident connection snapshot. Session `state` is `live` or
+`networking_pending`; `phase` is `connecting`, `live`, `backoff` or `stopped`.
+The outer `state` remains custody admission state: an admitted account can lose
+its session while custody stays `live`. Session loss and reconnect publish without
+an `account.status` request. Starting a new connection manager resets the stored
+session to `networking_pending` / `connecting` before replay can present it as current.
 It is appended on state, cause or binding changes and the end of a block; countdown
-changes alone do not emit events. The reason is a capture-time derived view, so
+changes and generation alone do not emit events. Complete refusal codes (including
+nested details), capacity scope, node binding and absolute capacity reset deadlines
+remain semantic changes. Custody and session writers preserve each other's fields.
+The reason is a capture-time derived view, so
 read fresh status for the current remaining delay. Expiry publication uses runtime
 attribution, including when checked before an unrelated command. A publication
 failure warns once and leaves commands and background sync running.

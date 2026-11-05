@@ -22,6 +22,10 @@ impl AccountRuntime {
             account.timeouts = self.timeouts.clone();
             account.transfer_slots = Some(self.transfers.slots.clone());
             account.connection_work = Some(self.connection_sender.clone());
+            #[cfg(test)]
+            if self.state.config.test_session_connector.is_some() {
+                account.test_connector.clone_from(&self.state.config.test_session_connector);
+            }
             if let Err(error) = account.start_connection() {
                 tracing::warn!(%error, "account connection manager startup deferred; account remains open");
             }
@@ -175,17 +179,10 @@ impl AccountRuntime {
                     let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
                 }
             }
-            AccountWork::Metadata { metadata } => {
-                if metadata.generation == handle.generation()
-                    && account.session_route_matches(&metadata.config)
-                {
-                    account.apply_resume_metadata(metadata.config);
-                    account.persist_push_route_seq();
-                    account.forget_confirmed_push_clear();
-                }
+            AccountWork::Metadata { metadata } => apply_metadata(account, &handle, *metadata),
+            AccountWork::Observation { event } => {
+                return record_observation(account, &handle, event);
             }
-            AccountWork::Observation { event } => observe_connection(event),
-
             AccountWork::Prepare { generation, deadline, reply } => {
                 if reply.is_closed()
                     || generation != handle.generation()
@@ -352,5 +349,31 @@ fn observe_connection(event: crate::bus::connection_manager::ConnectionEvent) {
                 "account connection attempt deferred"
             );
         }
+    }
+}
+
+fn record_observation(
+    account: &crate::bus::state::LocalBusAccountState,
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+    event: crate::bus::connection_manager::ConnectionEvent,
+) -> Result<bool, SdkError> {
+    observe_connection(event);
+    if account.client.born_v3_account.is_some() {
+        super::super::networking_events::record_session(account, &handle.snapshot())
+    } else {
+        Ok(false)
+    }
+}
+
+fn apply_metadata(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+    metadata: SessionMetadata,
+) {
+    if metadata.generation == handle.generation() && account.session_route_matches(&metadata.config)
+    {
+        account.apply_resume_metadata(metadata.config);
+        account.persist_push_route_seq();
+        account.forget_confirmed_push_clear();
     }
 }

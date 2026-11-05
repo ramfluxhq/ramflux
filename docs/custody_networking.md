@@ -582,8 +582,18 @@ rewriting the persisted refusal. An expired hint is discarded with one warning
 per account binding and hint value across consecutive reads. The 300-second
 legacy Capacity retry floor is still enforced when a shorter daily hint expires.
 
-`account.networking.changed` reports cause, node binding, and state transitions;
-it does not publish every countdown decrement or blocked retry. Its
+`account.networking.changed` reports cause, node binding, and state transitions.
+For native accounts its additive `session` object carries `state` (`live` or
+`networking_pending`), `phase` (`connecting`, `live`, `backoff`, `stopped`),
+`generation`, typed `cause` and capture-time `retry_after_ms` from the latest
+resident connection snapshot when an observation is applied. Custody `state`
+stays `live` during session loss; pending and restored Live events require no
+status read. Starting a new connection manager first resets the persisted session
+to pending/connecting, preserving custody fields. Each writer preserves the other
+half. Equality ignores session generation and countdown-only changes, retaining
+complete refusal codes and nested details, capacity scope, node binding and the
+absolute `capacity.resets_at_unix` deadline.
+It does not publish every countdown decrement or blocked retry. Its
 `networking_reason` is the derived view captured at that event's time. Delay
 fields describe the captured transition rather than a live countdown; obtain a
 fresh status view for the current remaining delay. Hinted blocks also retain the

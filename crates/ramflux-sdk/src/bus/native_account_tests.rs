@@ -10,6 +10,12 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 
 pub(crate) mod local_first;
+mod session_events;
+
+#[tokio::test]
+async fn admitted_account_disconnect_and_reconnect_publish_session_events() -> Result {
+    session_events::disconnect_and_reconnect().await
+}
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct Stop(watch::Sender<bool>);
@@ -220,15 +226,25 @@ async fn next_networking_event(
             json!({"topics":["account.networking.changed"],"since_seq":since_seq}),
         )
         .await?;
-    if since_seq == 0 {
-        let initial = tokio::time::timeout(Duration::from_secs(2), events.next_event()).await??;
-        assert_eq!(initial.body["session"]["phase"], "connecting");
-        assert!(initial.body["networking_reason"].is_null());
-    }
-    let event = tokio::time::timeout(Duration::from_secs(2), events.next_event()).await??;
-    assert_eq!(event.method, "account.networking.changed");
-    assert!(tokio::time::timeout(Duration::from_millis(150), events.next_event()).await.is_err());
+    let mut batch = networking_batch(&mut events, 3).await?;
+    assert_eq!(batch.first().ok_or("initial event")?.body["session"]["phase"], "connecting");
+    let event = batch.pop().ok_or("settled event")?;
+    assert_eq!(event.body["session"]["phase"], "backoff");
     Ok(event)
+}
+
+async fn networking_batch(events: &mut LocalBusClient, count: usize) -> Result<Vec<LocalBusFrame>> {
+    let mut batch = Vec::new();
+    for _ in 0..count {
+        let event = tokio::time::timeout(Duration::from_secs(2), events.next_event()).await??;
+        assert_eq!(event.method, "account.networking.changed");
+        batch.push(event);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), events.next_event()).await.is_err(),
+        "unexpected duplicate networking event"
+    );
+    Ok(batch)
 }
 
 async fn connect_creation(path: &std::path::Path) -> Result<crate::LocalBusCreationClient> {
@@ -498,17 +514,14 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
                 json!({"topics":["account.networking.changed"],"since_seq":0}),
             )
             .await?;
-        let initial = tokio::time::timeout(Duration::from_secs(2), ordinary.next_event()).await??;
-        assert_eq!(initial.body["session"]["phase"], "connecting");
-        assert!(initial.body["networking_reason"].is_null());
-        let networking =
-            tokio::time::timeout(Duration::from_secs(2), ordinary.next_event()).await??;
-        assert_eq!(networking.method, "account.networking.changed");
+        let mut replay = networking_batch(&mut ordinary, 5).await?;
+        assert_eq!(replay[0].body["session"]["phase"], "connecting");
+        assert!(replay[0].body["networking_reason"].is_null());
+        assert_eq!(replay[3].body["session"]["phase"], "connecting");
+        let networking = replay.pop().ok_or("settled networking event")?;
         assert_eq!(networking.body["state"], "networking_pending");
         assert_eq!(networking.body["networking_reason"]["kind"], "no_node_selected");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(150), ordinary.next_event()).await.is_err()
-        );
+        assert_eq!(networking.body["session"]["phase"], "backoff");
         ceremony.begin("Failed Human", ramflux_protocol::PrincipalKind::Human).await?;
         drop(ceremony.show_once().await?);
         ceremony.hidden_challenge().await?;
@@ -629,9 +642,7 @@ async fn networking_events_cover_change_live_and_restart_without_duplicates() ->
                 json!({"topics":["account.networking.changed"],"since_seq":live_seq}),
             )
             .await?;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), events.next_event()).await.is_err()
-        );
+        assert_restarted_networking(&mut events).await?;
         ordinary.request(Some(id), "account", "account.lock", json!({})).await?;
         Ok::<_, Box<dyn std::error::Error>>(())
     };
@@ -1301,6 +1312,17 @@ async fn networking_view_and_bus_error_report_server_retry_after() -> Result {
             body.code,
             super::io::local_bus_error_code(&crate::SdkError::CustodyNetwork(code))
         );
+    }
+    Ok(())
+}
+
+async fn assert_restarted_networking(events: &mut LocalBusClient) -> Result {
+    let restarted = networking_batch(events, 2).await?;
+    assert_eq!(restarted[0].body["session"]["phase"], "connecting");
+    assert_eq!(restarted[1].body["session"]["phase"], "backoff");
+    for event in &restarted {
+        assert_eq!(event.body["state"], "live");
+        assert!(event.body["networking_reason"].is_null());
     }
     Ok(())
 }

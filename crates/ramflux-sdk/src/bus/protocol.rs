@@ -25,6 +25,9 @@ pub struct LocalBusConfig {
     #[cfg(test)]
     pub(crate) test_suppress_receive_timers: bool,
     #[cfg(test)]
+    pub(crate) test_session_connector:
+        Option<std::sync::Arc<dyn super::connection_manager::SessionConnector>>,
+    #[cfg(test)]
     pub(crate) test_network_command_gate:
         Option<std::sync::Arc<super::native_account_tests::local_first::NetworkGate>>,
     #[cfg(any(test, feature = "itest-restore-state"))]
@@ -1184,6 +1187,8 @@ impl LocalBusConfig {
             test_retry_budget: None,
             #[cfg(test)]
             test_suppress_receive_timers: false,
+            #[cfg(test)]
+            test_session_connector: None,
             #[cfg(test)]
             test_network_command_gate: None,
             #[cfg(any(test, feature = "itest-restore-state"))]

@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native `account.networking.changed` events now include resident session state,
+  publishing disconnect/reconnect transitions while preserving custody admission
+  state. New connection managers reset persisted session state to connecting.
+
 - Remove revocation placeholders with the last reference of their selector and refuse
   revocations without an authenticated manifest.
 - **BREAKING (downgrade):** Account schema v13 uses a writer-floor sentinel;
