@@ -22,6 +22,7 @@ impl RouterRedbStore {
         txn: &redb::WriteTransaction,
         incoming: &CursorAckState,
         previous: Option<&CursorAckState>,
+        core: Option<&super::publication::PublicationCore>,
     ) -> Result<(CursorAckState, Option<String>), NodeCoreError> {
         let mut cursor = incoming.clone();
         let metadata = incarnation_state::read(txn, &cursor.target_delivery_id)?;
@@ -34,14 +35,10 @@ impl RouterRedbStore {
         if let Some(old) = previous {
             cursor.acked_inbox_seqs.extend(old.acked_inbox_seqs.iter().copied());
         }
-        // A core initializer holds this mutex while waiting for the DB writer.
-        // Never wait on it while this transaction owns that writer. Contention
-        // keeps the last committed floor; a later receiver checkpoint can advance.
-        let installed = self.publication.try_lock().ok().map(|core| core.clone());
-        let mut settled = installed.map_or(previous_r, |core| {
-            core.as_ref()
-                .map_or(issued, |core| core.settled_view(&cursor.target_delivery_id, &id).0)
-        });
+        // The installation mutex was released before acquiring this writer.
+        // Read the current durable boundary from that captured core here.
+        let mut settled =
+            core.map_or(issued, |core| core.settled_view(&cursor.target_delivery_id, &id).0);
         let entries = txn.open_table(ROUTER_INBOX_ENTRY_TABLE).map_err(incarnation::error)?;
         let start =
             inbox_entry_storage_key(&cursor.target_delivery_id, previous_r.saturating_add(1));
@@ -77,9 +74,22 @@ mod tests {
     #[test]
     fn receiver_checkpoint_does_not_wait_for_core_initializer_under_writer()
     -> Result<(), Box<dyn std::error::Error>> {
+        busy_installation(false)
+    }
+
+    #[test]
+    fn receiver_checkpoint_advances_r_after_busy_publication_lock()
+    -> Result<(), Box<dyn std::error::Error>> {
+        busy_installation(true)
+    }
+
+    fn busy_installation(bound: bool) -> Result<(), Box<dyn std::error::Error>> {
         let root = fixture("settlement-initializer");
         let store = std::sync::Arc::new(test_store(&root, 0, 1 << 20)?);
         store.record_inbox_entry(&entry(1))?;
+        if bound {
+            let _core = store.publication_core()?;
+        }
         let (committed, observed) = std::sync::mpsc::sync_channel(1);
         let signal = std::sync::Mutex::new(Some(committed));
         let registration = crate::durability_test_hooks::observe(
@@ -95,8 +105,8 @@ mod tests {
                 Ok(())
             }),
         );
-        // Model an initializer holding publication installation while waiting
-        // for this receiver's DB writer. The receiver must reach commit first.
+        // Installation owns the mutex before the ACK starts. The ACK must
+        // wait without taking the DB writer, then persist the actual R.
         let initializing = store.publication.lock().map_err(incarnation::error)?;
         let worker_store = std::sync::Arc::clone(&store);
         let worker = std::thread::spawn(move || {
@@ -110,16 +120,22 @@ mod tests {
                 "entry-1",
             )
         });
-        let reached = observed.recv_timeout(std::time::Duration::from_secs(5));
+        let reached = observed.recv_timeout(std::time::Duration::from_millis(200));
+        // A concurrent initializer must remain able to acquire the DB writer.
+        let independent_writer = store.db.begin_write()?;
+        independent_writer.abort()?;
         drop(initializing);
         worker.join().map_err(|_| incarnation::error("receiver worker panicked"))??;
-        reached?;
         let tx = store.db.begin_read()?;
         let table = tx.open_table(crate::ROUTER_CURSOR_STATE_TABLE)?;
         let row = table.get("target")?.ok_or("cursor")?;
         let cursor = incarnation::decode_cursor(row.value())?;
-        assert_eq!(cursor.settled_inbox_seq, 0, "contention preserves committed R");
-        assert!(cursor.acked_inbox_seqs.contains(&1), "ACK disposition still commits");
+        assert_eq!(cursor.settled_inbox_seq, 1, "contention cannot stall the last ACK");
+        assert!(
+            matches!(reached, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "ACK waits before taking the writer"
+        );
+
         drop(row);
         drop(table);
         drop(tx);
