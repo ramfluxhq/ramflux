@@ -29,6 +29,7 @@ ALLOW = {
     ('account_db/backup_merge.rs', 'finish_merge'): 'private restore staging database',
     ('account_db/backup_merge.rs', 'archive_outbound'): 'private restore staging database',
     ('account_db/backup_native.rs', 'sanitize_native_backup'): 'private native archive snapshot',
+    ('account_db/backup_normalization.rs', 'normalize_backup_candidate'): 'atomic single-input normalization of a private restore generation',
 }
 METHOD = re.compile(r'\.\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\s*(?:::\s*<[^;{}]*>)?\s*\(')
 ASSOCIATED = re.compile(r'\b(?:Transaction|Savepoint)\s*::\s*(?:new(?:_unchecked)?|with_name)\b|(?:\bConnection\s*|<[^;{}>]*\bConnection[^;{}>]*>\s*)::\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\b')

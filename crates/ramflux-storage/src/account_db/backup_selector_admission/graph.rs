@@ -100,7 +100,10 @@ pub(super) fn deleted(db: &Connection, schema: &str, message: &str) -> Result<bo
 
 // Read existing target deletion state only to decide whether pending work is needed.
 // Admission restrictions above combine bindings from both inputs.
-pub(super) fn target_deleted(db: &Connection, message: &str) -> Result<bool, StorageError> {
+pub(in crate::account_db) fn target_deleted(
+    db: &Connection,
+    message: &str,
+) -> Result<bool, StorageError> {
     deleted_with_bindings(
         db,
         "main",
