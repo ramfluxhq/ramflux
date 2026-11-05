@@ -30,9 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `group.history` reads stored history, name and roster offline while retaining
   revocation and erasure fences. New authorization keeps fresh-head checks and
   returns typed `NetworkingPending` within five seconds when refresh is unavailable.
-  Refresh heads on connect, every 150 seconds and on demand, with fair 32-root
-  passes; verified refresh immediately redrives matching deferred inbox entries
-  once, preserving unrelated retry backoff. Backup restore keeps freshness empty
+  Schedule head refresh on connect, every 150 seconds and on demand. Demand
+  precedes sweep work between fetches, and queued wakes cannot postpone a due
+  sweep. Each trigger handles at most 128 roots in paced 32-root batches, with
+  fair continuation and per-root failure backoff. Verified background refresh
+  immediately redrives matching deferred inbox entries once, preserving unrelated
+  retry backoff. Explicit `device.refresh` refreshes the named principal (own by
+  default) without redriving inbox retries. Backup restore keeps freshness empty
   until a new network observation. Peer changes use eventual observation, without
   a new node push notification.
 

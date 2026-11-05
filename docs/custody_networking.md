@@ -46,18 +46,25 @@ Failed or old refreshes leave them pending; unrelated retry backoff is preserved
 authenticated route for the requested group can hold those RPCs pending; unknown
 routes and unrelated conversations continue background refresh and retry.
 
-Heads refresh on connect, every 150 seconds while Live, and on demand. Each
-account runs one pass at a time, at most 32 sequential roots per pass with fair
-continuation and at most 512 pending demands. Fetches run off the account writer;
-Apply checks generation, session, root and current membership and retains the
-conservative fetch-start time. Lock or session loss cancels the pass. Freshness
-is process-local: backups preserve data and authority evidence, never observation
-clocks. A restored account starts without fresh observations and refreshes on
-connect; there is no schema or wire migration. For recovery, reconnect or restart
-the daemon to sweep due roots, or use `device.refresh` with networking available
-to request an immediate refresh. Peer device-set changes are observed eventually
-through reconnect, the timer, demand or inbound processing. There is no device-set
-change push notification. Desktop adoption is a separate integration.
+Background refresh runs on connect and demand, with periodic sweeps due every
+150 seconds while Live. Demand wakes cannot postpone a due sweep. Pending demands
+are selected before sweep roots, with demand rechecked between individual fetches.
+Each account fetches one root at a time, in batches of at most 32 roots and at most
+four batches (128 roots) per trigger, with 25 ms between batches. A fair cursor
+continues remaining roots on later triggers; large rosters may take several
+triggers to refresh. The pending-demand cap is 512. Repeated failures back off per root from 5 seconds, doubling up to 150 seconds.
+
+Fetches run off the account writer; Apply checks generation, session, root and
+current membership and retains the conservative fetch-start time. Lock or session
+loss cancels the pass. Freshness is process-local: backups preserve data and
+authority evidence, never observation clocks. A restored account starts without
+fresh observations and refreshes on connect; there is no schema or wire migration.
+For recovery, reconnect or restart the daemon to sweep due roots, or use
+`device.refresh` with networking available to refresh the named principal (the
+account's own principal by default). That explicit command does not redrive inbox retries.
+Peer device-set changes are observed eventually through reconnect, the timer,
+demand or inbound processing. There is no device-set change push notification.
+Desktop adoption is a separate integration.
 
 A native connection attempt has one 120-second outer deadline. Its admission
 retry budget is 90 seconds, and each open or frame read retains its 15-second

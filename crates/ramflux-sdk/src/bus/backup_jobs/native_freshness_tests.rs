@@ -80,6 +80,9 @@ async fn restored_account_has_empty_freshness_and_refreshes_on_connect() -> Test
             finished(&target, &id, crate::backup::BackupJobState::Done).await?;
             target.shutdown().await?;
 
+            // initialize constructs a new client with an empty process-local cache.
+            // The absence/refusal assertions guard against future persistence;
+            // the archive-row assertion separately proves the real restore merge.
             let mut restored = initialize(&root.0, AccountIndex::open(&root.0)?)?;
             assert_eq!(
                 restored
@@ -116,6 +119,8 @@ async fn restored_account_has_empty_freshness_and_refreshes_on_connect() -> Test
         .await
 }
 
+// This drives the child with a scripted Live session, not production child
+// registration. refresh_session_loss_cancels_registered_child covers registration.
 async fn refresh_on_connect(
     restored: &mut LocalBusAccountState,
     manifests: &[SdkDeviceManifestResponse],
