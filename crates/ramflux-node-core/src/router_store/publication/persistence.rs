@@ -77,9 +77,7 @@ impl RouterRedbStore {
                     resolver(&worker_shared);
                 }));
                 if result.is_err() {
-                    tracing::error!("fatal_tombstone_persistence");
-                    eprintln!("fatal_tombstone_persistence");
-                    std::process::abort();
+                    crate::fatal_durability::fence(true);
                 }
             })
             .map_err(error)?;
