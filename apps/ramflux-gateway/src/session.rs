@@ -1286,7 +1286,12 @@ pub(crate) async fn handle_gateway_submit(
     if response.outcome.starts_with("rejected_")
         || matches!(
             response.outcome.as_str(),
-            "forward_in_progress" | "capacity_retry_after" | "incarnation_mismatch" | "invalid_seq" | "aborted_retry_safe" | "idempotency_conflict"
+            "forward_in_progress"
+                | "capacity_retry_after"
+                | "incarnation_mismatch"
+                | "invalid_seq"
+                | "aborted_retry_safe"
+                | "idempotency_conflict"
         )
     {
         write_gateway_handle(
