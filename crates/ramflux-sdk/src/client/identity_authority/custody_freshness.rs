@@ -15,6 +15,9 @@ pub(crate) struct NativeHeadFreshness {
     heads: BTreeMap<String, (String, Instant)>,
 }
 impl NativeHeadFreshness {
+    pub(crate) fn observation(&self, root: &str) -> Option<Instant> {
+        self.heads.get(root).map(|(_, at)| *at)
+    }
     fn remember(&mut self, root: &str, hash: String, at: Instant) {
         if self.heads.get(root).is_some_and(|(seen, observed)| seen == &hash && *observed > at) {
             return;

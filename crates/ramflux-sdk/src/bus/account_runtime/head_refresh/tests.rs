@@ -67,6 +67,35 @@ async fn held_fetch(mode: &str) -> TestResult<HeldFetch> {
     })
 }
 
+async fn expire_after_connect(runtime: &mut AccountRuntime) -> TestResult {
+    // Drain the connect fetch before expiring the clock. With the timer
+    // disabled, only this command's new demand can refresh it a second time.
+    for _ in 0..3 {
+        let work = tokio::time::timeout(Duration::from_secs(1), runtime.connection_work.recv())
+            .await?
+            .ok_or("connect work")?;
+        runtime.apply_connection_work(work).await?;
+    }
+    let account = runtime.state.accounts.get("sender").ok_or("account")?;
+    assert!(stale_roots(account, &command().request)?.is_empty(), "connect drained");
+    *account.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    assert!(!stale_roots(account, &command().request)?.is_empty());
+    Ok(())
+}
+
+fn spawn_refresh(
+    mode: &str,
+    context: crate::bus::connection_manager::SessionContext,
+    writer: mpsc::Sender<crate::bus::connection_manager::AccountWork>,
+) -> tokio::task::JoinHandle<()> {
+    if mode == "success" {
+        tokio::spawn(crate::bus::couriers::head_refresh::run_without_timer(context, writer))
+    } else {
+        tokio::spawn(crate::bus::couriers::head_refresh::run(context, writer))
+    }
+}
+
 async fn case(mode: &str) -> TestResult {
     let native = Fixture::with_device("demand", "device").await?;
     let primary = native
@@ -120,10 +149,10 @@ async fn case(mode: &str) -> TestResult {
     }
     let (mut runtime, _commands, _stop, _observed) =
         super::super::tests::runtime(account, &native.root.0);
-    let child = tokio::spawn(crate::bus::couriers::head_refresh::run(
-        handle.test_context(),
-        runtime.connection_sender.clone(),
-    ));
+    let child = spawn_refresh(mode, handle.test_context(), runtime.connection_sender.clone());
+    if mode == "success" {
+        expire_after_connect(&mut runtime).await?;
+    }
     let mut command = command();
     let admitted = Instant::now() - Duration::from_secs(3);
     command.admission = Some(std::sync::Arc::new(

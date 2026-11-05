@@ -325,3 +325,5 @@ async fn refresh_session_loss_cancels_registered_child() -> TestResult {
     handle.stop().await;
     Ok(())
 }
+
+mod periodic;

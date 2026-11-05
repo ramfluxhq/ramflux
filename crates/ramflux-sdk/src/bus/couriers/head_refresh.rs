@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Demand-driven writer Prepare / off-actor fetch / writer Apply for current heads.
+//! Demand and periodic writer Prepare / off-actor fetch / writer Apply for current heads.
 
 use crate::bus::connection_manager::{AccountWork, ConnectionPhase, SessionContext};
 use crate::bus::state::LocalBusAccountState;
@@ -9,7 +9,7 @@ use crate::{GatewaySessionConfig, SdkDeviceManifestResponse, SdkError};
 use std::{
     collections::BTreeSet,
     sync::{Arc, Weak},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -17,10 +17,12 @@ pub(crate) mod inbound;
 
 const MAX_PENDING: usize = 512;
 const PASS_ROOTS: usize = 32;
+const REFRESH_INTERVAL: Duration = Duration::from_secs(150);
 
 #[derive(Default)]
 pub(crate) struct RefreshState {
     pending: BTreeSet<String>,
+    cursor: Option<(bool, String)>,
     inbound: inbound::Inbound,
     wake: Arc<tokio::sync::Notify>,
     // A dropped/cancelled pass releases ownership without needing an actor message.
@@ -62,6 +64,7 @@ pub(crate) struct Plan {
     fence: Fence,
     lease: Arc<()>,
     roots: Vec<String>,
+    remaining_passes: usize,
     config: GatewaySessionConfig,
 }
 pub(crate) enum Work {
@@ -70,6 +73,8 @@ pub(crate) enum Work {
     },
     Prepare {
         fence: Fence,
+        periodic: bool,
+        attempted: BTreeSet<String>,
         reply: oneshot::Sender<Result<Option<Plan>, SdkError>>,
     },
     Apply {
@@ -100,36 +105,55 @@ fn eligible_roots(account: &LocalBusAccountState) -> Result<BTreeSet<String>, Sd
     Ok(roots)
 }
 
+#[cfg(test)]
 fn prepare(account: &mut LocalBusAccountState, fence: Fence) -> Result<Option<Plan>, SdkError> {
+    prepare_due(account, fence, false, &BTreeSet::new())
+}
+
+fn prepare_due(
+    account: &mut LocalBusAccountState,
+    fence: Fence,
+    periodic: bool,
+    attempted: &BTreeSet<String>,
+) -> Result<Option<Plan>, SdkError> {
     if !fence.current(account) || account.head_refresh.active.upgrade().is_some() {
         return Ok(None);
     }
-    if account.head_refresh.pending.is_empty() {
+    if !periodic && account.head_refresh.pending.is_empty() {
         return Ok(None);
     }
     let eligible = eligible_roots(account)?;
-    let mut roots = Vec::new();
-    let mut removed = Vec::new();
-    // Periodic activation must replace prefix traversal with fair continuation.
-    for root in &account.head_refresh.pending {
-        if eligible.contains(root) {
-            roots.push(root.clone());
-        } else {
-            removed.push(root.clone());
-        }
-        if roots.len() == PASS_ROOTS {
-            break;
-        }
-    }
-    for root in removed {
-        account.head_refresh.pending.remove(&root);
-    }
-    if roots.is_empty() {
+    account.head_refresh.pending.retain(|root| eligible.contains(root));
+    let now = Instant::now();
+    let freshness = account.client.native_head_freshness.borrow();
+    let candidates: BTreeSet<_> = eligible
+        .into_iter()
+        .filter(|root| !attempted.contains(root))
+        .filter_map(|root| {
+            let observed = freshness.observation(&root);
+            let due = observed.is_none_or(|at| {
+                now.checked_duration_since(at).is_none_or(|age| age >= REFRESH_INTERVAL)
+            });
+            (account.head_refresh.pending.contains(&root) || (periodic && due))
+                .then_some((observed.is_some(), root))
+        })
+        .collect();
+    drop(freshness);
+    // Never-observed roots sort first. The cursor spans both classes and survives
+    // failed fetches, so a missing directory cannot monopolize the next pass.
+    let cursor = account.head_refresh.cursor.as_ref();
+    let after = candidates.iter().filter(|key| cursor.is_none_or(|last| *key > last));
+    let before = candidates.iter().filter(|key| cursor.is_some_and(|last| *key <= last));
+    let selected: Vec<_> = after.chain(before).take(PASS_ROOTS).cloned().collect();
+    if selected.is_empty() {
         return Ok(None);
     }
+    account.head_refresh.cursor = selected.last().cloned();
+    let remaining_passes = candidates.len().saturating_sub(selected.len()).div_ceil(PASS_ROOTS);
+    let roots = selected.into_iter().map(|(_, root)| root).collect();
     let lease = Arc::new(());
     account.head_refresh.active = Arc::downgrade(&lease);
-    Ok(Some(Plan { fence, lease, roots, config: account.gateway_config.clone() }))
+    Ok(Some(Plan { fence, lease, roots, remaining_passes, config: account.gateway_config.clone() }))
 }
 
 fn apply(
@@ -178,9 +202,9 @@ pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) {
         Work::Subscribe { reply } => {
             let _ = reply.send(account.head_refresh.wake.clone());
         }
-        Work::Prepare { fence, reply } => {
+        Work::Prepare { fence, periodic, attempted, reply } => {
             if !reply.is_closed() {
-                let _ = reply.send(prepare(account, fence));
+                let _ = reply.send(prepare_due(account, fence, periodic, &attempted));
             }
         }
         Work::Apply { plan, root, fetched_after, outcome, reply } => {
@@ -191,7 +215,8 @@ pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) {
     }
 }
 
-/// A session child may call this once per demand wake. It owns no account data.
+/// Test entry for cancellation of a single demand pass.
+#[cfg(test)]
 pub(crate) async fn pass(
     context: SessionContext,
     writer: mpsc::Sender<AccountWork>,
@@ -200,33 +225,39 @@ pub(crate) async fn pass(
         return Ok(());
     }
     let mut cancel = context.cancel.clone();
+    let mut attempted = BTreeSet::new();
     tokio::select! {
         biased;
         _ = cancel.changed() => Ok(()),
-        result = fetch_pass(&context, &writer) => result,
+        result = fetch_pass(&context, &writer, false, &mut attempted) => result.map(|_| ()),
     }
 }
 async fn fetch_pass(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
-) -> Result<(), SdkError> {
+    periodic: bool,
+    attempted: &mut BTreeSet<String>,
+) -> Result<usize, SdkError> {
     let (reply, response) = oneshot::channel();
     send(
         writer,
         Work::Prepare {
             fence: Fence { generation: context.generation, session_id: context.session_id.clone() },
+            periodic,
+            attempted: attempted.clone(),
             reply,
         },
     )
     .await?;
     let Some(plan) = response.await.map_err(|_| stopped())?? else {
-        return Ok(());
+        return Ok(0);
     };
     let plan = Arc::new(plan);
     for root in &plan.roots {
         // Lower bound taken BEFORE the request, never when the writer drains its queue.
         let fetched_after = Instant::now();
         let outcome = super::directory::fetch(&plan.config, root).await;
+        attempted.insert(root.clone());
         let (reply, response) = oneshot::channel();
         send(
             writer,
@@ -242,7 +273,7 @@ async fn fetch_pass(
         // A failed root stays pending, but does not prevent this bounded pass from continuing.
         let _ = response.await.map_err(|_| stopped())?;
     }
-    Ok(())
+    Ok(plan.remaining_passes)
 }
 async fn send(writer: &mpsc::Sender<AccountWork>, work: Work) -> Result<(), SdkError> {
     writer
@@ -254,8 +285,31 @@ fn stopped() -> SdkError {
     ramflux_transport::TransportError::ShutdownDraining.into()
 }
 
-/// Only explicit demand wakes this child; no connect or periodic refresh yet.
+/// The registered session child refreshes on connect, demand and the half-bound timer.
 pub(crate) async fn run(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
+    run_with_triggers(context, writer, true, true).await;
+}
+
+async fn cycle(
+    context: &SessionContext,
+    writer: &mpsc::Sender<AccountWork>,
+    periodic: bool,
+) -> Result<(), SdkError> {
+    let mut attempted = BTreeSet::new();
+    let remaining = fetch_pass(context, writer, periodic, &mut attempted).await?;
+    // Drain the finite snapshot in bounded passes; failures wait for another trigger.
+    for _ in 0..remaining {
+        fetch_pass(context, writer, periodic, &mut attempted).await?;
+    }
+    Ok(())
+}
+
+async fn run_with_triggers(
+    context: SessionContext,
+    writer: mpsc::Sender<AccountWork>,
+    connect: bool,
+    periodic: bool,
+) {
     let mut cancel = context.cancel.clone();
     if *cancel.borrow() {
         return;
@@ -264,9 +318,21 @@ pub(crate) async fn run(context: SessionContext, writer: mpsc::Sender<AccountWor
         let (reply, response) = oneshot::channel();
         send(&writer, Work::Subscribe { reply }).await?;
         let wake = response.await.map_err(|_| stopped())?;
+        let mut timer = tokio::time::interval_at(
+            tokio::time::Instant::now() + REFRESH_INTERVAL,
+            REFRESH_INTERVAL,
+        );
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        if connect {
+            cycle(&context, &writer, true).await?;
+        }
         loop {
-            wake.notified().await;
-            pass(context.clone(), writer.clone()).await?;
+            let periodic = tokio::select! {
+                biased;
+                () = wake.notified() => false,
+                _ = timer.tick(), if periodic => true,
+            };
+            cycle(&context, &writer, periodic).await?;
         }
         #[allow(unreachable_code)]
         Ok::<(), SdkError>(())
@@ -274,6 +340,11 @@ pub(crate) async fn run(context: SessionContext, writer: mpsc::Sender<AccountWor
     tokio::select! { biased; _ = cancel.changed() => {}, result = run => {
         if let Err(error) = result { tracing::debug!(%error, "head refresh stopped"); }
     }}
+}
+
+#[cfg(test)]
+pub(crate) async fn run_without_timer(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
+    run_with_triggers(context, writer, true, false).await;
 }
 
 #[cfg(test)]
