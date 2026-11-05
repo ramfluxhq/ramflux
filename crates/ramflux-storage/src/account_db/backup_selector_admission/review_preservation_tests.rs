@@ -191,3 +191,73 @@ fn seed_message_copies(source: &AccountDb) -> TestResult {
     db.execute_batch("INSERT INTO backup_archived_local_event SELECT 'old',* FROM local_event_log WHERE event_id='review-mixed-event'; INSERT OR IGNORE INTO message_footprint VALUES('message','event','review-mixed-event'); INSERT OR IGNORE INTO message_footprint SELECT 'message','archived_actor',CAST(rowid AS TEXT) FROM backup_archived_actor_state WHERE state_kind='message/origin/transitive'; INSERT OR IGNORE INTO message_footprint SELECT 'message','archived_event',CAST(rowid AS TEXT) FROM backup_archived_local_event WHERE event_id='review-mixed-event';")?;
     Ok(())
 }
+
+#[test]
+fn review_r3_sibling_binding_survives_archived_copy_exclusion() -> TestResult {
+    let mut out = Vec::new();
+    for candidate in [false, true] {
+        super::tests::fixture(&format!("rv3-sibling-{candidate}"), |_, _, target, path, key| {
+            let k = "attachment/progress/k";
+            target.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind));")?;
+            target.db.execute(
+                "INSERT INTO runtime_actor_state VALUES(?1,?2)",
+                params![k, serde_json::to_vec(&json!({"note":"live"}))?],
+            )?;
+            target.db.execute(
+                "INSERT INTO backup_archived_actor_state VALUES('old',?1,?2)",
+                params![k, serde_json::to_vec(&json!({"selector":"wire"}))?],
+            )?;
+            target.db.execute(
+                "INSERT INTO object_payload_actor VALUES('unrelated-live-commitment',?1)",
+                params![k],
+            )?;
+            target.db.execute(
+                "INSERT INTO object_erasure_fence VALUES(?1) ON CONFLICT DO NOTHING",
+                params![object_erasure_commitment("principal", "wire", "manifest")],
+            )?;
+            let r = if candidate {
+                target.merge_backup_candidate(path, key, || Ok(())).map(|_| ())
+            } else {
+                target.merge_backup(path, key, || Ok(())).map(|_| ())
+            };
+            r?;
+            let live: u64 = target.db.query_row(
+                "SELECT count(*) FROM runtime_actor_state WHERE state_kind=?1",
+                [k],
+                |r| r.get(0),
+            )?;
+            let archived: u64 = target.db.query_row("SELECT count(*) FROM backup_archived_actor_state WHERE state_kind=?1 AND source='old'", [k], |r| r.get(0))?;
+            let bound: u64 = target.db.query_row(
+                "SELECT count(*) FROM object_payload_actor WHERE state_kind=?1",
+                [k],
+                |r| r.get(0),
+            )?;
+            assert_eq!(live, 1, "current copy must survive candidate={candidate}");
+            if candidate {
+                assert_eq!(archived, 0, "excluded candidate archive must be removed");
+            }
+            assert_eq!(bound, 1, "surviving current copy needs its binding candidate={candidate}");
+            let source = BackupDatabase::open(path, key)?;
+            source.db.execute(
+                "INSERT INTO object_erasure_fence VALUES('unrelated-live-commitment')",
+                [],
+            )?;
+            drop(source);
+            merge(target, path, key, candidate)?;
+            assert_eq!(
+                target.db.query_row(
+                    "SELECT count(*) FROM runtime_actor_state WHERE state_kind=?1",
+                    [k],
+                    |r| r.get::<_, u64>(0)
+                )?,
+                0,
+                "later erasure must reach surviving copy candidate={candidate}"
+            );
+            out.push(format!("candidate={candidate} live={live} binding={bound}"));
+            Ok(())
+        })?;
+    }
+    eprintln!("{out:#?}");
+    assert!(out.iter().all(|o| !o.contains("live=1") || o.contains("binding=1")), "{out:#?}");
+    Ok(())
+}
