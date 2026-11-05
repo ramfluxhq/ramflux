@@ -5,7 +5,7 @@
 mod media;
 mod native;
 pub use media::{MediaKeySlot, MediaManifest, MediaRef, PeerMedia, QualifiedDevice, Thumbnail};
-pub use native::{ContentManifest, QualifiedOwner};
+pub use native::{ContentManifest, QualifiedOwner, VerifiedContentManifest};
 
 pub const SEGMENT_BYTES: u32 = 4 * 1024 * 1024;
 pub const PLAINTEXT_SEGMENT_BYTES: u64 = SEGMENT_BYTES as u64 - 16;

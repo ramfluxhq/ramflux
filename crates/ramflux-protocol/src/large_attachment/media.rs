@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use super::{
-    ContentManifest, FormatError, MAX_MANIFEST_BYTES, SEGMENT_BYTES, SegmentLayout, digest,
+    FormatError, MAX_MANIFEST_BYTES, SEGMENT_BYTES, SegmentLayout, VerifiedContentManifest, digest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -113,7 +113,8 @@ impl MediaManifest {
     /// Rejects malformed, noncanonical, oversized or inconsistent manifests.
     pub fn decode(input: &[u8]) -> Result<Self, FormatError> {
         let mut m = Self::default();
-        for f in fields(input)? {
+        for field in fields(input)? {
+            let f = field?;
             match f.tag {
                 1 => m.manifest_id = hash(f.data()?)?,
                 2 => m.plaintext_digest = hash(f.data()?)?,
@@ -151,10 +152,12 @@ impl MediaKeySlot {
     }
     fn decode(input: &[u8]) -> Result<Self, FormatError> {
         let mut s = Self::default();
-        for f in fields(input)? {
+        for field in fields(input)? {
+            let f = field?;
             match f.tag {
                 1 => {
-                    for q in fields(f.data()?)? {
+                    for field in fields(f.data()?)? {
+                        let q = field?;
                         match q.tag {
                             1 => s.recipient.account_anchor = string(q.data()?)?,
                             2 => s.recipient.device_id = string(q.data()?)?,
@@ -204,7 +207,8 @@ impl Thumbnail {
     }
     fn decode(input: &[u8]) -> Result<Self, FormatError> {
         let mut t = Self::default();
-        for f in fields(input)? {
+        for field in fields(input)? {
+            let f = field?;
             match f.tag {
                 1 => t.mime_type = string(f.data()?)?,
                 2 => t.width = narrow(f.number()?)?,
@@ -294,7 +298,8 @@ impl MediaRef {
             inline_thumbnail: None,
             large_manifest: MediaManifest::default(),
         };
-        for f in fields(input)? {
+        for field in fields(input)? {
+            let f = field?;
             match f.tag {
                 1 => r.object_id = string(f.data()?)?,
                 2 => r.manifest_digest = hash(f.data()?)?,
@@ -315,7 +320,8 @@ impl MediaRef {
 
     /// # Errors
     /// Rejects inner/native/reference identity, dimensions or key-slot mismatch.
-    pub fn validate_binding(&self, native: &ContentManifest) -> Result<(), FormatError> {
+    pub fn validate_binding(&self, verified: &VerifiedContentManifest) -> Result<(), FormatError> {
+        let native = verified.manifest();
         let m = &self.large_manifest;
         if self.object_id != crate::encode_base64url(native.object_id)
             || self.manifest_digest != m.hash()?
@@ -402,25 +408,45 @@ fn take_varint(input: &mut &[u8]) -> Result<u64, FormatError> {
     }
     Err(FormatError("varint overflow"))
 }
-fn fields(mut input: &[u8]) -> Result<Vec<Field<'_>>, FormatError> {
-    if input.len() > MAX_MANIFEST_BYTES {
-        return Err(FormatError("protobuf cap"));
+struct Fields<'a> {
+    remaining: &'a [u8],
+}
+impl<'a> Iterator for Fields<'a> {
+    type Item = Result<Field<'a>, FormatError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining.is_empty() {
+            return None;
+        }
+        let result = self.field();
+        if result.is_err() {
+            self.remaining = &[];
+        }
+        Some(result)
     }
-    let mut out = Vec::new();
-    while !input.is_empty() {
-        let key = take_varint(&mut input)?;
+}
+impl<'a> Fields<'a> {
+    fn field(&mut self) -> Result<Field<'a>, FormatError> {
+        let key = take_varint(&mut self.remaining)?;
         let value = match key & 7 {
-            0 => Value::Number(take_varint(&mut input)?),
+            0 => Value::Number(take_varint(&mut self.remaining)?),
             2 => {
-                let n = usize::try_from(take_varint(&mut input)?)
+                let n = usize::try_from(take_varint(&mut self.remaining)?)
                     .map_err(|_| FormatError("field length"))?;
-                let b = input.get(..n).ok_or(FormatError("truncated field"))?;
-                input = &input[n..];
+                let b = self.remaining.get(..n).ok_or(FormatError("truncated field"))?;
+                self.remaining = &self.remaining[n..];
                 Value::Data(b)
             }
             _ => return Err(FormatError("wire type")),
         };
-        out.push(Field { tag: key >> 3, value });
+        Ok(Field { tag: key >> 3, value })
     }
-    Ok(out)
 }
+fn fields(input: &[u8]) -> Result<Fields<'_>, FormatError> {
+    if input.len() > MAX_MANIFEST_BYTES {
+        return Err(FormatError("protobuf cap"));
+    }
+    Ok(Fields { remaining: input })
+}
+
+#[cfg(test)]
+mod refusal_tests;

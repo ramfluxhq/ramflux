@@ -49,10 +49,6 @@ fn large_manifest_matches_s0_layer4_vectors() {
         assert_eq!(native.signing_bytes().unwrap(), data(case, "content_signing_bytes_hex"));
         assert_eq!(native.hash().unwrap().as_slice(), data(case, "hrelay_hex"));
         let signature: [u8; 64] = data(case, "content_signature_hex").try_into().unwrap();
-        assert_eq!(
-            ContentManifest::decode_signed(&native.signed_bytes(&signature).unwrap()).unwrap(),
-            (native.clone(), signature)
-        );
         let mut bad_signature = signature;
         bad_signature[0] ^= 1;
         assert!(native.signed_bytes(&bad_signature).is_err());
@@ -66,6 +62,10 @@ fn large_manifest_matches_s0_layer4_vectors() {
         assert!(
             !native.canonical_bytes().unwrap().windows(32).any(|w| w == inner.plaintext_digest)
         );
+        let verified =
+            ContentManifest::decode_signed(&native.signed_bytes(&signature).unwrap()).unwrap();
+        assert_eq!(verified.manifest(), &native);
+        assert_eq!(verified.signature(), &signature);
         let mut reference = MediaRef {
             mime_type: "application/octet-stream".into(),
             file_name: Some("fixture.bin".into()),
@@ -76,7 +76,7 @@ fn large_manifest_matches_s0_layer4_vectors() {
             key_slots: inner.key_slots.clone(),
             large_manifest: inner.clone(),
         };
-        reference.validate_binding(&native).unwrap();
+        reference.validate_binding(&verified).unwrap();
         assert_eq!(MediaRef::decode(&reference.canonical_bytes().unwrap()).unwrap(), reference);
         for layer in 1..4 {
             assert_eq!(
@@ -86,11 +86,11 @@ fn large_manifest_matches_s0_layer4_vectors() {
         }
         assert!(matches!(reference.for_peer(4, "caption"), PeerMedia::Large(_)));
         reference.manifest_digest[0] ^= 1;
-        assert!(reference.validate_binding(&native).is_err());
+        assert!(reference.validate_binding(&verified).is_err());
         reference.manifest_digest = inner.hash().unwrap();
         reference.large_manifest.manifest_id[0] ^= 1;
         reference.manifest_digest = reference.large_manifest.hash().unwrap();
-        assert!(reference.validate_binding(&native).is_err());
+        assert!(reference.validate_binding(&verified).is_err());
         for mutation in [vec![0x68, 1], vec![0x18, 0], exact[..exact.len() - 1].to_vec()] {
             let mut invalid = exact.clone();
             invalid.extend(mutation);
