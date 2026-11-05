@@ -34,16 +34,13 @@ fn entry_admission_all_origins_fanout() -> Result {
                 "x".repeat(crate::ENTRY_FRAME_BYTE_CAP - base + usize::from(over));
             let envelope = signed_registered_envelope(envelope, "fanout", "source", 601)?;
             let now = envelope.created_at;
+            let request = ItestMvp10OwnDeviceFanoutRequest {
+                principal_id: "fanout".into(),
+                source_device_id: "source".into(),
+                envelope,
+            };
             let prepared = crate::publication::capture(|| {
-                router.prepare_sender_fanout(
-                    &store,
-                    &ItestMvp10OwnDeviceFanoutRequest {
-                        principal_id: "fanout".into(),
-                        source_device_id: "source".into(),
-                        envelope,
-                    },
-                    now,
-                )
+                router.prepare_sender_fanout(&store, &request, now)
             })?
             .published_blocking()??
             .resolved_blocking()?;
@@ -59,7 +56,48 @@ fn entry_admission_all_origins_fanout() -> Result {
             assert_eq!(store.inbox_status("target_left")?.1, u64::from(!over));
             assert_eq!(router.resume("target_left", 0, 10).len(), usize::from(!over));
             assert_eq!(store.sender_retry_registry_size(), 0);
+            if over {
+                legacy_retry(&router, &store, &request, normalized, now)?;
+            }
         }
     }
+    Ok(())
+}
+
+fn legacy_retry(
+    router: &RouterCore,
+    store: &crate::RouterRedbStore,
+    request: &ItestMvp10OwnDeviceFanoutRequest,
+    mut child: Envelope,
+    now: i64,
+) -> Result {
+    // A pre-bound row may be above today's admission limit. Its retry creates nothing.
+    child.encrypted_payload.clone_from(&request.envelope.encrypted_payload);
+    child.signed.signature.clone_from(&request.envelope.signed.signature);
+    let source = router.authenticated_envelope_source_durable(&request.envelope, store)?;
+    let replay_key = crate::envelope_replay_tuple_key(&source, &child);
+    let row = crate::InboxEntry {
+        inbox_seq: 1,
+        target_delivery_id: child.target_delivery_id.clone(),
+        envelope: child,
+    };
+    let lease = store.acquire_submission(&row.target_delivery_id)?;
+    store.record_leased_submission(
+        &replay_key,
+        now + 3600,
+        Some(&row),
+        Some(source.root_commitment()),
+        Some(lease),
+    )?;
+    store.record_identity_registry(&router.mvp1_identities_snapshot())?;
+    let restored = store.load_router()?.ok_or("legacy restore")?;
+    restored.prepare_publication_target(store, &row.target_delivery_id)?;
+    let reply =
+        crate::publication::capture(|| restored.prepare_sender_fanout(store, request, now))?
+            .published_blocking()??
+            .resolved_blocking()?;
+    assert_eq!(reply.delivered[0].inbox_seq, Some(1));
+    assert_eq!(store.inbox_status(&row.target_delivery_id)?.1, 1);
+    assert_eq!(store.sender_retry_registry_size(), 0);
     Ok(())
 }

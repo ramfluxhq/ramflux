@@ -131,21 +131,25 @@ impl RouterCore {
             .collect::<Result<Vec<_>, _>>()?;
         let mut normalized = request.envelope.clone();
         self.refresh_registered_envelope_authority(&mut normalized)?;
-        let mut checked = Vec::with_capacity(targets.len());
+        let mut normalized_children = Vec::with_capacity(targets.len());
         for (device, target) in targets {
             let mut envelope = normalized.clone();
             envelope.target_delivery_id = target;
             envelope.envelope_id = mvp10_fanout_envelope_id(&request.envelope.envelope_id, &device);
-            crate::check_entry_bound(&envelope)?;
-            checked.push((device, envelope));
+            normalized_children.push((device, envelope));
         }
-        let mut candidates = Vec::with_capacity(checked.len());
-        for (device, envelope) in checked {
+        let mut candidates = Vec::with_capacity(normalized_children.len());
+        for (device, envelope) in normalized_children {
             candidates.push(Candidate {
                 device,
                 admission: store.admit_sender_retry(&source, &envelope, now)?,
                 envelope,
             });
+        }
+        for child in &candidates {
+            if matches!(child.admission, RetryAdmission::Owner(_)) {
+                crate::check_entry_bound(&child.envelope)?;
+            }
         }
         let core = store.publication_core()?;
         let has_retry =

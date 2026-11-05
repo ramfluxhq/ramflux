@@ -49,10 +49,10 @@ fn run(origin: &str) -> anyhow::Result<()> {
             let base = wire_size(&envelope)?;
             envelope.encrypted_payload =
                 "x".repeat(ENTRY_FRAME_BYTE_CAP - base + usize::from(over));
-            envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(
-                &envelope,
+            envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+                &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
                 ramflux_crypto::blake3_256("ramflux.test.runtime.device.v1", b"alice/alice_phone"),
-            )?;
+            );
             assert_eq!(wire_size(&envelope)?, ENTRY_FRAME_BYTE_CAP + usize::from(over));
             if origin == "gateway" {
                 envelope.ext.ext.remove("source_device_authority");
