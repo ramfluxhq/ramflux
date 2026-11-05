@@ -43,11 +43,10 @@ pub(super) fn error(value: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(value.to_string())
 }
 pub(super) fn segment_error(path: &Path, cause: impl std::fmt::Display) -> NodeCoreError {
-    error(format!(
-        "{}: {cause}; stop every gateway, stop the router, then run ramflux-router --config <path> --rotate-inbox-incarnations --quarantine-wal-segment {} (never move or delete WAL segments by hand)",
-        path.display(),
-        path.display()
-    ))
+    NodeCoreError::WalSegmentRequiresQuarantine {
+        path: path.to_path_buf(),
+        cause: cause.to_string(),
+    }
 }
 fn directory_key(root: &Path, directory: &Path) -> Result<String, NodeCoreError> {
     Ok(directory.strip_prefix(root).map_err(error)?.to_string_lossy().into_owned())

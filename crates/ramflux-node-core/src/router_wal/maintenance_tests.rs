@@ -328,3 +328,201 @@ fn prior_cursor_field_store(root: &Path, mode: u8, ids: &[String]) -> Result {
     tx.commit()?;
     Ok(())
 }
+
+#[test]
+fn review_probe_rotate_then_quarantine() -> Result {
+    for mode in [1, 2] {
+        let root = fixture();
+        let old = seed(&root, mode)?;
+        torn(&root, false)?;
+        let failure = rotate(&root, mode, false).expect_err("plain rotation requires quarantine");
+        assert!(failure.to_string().contains(&segment(&root).display().to_string()));
+        assert!(
+            failure.to_string().contains("--rotate-inbox-incarnations --quarantine-wal-segment")
+        );
+        assert!(!operator_marker_exists(&root)?, "plain rotation must not poison the marker");
+        rotate(&root, mode, true)?;
+        assert!(!operator_marker_exists(&root)?);
+        let store = test_store(&root, mode, 1)?;
+        store.load_router()?;
+        assert_ne!(store.inbox_status("restore-target")?.0.as_ref(), Some(&old[0]));
+        drop(store);
+        // The inverse order also completes without ignoring a prior request.
+        rotate(&root, mode, false)?;
+        let store = test_store(&root, mode, 1)?;
+        store.load_router()?;
+        drop(store);
+        assert!(!operator_marker_exists(&root)?);
+        fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+fn operator_marker_exists(root: &Path) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+    let db = redb::Database::open(root.join("db"))?;
+    let tx = db.begin_read()?;
+    Ok(tx.open_table(crate::ROUTER_SNAPSHOT_TABLE)?.get(MARKER)?.is_some())
+}
+
+#[test]
+fn rotation_preflight_refuses_other_damage() -> Result {
+    for mode in [1, 2] {
+        let root = fixture();
+        let old = seed(&root, mode)?;
+        torn(&root, false)?;
+        let other = other_segment(&root)?;
+        let healthy = fs::read(&other)?;
+        let damaged = fs::read(segment(&root))?;
+        let failure = RouterRedbStore::rotate_inbox_incarnations_at(
+            &root.join("db"),
+            Some(&root.join("wal")),
+            Some(&other),
+        )
+        .expect_err("wrong segment must not hide actual damage");
+        assert!(matches!(failure, NodeCoreError::WalSegmentRequiresQuarantine { path, .. }
+            if path == segment(&root)));
+        assert!(!operator_marker_exists(&root)?);
+        assert_eq!(fs::read(&other)?, healthy);
+        assert_eq!(fs::read(segment(&root))?, damaged);
+        fs::write(&other, vec![b'x'; identity::HEADER_LEN + 80])?;
+        let failure = rotate(&root, mode, true).expect_err("two damaged segments refuse up front");
+        assert!(matches!(failure, NodeCoreError::WalSegmentRequiresQuarantine { path, .. }
+            if path == other));
+        assert_eq!(raw(&root)?, (old, false));
+        assert!(segment(&root).exists() && other.exists());
+        assert!(!root.join("wal/quarantine").exists());
+        fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+fn other_segment(root: &Path) -> std::result::Result<PathBuf, Box<dyn std::error::Error>> {
+    let shard = router_wal_shard_root(&root.join("wal"), 0);
+    router_wal_segment_ids(&shard)?
+        .into_iter()
+        .map(|id| router_wal_segment_path(&shard, id))
+        .find(|path| *path != segment(root))
+        .ok_or_else(|| "missing second segment".into())
+}
+
+const REPAIR: &str = "router_wal::maintenance_tests::pending_rotation_quarantine_repair";
+#[test]
+fn pending_rotation_quarantine_repair() -> Result {
+    if let Ok(root) = std::env::var("RAMFLUX_P3_REPAIR_CHILD") {
+        let mode: u8 = std::env::var("RAMFLUX_P3_MODE")?.parse()?;
+        let cut = std::env::var("RAMFLUX_P3_CUT")?;
+        let _observer = observe(
+            PathBuf::from(&root),
+            Arc::new(move |_, operation, done| {
+                if done && operation == cut {
+                    std::process::abort();
+                }
+                Ok(())
+            }),
+        );
+        rotate(Path::new(&root), mode, std::env::var("RAMFLUX_P3_REPAIR_QUARANTINE").is_ok())?;
+        panic!("repair crash cut not reached");
+    }
+    for mode in [1, 2] {
+        for cut in ["none", "operator_quarantine_amend", "quarantine_rename", "association_commit"]
+        {
+            let root = fixture();
+            let old = seed(&root, mode)?;
+            crash_repair_command(&root, mode, "operator_rotation_pending", false)?;
+            assert_eq!(raw(&root)?, (old.clone(), true));
+            // A preflight-complete plain marker models an older interrupted pass.
+            // The later damaged segment must be incorporated, never ignored.
+            torn(&root, false)?;
+            if cut == "none" {
+                rotate(&root, mode, true)?;
+            } else {
+                crash_repair_command(&root, mode, cut, true)?;
+            }
+            if cut == "operator_quarantine_amend" {
+                let conflict = RouterRedbStore::rotate_inbox_incarnations_at(
+                    &root.join("db"),
+                    Some(&root.join("wal")),
+                    Some(&other_segment(&root)?),
+                )
+                .expect_err("unfinished move must not be replaced");
+                assert!(conflict.to_string().contains("unfinished pending move"));
+                assert!(operator_marker_exists(&root)? && segment(&root).exists());
+            }
+            if cut == "quarantine_rename" {
+                // Retry the exact argument after its source was already moved.
+                rotate(&root, mode, true)?;
+            } else {
+                // Plain rotation must honour the pending quarantine on resume.
+                rotate(&root, mode, false)?;
+            }
+            assert_repair_complete(&root, mode, &old)?;
+            fs::remove_dir_all(root)?;
+        }
+        completed_move_can_amend(&fixture(), mode)?;
+    }
+    Ok(())
+}
+
+fn crash_repair_command(root: &Path, mode: u8, cut: &str, quarantine: bool) -> Result {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .args(["--exact", REPAIR])
+        .env("RAMFLUX_P3_REPAIR_CHILD", root)
+        .env("RAMFLUX_P3_MODE", mode.to_string())
+        .env("RAMFLUX_P3_CUT", cut)
+        .stdout(std::process::Stdio::null());
+    if quarantine {
+        command.env("RAMFLUX_P3_REPAIR_QUARANTINE", "1");
+    } else {
+        command.env_remove("RAMFLUX_P3_REPAIR_QUARANTINE");
+    }
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(status.signal(), Some(6), "real crash at {cut}");
+            }
+            assert!(!status.success());
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            panic!("repair crash watchdog at {cut}");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn assert_repair_complete(root: &Path, mode: u8, old: &[String]) -> Result {
+    let (new, pending) = raw(root)?;
+    assert!(!pending);
+    assert!(new.iter().zip(old).all(|(a, b)| a != b));
+    for _ in 0..2 {
+        let store = test_store(root, mode, 1)?;
+        store.load_router()?;
+        assert_eq!(store.inbox_status("restore-target")?, (Some(new[0].clone()), 2));
+    }
+    Ok(())
+}
+
+fn completed_move_can_amend(root: &Path, mode: u8) -> Result {
+    let old = seed(root, mode)?;
+    torn(root, false)?;
+    let other = other_segment(root)?;
+    crash_repair_command(root, mode, "quarantine_rename", true)?;
+    assert!(operator_marker_exists(root)?);
+    assert!(!segment(root).exists());
+    fs::write(&other, vec![b'x'; identity::HEADER_LEN + 80])?;
+    RouterRedbStore::rotate_inbox_incarnations_at(
+        &root.join("db"),
+        Some(&root.join("wal")),
+        Some(&other),
+    )?;
+    assert_repair_complete(root, mode, &old)?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
